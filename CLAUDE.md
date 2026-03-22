@@ -16,6 +16,8 @@ Read `design/` for the full picture. Key docs:
 | [agents.md](design/agents.md) | Agentic loop, sub-agents, channel registry, crash recovery |
 | [integrations.md](design/integrations.md) | MCP, Telegram adapter, skill library |
 | [infrastructure.md](design/infrastructure.md) | NixOS service, PostgreSQL, Redis, secrets, deployment |
+| [data-model.md](design/data-model.md) | PostgreSQL schema — all tables, relationships, migrations |
+| [testing.md](design/testing.md) | Local dev, unit/integration/LLM tests, mocking, evaluation dataset |
 | [decisions.md](design/decisions.md) | All decisions with rationale, eliminated options, adopted patterns |
 
 ## Tracking
