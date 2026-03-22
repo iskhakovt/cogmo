@@ -127,7 +127,7 @@ Memory metadata (agent_id, source, confidence, mention_count, last_mentioned_at)
 
 ## Schema Migrations
 
-No ORM. Use raw SQL migration files in `migrations/` directory, numbered sequentially (`001_init.sql`, `002_add_signals.sql`, etc.). Run on startup if not yet applied (track in a `schema_migrations` table).
+No ORM. Use raw SQL migration files (suggested approach, not confirmed) in `migrations/` directory, numbered sequentially (`001_init.sql`, `002_add_signals.sql`, etc.). Run on startup if not yet applied (track in a `schema_migrations` table).
 
 ```sql
 CREATE TABLE IF NOT EXISTS schema_migrations (

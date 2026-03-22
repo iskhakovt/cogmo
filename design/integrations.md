@@ -18,7 +18,7 @@ Webhook mode — Telegram pushes to the bot's HTTPS endpoint. Express/Fastify ha
 
 | Detail | Value |
 |-|-|
-| Library | `telegraf` or `grammy` (TypeScript Telegram frameworks) |
+| Library | `telegraf` or `grammy` (TypeScript Telegram frameworks) (unconfirmed — implementation-time choice) |
 | Auth | Bot token from BotFather, stored in sops |
 | Webhook URL | Via Cloudflare Tunnel (`bot.timur.fyi`) or Tailscale |
 | Features needed | Text messages, callback buttons (for approval flows), markdown formatting |

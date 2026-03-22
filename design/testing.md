@@ -12,7 +12,7 @@ Type messages, see agent responses, memory operations, and tool calls in structu
 
 ## Unit Tests
 
-Use vitest (fast, native TS, ESM). Test what's deterministic:
+Use vitest (suggested, not confirmed) (fast, native TS, ESM). Test what's deterministic:
 
 | Layer | What to test | How |
 |-|-|-|

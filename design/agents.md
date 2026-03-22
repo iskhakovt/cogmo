@@ -90,7 +90,7 @@ Sub-agents never see API keys. Orchestrator makes all external calls. Sub-agents
 
 **Active:** Messages within a session share the same conversation ID, history, and memory context.
 
-**Idle detection:** After ~5 min with no messages, mark session ended and trigger Observer extraction as a delayed BullMQ job.
+**Idle detection:** After ~5 min (suggested, not confirmed) with no messages, mark session ended and trigger Observer extraction as a delayed BullMQ job.
 
 **Resume:** If user messages again after idle timeout, start a new conversation. Don't reuse ended sessions — Observer has already extracted the knowledge. The new session benefits from that knowledge via memory recall.
 
@@ -99,11 +99,11 @@ Sub-agents never see API keys. Orchestrator makes all external calls. Sub-agents
 2. Relevant memories from Hindsight recall (~500-2000 tokens)
 3. Recent session history
 
-If session history exceeds ~80% of context window, truncate oldest messages. Keep the first message (sets context) and the most recent N messages. Future: summarize truncated middle instead of dropping.
+If session history exceeds ~80% of context window (suggested, not confirmed), truncate oldest messages. Keep the first message (sets context) and the most recent N messages. Future: summarize truncated middle instead of dropping.
 
 Track `token_count` per message in `session_history` for budget calculations.
 
-**Message batching:** If user sends 3 quick messages before the agent responds, concatenate them into a single user turn. Use a short debounce (~2 seconds) before invoking the agent.
+**Message batching:** If user sends 3 quick messages before the agent responds, concatenate them into a single user turn. Use a short debounce (~2 seconds) (suggested, not confirmed) before invoking the agent.
 
 **Auth:** Validate Telegram `user_id` against an allowlist (initially just Timur's ID, stored in config). Reject all other users silently.
 
