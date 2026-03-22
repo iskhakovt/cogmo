@@ -75,6 +75,30 @@ On failure, feed failed output + why it failed back to model (~20 lines, from DS
 **What:** Full capture -> evaluate -> rewrite -> test -> deploy loop.
 **Implementation:** ACE-style playbook deltas with automated signal capture from conversation outcomes.
 
+**Signal capture schema:**
+```sql
+CREATE TABLE signals (
+  id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  signal_type TEXT NOT NULL,  -- 're-ask', 'correction', 'task_completion', 'result_usage', 'sentiment'
+  content TEXT NOT NULL,
+  reliability TEXT NOT NULL,  -- 'high', 'medium', 'low'
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+**Signal types and reliability:**
+
+| Signal | Reliability | Example |
+|-|-|-|
+| Re-asks | High | User rephrases question — agent missed the point |
+| Corrections | High | "No, I meant..." — explicit feedback |
+| Task completion | High | User confirms task is done |
+| Result usage | Medium | User acts on agent's output |
+| Sentiment alone | Very low | ~80% false-positive rate (PAI finding) — never use alone |
+
+**Anti-patterns to enforce:** no instruction bloat, no contradictory rules, no over-specificity. Verification gate checks coherence before promoting.
+
 ### Stage 6: Evolutionary Search
 **Trigger:** Multiple optimization dimensions, sufficient compute budget
 **What:** Bounded code mutation with tree-structured archive, lineage tracing, human gate.
@@ -92,6 +116,18 @@ On failure, feed failed output + why it failed back to model (~20 lines, from DS
 | Test before trust | Run on held-out set before promoting |
 | Human review for code changes | BullMQ `waitForEvent()` + Telegram approval |
 | Overfitting guard | Forbid referencing specific examples in optimized prompts (Dropbox lesson) |
+
+## Stage 4 Graduation Features
+
+Add these incrementally as complexity demands:
+
+| Feature | Trigger | Source |
+|-|-|-|
+| Bayesian optimization (TPE) | 3+ interacting LLM calls | MIPROv2 |
+| Pareto frontier | Multiple quality dimensions that trade off | GEPA |
+| Reflective mutation | Pre-generated candidates miss failure modes | GEPA |
+| Module credit assignment | Long multi-step pipelines | MIPROv2 |
+| Crossover/merge | Complementary strengths across lineages | DGM |
 
 ## Build Order
 

@@ -1,8 +1,12 @@
 # Architecture
 
-## Core Principle
+## Core Principles
 
-The memory layer is a dumb store; all intelligence lives in Claude sessions. Agent invocations are stateless — webhook triggers fresh agent, reads config from DB, calls tools via MCP, responds, exits. Evolution supervisor edits configs between invocations.
+**Memory is a dumb store** — all intelligence lives in Claude sessions. Hindsight stores and retrieves; Claude decides what matters.
+
+**Stateless per invocation** — the Node.js process stays up (HTTP server, BullMQ workers), but each agent invocation is stateless. Webhook triggers fresh agent call, agent reads latest config/memory from DB, calls tools via MCP, responds, done. No in-memory state carries between invocations. This means framework "immutable at runtime" limitations don't apply — self-evolution is just "edit config/prompts between invocations."
+
+**Model-agnostic API tier** — orchestrator uses raw SDK calls. Interactive tier can be Claude Sonnet, GPT, or Grok — swap providers without touching orchestration. Background tasks use `claude -p` headless (subscription, $0).
 
 ## Topology: Orchestrator-Worker (Hub-and-Spoke)
 

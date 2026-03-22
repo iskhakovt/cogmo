@@ -99,6 +99,6 @@ async function removeTask(args: { name: string }) {
 }
 ```
 
-## Graduation Path
+## Why Not systemd Timers
 
-Start with systemd timers for the simplest cron jobs (morning briefing). Graduate to BullMQ when retry/backoff across multiple jobs or agent self-scheduling is needed.
+systemd timers were eliminated — the agent can't modify NixOS config, which breaks self-evolution. BullMQ from day one: the agent can create/modify/delete its own scheduled jobs via tool calls.

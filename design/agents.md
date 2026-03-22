@@ -1,8 +1,8 @@
 # Agents
 
-## The Agentic Loop (~30 Lines)
+## The Agentic Loop
 
-No framework. Raw SDK while loop + tool dispatch.
+No framework. Raw SDK while loop + tool dispatch. Core loop is ~30 lines; full orchestration with error handling, HITL, and checkpointing is ~200 lines. ~200 more for HITL (PG state serialization + messenger callback buttons + resume). ~50 for checkpointing (save/load conversation state).
 
 ```typescript
 async function runAgent(
@@ -133,10 +133,49 @@ Per-conversation FIFO ordering with global concurrency limit.
 ```typescript
 // Default: max 3 parallel LLM calls across all conversations
 // Within a conversation: strict FIFO (no interleaving)
-// Tasks (extraction, ingestion) prioritized over user messages
+// User messages prioritized over background work (extraction, ingestion)
 ```
 
 Prevents a chatty conversation from starving background work. Implement as BullMQ named queues with rate limiting.
+
+## AI Steering Rules (From PAI)
+
+Rules stored as PostgreSQL rows, not prose files. Injected into system prompts at invocation time. Enforced via code, not hope.
+
+```typescript
+interface SteeringRule {
+  id: string;
+  rule: string;          // "Always confirm before sending emails"
+  category: string;      // "safety" | "style" | "domain"
+  active: boolean;
+  created_at: Date;
+}
+
+// On each invocation: load active rules, inject into system prompt
+const rules = await db.query('SELECT rule FROM steering_rules WHERE active = true');
+const systemPrompt = BASE_PROMPT + '\n\nRules:\n' + rules.map(r => `- ${r.rule}`).join('\n');
+```
+
+Stage 1 evolution edits these rows. Stage 5 signal pipeline auto-proposes new rules from conversation signals.
+
+## Dual-Mode Monitoring (From memU)
+
+For ingestion agents: cheap embedding scan first, LLM only when relevant.
+
+```typescript
+// Cron checks email/calendar
+const newItems = await fetchNewEmails();
+for (const item of newItems) {
+  const relevance = await embeddingSimilarity(item.subject, userInterests);
+  if (relevance > THRESHOLD) {
+    // Worth deep processing — call Claude to extract facts
+    await extractAndRetain(item);
+  }
+  // Below threshold: skip, save tokens
+}
+```
+
+Saves ~30% of ingestion costs by filtering before LLM processing.
 
 ## Internal Tag Stripping (From NanoClaw)
 
