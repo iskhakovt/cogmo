@@ -2,6 +2,7 @@
 
 | Date | Change |
 |-|-|
+| 2026-03-22 | Add tooling.md — dev stack research (pnpm, tsx, tsup, Fastify, Drizzle, Vitest, Pino, Biome, Remeda, neverthrow) |
 | 2026-03-22 | Add data-model.md (unified PostgreSQL schema), testing.md (local dev, mocking, evaluation) |
 | 2026-03-22 | Add session lifecycle, context window mgmt, message batching, Telegram auth to agents.md |
 | 2026-03-22 | Add Hindsight deployment clarification, `claude -p` integration pattern to architecture.md |

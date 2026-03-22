@@ -18,6 +18,7 @@ Read `design/` for the full picture. Key docs:
 | [infrastructure.md](design/infrastructure.md) | NixOS service, PostgreSQL, Redis, secrets, deployment |
 | [data-model.md](design/data-model.md) | PostgreSQL schema — all tables, relationships, migrations |
 | [testing.md](design/testing.md) | Local dev, unit/integration/LLM tests, mocking, evaluation dataset |
+| [tooling.md](design/tooling.md) | Dev stack — runtime, build, ORM, testing, logging, linting, Kotlin-feel patterns |
 | [decisions.md](design/decisions.md) | All decisions with rationale, eliminated options, adopted patterns |
 
 ## Tracking
