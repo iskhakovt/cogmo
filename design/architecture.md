@@ -86,3 +86,18 @@ Additive-only writes. Never fail a write. Post-conversation dedup via Hindsight'
 | Scheduler | BullMQ | Library (Redis backend) |
 | Interfaces | Telegram adapter (webhook) | Express/Fastify HTTP handler |
 | MCP integrations | MCP client SDK | Per-integration MCP servers |
+
+## Hindsight Deployment
+
+Hindsight is an **in-process npm library** (`@vectorize-io/hindsight-client`), not a separate service. It connects directly to PostgreSQL + pgvector from the Node.js process. No Docker container, no sidecar. Zero additional RAM beyond what PostgreSQL uses for pgvector indexes.
+
+## Background Tasks: `claude -p` vs SDK
+
+Two code paths for LLM calls:
+
+| Path | When | How | Cost |
+|-|-|-|-|
+| Anthropic SDK (`client.messages.create`) | Interactive (user waiting) | In-process, per-token billing | ~$80-400/mo |
+| `claude -p` (headless CLI) | Background (ingestion, extraction, evolution) | Spawn as child process, pipe stdin/stdout | $0 (subscription) |
+
+Background workers (BullMQ jobs) shell out to `claude -p` with a prompt, parse the structured output. Interactive agents use the SDK directly for lower latency.

@@ -6,6 +6,7 @@
 - [ ] Set up TypeScript build (`tsc` or `tsx` for dev)
 - [ ] Install core dependencies: `@anthropic-ai/sdk`, `bullmq`, `@vectorize-io/hindsight-client`, `zod`
 - [ ] Set up directory structure (`src/`, `src/agents/`, `src/memory/`, `src/channels/`, `src/scheduler/`, `src/evolution/`)
+- [ ] Database schema — run `migrations/001_init.sql` (see `design/data-model.md`)
 - [ ] Verify Hindsight connects to PostgreSQL + pgvector
 - [ ] Verify BullMQ connects to Redis (port 6380)
 - [ ] Basic health check endpoint (HTTP)
@@ -28,6 +29,11 @@ The minimum useful system: talk to it, it remembers things.
 - [ ] Steering rules table in PostgreSQL — injected into system prompt per invocation
 - [ ] Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
 - [ ] Crash recovery — persist message cursor to PostgreSQL
+- [ ] Session lifecycle — conversation start/end, idle detection (~5 min), new session on resume
+- [ ] Context window management — token counting, truncate oldest messages at ~80% capacity
+- [ ] Message batching — debounce ~2s for rapid consecutive messages
+- [ ] Telegram auth — validate user_id against allowlist
+- [ ] System prompt assembly — base prompt + steering rules + relevant memories
 
 ## Phase 2: Scheduling + Ingestion
 
@@ -43,6 +49,7 @@ The agent does things on its own, not just when you talk to it.
 - [ ] First ingestion agent: Gmail (MCP)
 - [ ] First ingestion agent: Google Calendar (MCP)
 - [ ] GroupQueue — per-conversation FIFO, global concurrency limit, user messages prioritized
+- [ ] `claude -p` integration — child process spawning for background agents ($0 subscription tier)
 
 ## Phase 3: Skill Library + More Integrations
 
