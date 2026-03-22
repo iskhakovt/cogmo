@@ -55,6 +55,15 @@ async function consolidate(): Promise<void> {
 - 74% update omission rate
 - Post-conversation extraction bypasses the "remember to remember" problem entirely
 
+## Embedding Model
+
+Hindsight handles embedding internally — model choice is a config option.
+
+| Tier | Model | Cost | Notes |
+|-|-|-|-|
+| Cloud | gemini-embedding-001 | $0.006/MTok | #1 MTEB ranking |
+| Local (Mac Mini tier) | nomic-embed-text-v2-moe | $0 | Best open-source, Ollama-compatible |
+
 ## Retrieval Strategy
 
 Start simple, add complexity only when needed:
@@ -62,6 +71,9 @@ Start simple, add complexity only when needed:
 1. **Keyword search** (tsvector) — handles exact name/term matches
 2. **Vector search** (pgvector) — add when FTS misses conceptual/semantic matches
 3. **No graph DB** — overkill for personal-scale thousands of facts
+4. **No RAG** — not needed at personal scale. Revisit if a document corpus (PDFs, notes) grows large enough to need chunking
+
+**Graduation:** pgvector handles up to ~10M vectors. Past that, evaluate Qdrant (pgvectorscale gets 471 QPS / 99% recall on 50M vectors, but dedicated vector DBs earn their keep at that scale).
 
 ## Salience Scoring (From memU)
 
