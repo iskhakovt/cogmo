@@ -18,6 +18,15 @@ Read `design/` for the full picture. Key docs:
 | [infrastructure.md](design/infrastructure.md) | NixOS service, PostgreSQL, Redis, secrets, deployment |
 | [decisions.md](design/decisions.md) | All decisions with rationale, eliminated options, adopted patterns |
 
+## Tracking
+
+| Doc | Purpose |
+|-|-|
+| [PROGRESS.md](PROGRESS.md) | Phased delivery plan — what's done, what's next |
+| [CHANGELOG.md](CHANGELOG.md) | Significant changes log |
+
+When completing work, update both: check off items in PROGRESS.md and add a dated entry to CHANGELOG.md.
+
 ## Stack
 
 - **Language:** TypeScript on Node.js
@@ -29,7 +38,7 @@ Read `design/` for the full picture. Key docs:
 
 ## Rules
 
-- No frameworks — raw SDK only. The agentic loop is ~30 lines.
+- No frameworks — raw SDK only. Core loop ~30 lines, full orchestration ~200 lines.
 - Memory writes are always additive. Dedup runs async via `reflect()`.
 - Sub-agents never see API keys. Orchestrator makes all external calls.
 - Every LLM call uses typed contracts (Zod schema in, Zod schema out) with retry + feedback injection.
