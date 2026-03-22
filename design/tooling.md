@@ -92,6 +92,67 @@ const activeRules = await db
 
 Drizzle-kit generates migration SQL from schema diffs: `drizzle-kit generate` → review `.sql` → `drizzle-kit migrate`.
 
+## Utility Libraries
+
+Small, focused libraries that fill gaps in the TS stdlib.
+
+### Zero-Runtime (Types Only)
+
+| Library | What | Stars |
+|-|-|-|
+| **type-fest** | 200+ utility types (`PartialDeep`, `Merge`, `JsonObject`, `Promisable`, etc.) | ~15k |
+| **ts-reset** | Fixes TS stdlib holes — `JSON.parse` returns `unknown`, `.filter(Boolean)` narrows, `.includes()` works with `as const` | ~8k |
+
+Install both, forget about them. Immediate DX improvement, zero runtime cost.
+
+### Pattern Matching
+
+```typescript
+import { match, P } from 'ts-pattern';
+
+// Exhaustive at compile time — miss a case, get a type error
+const response = match(event)
+  .with({ type: 'message' }, e => handleMessage(e))
+  .with({ type: 'callback' }, e => handleCallback(e))
+  .with({ type: 'command', command: P.string }, e => handleCommand(e))
+  .exhaustive();
+```
+
+**ts-pattern** (~13k stars) — replaces sprawling if/else and switch. Exhaustiveness checking means the compiler catches missing cases.
+
+### Async Primitives (p-* family by Sindre Sorhus)
+
+| Library | What | Example |
+|-|-|-|
+| **p-limit** | Concurrency limiter | `const limit = pLimit(3); limit(() => callLLM(...))` |
+| **p-retry** | Retry with backoff | `pRetry(() => fetch(url), { retries: 3 })` |
+| **p-queue** | Priority queue with concurrency | When p-limit isn't enough |
+
+Essential for LLM calls — limit concurrent API requests, retry transient failures.
+
+### Environment Parsing
+
+```typescript
+import { parseEnv, z } from 'znv';
+
+const env = parseEnv(process.env, {
+  ANTHROPIC_API_KEY: z.string().min(1),
+  REDIS_PORT: z.number().default(6380),
+  DEBUG: z.boolean().default(false),  // handles "false" → false correctly
+});
+```
+
+**znv** — type-safe `process.env` parsing with Zod. Coerces correctly, per-environment defaults.
+
+### IDs, Dates, Serialization
+
+| Library | What | When to use |
+|-|-|-|
+| **cuid2** | Sortable, collision-resistant IDs | DB primary keys (time-sorted, better than UUID for indexing) |
+| **nanoid** | URL-friendly unique IDs (130 bytes) | Short tokens, non-DB identifiers |
+| **date-fns** | Modular date utilities | Until Node ships Temporal API natively |
+| **superjson** | JSON.stringify that preserves Date, Map, Set, BigInt | API boundaries, BullMQ job data |
+
 ## Not Needed
 
 | Tool | Why not |
