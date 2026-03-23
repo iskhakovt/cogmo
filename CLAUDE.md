@@ -63,7 +63,7 @@ Other tracking docs:
 
 - **Language:** TypeScript on Node.js
 - **Framework:** None — raw Anthropic SDK
-- **Memory:** Hindsight (`@vectorize-io/hindsight-client`) + PostgreSQL + pgvector
+- **Memory:** Hindsight (self-hosted server + HTTP client) — PostgreSQL + pgvector managed by Hindsight
 - **Orchestration:** Inngest (self-hosted) — event-driven durable execution, scheduling, queues
 - **Interface:** Telegram (primary), adapter pattern for others
 - **Deployment:** Standard Node.js process (systemd, Docker, etc.)

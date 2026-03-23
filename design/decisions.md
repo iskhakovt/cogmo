@@ -7,7 +7,7 @@
 | Framework | None (raw `anthropic` SDK) | ~30 line agentic loop. LangGraph's immutable compiled graph incompatible with self-evolution. LangChain sentiment brutally negative. |
 | Language | TypeScript (Node.js) | Tier 1 SDK support across providers, real types, 60-70% of YC X25 agent startups chose TS. Node over Bun (memory leaks). |
 | Topology | Layered hub-and-spoke | 4.4x error rate with orchestrator vs 17.2x without. Peer mesh: 0 production successes. |
-| Memory | Hindsight + Observer | 91.4% LongMemEval, PostgreSQL-native, first-class TS SDK, MCP. Post-conversation extraction bypasses 15% silent failure rate. |
+| Memory | Hindsight (self-hosted server) + Observer | 91.4% LongMemEval, PostgreSQL-native, HTTP client SDK, MCP. Post-conversation extraction bypasses 15% silent failure rate. |
 | Self-evolution | 6-stage ladder | Each stage complete and useful alone. Data thresholds gate progression. |
 | Orchestration | Inngest (self-hosted) | Event-driven durable execution. Replaces BullMQ. Native `step.waitForEvent()` for HITL, built-in cron/queues, `step.ai.infer()` for LLM calls, AgentKit for multi-agent. SSPL license (fine for personal use). Connect + Checkpointing gives ~2ms per step. |
 | Prompt optimization | Build own (7 patterns) | Core loop ~50-100 lines TS. DSPy: Python. Ax: API churn (348 npm releases). |

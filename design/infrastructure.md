@@ -4,7 +4,8 @@
 
 | Dependency | Version | Purpose |
 |-|-|-|
-| PostgreSQL | 17+ | Application state + pgvector for Hindsight |
+| PostgreSQL | 17+ | Application state (Drizzle) + Hindsight server storage (pgvector) |
+| Hindsight | latest | Self-hosted memory server (`ghcr.io/vectorize-io/hindsight`), HTTP API on port 8888 |
 | Redis | 7+ | Inngest queue + state store (production); not needed in dev mode |
 | Inngest | latest | Event-driven orchestration — `inngest dev` locally, `inngest start` in production |
 | Node.js | 24+ (LTS Krypton) | Runtime |

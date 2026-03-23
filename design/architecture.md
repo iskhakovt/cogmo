@@ -82,14 +82,20 @@ Additive-only writes. Never fail a write. Post-conversation dedup via Hindsight'
 | Ingestion agents | Inngest functions, cron-triggered | Durable steps in main process |
 | Extraction agent | Inngest function, triggered by `conversation/idle` event | Durable steps in main process |
 | Evolution supervisor | Inngest function, cron-triggered | Durable steps in main process |
-| Memory | Hindsight TS SDK | Library (PostgreSQL backend) |
+| Memory | Hindsight HTTP client → self-hosted Hindsight server | Docker service (Python, uses PostgreSQL + pgvector internally) |
 | Orchestration | Inngest (self-hosted) | Go binary (Connect via WebSocket) |
 | Interfaces | Telegram adapter (webhook) | Fastify HTTP handler |
 | MCP integrations | MCP client SDK | Per-integration MCP servers |
 
-## Hindsight Deployment `[research]`
+## Hindsight Deployment `[confirmed]`
 
-Hindsight is an **in-process npm library** (`@vectorize-io/hindsight-client`), not a separate service (assumed, needs verification against Hindsight docs). It connects directly to PostgreSQL + pgvector from the Node.js process. No Docker container, no sidecar. Zero additional RAM beyond what PostgreSQL uses for pgvector indexes.
+Hindsight is a **client-server system**. `@vectorize-io/hindsight-client` is a pure HTTP client; the server (`ghcr.io/vectorize-io/hindsight`) is a self-hosted Python service that manages its own PostgreSQL + pgvector storage. Runs as a Docker service alongside our app.
+
+- **Server image:** `ghcr.io/vectorize-io/hindsight:latest`
+- **Ports:** 8888 (API), 9999 (UI)
+- **LLM provider:** Configurable — supports Anthropic, OpenAI, Ollama, etc. Uses LLM for memory extraction and reflection.
+- **Storage:** Can share our PostgreSQL instance (separate database/schema) or use its embedded Postgres.
+- **Client config:** Just `baseUrl` + optional `apiKey`. No database connections from our app.
 
 ## Background Tasks: Claude Code Agent SDK `[research]`
 
