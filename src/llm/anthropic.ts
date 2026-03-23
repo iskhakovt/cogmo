@@ -21,8 +21,8 @@ export class AnthropicProvider implements LlmProvider {
   readonly name = "anthropic";
   private readonly client: Anthropic;
 
-  constructor(apiKey: string) {
-    this.client = new Anthropic({ apiKey });
+  constructor(apiKey: string, baseURL?: string) {
+    this.client = new Anthropic({ apiKey, ...(baseURL ? { baseURL } : {}) });
   }
 
   async chat(params: ChatParams): Promise<LlmResponse> {

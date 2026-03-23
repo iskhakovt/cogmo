@@ -1,3 +1,4 @@
+import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { connect } from "inngest/connect";
 import { runAgentLoop } from "./agent/loop.js";
 import { assembleSystemPrompt } from "./agent/prompt.js";
@@ -15,8 +16,12 @@ import { AnthropicProvider } from "./llm/anthropic.js";
 import { logger } from "./logger.js";
 
 async function main() {
+  // Apply database migrations
+  await migrate(db, { migrationsFolder: "./migrations" });
+  logger.info("database migrations applied");
+
   // Wire dependencies
-  const provider = new AnthropicProvider(env.ANTHROPIC_API_KEY);
+  const provider = new AnthropicProvider(env.ANTHROPIC_API_KEY, env.ANTHROPIC_BASE_URL);
   const tools = createDefaultTools();
 
   const handleMessage = createHandleMessage({
