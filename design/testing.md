@@ -1,41 +1,41 @@
 # Testing
 
-## Local Development
+## Local Development `[proposed]`
 
 CLI adapter (`src/channels/cli.ts`) is the primary dev/test interface. stdin/stdout, no Telegram needed. Start with:
 
 ```bash
-npm run dev  # tsx watch mode
+pnpm dev  # tsx watch mode
 ```
 
 Type messages, see agent responses, memory operations, and tool calls in structured log output.
 
-## Unit Tests
+## Unit Tests `[confirmed]`
 
-Use vitest (suggested, not confirmed) (fast, native TS, ESM). Test what's deterministic:
+Use Vitest (fast, native TS, ESM). Test what's deterministic:
 
 | Layer | What to test | How |
 |-|-|-|
 | Typed LLM calls | Zod schema validation, retry logic | Mock the SDK client, inject known responses |
 | Memory metadata | Salience scoring, network routing | Pure functions, no LLM |
 | Channel registry | Registration, factory pattern | No external deps |
-| Scheduler | Job creation, cron parsing | Mock BullMQ queue |
+| Scheduler | Job creation, cron parsing | Mock Inngest queue |
 | Tag stripping | `<internal>` removal | String in, string out |
 | Session lifecycle | Idle detection, conversation boundaries | Time-based logic |
 | Prompt assembly | System prompt + rules + memories | Template rendering |
 
-## Integration Tests
+## Integration Tests `[proposed]`
 
-Test real interactions with PostgreSQL and Redis (both already running on nucleus). Use a separate `assistant_test` database.
+Test real interactions with PostgreSQL and Redis. Use Docker Compose for local dev (`docker-compose.yml`), or a separate `assistant_test` database.
 
 | Test | What |
 |-|-|
 | Hindsight round-trip | `retain()` -> `recall()` returns the fact |
-| BullMQ job flow | Enqueue job -> worker processes -> result in DB |
+| Inngest job flow | Enqueue job -> worker processes -> result in DB |
 | Schema migrations | Apply all migrations to empty DB, verify tables |
 | Crash recovery | Write cursor, simulate crash, resume from cursor |
 
-## LLM Tests (Non-Deterministic)
+## LLM Tests (Non-Deterministic) `[research]`
 
 LLM outputs vary. Test with assertions on structure, not exact content:
 
@@ -53,7 +53,7 @@ expect(result[0].fact).toBe("User prefers dark mode");
 
 For evolution Stage 4+, use LLM-as-judge rubrics with held-out test sets. Track scores over time — regression = prompt change broke something.
 
-## Mocking External Services
+## Mocking External Services `[proposed]`
 
 | Service | Mock strategy |
 |-|-|
@@ -62,7 +62,7 @@ For evolution Stage 4+, use LLM-as-judge rubrics with held-out test sets. Track 
 | Telegram | CLI adapter (same Channel interface, no network) |
 | Gmail/Calendar | Record real responses, replay in tests |
 
-## Evaluation Dataset
+## Evaluation Dataset `[research]`
 
 Build incrementally from real conversations (Phase 4 prerequisite):
 

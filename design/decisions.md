@@ -1,6 +1,6 @@
 # Decisions
 
-## Decision Table
+## Decision Table `[confirmed]`
 
 | Decision | Choice | Rationale |
 |-|-|-|
@@ -9,15 +9,14 @@
 | Topology | Layered hub-and-spoke | 4.4x error rate with orchestrator vs 17.2x without. Peer mesh: 0 production successes. |
 | Memory | Hindsight + Observer | 91.4% LongMemEval, PostgreSQL-native, first-class TS SDK, MCP. Post-conversation extraction bypasses 15% silent failure rate. |
 | Self-evolution | 6-stage ladder | Each stage complete and useful alone. Data thresholds gate progression. |
-| Scheduling | BullMQ | In-app, agent-modifiable. systemd: agent can't modify NixOS config. Temporal: 13GB minimum. |
+| Orchestration | Inngest (self-hosted) | Event-driven durable execution. Replaces BullMQ. Native `step.waitForEvent()` for HITL, built-in cron/queues, `step.ai.infer()` for LLM calls, AgentKit for multi-agent. SSPL license (fine for personal use). Connect + Checkpointing gives ~2ms per step. |
 | Prompt optimization | Build own (7 patterns) | Core loop ~50-100 lines TS. DSPy: Python. Ax: API churn (348 npm releases). |
-| Infrastructure | NUC -> Hetzner -> Mac Mini | Prove workload at each tier. NUC has ~4GB free. |
 | Model strategy | Hybrid: subscription CLI + per-token API | Background tasks via `claude -p` ($0). Interactive via API (~$80-200/mo). |
 | Interface | Telegram first, adapter pattern | Messenger is transport. Telegram first (existing usage). Adapter pattern for CLI/Discord/API. |
 | Personal agents | Build own | No existing tool covers memory + agent runtime + evolution together. |
 | Team tool | Dust.tt or Onyx | Separate from personal bot. Dust: $315/mo, 88% DAU. Onyx: MIT, self-hosted. |
 
-## Eliminated Options
+## Eliminated Options `[confirmed]`
 
 | Tool | Category | Why eliminated |
 |-|-|-|
@@ -27,8 +26,13 @@
 | Mastra | Framework | Graduation path only — revisit if plumbing > ~500 lines |
 | DSPy | Prompt opt | Python-only, wrong language |
 | Ax | Prompt opt | 348 npm releases (API churn), bus factor |
-| Temporal | Scheduling | 13+GB RAM, enterprise infrastructure |
-| Windmill | Scheduling | 3+GB baseline, visual flow builder fights raw SDK |
+| BullMQ | Orchestration | No durable execution — crash mid-job = restart from scratch. No native event model, no HITL. Building durability on top is a known anti-pattern. |
+| Temporal | Orchestration | Best durability guarantees but TS SDK requires sandboxed V8 (no normal Node.js APIs in workflows). Self-hosting is heavy (2-4GB server). TS SDK release cadence slowed (meta-package stuck since Feb 2024). Overkill for single-user assistant. |
+| Trigger.dev | Orchestration | Self-hosting requires 4 cores + 8GB RAM minimum. Designed as managed platform; self-hosting explicitly "for evaluation only." |
+| DBOS Transact | Orchestration | Library approach (no extra service), MIT license, PostgreSQL-only. But smallest community (1.1K stars, 17K npm/week vs Inngest's 289K). No native event model. Viable fallback if Inngest doesn't work out. |
+| Restate | Orchestration | Excellent performance (single Rust binary, <100ms p99) but no built-in cron/scheduling, BSL license, smaller community. Would need BullMQ alongside for cron. |
+| Hatchet | Orchestration | Pre-1.0 (v0.81), adds RabbitMQ dependency, rapidly changing API. |
+| Windmill | Orchestration | Platform, not a library — architecture mismatch. 3+GB baseline. |
 | Activepieces | Scheduling | 1.5GB baseline (revisit for MCP integrations) |
 | Mem0 | Memory | No MCP, limited memory types |
 | Graphiti | Memory | O(n) growth bug, Python-only |
@@ -39,10 +43,18 @@
 
 ## Adopted Patterns
 
+### From proven reference implementations `[confirmed]`
+
 | Source | Patterns |
 |-|-|
-| NanoClaw | Channel registry, GroupQueue (per-entity FIFO), cursor-based crash recovery, drift-resistant scheduling, activity-based timeouts, internal tag stripping, orchestrator-holds-secrets |
+| NanoClaw | Channel registry, cursor-based crash recovery, drift-resistant scheduling, activity-based timeouts, internal tag stripping, orchestrator-holds-secrets |
 | Mastra | Post-conversation Observer extraction, confidence-based network routing |
+
+### From research papers — needs evaluation before adopting `[research]`
+
+| Source | Patterns |
+|-|-|
+| NanoClaw | GroupQueue (per-entity FIFO) |
 | memU | Salience scoring, route intention gate, tiered retrieval, tool performance tracking |
 | DSPy MIPROv2 | Bootstrapped few-shot, instruction candidate generation with tip randomization |
 | DSPy GEPA | Textual feedback in metrics, Pareto frontier, reflective mutation |
