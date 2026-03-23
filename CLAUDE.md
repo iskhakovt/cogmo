@@ -47,3 +47,4 @@ When completing work, update both: check off items in PROGRESS.md and add a date
 - Every LLM call uses typed contracts (Zod schema in, Zod schema out) with retry + feedback injection.
 - Self-evolution changes are gated: instruction file edits auto-apply, code/skill changes require human approval.
 - Secrets via sops-nix `LoadCredential`, never in env files or git.
+- **Check versions** — before adding a dependency, check the latest version on npm and read the setup/migration guide. Don't assume versions from memory — they go stale fast.
