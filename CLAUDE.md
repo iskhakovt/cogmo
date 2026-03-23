@@ -42,6 +42,9 @@ When completing work, update both: check off items in PROGRESS.md and add a date
 ## Code Style
 
 - **Idiomatic TypeScript** — use classes, interfaces, enums where they make the domain clear. Prefer `interface` over `type` for object shapes (extendable). Use generics for reusable components.
+- **Naming** — lowercase-hyphenated filenames (`steering-rules.ts`), `.test.ts` suffix for tests. PascalCase for classes/types/interfaces, camelCase for functions/variables.
+- **Imports** — ESM with `.js` extensions (`import { foo } from "./bar.js"`). Named imports over default exports. Biome organises imports automatically.
+- **Error handling** — `Result<T, E>` (neverthrow) at service boundaries and anywhere failure is expected. Exceptions only for programmer errors (bugs). Never `catch` and silently swallow.
 - **Prefer libraries over bespoke code** — check if a well-maintained library solves the problem before writing a custom implementation. See `design/tooling.md` for the approved stack.
 - **Use the stack** — Remeda for collection processing (not hand-rolled loops), neverthrow for Result types, ts-pattern for pattern matching, Zod for validation, Drizzle for queries. Don't reinvent what these provide.
 - **Generalise where reasonable** — extract interfaces and shared types when two or more consumers exist. Don't over-abstract for hypothetical future use.
@@ -53,9 +56,17 @@ When completing work, update both: check off items in PROGRESS.md and add a date
 - **Research before building** — before implementing a feature, search for how it's done idiomatically in the framework/library you're using. Google "how to do X in Fastify/Drizzle/BullMQ" before writing custom code.
 - **Review existing tools** — before committing to a bespoke implementation, check if a maintained library or built-in feature covers the use case. Prefer battle-tested solutions.
 
+## Autonomy
+
+- Adding/updating dev dependencies, editing existing files, running tests — go ahead.
+- Adding a new **runtime dependency** — discuss first (affects deployment size and RAM).
+- Changing architecture patterns or data model — discuss first.
+
 ## Verification
 
 After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
+
+**Bug fixes: verify-then-act.** Prove the symptom (failing test or repro steps), identify root cause, propose fix, write a regression test. No shotgun debugging.
 
 ## Architecture Rules
 
