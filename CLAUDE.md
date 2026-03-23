@@ -116,6 +116,7 @@ After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 - **Event decoupling** — components communicate via Inngest events, not direct imports. The orchestrator emits `message/response`; channel adapters listen independently. Adding a new channel never touches the orchestrator.
 - **Thin infrastructure layers** — Inngest functions are controllers: receive event, call domain services, emit events. Zero business logic in `src/inngest/functions/`. Domain logic lives in `src/agent/`, `src/llm/`, `src/channels/` and is testable without Inngest.
 - **Domain owns logic, infra owns wiring** — if swapping Inngest for something else, only `src/inngest/` changes. If swapping Anthropic for OpenAI, only `src/llm/anthropic.ts` changes.
+- **Design for pluggability** — prompts, tools, LLM providers, and channels each have an explicit interface (`LlmProvider`, `ToolHandler`, `Channel`, etc.) that defines the plugin contract. All code depends on these interfaces, never on concrete implementations. Today they're in-process; in the future they become the boundary for external plugins (WASM, MCP, containers). Every new extension point must define its interface first. See `design/integrations.md`.
 
 ## Architecture Rules
 
