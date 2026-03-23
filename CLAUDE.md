@@ -93,7 +93,7 @@ Other tracking docs:
 
 ## Working with Tools
 
-- **IMPORTANT: Check versions** — before adding a dependency, check the latest version on npm and read the official setup/migration guide. Don't assume versions or config from memory — they go stale fast.
+- **IMPORTANT: Check versions** — before adding a dependency, check the latest version on npm and read the official setup/migration guide. Don't assume versions or config from memory — they go stale fast. Check both the latest release and the latest LTS. If they differ, ask the user which to use.
 - **Research before building** — before implementing a feature, search for how it's done idiomatically in the framework/library you're using. Google "how to do X in Inngest/Drizzle/Fastify" before writing custom code.
 - **Review existing tools** — before committing to a bespoke implementation, check if a maintained library or built-in feature covers the use case. Prefer battle-tested solutions.
 - **When unsure or iterating — stop and google.** If you're guessing at how something works (Docker Compose patterns, library APIs, infrastructure setup), look up the official docs and best practices first. Don't iterate through trial-and-error when the answer is a search away. This applies especially to infrastructure, deployment, and tooling decisions where conventions exist.

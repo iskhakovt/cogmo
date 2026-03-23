@@ -4,10 +4,10 @@
 
 | Dependency | Version | Purpose |
 |-|-|-|
-| PostgreSQL | 16+ | Application state + pgvector for Hindsight |
-| Redis | 7+ | Inngest queue + state store |
-| Inngest | 1.17+ | Event-driven orchestration (self-hosted Go binary) |
-| Node.js | 22+ | Runtime |
+| PostgreSQL | 17+ | Application state + pgvector for Hindsight |
+| Redis | 7+ | Inngest queue + state store (production); not needed in dev mode |
+| Inngest | latest | Event-driven orchestration — `inngest dev` locally, `inngest start` in production |
+| Node.js | 24+ (LTS Krypton) | Runtime |
 
 ## Local Development `[confirmed]`
 
@@ -51,14 +51,14 @@ Future: containerised deployment with Docker.
 Expose Prometheus metrics on a localhost port:
 - LLM call count, latency, token usage, errors
 - Memory operations (retain/recall/reflect count, latency)
-- BullMQ job counts (completed, failed, delayed, active)
+- Inngest function runs (completed, failed, retried)
 - Conversation count, messages per conversation
 
 Monitor RAM usage — avoid bloat, but don't prematurely optimise. Address when actual pressure appears.
 
 ## Web UI (Optional) `[proposed]`
 
-Bull Board or a custom status page for job monitoring. Add when needed.
+Inngest dashboard (built-in at port 8288) for event/function monitoring. Add custom status page when needed.
 
 ## Scaling Triggers `[proposed]`
 
