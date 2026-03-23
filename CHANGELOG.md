@@ -2,6 +2,9 @@
 
 | Date | Change |
 |-|-|
+| 2026-03-23 | End-to-end message pipeline — LLM abstraction (provider-agnostic), agentic loop, CLI adapter, Inngest orchestration with DI, 37 unit tests |
+| 2026-03-23 | Initial Drizzle migration generated and verified against PostgreSQL |
+| 2026-03-23 | CLAUDE.md — design philosophy (early abstractions, event decoupling, thin infra), testing rules, DI stance, code style |
 | 2026-03-23 | Replace BullMQ with Inngest — event-driven durable execution, added to Docker Compose, updated all design docs |
 | 2026-03-23 | Add todo.md + `/next` command — priority-based task tracking |
 | 2026-03-23 | Add confidence markers to all design docs (`[confirmed]`/`[proposed]`/`[research]`) |
