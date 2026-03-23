@@ -2,10 +2,10 @@
 
 ## Phase 0: Project Setup
 
-- [ ] Initialize Node.js project (`package.json`, `tsconfig.json`, `.eslintrc`)
-- [ ] Set up TypeScript build (`tsc` or `tsx` for dev)
-- [ ] Install core dependencies: `@anthropic-ai/sdk`, `bullmq`, `@vectorize-io/hindsight-client`, `zod`
-- [ ] Set up directory structure (`src/`, `src/agents/`, `src/memory/`, `src/channels/`, `src/scheduler/`, `src/evolution/`)
+- [x] Initialize Node.js project (`package.json`, `tsconfig.json`, Biome, Vitest)
+- [x] Set up TypeScript build (tsx watch for dev, tsup for production)
+- [x] Install core dependencies (Anthropic SDK, BullMQ, Drizzle, Zod v4, Pino, Remeda, neverthrow, ts-pattern, etc.)
+- [x] Set up directory structure (`src/`, `src/agents/`, `src/memory/`, `src/channels/`, `src/scheduler/`, `src/evolution/`)
 - [ ] Database schema — run `migrations/001_init.sql` (see `design/data-model.md`)
 - [ ] Verify Hindsight connects to PostgreSQL + pgvector
 - [ ] Verify BullMQ connects to Redis (port 6380)
