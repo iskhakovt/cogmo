@@ -133,7 +133,7 @@ Essential for LLM calls — limit concurrent API requests, retry transient failu
 ### Environment Parsing
 
 ```typescript
-import { parseEnv, z } from 'znv';
+import { parseEnv, z } from '@t3-oss/env-core';
 
 const env = parseEnv(process.env, {
   ANTHROPIC_API_KEY: z.string().min(1),
@@ -142,7 +142,7 @@ const env = parseEnv(process.env, {
 });
 ```
 
-**znv** — type-safe `process.env` parsing with Zod. Coerces correctly, per-environment defaults.
+**@t3-oss/env-core** — type-safe `process.env` parsing with Zod. Coerces correctly, per-environment defaults.
 
 ### IDs, Dates, Serialization
 
