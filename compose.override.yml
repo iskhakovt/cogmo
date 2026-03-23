@@ -1,0 +1,15 @@
+# Auto-loaded by `docker compose up` — adds fixed ports for local dev.
+# Testcontainers only loads docker-compose.yml, so tests get random ports.
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6380:6379"
+
+  inngest:
+    ports:
+      - "8288:8288"
+      - "8289:8289"

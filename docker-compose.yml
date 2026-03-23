@@ -2,7 +2,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg17
     ports:
-      - "5432:5432"
+      - "5432"
     environment:
       POSTGRES_USER: assistant
       POSTGRES_DB: assistant
@@ -19,7 +19,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6380:6379"
+      - "6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -31,25 +31,47 @@ services:
   inngest:
     image: inngest/inngest
     command: >
-      inngest start
+      inngest dev
       --host 0.0.0.0
       --port 8288
-      --postgres-uri postgres://assistant@postgres:5432/assistant?sslmode=disable
-      --redis-uri redis://redis:6379
+      --no-discovery
     ports:
-      - "8288:8288"
-      - "8289:8289"
+      - "8288"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8288/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  mock-anthropic:
+    profiles: [test]
+    build:
+      context: ./test/mock-anthropic
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r => process.exit(r.ok ? 0 : 1))"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
+
+  assistant:
+    profiles: [test]
+    build:
+      context: .
+    environment:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://assistant@postgres:5432/assistant
+      ANTHROPIC_API_KEY: test-key
+      ANTHROPIC_BASE_URL: http://mock-anthropic:3000
+      INNGEST_DEV: "true"
+      INNGEST_BASE_URL: http://inngest:8288
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
+      inngest:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8288/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
+      mock-anthropic:
+        condition: service_healthy
 
 volumes:
   pgdata:

@@ -24,15 +24,29 @@ Use Vitest (fast, native TS, ESM). Test what's deterministic:
 | Session lifecycle | Idle detection, conversation boundaries | Time-based logic |
 | Prompt assembly | System prompt + rules + memories | Template rendering |
 
-## Integration Tests `[proposed]`
+## Integration Tests `[confirmed]`
 
-Test real interactions with PostgreSQL and Redis. Use Docker Compose for local dev (`docker-compose.yml`), or a separate `assistant_test` database.
+True E2E: all services run in Docker, test runner talks to them like a client.
+
+**Infrastructure:**
+- Single `docker-compose.yml` with profiles: base services (postgres, redis, inngest) always, test services (assistant app, mock-anthropic) via `--profile test`
+- `compose.override.yml` adds fixed port mappings for dev. Testcontainers ignores overrides — gets random ports.
+- Testcontainers `DockerComposeEnvironment` in vitest `globalSetup` manages lifecycle (up/down)
+- `pnpm test:integration` runs them, `pnpm test` runs unit only
+
+**Mock LLM:** Separate container running a tiny HTTP server that implements `POST /v1/messages` with canned responses. App points `ANTHROPIC_BASE_URL` at it — zero test code in production.
+
+**Inngest:** Uses `inngest dev` (not `inngest start`) for integration tests. Dev mode skips auth, stores state in memory. We're testing our app's event flow, not Inngest's durability. May revisit with `inngest start` + postgres/redis if we need to test durable execution guarantees.
+
+**DB isolation:** Schema-per-test with `CREATE SCHEMA` + `DROP SCHEMA CASCADE`. Avoids FK ordering headaches, parallel-safe.
+
+**Naming:** `.integration.test.ts` suffix, co-located with source. Vitest projects config separates unit from integration.
 
 | Test | What |
 |-|-|
+| Full pipeline | Send `message/received` event → assert conversation + messages in DB, response event emitted |
+| Schema migrations | App starts = migrations applied. Verify tables queryable. |
 | Hindsight round-trip | `retain()` -> `recall()` returns the fact |
-| Inngest job flow | Enqueue job -> worker processes -> result in DB |
-| Schema migrations | Apply all migrations to empty DB, verify tables |
 | Crash recovery | Write cursor, simulate crash, resume from cursor |
 
 ## LLM Tests (Non-Deterministic) `[research]`
