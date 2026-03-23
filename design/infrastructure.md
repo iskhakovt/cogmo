@@ -1,107 +1,52 @@
 # Infrastructure
 
-## Nucleus (Host)
+## Runtime Requirements `[confirmed]`
 
-| Attribute | Value |
-|-|-|
-| Hardware | ASUS NUC14MNK150 — Intel N150, 8GB DDR5 (soldered), 256GB SSD |
-| OS | NixOS 25.11, flakes, sops-nix |
-| IP | 10.0.10.10 (Management VLAN), 100.124.178.90 (Tailscale) |
-| SSH | Key-only, no root, via Tailscale |
-| Config repo | `~/homelab` — `device-configs/nucleus/` for NixOS, `tf/` for infra |
-
-## Existing Services (Relevant)
-
-| Service | Port | Notes |
+| Dependency | Version | Purpose |
 |-|-|-|
-| PostgreSQL 18 | 5432 | + PostGIS, peer auth for local users, password auth for Podman bridge |
-| Redis | 6380 | All interfaces, no auth (firewall-protected) |
-| Cloudflare Tunnel | — | `*.timur.fyi` routes to localhost ports, Access OTP auth |
-| Tailscale | — | HTTPS serve for web UIs (Grafana :443, etc.) |
+| PostgreSQL | 16+ | Application state + pgvector for Hindsight |
+| Redis | 7+ | Inngest queue + state store |
+| Inngest | 1.17+ | Event-driven orchestration (self-hosted Go binary) |
+| Node.js | 22+ | Runtime |
 
-## PostgreSQL Setup
+## Local Development `[confirmed]`
 
-Already running. Needs:
-- pgvector extension added (for Hindsight)
-- New database for the assistant
-- Peer auth for local Node.js process (same as Grafana pattern)
+Docker Compose provides PostgreSQL (with pgvector) and Redis for local dev. See `docker-compose.yml`.
 
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE DATABASE assistant;
-CREATE USER assistant;
-GRANT ALL ON DATABASE assistant TO assistant;
+```bash
+docker compose up -d
+pnpm dev
 ```
 
-NixOS config (in a new `assistant.nix` module):
-```nix
-services.postgresql.ensureDatabases = [ "assistant" ];
-services.postgresql.ensureUsers = [{ name = "assistant"; ensureDBOwnership = true; }];
-services.postgresql.extensions = [ pkgs.postgresqlPackages.pgvector ];
-```
+## Configuration `[confirmed]`
 
-## Redis
+All configuration via environment variables. See `src/env.ts` for the schema.
 
-Already running on port 6380. BullMQ connects directly:
-```typescript
-const connection = { host: '127.0.0.1', port: 6380 };
-```
+| Variable | Default | Purpose |
+|-|-|-|
+| `DATABASE_URL` | `postgresql://assistant@localhost/assistant` | PostgreSQL connection |
+| `REDIS_HOST` | `127.0.0.1` | Redis host |
+| `REDIS_PORT` | `6380` | Redis port |
+| `NODE_ENV` | `development` | Environment |
+| `LOG_LEVEL` | `info` | Pino log level |
 
-## NixOS Service
+## Secrets `[confirmed]`
 
-Deploy as a systemd service with sops secrets:
-
-```nix
-{ config, pkgs, ... }:
-{
-  sops.secrets = {
-    "anthropic-api-key" = {};
-    "telegram-bot-token" = {};
-    # ... per-integration secrets
-  };
-
-  systemd.services.assistant = {
-    description = "AI Assistant Runtime";
-    after = [ "network-online.target" "postgresql.service" "redis.service" ];
-    wants = [ "network-online.target" ];
-    wantedBy = [ "multi-user.target" ];
-    serviceConfig = {
-      WorkingDirectory = "/var/lib/assistant";
-      StateDirectory = "assistant";
-      DynamicUser = true;
-      Restart = "on-failure";
-      RestartSec = "5s";
-      LoadCredential = [
-        "anthropic-api-key:${config.sops.secrets."anthropic-api-key".path}"
-        "telegram-bot-token:${config.sops.secrets."telegram-bot-token".path}"
-      ];
-    };
-    script = ''
-      export ANTHROPIC_API_KEY=$(cat "$CREDENTIALS_DIRECTORY/anthropic-api-key")
-      export TELEGRAM_BOT_TOKEN=$(cat "$CREDENTIALS_DIRECTORY/telegram-bot-token")
-      exec ${pkgs.nodejs}/bin/node /var/lib/assistant/dist/index.js
-    '';
-  };
-}
-```
-
-## Secrets
-
-All API keys in sops (`secrets/secrets.yaml`), decrypted at service start via `LoadCredential`. Never in environment files or git.
+API keys must never be in env files or git. In production, use the host's secret management (sops-nix, Vault, etc.) and inject via environment or `LoadCredential`.
 
 | Secret | Purpose |
 |-|-|
-| `anthropic-api-key` | Claude API (interactive, per-token) |
-| `telegram-bot-token` | Telegram Bot API |
+| `ANTHROPIC_API_KEY` | Claude API |
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot API |
 | Per-integration keys | Gmail, Calendar, Strava, etc. (added as integrations ship) |
 
-## Deployment
+## Deployment `[proposed]`
 
-Build TypeScript -> `dist/`. Copy to nucleus via `scp` or nix package. `systemctl restart assistant`.
+Build TypeScript -> `dist/`. Deploy however suits the host — systemd service, Docker, etc. The app is a standard Node.js process with no special requirements beyond PostgreSQL and Redis.
 
-Future: proper nix package with `buildNpmPackage` or similar.
+Future: containerised deployment with Docker.
 
-## Monitoring
+## Monitoring `[proposed]`
 
 Expose Prometheus metrics on a localhost port:
 - LLM call count, latency, token usage, errors
@@ -109,16 +54,16 @@ Expose Prometheus metrics on a localhost port:
 - BullMQ job counts (completed, failed, delayed, active)
 - Conversation count, messages per conversation
 
-Scrape into existing VictoriaMetrics. Grafana dashboard.
+Monitor RAM usage — avoid bloat, but don't prematurely optimise. Address when actual pressure appears.
 
-## Web UI (Optional)
+## Web UI (Optional) `[proposed]`
 
-If needed, expose Bull Board or a custom status page via Cloudflare Tunnel (`assistant.timur.fyi`). Already have the pattern — add ingress rule to `tf/cloudflare/tunnel.tf`.
+Bull Board or a custom status page for job monitoring. Add when needed.
 
-## Scaling Triggers
+## Scaling Triggers `[proposed]`
 
 | Signal | Action |
 |-|-|
-| Node.js OOM or swap pressure | Move to Hetzner (EUR 10-30/mo, 16-32GB) |
-| API costs > EUR 50/mo sustained | Evaluate Mac Mini for local sub-task inference |
-| pgvector index > 1GB | Evaluate dedicated vector store or upgrade SSD |
+| RAM pressure or swap | Move to larger host or optimise |
+| API costs unsustainable | Evaluate local inference for background tasks |
+| pgvector index > 1GB | Evaluate dedicated vector store |

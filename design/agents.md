@@ -1,6 +1,6 @@
 # Agents
 
-## The Agentic Loop
+## The Agentic Loop `[proposed]`
 
 No framework. Raw SDK while loop + tool dispatch. Core loop is ~30 lines; full orchestration with error handling, HITL, and checkpointing is ~200 lines. ~200 more for HITL (PG state serialization + messenger callback buttons + resume). ~50 for checkpointing (save/load conversation state).
 
@@ -43,7 +43,7 @@ async function runAgent(
 }
 ```
 
-## Routing: Agents-as-Tools
+## Routing: Agents-as-Tools `[proposed]`
 
 Define each sub-agent as a tool. Claude's native tool selection handles routing. No router agent needed.
 
@@ -80,17 +80,17 @@ const tools: Tool[] = [
 
 Sub-agents are just nested `runAgent()` calls with their own system prompts and tool sets.
 
-## Security: Orchestrator Holds Secrets
+## Security: Orchestrator Holds Secrets `[confirmed]`
 
 Sub-agents never see API keys. Orchestrator makes all external calls. Sub-agents return tool calls and text; orchestrator validates and executes.
 
-## Session Lifecycle
+## Session Lifecycle `[proposed]`
 
 **Start:** New conversation ID created on first message from a user if no active session exists (or previous session ended).
 
 **Active:** Messages within a session share the same conversation ID, history, and memory context.
 
-**Idle detection:** After ~5 min (suggested, not confirmed) with no messages, mark session ended and trigger Observer extraction as a delayed BullMQ job.
+**Idle detection:** After ~5 min (suggested, not confirmed) with no messages, mark session ended and trigger Observer extraction as a delayed Inngest job.
 
 **Resume:** If user messages again after idle timeout, start a new conversation. Don't reuse ended sessions — Observer has already extracted the knowledge. The new session benefits from that knowledge via memory recall.
 
@@ -101,15 +101,15 @@ Sub-agents never see API keys. Orchestrator makes all external calls. Sub-agents
 
 If session history exceeds ~80% of context window (suggested, not confirmed), truncate oldest messages. Keep the first message (sets context) and the most recent N messages. Future: summarize truncated middle instead of dropping.
 
-Track `token_count` per message in `session_history` for budget calculations.
+Track `token_count` per message in `messages` for budget calculations.
 
 **Message batching:** If user sends 3 quick messages before the agent responds, concatenate them into a single user turn. Use a short debounce (~2 seconds) (suggested, not confirmed) before invoking the agent.
 
 **Auth:** Validate Telegram `user_id` against an allowlist (initially just Timur's ID, stored in config). Reject all other users silently.
 
-## Channel Registry (From NanoClaw)
+## Channel Registry `[proposed]`
 
-Self-registration factory pattern. Each channel module calls `registerChannel()` on import.
+From NanoClaw. Self-registration factory pattern. Each channel module calls `registerChannel()` on import.
 
 ```typescript
 interface Channel {
@@ -142,16 +142,16 @@ function initChannels(): Channel[] {
 }
 ```
 
-## Per-Conversation Context
+## Per-Conversation Context `[proposed]`
 
 Each conversation gets its own:
 - Session history (PostgreSQL rows)
 - Memory partition (Hindsight namespace or agent_id filter)
 - System prompt augmentation (relevant memories prepended)
 
-## GroupQueue (From NanoClaw)
+## GroupQueue `[research]`
 
-Per-conversation FIFO ordering with global concurrency limit.
+From NanoClaw. Per-conversation FIFO ordering with global concurrency limit.
 
 ```typescript
 // Default: max 3 parallel LLM calls across all conversations
@@ -159,9 +159,9 @@ Per-conversation FIFO ordering with global concurrency limit.
 // User messages prioritized over background work (extraction, ingestion)
 ```
 
-Prevents a chatty conversation from starving background work. Implement as BullMQ named queues with rate limiting.
+Prevents a chatty conversation from starving background work. Implement as Inngest named queues with rate limiting.
 
-## AI Steering Rules (From PAI)
+## AI Steering Rules `[proposed]`
 
 Rules stored as PostgreSQL rows, not prose files. Injected into system prompts at invocation time. Enforced via code, not hope.
 
@@ -181,9 +181,9 @@ const systemPrompt = BASE_PROMPT + '\n\nRules:\n' + rules.map(r => `- ${r.rule}`
 
 Stage 1 evolution edits these rows. Stage 5 signal pipeline auto-proposes new rules from conversation signals.
 
-## Dual-Mode Monitoring (From memU)
+## Dual-Mode Monitoring `[research]`
 
-For ingestion agents: cheap embedding scan first, LLM only when relevant.
+From memU. For ingestion agents: cheap embedding scan first, LLM only when relevant.
 
 ```typescript
 // Cron checks email/calendar
@@ -200,7 +200,7 @@ for (const item of newItems) {
 
 Saves ~30% of ingestion costs by filtering before LLM processing.
 
-## Internal Tag Stripping (From NanoClaw)
+## Internal Tag Stripping `[confirmed]`
 
 Agent uses `<internal>` tags for reasoning visible to orchestrator but not user:
 
@@ -210,13 +210,13 @@ function stripInternalTags(text: string): string {
 }
 ```
 
-## Activity-Based Timeouts (From NanoClaw)
+## Activity-Based Timeouts `[proposed]`
 
-Timeout resets on every tool call or partial response. Only kill truly stuck agents, not long-running ones that are making progress.
+From NanoClaw. Timeout resets on every tool call or partial response. Only kill truly stuck agents, not long-running ones that are making progress.
 
-## Crash Recovery (From NanoClaw)
+## Crash Recovery `[proposed]`
 
-Persist message cursor to PostgreSQL before processing. Restart from last persisted cursor on crash. At-least-once delivery guarantee.
+From NanoClaw. Persist message cursor to PostgreSQL before processing. Restart from last persisted cursor on crash. At-least-once delivery guarantee.
 
 ```typescript
 // Before processing message:

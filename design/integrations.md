@@ -1,6 +1,6 @@
 # Integrations
 
-## Interface Pattern: Messenger-Agnostic Adapters
+## Interface Pattern: Messenger-Agnostic Adapters `[confirmed]`
 
 Telegram is just transport. The bot runtime exposes a generic message handler; adapters bridge specific platforms.
 
@@ -12,7 +12,7 @@ Telegram is just transport. The bot runtime exposes a generic message handler; a
 
 Each adapter implements the `Channel` interface (see agents.md). Adding a new interface = implementing `connect()`, `sendMessage()`, `onMessage()`.
 
-### Telegram (Primary)
+### Telegram (Primary) `[proposed]`
 
 Webhook mode — Telegram pushes to the bot's HTTPS endpoint. Express/Fastify handler receives updates, routes to orchestrator.
 
@@ -23,15 +23,15 @@ Webhook mode — Telegram pushes to the bot's HTTPS endpoint. Express/Fastify ha
 | Webhook URL | Via Cloudflare Tunnel (`bot.timur.fyi`) or Tailscale |
 | Features needed | Text messages, callback buttons (for approval flows), markdown formatting |
 
-### Discord (Future, Team)
+### Discord (Future, Team) `[research]`
 
 Similar adapter, bot token auth, slash commands.
 
-### CLI (Development/Testing)
+### CLI (Development/Testing) `[proposed]`
 
 stdin/stdout adapter for local testing without Telegram.
 
-## MCP Integrations
+## MCP Integrations `[proposed]`
 
 MCP (Model Context Protocol) for tool/data integrations. 17,000+ servers in ecosystem (March 2026).
 
@@ -46,7 +46,7 @@ MCP (Model Context Protocol) for tool/data integrations. 17,000+ servers in ecos
 | Linear | Official | Low (team use) |
 | Slack | Official | Low (team use) |
 
-### MCP Client Pattern
+### MCP Client Pattern `[proposed]`
 
 ```typescript
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -67,7 +67,7 @@ const tools = await client.listTools();
 const result = await client.callTool({ name: "retain", arguments: { fact: "...", network: "bank" } });
 ```
 
-### Dynamic Tool Registration (MCP Spec)
+### Dynamic Tool Registration (MCP Spec) `[research]`
 
 MCP supports runtime tool creation — the agent can extend its own capabilities:
 
@@ -78,7 +78,9 @@ MCP supports runtime tool creation — the agent can extend its own capabilities
 
 This enables the Skill Library (evolution stage 2) — agent writes a skill, registers it as an MCP tool, immediately available.
 
-## Skill Library (From Voyager)
+## Skill Library `[research]`
+
+From Voyager.
 
 ```
 skills/
@@ -92,7 +94,7 @@ skills/
 
 Code and descriptions are separated. Description embedding is the retrieval key; code is the value. Skills are compositional — new skills build on existing ones.
 
-### SKILL.md Standard (Anthropic, Dec 2025)
+### SKILL.md Standard (Anthropic, Dec 2025) `[research]`
 
 Progressive disclosure for managing skill count:
 
@@ -104,7 +106,7 @@ Progressive disclosure for managing skill count:
 
 Phase transition at ~50-100 skills: selection accuracy degrades, need hierarchical organization (skill categories, multi-level retrieval).
 
-## Permission Tiers
+## Permission Tiers `[proposed]`
 
 | Tier | Actions | Examples |
 |-|-|-|
@@ -112,4 +114,4 @@ Phase transition at ~50-100 skills: selection accuracy degrades, need hierarchic
 | Read-write (auto) | Create, modify low-risk items | Create calendar event, draft email (not send) |
 | Read-write (approval) | Destructive or irreversible | Send email, transfer money, delete data |
 
-Approval tier uses BullMQ `waitForEvent()` + Telegram callback buttons.
+Approval tier uses Inngest `waitForEvent()` + Telegram callback buttons.

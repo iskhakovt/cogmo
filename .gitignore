@@ -4,4 +4,6 @@ build/
 .env
 *.tfvars
 !*.tfvars.example
-.claude/
+.claude/*
+!.claude/commands/
+!.claude/settings.json

@@ -1,6 +1,6 @@
 # Architecture
 
-## Core Principles
+## Core Principles `[confirmed]`
 
 **Memory is a dumb store** — all intelligence lives in Claude sessions. Hindsight stores and retrieves; Claude decides what matters.
 
@@ -8,7 +8,7 @@
 
 **Model-agnostic API tier** — orchestrator uses raw SDK calls. Interactive tier can be Claude Sonnet, GPT, or Grok — swap providers without touching orchestration. Background tasks use `claude -p` headless (subscription, $0).
 
-## Topology: Orchestrator-Worker (Hub-and-Spoke)
+## Topology: Orchestrator-Worker (Hub-and-Spoke) `[confirmed]`
 
 No peer mesh (17x error amplification in Google/MIT research, 0 production successes, Cursor's 20-agent flat deployment failed). Orchestrator-worker with centralized validation (4.4x error rate vs 17.2x without).
 
@@ -36,7 +36,7 @@ No peer mesh (17x error amplification in Google/MIT research, 0 production succe
     +-------------+   +-------------+   +-------------+
 ```
 
-## Data Flow
+## Data Flow `[confirmed]`
 
 ```
 INGESTION (scheduled, headless)              RETRIEVAL (interactive)
@@ -54,7 +54,7 @@ INGESTION (scheduled, headless)              RETRIEVAL (interactive)
                          (pgvector + memories)
 ```
 
-## Three Memory Write Paths
+## Three Memory Write Paths `[confirmed]`
 
 | Path | Trigger | Method |
 |-|-|-|
@@ -62,42 +62,87 @@ INGESTION (scheduled, headless)              RETRIEVAL (interactive)
 | Post-conversation (Observer) | Chat idle ~5 min | Bot code extracts facts from transcript |
 | Scheduled ingestion | Cron / BullMQ | Pull email/calendar/etc, extract, `retain()` |
 
-## Two-Tier Memory
+## Two-Tier Memory `[confirmed]`
 
 | Tier | Contents | Storage |
 |-|-|-|
 | Private | Per-agent conversation context, scratchpad | Session-scoped rows in PostgreSQL |
 | Shared | Facts, preferences, decisions, people, events | Hindsight (PostgreSQL + pgvector). All agents read/write. `agent_id` column tracks provenance |
 
-## Multi-Agent Memory Consistency
+## Multi-Agent Memory Consistency `[proposed]`
 
 Additive-only writes. Never fail a write. Post-conversation dedup via Hindsight's `reflect()` or periodic Claude pass running async.
 
-## Component Map
+## Component Map `[proposed]`
 
 | Component | Implementation | Runs as |
 |-|-|-|
-| Orchestrator | TypeScript, raw SDK while loop + tool dispatch | Main Node.js process |
-| Conversation agent | Claude tool call from orchestrator | Inline (same process) |
-| Ingestion agents | Claude tool calls, scheduled | BullMQ workers |
-| Extraction agent | Claude tool call, post-conversation | BullMQ delayed job |
-| Evolution supervisor | Claude, periodic | BullMQ cron job |
+| Orchestrator | Inngest functions + raw SDK tool dispatch | Main Node.js process (Inngest Connect) |
+| Conversation agent | Inngest function, triggered by `message/received` event | Durable steps in main process |
+| Ingestion agents | Inngest functions, cron-triggered | Durable steps in main process |
+| Extraction agent | Inngest function, triggered by `conversation/idle` event | Durable steps in main process |
+| Evolution supervisor | Inngest function, cron-triggered | Durable steps in main process |
 | Memory | Hindsight TS SDK | Library (PostgreSQL backend) |
-| Scheduler | BullMQ | Library (Redis backend) |
-| Interfaces | Telegram adapter (webhook) | Express/Fastify HTTP handler (unconfirmed — implementation-time choice) |
+| Orchestration | Inngest (self-hosted) | Go binary (Connect via WebSocket) |
+| Interfaces | Telegram adapter (webhook) | Fastify HTTP handler |
 | MCP integrations | MCP client SDK | Per-integration MCP servers |
 
-## Hindsight Deployment
+## Hindsight Deployment `[research]`
 
 Hindsight is an **in-process npm library** (`@vectorize-io/hindsight-client`), not a separate service (assumed, needs verification against Hindsight docs). It connects directly to PostgreSQL + pgvector from the Node.js process. No Docker container, no sidecar. Zero additional RAM beyond what PostgreSQL uses for pgvector indexes.
 
-## Background Tasks: `claude -p` vs SDK
+## Background Tasks: Claude Code Agent SDK `[research]`
 
-Two code paths for LLM calls:
+Three tiers of LLM calls:
 
-| Path | When | How | Cost |
+| Tier | When | How | Cost |
 |-|-|-|-|
-| Anthropic SDK (`client.messages.create`) | Interactive (user waiting) | In-process, per-token billing | ~$80-400/mo |
-| `claude -p` (headless CLI) | Background (ingestion, extraction, evolution) | Spawn as child process, pipe stdin/stdout (suggested pattern, not proven) | $0 (subscription) |
+| Anthropic SDK (`client.messages.create`) | Interactive chat (user waiting) | In-process, per-token billing | ~$80-400/mo |
+| Claude Agent SDK (`claude-agent-sdk`) | Background tasks (extraction, ingestion) | Subprocess via SDK, subscription auth | $0 (subscription) |
+| Claude Agent SDK (long-running) | Coding tasks (refactor, fix tests) | Subprocess, isolated worktree, 30+ min | $0 (subscription) |
 
-Background workers (BullMQ jobs) shell out to `claude -p` with a prompt, parse the structured output. Interactive agents use the SDK directly for lower latency.
+### Claude Agent SDK (not raw `claude -p`)
+
+Reference: `claude-code-telegram` (deployed on nucleus as `@nucleus_claude_bot`) uses `claude-agent-sdk` Python SDK, which drives the Claude Code CLI as a subprocess. The SDK provides:
+- Session resumption (multi-turn via `options.resume = session_id`)
+- Streaming (real-time `AssistantMessage`, `ToolUseBlock`, `ResultMessage`)
+- Tool permission callbacks (`can_use_tool` for security gating)
+- Cost tracking (`total_cost_usd` on `ResultMessage`)
+- MCP server passthrough
+- Built-in sandbox support (`sandbox.enabled`)
+
+TypeScript equivalent: `@anthropic-ai/claude-agent-sdk` — verify maturity before adopting.
+
+Architecture: `Our app → claude-agent-sdk → claude CLI process → Anthropic API`
+
+### Async pattern for long-running tasks
+
+Long-running Claude Code sessions (coding tasks, 30+ min) should NOT block a workflow step. Instead, decouple via events:
+
+1. Spawn Claude Code session as detached process
+2. Workflow suspends via `step.waitForEvent("claude-task/completed", timeout: "2h")`
+3. Wrapper/hook sends completion event when session finishes
+4. Workflow resumes, collects results
+
+### Session isolation for coding tasks `[research]`
+
+Only coding tasks need filesystem isolation (chat, extraction, ingestion don't touch the filesystem).
+
+| Approach | Isolation | Overhead | When to use |
+|-|-|-|-|
+| **Git worktrees** | Branch-level, shared .git | Instant, minimal disk | Coding tasks on own repo |
+| **Claude Code sandbox** | Process-level (seccomp/namespace) | Minimal | Always for subprocess tasks |
+| **Container per session** | Full filesystem + process | Slower startup, more RAM | Untrusted code execution |
+
+Recommended combo: **git worktree + Claude Code sandbox**. Worktree prevents main branch corruption, sandbox prevents process escape. No containers needed for personal use.
+
+Workflow pattern:
+```
+event: coding-task/requested
+  → step: create worktree + branch
+  → step: spawn claude-agent-sdk session (cwd = worktree)
+  → waitForEvent("coding-task/completed")
+  → step: review results (diff, test output)
+  → step: merge or request human approval
+  → step: cleanup worktree
+```

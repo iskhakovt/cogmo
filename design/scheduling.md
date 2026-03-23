@@ -1,104 +1,188 @@
-# Scheduling
+# Scheduling & Orchestration
 
-## Decision: BullMQ
+## Decision: Inngest (Self-Hosted) `[confirmed]`
 
-Scheduling lives in app code (TypeScript), modifiable by the agent itself. Self-evolution requires the agent to create/modify its own scheduled tasks — impossible with systemd timers (agent can't modify NixOS config).
+Event-driven durable execution platform. Replaces BullMQ — handles queues, scheduling, durable workflows, human-in-the-loop, and observability in one tool.
 
 | Attribute | Detail |
 |-|-|
-| Package | `bullmq` (npm) |
-| License | MIT |
-| Architecture | Library — runs in-process. Needs only Redis |
-| RAM | ~120 KB per queue. Redis already running on nucleus (port 6380) |
-| TypeScript | Native (BullMQ IS TypeScript) |
-| Dashboard | Bull Board (separate npm package, optional) |
+| Package | `inngest` (npm SDK) |
+| Server | `inngest-cli` (single Go binary, self-hosted) |
+| License | SDK: Apache 2.0, Server: SSPL (fine for personal use) |
+| Architecture | Event-driven — send events, functions trigger. Connect mode uses persistent WebSocket (no inbound ports needed) |
+| Durability | Each `step.run()` checkpoints. Crash between steps → resume from last completed step |
+| Dependencies | PostgreSQL + Redis (or SQLite + in-memory for dev) |
+| Performance | Connect + Checkpointing: ~2ms per step transition |
+| Dashboard | Built-in observability UI with step-level traces |
 
-## Job Types
+## Why Inngest Over BullMQ
 
-| Job | Schedule | Complexity |
+BullMQ is a queue — no durable execution, no event model, no HITL, no workflow state machine. Building durability on top of BullMQ is a known anti-pattern. Inngest gives us all of that natively:
+
+| Feature | BullMQ | Inngest |
 |-|-|-|
-| Morning briefing | Daily cron (`30 7 * * *`) | Call agent, format, send to Telegram |
-| Email ingestion | Every 15-30 min | Fetch IMAP, extract facts, `retain()` |
-| Calendar sync | Every 15-30 min | Fetch events, extract, `retain()` |
-| Post-conversation extraction | Delayed (~5 min after last message) | Run Observer on transcript |
-| Memory consolidation | Daily | `hindsight.reflect()` |
-| Evolution supervisor | Daily/weekly | Review extractions, evolve prompts |
-| User-created reminders | One-shot or recurring | Agent schedules via tool call |
-| Retry on failure | Automatic | Exponential backoff, dead letter after N |
+| Durable execution | No (crash = restart from scratch) | Yes (resume from last step) |
+| Event-driven | Manual | Core design |
+| Human-in-the-loop | Manual | `step.waitForEvent()` (zero resources while waiting) |
+| Observability | BullBoard (separate) | Built-in dashboard with traces |
+| AI features | None | `step.ai.infer()`, AgentKit |
+| Cron/scheduling | Yes | Yes |
+| Queues/concurrency | Yes | Yes |
 
-## Core Patterns
+## Core Patterns `[proposed]`
+
+### Message handling (event-driven pipeline)
 
 ```typescript
-import { Queue, Worker, FlowProducer } from 'bullmq';
+const handleMessage = inngest.createFunction(
+  { id: "handle-message", triggers: [{ event: "message/received" }] },
+  async ({ event, step }) => {
+    const context = await step.run("load-context", () =>
+      loadConversation(event.data.conversationId)
+    );
 
-const connection = { host: 'localhost', port: 6380 };
-const queue = new Queue('assistant', { connection });
+    const memories = await step.run("recall-memories", () =>
+      hindsight.recall(event.data.text)
+    );
 
-// Scheduled job (cron)
-await queue.add('morning-briefing', {}, {
-  repeat: { pattern: '30 7 * * *' }
-});
+    // Agentic loop — each Claude call is a durable step
+    let messages = context.messages;
+    let i = 0;
+    while (true) {
+      const response = await step.run(`claude-${i}`, () =>
+        claude.messages.create({ model: "claude-sonnet-4-20250514", messages, tools })
+      );
 
-// Retry with exponential backoff
-await queue.add('ingest-email', { accountId: 'gmail' }, {
-  attempts: 5,
-  backoff: { type: 'exponential', delay: 1000 }
-});
+      if (response.stop_reason === "end_turn") {
+        await step.run("respond", () => sendToUser(response));
+        break;
+      }
 
-// Delayed job (post-conversation extraction)
-await queue.add('extract-memories', { conversationId: '123' }, {
-  delay: 5 * 60 * 1000  // 5 minutes
-});
+      const results = await step.run(`tools-${i}`, () =>
+        executeTools(response.content)
+      );
+      messages.push(...results);
+      i++;
+    }
 
-// Worker
-const worker = new Worker('assistant', async (job) => {
-  switch (job.name) {
-    case 'morning-briefing': return handleBriefing(job.data);
-    case 'ingest-email': return handleEmailIngestion(job.data);
-    case 'extract-memories': return handleExtraction(job.data);
+    await step.run("save", () => saveConversation(messages));
   }
-}, { connection });
+);
 ```
 
-## Human-in-the-Loop
-
-BullMQ `waitForEvent()` pauses a workflow, consuming zero resources while waiting. Resume on Telegram callback button press.
+### Scheduled jobs (cron)
 
 ```typescript
-// In worker: pause for approval
-await job.moveToWaitingChildren(token);
-// ... later, on Telegram callback:
-await queue.add('resume-workflow', { parentId: job.id, approved: true });
+const morningBriefing = inngest.createFunction(
+  { id: "morning-briefing", triggers: [{ cron: "30 7 * * *" }] },
+  async ({ step }) => {
+    const summary = await step.run("generate", () => generateBriefing());
+    await step.run("send", () => sendToTelegram(summary));
+  }
+);
 ```
 
-## Drift-Resistant Intervals (From NanoClaw)
-
-If an interval task takes 5 minutes and is scheduled hourly, next run = `previous_scheduled_time + interval`, not `now + interval`. BullMQ's `repeat` handles this correctly with `every` (ms) or `pattern` (cron).
-
-## Agent Self-Scheduling
-
-The agent can create/modify/delete scheduled jobs via tool calls:
+### Post-conversation extraction (delayed)
 
 ```typescript
-// Tool: schedule_task
+const extractMemories = inngest.createFunction(
+  { id: "extract-memories", triggers: [{ event: "conversation/idle" }] },
+  async ({ event, step }) => {
+    // Wait 5 min after idle detected (debounce)
+    await step.sleep("wait-for-silence", "5m");
+
+    const transcript = await step.run("load", () =>
+      loadMessages(event.data.conversationId)
+    );
+
+    const facts = await step.run("extract", () =>
+      extractFacts(transcript)
+    );
+
+    await step.run("retain", () => retainAll(facts));
+  }
+);
+```
+
+### Human-in-the-loop (approval)
+
+```typescript
+const reviewSkill = inngest.createFunction(
+  { id: "review-skill", triggers: [{ event: "skill/created" }] },
+  async ({ event, step }) => {
+    await step.run("notify", () =>
+      sendToTelegram(`New skill: ${event.data.name}. Approve?`)
+    );
+
+    const approval = await step.waitForEvent("skill/reviewed", {
+      match: "data.skillId",
+      timeout: "24h",
+    });
+
+    if (approval?.data.approved) {
+      await step.run("activate", () => activateSkill(event.data.skillId));
+    }
+  }
+);
+```
+
+### Long-running Claude Code tasks (async)
+
+```typescript
+const codingTask = inngest.createFunction(
+  { id: "coding-task", triggers: [{ event: "coding-task/requested" }] },
+  async ({ event, step }) => {
+    await step.run("prepare", () =>
+      createWorktree(event.data.branch)
+    );
+
+    await step.run("spawn", () =>
+      spawnClaudeSession(event.data.prompt, event.data.worktreePath)
+    );
+
+    // Claude session runs independently — wait for completion event
+    const result = await step.waitForEvent("coding-task/completed", {
+      match: "data.taskId",
+      timeout: "2h",
+    });
+
+    if (result?.data.success) {
+      await step.run("review", () => reviewDiff(event.data.branch));
+    }
+
+    await step.run("cleanup", () => cleanupWorktree(event.data.branch));
+  }
+);
+```
+
+## Agent Self-Scheduling `[proposed]`
+
+The agent can create scheduled tasks by sending events that trigger Inngest functions, or by using the Inngest REST API to create new function triggers.
+
+```typescript
+// Tool: schedule_task — agent sends an event that creates a cron function
 async function scheduleTask(args: { name: string; cron: string; prompt: string }) {
-  await queue.add(args.name, { prompt: args.prompt }, {
-    repeat: { pattern: args.cron },
-    jobId: args.name,  // dedup key
+  await inngest.send({
+    name: "task/scheduled",
+    data: { name: args.name, cron: args.cron, prompt: args.prompt },
   });
 }
-
-// Tool: list_scheduled_tasks
-async function listTasks() {
-  return queue.getRepeatableJobs();
-}
-
-// Tool: remove_scheduled_task
-async function removeTask(args: { name: string }) {
-  await queue.removeRepeatableByKey(args.name);
-}
 ```
 
-## Why Not systemd Timers
+## Connection Modes `[confirmed]`
 
-systemd timers were eliminated — the agent can't modify NixOS config, which breaks self-evolution. BullMQ from day one: the agent can create/modify/delete its own scheduled jobs via tool calls.
+| Mode | How | Latency | Use when |
+|-|-|-|-|
+| **Connect (WebSocket)** | App dials out to Inngest server, persistent bidirectional | ~10-50ms/step | Self-hosted, long-running process (our case) |
+| **Connect + Checkpointing** | WebSocket + local step execution, async persistence | ~2ms/step | Default for us |
+| **HTTP serve** | Inngest calls your HTTP endpoints per step | 100-500ms/step | Serverless platforms |
+
+We use Connect + Checkpointing. No inbound ports needed.
+
+## Why Not Other Options `[confirmed]`
+
+See `decisions.md` for the full eliminated options table. Key points:
+- **BullMQ:** No durable execution, no events, no HITL. Building durability on top is a known trap.
+- **Temporal:** Best durability but TS SDK requires sandboxed V8 (no normal Node.js in workflows). Heavy self-hosting (2-4GB). Overkill.
+- **DBOS Transact:** Library approach (no extra service), MIT, PostgreSQL-only. But smallest community (1.1K stars vs Inngest's 5.1K). No event model. Viable fallback.
+- **Restate:** Clean API, light binary, but no cron/scheduling. Would need BullMQ alongside.
