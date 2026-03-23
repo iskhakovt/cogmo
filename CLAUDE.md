@@ -71,13 +71,25 @@ Other tracking docs:
 ## Code Style
 
 - **Idiomatic TypeScript** — use classes, interfaces, enums where they make the domain clear. Prefer `interface` over `type` for object shapes (extendable). Use generics for reusable components.
+- **`function` declarations for named exports** — use `function foo()` not `const foo = () => {}`. Better stack traces, hoisted, readable. Arrow functions for callbacks and inline lambdas only.
 - **Naming** — lowercase-hyphenated filenames (`steering-rules.ts`), `.test.ts` suffix for tests. PascalCase for classes/types/interfaces, camelCase for functions/variables.
 - **Imports** — ESM with `.js` extensions (`import { foo } from "./bar.js"`). Named imports over default exports. Biome organises imports automatically.
 - **Error handling** — `Result<T, E>` (neverthrow) at service boundaries and anywhere failure is expected. Exceptions only for programmer errors (bugs). Never `catch` and silently swallow.
+- **No mutable state across boundaries** — functions may mutate local arrays/objects internally for performance, but must return defensive copies (spread or `structuredClone`). Never return a reference to internal mutable state — this is rep exposure. Use `Readonly<T>` / `ReadonlyArray<T>` in return types where practical.
 - **Prefer libraries over bespoke code** — check if a well-maintained library solves the problem before writing a custom implementation. See `design/tooling.md` for the approved stack.
 - **Use the stack** — Remeda for collection processing (not hand-rolled loops), neverthrow for Result types, ts-pattern for pattern matching, Zod for validation, Drizzle for queries. Don't reinvent what these provide.
+- **Inject dependencies, don't hard-import them** — services and stateful dependencies (db, LLM provider, agent loop) should be passed in as parameters — interface, class, or function. Hard-importing a concrete implementation creates coupling that requires `vi.mock()` to test. A function parameter counts as injection — `bar(chat: () => Promise<Response>)` is as good as `bar(provider: LlmProvider)`. Pure helpers, utilities, constants, type definitions, and schema objects (e.g. `eq()` from drizzle, `logger`, Zod schemas) are fine to import directly.
 - **Generalise where reasonable** — extract interfaces and shared types when two or more consumers exist. Don't over-abstract for hypothetical future use.
-- **Tests** — write tests for new functionality. Use Vitest. Mock external services, test real logic. See `design/testing.md`.
+- **No dead code** — if nothing consumes a method, delete it or make it private. No code "just in case".
+
+## Testing
+
+- **One module per test file** — each `.test.ts` tests exactly one source module. Mock everything outside that module.
+- **Design for testability** — accept interfaces, not concrete classes. Pass dependencies (db, provider) as parameters, not imports. If something is hard to test, the design is wrong — fix the design, not the test.
+- **Test contracts, not internals** — test the interface a consumer depends on. If changing an implementation detail breaks a test, the test is too coupled. If a contract changes and no test breaks, there's a gap.
+- **Boundary behavior matters** — defensive copies, error propagation, unknown/missing inputs, edge cases at module boundaries. This is where real bugs live.
+- **Test helpers for readability** — factory functions (`mockProvider()`, `textResponse()`) keep tests scannable. Prefer building test data declaratively over inline object literals repeated across tests.
+- **Framework:** Vitest. See `design/testing.md` for integration and LLM test patterns.
 
 ## Working with Tools
 
@@ -97,9 +109,16 @@ After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 
 **Bug fixes: verify-then-act.** Prove the symptom (failing test or repro steps), identify root cause, propose fix, write a regression test. No shotgun debugging.
 
+## Design Philosophy
+
+- **Early abstractions pay off** — define interfaces and typed contracts upfront. A clean LLM provider interface costs nothing now and saves a rewrite later.
+- **Event decoupling** — components communicate via Inngest events, not direct imports. The orchestrator emits `message/response`; channel adapters listen independently. Adding a new channel never touches the orchestrator.
+- **Thin infrastructure layers** — Inngest functions are controllers: receive event, call domain services, emit events. Zero business logic in `src/inngest/functions/`. Domain logic lives in `src/agent/`, `src/llm/`, `src/channels/` and is testable without Inngest.
+- **Domain owns logic, infra owns wiring** — if swapping Inngest for something else, only `src/inngest/` changes. If swapping Anthropic for OpenAI, only `src/llm/anthropic.ts` changes.
+
 ## Architecture Rules
 
-- No frameworks — raw SDK only. Core loop ~30 lines, full orchestration ~200 lines.
+- No frameworks — raw SDK only.
 - Memory writes are always additive. Dedup runs async via `reflect()`.
 - Sub-agents never see API keys. Orchestrator makes all external calls.
 - Every LLM call uses typed contracts (Zod schema in, Zod schema out) with retry + feedback injection.
