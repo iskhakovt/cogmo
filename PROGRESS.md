@@ -8,11 +8,14 @@
 - [x] Set up directory structure (`src/`, `src/agents/`, `src/memory/`, `src/channels/`, `src/scheduler/`, `src/evolution/`)
 - [x] Docker Compose for local dev (PostgreSQL + pgvector, Redis)
 - [x] Drizzle schema — Phase 1 tables (conversations, messages, steering_rules)
-- [ ] Generate Drizzle migration and verify against PostgreSQL
+- [x] Generate Drizzle migration and verify against PostgreSQL
+- [x] Set up Inngest — SDK installed, Docker Compose configured, events typed
+- [x] CLI adapter — stdin/stdout for local testing
+- [x] End-to-end message pipeline — LLM abstraction, agentic loop, Inngest orchestration
+- [x] Unit tests — 37 tests, full module coverage
+- [ ] Integration test infrastructure — compose.test.yml, mock LLM, testcontainers
 - [ ] Verify Hindsight connects to PostgreSQL + pgvector
-- [ ] Set up Inngest (self-hosted) — install SDK, add to Docker Compose, verify connection
 - [ ] Basic health check endpoint (HTTP)
-- [ ] CLI adapter — stdin/stdout for local testing (no Telegram needed yet)
 
 ## Phase 1: MVP — Conversation + Memory
 
