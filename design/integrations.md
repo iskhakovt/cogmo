@@ -115,3 +115,47 @@ Phase transition at ~50-100 skills: selection accuracy degrades, need hierarchic
 | Read-write (approval) | Destructive or irreversible | Send email, transfer money, delete data |
 
 Approval tier uses Inngest `waitForEvent()` + Telegram callback buttons.
+
+## Plugin Extensibility `[research]`
+
+Goal: open-source ecosystem where people publish and install plugins (tools, integrations, channels).
+
+### Execution models evaluated
+
+| Model | Idle cost | Cold start | Isolation | Can exec | Ecosystem examples |
+|-|-|-|-|-|-|
+| In-process import | Memory | 0 | None | Yes | Home Assistant, Obsidian, LangChain |
+| MCP subprocess (stdio) | Per-process | ~100-500ms | Process | Yes | VS Code, Claude, Cursor |
+| WASM (Extism) | Zero | ~1-5ms | Sandbox | No | Figma, Envoy, Helm 4 |
+| Container (HTTP+SSE) | High | ~1-5s | Full | Yes | No major plugin system uses this for per-call |
+
+### Leading candidate: WASM + capability bus
+
+WASM plugins can't exec, can't access the network, can't touch the filesystem — unless the host explicitly grants it. This is a feature, not a bug. The host exposes capabilities through an event bus:
+
+```
+WASM plugin → request: exec("git", args) → Host ACL check → subprocess → result
+WASM plugin → request: http(url)         → Host ACL check → fetch → result
+WASM plugin → request: db.query(sql)     → Host ACL check → query → result
+```
+
+Benefits:
+- **ACL** — host decides what each plugin is allowed to do
+- **Audit** — every capability request is logged, traceable to the plugin
+- **Rate limiting** — host controls concurrency per plugin
+- **True sandboxing** — plugin literally cannot escape WASM, all capabilities are granted
+
+This is capability-based security (same model as Deno permissions, Android app permissions, WASM design philosophy).
+
+### WASM maturity (as of 2026)
+
+- WASI Preview 2 stable — HTTP, filesystem, env vars all standardized
+- Extism production-ready — used by Helm 4 for plugin sandboxing
+- TypeScript-to-WASM works (AssemblyScript, ComponentizeJS) but plugins are ~12MB vs ~100KB for Rust
+- **Limitation:** no subprocess spawning from within WASM — this is exactly why the capability bus pattern works
+
+### Phased approach (not a final decision)
+
+1. **Now:** In-process `Tool` interface, direct function calls
+2. **Phase 2:** MCP client for third-party tools (subprocess isolation, proven pattern, growing ecosystem)
+3. **Phase 3+:** Evaluate WASM + capability bus for open-source plugin ecosystem. MCP and WASM can coexist — MCP for power-user integrations that need full OS access, WASM for sandboxed community plugins
