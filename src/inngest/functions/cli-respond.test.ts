@@ -1,19 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CliChannel } from "../../channels/cli.js";
+import type { Channel } from "../../channels/types.js";
 import { createCliRespond } from "./cli-respond.js";
 
-function mockCliChannel(): CliChannel {
+function mockChannel(): Channel {
   return {
     name: "cli",
     write: vi.fn(),
     start: vi.fn(),
     stop: vi.fn(),
-  } as any;
+  };
 }
 
 describe("createCliRespond", () => {
   it("calls cliChannel.write with event text", async () => {
-    const channel = mockCliChannel();
+    const channel = mockChannel();
     const fn = createCliRespond(channel);
     const handler = (fn as any).fn;
 
