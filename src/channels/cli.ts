@@ -1,7 +1,7 @@
 import * as readline from "node:readline";
 import { createId } from "@paralleldrive/cuid2";
 import { logger } from "../logger.js";
-import type { InboundMessage } from "./types.js";
+import type { Channel, InboundMessage } from "./types.js";
 
 /**
  * CLI channel adapter — stdin for input, stdout for output.
@@ -9,7 +9,7 @@ import type { InboundMessage } from "./types.js";
  * Used for local testing without Telegram. Sends InboundMessage objects
  * via a callback (typically wired to send an Inngest event).
  */
-export class CliChannel {
+export class CliChannel implements Channel {
   readonly name = "cli";
   private rl: readline.Interface | null = null;
   private conversationId: string = createId();

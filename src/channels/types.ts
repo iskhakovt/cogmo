@@ -11,3 +11,16 @@ export interface InboundMessage {
   text: string;
   timestamp: Date;
 }
+
+/**
+ * Channel adapter interface — the plugin contract for input/output transports.
+ *
+ * Each channel (CLI, Telegram, Slack, etc.) implements this interface.
+ * The orchestrator and response handlers depend on this, never on concrete adapters.
+ */
+export interface Channel {
+  readonly name: string;
+  start(onMessage: (msg: InboundMessage) => void): void;
+  write(text: string): void;
+  stop(): void;
+}
