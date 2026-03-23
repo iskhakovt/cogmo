@@ -4,14 +4,18 @@
 
 | Attribute | Detail |
 |-|-|
-| Package | `@vectorize-io/hindsight-client` |
+| Attribute | Detail |
+|-|-|
+| Client | `@vectorize-io/hindsight-client` (HTTP client, no DB access) |
+| Server | `ghcr.io/vectorize-io/hindsight` (self-hosted Python service) |
 | License | MIT |
-| Backend | PostgreSQL + pgvector |
+| Storage | Server manages its own PostgreSQL + pgvector (can share our Postgres instance) |
+| LLM | Server uses an LLM provider (Anthropic, OpenAI, etc.) for extraction and reflection |
 | Benchmark | 91.4% LongMemEval |
-| Key ops | `retain(fact, network)`, `recall(query)`, `reflect()` |
+| Key ops | `retain(bankId, content)`, `recall(bankId, query)`, `reflect(bankId, query)` |
 | MCP | Native MCP server |
 
-Hindsight handles storage, embedding, retrieval, and deduplication. We supply the extraction logic (what goes in) and retrieval queries (what comes out).
+Hindsight is a client-server system. Our app talks to it via HTTP — no direct database access. The server handles storage, embedding, retrieval, and deduplication. We supply the extraction logic (what goes in) and retrieval queries (what comes out).
 
 ## Four Memory Networks `[proposed]`
 
