@@ -1,47 +1,12 @@
 # Agents
 
-## The Agentic Loop `[proposed]`
+## The Agentic Loop `[confirmed]`
 
-No framework. Raw SDK while loop + tool dispatch. Core loop is ~30 lines; full orchestration with error handling, HITL, and checkpointing is ~200 lines. ~200 more for HITL (PG state serialization + messenger callback buttons + resume). ~50 for checkpointing (save/load conversation state).
+No framework. Raw SDK while loop + tool dispatch. Implemented in `src/agent/loop.ts`.
 
-```typescript
-async function runAgent(
-  systemPrompt: string,
-  userMessage: string,
-  tools: Tool[],
-  toolHandlers: Record<string, (args: any) => Promise<any>>
-): Promise<string> {
-  const messages: Message[] = [{ role: "user", content: userMessage }];
+The loop takes a system prompt, message history, tools, and an LLM provider. It calls the LLM, executes any tool calls, appends results, and repeats until the LLM returns `end_turn` or `max_tokens`. Returns the final text, full message history (defensive copy), and usage stats.
 
-  while (true) {
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      system: systemPrompt,
-      messages,
-      tools,
-    });
-
-    messages.push({ role: "assistant", content: response.content });
-
-    if (response.stop_reason === "end_turn") {
-      return response.content.filter(b => b.type === "text").map(b => b.text).join("");
-    }
-
-    // Execute tool calls
-    const toolResults = [];
-    for (const block of response.content.filter(b => b.type === "tool_use")) {
-      const handler = toolHandlers[block.name];
-      try {
-        const result = await handler(block.input);
-        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify(result) });
-      } catch (err) {
-        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: `Error: ${err.message}`, is_error: true });
-      }
-    }
-    messages.push({ role: "user", content: toolResults });
-  }
-}
-```
+Provider-agnostic — depends on the `LlmProvider` interface, not the Anthropic SDK directly. See `src/llm/provider.ts`.
 
 ## Routing: Agents-as-Tools `[proposed]`
 
@@ -49,16 +14,6 @@ Define each sub-agent as a tool. Claude's native tool selection handles routing.
 
 ```typescript
 const tools: Tool[] = [
-  {
-    name: "email_agent",
-    description: "Draft, search, or summarize emails",
-    input_schema: { type: "object", properties: { task: { type: "string" } } }
-  },
-  {
-    name: "finance_agent",
-    description: "Query spending, budgets, subscriptions",
-    input_schema: { type: "object", properties: { query: { type: "string" } } }
-  },
   {
     name: "memory_recall",
     description: "Search long-term memory for facts, preferences, past decisions",
@@ -69,136 +24,140 @@ const tools: Tool[] = [
     description: "Store a fact in long-term memory",
     input_schema: { type: "object", properties: { fact: { type: "string" }, network: { enum: ["world", "bank", "opinion", "observation"] } } }
   },
-  {
-    name: "schedule_task",
-    description: "Create, modify, or delete a scheduled task",
-    input_schema: { ... }
-  },
   // ...
 ];
 ```
 
-Sub-agents are just nested `runAgent()` calls with their own system prompts and tool sets.
+Sub-agents are just nested `runAgentLoop()` calls with their own system prompts and tool sets.
 
 ## Security: Orchestrator Holds Secrets `[confirmed]`
 
 Sub-agents never see API keys. Orchestrator makes all external calls. Sub-agents return tool calls and text; orchestrator validates and executes.
 
-## Session Lifecycle `[proposed]`
+## Conversation Layer `[proposed]`
 
-**Start:** New conversation ID created on first message from a user if no active session exists (or previous session ended).
+The conversation layer manages the relationship between where messages come from (channels/chats), what dialogue they belong to (conversations), and how responses get delivered back.
 
-**Active:** Messages within a session share the same conversation ID, history, and memory context.
+### Key Concepts
 
-**Idle detection:** After ~5 min (suggested, not confirmed) with no messages, mark session ended and trigger Observer extraction as a delayed Inngest job.
+**Channel** — A transport adapter (Telegram, CLI, Slack). Code interface that knows how to send/receive messages over a specific platform. See `src/channels/types.ts`.
 
-**Resume:** If user messages again after idle timeout, start a new conversation. Don't reuse ended sessions — Observer has already extracted the knowledge. The new session benefits from that knowledge via memory recall.
+**Chat** — A persistent endpoint within a channel. A Telegram DM with the bot is a chat. A CLI terminal session is a chat. A Slack thread is a chat. Each chat has a polymorphic **address** stored as `jsonb` (e.g. `{ channel: "telegram", chatId: 123456 }`). The address is opaque to the orchestrator — only the channel adapter that created it knows how to interpret it.
 
-**Context window management:** Each invocation assembles context from:
-1. System prompt + steering rules (~500-1000 tokens)
-2. Relevant memories from Hindsight recall (~500-2000 tokens)
-3. Recent session history
+**Conversation** — A thread of dialogue with shared LLM context. When the orchestrator processes a message, it loads the conversation's history and assembles the context window from it. Conversations don't have an explicit lifecycle — they don't "end." They just go idle. `/new` on a channel creates a fresh conversation and relinks the chat to it. The old conversation stays in the DB permanently (reflection can still process it).
 
-If session history exceeds ~80% of context window (suggested, not confirmed), truncate oldest messages. Keep the first message (sets context) and the most recent N messages. Future: summarize truncated middle instead of dropping.
+**The relationship:** A chat is linked to one active conversation at a time. A conversation can receive messages from multiple chats (e.g. same conversation accessible from Telegram and CLI). Over time, a chat may be linked to many different conversations (each `/new` creates one).
 
-Track `token_count` per message in `messages` for budget calculations.
+### Session Manager
 
-**Message batching:** If user sends 3 quick messages before the agent responds, concatenate them into a single user turn. Use a short debounce (~2 seconds) (suggested, not confirmed) before invoking the agent.
+The session manager resolves inbound messages to conversations:
 
-**Auth:** Validate Telegram `user_id` against an allowlist (initially just Timur's ID, stored in config). Reject all other users silently.
+1. Message arrives with `(channel, chatId, userId)` from the channel adapter
+2. Look up chat by address → found? Get its linked `conversationId`. Not found? Create the chat.
+3. Chat has no active conversation? Create one (using the user's default profile) and link the chat to it.
+4. Now we have a `conversationId` — load history, run the agent, persist the response.
 
-## Channel Registry `[proposed]`
+This is implemented in the `resolve-session` step of `handle-message.ts`.
 
-From NanoClaw. Self-registration factory pattern. Each channel module calls `registerChannel()` on import.
+### Profiles
+
+A profile is a named agent configuration owned by a user: base prompt, LLM model, enabled tool set. Examples: "assistant" (general chat), "coder" (coding tasks), "buddy" (casual).
+
+Conversations use a profile — the profile determines what the agent acts like. `/new coder` would create a conversation using the "coder" profile. Steering rules can be global or scoped to a specific profile.
+
+### Message Flow
+
+```
+1. Channel adapter receives raw input (webhook, stdin, etc.)
+2. Persist as InboundMessage immediately (durability — never lose a webhook payload)
+3. Emit Inngest event (notification, not payload)
+4. Debounce/batch (wait for user to finish typing)
+5. Orchestrator picks up:
+   a. Resolve session (find/create chat → find/create conversation)
+   b. Combine pending InboundMessages into one conversation Message
+   c. Load conversation history
+   d. Assemble system prompt (profile base prompt + steering rules + memories)
+   e. Run agentic loop
+   f. Persist assistant Message
+   g. Emit response event
+6. Response router decides which chats receive the response
+7. Channel adapters deliver to their respective endpoints
+```
+
+### Inbound Buffer
+
+Raw messages are persisted to `inbound_messages` immediately on arrival — before any processing. This ensures durability for push-only channels (Telegram webhooks, Slack events) where the platform won't resend if we lose the payload.
+
+Each inbound message has a status lifecycle: `pending` → `processing` → `processed`. When the orchestrator batches pending messages into a conversation turn, it creates one `messages` row and stamps all source `inbound_messages` rows with the resulting `messageId`.
+
+### Message Batching (Debounce) `[proposed]`
+
+When a user sends multiple messages rapidly, they should be batched into one LLM call rather than processed individually. Two configurable thresholds:
+
+- **`idleTimeoutMs`** — time since last message, resets on each new message. "User stopped typing."
+- **`maxWaitMs`** — time since first unbatched message, never resets. "Don't wait forever."
+
+Fire when either threshold triggers. Both are optional — see `data-model.md` for the full configuration matrix.
+
+### Resume Policy `[proposed]`
+
+When the orchestrator finishes a turn and there are messages that were buffered while it was busy, the **resume policy** controls what happens:
+
+- **`debounce`** — re-apply debounce rules to the buffered messages (user might still be typing)
+- **`flush`** — process buffered messages immediately (prioritize responsiveness)
+- **`await_input`** — hold until user sends another message or confirms (good for review/coding workflows where the user wants to see the response before the next batch runs)
+
+Configurable per profile.
+
+### Delivery & Response Routing `[proposed]`
+
+A conversation message (user or assistant) may be delivered to multiple chats. The `deliveries` table tracks each delivery: which message, which chat, direction (inbound/outbound), status (pending/sent/delivered/failed).
+
+Response routing is a separate concern from the orchestrator. The orchestrator emits a `message/response` event. A response router (not yet implemented) decides which chats receive it based on user configuration: reply-to-source, reply-to-all, reply-to-preferred, etc.
+
+### Concurrency `[confirmed]`
+
+One message batch at a time per chat. Inngest `concurrency: { limit: 1, key: chatId }`. Second batch waits in Inngest's queue until the first completes. This is the standard pattern — Letta explicitly documents that agents are not thread-safe per conversation.
+
+### Context Window Management `[proposed]`
+
+Each invocation assembles context from:
+1. Profile base prompt + steering rules
+2. Relevant memories from Hindsight recall
+3. Conversation message history
+
+If history exceeds context limits, truncate oldest messages. Keep the first message (sets context) and the most recent N messages. Future: summarize truncated middle instead of dropping.
+
+## Channel Interface `[confirmed]`
 
 ```typescript
 interface Channel {
-  name: string;
-  connect(): Promise<void>;
-  disconnect(): Promise<void>;
-  sendMessage(chatId: string, text: string): Promise<void>;
-  onMessage(handler: (msg: InboundMessage) => void): void;
+  readonly name: string;
+  start(onMessage: (msg: InboundMessage) => void): void;
+  write(text: string): void;
+  stop(): void;
 }
 
 interface InboundMessage {
-  channel: string;
-  chatId: string;
-  userId: string;
+  channel: string;   // "cli", "telegram", etc.
+  chatId: string;    // channel-specific endpoint ID
+  userId: string;    // who sent it
   text: string;
   timestamp: Date;
 }
-
-const channelFactories = new Map<string, () => Channel | null>();
-
-function registerChannel(name: string, factory: () => Channel | null) {
-  channelFactories.set(name, factory);
-}
-
-// On startup: instantiate all registered channels
-function initChannels(): Channel[] {
-  return [...channelFactories.entries()]
-    .map(([name, factory]) => factory())
-    .filter((ch): ch is Channel => ch !== null);
-}
 ```
 
-## Per-Conversation Context `[proposed]`
+Channel adapters produce `InboundMessage` with flat typed fields. The orchestrator composes `{ channel, chatId }` into the polymorphic `address` jsonb when looking up or creating a chat row. This is the right boundary — typed at the adapter layer, polymorphic at the storage layer.
 
-Each conversation gets its own:
-- Session history (PostgreSQL rows)
-- Memory partition (Hindsight namespace or agent_id filter)
-- System prompt augmentation (relevant memories prepended)
+## AI Steering Rules `[confirmed]`
 
-## GroupQueue `[research]`
-
-From NanoClaw. Per-conversation FIFO ordering with global concurrency limit.
-
-```typescript
-// Default: max 3 parallel LLM calls across all conversations
-// Within a conversation: strict FIFO (no interleaving)
-// User messages prioritized over background work (extraction, ingestion)
-```
-
-Prevents a chatty conversation from starving background work. Implement as Inngest named queues with rate limiting.
-
-## AI Steering Rules `[proposed]`
-
-Rules stored as PostgreSQL rows, not prose files. Injected into system prompts at invocation time. Enforced via code, not hope.
-
-```typescript
-interface SteeringRule {
-  id: string;
-  rule: string;          // "Always confirm before sending emails"
-  category: string;      // "safety" | "style" | "domain"
-  active: boolean;
-  created_at: Date;
-}
-
-// On each invocation: load active rules, inject into system prompt
-const rules = await db.query('SELECT rule FROM steering_rules WHERE active = true');
-const systemPrompt = BASE_PROMPT + '\n\nRules:\n' + rules.map(r => `- ${r.rule}`).join('\n');
-```
+Rules stored as PostgreSQL rows. Injected into system prompts at invocation time. Can be global or scoped to a profile. Managed by the `DefaultPromptSource` which loads the profile's base prompt and layers applicable rules on top.
 
 Stage 1 evolution edits these rows. Stage 5 signal pipeline auto-proposes new rules from conversation signals.
 
-## Dual-Mode Monitoring `[research]`
+## Crash Recovery `[confirmed]`
 
-From memU. For ingestion agents: cheap embedding scan first, LLM only when relevant.
-
-```typescript
-// Cron checks email/calendar
-const newItems = await fetchNewEmails();
-for (const item of newItems) {
-  const relevance = await embeddingSimilarity(item.subject, userInterests);
-  if (relevance > THRESHOLD) {
-    // Worth deep processing — call Claude to extract facts
-    await extractAndRetain(item);
-  }
-  // Below threshold: skip, save tokens
-}
-```
-
-Saves ~30% of ingestion costs by filtering before LLM processing.
+Handled by Inngest durable steps — each `step.run()` checkpoints. Crash between steps resumes from last completed step. No application-level cursor needed.
 
 ## Internal Tag Stripping `[confirmed]`
 
@@ -214,14 +173,6 @@ function stripInternalTags(text: string): string {
 
 From NanoClaw. Timeout resets on every tool call or partial response. Only kill truly stuck agents, not long-running ones that are making progress.
 
-## Crash Recovery `[proposed]`
+## Dual-Mode Monitoring `[research]`
 
-From NanoClaw. Persist message cursor to PostgreSQL before processing. Restart from last persisted cursor on crash. At-least-once delivery guarantee.
-
-```typescript
-// Before processing message:
-await db.query('UPDATE conversations SET cursor = $1 WHERE id = $2', [messageId, conversationId]);
-// On restart:
-const { cursor } = await db.query('SELECT cursor FROM conversations WHERE id = $1', [conversationId]);
-// Resume from cursor
-```
+From memU. For ingestion agents: cheap embedding scan first, LLM only when relevant. Saves ~30% of ingestion costs by filtering before LLM processing.
