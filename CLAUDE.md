@@ -103,6 +103,7 @@ Other tracking docs:
 - Adding/updating dev dependencies, editing existing files, running tests — go ahead.
 - Adding a new **runtime dependency** — discuss first (affects deployment size and RAM).
 - Changing architecture patterns or data model — discuss first.
+- **Scope the domain before implementing.** Walk through real use cases and challenge every abstraction before writing code. Ask: what are the entities, how do they relate, what changes independently? If two things evolve at different rates or serve different consumers, they're separate concerns — don't merge them because they happen to be available together. E.g.: "what the user said" and "how it was delivered" feel like one thing at arrival time, but one is conversation history and the other is transport — different lifecycles, different consumers, different tables.
 
 ## Verification
 
@@ -121,6 +122,8 @@ After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 ## Architecture Rules
 
 - No frameworks — raw SDK only.
+- **All DB operations use transactions.** Use `db.transaction(async (tx) => { ... })`.
+- **Prefer immutable rows.** Insert once, avoid updates where practical. When updates are necessary (e.g. status transitions), that's fine — just design tables so most rows are append-only.
 - Memory writes are always additive. Dedup runs async via `reflect()`.
 - Sub-agents never see API keys. Orchestrator makes all external calls.
 - Every LLM call uses typed contracts (Zod schema in, Zod schema out) with retry + feedback injection.

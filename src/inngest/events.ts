@@ -4,10 +4,10 @@ import { z } from "zod";
 /**
  * Fired when a user sends a message from any channel.
  * The orchestrator (handle-message) listens for this.
+ * No conversationId — the orchestrator resolves it via the session manager.
  */
 export const messageReceived = eventType("message/received", {
   schema: z.object({
-    conversationId: z.string(),
     channel: z.string(),
     chatId: z.string(),
     userId: z.string(),

@@ -8,6 +8,7 @@ export const env = createEnv({
     DATABASE_URL: z.string().default("postgresql://assistant@localhost/assistant"),
     ANTHROPIC_API_KEY: z.string(),
     ANTHROPIC_BASE_URL: z.string().optional(),
+    HINDSIGHT_URL: z.string().default("http://localhost:8888"),
     INNGEST_DEV: z.coerce.boolean().default(true),
     INNGEST_EVENT_KEY: z.string().optional(),
     INNGEST_SIGNING_KEY: z.string().optional(),
