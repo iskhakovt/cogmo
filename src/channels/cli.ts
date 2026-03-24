@@ -12,7 +12,7 @@ import type { Channel, InboundMessage } from "./types.js";
 export class CliChannel implements Channel {
   readonly name = "cli";
   private rl: readline.Interface | null = null;
-  private conversationId: string = crypto.randomUUID();
+  private chatId: string = crypto.randomUUID();
 
   /**
    * Start reading stdin. Each line becomes an InboundMessage
@@ -35,15 +35,15 @@ export class CliChannel implements Channel {
       }
 
       if (text === "/new") {
-        this.conversationId = crypto.randomUUID();
-        logger.info({ conversationId: this.conversationId }, "new conversation");
+        this.chatId = crypto.randomUUID();
+        logger.info({ chatId: this.chatId }, "new chat session");
         this.rl?.prompt();
         return;
       }
 
       onMessage({
         channel: this.name,
-        chatId: this.conversationId,
+        chatId: this.chatId,
         userId: "cli-user",
         text,
         timestamp: new Date(),
