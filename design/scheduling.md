@@ -2,7 +2,7 @@
 
 ## Decision: Inngest (Self-Hosted) `[confirmed]`
 
-Event-driven durable execution platform. Replaces BullMQ — handles queues, scheduling, durable workflows, human-in-the-loop, and observability in one tool.
+Event-driven durable execution platform. Handles queues, scheduling, durable workflows, human-in-the-loop, and observability in one tool.
 
 | Attribute | Detail |
 |-|-|
@@ -15,19 +15,19 @@ Event-driven durable execution platform. Replaces BullMQ — handles queues, sch
 | Performance | Connect + Checkpointing: ~2ms per step transition |
 | Dashboard | Built-in observability UI with step-level traces |
 
-## Why Inngest Over BullMQ
+## Why Inngest
 
-BullMQ is a queue — no durable execution, no event model, no HITL, no workflow state machine. Building durability on top of BullMQ is a known anti-pattern. Inngest gives us all of that natively:
+Inngest is purpose-built for durable, event-driven workflows. It provides everything an agent runtime needs in a single tool:
 
-| Feature | BullMQ | Inngest |
-|-|-|-|
-| Durable execution | No (crash = restart from scratch) | Yes (resume from last step) |
-| Event-driven | Manual | Core design |
-| Human-in-the-loop | Manual | `step.waitForEvent()` (zero resources while waiting) |
-| Observability | BullBoard (separate) | Built-in dashboard with traces |
-| AI features | None | `step.ai.infer()`, AgentKit |
-| Cron/scheduling | Yes | Yes |
-| Queues/concurrency | Yes | Yes |
+| Feature | What Inngest provides |
+|-|-|
+| Durable execution | Each `step.run()` checkpoints — crash between steps resumes from last completed step |
+| Event-driven | Core design — send events, functions trigger automatically |
+| Human-in-the-loop | `step.waitForEvent()` suspends with zero resources while waiting |
+| Observability | Built-in dashboard with step-level traces |
+| AI features | `step.ai.infer()`, AgentKit for multi-agent |
+| Cron/scheduling | Native cron triggers on any function |
+| Queues/concurrency | Built-in concurrency control and rate limiting |
 
 ## Core Patterns `[proposed]`
 
@@ -185,4 +185,4 @@ See `decisions.md` for the full eliminated options table. Key points:
 - **BullMQ:** No durable execution, no events, no HITL. Building durability on top is a known trap.
 - **Temporal:** Best durability but TS SDK requires sandboxed V8 (no normal Node.js in workflows). Heavy self-hosting (2-4GB). Overkill.
 - **DBOS Transact:** Library approach (no extra service), MIT, PostgreSQL-only. But smallest community (1.1K stars vs Inngest's 5.1K). No event model. Viable fallback.
-- **Restate:** Clean API, light binary, but no cron/scheduling. Would need BullMQ alongside.
+- **Restate:** Clean API, light binary, but no cron/scheduling. Would need a separate scheduler.
