@@ -13,6 +13,8 @@
 | Prompt optimization | Build own (7 patterns) | Core loop ~50-100 lines TS. DSPy: Python. Ax: API churn (348 npm releases). |
 | Model strategy | Hybrid: subscription CLI + per-token API | Background tasks via `claude -p` ($0). Interactive via API (~$80-200/mo). |
 | Interface | Telegram first, adapter pattern | Messenger is transport. Telegram first (existing usage). Adapter pattern for CLI/Discord/API. |
+| LLM routing | Direct SDKs, not OpenRouter | Our `LlmProvider` interface already abstracts providers. Adding a new provider = one file. OpenRouter adds 50-100ms latency + 5.5% markup for a convenience we don't need. If we want multi-provider A/B testing or user-selected models, OpenRouter becomes another `LlmProvider` implementation — zero domain code changes. |
+| Async LLM costs | Batch APIs for evolution tasks | Anthropic, OpenAI, Gemini all offer 50% discount batch APIs (24h turnaround). Stacks with prompt caching (up to 95% off). Use for reflection, signal extraction, prompt optimization — anything that can wait. Interactive chat stays on real-time API. |
 | Personal agents | Build own | No existing tool covers memory + agent runtime + evolution together. |
 | Team tool | Dust.tt or Onyx | Separate from personal bot. Dust: $315/mo, 88% DAU. Onyx: MIT, self-hosted. |
 
@@ -38,6 +40,7 @@
 | Graphiti | Memory | O(n) growth bug, Python-only |
 | Letta | Memory | Oversized for personal use, was in AI agent sunset |
 | LightRAG | Memory | Wrong scale — personal has thousands of facts, not millions of docs |
+| OpenRouter | LLM routing | Adds 50-100ms latency + 5.5% markup. Useful for multi-provider A/B testing — keep as future `LlmProvider` implementation if needed. |
 | PAI | Reference arch | 95% single-author, breaking changes every 2 weeks, 80% false-positive ratings |
 | Peer mesh | Topology | 17x error amplification, 3-5x dev cost, 0 production deployments |
 
