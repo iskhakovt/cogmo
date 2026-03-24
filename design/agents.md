@@ -119,14 +119,31 @@ Response routing is a separate concern from the orchestrator. The orchestrator e
 
 One message batch at a time per chat. Inngest `concurrency: { limit: 1, key: chatId }`. Second batch waits in Inngest's queue until the first completes. This is the standard pattern — Letta explicitly documents that agents are not thread-safe per conversation.
 
-### Context Window Management `[proposed]`
+### Context Window Management `[research]`
 
 Each invocation assembles context from:
 1. Profile base prompt + steering rules
 2. Relevant memories from Hindsight recall
 3. Conversation message history
 
-If history exceeds context limits, truncate oldest messages. Keep the first message (sets context) and the most recent N messages. Future: summarize truncated middle instead of dropping.
+Two-tier memory architecture — no separate in-session memory layer needed:
+- **Conversation messages** (hot) — recent turns, loaded directly into context
+- **Hindsight** (archival) — facts extracted by the Observer from past conversations, recalled by semantic query
+
+When a conversation exceeds the context budget, old messages are compacted. The Observer has already extracted important facts into Hindsight, so cross-session knowledge isn't lost. Within a single session, compaction strategy matters more — a relevant early message shouldn't be dropped just because it's old.
+
+**Compaction strategies under consideration (not decided):**
+
+| Strategy | How it works | Tradeoff |
+|---|---|---|
+| **Trimming** | Drop oldest messages, keep first + last N | Simplest. May lose important mid-conversation context. |
+| **Trimming + retrieval** | Trim old messages, use Hindsight `recall()` to fill gaps | Good default. Depends on Observer having extracted the right facts — but Observer may not have run yet on an active conversation. |
+| **Summarization** | LLM condenses old messages into a short summary | Preserves intent. Costs an LLM call per compaction. Can lose details. Claude Code uses this approach. |
+| **Observation masking** | Score each message's relevance to the current query, drop low-scoring ones regardless of position | Best context quality. Anthropic research shows it halves costs vs summarization. Needs a relevance scorer (embedding similarity or heuristics). |
+
+These could be configurable per profile — a coding profile might benefit from masking (keep relevant code context, drop chit-chat), while a casual chat profile might work fine with simple trimming.
+
+**For MVP:** Not needed — Claude's 200K context window covers very long conversations. Implement when we see real context pressure.
 
 ## Channel Interface `[confirmed]`
 
