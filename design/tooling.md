@@ -20,7 +20,7 @@ Modern TypeScript/Node.js stack for a long-running backend service. No frontend,
 | Linter/formatter | Biome | Replaces ESLint + Prettier, 20x faster, one tool |
 | Collections | Remeda + ES2025 | Kotlin-feel pipe chains, groupBy, lazy eval |
 | Error handling | neverthrow | Result\<T, E\> without exceptions |
-| Orchestration | Inngest (self-hosted) | Event-driven durable execution. Replaces BullMQ — queues, scheduling, HITL, observability in one tool |
+| Orchestration | Inngest (self-hosted) | Event-driven durable execution — queues, scheduling, HITL, observability in one tool |
 
 ## Kotlin-Developer Patterns
 
@@ -149,10 +149,9 @@ const env = parseEnv(process.env, {
 
 | Library | What | When to use |
 |-|-|-|
-| **cuid2** | Sortable, collision-resistant IDs | DB primary keys (time-sorted, better than UUID for indexing) |
-| **nanoid** | URL-friendly unique IDs (130 bytes) | Short tokens, non-DB identifiers |
+| **UUID v7** | Time-ordered unique IDs (native PostgreSQL 18, `uuidv7()`) | DB-generated, time-ordered, no dependency |
 | **date-fns** | Modular date utilities | Until Node ships Temporal API natively |
-| **superjson** | JSON.stringify that preserves Date, Map, Set, BigInt | API boundaries, BullMQ job data |
+| **superjson** | JSON.stringify that preserves Date, Map, Set, BigInt | API boundaries, Inngest event data |
 
 ## Not Needed
 
@@ -166,6 +165,9 @@ const env = parseEnv(process.env, {
 | Lodash | Remeda is TS-first; ES2025 covers basics natively |
 | tRPC | No TypeScript client consuming the API yet — add when a TS frontend or service-to-service calls appear |
 | gRPC / ConnectRPC | Overkill for single service — add if polyglot microservices appear |
+| cuid2 | UUID v7 is native in PostgreSQL 18 — no dependency needed |
+| nanoid | UUID v7 covers all ID generation needs |
+| BullMQ | Inngest handles all orchestration — queues, scheduling, durable execution |
 | Effect-TS | Massive learning curve, overkill for solo project |
 | fp-ts | Superseded by Effect; neverthrow covers Result types |
 | Prisma | Heavier than Drizzle, custom DSL instead of TypeScript schema |
