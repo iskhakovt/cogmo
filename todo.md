@@ -15,6 +15,8 @@
 - [ ] `p2` Context window management — token counting, truncate oldest messages
 - [ ] `p2` Message batching — debounce rapid consecutive messages
 - [ ] `p2` Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
+- [ ] `p2` Additional LlmProvider implementations — OpenRouter, OpenAI, Grok (pluggable via profile config)
+- [ ] `p2` Batch API support for async evolution tasks — 50% cost reduction for reflection, extraction, optimization
 - [ ] `p3` Telegram auth — validate user_id against allowlist
 - [ ] `p3` Basic health check endpoint (HTTP)
 
