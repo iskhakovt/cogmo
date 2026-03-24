@@ -8,7 +8,7 @@ An event-driven AI assistant built on the Anthropic SDK and Inngest. Processes m
 
 ## Stack
 
-- **TypeScript** on Node.js 22
+- **TypeScript** on Node.js 24
 - **Anthropic SDK** — provider-agnostic LLM layer (Anthropic first, others plug in)
 - **Inngest** — event-driven durable execution (self-hosted, dev mode)
 - **PostgreSQL** + pgvector — conversations, messages, steering rules, vector memory
