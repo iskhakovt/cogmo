@@ -1,5 +1,5 @@
+import * as crypto from "node:crypto";
 import * as readline from "node:readline";
-import { createId } from "@paralleldrive/cuid2";
 import { logger } from "../logger.js";
 import type { Channel, InboundMessage } from "./types.js";
 
@@ -12,7 +12,7 @@ import type { Channel, InboundMessage } from "./types.js";
 export class CliChannel implements Channel {
   readonly name = "cli";
   private rl: readline.Interface | null = null;
-  private conversationId: string = createId();
+  private conversationId: string = crypto.randomUUID();
 
   /**
    * Start reading stdin. Each line becomes an InboundMessage
@@ -35,7 +35,7 @@ export class CliChannel implements Channel {
       }
 
       if (text === "/new") {
-        this.conversationId = createId();
+        this.conversationId = crypto.randomUUID();
         logger.info({ conversationId: this.conversationId }, "new conversation");
         this.rl?.prompt();
         return;

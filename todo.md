@@ -2,7 +2,6 @@
 
 ## Next
 
-- [ ] `p1` Integration test infrastructure — compose.test.yml, mock Anthropic server, testcontainers globalSetup, migration smoke test
 - [ ] `p1` Verify Hindsight connects to PostgreSQL + pgvector — install client, test `retain()`/`recall()` round-trip
 - [ ] `p1` `memory_recall` and `memory_retain` tools for the agent
 - [ ] `p1` Memory: Hindsight integration — `retain()`, `recall()`, `reflect()`

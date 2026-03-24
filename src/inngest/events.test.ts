@@ -4,7 +4,6 @@ import { messageReceived, messageResponse } from "./events.js";
 describe("messageReceived", () => {
   it("creates a valid event", () => {
     const event = messageReceived.create({
-      conversationId: "conv-1",
       channel: "cli",
       chatId: "chat-1",
       userId: "user-1",
@@ -12,7 +11,6 @@ describe("messageReceived", () => {
     });
 
     expect(event.name).toBe("message/received");
-    expect(event.data.conversationId).toBe("conv-1");
     expect(event.data.channel).toBe("cli");
     expect(event.data.text).toBe("hello");
   });

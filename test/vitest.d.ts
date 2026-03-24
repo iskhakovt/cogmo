@@ -3,5 +3,6 @@ declare module "vitest" {
     databaseUrl: string;
     inngestBaseUrl: string;
     inngestEventKey: string;
+    hindsightUrl: string;
   }
 }
