@@ -1,6 +1,4 @@
-import { and, asc, eq, isNull, or } from "drizzle-orm";
-import type { Database } from "../db/index.js";
-import { profiles, steeringRules } from "../db/schema.js";
+import type { AgentStore } from "./store/index.js";
 
 /**
  * Prompt source interface — the plugin contract for system prompt assembly.
@@ -9,7 +7,7 @@ import { profiles, steeringRules } from "../db/schema.js";
  * The orchestrator depends on this interface, never on a concrete source.
  */
 export interface PromptSource {
-  assemble(db: Database, profileId: string): Promise<string>;
+  assemble(store: AgentStore, profileId: string): Promise<string>;
 }
 
 const DEFAULT_BASE_PROMPT = `You are a personal AI assistant. You are helpful, concise, and direct.
@@ -21,27 +19,11 @@ If you don't know something and don't have a tool for it, say so honestly.`;
  * Default prompt source: profile base prompt + steering rules from DB.
  */
 export class DefaultPromptSource implements PromptSource {
-  async assemble(db: Database, profileId: string): Promise<string> {
-    // Load base prompt from profile
-    const profile = await db
-      .select({ basePrompt: profiles.basePrompt })
-      .from(profiles)
-      .where(eq(profiles.id, profileId))
-      .limit(1);
+  async assemble(store: AgentStore, profileId: string): Promise<string> {
+    const profile = await store.getProfile(profileId);
+    const basePrompt = profile?.basePrompt ?? DEFAULT_BASE_PROMPT;
 
-    const basePrompt = profile[0]?.basePrompt ?? DEFAULT_BASE_PROMPT;
-
-    // Load steering rules: global + profile-specific
-    const rules = await db
-      .select({ rule: steeringRules.rule })
-      .from(steeringRules)
-      .where(
-        and(
-          eq(steeringRules.active, true),
-          or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
-        ),
-      )
-      .orderBy(asc(steeringRules.priority));
+    const rules = await store.getActiveRules(profileId);
 
     if (rules.length === 0) {
       return basePrompt;

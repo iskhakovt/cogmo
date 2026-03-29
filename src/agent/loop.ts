@@ -1,6 +1,7 @@
 import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, LlmResponse, Message } from "../llm/types.js";
 import { logger } from "../logger.js";
+import type { Service } from "./service.js";
 import type { ToolRegistry } from "./tools.js";
 
 export interface AgentLoopParams {
@@ -9,6 +10,7 @@ export interface AgentLoopParams {
   systemPrompt: string;
   messages: Message[];
   tools: ToolRegistry;
+  service: Service;
   maxIterations?: number;
 }
 
@@ -35,7 +37,14 @@ const DEFAULT_MAX_ITERATIONS = 20;
  * the LLM returns end_turn or max_tokens, or we hit the iteration limit.
  */
 export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopResult> {
-  const { provider, model, systemPrompt, tools, maxIterations = DEFAULT_MAX_ITERATIONS } = params;
+  const {
+    provider,
+    model,
+    systemPrompt,
+    tools,
+    service,
+    maxIterations = DEFAULT_MAX_ITERATIONS,
+  } = params;
   const messages = [...params.messages];
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };
@@ -68,7 +77,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     }
 
     // Execute tool calls and append results
-    const toolResults = await executeToolCalls(response.content, tools);
+    const toolResults = await executeToolCalls(response.content, tools, service);
     messages.push({ role: "user", content: toolResults });
 
     logger.debug({ iteration: iterations, toolCalls: toolResults.length }, "tool round complete");
@@ -81,6 +90,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
 async function executeToolCalls(
   content: ContentBlock[],
   tools: ToolRegistry,
+  service: Service,
 ): Promise<ContentBlock[]> {
   const toolUseBlocks = content.filter((b) => b.type === "tool_use");
   const results: ContentBlock[] = [];
@@ -100,7 +110,7 @@ async function executeToolCalls(
     }
 
     try {
-      const result = await spec.handler(block.input as Record<string, unknown>);
+      const result = await spec.handler(block.input as Record<string, unknown>, service);
       results.push({ type: "tool_result", toolUseId: block.id, content: result });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

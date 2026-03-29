@@ -1,14 +1,13 @@
 # Testing
 
-## Local Development `[proposed]`
+## Local Development `[confirmed]`
 
-CLI adapter (`src/channels/cli.ts`) is the primary dev/test interface. stdin/stdout, no Telegram needed. Start with:
+Direct channel + console script for dev/test. Start infra + app, interact in a separate terminal:
 
 ```bash
-pnpm dev  # tsx watch mode
+pnpm dev:infra          # start infra + seed + app
+pnpm console            # interactive console (separate terminal)
 ```
-
-Type messages, see agent responses, memory operations, and tool calls in structured log output.
 
 ## Unit Tests `[confirmed]`
 
@@ -18,36 +17,35 @@ Use Vitest (fast, native TS, ESM). Test what's deterministic:
 |-|-|-|
 | Typed LLM calls | Zod schema validation, retry logic | Mock the SDK client, inject known responses |
 | Memory metadata | Salience scoring, network routing | Pure functions, no LLM |
-| Channel registry | Registration, factory pattern | No external deps |
-| Scheduler | Job creation, cron parsing | Mock Inngest queue |
+| Adapter modules | Setup, deliver, inbound handling | Mock Transport, use shared test factories |
 | Tag stripping | `<internal>` removal | String in, string out |
-| Session lifecycle | Idle detection, conversation boundaries | Time-based logic |
-| Prompt assembly | System prompt + rules + memories | Template rendering |
+| Prompt assembly | System prompt + rules + memories | Mock AgentStore |
+| Transport | Session resolution, emit, conversation creation | Mock stores |
+| Respond | Message loading, session filtering, delivery | Mock stores + adapter |
+
+Shared test factories in `src/test/factories.ts` — `mockAgentStore()`, `mockTransportStore()`, `mockTransport()`, `mockAdapter()`, `mockStep()`, etc.
 
 ## Integration Tests `[confirmed]`
 
-True E2E: all services run in Docker, test runner talks to them like a client.
+All services run in Docker (testcontainers), test runner seeds the DB and sends events.
 
 **Infrastructure:**
-- Single `docker-compose.yml` with profiles: base services (postgres, redis, inngest) always, test services (assistant app, mock-anthropic) via `--profile test`
-- `compose.override.yml` adds fixed port mappings for dev. Testcontainers ignores overrides — gets random ports.
-- Testcontainers `DockerComposeEnvironment` in vitest `globalSetup` manages lifecycle (up/down)
+- Individual testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`, random ports
+- Container definitions in `test/containers.ts` (shared with `scripts/dev-infra.ts` for local dev)
 - `pnpm test:integration` runs them, `pnpm test` runs unit only
+- Seed runs before app start (`tsx src/cli.ts seed`)
 
 **Mock LLM:** Separate container running a tiny HTTP server that implements `POST /v1/messages` with canned responses. App points `ANTHROPIC_BASE_URL` at it — zero test code in production.
 
-**Inngest:** Uses `inngest dev` (not `inngest start`) for integration tests. Dev mode skips auth, stores state in memory. We're testing our app's event flow, not Inngest's durability. May revisit with `inngest start` + postgres/redis if we need to test durable execution guarantees.
-
-**DB isolation:** Schema-per-test with `CREATE SCHEMA` + `DROP SCHEMA CASCADE`. Avoids FK ordering headaches, parallel-safe.
+**Inngest:** Uses `inngest dev` (not `inngest start`) for integration tests. Dev mode skips auth, stores state in memory. We're testing our app's event flow, not Inngest's durability.
 
 **Naming:** `.integration.test.ts` suffix, co-located with source. Vitest projects config separates unit from integration.
 
 | Test | What |
 |-|-|
-| Full pipeline | Send `message/received` event → assert conversation + messages in DB, response event emitted |
+| Full pipeline | Seed DB, create session + inbound, emit `inbound/arrived` → assert assistant message in DB |
 | Schema migrations | App starts = migrations applied. Verify tables queryable. |
 | Hindsight round-trip | `retain()` -> `recall()` returns the fact |
-| Crash recovery | Write cursor, simulate crash, resume from cursor |
 
 ## LLM Tests (Non-Deterministic) `[research]`
 
@@ -73,7 +71,7 @@ For evolution Stage 4+, use LLM-as-judge rubrics with held-out test sets. Track 
 |-|-|
 | Anthropic SDK | Inject mock client returning canned responses |
 | MCP servers | Stub MCP client with fixed tool results |
-| Telegram | CLI adapter (same Channel interface, no network) |
+| Telegram | grammY mock bot (vi.mock), Transport mock |
 | Gmail/Calendar | Record real responses, replay in tests |
 
 ## Evaluation Dataset `[research]`

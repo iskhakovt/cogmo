@@ -1,120 +1,94 @@
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { connect } from "inngest/connect";
+import { createServer as createInngestServer } from "inngest/node";
+import { createHandleMessage } from "./agent/handle-message.js";
 import { runAgentLoop } from "./agent/loop.js";
+import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
+import { DrizzleAgentStore } from "./agent/store/index.js";
 import { createDefaultTools } from "./agent/tools.js";
-import { CliChannel } from "./channels/cli.js";
-import { single } from "./db/helpers.js";
 import { db } from "./db/index.js";
-import { profiles, users } from "./db/schema.js";
 import { env } from "./env.js";
-import {
-  createCliRespond,
-  createHandleMessage,
-  inngest,
-  messageReceived,
-} from "./inngest/index.js";
+import { inboundArrived, inngest } from "./inngest/index.js";
 import { AnthropicProvider } from "./llm/anthropic.js";
 import { logger } from "./logger.js";
+import { HindsightMemoryProvider } from "./memory/hindsight.js";
+import { startChannels } from "./transport/registry.js";
+import { DrizzleTransportStore } from "./transport/store/index.js";
 
 async function main() {
-  // Apply database migrations
   await migrate(db, { migrationsFolder: "./migrations" });
   logger.info("database migrations applied");
 
-  // Ensure default user and profile exist
-  const defaultProfileId = await ensureDefaults();
+  // Wire stores
+  const agentStore = new DrizzleAgentStore(db);
+  const transportStore = new DrizzleTransportStore(db);
 
-  // Wire dependencies
+  // Load defaults — seed must have been run
+  const user = await agentStore.getFirstUser();
+  const profile = await agentStore.getDefaultProfile();
+  if (!user || !profile) {
+    logger.fatal("no user or profile found — run `seed` first");
+    process.exit(1);
+  }
+
+  // Wire agent dependencies
   const provider = new AnthropicProvider(env.ANTHROPIC_API_KEY, env.ANTHROPIC_BASE_URL);
-  const tools = createDefaultTools();
+  const tools = createDefaultTools(memoryTools);
   const promptSource = new DefaultPromptSource();
+  const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL);
 
   const handleMessage = createHandleMessage({
-    db,
+    agentStore,
+    transportStore,
     provider,
     tools,
-    assembleSystemPrompt: (db, profileId) => promptSource.assemble(db, profileId),
+    memory,
+    promptSource,
     runAgentLoop,
-    defaultProfileId,
   });
 
-  const cliChannel = new CliChannel();
-  const cliRespond = createCliRespond(cliChannel);
-
-  // Start Inngest Connect — WebSocket to local Inngest server
-  const connection = await connect({
-    apps: [
-      {
-        client: inngest,
-        functions: [handleMessage, cliRespond],
-      },
-    ],
-    handleShutdownSignals: ["SIGTERM", "SIGINT"],
+  // Start channel adapters from DB
+  const { functions: channelFunctions, adapters } = await startChannels({
+    defaultUserId: user.id,
+    defaultProfileId: profile.id,
+    transportStore,
+    agentStore,
+    inngest,
+    inboundArrived,
   });
 
-  logger.info({ connectionId: connection.connectionId }, "inngest connected");
+  // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
+  const functions: any[] = [handleMessage, ...channelFunctions];
 
-  // Start CLI input — each line becomes a message/received event
-  cliChannel.start((msg) => {
-    inngest
-      .send(
-        messageReceived.create({
-          channel: msg.channel,
-          chatId: msg.chatId,
-          userId: msg.userId,
-          text: msg.text,
-        }),
-      )
-      .catch((err) => logger.error({ err }, "failed to send message event"));
-  });
+  if (env.INNGEST_MODE === "serve") {
+    const server = createInngestServer({ client: inngest, functions });
+    await new Promise<void>((resolve) => server.listen(env.INNGEST_SERVE_PORT, resolve));
+    logger.info({ port: env.INNGEST_SERVE_PORT }, "inngest connected");
 
-  logger.info("assistant ready — type a message");
+    await new Promise<void>((resolve) => {
+      const shutdown = () => {
+        server.close();
+        resolve();
+      };
+      process.on("SIGTERM", shutdown);
+      process.on("SIGINT", shutdown);
+    });
+  } else {
+    const connection = await connect({
+      apps: [{ client: inngest, functions }],
+      handleShutdownSignals: ["SIGTERM", "SIGINT"],
+    });
+    logger.info({ connectionId: connection.connectionId }, "inngest connected");
+    logger.info("assistant ready — use `pnpm console` to interact");
+    await connection.closed;
+  }
 
-  // Wait for connection to close (shutdown signal)
-  await connection.closed;
-  cliChannel.stop();
+  for (const adapter of adapters) {
+    await adapter.stop();
+  }
+
   logger.info("assistant stopped");
-}
-
-const DEFAULT_BASE_PROMPT = `You are a personal AI assistant. You are helpful, concise, and direct.
-
-You have access to tools — use them when they help answer the user's question.
-If you don't know something and don't have a tool for it, say so honestly.`;
-
-async function ensureDefaults(): Promise<string> {
-  return db.transaction(async (tx) => {
-    // Upsert default user
-    const existingUsers = await tx.select().from(users).limit(1);
-    let userId: string;
-    if (existingUsers[0]) {
-      userId = existingUsers[0].id;
-    } else {
-      userId = single(await tx.insert(users).values({}).returning({ id: users.id })).id;
-    }
-
-    // Upsert default profile
-    const existingProfiles = await tx.select().from(profiles).limit(1);
-    if (existingProfiles[0]) {
-      return existingProfiles[0].id;
-    }
-
-    const newProfile = single(
-      await tx
-        .insert(profiles)
-        .values({
-          userId,
-          name: "assistant",
-          basePrompt: DEFAULT_BASE_PROMPT,
-          model: "claude-sonnet-4-20250514",
-          toolSet: ["get_current_time"],
-        })
-        .returning({ id: profiles.id }),
-    );
-
-    logger.info("created default user and profile");
-    return newProfile.id;
-  });
 }
 
 main().catch((err) => {

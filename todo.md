@@ -2,13 +2,8 @@
 
 ## Next
 
-- [ ] `p1` Verify Hindsight connects to PostgreSQL + pgvector — install client, test `retain()`/`recall()` round-trip
-- [ ] `p1` `memory_recall` and `memory_retain` tools for the agent
-- [ ] `p1` Memory: Hindsight integration — `retain()`, `recall()`, `reflect()`
 - [ ] `p2` Typed LLM calls with Zod schemas + retry with feedback injection
-- [ ] `p2` Telegram adapter — webhook handler, send/receive messages
-- [ ] `p2` Channel registry — self-registration factory pattern
-- [ ] `p2` Session lifecycle — conversation start/end, idle detection, new session on resume
+- [ ] `p2` Session lifecycle — idle detection, debounce, new session on `/new`
 - [ ] `p2` Steering rules table — injected into system prompt per invocation
 - [ ] `p2` Post-conversation Observer — Inngest function triggered by `conversation/idle` event
 - [ ] `p2` Instruction file (Stage 1 evolution) — corrections append to JSON, loaded into system prompt
@@ -17,8 +12,19 @@
 - [ ] `p2` Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
 - [ ] `p2` Additional LlmProvider implementations — OpenRouter, OpenAI, Grok (pluggable via profile config)
 - [ ] `p2` Batch API support for async evolution tasks — 50% cost reduction for reflection, extraction, optimization
-- [ ] `p3` Telegram auth — validate user_id against allowlist
+- [ ] `p2` LLM snapshotting proxy — record/replay HTTP proxy for Anthropic API. Replace `mock-anthropic` with a proxy that records real responses on first run, replays in CI. Route both our app and Hindsight through it via `BASE_URL`. Fixtures committed to `test/fixtures/`.
+- [ ] `p2` Define InboundContent schema (Zod) — structured message content type instead of raw JsonValue everywhere
+- [ ] `p2` CLI channel management commands — `cli.ts channel add telegram --token=...`, `channel list`, `channel remove`
+- [ ] `p2` Store unit tests using PGlite — test Drizzle queries against real SQL without Docker
+- [ ] `p2` In-process integration tests — run full pipeline in-process (no subprocess), enable TestAdapter injection
+- [ ] `p3` Telegram response formatting — HTML or MarkdownV2 with escape function
+- [ ] `p3` Interactive bootstrap — guided setup for new deployments (choose channels, configure credentials)
 - [ ] `p3` Basic health check endpoint (HTTP)
+- [ ] `p3` Move `test/containers.ts` to `dev/containers.ts`
+- [ ] `p3` Consider web interface adapter for e2e testing
+- [ ] `p3` Consider lazy env validation — avoid eager `env.ts` import forcing mocks in unit tests and requiring all env vars for seed
+- [ ] `p3` Consider replacing `pg` driver — evaluate alternatives (postgres.js, electric-sql, etc.)
+- [ ] `p3` Evaluate DI library (ditox/awilix) when adapter count exceeds 5
 
 ## Later
 
@@ -29,9 +35,9 @@
 - [ ] `p2` Claude Agent SDK integration — background tasks via subscription (Phase 2)
 - [ ] `p2` First ingestion agent: Gmail via MCP (Phase 2)
 - [ ] `p2` First ingestion agent: Google Calendar via MCP (Phase 2)
+- [ ] `p3` Artifact renderer — standalone web server for rich content (charts, tables, interactive views)
 - [ ] `p3` Skill library — Voyager pattern (Phase 3)
 - [ ] `p3` MCP dynamic tool registration (Phase 3)
-- [ ] `p3` LLM snapshot interceptor — run integration tests once with real LLM, capture responses, replay in CI
 - [ ] `p3` Prompt optimization — evaluation rubrics, bootstrapped few-shot (Phase 4)
 
 ## Blocked
@@ -42,11 +48,30 @@
 - [x] Set up TypeScript build (tsx watch, tsup production)
 - [x] Install core dependencies
 - [x] Set up directory structure
-- [x] Docker Compose for local dev (PostgreSQL + pgvector, Redis)
-- [x] Drizzle schema — Phase 1 tables (conversations, messages, steering_rules)
+- [x] Docker infra via testcontainers (`scripts/dev-infra.ts`, `test/containers.ts`)
+- [x] Drizzle schema — module store pattern (`agent/store/`, `transport/store/`)
 - [x] Design doc confidence markers (`[confirmed]`/`[proposed]`/`[research]`)
 - [x] Decide orchestration: Inngest over BullMQ (event-driven durable execution)
-- [x] End-to-end message pipeline — LLM abstraction, agentic loop, CLI adapter, Inngest orchestration
-- [x] Unit tests — 37 tests across 8 files, all modules with logic covered
-- [x] Initial Drizzle migration — conversations, messages, steering_rules tables verified
-- [x] CLAUDE.md — design philosophy, testing rules, DI stance, code style
+- [x] End-to-end message pipeline — LLM abstraction, agentic loop, Inngest orchestration
+- [x] Unit tests — 84 tests across 14 files
+- [x] Initial Drizzle migration — 9 tables (users, profiles, conversations, messages, steering_rules, channels, channel_sessions, inbound_messages, user_identities)
+- [x] CLAUDE.md — design philosophy, testing rules, DI stance, code style, encapsulation rules
+- [x] Tool system refactor — Service interface (ACL boundary), Zod validation, defineTool helper
+- [x] `memory_recall` and `memory_retain` tools with Service integration
+- [x] Hindsight wired into orchestrator via Service
+- [x] Hindsight retain/recall round-trip verified — integration test with Ollama via testcontainers
+- [x] Telegram adapter — grammY, long polling, Transport interface, AdapterModule contract
+- [x] Telegram auth — user ID allowlist via env var
+- [x] Structural alignment — renamed `channels/` → `transport/`, store pattern, new events (`inbound/arrived`, `response/ready`), Adapter/Transport interfaces
+- [x] Direct channel adapter — event-driven via Inngest, replaces old CLI adapter
+- [x] Channel registry — table-driven adapter discovery via `AdapterModule` + `satisfies` barrel
+- [x] Shared respond factory — `createRespond()`, generic per-channel respond in registry
+- [x] Shared test factories — `src/test/factories.ts`, all test files use shared mocks
+- [x] Transport tests — `transport.test.ts` covering resolveSession, createConversation, emit
+- [x] neverthrow at Transport boundary — `emit()` and `createConversation()` return `Result<T, TransportError>`
+- [x] `#private` fields on all classes — ES2022 runtime enforcement
+- [x] `private constructor` + `static async create()` — TelegramAdapter
+- [x] CLI entrypoint — `src/cli.ts` with `serve`/`seed` commands, Dockerfile ENTRYPOINT
+- [x] Seed script — `src/seed.ts`, extracted from `ensureDefaults()`, idempotent
+- [x] `contentToText()` helper — centralized JsonValue → string conversion
+- [x] Console script — `scripts/console.ts`, standalone readline + DB polling

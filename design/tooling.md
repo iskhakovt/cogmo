@@ -72,15 +72,16 @@ type ConversationId = Brand<string, 'ConversationId'>;
 ## Drizzle (SQL-like, Kotlin Exposed/jOOQ equivalent)
 
 ```typescript
-import { pgTable, text, serial, boolean, timestamp } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
+import { pgTable, text, uuid, boolean, timestamp } from 'drizzle-orm/pg-core';
 
 // Schema as TypeScript
 export const steeringRules = pgTable('steering_rules', {
-  id: serial('id').primaryKey(),
+  id: uuid('id').primaryKey().default(sql`uuidv7()`),
   rule: text('rule').notNull(),
   category: text('category').notNull(),
-  active: boolean('active').notNull().default(true),
-  createdAt: timestamp('created_at').notNull().defaultNow(),
+  active: boolean('active').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
 // Query — SQL-like chains with full autocompletion

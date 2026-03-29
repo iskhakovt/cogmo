@@ -5,40 +5,48 @@
 - [x] Initialize Node.js project (`package.json`, `tsconfig.json`, Biome, Vitest)
 - [x] Set up TypeScript build (tsx watch for dev, tsup for production)
 - [x] Install core dependencies (Anthropic SDK, Drizzle, Zod v4, Pino, Remeda, neverthrow, ts-pattern, etc.)
-- [x] Set up directory structure (`src/`, `src/agents/`, `src/memory/`, `src/channels/`, `src/scheduler/`, `src/evolution/`)
-- [x] Docker Compose for local dev (PostgreSQL + pgvector, Redis)
-- [x] Drizzle schema — Phase 1 tables (conversations, messages, steering_rules)
+- [x] Set up directory structure (`src/agent/`, `src/transport/`, `src/db/`, `src/inngest/`, `src/llm/`, `src/memory/`)
+- [x] Docker infra via testcontainers (`scripts/dev-infra.ts`, `test/containers.ts`)
+- [x] Drizzle schema — 9 tables across two stores (`agent/store/`, `transport/store/`)
 - [x] Generate Drizzle migration and verify against PostgreSQL
-- [x] Set up Inngest — SDK installed, Docker Compose configured, events typed
-- [x] CLI adapter — stdin/stdout for local testing
+- [x] Set up Inngest — SDK installed, Docker container configured, events typed
 - [x] End-to-end message pipeline — LLM abstraction, agentic loop, Inngest orchestration
-- [x] Unit tests — 37 tests, full module coverage
-- [ ] Integration test infrastructure — compose.test.yml, mock LLM, testcontainers
-- [ ] Verify Hindsight connects to PostgreSQL + pgvector
+- [x] Unit tests — 84 tests, full module coverage
+- [x] Verify Hindsight connects to PostgreSQL + pgvector
+- [x] CLI entrypoint (`src/cli.ts`) — `serve` and `seed` commands
+- [x] Seed script (`src/seed.ts`) — idempotent database seeding for single-user deployment
+- [ ] Integration test infrastructure — testcontainers global-setup (needs update for new events)
 - [ ] Basic health check endpoint (HTTP)
 
 ## Phase 1: MVP — Conversation + Memory
 
 The minimum useful system: talk to it, it remembers things.
 
-- [ ] Agentic loop as Inngest function — event-driven, durable steps per Claude call + tool execution
+- [x] Agentic loop as Inngest function — event-driven, durable steps per Claude call + tool execution
 - [ ] Typed LLM calls with Zod schemas + retry with feedback injection (Stage 3, day 1)
-- [ ] Telegram adapter — webhook handler, send/receive messages
-- [ ] Channel registry — self-registration factory pattern
-- [ ] Memory: Hindsight integration — `retain()`, `recall()`, `reflect()`
+- [x] Telegram adapter — grammY, long polling, DMs only, `AdapterModule` contract
+- [x] Channel registry — table-driven adapter discovery via `AdapterModule` + `satisfies` barrel
+- [x] Direct channel adapter — event-driven via Inngest (`adapter/direct/inbound`, `adapter/direct/outbound`)
+- [x] Memory: Hindsight integration — `retain()`, `recall()`, `reflect()`
 - [ ] Memory: 4 networks (world, bank, opinion, observation)
 - [ ] Memory: route intention gate — "does this query need memory?"
-- [ ] `memory_recall` and `memory_retain` tools for the agent
+- [x] `memory_recall` and `memory_retain` tools for the agent
 - [ ] Post-conversation Observer — Inngest function triggered by `conversation/idle` event
 - [ ] Instruction file (Stage 1 evolution) — corrections append to JSON, loaded into system prompt
-- [ ] Steering rules table in PostgreSQL — injected into system prompt per invocation
+- [x] Steering rules table in PostgreSQL — injected into system prompt per invocation
 - [ ] Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
 - [ ] Crash recovery — handled by Inngest durable steps (automatic resume from last checkpoint)
-- [ ] Session lifecycle — conversation start/end, idle detection (~5 min), new session on resume
+- [ ] Session lifecycle — idle detection (~5 min), debounce, new session on `/new`
 - [ ] Context window management — token counting, truncate oldest messages at ~80% capacity
 - [ ] Message batching — debounce rapid consecutive messages
-- [ ] Telegram auth — validate user_id against allowlist
-- [ ] System prompt assembly — base prompt + steering rules + relevant memories
+- [x] Telegram auth — user ID allowlist via env var
+- [x] System prompt assembly — base prompt + steering rules from DB
+- [x] Store pattern — `agent/store/` and `transport/store/` with interfaces + Drizzle implementations
+- [x] Transport layer — `Adapter`, `Transport` interfaces, event-driven inbound pipeline (`inbound/arrived`, `response/ready`)
+- [x] Shared respond factory — `createRespond()`, generic per-channel respond created by registry
+- [x] neverthrow at Transport boundary — `emit()` and `createConversation()` return `Result<T, TransportError>`
+- [x] `#private` fields + `private constructor` + `static async create()` on all classes
+- [x] Console script — `scripts/console.ts`, standalone readline + DB polling client
 
 ## Phase 2: Scheduling + Ingestion
 

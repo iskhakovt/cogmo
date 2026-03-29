@@ -1,7 +1,8 @@
 /// <reference path="../../test/vitest.d.ts" />
 import { drizzle } from "drizzle-orm/node-postgres";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
-import { chats, conversations, messages } from "../db/schema.js";
+import { conversations, messages, profiles, users } from "../agent/store/schema.js";
+import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 
 let db: ReturnType<typeof drizzle>;
 let inngestBaseUrl: string;
@@ -9,7 +10,6 @@ let inngestBaseUrl: string;
 beforeAll(() => {
   const databaseUrl = inject("databaseUrl");
   inngestBaseUrl = inject("inngestBaseUrl");
-
   db = drizzle({ connection: databaseUrl });
 });
 
@@ -42,42 +42,75 @@ async function waitForAssistantMessage(timeoutMs = 15_000) {
 }
 
 describe("message pipeline", () => {
-  it("processes a message end-to-end", async () => {
-    const chatId = `test-chat-${Date.now()}`;
+  it("processes inbound/arrived end-to-end", async () => {
+    // The app's ensureDefaults creates a user, profile, CLI channel, and wildcard identity.
+    // We need to create a conversation + session + inbound message, then emit the event.
+    const defaultUserId = inject("defaultUserId");
 
-    // Send message/received event to Inngest
-    await sendEvent("message/received", {
-      channel: "test",
-      chatId,
-      userId: "test-user",
-      text: "Hello integration test",
+    // Find the default profile and CLI channel (created by ensureDefaults)
+    const profileRows = await db.select({ id: profiles.id }).from(profiles).limit(1);
+    const channelRows = await db.select({ id: channels.id }).from(channels).limit(1);
+    expect(profileRows.length).toBe(1);
+    expect(channelRows.length).toBeGreaterThanOrEqual(1);
+
+    const profileId = profileRows[0]!.id;
+    const channelId = channelRows[0]!.id;
+
+    // Create conversation
+    const [conv] = await db
+      .insert(conversations)
+      .values({ userId: defaultUserId, profileId, isPrivate: true })
+      .returning({ id: conversations.id });
+
+    // Create session
+    const [session] = await db
+      .insert(channelSessions)
+      .values({
+        channelId,
+        platformAddress: `test-${Date.now()}`,
+        conversationId: conv!.id,
+        status: "active",
+        receive: "routed",
+      })
+      .returning({ id: channelSessions.id });
+
+    // Persist inbound message
+    const [inbound] = await db
+      .insert(inboundMessages)
+      .values({
+        channelSessionId: session!.id,
+        conversationId: conv!.id,
+        content: "Hello integration test",
+        platformTs: new Date(),
+      })
+      .returning({ id: inboundMessages.id });
+
+    // Emit inbound/arrived — this is what the adapter does
+    await sendEvent("inbound/arrived", {
+      conversationId: conv!.id,
+      inboundMessageId: inbound!.id,
     });
 
-    // Wait for assistant response to be persisted
+    // Wait for assistant response
     const assistantMsg = await waitForAssistantMessage();
     expect(assistantMsg.content).toBeDefined();
 
-    // Verify user message was also persisted
-    const userMsgs = await db.select().from(messages);
-    const userMsg = userMsgs.find((r) => r.role === "user");
+    // Verify user message was created
+    const allMsgs = await db.select().from(messages);
+    const userMsg = allMsgs.find((r) => r.role === "user");
     expect(userMsg).toBeDefined();
-
-    // Verify conversation was created
-    const convRows = await db.select().from(conversations);
-    expect(convRows.length).toBeGreaterThan(0);
-
-    // Verify chat was created
-    const chatRows = await db.select().from(chats);
-    expect(chatRows.length).toBeGreaterThan(0);
   });
 });
 
 describe("migrations", () => {
-  it("tables exist with correct structure", async () => {
-    const convResult = await db.select().from(conversations).limit(0);
-    expect(convResult).toEqual([]);
-
-    const msgResult = await db.select().from(messages).limit(0);
-    expect(msgResult).toEqual([]);
+  it("all tables exist with correct structure", async () => {
+    // Query each table — if schema is wrong, this throws
+    expect(await db.select().from(users).limit(0)).toEqual([]);
+    expect(await db.select().from(profiles).limit(0)).toEqual([]);
+    expect(await db.select().from(conversations).limit(0)).toEqual([]);
+    expect(await db.select().from(messages).limit(0)).toEqual([]);
+    expect(await db.select().from(channels).limit(0)).toEqual([]);
+    expect(await db.select().from(channelSessions).limit(0)).toEqual([]);
+    expect(await db.select().from(inboundMessages).limit(0)).toEqual([]);
   });
 });

@@ -1,0 +1,206 @@
+import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
+import type { JsonValue } from "type-fest";
+import { single } from "../../db/helpers.js";
+import type { Database } from "../../db/index.js";
+import { conversations, messages, profiles, steeringRules, users } from "./schema.js";
+
+export interface AgentStore {
+  /** Create a new user. */
+  createUser(): Promise<{ id: string }>;
+
+  /** Create a new conversation. */
+  createConversation(params: {
+    userId: string;
+    profileId: string;
+    isPrivate: boolean;
+  }): Promise<{ id: string }>;
+
+  /** Load a conversation by ID. */
+  getConversation(
+    conversationId: string,
+  ): Promise<{ id: string; userId: string; profileId: string; isPrivate: boolean } | null>;
+
+  /** Insert a message (user or assistant). Returns the new message ID. */
+  insertMessage(params: {
+    conversationId: string;
+    role: "user" | "assistant";
+    content: JsonValue;
+    lastInboundMessageId: string;
+  }): Promise<{ id: string }>;
+
+  /** Get the most recent assistant message for a conversation (for cursor chain). */
+  getLastAssistantMessage(
+    conversationId: string,
+  ): Promise<{ id: string; lastInboundMessageId: string } | null>;
+
+  /** Load full message history for a conversation, ordered by id. */
+  getHistory(
+    conversationId: string,
+  ): Promise<ReadonlyArray<{ role: "user" | "assistant"; content: JsonValue }>>;
+
+  /** Load a profile by ID. */
+  getProfile(
+    profileId: string,
+  ): Promise<{ id: string; basePrompt: string; model: string; toolSet: JsonValue } | null>;
+
+  /** Get the first user (for bootstrapping). */
+  getFirstUser(): Promise<{ id: string } | null>;
+
+  /** Get the first profile (for bootstrapping). */
+  getDefaultProfile(): Promise<{ id: string } | null>;
+
+  /** Create a profile. */
+  createProfile(params: {
+    name: string;
+    basePrompt: string;
+    model: string;
+    toolSet: JsonValue;
+  }): Promise<{ id: string }>;
+
+  /** Load a single message by ID. */
+  getMessage(messageId: string): Promise<{ id: string; role: string; content: JsonValue } | null>;
+
+  /** Load active steering rules for a profile (global + profile-specific, ordered by priority). */
+  getActiveRules(profileId: string): Promise<ReadonlyArray<{ rule: string }>>;
+}
+
+export class DrizzleAgentStore implements AgentStore {
+  #db: Database;
+  constructor(db: Database) {
+    this.#db = db;
+  }
+
+  async createUser(): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      return single(await tx.insert(users).values({}).returning({ id: users.id }));
+    });
+  }
+
+  async createConversation(params: {
+    userId: string;
+    profileId: string;
+    isPrivate: boolean;
+  }): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      return single(
+        await tx.insert(conversations).values(params).returning({ id: conversations.id }),
+      );
+    });
+  }
+
+  async getConversation(
+    conversationId: string,
+  ): Promise<{ id: string; userId: string; profileId: string; isPrivate: boolean } | null> {
+    const rows = await this.#db
+      .select({
+        id: conversations.id,
+        userId: conversations.userId,
+        profileId: conversations.profileId,
+        isPrivate: conversations.isPrivate,
+      })
+      .from(conversations)
+      .where(eq(conversations.id, conversationId))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async insertMessage(params: {
+    conversationId: string;
+    role: "user" | "assistant";
+    content: JsonValue;
+    lastInboundMessageId: string;
+  }): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      return single(await tx.insert(messages).values(params).returning({ id: messages.id }));
+    });
+  }
+
+  async getLastAssistantMessage(
+    conversationId: string,
+  ): Promise<{ id: string; lastInboundMessageId: string } | null> {
+    const rows = await this.#db
+      .select({
+        id: messages.id,
+        lastInboundMessageId: messages.lastInboundMessageId,
+      })
+      .from(messages)
+      .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
+      .orderBy(desc(messages.id))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async getHistory(
+    conversationId: string,
+  ): Promise<ReadonlyArray<{ role: "user" | "assistant"; content: JsonValue }>> {
+    const rows = await this.#db
+      .select({ role: messages.role, content: messages.content })
+      .from(messages)
+      .where(eq(messages.conversationId, conversationId))
+      .orderBy(asc(messages.id));
+    return rows as ReadonlyArray<{ role: "user" | "assistant"; content: JsonValue }>;
+  }
+
+  async getProfile(
+    profileId: string,
+  ): Promise<{ id: string; basePrompt: string; model: string; toolSet: JsonValue } | null> {
+    const rows = await this.#db
+      .select({
+        id: profiles.id,
+        basePrompt: profiles.basePrompt,
+        model: profiles.model,
+        toolSet: profiles.toolSet,
+      })
+      .from(profiles)
+      .where(eq(profiles.id, profileId))
+      .limit(1);
+    return (
+      (rows[0] as { id: string; basePrompt: string; model: string; toolSet: JsonValue }) ?? null
+    );
+  }
+
+  async getFirstUser(): Promise<{ id: string } | null> {
+    const rows = await this.#db.select({ id: users.id }).from(users).limit(1);
+    return rows[0] ?? null;
+  }
+
+  async getDefaultProfile(): Promise<{ id: string } | null> {
+    const rows = await this.#db.select({ id: profiles.id }).from(profiles).limit(1);
+    return rows[0] ?? null;
+  }
+
+  async createProfile(params: {
+    name: string;
+    basePrompt: string;
+    model: string;
+    toolSet: JsonValue;
+  }): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      return single(await tx.insert(profiles).values(params).returning({ id: profiles.id }));
+    });
+  }
+
+  async getMessage(
+    messageId: string,
+  ): Promise<{ id: string; role: string; content: JsonValue } | null> {
+    const rows = await this.#db
+      .select({ id: messages.id, role: messages.role, content: messages.content })
+      .from(messages)
+      .where(eq(messages.id, messageId))
+      .limit(1);
+    return (rows[0] as { id: string; role: string; content: JsonValue }) ?? null;
+  }
+
+  async getActiveRules(profileId: string): Promise<ReadonlyArray<{ rule: string }>> {
+    return this.#db
+      .select({ rule: steeringRules.rule })
+      .from(steeringRules)
+      .where(
+        and(
+          eq(steeringRules.active, true),
+          or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
+        ),
+      )
+      .orderBy(asc(steeringRules.priority));
+  }
+}

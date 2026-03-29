@@ -1,18 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { createDefaultTools, ToolRegistry } from "./tools.js";
+import { z } from "zod";
+import { memoryTools } from "./memory-tools.js";
+import type { Service } from "./service.js";
+import { createDefaultTools, defineTool, ToolRegistry } from "./tools.js";
+
+const stubService: Service = {
+  memory: {
+    recall: async () => ({ memories: [] }),
+    retain: async () => {},
+  },
+};
 
 describe("ToolRegistry", () => {
   it("registers and retrieves a tool", () => {
     const registry = new ToolRegistry();
-    const handler = async () => "result";
+    const spec = defineTool({
+      name: "my_tool",
+      description: "does stuff",
+      schema: z.object({}),
+      handler: async () => "result",
+    });
 
-    registry.register("my_tool", "does stuff", { type: "object" }, handler);
+    registry.register(spec);
 
-    const spec = registry.get("my_tool");
-    expect(spec).toBeDefined();
-    expect(spec?.definition.name).toBe("my_tool");
-    expect(spec?.definition.description).toBe("does stuff");
-    expect(spec?.handler).toBe(handler);
+    const retrieved = registry.get("my_tool");
+    expect(retrieved).toBeDefined();
+    expect(retrieved?.name).toBe("my_tool");
+    expect(retrieved?.description).toBe("does stuff");
   });
 
   it("returns undefined for unknown tool", () => {
@@ -22,12 +36,21 @@ describe("ToolRegistry", () => {
 
   it("returns all definitions", () => {
     const registry = new ToolRegistry();
-    registry.register("a", "tool a", { type: "object" }, async () => "");
     registry.register(
-      "b",
-      "tool b",
-      { type: "object", properties: { x: { type: "string" } } },
-      async () => "",
+      defineTool({
+        name: "a",
+        description: "tool a",
+        schema: z.object({}),
+        handler: async () => "",
+      }),
+    );
+    registry.register(
+      defineTool({
+        name: "b",
+        description: "tool b",
+        schema: z.object({ x: z.string() }),
+        handler: async () => "",
+      }),
     );
 
     const defs = registry.definitions();
@@ -41,14 +64,76 @@ describe("ToolRegistry", () => {
   });
 });
 
+describe("defineTool", () => {
+  it("generates inputSchema from Zod schema", () => {
+    const spec = defineTool({
+      name: "test",
+      description: "test tool",
+      schema: z.object({ query: z.string() }),
+      handler: async () => "ok",
+    });
+
+    expect(spec.inputSchema.type).toBe("object");
+    expect(spec.inputSchema.properties).toHaveProperty("query");
+    expect(spec.inputSchema.required).toContain("query");
+  });
+
+  it("validates input at runtime", async () => {
+    const spec = defineTool({
+      name: "test",
+      description: "test tool",
+      schema: z.object({ query: z.string() }),
+      handler: async () => "ok",
+    });
+
+    // Invalid input — missing required field
+    await expect(spec.handler({}, stubService)).rejects.toThrow();
+  });
+
+  it("passes parsed typed input to handler", async () => {
+    const spec = defineTool({
+      name: "test",
+      description: "test tool",
+      schema: z.object({ query: z.string(), count: z.number().optional() }),
+      handler: async (input) => `got: ${input.query}`,
+    });
+
+    const result = await spec.handler({ query: "hello" }, stubService);
+    expect(result).toBe("got: hello");
+  });
+
+  it("passes service to handler", async () => {
+    let received: Service | undefined;
+    const spec = defineTool({
+      name: "test",
+      description: "test",
+      schema: z.object({}),
+      handler: async (_input, caps) => {
+        received = caps;
+        return "ok";
+      },
+    });
+
+    await spec.handler({}, stubService);
+    expect(received).toBe(stubService);
+  });
+});
+
 describe("createDefaultTools", () => {
   it("get_current_time returns ISO date string", async () => {
     const registry = createDefaultTools();
     const spec = registry.get("get_current_time");
     expect(spec).toBeDefined();
-    const result = await spec!.handler({});
+    const result = await spec!.handler({}, stubService);
 
     expect(() => new Date(result)).not.toThrow();
     expect(result).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("accepts extra tools", () => {
+    const registry = createDefaultTools(memoryTools);
+    expect(registry.get("memory_recall")).toBeDefined();
+    expect(registry.get("memory_retain")).toBeDefined();
+    expect(registry.definitions()).toHaveLength(3);
   });
 });

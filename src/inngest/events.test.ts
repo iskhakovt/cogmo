@@ -1,31 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { messageReceived, messageResponse } from "./events.js";
+import { inboundArrived, responseReady } from "./events.js";
 
-describe("messageReceived", () => {
+describe("inboundArrived", () => {
   it("creates a valid event", () => {
-    const event = messageReceived.create({
-      channel: "cli",
-      chatId: "chat-1",
-      userId: "user-1",
-      text: "hello",
+    const event = inboundArrived.create({
+      conversationId: "conv-1",
+      inboundMessageId: "inbound-1",
     });
 
-    expect(event.name).toBe("message/received");
-    expect(event.data.channel).toBe("cli");
-    expect(event.data.text).toBe("hello");
+    expect(event.name).toBe("inbound/arrived");
+    expect(event.data.conversationId).toBe("conv-1");
+    expect(event.data.inboundMessageId).toBe("inbound-1");
   });
 });
 
-describe("messageResponse", () => {
+describe("responseReady", () => {
   it("creates a valid event", () => {
-    const event = messageResponse.create({
+    const event = responseReady.create({
       conversationId: "conv-1",
-      channel: "cli",
-      chatId: "chat-1",
-      text: "hi there",
+      messageId: "msg-1",
     });
 
-    expect(event.name).toBe("message/response");
-    expect(event.data.text).toBe("hi there");
+    expect(event.name).toBe("response/ready");
+    expect(event.data.messageId).toBe("msg-1");
   });
 });

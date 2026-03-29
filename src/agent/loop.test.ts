@@ -1,8 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import type { LlmProvider } from "../llm/provider.js";
 import type { LlmResponse } from "../llm/types.js";
 import { runAgentLoop } from "./loop.js";
-import { ToolRegistry } from "./tools.js";
+import type { Service } from "./service.js";
+import { defineTool, ToolRegistry } from "./tools.js";
+
+function stubService(): Service {
+  return {
+    memory: {
+      recall: vi.fn().mockResolvedValue({ memories: [] }),
+      retain: vi.fn().mockResolvedValue(undefined),
+    },
+  };
+}
 
 function mockProvider(responses: LlmResponse[]): LlmProvider {
   const chat = vi.fn();
@@ -41,6 +52,7 @@ describe("runAgentLoop", () => {
       systemPrompt: "Be helpful",
       messages: [{ role: "user", content: "Hi" }],
       tools,
+      service: stubService(),
     });
 
     expect(result.text).toBe("Hello!");
@@ -57,9 +69,14 @@ describe("runAgentLoop", () => {
     ]);
 
     const tools = new ToolRegistry();
-    tools.register("echo", "echoes", { type: "object" }, async (input) => {
-      return `pong from ${(input as { text: string }).text}`;
-    });
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echoes",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => `pong from ${input.text}`,
+      }),
+    );
 
     const result = await runAgentLoop({
       provider,
@@ -67,6 +84,7 @@ describe("runAgentLoop", () => {
       systemPrompt: "sys",
       messages: [{ role: "user", content: "echo ping" }],
       tools,
+      service: stubService(),
     });
 
     expect(result.text).toBe("Got: pong");
@@ -95,6 +113,7 @@ describe("runAgentLoop", () => {
       systemPrompt: "sys",
       messages: [{ role: "user", content: "use magic" }],
       tools,
+      service: stubService(),
     });
 
     expect(result.iterations).toBe(2);
@@ -115,9 +134,16 @@ describe("runAgentLoop", () => {
     ]);
 
     const tools = new ToolRegistry();
-    tools.register("fail_tool", "always fails", { type: "object" }, async () => {
-      throw new Error("boom");
-    });
+    tools.register(
+      defineTool({
+        name: "fail_tool",
+        description: "always fails",
+        schema: z.object({}),
+        handler: async () => {
+          throw new Error("boom");
+        },
+      }),
+    );
 
     const result = await runAgentLoop({
       provider,
@@ -125,6 +151,7 @@ describe("runAgentLoop", () => {
       systemPrompt: "sys",
       messages: [{ role: "user", content: "fail" }],
       tools,
+      service: stubService(),
     });
 
     expect(result.iterations).toBe(2);
@@ -148,8 +175,22 @@ describe("runAgentLoop", () => {
     ]);
 
     const tools = new ToolRegistry();
-    tools.register("a", "a", { type: "object" }, async () => "result-a");
-    tools.register("b", "b", { type: "object" }, async () => "result-b");
+    tools.register(
+      defineTool({
+        name: "a",
+        description: "a",
+        schema: z.object({}),
+        handler: async () => "result-a",
+      }),
+    );
+    tools.register(
+      defineTool({
+        name: "b",
+        description: "b",
+        schema: z.object({}),
+        handler: async () => "result-b",
+      }),
+    );
 
     const result = await runAgentLoop({
       provider,
@@ -157,6 +198,7 @@ describe("runAgentLoop", () => {
       systemPrompt: "sys",
       messages: [{ role: "user", content: "do both" }],
       tools,
+      service: stubService(),
     });
 
     expect(result.text).toBe("Both done");
@@ -175,7 +217,14 @@ describe("runAgentLoop", () => {
     ]);
 
     const tools = new ToolRegistry();
-    tools.register("echo", "echo", { type: "object" }, async () => "ok");
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({}),
+        handler: async () => "ok",
+      }),
+    );
 
     const result = await runAgentLoop({
       provider,
@@ -183,6 +232,7 @@ describe("runAgentLoop", () => {
       systemPrompt: "sys",
       messages: [{ role: "user", content: "loop" }],
       tools,
+      service: stubService(),
       maxIterations: 2,
     });
 
@@ -200,6 +250,7 @@ describe("runAgentLoop", () => {
       systemPrompt: "sys",
       messages: [{ role: "user", content: "hi" }],
       tools,
+      service: stubService(),
     });
 
     const callArgs = vi.mocked(provider.chat).mock.calls[0]![0];
@@ -217,8 +268,40 @@ describe("runAgentLoop", () => {
       systemPrompt: "sys",
       messages: original,
       tools,
+      service: stubService(),
     });
 
     expect(original).toHaveLength(1);
+  });
+
+  it("passes service to tool handler", async () => {
+    let receivedService: Service | undefined;
+    const svc = stubService();
+
+    const provider = mockProvider([toolUseResponse("spy", "t1", {}), textResponse("done")]);
+
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "spy",
+        description: "captures service",
+        schema: z.object({}),
+        handler: async (_input, service) => {
+          receivedService = service;
+          return "ok";
+        },
+      }),
+    );
+
+    await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "spy" }],
+      tools,
+      service: svc,
+    });
+
+    expect(receivedService).toBe(svc);
   });
 });

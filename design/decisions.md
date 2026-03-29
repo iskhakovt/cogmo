@@ -13,6 +13,9 @@
 | Prompt optimization | Build own (7 patterns) | Core loop ~50-100 lines TS. DSPy: Python. Ax: API churn (348 npm releases). |
 | Model strategy | Hybrid: subscription CLI + per-token API | Background tasks via `claude -p` ($0). Interactive via API (~$80-200/mo). |
 | Interface | Telegram first, adapter pattern | Messenger is transport. Telegram first (existing usage). Adapter pattern for CLI/Discord/API. |
+| Response rendering | Agent returns markdown, adapters render | Researched MS Bot Framework (Activity model), Adaptive Cards, Botpress content types. Industry consensus across all AI agent frameworks (Letta, OpenClaw, Dust, Vercel AI SDK, LangChain): agent outputs text/markdown, adapters handle platform rendering. No rich intermediate representation. |
+| Control commands | Adapter-intercepted, no orchestrator | `/new`, `/profile`, `/settings` handled by channel adapter directly via domain services. Never become inbound messages or Inngest events. Instant response, no LLM call. |
+| Telegram library | grammY | TypeScript-first, 1.7M weekly npm downloads, actively maintained. Telegraf is older, heavier. node-telegram-bot-api unmaintained. |
 | LLM routing | Direct SDKs, not OpenRouter | Our `LlmProvider` interface already abstracts providers. Adding a new provider = one file. OpenRouter adds 50-100ms latency + 5.5% markup for a convenience we don't need. If we want multi-provider A/B testing or user-selected models, OpenRouter becomes another `LlmProvider` implementation — zero domain code changes. |
 | Async LLM costs | Batch APIs for evolution tasks | Anthropic, OpenAI, Gemini all offer 50% discount batch APIs (24h turnaround). Stacks with prompt caching (up to 95% off). Use for reflection, signal extraction, prompt optimization — anything that can wait. Interactive chat stays on real-time API. |
 | Personal agents | Build own | No existing tool covers memory + agent runtime + evolution together. |
