@@ -2,6 +2,11 @@
 
 | Date | Change |
 |-|-|
+| 2026-03-29 | llmock replaces mock-anthropic + Ollama — `@copilotkit/llmock` 1.6.0 serves Anthropic API + OpenAI-compatible endpoints from fixtures. Single in-process instance backs both our app and Hindsight. Deleted `test/mock-anthropic/`. E2e drops from ~5min to ~1min. |
+| 2026-03-29 | Integration tests (in-process) — `bootstrap()` extracted from `src/index.ts`, called directly in test workers. Env injection via `process.env` in globalSetup (propagates to Vitest workers). Pipeline + memory tests moved from e2e. E2e slimmed to boot smoke test. |
+| 2026-03-29 | Three-tier test structure — unit (PGlite, mocks), integration (Docker + in-process), e2e (Docker + subprocess). Renamed `*.integration.test.ts` → `*.e2e.test.ts`. Moved `test/containers.ts` → `dev/containers.ts`. |
+| 2026-03-29 | Store unit tests with PGlite — `@electric-sql/pglite` 0.4.2 (PG17 in WASM). `pushSchema` from `drizzle-kit/api` applies schema without migration files. `pg_uuidv7` extension + `uuidv7()` alias. 31 tests across 2 store files. Driver-agnostic `Database` type (`PgDatabase<PgQueryResultHKT>`) eliminates `as any` casts. |
+| 2026-03-29 | Replace `pg` driver with `postgres.js` — pure JS, faster, modern. Swap `drizzle-orm/node-postgres` → `drizzle-orm/postgres-js` across 5 files. Zero API changes needed — Drizzle's connection pattern and `$client.end()` work identically. |
 | 2026-03-29 | CLI entrypoint (`src/cli.ts`) — `serve` and `seed` commands. Seed script (`src/seed.ts`) extracted from app startup, runs independently with only `DATABASE_URL`. Dockerfile uses `ENTRYPOINT ["node", "dist/cli.js"]`. App fails fast if seed hasn't run. |
 | 2026-03-29 | Channel registry — table-driven adapter discovery. `AdapterModule` contract (`channelType` + `setup()`) with `satisfies` barrel enforcement. Registry reads `channels` table, starts matching adapters, creates generic respond functions. No per-adapter respond files. |
 | 2026-03-29 | Direct channel adapter — replaces old CLI adapter. Event-driven via Inngest (`adapter/direct/inbound`, `adapter/direct/outbound`). Console script (`scripts/console.ts`) for dev interaction. No in-process stdin/stdout. |

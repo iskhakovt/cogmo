@@ -1,18 +1,26 @@
 import type { ChildProcess } from "node:child_process";
 import { execSync, spawn } from "node:child_process";
+import { LLMock } from "@copilotkit/llmock";
 import type { StartedTestContainer } from "testcontainers";
 import { Network } from "testcontainers";
 import type { GlobalSetupContext } from "vitest/node";
-import * as c from "./containers.js";
+import * as c from "../dev/containers.js";
 
 /// <reference path="./vitest.d.ts" />
 
 const containers: StartedTestContainer[] = [];
 let network: Awaited<ReturnType<InstanceType<typeof Network>["start"]>> | null = null;
 let appProcess: ChildProcess | null = null;
+let mock: LLMock | null = null;
 
 export async function setup({ provide }: GlobalSetupContext) {
   network = await new Network().start();
+
+  // Start llmock in-process — serves both Anthropic API and Ollama-compatible API for Hindsight
+  mock = new LLMock({ port: 0, host: "0.0.0.0", logLevel: "silent" });
+  mock.onMessage(/./, { content: "Mock e2e response from llmock" });
+  await mock.start();
+  console.log(`llmock at ${mock.url}`);
 
   // Start infra containers (parallel where possible)
   console.log("Starting containers...");
@@ -23,26 +31,21 @@ export async function setup({ provide }: GlobalSetupContext) {
   ]);
   containers.push(pg, _rd, inn);
 
-  // Ollama: start, pull model, then start Hindsight (sequential — Hindsight needs the model)
-  const ollamaContainer = await c.ollama(network).start();
-  containers.push(ollamaContainer);
-  await c.pullModel(ollamaContainer, c.OLLAMA_MODEL);
-
-  const hindsightContainer = await c.hindsight(network, "ollama").start();
+  // Hindsight backed by llmock (via host.docker.internal) instead of Ollama
+  const hindsightContainer = await c
+    .hindsight(network, "ollama", {
+      baseUrl: `http://host.docker.internal:${mock.port}/v1`,
+    })
+    .start();
   containers.push(hindsightContainer);
 
-  // Mock Anthropic for pipeline test
-  const mockAnthropicContainer = await c.mockAnthropic(network);
-  containers.push(mockAnthropicContainer);
-
   // Get URLs
-  const urls = c.getUrls({
+  const { hindsightUrl, ...urls } = c.getUrls({
     postgres: pg,
     inngest: inn,
     hindsight: hindsightContainer,
-    ollama: ollamaContainer,
   });
-  const mockAnthropicUrl = `http://${mockAnthropicContainer.getHost()}:${mockAnthropicContainer.getMappedPort(3000)}`;
+  if (!hindsightUrl) throw new Error("hindsight is required for e2e");
 
   // Seed database (applies migrations + creates default data)
   console.log("Running seed...");
@@ -53,16 +56,14 @@ export async function setup({ provide }: GlobalSetupContext) {
   console.log("Seed complete.");
 
   // Query the default user created by seed
-  const { drizzle } = await import("drizzle-orm/node-postgres");
-  const setupDb = drizzle({ connection: urls.databaseUrl });
-  const result = await setupDb.$client.query<{ id: string }>("SELECT id FROM users LIMIT 1");
-  await setupDb.$client.end();
-  const defaultUserId = result.rows[0]?.id;
+  const postgres = (await import("postgres")).default;
+  const sql = postgres(urls.databaseUrl);
+  const rows = await sql<{ id: string }[]>`SELECT id FROM users LIMIT 1`;
+  await sql.end();
+  const defaultUserId = rows[0]?.id;
   if (!defaultUserId) throw new Error("Default user not found after seed");
 
   // Start the assistant app in connect mode (WebSocket to Inngest dev server)
-  // Connect mode initiates outbound — no function discovery timing issues.
-  // connect() only resolves after successful handshake, so "inngest connected" is accurate.
   const gatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;
   console.log("Starting assistant app (connect mode)...");
   appProcess = spawn("tsx", ["src/index.ts"], {
@@ -71,17 +72,16 @@ export async function setup({ provide }: GlobalSetupContext) {
       ...process.env,
       DATABASE_URL: urls.databaseUrl,
       ANTHROPIC_API_KEY: "test-key",
-      ANTHROPIC_BASE_URL: mockAnthropicUrl,
+      ANTHROPIC_BASE_URL: `http://localhost:${mock.port}`,
       INNGEST_BASE_URL: urls.inngestBaseUrl,
       INNGEST_CONNECT_GATEWAY_URL: gatewayUrl,
-      HINDSIGHT_URL: urls.hindsightUrl,
+      HINDSIGHT_URL: hindsightUrl,
       INNGEST_DEV: "true",
       LOG_LEVEL: "info",
     },
   });
 
-  // Wait for "inngest connected" in stdout — in connect mode this means the WebSocket
-  // handshake succeeded and functions are registered with the dev server.
+  // Wait for "inngest connected" in stdout
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(
       () => reject(new Error("App startup timeout — 'inngest connected' not seen")),
@@ -108,23 +108,23 @@ export async function setup({ provide }: GlobalSetupContext) {
   provide("databaseUrl", urls.databaseUrl);
   provide("inngestBaseUrl", urls.inngestBaseUrl);
   provide("inngestEventKey", "test");
-  provide("hindsightUrl", urls.hindsightUrl);
-  provide("ollamaUrl", urls.ollamaUrl);
+  provide("hindsightUrl", hindsightUrl);
   provide("defaultUserId", defaultUserId);
 
-  console.log(`Test environment ready — ${JSON.stringify(urls)}`);
+  console.log(`Test environment ready — ${JSON.stringify({ ...urls, hindsightUrl })}`);
 }
 
 export async function teardown() {
-  // Stop app first
   if (appProcess) {
     console.log("Stopping assistant app...");
     appProcess.kill("SIGTERM");
     await new Promise<void>((resolve) => {
       appProcess?.on("exit", () => resolve());
-      setTimeout(resolve, 5_000); // force proceed after 5s
+      setTimeout(resolve, 5_000);
     });
   }
+
+  if (mock) await mock.stop();
 
   console.log("Stopping test containers...");
   for (const container of containers.reverse()) {

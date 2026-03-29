@@ -23,7 +23,7 @@ importers:
         version: 4.1.0
       drizzle-orm:
         specifier: ^0.45.1
-        version: 0.45.1(@opentelemetry/api@1.9.0)(@types/pg@8.20.0)(pg@8.20.0)
+        version: 0.45.1(@electric-sql/pglite@0.4.2)(@opentelemetry/api@1.9.0)(@types/pg@8.20.0)(pg@8.20.0)(postgres@3.4.8)
       grammy:
         specifier: ^1.41.1
         version: 1.41.1
@@ -39,12 +39,12 @@ importers:
       p-retry:
         specifier: ^7.1.1
         version: 7.1.1
-      pg:
-        specifier: ^8.20.0
-        version: 8.20.0
       pino:
         specifier: ^10.3.1
         version: 10.3.1
+      postgres:
+        specifier: ^3.4.8
+        version: 3.4.8
       remeda:
         specifier: ^2.33.6
         version: 2.33.6
@@ -61,6 +61,12 @@ importers:
       '@biomejs/biome':
         specifier: ^2.4.8
         version: 2.4.8
+      '@copilotkit/llmock':
+        specifier: ^1.6.0
+        version: 1.6.0
+      '@electric-sql/pglite':
+        specifier: ^0.4.2
+        version: 0.4.2
       '@inngest/test':
         specifier: ^1.0.0
         version: 1.0.0(inngest@4.0.5(@opentelemetry/core@2.6.0(@opentelemetry/api@1.9.0))(typescript@6.0.2)(zod@4.3.6))
@@ -73,9 +79,6 @@ importers:
       '@types/node':
         specifier: ^25.5.0
         version: 25.5.0
-      '@types/pg':
-        specifier: ^8.20.0
-        version: 8.20.0
       drizzle-kit:
         specifier: ^0.31.10
         version: 0.31.10
@@ -178,8 +181,16 @@ packages:
   '@bufbuild/protobuf@2.11.0':
     resolution: {integrity: sha512-sBXGT13cpmPR5BMgHE6UEEfEaShh5Ror6rfN3yEK5si7QVrtZg8LEPQb0VVhiLRUslD2yLnXtnRzG035J/mZXQ==}
 
+  '@copilotkit/llmock@1.6.0':
+    resolution: {integrity: sha512-wq4J7ampjoEiOi6v2d7GMK5lTZcTnuhMduSPCIwmyxBTCPA3lekXyNKGJ4t3xM5OgoJReMQ5KmlfrMBVTRNGsA==}
+    engines: {node: '>=20.15.0'}
+    hasBin: true
+
   '@drizzle-team/brocli@0.10.2':
     resolution: {integrity: sha512-z33Il7l5dKjUgGULTqBsQBQwckHh5AbIuxhdsIxDDiZAzBOrZO6q9ogcWC65kU382AfynTfgNumVcNIjuIua6w==}
+
+  '@electric-sql/pglite@0.4.2':
+    resolution: {integrity: sha512-1GUUl/MZpy5QWgWisD3Epho3GkJrZ1MzVgQpo2pifQWUs96F9rXKZxeVLPhkwFYck34CH/kQ8lis6wX9ifn3kg==}
 
   '@emnapi/core@1.9.1':
     resolution: {integrity: sha512-mukuNALVsoix/w1BJwFzwXBN/dHeejQtuVzcDsfOEsdpCumXb/E9j8w11h5S54tT1xhifGfbbSm/ICrObRb3KA==}
@@ -2722,6 +2733,10 @@ packages:
     resolution: {integrity: sha512-9ZhXKM/rw350N1ovuWHbGxnGh/SNJ4cnxHiM0rxE4VN41wsg8P8zWn9hv/buK00RP4WvlOyr/RBDiptyxVbkZQ==}
     engines: {node: '>=0.10.0'}
 
+  postgres@3.4.8:
+    resolution: {integrity: sha512-d+JFcLM17njZaOLkv6SCev7uoLaBtfK86vMUXhW1Z4glPWh4jozno9APvW/XKFJ3CCxVoC7OL38BqRydtu5nGg==}
+    engines: {node: '>=12'}
+
   process-nextick-args@2.0.1:
     resolution: {integrity: sha512-3ouUOpQhtgrbOa17J7+uxOTpITYWaGP7/AhoR3+A+/1e9skrzelGi/dXzEYyvbxubEF6Wn2ypscTKiKJFFn1ag==}
 
@@ -3347,7 +3362,11 @@ snapshots:
 
   '@bufbuild/protobuf@2.11.0': {}
 
+  '@copilotkit/llmock@1.6.0': {}
+
   '@drizzle-team/brocli@0.10.2': {}
+
+  '@electric-sql/pglite@0.4.2': {}
 
   '@emnapi/core@1.9.1':
     dependencies:
@@ -5029,11 +5048,13 @@ snapshots:
       esbuild: 0.25.12
       tsx: 4.21.0
 
-  drizzle-orm@0.45.1(@opentelemetry/api@1.9.0)(@types/pg@8.20.0)(pg@8.20.0):
+  drizzle-orm@0.45.1(@electric-sql/pglite@0.4.2)(@opentelemetry/api@1.9.0)(@types/pg@8.20.0)(pg@8.20.0)(postgres@3.4.8):
     optionalDependencies:
+      '@electric-sql/pglite': 0.4.2
       '@opentelemetry/api': 1.9.0
       '@types/pg': 8.20.0
       pg: 8.20.0
+      postgres: 3.4.8
 
   dunder-proto@1.0.1:
     dependencies:
@@ -5670,13 +5691,15 @@ snapshots:
   pg-cloudflare@1.3.0:
     optional: true
 
-  pg-connection-string@2.12.0: {}
+  pg-connection-string@2.12.0:
+    optional: true
 
   pg-int8@1.0.1: {}
 
   pg-pool@3.13.0(pg@8.20.0):
     dependencies:
       pg: 8.20.0
+    optional: true
 
   pg-protocol@1.13.0: {}
 
@@ -5697,10 +5720,12 @@ snapshots:
       pgpass: 1.0.5
     optionalDependencies:
       pg-cloudflare: 1.3.0
+    optional: true
 
   pgpass@1.0.5:
     dependencies:
       split2: 4.2.0
+    optional: true
 
   picocolors@1.1.1: {}
 
@@ -5775,6 +5800,8 @@ snapshots:
   postgres-interval@1.2.0:
     dependencies:
       xtend: 4.0.2
+
+  postgres@3.4.8: {}
 
   process-nextick-args@2.0.1: {}
 

@@ -15,7 +15,7 @@
  */
 import * as readline from "node:readline";
 import { and, desc, eq, gt } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/node-postgres";
+import { drizzle } from "drizzle-orm/postgres-js";
 import { messages } from "../src/agent/store/schema.js";
 import { channelSessions, channels } from "../src/transport/store/schema.js";
 

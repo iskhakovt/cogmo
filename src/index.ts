@@ -1,4 +1,4 @@
-import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { connect } from "inngest/connect";
 import { createServer as createInngestServer } from "inngest/node";
 import { createHandleMessage } from "./agent/handle-message.js";
@@ -16,23 +16,25 @@ import { HindsightMemoryProvider } from "./memory/hindsight.js";
 import { startChannels } from "./transport/registry.js";
 import { DrizzleTransportStore } from "./transport/store/index.js";
 
-async function main() {
+/**
+ * Wire all application dependencies — stores, providers, tools, adapters, Inngest functions.
+ *
+ * Returns the assembled pieces so callers can choose how to run them
+ * (serve mode, connect mode, or in-process for tests).
+ */
+export async function bootstrap() {
   await migrate(db, { migrationsFolder: "./migrations" });
   logger.info("database migrations applied");
 
-  // Wire stores
   const agentStore = new DrizzleAgentStore(db);
   const transportStore = new DrizzleTransportStore(db);
 
-  // Load defaults — seed must have been run
   const user = await agentStore.getFirstUser();
   const profile = await agentStore.getDefaultProfile();
   if (!user || !profile) {
-    logger.fatal("no user or profile found — run `seed` first");
-    process.exit(1);
+    throw new Error("no user or profile found — run `seed` first");
   }
 
-  // Wire agent dependencies
   const provider = new AnthropicProvider(env.ANTHROPIC_API_KEY, env.ANTHROPIC_BASE_URL);
   const tools = createDefaultTools(memoryTools);
   const promptSource = new DefaultPromptSource();
@@ -48,7 +50,6 @@ async function main() {
     runAgentLoop,
   });
 
-  // Start channel adapters from DB
   const { functions: channelFunctions, adapters } = await startChannels({
     defaultUserId: user.id,
     defaultProfileId: profile.id,
@@ -60,6 +61,21 @@ async function main() {
 
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [handleMessage, ...channelFunctions];
+
+  return {
+    db,
+    inngest,
+    functions,
+    adapters,
+    agentStore,
+    transportStore,
+    provider,
+    memory,
+  };
+}
+
+async function main() {
+  const { functions, adapters } = await bootstrap();
 
   if (env.INNGEST_MODE === "serve") {
     const server = createInngestServer({ client: inngest, functions });

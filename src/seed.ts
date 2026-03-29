@@ -1,5 +1,5 @@
-import { drizzle } from "drizzle-orm/node-postgres";
-import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { drizzle } from "drizzle-orm/postgres-js";
+import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { DrizzleAgentStore } from "./agent/store/index.js";
 import * as schema from "./db/schemas.js";
 import { logger } from "./logger.js";

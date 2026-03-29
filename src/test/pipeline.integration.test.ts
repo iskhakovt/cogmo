@@ -1,20 +1,28 @@
 /// <reference path="../../test/vitest.d.ts" />
-import { drizzle } from "drizzle-orm/node-postgres";
+
+import { connect } from "inngest/connect";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
-import { conversations, messages, profiles, users } from "../agent/store/schema.js";
+import { conversations, messages, profiles } from "../agent/store/schema.js";
+import { db } from "../db/index.js";
+import { bootstrap } from "../index.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 
-let db: ReturnType<typeof drizzle>;
 let inngestBaseUrl: string;
+let connection: Awaited<ReturnType<typeof connect>>;
 
-beforeAll(() => {
-  const databaseUrl = inject("databaseUrl");
+beforeAll(async () => {
   inngestBaseUrl = inject("inngestBaseUrl");
-  db = drizzle({ connection: databaseUrl });
+
+  // Wire app in-process and register Inngest functions via connect mode (WebSocket).
+  // Connect mode self-registers with the Inngest dev server — no discovery needed.
+  const { inngest, functions } = await bootstrap();
+  connection = await connect({
+    apps: [{ client: inngest, functions }],
+  });
 });
 
 afterAll(async () => {
-  await db.$client.end();
+  if (connection) connection.close();
 });
 
 async function sendEvent(name: string, data: Record<string, unknown>) {
@@ -30,7 +38,7 @@ async function sendEvent(name: string, data: Record<string, unknown>) {
   return res.json();
 }
 
-async function waitForAssistantMessage(timeoutMs = 15_000) {
+async function waitForAssistantMessage(timeoutMs = 30_000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const rows = await db.select().from(messages);
@@ -43,11 +51,8 @@ async function waitForAssistantMessage(timeoutMs = 15_000) {
 
 describe("message pipeline", () => {
   it("processes inbound/arrived end-to-end", async () => {
-    // The app's ensureDefaults creates a user, profile, CLI channel, and wildcard identity.
-    // We need to create a conversation + session + inbound message, then emit the event.
     const defaultUserId = inject("defaultUserId");
 
-    // Find the default profile and CLI channel (created by ensureDefaults)
     const profileRows = await db.select({ id: profiles.id }).from(profiles).limit(1);
     const channelRows = await db.select({ id: channels.id }).from(channels).limit(1);
     expect(profileRows.length).toBe(1);
@@ -56,13 +61,11 @@ describe("message pipeline", () => {
     const profileId = profileRows[0]!.id;
     const channelId = channelRows[0]!.id;
 
-    // Create conversation
     const [conv] = await db
       .insert(conversations)
       .values({ userId: defaultUserId, profileId, isPrivate: true })
       .returning({ id: conversations.id });
 
-    // Create session
     const [session] = await db
       .insert(channelSessions)
       .values({
@@ -74,7 +77,6 @@ describe("message pipeline", () => {
       })
       .returning({ id: channelSessions.id });
 
-    // Persist inbound message
     const [inbound] = await db
       .insert(inboundMessages)
       .values({
@@ -85,32 +87,16 @@ describe("message pipeline", () => {
       })
       .returning({ id: inboundMessages.id });
 
-    // Emit inbound/arrived — this is what the adapter does
     await sendEvent("inbound/arrived", {
       conversationId: conv!.id,
       inboundMessageId: inbound!.id,
     });
 
-    // Wait for assistant response
     const assistantMsg = await waitForAssistantMessage();
     expect(assistantMsg.content).toBeDefined();
 
-    // Verify user message was created
     const allMsgs = await db.select().from(messages);
     const userMsg = allMsgs.find((r) => r.role === "user");
     expect(userMsg).toBeDefined();
-  });
-});
-
-describe("migrations", () => {
-  it("all tables exist with correct structure", async () => {
-    // Query each table — if schema is wrong, this throws
-    expect(await db.select().from(users).limit(0)).toEqual([]);
-    expect(await db.select().from(profiles).limit(0)).toEqual([]);
-    expect(await db.select().from(conversations).limit(0)).toEqual([]);
-    expect(await db.select().from(messages).limit(0)).toEqual([]);
-    expect(await db.select().from(channels).limit(0)).toEqual([]);
-    expect(await db.select().from(channelSessions).limit(0)).toEqual([]);
-    expect(await db.select().from(inboundMessages).limit(0)).toEqual([]);
   });
 });

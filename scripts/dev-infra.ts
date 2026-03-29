@@ -12,7 +12,7 @@
  */
 import { spawn } from "node:child_process";
 import { Network } from "testcontainers";
-import * as c from "../test/containers.js";
+import * as c from "../dev/containers.js";
 
 async function main() {
   const infraOnly = process.argv.includes("--only");

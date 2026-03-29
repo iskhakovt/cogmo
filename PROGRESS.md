@@ -6,7 +6,7 @@
 - [x] Set up TypeScript build (tsx watch for dev, tsup for production)
 - [x] Install core dependencies (Anthropic SDK, Drizzle, Zod v4, Pino, Remeda, neverthrow, ts-pattern, etc.)
 - [x] Set up directory structure (`src/agent/`, `src/transport/`, `src/db/`, `src/inngest/`, `src/llm/`, `src/memory/`)
-- [x] Docker infra via testcontainers (`scripts/dev-infra.ts`, `test/containers.ts`)
+- [x] Docker infra via testcontainers (`scripts/dev-infra.ts`, `dev/containers.ts`)
 - [x] Drizzle schema — 9 tables across two stores (`agent/store/`, `transport/store/`)
 - [x] Generate Drizzle migration and verify against PostgreSQL
 - [x] Set up Inngest — SDK installed, Docker container configured, events typed
@@ -15,7 +15,7 @@
 - [x] Verify Hindsight connects to PostgreSQL + pgvector
 - [x] CLI entrypoint (`src/cli.ts`) — `serve` and `seed` commands
 - [x] Seed script (`src/seed.ts`) — idempotent database seeding for single-user deployment
-- [ ] Integration test infrastructure — testcontainers global-setup (needs update for new events)
+- [x] Three-tier test structure — unit (PGlite), integration (Docker + in-process), e2e (Docker + subprocess)
 - [ ] Basic health check endpoint (HTTP)
 
 ## Phase 1: MVP — Conversation + Memory
