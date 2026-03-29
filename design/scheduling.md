@@ -35,7 +35,7 @@ Inngest is purpose-built for durable, event-driven workflows. It provides everyt
 
 ```typescript
 const handleMessage = inngest.createFunction(
-  { id: "handle-message", triggers: [{ event: "message/received" }] },
+  { id: "handle-message", triggers: [{ event: "inbound/ready" }] },
   async ({ event, step }) => {
     const context = await step.run("load-context", () =>
       loadConversation(event.data.conversationId)

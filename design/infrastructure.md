@@ -12,12 +12,14 @@
 
 ## Local Development `[confirmed]`
 
-Docker Compose provides PostgreSQL (with pgvector) and Redis for local dev. See `docker-compose.yml`.
+Testcontainers via `scripts/dev-infra.ts` — starts PostgreSQL (with pgvector), Redis, Inngest, and Hindsight as reusable containers, applies migrations, then spawns the app with injected env vars. No Docker Compose files needed.
 
 ```bash
-docker compose up -d
-pnpm dev
+pnpm dev:infra          # start infra + app
+pnpm dev:infra --only   # start infra only (prints env vars)
 ```
+
+Containers survive across restarts (`withReuse()`). `Ctrl+C` stops the app; containers keep running. Use `docker stop` to kill them.
 
 ## Configuration `[confirmed]`
 
@@ -38,7 +40,6 @@ API keys must never be in env files or git. In production, use the host's secret
 | Secret | Purpose |
 |-|-|
 | `ANTHROPIC_API_KEY` | Claude API |
-| `TELEGRAM_BOT_TOKEN` | Telegram Bot API |
 | Per-integration keys | Gmail, Calendar, Strava, etc. (added as integrations ship) |
 
 ## Deployment `[proposed]`

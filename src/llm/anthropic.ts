@@ -19,14 +19,14 @@ const DEFAULT_MAX_TOKENS = 8192;
  */
 export class AnthropicProvider implements LlmProvider {
   readonly name = "anthropic";
-  private readonly client: Anthropic;
+  #client: Anthropic;
 
   constructor(apiKey: string, baseURL?: string) {
-    this.client = new Anthropic({ apiKey, ...(baseURL ? { baseURL } : {}) });
+    this.#client = new Anthropic({ apiKey, ...(baseURL ? { baseURL } : {}) });
   }
 
   async chat(params: ChatParams): Promise<LlmResponse> {
-    const response = await this.client.messages.create({
+    const response = await this.#client.messages.create({
       model: params.model,
       max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
       system: params.system,

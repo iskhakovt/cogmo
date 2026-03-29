@@ -2,6 +2,22 @@
 
 Personal AI assistant runtime — modular agent system with persistent memory and self-evolution.
 
+## Glossary
+
+| Term | Meaning |
+|-|-|
+| **Tool** | An LLM-callable function. Defined by name, description, and JSON Schema input. The LLM decides when to call it via `tool_use`. Implementation can be simple (return current time) or heavy (run a nested agent loop). See `ToolSpec` in `src/agent/tools.ts`. |
+| **Agent** | An autonomous loop with its own system prompt, tool set, and model. Heavier than a simple tool — makes multiple LLM calls. Exposed to the orchestrator as a Tool (agents-as-tools pattern). The orchestrator doesn't distinguish agents from simple tools — both are `ToolSpec` entries. |
+| **Service** | Scoped runtime dependencies injected into tool handlers by the orchestrator. The ACL boundary — tools access memory, http, etc. through this interface, never via direct service references. Scoped per conversation turn (userId, profile rules baked in). See `Service` in `src/agent/service.ts`. |
+| **Channel** | A platform connection (Telegram, Direct, Slack). DB row with credentials and identity mode. Each channel type has an `AdapterModule` in `src/transport/adapters/`. |
+| **Channel Session** | Maps a platform address to an active conversation (a Telegram DM, a Direct event address, a Web UI tab). Invisible to the agent — only the transport layer manages sessions. |
+| **Conversation** | A dialogue thread with shared LLM context. No explicit lifecycle — just goes idle. |
+| **Profile** | A named agent configuration: base prompt, model, enabled tools. Conversations use a profile. |
+| **Orchestrator** | The `handle-message` Inngest function. Thin controller — resolves session, constructs scoped service, calls the agent loop, emits response events. Zero business logic. |
+| **Control Command** | A channel command that doesn't go through the orchestrator (`/new`, `/profile`, `/settings`). Intercepted by the channel adapter, executed via domain services directly. Instant response, no LLM call. Distinct from regular messages which flow through the full pipeline. |
+| **Steering Rules** | Dynamic behavioral rules stored as DB rows, injected into system prompts at invocation time. Can be global or scoped to a profile. Managed by evolution stages. |
+| **Observer** | Post-conversation extraction. Runs after a conversation goes idle, extracts facts into Hindsight memory. |
+
 ## Design Doc Confidence Markers
 
 Sections and decisions in `design/` docs carry a confidence marker:
@@ -25,10 +41,11 @@ Read `design/` for the full picture. Key docs:
 | [memory.md](design/memory.md) | Hindsight, 4 networks, Observer extraction, retrieval |
 | [evolution.md](design/evolution.md) | 6-stage self-evolution ladder, safety patterns |
 | [scheduling.md](design/scheduling.md) | Inngest, event-driven orchestration, job types, agent self-scheduling |
-| [agents.md](design/agents.md) | Agentic loop, sub-agents, channel registry, crash recovery |
+| [agents.md](design/agents.md) | Agentic loop, sub-agents, crash recovery |
+| [transport/](design/transport/) | Messaging architecture — adapters, sessions, debounce, routing, identity |
 | [integrations.md](design/integrations.md) | MCP, Telegram adapter, skill library |
 | [infrastructure.md](design/infrastructure.md) | Runtime requirements, Docker Compose, secrets, deployment |
-| [data-model.md](design/data-model.md) | PostgreSQL schema — all tables, relationships, migrations |
+| [data-model.md](design/data-model.md) | Table index — points to schemas in domain docs, deferred tables, design decisions |
 | [testing.md](design/testing.md) | Local dev, unit/integration/LLM tests, mocking, evaluation dataset |
 | [tooling.md](design/tooling.md) | Dev stack — runtime, build, ORM, testing, logging, linting, Kotlin-feel patterns |
 | [decisions.md](design/decisions.md) | All decisions with rationale, eliminated options, adopted patterns |
@@ -68,17 +85,48 @@ Other tracking docs:
 - **Interface:** Telegram (primary), adapter pattern for others
 - **Deployment:** Standard Node.js process (systemd, Docker, etc.)
 
+## Module Structure
+
+| Module | Responsibility | Rule |
+|-|-|-|
+| `src/agent/` | Agentic loop, tool registry, service interface, prompt assembly, memory tools | Domain logic — how the agent thinks and acts |
+| `src/transport/` | Channel adapters (CLI, Telegram), respond functions, session management, identity | Transport — how messages arrive and responses are delivered |
+| `src/db/` | Connection pool, transaction helper | Pure infrastructure — no schemas, no business logic |
+| `src/inngest/` | Inngest client, event definitions | Orchestration infrastructure — client setup and event schemas only, no business logic |
+| `src/llm/` | LLM provider interface, SDK adapters (Anthropic), canonical types | Single LLM call — provider abstraction, request/response translation |
+| `src/memory/` | Memory provider interface, Hindsight adapter | Memory access — provider abstraction, HTTP client |
+
+**Infrastructure modules (`db/`, `inngest/`, `llm/`, `memory/`) contain only core setup and abstractions.** Business logic that uses them lives in domain modules (`agent/`, `transport/`). Example: the Inngest event definitions live in `src/inngest/events.ts`, but the `handle-message` orchestrator function that uses them lives in `src/agent/`. Respond functions live in `src/transport/`, not `src/inngest/functions/`.
+
+### Store Pattern
+
+Each domain module owns its DB access in a `store/` subdirectory:
+
+- **`<module>/store/schema.ts`** — Drizzle table definitions owned by this module
+- **`<module>/store/index.ts`** — Store interface + implementation. All DB reads/writes go through this.
+- **`src/db/schemas.ts`** — Barrel file re-exporting all module schemas (for drizzle-kit migrations only)
+
+| Store | Tables |
+|-|-|
+| `agent/store/` | conversations, messages, steering_rules, profiles |
+| `transport/store/` | channels, channel_sessions, inbound_messages, user_identities |
+
+**Interface boundary, not table boundary.** A store implementation can import schemas from any module — JOINs and cross-table transactions are fine. Consumers depend on the store interface and mock it in tests. The schema defines ownership (who creates/migrates the table); the interface defines access (who can read/write what).
+
 ## Code Style
 
 - **Idiomatic TypeScript** — use classes, interfaces, enums where they make the domain clear. Prefer `interface` over `type` for object shapes (extendable). Use generics for reusable components.
 - **`function` declarations for named exports** — use `function foo()` not `const foo = () => {}`. Better stack traces, hoisted, readable. Arrow functions for callbacks and inline lambdas only.
 - **Naming** — lowercase-hyphenated filenames (`steering-rules.ts`), `.test.ts` suffix for tests. PascalCase for classes/types/interfaces, camelCase for functions/variables.
-- **Imports** — ESM with `.js` extensions (`import { foo } from "./bar.js"`). Named imports over default exports. Biome organises imports automatically.
+- **Imports** — ESM with `.js` extensions (`import { foo } from "./bar.js"`). Named imports over default exports. Biome organises imports automatically. **No circular imports** — tsx/esbuild's `keepNames` helper breaks on circular ESM imports (`__name is not a function`). If A imports B and B imports A, restructure so one side accepts the dependency as a parameter instead.
+- **Return types** — annotate exported functions that return domain types (`Transport`, `Service`, `AgentLoopResult`, etc.). Skip annotation when the return type is a complex library generic (Inngest functions, Drizzle columns) — inference is better there. Biome's `useExplicitType` nursery rule is too broad to enforce this; rely on review discipline.
 - **Error handling** — `Result<T, E>` (neverthrow) at service boundaries and anywhere failure is expected. Exceptions only for programmer errors (bugs). Never `catch` and silently swallow.
 - **No mutable state across boundaries** — functions may mutate local arrays/objects internally for performance, but must return defensive copies (spread or `structuredClone`). Never return a reference to internal mutable state — this is rep exposure. Use `Readonly<T>` / `ReadonlyArray<T>` in return types where practical.
 - **Prefer libraries over bespoke code** — check if a well-maintained library solves the problem before writing a custom implementation. See `design/tooling.md` for the approved stack.
 - **Use the stack** — Remeda for collection processing (not hand-rolled loops), neverthrow for Result types, ts-pattern for pattern matching, Zod for validation, Drizzle for queries. Don't reinvent what these provide.
 - **Inject dependencies, don't hard-import them** — services and stateful dependencies (db, LLM provider, agent loop) should be passed in as parameters — interface, class, or function. Hard-importing a concrete implementation creates coupling that requires `vi.mock()` to test. A function parameter counts as injection — `bar(chat: () => Promise<Response>)` is as good as `bar(provider: LlmProvider)`. Pure helpers, utilities, constants, type definitions, and schema objects (e.g. `eq()` from drizzle, `logger`, Zod schemas) are fine to import directly.
+- **Strict encapsulation** — all class fields and methods must be `#private` unless declared on the interface the class implements. Use ES2022 `#` (runtime-enforced), not TypeScript `private` (erased at compile time). This prevents accidental exposure of implementation details and ensures the interface IS the public API.
+- **Async class initialization** — use `private constructor` + `static async create()` factory. Never do async work in constructors. The factory ensures the instance is fully initialized before it's returned. Thin standalone factory functions can alias the static method (e.g., `const startFoo: StartAdapter = Foo.create`).
 - **Generalise where reasonable** — extract interfaces and shared types when two or more consumers exist. Don't over-abstract for hypothetical future use.
 - **No dead code** — if nothing consumes a method, delete it or make it private. No code "just in case".
 
@@ -93,10 +141,9 @@ Other tracking docs:
 
 ## Working with Tools
 
-- **IMPORTANT: Check versions** — before adding a dependency, check the latest version on npm and read the official setup/migration guide. Don't assume versions or config from memory — they go stale fast. Check both the latest release and the latest LTS. If they differ, ask the user which to use.
-- **Research before building** — before implementing a feature, search for how it's done idiomatically in the framework/library you're using. Google "how to do X in Inngest/Drizzle/Fastify" before writing custom code.
+- **IMPORTANT: Research the documented approach first.** Before implementing anything that involves infrastructure, library integration, testing patterns, or deployment — search for the official docs and best practices. The documented approach is almost always better than a workaround. This has been validated repeatedly: Docker Compose profiles, Inngest connect mode for testing, testcontainers patterns. Don't debug symptoms when the root cause is "we're not using the tool the way it was designed." If you catch yourself iterating through trial-and-error, stop and google.
+- **Check versions** — before adding a dependency, check the latest version on npm and read the official setup/migration guide. Don't assume versions or config from memory — they go stale fast. Check both the latest release and the latest LTS. If they differ, ask the user which to use.
 - **Review existing tools** — before committing to a bespoke implementation, check if a maintained library or built-in feature covers the use case. Prefer battle-tested solutions.
-- **When unsure or iterating — stop and google.** If you're guessing at how something works (Docker Compose patterns, library APIs, infrastructure setup), look up the official docs and best practices first. Don't iterate through trial-and-error when the answer is a search away. This applies especially to infrastructure, deployment, and tooling decisions where conventions exist.
 
 ## Autonomy
 
@@ -113,16 +160,22 @@ After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 
 ## Design Philosophy
 
+- **Build for the long term, not just the next feature.** This is not an MVP hack — it's a system designed to grow. Before implementing, think about how each piece interacts with the rest: how will this work with memory extraction? With multi-channel? With evolution? If a shortcut now creates a rewrite later, take the longer path. Stop and think about how pieces fit together before writing code.
 - **Early abstractions pay off** — define interfaces and typed contracts upfront. A clean LLM provider interface costs nothing now and saves a rewrite later.
-- **Event decoupling** — components communicate via Inngest events, not direct imports. The orchestrator emits `message/response`; channel adapters listen independently. Adding a new channel never touches the orchestrator.
-- **Thin infrastructure layers** — Inngest functions are controllers: receive event, call domain services, emit events. Zero business logic in `src/inngest/functions/`. Domain logic lives in `src/agent/`, `src/llm/`, `src/channels/` and is testable without Inngest.
+- **Event decoupling** — components communicate via Inngest events, not direct imports. The orchestrator emits `response/ready`; channel adapters listen independently. Adding a new channel never touches the orchestrator.
+- **Thin infrastructure layers** — Inngest functions are controllers: receive event, call domain services, emit events. Zero business logic in `src/inngest/functions/`. Domain logic lives in `src/agent/`, `src/llm/`, `src/transport/` and is testable without Inngest.
 - **Domain owns logic, infra owns wiring** — if swapping Inngest for something else, only `src/inngest/` changes. If swapping Anthropic for OpenAI, only `src/llm/anthropic.ts` changes.
-- **Design for pluggability** — prompts, tools, LLM providers, and channels each have an explicit interface (`LlmProvider`, `ToolHandler`, `Channel`, etc.) that defines the plugin contract. All code depends on these interfaces, never on concrete implementations. Today they're in-process; in the future they become the boundary for external plugins (WASM, MCP, containers). Every new extension point must define its interface first. See `design/integrations.md`.
+- **Design for pluggability** — prompts, tools, LLM providers, and channels each have an explicit interface (`LlmProvider`, `Service`, `Adapter`, `Transport`, etc.) that defines the plugin contract. All code depends on these interfaces, never on concrete implementations. Today they're in-process; in the future they become the boundary for external plugins (WASM, MCP, containers). Every new extension point must define its interface first. See `design/integrations.md`.
+- **Service interface for tools** — tools access external systems exclusively through `Service`, never via direct service references. The orchestrator scopes the service per request (e.g., memory scoped to the current user's bank) and controls what each tool can access (ACL boundary). This is the same interface whether tools run in-process or in WASM. Tool inputs are validated at runtime — Zod for in-process TypeScript tools, JSON Schema validator for future plugins. See `design/agents.md` → Tool Architecture.
 
 ## Architecture Rules
 
 - No frameworks — raw SDK only.
 - **All DB operations use transactions.** Use `db.transaction(async (tx) => { ... })`.
+- **Every table gets a UUIDv7 primary key (`id`, DB-generated) and `created_at TIMESTAMPTZ DEFAULT now()`.** No exceptions.
+- **Columns are NOT NULL unless explicitly nullable.** Drizzle defaults to nullable — always add `.notNull()`. Nullable columns must be justified (e.g., `expires_at` = never expires, `steering_rules.profile_id` = null means applies to all profiles).
+- **Avoid default values** in DB columns and function parameters unless strongly justified (`id`, `created_at` are justified). Explicit values at the call site prevent hidden assumptions.
+- **No table design is final.** Schemas in `design/` docs are design intent, not frozen specs — they evolve as real usage reveals issues. When changing a table, update both the Drizzle schema (`<module>/store/schema.ts`) and the design doc that owns it simultaneously.
 - **Prefer immutable rows.** Insert once, avoid updates where practical. When updates are necessary (e.g. status transitions), that's fine — just design tables so most rows are append-only.
 - Memory writes are always additive. Dedup runs async via `reflect()`.
 - Sub-agents never see API keys. Orchestrator makes all external calls.

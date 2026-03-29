@@ -13,7 +13,9 @@ export interface MemoryProvider {
   /** Semantic search for relevant memories. */
   recall(bankId: string, query: string, options?: RecallOptions): Promise<RecallResult>;
 
-  /** Generate a contextual answer from memories. */
+  // TODO: not yet exposed as a Service method — start with recall+retain,
+  // add reflect when recall proves insufficient for synthesis-heavy queries.
+  /** Agentic reasoning loop — synthesizes an answer from memories (not consolidation). */
   reflect(bankId: string, query: string, options?: ReflectOptions): Promise<ReflectResult>;
 }
 

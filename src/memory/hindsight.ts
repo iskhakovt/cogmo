@@ -14,10 +14,10 @@ import type {
  */
 export class HindsightMemoryProvider implements MemoryProvider {
   readonly name = "hindsight";
-  private readonly client: HindsightClient;
+  #client: HindsightClient;
 
   constructor(baseUrl: string) {
-    this.client = new HindsightClient({ baseUrl });
+    this.#client = new HindsightClient({ baseUrl });
   }
 
   async retain(bankId: string, content: string, options?: RetainOptions): Promise<void> {
@@ -25,7 +25,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
     if (options?.context !== undefined) opts.context = options.context;
     if (options?.metadata !== undefined) opts.metadata = options.metadata;
     if (options?.tags !== undefined) opts.tags = options.tags;
-    await this.client.retain(bankId, content, opts);
+    await this.#client.retain(bankId, content, opts);
   }
 
   async recall(bankId: string, query: string, options?: RecallOptions): Promise<RecallResult> {
@@ -33,7 +33,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
     if (options?.maxTokens !== undefined) opts.maxTokens = options.maxTokens;
     if (options?.tags !== undefined) opts.tags = options.tags;
 
-    const response = await this.client.recall(bankId, query, opts);
+    const response = await this.#client.recall(bankId, query, opts);
 
     const memories: Memory[] = (response.results ?? []).map((r) => {
       const memory: Memory = { content: r.text, type: r.type ?? "unknown" };
@@ -49,7 +49,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
     if (options?.context !== undefined) opts.context = options.context;
     if (options?.tags !== undefined) opts.tags = options.tags;
 
-    const response = await this.client.reflect(bankId, query, opts);
+    const response = await this.#client.reflect(bankId, query, opts);
     return { answer: response.text };
   }
 }

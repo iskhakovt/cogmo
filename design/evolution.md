@@ -83,7 +83,7 @@ CREATE TABLE signals (
   signal_type TEXT NOT NULL,  -- 're-ask', 'correction', 'task_completion', 'result_usage', 'sentiment'
   content TEXT NOT NULL,
   reliability TEXT NOT NULL,  -- 'high', 'medium', 'low'
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
 
@@ -137,3 +137,7 @@ Add these incrementally as complexity demands:
 4. Bootstrapped few-shot — when ~20 real conversations exist
 5. Stage 4 (prompt optimization) — when ~50 labeled examples
 6. Stages 5-6 — when data volume and compute budget justify
+
+## Dual-Mode Monitoring `[research]`
+
+From memU. For ingestion agents: cheap embedding scan first, LLM only when relevant. Saves ~30% of ingestion costs by filtering before LLM processing.

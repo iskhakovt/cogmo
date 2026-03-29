@@ -32,7 +32,7 @@ No peer mesh (17x error amplification in Google/MIT research, 0 production succe
     +---------v---+   +---------v---+   +----------v--+
     | Conversation|   | Ingestion   |   | Extraction  |
     | Agent       |   | Agents      |   | Agent       |
-    | (Telegram)  |   | (email,cal) |   | (Observer)  |
+    |             |   | (email,cal) |   | (Observer)  |
     +-------------+   +-------------+   +-------------+
 ```
 
@@ -78,13 +78,13 @@ Additive-only writes. Never fail a write. Post-conversation dedup via Hindsight'
 | Component | Implementation | Runs as |
 |-|-|-|
 | Orchestrator | Inngest functions + raw SDK tool dispatch | Main Node.js process (Inngest Connect) |
-| Conversation agent | Inngest function, triggered by `message/received` event | Durable steps in main process |
+| Conversation agent | Inngest function, triggered by `inbound/arrived` event | Durable steps in main process |
 | Ingestion agents | Inngest functions, cron-triggered | Durable steps in main process |
 | Extraction agent | Inngest function, triggered by `conversation/idle` event | Durable steps in main process |
 | Evolution supervisor | Inngest function, cron-triggered | Durable steps in main process |
 | Memory | Hindsight HTTP client → self-hosted Hindsight server | Docker service (Python, uses PostgreSQL + pgvector internally) |
 | Orchestration | Inngest (self-hosted) | Go binary (Connect via WebSocket) |
-| Interfaces | Telegram adapter (webhook) | Fastify HTTP handler |
+| Interfaces | Channel adapters (`AdapterModule` contract) | Table-driven: direct (Inngest events), Telegram (long polling), future: webhooks, SSE |
 | MCP integrations | MCP client SDK | Per-integration MCP servers |
 
 ## Hindsight Deployment `[confirmed]`

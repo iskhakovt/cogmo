@@ -4,5 +4,7 @@ declare module "vitest" {
     inngestBaseUrl: string;
     inngestEventKey: string;
     hindsightUrl: string;
+    ollamaUrl: string;
+    defaultUserId: string;
   }
 }

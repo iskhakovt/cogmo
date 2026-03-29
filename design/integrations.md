@@ -1,35 +1,12 @@
 # Integrations
 
-## Interface Pattern: Messenger-Agnostic Adapters `[confirmed]`
+## Channel Adapters `[confirmed]`
 
-Telegram is just transport. The bot runtime exposes a generic message handler; adapters bridge specific platforms.
+Each adapter implements the `AdapterModule` contract (`channelType` + `setup()`) and receives a scoped `Transport`. The channel registry discovers adapters from the DB and starts them at boot. See [transport/adapters.md](transport/adapters.md) for the interface contract. Per-channel:
 
-```
-[Telegram Webhook] -> [Telegram Adapter] -> [Message Handler] -> [Orchestrator]
-[CLI stdin]        -> [CLI Adapter]       -> [Message Handler] -> [Orchestrator]
-[API endpoint]     -> [HTTP Adapter]      -> [Message Handler] -> [Orchestrator]
-```
-
-Each adapter implements the `Channel` interface (see agents.md). Adding a new interface = implementing `connect()`, `sendMessage()`, `onMessage()`.
-
-### Telegram (Primary) `[proposed]`
-
-Webhook mode — Telegram pushes to the bot's HTTPS endpoint. Express/Fastify handler receives updates, routes to orchestrator.
-
-| Detail | Value |
-|-|-|
-| Library | `telegraf` or `grammy` (TypeScript Telegram frameworks) (unconfirmed — implementation-time choice) |
-| Auth | Bot token from BotFather, stored in sops |
-| Webhook URL | Via Cloudflare Tunnel (`bot.timur.fyi`) or Tailscale |
-| Features needed | Text messages, callback buttons (for approval flows), markdown formatting |
-
-### Discord (Future, Team) `[research]`
-
-Similar adapter, bot token auth, slash commands.
-
-### CLI (Development/Testing) `[proposed]`
-
-stdin/stdout adapter for local testing without Telegram.
+- **Direct** — event-driven via Inngest (`adapter/direct/inbound`, `adapter/direct/outbound`). Console script (`scripts/console.ts`) for dev interaction.
+- [transport/telegram.md](transport/telegram.md) — Telegram (primary): grammY, long polling, DMs only
+- Discord, Slack, Web UI — future
 
 ## MCP Integrations `[proposed]`
 
@@ -147,6 +124,20 @@ Benefits:
 
 This is capability-based security (same model as Deno permissions, Android app permissions, WASM design philosophy).
 
+### Plugin trust tiers `[proposed]`
+
+Plugins (and profiles that use them) operate at different trust levels. The trust tier controls what memory and capabilities are accessible:
+
+| Tier | Who | Memory access | Capability access |
+|-|-|-|-|
+| **First-party** | Profiles you control (assistant, coder, buddy) | Full (filtered by compartment) | All granted capabilities |
+| **Third-party trusted** | Vetted community plugins | Only `trust:any` memories | Restricted capability set |
+| **Third-party sandboxed** | Untrusted/new plugins | No memory access | Minimal capabilities (e.g., no network, no filesystem) |
+
+Trust tier is enforced at two layers:
+1. **Memory:** tag-based filtering via `trust:*` tags in Hindsight (see `memory.md` → Memory Access Control)
+2. **Capabilities:** the WASM bridge exposes different `Service` based on trust tier — a sandboxed plugin simply doesn't have memory or network capabilities available
+
 ### WASM maturity (as of 2026)
 
 - WASI Preview 2 stable — HTTP, filesystem, env vars all standardized
@@ -154,8 +145,19 @@ This is capability-based security (same model as Deno permissions, Android app p
 - TypeScript-to-WASM works (AssemblyScript, ComponentizeJS) but plugins are ~12MB vs ~100KB for Rust
 - **Limitation:** no subprocess spawning from within WASM — this is exactly why the capability bus pattern works
 
+### Plugin tool validation
+
+Plugin tools (WASM, MCP, future execution models) provide JSON Schema for input validation. In-process TypeScript tools use Zod (converted to JSON Schema via `z.toJSONSchema()`). No dynamic JSON Schema → Zod conversion — each environment uses its native validator:
+
+| Environment | Schema source | Validator | Typed handler |
+|-|-|-|-|
+| In-process (TypeScript) | Zod → JSON Schema | Zod `.parse()` | Yes (`input: T`) |
+| Plugin (WASM, future) | JSON Schema directly | ajv or alternative (decide at implementation time) | No (`input: Record<string, unknown>`) |
+
+JSON Schema is the universal contract format. Zod is a convenience, not a requirement. See `agents.md` → Tool Architecture for the full design.
+
 ### Phased approach (not a final decision)
 
-1. **Now:** In-process `Tool` interface, direct function calls
+1. **Now:** In-process `ToolSpec` with `Service` interface, Zod input validation, direct function calls. Capability interface from day 1 — same contract that WASM plugins will use later.
 2. **Phase 2:** MCP client for third-party tools (subprocess isolation, proven pattern, growing ecosystem)
-3. **Phase 3+:** Evaluate WASM + capability bus for open-source plugin ecosystem. MCP and WASM can coexist — MCP for power-user integrations that need full OS access, WASM for sandboxed community plugins
+3. **Phase 3+:** Evaluate WASM + capability bus for open-source plugin ecosystem. MCP and WASM can coexist — MCP for power-user integrations that need full OS access, WASM for sandboxed community plugins. `Service` becomes host-imported WASM functions.

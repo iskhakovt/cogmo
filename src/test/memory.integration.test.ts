@@ -15,16 +15,24 @@ beforeAll(async () => {
 });
 
 describe("hindsight memory", () => {
-  it("retain and recall round-trip", async () => {
+  it("retain and recall round-trip", { timeout: 300_000 }, async () => {
     await memory.retain(BANK_ID, "The user's favorite color is blue");
 
-    // Hindsight extracts facts via LLM (Ollama) — wait for processing
-    await new Promise((r) => setTimeout(r, 5000));
+    // Hindsight extracts facts via LLM (Ollama qwen2.5:3b) — wait for processing
+    // Small models are slow; poll instead of fixed wait
+    let found = false;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      await new Promise((r) => setTimeout(r, 5000));
+      const result = await memory.recall(BANK_ID, "what is the user's favorite color?");
+      if (result.memories.length > 0) {
+        const match = result.memories.find((m) => m.content.toLowerCase().includes("blue"));
+        if (match) {
+          found = true;
+          break;
+        }
+      }
+    }
 
-    const result = await memory.recall(BANK_ID, "what is the user's favorite color?");
-
-    expect(result.memories.length).toBeGreaterThan(0);
-    const match = result.memories.find((m) => m.content.toLowerCase().includes("blue"));
-    expect(match).toBeDefined();
+    expect(found).toBe(true);
   });
 });

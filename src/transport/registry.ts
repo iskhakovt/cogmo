@@ -1,0 +1,83 @@
+import type { Inngest } from "inngest";
+import type { AgentStore } from "../agent/store/index.js";
+import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
+import { logger } from "../logger.js";
+import { adaptersByType } from "./adapters/index.js";
+import { createRespond } from "./respond.js";
+import type { TransportStore } from "./store/index.js";
+import { createTransport } from "./transport.js";
+import type { Adapter } from "./types.js";
+
+export interface RegistryDeps {
+  defaultUserId: string;
+  defaultProfileId: string;
+  transportStore: TransportStore;
+  agentStore: AgentStore;
+  inngest: Inngest;
+  inboundArrived: typeof InboundArrivedEvent;
+}
+
+export interface RegistryResult {
+  // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
+  functions: any[];
+  adapters: Adapter[];
+}
+
+/**
+ * Read channels from DB and start the appropriate adapters.
+ *
+ * Table-driven — matches channel.type to registered adapter modules.
+ * Each adapter provides an Adapter instance + optional Inngest functions.
+ * The registry creates a generic respond function per channel.
+ */
+export async function startChannels(deps: RegistryDeps): Promise<RegistryResult> {
+  const { transportStore, agentStore } = deps;
+  // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
+  const functions: any[] = [];
+  const adapters: Adapter[] = [];
+
+  const channels = await transportStore.getAllChannels();
+
+  for (const channel of channels) {
+    const mod = adaptersByType.get(channel.type);
+    if (!mod) {
+      logger.warn({ type: channel.type, channelId: channel.id }, "unknown channel type");
+      continue;
+    }
+
+    logger.info({ type: channel.type, channelId: channel.id }, "starting channel adapter");
+
+    const transport = createTransport({
+      channelId: channel.id,
+      defaultUserId: deps.defaultUserId,
+      defaultProfileId: deps.defaultProfileId,
+      transportStore,
+      agentStore,
+      inngest: deps.inngest,
+      inboundArrived: deps.inboundArrived,
+    });
+
+    const result = await mod.setup({
+      channelId: channel.id,
+      credentials: channel.credentials,
+      transport,
+    });
+
+    adapters.push(result.adapter);
+    functions.push(...result.functions);
+
+    // Generic respond function — same for every channel
+    functions.push(
+      createRespond({
+        id: `${channel.type}-respond`,
+        channelId: channel.id,
+        agentStore,
+        transportStore,
+        deliver: (addr, text) => result.adapter.deliver(addr, text),
+      }),
+    );
+  }
+
+  logger.info({ count: channels.length }, "channel adapters started");
+  return { functions, adapters };
+}

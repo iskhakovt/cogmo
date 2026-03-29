@@ -4,8 +4,6 @@
 
 | Attribute | Detail |
 |-|-|
-| Attribute | Detail |
-|-|-|
 | Client | `@vectorize-io/hindsight-client` (HTTP client, no DB access) |
 | Server | `ghcr.io/vectorize-io/hindsight` (self-hosted Python service) |
 | License | MIT |
@@ -16,6 +14,54 @@
 | MCP | Native MCP server |
 
 Hindsight is a client-server system. Our app talks to it via HTTP — no direct database access. The server handles storage, embedding, retrieval, and deduplication. We supply the extraction logic (what goes in) and retrieval queries (what comes out).
+
+## Bank Strategy `[confirmed]`
+
+One Hindsight bank per user, tags for memory networks. Networks are **not** separate banks.
+
+| Strategy | Tradeoff | Verdict |
+|-|-|-|
+| One bank per network per user (`ti-world`, `ti-opinions`, ...) | Strongest isolation, but **no cross-bank search in Hindsight** — "what do I know about Alice?" requires 4 API calls + client merge. Entity graphs are fragmented. Consolidation LLM costs multiplied per bank. | Reject |
+| **One bank per user, tags for networks** | Unified entity graph — "Alice" connects across all networks. Query one network, multiple, or all. Hindsight supports `observation_scopes: "per_tag"` for separate consolidation per network. | **Adopt** |
+| One global bank, metadata for everything | All users share entity graph. Missing filter = data leakage. No benefit over per-user banks for single-user. | Reject |
+
+Usage: `bankId = userId` (e.g. `"ti"`), retain with `tags: ["network:world"]`, recall with tags to filter or omit for full-brain search. Hindsight's `tagsMatch` modes (`any`, `all`, `any_strict`, `all_strict`) and compound `tag_groups` provide fine-grained filtering.
+
+**Gap:** `MemoryProvider` interface doesn't yet expose `tagsMatch` or `tag_groups` — add when implementing memory tools.
+
+## Memory Access Control via Tags `[proposed]`
+
+Memory access control uses the same Hindsight tag mechanism as network classification — no separate ACL system needed.
+
+**Two orthogonal dimensions:**
+
+| Dimension | Purpose | Examples |
+|-|-|-|
+| **Compartment** (lateral) | Domain isolation — different areas of life | `compartment:personal`, `compartment:work`, `compartment:health`, `compartment:financial`, `compartment:technical` |
+| **Trust tier** (vertical) | Plugin trust boundary — who can access | `trust:first-party` (only profiles you control), `trust:any` (safe for third-party plugins) |
+
+Profiles declare which compartments and trust levels they can access. The orchestrator constructs compound tag filters via Hindsight's `tag_groups` at recall time, enforced through the `Service` interface (see `agents.md` → Tool Architecture):
+
+```
+// "coder" profile recall filter:
+{
+  and: [
+    { tags: ["compartment:work", "compartment:technical"], match: "any_strict" },
+    { tags: ["trust:first-party"], match: "any_strict" }
+  ]
+}
+```
+
+A memory about a date tagged `compartment:personal` is invisible to the coder profile. A memory tagged `trust:first-party` is invisible to third-party plugin profiles. Same bank, same entity graph — just filtered at the capability boundary.
+
+**Tagging strategy:**
+- **Observer assigns** compartment and trust tags during post-conversation extraction (same as network classification)
+- **Default:** untagged memories get `trust:first-party` (safe default — restrict rather than expose)
+- **User override:** user can explicitly tag sensitive info ("this is private")
+
+**Relationship to networks:** Networks classify *what kind of knowledge* (world/bank/opinion/observation). Compartments classify *what domain*. Trust classifies *who can access*. All three are just tags — independent, combinable, filtered by the same mechanism. A memory can be `network:world` + `compartment:work` + `trust:any` (a public work fact any plugin can see).
+
+**For MVP:** Document the mechanism, implement the tag filtering in `Service`, but start with no compartment restrictions. Add compartment/trust tagging when profiles with different access needs exist. The infrastructure (tags + capability scoping) is ready from day 1.
 
 ## Four Memory Networks `[proposed]`
 
@@ -42,13 +88,10 @@ async function extractMemories(transcript: Message[]): Promise<void> {
 
   const memories = parseExtraction(response);
   for (const mem of memories) {
+    // Consolidation (dedup, observation creation) runs automatically
+    // inside Hindsight after each retain() call — no separate step needed.
     await hindsight.retain(mem.fact, mem.network);
   }
-}
-
-// Periodic dedup/consolidation
-async function consolidate(): Promise<void> {
-  await hindsight.reflect(); // merges duplicates, consolidates related
 }
 ```
 
@@ -58,6 +101,26 @@ async function consolidate(): Promise<void> {
 - 62% accuracy on HaluMem benchmark for in-context memory
 - 74% update omission rate
 - Post-conversation extraction bypasses the "remember to remember" problem entirely
+
+## Hindsight Operations `[confirmed]`
+
+Three distinct operations — don't confuse them:
+
+| Operation | What it does | When to use |
+|-|-|-|
+| **`retain()`** | Stores a memory. Consolidation engine runs **automatically** after each call — creates/updates observations (synthesized knowledge from multiple related facts), deduplicates. | Post-conversation extraction (Observer), real-time via `memory_retain` tool |
+| **`recall()`** | Searches memories — parallel vector, keyword, graph, and temporal search, returns ranked raw results. | Real-time retrieval via `memory_recall` tool |
+| **`reflect()`** | Spins up an **agentic reasoning loop** inside Hindsight — searches memories, follows entity graph links, synthesizes an answer. Returns interpretation, not raw data. | Real-time Q&A for complex questions needing synthesis across many facts |
+
+`reflect()` is **not** consolidation. It reads from the consolidation layer but doesn't write to it. Consolidation is automatic inside `retain()`.
+
+### Should `reflect` be an LLM tool? `[proposed]`
+
+`reflect()` is a real-time operation suitable as an agent tool. Use case: questions that need multi-hop reasoning across memories ("What risks should I watch for on project X?", "Summarize everything I know about Alice's career"). `recall()` returns raw facts; `reflect()` synthesizes an answer.
+
+Cost: `reflect()` makes its own LLM calls inside Hindsight (configurable budget: low/mid/high). It's heavier than `recall()`.
+
+Decision: start with `memory_recall` and `memory_retain` tools. Add `memory_reflect` if `recall()` proves insufficient for synthesis-heavy queries.
 
 ## Embedding Model `[research]`
 
