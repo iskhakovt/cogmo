@@ -1,39 +1,23 @@
-import type { ChildProcess } from "node:child_process";
-import { execSync, spawn } from "node:child_process";
-import { LLMock } from "@copilotkit/llmock";
+import type { LLMock } from "@copilotkit/llmock";
 import type { StartedTestContainer } from "testcontainers";
-import { Network } from "testcontainers";
+import { GenericContainer, Network, Wait } from "testcontainers";
 import type { GlobalSetupContext } from "vitest/node";
 import * as c from "../dev/containers.js";
+import { createMock } from "./llmock-setup.js";
 
 /// <reference path="./vitest.d.ts" />
 
 const containers: StartedTestContainer[] = [];
 let network: Awaited<ReturnType<InstanceType<typeof Network>["start"]>> | null = null;
-let appProcess: ChildProcess | null = null;
 let mock: LLMock | null = null;
 
 export async function setup({ provide }: GlobalSetupContext) {
   network = await new Network().start();
 
-  const recording = process.env.LLMOCK_RECORD === "1";
-  mock = new LLMock({
-    port: 0,
-    host: "0.0.0.0",
-    logLevel: recording ? "info" : "silent",
-    strict: !recording,
-    ...(recording && {
-      record: {
-        providers: { openai: "https://api.openai.com" },
-        fixturePath: "./test/fixtures/recorded",
-      },
-    }),
-  });
-  mock.loadFixtureDir("./test/fixtures/recorded");
+  mock = createMock();
   await mock.start();
   console.log(`llmock at ${mock.url}`);
 
-  // Start infra containers (parallel where possible)
   console.log("Starting containers...");
   const [pg, _rd, inn] = await Promise.all([
     c.postgres(network).start(),
@@ -42,7 +26,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   ]);
   containers.push(pg, _rd, inn);
 
-  // Slim Hindsight — external LLM + embeddings via llmock (replays recorded fixtures)
+  // Slim Hindsight
   const llmockUrl = `http://host.docker.internal:${mock.port}/v1`;
   const hindsightContainer = await c
     .hindsightSlim(network, {
@@ -56,7 +40,6 @@ export async function setup({ provide }: GlobalSetupContext) {
     .start();
   containers.push(hindsightContainer);
 
-  // Get URLs
   const { hindsightUrl, ...urls } = c.getUrls({
     postgres: pg,
     inngest: inn,
@@ -64,15 +47,22 @@ export async function setup({ provide }: GlobalSetupContext) {
   });
   if (!hindsightUrl) throw new Error("hindsight is required for e2e");
 
-  // Seed database (applies migrations + creates default data)
+  // Build app Docker image and run seed + app as containers.
+  // This tests the real production artifact — Dockerfile, build, distroless runtime.
+  console.log("Building app Docker image...");
+  const appImage = await GenericContainer.fromDockerfile(".", "Dockerfile").build("assistant-e2e");
+
   console.log("Running seed...");
-  execSync("tsx src/cli.ts seed", {
-    stdio: "inherit",
-    env: { ...process.env, DATABASE_URL: urls.databaseUrl },
-  });
+  const seedContainer = await appImage
+    .withNetwork(network)
+    .withCommand(["seed"])
+    .withEnvironment({ DATABASE_URL: "postgresql://assistant@postgres:5432/assistant" })
+    .withWaitStrategy(Wait.forLogMessage(/seed complete/i))
+    .withStartupTimeout(60_000)
+    .start();
+  await seedContainer.stop();
   console.log("Seed complete.");
 
-  // Query the default user created by seed
   const postgres = (await import("postgres")).default;
   const sql = postgres(urls.databaseUrl);
   const rows = await sql<{ id: string }[]>`SELECT id FROM users LIMIT 1`;
@@ -80,47 +70,26 @@ export async function setup({ provide }: GlobalSetupContext) {
   const defaultUserId = rows[0]?.id;
   if (!defaultUserId) throw new Error("Default user not found after seed");
 
-  // Start the assistant app in connect mode (WebSocket to Inngest dev server)
-  const gatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;
-  console.log("Starting assistant app (connect mode)...");
-  appProcess = spawn("tsx", ["src/index.ts"], {
-    stdio: "pipe",
-    env: {
-      ...process.env,
-      DATABASE_URL: urls.databaseUrl,
+  console.log("Starting app container (connect mode)...");
+  const appContainer = await appImage
+    .withNetwork(network)
+    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
+    .withCommand(["serve"])
+    .withEnvironment({
+      DATABASE_URL: "postgresql://assistant@postgres:5432/assistant",
       ANTHROPIC_API_KEY: "test-key",
-      ANTHROPIC_BASE_URL: `http://localhost:${mock.port}`,
-      INNGEST_BASE_URL: urls.inngestBaseUrl,
-      INNGEST_CONNECT_GATEWAY_URL: gatewayUrl,
-      HINDSIGHT_URL: hindsightUrl,
+      ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}`,
+      INNGEST_BASE_URL: "http://inngest:8288",
+      INNGEST_CONNECT_GATEWAY_URL: "ws://inngest:8289/v0/connect",
+      HINDSIGHT_URL: "http://hindsight:8888",
       INNGEST_DEV: "true",
       LOG_LEVEL: "info",
-    },
-  });
-
-  // Wait for "inngest connected" in stdout
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(
-      () => reject(new Error("App startup timeout — 'inngest connected' not seen")),
-      60_000,
-    );
-    appProcess?.stdout?.on("data", (data: Buffer) => {
-      const text = data.toString();
-      process.stdout.write(`[app] ${text}`);
-      if (text.includes("inngest connected")) {
-        clearTimeout(timeout);
-        resolve();
-      }
-    });
-    appProcess?.stderr?.on("data", (data: Buffer) => {
-      process.stderr.write(`[app:err] ${data}`);
-    });
-    appProcess?.on("exit", (code) => {
-      clearTimeout(timeout);
-      reject(new Error(`App exited unexpectedly with code ${code}`));
-    });
-  });
-  console.log("Assistant app ready.");
+    })
+    .withWaitStrategy(Wait.forLogMessage(/inngest connected/i))
+    .withStartupTimeout(60_000)
+    .start();
+  containers.push(appContainer);
+  console.log("App container ready.");
 
   provide("databaseUrl", urls.databaseUrl);
   provide("inngestBaseUrl", urls.inngestBaseUrl);
@@ -128,25 +97,16 @@ export async function setup({ provide }: GlobalSetupContext) {
   provide("hindsightUrl", hindsightUrl);
   provide("defaultUserId", defaultUserId);
 
-  console.log(`Test environment ready — ${JSON.stringify({ ...urls, hindsightUrl })}`);
+  console.log(`E2E environment ready — ${JSON.stringify({ ...urls, hindsightUrl })}`);
 }
 
 export async function teardown() {
-  if (appProcess) {
-    console.log("Stopping assistant app...");
-    appProcess.kill("SIGTERM");
-    await new Promise<void>((resolve) => {
-      appProcess?.on("exit", () => resolve());
-      setTimeout(resolve, 5_000);
-    });
-  }
-
   if (mock) await mock.stop();
 
-  console.log("Stopping test containers...");
+  console.log("Stopping containers...");
   for (const container of containers.reverse()) {
     await container.stop();
   }
   if (network) await network.stop();
-  console.log("Test containers stopped.");
+  console.log("Containers stopped.");
 }

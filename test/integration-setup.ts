@@ -1,9 +1,10 @@
 import { execSync } from "node:child_process";
-import { LLMock } from "@copilotkit/llmock";
+import type { LLMock } from "@copilotkit/llmock";
 import type { StartedTestContainer } from "testcontainers";
 import { Network } from "testcontainers";
 import type { GlobalSetupContext } from "vitest/node";
 import * as c from "../dev/containers.js";
+import { createMock } from "./llmock-setup.js";
 
 /// <reference path="./vitest.d.ts" />
 
@@ -14,50 +15,7 @@ let mock: LLMock | null = null;
 export async function setup({ provide }: GlobalSetupContext) {
   network = await new Network().start();
 
-  // LLMOCK_RECORD=1 enables record mode: replay existing fixtures, proxy + save new ones.
-  // Default (CI): strict mode — 503 on unmatched requests, no API calls.
-  const recording = process.env.LLMOCK_RECORD === "1";
-
-  // Strip timestamps, UUIDs, and metadata from prompts for deterministic matching.
-  // With requestTransform set, llmock uses exact match (===) instead of substring (includes).
-  const requestTransform = (req: import("@copilotkit/llmock").ChatCompletionRequest) => ({
-    ...req,
-    messages: req.messages.map((m) => ({
-      ...m,
-      content:
-        typeof m.content === "string"
-          ? m.content
-              .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+(\+[\d:]+|Z)/g, "")
-              .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "")
-              .replace(
-                /\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+\w+\s+\d{1,2},\s+\d{4}\b/g,
-                "",
-              )
-          : m.content,
-    })),
-    embeddingInput: req.embeddingInput?.split(" | ")[0],
-  });
-
-  mock = new LLMock({
-    port: 0,
-    host: "0.0.0.0",
-    logLevel: recording ? "info" : "silent",
-    strict: !recording,
-    requestTransform,
-    ...(recording && {
-      record: {
-        providers: {
-          openai: "https://api.openai.com",
-          anthropic: "https://api.anthropic.com",
-        },
-        fixturePath: "./test/fixtures/recorded",
-      },
-    }),
-  });
-  mock.loadFixtureDir("./test/fixtures/recorded");
-  // Embeddings: llmock can't record OpenAI embedding responses (proxy_error bug).
-  // Use deterministic catch-all — 1536-dim vectors work for Hindsight's pgvector storage.
-  mock.onEmbedding(/./, { embedding: Array.from({ length: 1536 }, (_, i) => Math.sin(i) * 0.1) });
+  mock = createMock();
   await mock.start();
   console.log(`llmock at ${mock.url}`);
 
@@ -91,8 +49,6 @@ export async function setup({ provide }: GlobalSetupContext) {
   if (!hindsightUrl) throw new Error("hindsight is required for integration tests");
 
   // Set process.env — propagates to Vitest test workers.
-  // This allows test files to do normal top-level imports of app modules
-  // that transitively import env.ts (createEnv validates process.env at import time).
   process.env.DATABASE_URL = urls.databaseUrl;
   process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "test-key";
   process.env.ANTHROPIC_BASE_URL = `http://localhost:${mock.port}`;
@@ -101,16 +57,13 @@ export async function setup({ provide }: GlobalSetupContext) {
   process.env.INNGEST_DEV = "true";
   process.env.LOG_LEVEL = "warn";
 
-  // Gateway URL for connect mode — tests use this to register functions in-process
   const gatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;
   process.env.INNGEST_CONNECT_GATEWAY_URL = gatewayUrl;
 
-  // Seed database
   console.log("Running seed...");
   execSync("tsx src/cli.ts seed", { stdio: "inherit" });
   console.log("Seed complete.");
 
-  // Query the default user created by seed
   const postgres = (await import("postgres")).default;
   const sql = postgres(urls.databaseUrl);
   const rows = await sql<{ id: string }[]>`SELECT id FROM users LIMIT 1`;
@@ -118,7 +71,6 @@ export async function setup({ provide }: GlobalSetupContext) {
   const defaultUserId = rows[0]?.id;
   if (!defaultUserId) throw new Error("Default user not found after seed");
 
-  // Also provide values for direct use in tests via inject()
   provide("databaseUrl", urls.databaseUrl);
   provide("inngestBaseUrl", urls.inngestBaseUrl);
   provide("inngestEventKey", "test");
