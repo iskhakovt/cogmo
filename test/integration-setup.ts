@@ -14,15 +14,49 @@ let mock: LLMock | null = null;
 export async function setup({ provide }: GlobalSetupContext) {
   network = await new Network().start();
 
-  // llmock serves Anthropic API for both our app and Hindsight.
-  // Recorded fixtures (from scripts/record-fixtures.ts) provide realistic Hindsight responses.
-  // The catch-all fixture handles our app's direct LLM calls.
-  mock = new LLMock({ port: 0, host: "0.0.0.0", logLevel: "silent" });
+  // LLMOCK_RECORD=1 enables record mode: replay existing fixtures, proxy + save new ones.
+  // Default (CI): strict mode — 503 on unmatched requests, no API calls.
+  const recording = process.env.LLMOCK_RECORD === "1";
+
+  // Strip timestamps, UUIDs, and metadata from prompts for deterministic matching.
+  // With requestTransform set, llmock uses exact match (===) instead of substring (includes).
+  const requestTransform = (req: import("@copilotkit/llmock").ChatCompletionRequest) => ({
+    ...req,
+    messages: req.messages.map((m) => ({
+      ...m,
+      content:
+        typeof m.content === "string"
+          ? m.content
+              .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+(\+[\d:]+|Z)/g, "")
+              .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "")
+              .replace(
+                /\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+\w+\s+\d{1,2},\s+\d{4}\b/g,
+                "",
+              )
+          : m.content,
+    })),
+    embeddingInput: req.embeddingInput?.split(" | ")[0],
+  });
+
+  mock = new LLMock({
+    port: 0,
+    host: "0.0.0.0",
+    logLevel: recording ? "info" : "silent",
+    strict: !recording,
+    requestTransform,
+    ...(recording && {
+      record: {
+        providers: {
+          openai: "https://api.openai.com",
+          anthropic: "https://api.anthropic.com",
+        },
+        fixturePath: "./test/fixtures/recorded",
+      },
+    }),
+  });
   mock.loadFixtureDir("./test/fixtures/recorded");
-  mock.onMessage(/./, { content: "Mock integration response from llmock" });
-  // Catch-all embedding fixture — returns deterministic 1536-dim vector for any input.
-  // Hindsight decorates text with timestamps/metadata before embedding, making
-  // exact inputText matching fragile. The catch-all ensures all embedding calls succeed.
+  // Embeddings: llmock can't record OpenAI embedding responses (proxy_error bug).
+  // Use deterministic catch-all — 1536-dim vectors work for Hindsight's pgvector storage.
   mock.onEmbedding(/./, { embedding: Array.from({ length: 1536 }, (_, i) => Math.sin(i) * 0.1) });
   await mock.start();
   console.log(`llmock at ${mock.url}`);
@@ -40,10 +74,10 @@ export async function setup({ provide }: GlobalSetupContext) {
   const hindsightContainer = await c
     .hindsightSlim(network, {
       llmBaseUrl: llmockUrl,
-      llmApiKey: "test-key",
+      llmApiKey: process.env.OPENAI_API_KEY ?? "test-key",
       llmModel: "gpt-5-nano",
       embeddingsBaseUrl: llmockUrl,
-      embeddingsApiKey: "test-key",
+      embeddingsApiKey: process.env.OPENAI_API_KEY ?? "test-key",
       embeddingsModel: "text-embedding-3-small",
     })
     .start();
@@ -60,7 +94,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   // This allows test files to do normal top-level imports of app modules
   // that transitively import env.ts (createEnv validates process.env at import time).
   process.env.DATABASE_URL = urls.databaseUrl;
-  process.env.ANTHROPIC_API_KEY = "test-key";
+  process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "test-key";
   process.env.ANTHROPIC_BASE_URL = `http://localhost:${mock.port}`;
   process.env.HINDSIGHT_URL = hindsightUrl;
   process.env.INNGEST_BASE_URL = urls.inngestBaseUrl;

@@ -16,11 +16,20 @@ let mock: LLMock | null = null;
 export async function setup({ provide }: GlobalSetupContext) {
   network = await new Network().start();
 
-  // llmock serves Anthropic API for both our app and Hindsight
-  mock = new LLMock({ port: 0, host: "0.0.0.0", logLevel: "silent" });
+  const recording = process.env.LLMOCK_RECORD === "1";
+  mock = new LLMock({
+    port: 0,
+    host: "0.0.0.0",
+    logLevel: recording ? "info" : "silent",
+    strict: !recording,
+    ...(recording && {
+      record: {
+        providers: { openai: "https://api.openai.com" },
+        fixturePath: "./test/fixtures/recorded",
+      },
+    }),
+  });
   mock.loadFixtureDir("./test/fixtures/recorded");
-  mock.onMessage(/./, { content: "Mock e2e response from llmock" });
-  mock.onEmbedding(/./, { embedding: Array.from({ length: 1536 }, (_, i) => Math.sin(i) * 0.1) });
   await mock.start();
   console.log(`llmock at ${mock.url}`);
 

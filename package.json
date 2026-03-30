@@ -16,6 +16,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
+    "test:record": "LLMOCK_RECORD=1 node --env-file-if-exists=.env node_modules/.bin/vitest run --project integration",
     "test:e2e": "vitest run --project e2e",
     "test:all": "vitest run",
     "test:watch": "vitest --project unit",

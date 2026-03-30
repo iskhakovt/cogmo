@@ -15,8 +15,7 @@ beforeAll(async () => {
 });
 
 describe("hindsight memory", () => {
-  // TODO: Hindsight embedding calls not reaching llmock — investigate HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL config
-  it.skip("retain and recall round-trip", { timeout: 60_000 }, async () => {
+  it("retain and recall round-trip", { timeout: 60_000 }, async () => {
     await memory.retain(BANK_ID, "The user's favorite color is blue");
 
     // Hindsight extracts facts via llmock (instant responses).
