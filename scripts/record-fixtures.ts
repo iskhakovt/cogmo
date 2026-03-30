@@ -1,84 +1,96 @@
 #!/usr/bin/env tsx
+import { LLMock } from "@copilotkit/llmock";
+import { HindsightClient } from "@vectorize-io/hindsight-client";
 /**
- * Record Hindsight's Ollama interactions as llmock fixtures.
+ * Record Hindsight's LLM interactions as llmock fixtures.
  *
- * Boots Ollama + Hindsight with llmock as a recording proxy in between.
- * Runs a retain/recall cycle and saves the captured request/response pairs
+ * Boots slim Hindsight with llmock as a recording proxy to the real OpenAI API.
+ * Runs a retain/recall cycle and saves captured request/response pairs
  * as fixture files for deterministic test replay.
+ *
+ * Embeddings use llmock's deterministic vectors (text-embedding-3-small
+ * dimensions are hardcoded in Hindsight — no probe call needed).
  *
  * Usage:
  *   pnpm tsx scripts/record-fixtures.ts
  *
- * Requires Docker (testcontainers).
- * Output: test/fixtures/hindsight-ollama.json
+ * Requires: Docker, .env with OPENAI_API_KEY.
+ * Output: test/fixtures/recorded/*.json (llmock fixture format)
  */
-import { writeFileSync } from "node:fs";
-import { LLMock } from "@copilotkit/llmock";
-import { HindsightClient } from "@vectorize-io/hindsight-client";
+import { config } from "dotenv";
 import { Network } from "testcontainers";
 import * as c from "../dev/containers.js";
 
+config(); // load .env
+
 const BANK_ID = `fixture-recording-${Date.now()}`;
-const FIXTURE_PATH = "./test/fixtures/hindsight-ollama.json";
+const FIXTURE_DIR = "./test/fixtures/recorded";
 
 async function main() {
-  console.log("Starting fixture recording...");
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    console.error("OPENAI_API_KEY is required in .env");
+    process.exit(1);
+  }
 
-  // 1. Start network + Ollama
+  console.log("Starting fixture recording (slim Hindsight + OpenAI via llmock)...");
+
   const network = await new Network().start();
-  const ollamaContainer = await c.ollama(network).start();
-  await c.pullModel(ollamaContainer, c.OLLAMA_MODEL);
 
-  const ollamaHost = ollamaContainer.getHost();
-  const ollamaPort = ollamaContainer.getMappedPort(11434);
-  const ollamaUrl = `http://${ollamaHost}:${ollamaPort}`;
-
-  // 2. Start llmock in record mode — proxy to real Ollama
+  // llmock in record mode — proxy LLM calls to real OpenAI API.
+  // Existing fixtures replay instantly; only new prompts hit the real API.
+  // Embeddings use llmock's built-in deterministic vectors (no recording needed).
   const mock = new LLMock({
     port: 0,
+    host: "0.0.0.0",
     logLevel: "info",
     record: {
-      providers: { ollama: ollamaUrl },
+      providers: { openai: "https://api.openai.com" },
+      fixturePath: FIXTURE_DIR,
     },
   });
+  try {
+    mock.loadFixtureDir(FIXTURE_DIR);
+  } catch {
+    // No fixtures yet
+  }
   await mock.start();
-  console.log(`llmock recording proxy at ${mock.url} → Ollama at ${ollamaUrl}`);
+  console.log(`llmock recording proxy at ${mock.url}`);
 
-  // 3. Start Hindsight pointing at llmock (via host.docker.internal)
-  // Hindsight uses /v1 suffix for OpenAI-compatible endpoint
+  // Slim Hindsight — OpenAI for LLM, deterministic embeddings via llmock, RRF reranker
+  const llmockUrl = `http://host.docker.internal:${mock.port}/v1`;
   const hindsightContainer = await c
-    .hindsight(network, "ollama", {
-      baseUrl: `http://host.docker.internal:${mock.port}/v1`,
+    .hindsightSlim(network, {
+      llmBaseUrl: llmockUrl,
+      llmApiKey: apiKey,
+      llmModel: "gpt-5-nano",
+      embeddingsBaseUrl: llmockUrl,
+      embeddingsApiKey: apiKey,
+      embeddingsModel: "text-embedding-3-small",
     })
-    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .start();
 
-  const hindsightHost = hindsightContainer.getHost();
-  const hindsightPort = hindsightContainer.getMappedPort(8888);
-  const hindsightUrl = `http://${hindsightHost}:${hindsightPort}`;
+  const hindsightUrl = `http://${hindsightContainer.getHost()}:${hindsightContainer.getMappedPort(8888)}`;
   console.log(`Hindsight at ${hindsightUrl}`);
 
-  // 4. Create bank and run retain/recall cycle
   const client = new HindsightClient({ baseUrl: hindsightUrl });
   await client.createBank(BANK_ID);
   console.log(`Created bank ${BANK_ID}`);
 
-  // Retain a fact
   const { HindsightMemoryProvider } = await import("../src/memory/hindsight.js");
   const memory = new HindsightMemoryProvider(hindsightUrl);
   await memory.retain(BANK_ID, "The user's favorite color is blue");
-  console.log("Retained fact. Waiting for extraction...");
+  console.log("Retained fact. Polling for recall...");
 
-  // Poll for recall — Ollama is slow, wait up to 3 minutes
   let found = false;
-  for (let attempt = 0; attempt < 36; attempt++) {
-    await new Promise((r) => setTimeout(r, 5000));
+  for (let attempt = 0; attempt < 30; attempt++) {
+    await new Promise((r) => setTimeout(r, 2000));
     const result = await memory.recall(BANK_ID, "what is the user's favorite color?");
     if (result.memories.length > 0) {
       const match = result.memories.find((m) => m.content.toLowerCase().includes("blue"));
       if (match) {
         found = true;
-        console.log(`Found memory after ${(attempt + 1) * 5}s: ${match.content}`);
+        console.log(`\nFound memory after ${(attempt + 1) * 2}s: ${match.content}`);
         break;
       }
     }
@@ -86,29 +98,14 @@ async function main() {
   }
 
   if (!found) {
-    console.error("\nFailed to find the retained fact via recall. Saving what we captured anyway.");
+    console.error("\nFailed to find the retained fact via recall.");
   }
 
-  // 5. Extract recorded fixtures from journal
   const entries = mock.getRequests();
-  console.log(`\nCaptured ${entries.length} requests`);
+  console.log(`Captured ${entries.length} requests. Fixtures saved to ${FIXTURE_DIR}/`);
 
-  const fixtures = entries
-    .filter((e) => e.response.fixture !== null || e.response.status === 200)
-    .map((entry) => ({
-      method: entry.method,
-      path: entry.path,
-      request: entry.body,
-      response: entry.response,
-    }));
-
-  writeFileSync(FIXTURE_PATH, JSON.stringify({ recorded: fixtures }, null, 2));
-  console.log(`Saved ${fixtures.length} fixtures to ${FIXTURE_PATH}`);
-
-  // 6. Cleanup
   await mock.stop();
   await hindsightContainer.stop();
-  await ollamaContainer.stop();
   await network.stop();
   console.log("Done.");
 }

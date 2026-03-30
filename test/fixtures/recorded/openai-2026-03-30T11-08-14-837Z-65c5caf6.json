@@ -1,0 +1,16 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "inputText": "The user's favorite color is blue."
+      },
+      "response": {
+        "error": {
+          "message": "Could not detect response format from upstream",
+          "type": "proxy_error"
+        },
+        "status": 200
+      }
+    }
+  ]
+}

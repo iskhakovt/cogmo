@@ -14,9 +14,16 @@ let mock: LLMock | null = null;
 export async function setup({ provide }: GlobalSetupContext) {
   network = await new Network().start();
 
-  // llmock serves both Anthropic API (for our app) and OpenAI-compatible API (for Hindsight)
+  // llmock serves Anthropic API for both our app and Hindsight.
+  // Recorded fixtures (from scripts/record-fixtures.ts) provide realistic Hindsight responses.
+  // The catch-all fixture handles our app's direct LLM calls.
   mock = new LLMock({ port: 0, host: "0.0.0.0", logLevel: "silent" });
+  mock.loadFixtureDir("./test/fixtures/recorded");
   mock.onMessage(/./, { content: "Mock integration response from llmock" });
+  // Catch-all embedding fixture — returns deterministic 1536-dim vector for any input.
+  // Hindsight decorates text with timestamps/metadata before embedding, making
+  // exact inputText matching fragile. The catch-all ensures all embedding calls succeed.
+  mock.onEmbedding(/./, { embedding: Array.from({ length: 1536 }, (_, i) => Math.sin(i) * 0.1) });
   await mock.start();
   console.log(`llmock at ${mock.url}`);
 
@@ -28,10 +35,16 @@ export async function setup({ provide }: GlobalSetupContext) {
   ]);
   containers.push(pg, _rd, inn);
 
-  // Hindsight backed by llmock (via host.docker.internal)
+  // Slim Hindsight — external LLM + embeddings via llmock (replays recorded fixtures)
+  const llmockUrl = `http://host.docker.internal:${mock.port}/v1`;
   const hindsightContainer = await c
-    .hindsight(network, "ollama", {
-      baseUrl: `http://host.docker.internal:${mock.port}/v1`,
+    .hindsightSlim(network, {
+      llmBaseUrl: llmockUrl,
+      llmApiKey: "test-key",
+      llmModel: "gpt-5-nano",
+      embeddingsBaseUrl: llmockUrl,
+      embeddingsApiKey: "test-key",
+      embeddingsModel: "text-embedding-3-small",
     })
     .start();
   containers.push(hindsightContainer);

@@ -1,0 +1,12 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "You are a memory consolidation system"
+      },
+      "response": {
+        "content": "{\n  \"creates\": [\n    {\n      \"text\": \"The user's favorite color is blue.\",\n      \"source_fact_ids\": [\"c8fcc508-3f97-497c-a6e4-fcd95e004b2f\"]\n    }\n    ],\n  \"updates\": [],\n  \"deletes\": []\n}"
+      }
+    }
+  ]
+}

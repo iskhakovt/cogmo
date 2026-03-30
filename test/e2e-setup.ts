@@ -16,9 +16,11 @@ let mock: LLMock | null = null;
 export async function setup({ provide }: GlobalSetupContext) {
   network = await new Network().start();
 
-  // Start llmock in-process — serves both Anthropic API and Ollama-compatible API for Hindsight
+  // llmock serves Anthropic API for both our app and Hindsight
   mock = new LLMock({ port: 0, host: "0.0.0.0", logLevel: "silent" });
+  mock.loadFixtureDir("./test/fixtures/recorded");
   mock.onMessage(/./, { content: "Mock e2e response from llmock" });
+  mock.onEmbedding(/./, { embedding: Array.from({ length: 1536 }, (_, i) => Math.sin(i) * 0.1) });
   await mock.start();
   console.log(`llmock at ${mock.url}`);
 
@@ -31,10 +33,16 @@ export async function setup({ provide }: GlobalSetupContext) {
   ]);
   containers.push(pg, _rd, inn);
 
-  // Hindsight backed by llmock (via host.docker.internal) instead of Ollama
+  // Slim Hindsight — external LLM + embeddings via llmock (replays recorded fixtures)
+  const llmockUrl = `http://host.docker.internal:${mock.port}/v1`;
   const hindsightContainer = await c
-    .hindsight(network, "ollama", {
-      baseUrl: `http://host.docker.internal:${mock.port}/v1`,
+    .hindsightSlim(network, {
+      llmBaseUrl: llmockUrl,
+      llmApiKey: "test-key",
+      llmModel: "gpt-5-nano",
+      embeddingsBaseUrl: llmockUrl,
+      embeddingsApiKey: "test-key",
+      embeddingsModel: "text-embedding-3-small",
     })
     .start();
   containers.push(hindsightContainer);

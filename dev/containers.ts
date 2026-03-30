@@ -88,6 +88,45 @@ export function hindsight(
     .withStartupTimeout(120_000);
 }
 
+/**
+ * Slim Hindsight — no local ML models, external LLM + embeddings + RRF reranker.
+ * ~500MB image, ~5s startup. Use for tests and fixture recording.
+ */
+export function hindsightSlim(
+  network: StartedNetwork,
+  opts: {
+    llmProvider?: "openai" | "anthropic";
+    llmBaseUrl: string;
+    llmApiKey: string;
+    llmModel: string;
+    embeddingsBaseUrl: string;
+    embeddingsApiKey: string;
+    embeddingsModel: string;
+  },
+) {
+  const llmProvider = opts.llmProvider ?? "openai";
+
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight:latest-slim")
+    .withNetwork(network)
+    .withNetworkAliases("hindsight")
+    .withExposedPorts(8888)
+    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
+    .withEnvironment({
+      HINDSIGHT_API_LLM_PROVIDER: llmProvider,
+      HINDSIGHT_API_LLM_BASE_URL: opts.llmBaseUrl,
+      HINDSIGHT_API_LLM_API_KEY: opts.llmApiKey,
+      HINDSIGHT_API_LLM_MODEL: opts.llmModel,
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: "openai",
+      HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL: opts.embeddingsBaseUrl,
+      HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY: opts.embeddingsApiKey,
+      HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: opts.embeddingsModel,
+      HINDSIGHT_API_RERANKER_PROVIDER: "rrf",
+      HINDSIGHT_API_SKIP_LLM_VERIFICATION: "true",
+    })
+    .withWaitStrategy(Wait.forHttp("/health", 8888))
+    .withStartupTimeout(120_000);
+}
+
 /** Pull a model in a started Ollama container. */
 export async function pullModel(
   ollamaContainer: Awaited<ReturnType<typeof OllamaContainer.prototype.start>>,
