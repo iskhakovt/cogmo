@@ -63,7 +63,7 @@ importers:
         version: 2.4.8
       '@copilotkit/llmock':
         specifier: github:iskhakovt/llmock#patched
-        version: https://codeload.github.com/iskhakovt/llmock/tar.gz/4902f9a645e02611b545c2305282aebe4c43bb24
+        version: https://codeload.github.com/iskhakovt/llmock/tar.gz/185e20c9225488d853c3d15ed6648513bd06ea43
       '@electric-sql/pglite':
         specifier: ^0.4.2
         version: 0.4.2
@@ -184,8 +184,8 @@ packages:
   '@bufbuild/protobuf@2.11.0':
     resolution: {integrity: sha512-sBXGT13cpmPR5BMgHE6UEEfEaShh5Ror6rfN3yEK5si7QVrtZg8LEPQb0VVhiLRUslD2yLnXtnRzG035J/mZXQ==}
 
-  '@copilotkit/llmock@https://codeload.github.com/iskhakovt/llmock/tar.gz/4902f9a645e02611b545c2305282aebe4c43bb24':
-    resolution: {tarball: https://codeload.github.com/iskhakovt/llmock/tar.gz/4902f9a645e02611b545c2305282aebe4c43bb24}
+  '@copilotkit/llmock@https://codeload.github.com/iskhakovt/llmock/tar.gz/185e20c9225488d853c3d15ed6648513bd06ea43':
+    resolution: {tarball: https://codeload.github.com/iskhakovt/llmock/tar.gz/185e20c9225488d853c3d15ed6648513bd06ea43}
     version: 1.6.0
     engines: {node: '>=20.15.0'}
     hasBin: true
@@ -3370,7 +3370,7 @@ snapshots:
 
   '@bufbuild/protobuf@2.11.0': {}
 
-  '@copilotkit/llmock@https://codeload.github.com/iskhakovt/llmock/tar.gz/4902f9a645e02611b545c2305282aebe4c43bb24': {}
+  '@copilotkit/llmock@https://codeload.github.com/iskhakovt/llmock/tar.gz/185e20c9225488d853c3d15ed6648513bd06ea43': {}
 
   '@drizzle-team/brocli@0.10.2': {}
 
