@@ -14,6 +14,7 @@
 - [ ] `p2` Batch API support for async evolution tasks — 50% cost reduction for reflection, extraction, optimization
 - [ ] `p2` Define InboundContent schema (Zod) — structured message content type instead of raw JsonValue everywhere
 - [ ] `p2` CLI channel management commands — `main.ts channel add telegram --token=...`, `channel list`, `channel remove`
+- [ ] `p2` Pass transaction function to stores instead of full Database — makes transactions inescapable, narrows the interface
 - [ ] `p3` Stale llmock fixture cleanup — detect unused fixtures after test run, auto-delete
 - [ ] `p3` Telegram response formatting — HTML or MarkdownV2 with escape function
 - [ ] `p3` Interactive bootstrap — guided setup for new deployments (choose channels, configure credentials)
