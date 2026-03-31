@@ -4,7 +4,6 @@ RUN corepack enable
 FROM base AS build
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY vendor/ vendor/
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 COPY tsconfig.json tsup.config.ts ./
