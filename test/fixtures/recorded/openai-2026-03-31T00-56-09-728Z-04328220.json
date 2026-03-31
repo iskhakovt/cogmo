@@ -1,0 +1,12 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Extract facts from the following text chunk.\n\nChunk: 1/1\nEvent Date:  ()\nContext: none\n\nText:\nThe user's favorite color is blue"
+      },
+      "response": {
+        "content": "{\n  \"facts\": [\n    {\n      \"what\": \"User's favorite color is blue\",\n      \"when\": \"N/A\",\n      \"where\": \"N/A\",\n      \"who\": \"user\",\n      \"why\": \"N/A\",\n      \"fact_kind\": \"world\",\n      \"occurred_start\": null,\n      \"occurred_end\": null,\n      \"fact_type\": \"world\",\n      \"entities\": [\n        {\n          \"text\": \"user\"\n        },\n        {\n          \"text\": \"blue\"\n        }\n      ],\n      \"causal_relations\": null\n    }\n  ]\n}"
+      }
+    }
+  ]
+}

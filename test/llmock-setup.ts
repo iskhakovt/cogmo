@@ -54,9 +54,5 @@ export function createMock(): LLMock {
 
   mock.loadFixtureDir(FIXTURE_DIR);
 
-  // Embeddings: llmock can't record OpenAI embedding responses (proxy_error bug).
-  // Use deterministic catch-all — 1536-dim vectors work for Hindsight's pgvector storage.
-  mock.onEmbedding(/./, { embedding: Array.from({ length: 1536 }, (_, i) => Math.sin(i) * 0.1) });
-
   return mock;
 }
