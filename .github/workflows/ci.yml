@@ -86,9 +86,6 @@ jobs:
         env:
           E2E_IMAGE: assistant:ci
           TESTCONTAINERS_RYUK_DISABLED: "true"
-        env:
-          TESTCONTAINERS_RYUK_DISABLED: "true"
-          E2E_IMAGE: assistant:ci
 
   release:
     name: Release
