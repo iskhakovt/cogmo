@@ -47,10 +47,16 @@ export async function setup({ provide }: GlobalSetupContext) {
   });
   if (!hindsightUrl) throw new Error("hindsight is required for e2e");
 
-  // Build app Docker image and run seed + app as containers.
-  // This tests the real production artifact — Dockerfile, build, distroless runtime.
-  console.log("Building app Docker image...");
-  const appImage = await GenericContainer.fromDockerfile(".", "Dockerfile").build("assistant-e2e");
+  // Use pre-built Docker image if available (CI builds it), otherwise build from Dockerfile.
+  const imageName = process.env.E2E_IMAGE ?? "assistant-e2e";
+  let appImage: GenericContainer;
+  if (process.env.E2E_IMAGE) {
+    console.log(`Using pre-built image: ${imageName}`);
+    appImage = new GenericContainer(imageName);
+  } else {
+    console.log("Building app Docker image...");
+    appImage = await GenericContainer.fromDockerfile(".", "Dockerfile").build(imageName);
+  }
 
   console.log("Running seed...");
   const seedContainer = await appImage

@@ -84,6 +84,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:e2e
         env:
+          E2E_IMAGE: assistant:ci
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+        env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
           E2E_IMAGE: assistant:ci
 
