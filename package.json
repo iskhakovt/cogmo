@@ -55,6 +55,7 @@
     "@testcontainers/ollama": "^11.13.0",
     "@total-typescript/ts-reset": "^0.6.1",
     "@types/node": "^25.5.0",
+    "@vitest/coverage-v8": "^4.1.2",
     "dotenv": "^17.3.1",
     "drizzle-kit": "^0.31.10",
     "pino-pretty": "^13.1.3",
