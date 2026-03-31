@@ -85,7 +85,7 @@ export function hindsight(
     .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withEnvironment(env)
     .withWaitStrategy(Wait.forHttp("/health", 8888))
-    .withStartupTimeout(120_000);
+    .withStartupTimeout(300_000);
 }
 
 /**
@@ -144,7 +144,7 @@ export function hindsightSlim(
       },
     ])
     .withWaitStrategy(Wait.forHttp("/health", 8888))
-    .withStartupTimeout(120_000);
+    .withStartupTimeout(300_000);
 }
 
 /** Pull a model in a started Ollama container. */
