@@ -13,8 +13,8 @@
 - [ ] `p2` Additional LlmProvider implementations — OpenRouter, OpenAI, Grok (pluggable via profile config)
 - [ ] `p2` Batch API support for async evolution tasks — 50% cost reduction for reflection, extraction, optimization
 - [ ] `p2` Define InboundContent schema (Zod) — structured message content type instead of raw JsonValue everywhere
-- [ ] `p2` CLI channel management commands — `cli.ts channel add telegram --token=...`, `channel list`, `channel remove`
-- [ ] `p2` Record llmock fixtures from real Ollama — run `scripts/record-fixtures.ts`, commit to `test/fixtures/`
+- [ ] `p2` CLI channel management commands — `main.ts channel add telegram --token=...`, `channel list`, `channel remove`
+- [ ] `p3` Stale llmock fixture cleanup — detect unused fixtures after test run, auto-delete
 - [ ] `p3` Telegram response formatting — HTML or MarkdownV2 with escape function
 - [ ] `p3` Interactive bootstrap — guided setup for new deployments (choose channels, configure credentials)
 - [ ] `p3` Basic health check endpoint (HTTP)
@@ -81,3 +81,9 @@
 - [x] E2e smoke test — subprocess boot, migrations, one message end-to-end
 - [x] `bootstrap()` extracted from `src/index.ts` — reusable wiring for tests
 - [x] Test philosophy documented in CLAUDE.md — tiers, PGlite, llmock, env injection, Telegram strategy
+- [x] Slim Hindsight image — external providers, no PyTorch, ~5s startup
+- [x] llmock `requestTransform` — deterministic fixture matching with timestamp/UUID stripping
+- [x] Docker-based e2e — builds from Dockerfile, tests real production artifact
+- [x] Rename `cli.ts` → `main.ts`, fix Dockerfile entrypoint
+- [x] CI: Codecov coverage, JUnit test reports, `dorny/test-reporter` job summaries
+- [x] Hindsight provider config — production (OpenRouter + zerank-2) vs test (slim + llmock)

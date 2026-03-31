@@ -11,11 +11,13 @@
 - [x] Generate Drizzle migration and verify against PostgreSQL
 - [x] Set up Inngest — SDK installed, Docker container configured, events typed
 - [x] End-to-end message pipeline — LLM abstraction, agentic loop, Inngest orchestration
-- [x] Unit tests — 84 tests, full module coverage
+- [x] Unit tests — 115 tests (31 PGlite store tests + 84 mocked tests)
 - [x] Verify Hindsight connects to PostgreSQL + pgvector
-- [x] CLI entrypoint (`src/cli.ts`) — `serve` and `seed` commands
+- [x] Main entrypoint (`src/main.ts`) — `serve` and `seed` commands
 - [x] Seed script (`src/seed.ts`) — idempotent database seeding for single-user deployment
-- [x] Three-tier test structure — unit (PGlite), integration (Docker + in-process), e2e (Docker + subprocess)
+- [x] Three-tier test structure — unit (PGlite), integration (Docker + in-process), e2e (Docker container)
+- [x] CI pipeline — typecheck, lint, unit tests, integration tests, Docker-based e2e, Codecov coverage, JUnit test reports
+- [x] Slim Hindsight image for tests — llmock fixture replay, no Ollama dependency
 - [ ] Basic health check endpoint (HTTP)
 
 ## Phase 1: MVP — Conversation + Memory
