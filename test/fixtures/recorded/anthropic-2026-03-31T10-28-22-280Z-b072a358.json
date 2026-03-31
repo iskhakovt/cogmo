@@ -1,0 +1,17 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Hello integration test"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "get_current_time",
+            "arguments": "{}"
+          }
+        ]
+      }
+    }
+  ]
+}

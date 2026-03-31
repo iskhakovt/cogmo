@@ -5,3 +5,6 @@ injectWorkspacePackages: true
 
 ignoredBuiltDependencies:
   - esbuild
+
+onlyBuiltDependencies:
+  - "@copilotkit/llmock"
