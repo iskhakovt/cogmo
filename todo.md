@@ -12,18 +12,17 @@
 - [ ] `p2` Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
 - [ ] `p2` Additional LlmProvider implementations — OpenRouter, OpenAI, Grok (pluggable via profile config)
 - [ ] `p2` Batch API support for async evolution tasks — 50% cost reduction for reflection, extraction, optimization
-- [ ] `p2` LLM snapshotting proxy — record/replay HTTP proxy for Anthropic API. Replace `mock-anthropic` with a proxy that records real responses on first run, replays in CI. Route both our app and Hindsight through it via `BASE_URL`. Fixtures committed to `test/fixtures/`.
 - [ ] `p2` Define InboundContent schema (Zod) — structured message content type instead of raw JsonValue everywhere
-- [ ] `p2` CLI channel management commands — `cli.ts channel add telegram --token=...`, `channel list`, `channel remove`
-- [ ] `p2` Store unit tests using PGlite — test Drizzle queries against real SQL without Docker
-- [ ] `p2` In-process integration tests — run full pipeline in-process (no subprocess), enable TestAdapter injection
+- [ ] `p2` CLI channel management commands — `main.ts channel add telegram --token=...`, `channel list`, `channel remove`
+- [ ] `p2` Pass transaction function to stores instead of full Database — makes transactions inescapable, narrows the interface
+- [ ] `p3` Consider dropping Inngest serve mode — only connect mode is used (tests, production, local dev)
+- [ ] `p3` Stale llmock fixture cleanup — detect unused fixtures after test run, auto-delete
 - [ ] `p3` Telegram response formatting — HTML or MarkdownV2 with escape function
 - [ ] `p3` Interactive bootstrap — guided setup for new deployments (choose channels, configure credentials)
 - [ ] `p3` Basic health check endpoint (HTTP)
-- [ ] `p3` Move `test/containers.ts` to `dev/containers.ts`
+- [ ] `p3` grammY native test primitives — use `bot.handleUpdate()` + `bot.api.config.use(transformer)` instead of `vi.mock("grammy")`
+- [ ] `p3` Telegram e2e via Test DC + tgintegration — real user on Telegram test servers, TypeScript/mtcute client
 - [ ] `p3` Consider web interface adapter for e2e testing
-- [ ] `p3` Consider lazy env validation — avoid eager `env.ts` import forcing mocks in unit tests and requiring all env vars for seed
-- [ ] `p3` Consider replacing `pg` driver — evaluate alternatives (postgres.js, electric-sql, etc.)
 - [ ] `p3` Evaluate DI library (ditox/awilix) when adapter count exceeds 5
 
 ## Later
@@ -75,3 +74,18 @@
 - [x] Seed script — `src/seed.ts`, extracted from `ensureDefaults()`, idempotent
 - [x] `contentToText()` helper — centralized JsonValue → string conversion
 - [x] Console script — `scripts/console.ts`, standalone readline + DB polling
+- [x] Replace `pg` driver with `postgres.js` — pure JS, faster, zero API changes
+- [x] Store unit tests with PGlite — 31 tests, real SQL without Docker, driver-agnostic `Database` type
+- [x] Move `test/containers.ts` → `dev/containers.ts` — shared with dev-infra
+- [x] Three-tier test structure — unit (PGlite), integration (Docker + in-process), e2e (Docker + subprocess)
+- [x] llmock replaces mock-anthropic + Ollama — fixture-based deterministic LLM responses
+- [x] Integration tests — pipeline (in-process bootstrap + Inngest) + memory (Hindsight + llmock)
+- [x] E2e smoke test — subprocess boot, migrations, one message end-to-end
+- [x] `bootstrap()` extracted from `src/index.ts` — reusable wiring for tests
+- [x] Test philosophy documented in CLAUDE.md — tiers, PGlite, llmock, env injection, Telegram strategy
+- [x] Slim Hindsight image — external providers, no PyTorch, ~5s startup
+- [x] llmock `requestTransform` — deterministic fixture matching with timestamp/UUID stripping
+- [x] Docker-based e2e — builds from Dockerfile, tests real production artifact
+- [x] Rename `cli.ts` → `main.ts`, fix Dockerfile entrypoint
+- [x] CI: Codecov coverage, JUnit test reports, `dorny/test-reporter` job summaries
+- [x] Hindsight provider config — production (OpenRouter + zerank-2) vs test (slim + llmock)

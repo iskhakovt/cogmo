@@ -4,3 +4,8 @@ dist
 .claude
 *.md
 !README.md
+src/**/*.test.ts
+src/test/
+test/
+dev/
+scripts/

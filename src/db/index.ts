@@ -1,4 +1,5 @@
-import { drizzle } from "drizzle-orm/node-postgres";
+import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
+import { drizzle } from "drizzle-orm/postgres-js";
 import { env } from "../env.js";
 import * as schema from "./schemas.js";
 
@@ -8,4 +9,5 @@ export const db = drizzle({
   logger: env.NODE_ENV === "development",
 });
 
-export type Database = typeof db;
+/** Driver-agnostic database type — works with postgres-js, PGlite, or any PG driver. */
+export type Database = PgDatabase<PgQueryResultHKT, typeof schema>;
