@@ -34,8 +34,8 @@ ANTHROPIC_API_KEY=sk-... pnpm dev
 # Unit tests (fast, no Docker needed)
 pnpm test
 
-# Integration tests (spins up all containers via testcontainers)
-pnpm test:integration
+# E2E tests (spins up all containers via testcontainers)
+pnpm test:e2e
 
 # Everything
 pnpm test:all

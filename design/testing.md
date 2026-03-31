@@ -15,37 +15,61 @@ Use Vitest (fast, native TS, ESM). Test what's deterministic:
 
 | Layer | What to test | How |
 |-|-|-|
+| Store implementations | Drizzle queries against real SQL | PGlite (in-process PG17 WASM), `pushSchema` from `drizzle-kit/api` |
 | Typed LLM calls | Zod schema validation, retry logic | Mock the SDK client, inject known responses |
-| Memory metadata | Salience scoring, network routing | Pure functions, no LLM |
 | Adapter modules | Setup, deliver, inbound handling | Mock Transport, use shared test factories |
-| Tag stripping | `<internal>` removal | String in, string out |
 | Prompt assembly | System prompt + rules + memories | Mock AgentStore |
 | Transport | Session resolution, emit, conversation creation | Mock stores |
 | Respond | Message loading, session filtering, delivery | Mock stores + adapter |
 
 Shared test factories in `src/test/factories.ts` — `mockAgentStore()`, `mockTransportStore()`, `mockTransport()`, `mockAdapter()`, `mockStep()`, etc.
 
+**PGlite setup:** `src/test/pglite.ts` — `createTestDatabase()` boots PGlite with `pg_uuidv7` extension, applies schema via `pushSchema`, returns driver-agnostic `Database` type. `truncateAll()` clears tables between tests.
+
+**Naming:** `.test.ts` suffix. `pnpm test`.
+
 ## Integration Tests `[confirmed]`
 
-All services run in Docker (testcontainers), test runner seeds the DB and sends events.
+Docker services + app wired in-process. Tests the orchestration pipeline — debuggable, injectable, faster than e2e.
 
 **Infrastructure:**
-- Individual testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`, random ports
-- Container definitions in `test/containers.ts` (shared with `scripts/dev-infra.ts` for local dev)
-- `pnpm test:integration` runs them, `pnpm test` runs unit only
-- Seed runs before app start (`tsx src/cli.ts seed`)
+- Testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`, random ports
+- Container definitions in `dev/containers.ts` (shared with `scripts/dev-infra.ts` for local dev)
+- llmock (`@copilotkit/llmock`) runs in-process — serves both Anthropic API (for app) and OpenAI-compatible API (for Hindsight, replacing Ollama)
+- Hindsight reaches llmock via `host.docker.internal`
+- App modules imported directly — `bootstrap()` from `src/index.ts` wires everything
 
-**Mock LLM:** Separate container running a tiny HTTP server that implements `POST /v1/messages` with canned responses. App points `ANTHROPIC_BASE_URL` at it — zero test code in production.
+**Env injection:** `process.env` mutations in `globalSetup` propagate to Vitest test workers. Dynamic container URLs set via `process.env`, static values in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
 
-**Inngest:** Uses `inngest dev` (not `inngest start`) for integration tests. Dev mode skips auth, stores state in memory. We're testing our app's event flow, not Inngest's durability.
-
-**Naming:** `.integration.test.ts` suffix, co-located with source. Vitest projects config separates unit from integration.
+**Naming:** `.integration.test.ts` suffix. `pnpm test:integration`.
 
 | Test | What |
 |-|-|
-| Full pipeline | Seed DB, create session + inbound, emit `inbound/arrived` → assert assistant message in DB |
-| Schema migrations | App starts = migrations applied. Verify tables queryable. |
-| Hindsight round-trip | `retain()` -> `recall()` returns the fact |
+| Pipeline | `bootstrap()` in-process, emit `inbound/arrived` → assert assistant message in DB |
+| Hindsight round-trip | `retain()` → `recall()` returns the fact (llmock provides instant deterministic responses) |
+
+## E2E Tests `[confirmed]`
+
+Full deployment-like stack — assistant as a subprocess in connect mode. Smoke test.
+
+**Infrastructure:**
+- Testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`
+- llmock in-process — replaces both mock-anthropic container and Ollama
+- App spawned as subprocess with connect mode (WebSocket to Inngest dev server)
+- Seed runs before app start (`tsx src/cli.ts seed`)
+
+**Naming:** `.e2e.test.ts` suffix. `pnpm test:e2e`.
+
+| Test | What |
+|-|-|
+| Migrations | App subprocess applies migrations on boot. Verify tables queryable. |
+| Smoke | Emit one event via Inngest API → assert assistant response in DB |
+
+## Telegram Testing `[proposed]`
+
+- **Unit (current):** `vi.mock("grammy")`, mock Transport. Tests adapter logic without network.
+- **Unit (future enhancement):** grammY `bot.handleUpdate()` + `bot.api.config.use(transformer)` — tests against real grammY framework, catches API contract drift.
+- **E2e (future):** Telegram Test DC + tgintegration (TypeScript/mtcute). Real user on Telegram's test servers. Network-dependent, run on schedule.
 
 ## LLM Tests (Non-Deterministic) `[research]`
 
@@ -65,13 +89,14 @@ expect(result[0].fact).toBe("User prefers dark mode");
 
 For evolution Stage 4+, use LLM-as-judge rubrics with held-out test sets. Track scores over time — regression = prompt change broke something.
 
-## Mocking External Services `[proposed]`
+## Mocking External Services `[confirmed]`
 
 | Service | Mock strategy |
 |-|-|
-| Anthropic SDK | Inject mock client returning canned responses |
+| Anthropic API | llmock — fixture-based HTTP server, supports streaming + tool_use |
+| Ollama (for Hindsight) | llmock — same instance, serves OpenAI-compatible endpoints |
 | MCP servers | Stub MCP client with fixed tool results |
-| Telegram | grammY mock bot (vi.mock), Transport mock |
+| Telegram | grammY `vi.mock` (unit), Test DC + tgintegration (e2e, future) |
 | Gmail/Calendar | Record real responses, replay in tests |
 
 ## Evaluation Dataset `[research]`

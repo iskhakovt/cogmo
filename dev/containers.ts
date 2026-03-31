@@ -1,5 +1,5 @@
 /**
- * Shared testcontainers factories — used by both test global-setup and dev-infra script.
+ * Shared testcontainers factories — used by both e2e test setup and dev-infra script.
  *
  * Each factory returns a configured (but not started) container.
  * The caller starts them in the right order and manages lifecycle.
@@ -70,7 +70,7 @@ export function hindsight(
   if (llmProvider === "ollama") {
     env.HINDSIGHT_API_LLM_PROVIDER = "ollama";
     env.HINDSIGHT_API_LLM_MODEL = OLLAMA_MODEL;
-    env.HINDSIGHT_API_LLM_BASE_URL = "http://ollama:11434/v1";
+    env.HINDSIGHT_API_LLM_BASE_URL = opts?.baseUrl ?? "http://ollama:11434/v1";
     env.HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS = "16000";
   } else {
     env.HINDSIGHT_API_LLM_PROVIDER = "anthropic";
@@ -82,22 +82,61 @@ export function hindsight(
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
+    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withEnvironment(env)
     .withWaitStrategy(Wait.forHttp("/health", 8888))
-    .withStartupTimeout(120_000);
+    .withStartupTimeout(300_000);
 }
 
-export function mockAnthropic(network: StartedNetwork) {
-  return GenericContainer.fromDockerfile("./test/mock-anthropic")
-    .build()
-    .then((image) =>
-      image
-        .withNetwork(network)
-        .withNetworkAliases("mock-anthropic")
-        .withExposedPorts(3000)
-        .withWaitStrategy(Wait.forHttp("/health", 3000))
-        .start(),
-    );
+/**
+ * Slim Hindsight — no local ML models, external LLM + embeddings + reranker.
+ * ~500MB image, ~5s startup. Patched config/cross_encoder for zerank base URL support.
+ */
+export function hindsightSlim(
+  network: StartedNetwork,
+  opts: {
+    llmProvider?: "openai" | "anthropic";
+    llmBaseUrl: string;
+    llmApiKey: string;
+    llmModel: string;
+    embeddingsBaseUrl: string;
+    embeddingsApiKey: string;
+    embeddingsModel: string;
+    rerankerProvider?: "rrf" | "zeroentropy";
+    rerankerApiKey?: string;
+    rerankerBaseUrl?: string;
+  },
+) {
+  const llmProvider = opts.llmProvider ?? "openai";
+  const rerankerProvider = opts.rerankerProvider ?? "rrf";
+
+  const env: Record<string, string> = {
+    HINDSIGHT_API_LLM_PROVIDER: llmProvider,
+    HINDSIGHT_API_LLM_BASE_URL: opts.llmBaseUrl,
+    HINDSIGHT_API_LLM_API_KEY: opts.llmApiKey,
+    HINDSIGHT_API_LLM_MODEL: opts.llmModel,
+    HINDSIGHT_API_EMBEDDINGS_PROVIDER: "openai",
+    HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL: opts.embeddingsBaseUrl,
+    HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY: opts.embeddingsApiKey,
+    HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: opts.embeddingsModel,
+    HINDSIGHT_API_RERANKER_PROVIDER: rerankerProvider,
+    HINDSIGHT_API_SKIP_LLM_VERIFICATION: "true",
+  };
+
+  if (rerankerProvider === "zeroentropy") {
+    if (opts.rerankerApiKey) env.HINDSIGHT_API_RERANKER_ZEROENTROPY_API_KEY = opts.rerankerApiKey;
+    if (opts.rerankerBaseUrl)
+      env.HINDSIGHT_API_RERANKER_ZEROENTROPY_BASE_URL = opts.rerankerBaseUrl;
+  }
+
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight:latest-slim")
+    .withNetwork(network)
+    .withNetworkAliases("hindsight")
+    .withExposedPorts(8888)
+    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
+    .withEnvironment(env)
+    .withWaitStrategy(Wait.forHttp("/health", 8888))
+    .withStartupTimeout(300_000);
 }
 
 /** Pull a model in a started Ollama container. */
@@ -113,17 +152,26 @@ export async function pullModel(
   console.log(`Model ${model} ready.`);
 }
 
+interface ContainerEndpoint {
+  getHost(): string;
+  getMappedPort(p: number): number;
+}
+
 /** Get mapped URLs from started containers. */
 export function getUrls(containers: {
-  postgres: { getHost(): string; getMappedPort(p: number): number };
-  inngest: { getHost(): string; getMappedPort(p: number): number };
-  hindsight: { getHost(): string; getMappedPort(p: number): number };
-  ollama: { getHost(): string; getMappedPort(p: number): number };
+  postgres: ContainerEndpoint;
+  inngest: ContainerEndpoint;
+  hindsight?: ContainerEndpoint;
+  ollama?: ContainerEndpoint;
 }) {
   return {
     databaseUrl: `postgresql://assistant@${containers.postgres.getHost()}:${containers.postgres.getMappedPort(5432)}/assistant`,
     inngestBaseUrl: `http://${containers.inngest.getHost()}:${containers.inngest.getMappedPort(8288)}`,
-    hindsightUrl: `http://${containers.hindsight.getHost()}:${containers.hindsight.getMappedPort(8888)}`,
-    ollamaUrl: `http://${containers.ollama.getHost()}:${containers.ollama.getMappedPort(11434)}`,
+    ...(containers.hindsight && {
+      hindsightUrl: `http://${containers.hindsight.getHost()}:${containers.hindsight.getMappedPort(8888)}`,
+    }),
+    ...(containers.ollama && {
+      ollamaUrl: `http://${containers.ollama.getHost()}:${containers.ollama.getMappedPort(11434)}`,
+    }),
   };
 }

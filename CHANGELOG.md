@@ -2,6 +2,18 @@
 
 | Date | Change |
 |-|-|
+| 2026-03-31 | CI: Codecov coverage reporting, JUnit test reports via `dorny/test-reporter`, `checks:write` permissions. `@vitest/coverage-v8` for v8 coverage provider. |
+| 2026-03-31 | Docker-based e2e — builds from Dockerfile, runs app as container (tests real production artifact). Pre-built image in CI via `docker/build-push-action` with GHA cache. `E2E_IMAGE` env var for pre-built images. |
+| 2026-03-31 | Rename `cli.ts` → `main.ts`, add to tsup entry points. Fix distroless ENTRYPOINT (`/nodejs/bin/node`). |
+| 2026-03-31 | llmock `requestTransform` — strips timestamps/UUIDs for deterministic fixture matching. Exact match (`===`) when transform set. Shared setup in `test/llmock-setup.ts`. Record mode via `LLMOCK_RECORD=1` + `pnpm test:record`. |
+| 2026-03-31 | Slim Hindsight image (`latest-slim`, ~500MB) — external LLM + embeddings via llmock, RRF reranker. No PyTorch, no model downloads. `hindsightSlim()` container factory with zerank support (patched config for base URL). |
+| 2026-03-31 | Hindsight provider config documented in `design/memory.md` — production (OpenRouter gpt-5-nano + qwen3-embedding + zerank-2, ~$6/mo) vs test (slim + llmock replay). |
+| 2026-03-31 | llmock installed from patched fork (`iskhakovt/llmock#patched`) — 4 fixes: URL path prefix, header forwarding, requestTransform, base64 embedding decoding. PRs: CopilotKit/llmock#57, #58, #63, #64. |
+| 2026-03-29 | llmock replaces mock-anthropic + Ollama — `@copilotkit/llmock` 1.6.0 serves Anthropic API + OpenAI-compatible endpoints from fixtures. Single in-process instance backs both our app and Hindsight. Deleted `test/mock-anthropic/`. E2e drops from ~5min to ~1min. |
+| 2026-03-29 | Integration tests (in-process) — `bootstrap()` extracted from `src/index.ts`, called directly in test workers. Env injection via `process.env` in globalSetup (propagates to Vitest workers). Pipeline + memory tests moved from e2e. E2e slimmed to boot smoke test. |
+| 2026-03-29 | Three-tier test structure — unit (PGlite, mocks), integration (Docker + in-process), e2e (Docker + subprocess). Renamed `*.integration.test.ts` → `*.e2e.test.ts`. Moved `test/containers.ts` → `dev/containers.ts`. |
+| 2026-03-29 | Store unit tests with PGlite — `@electric-sql/pglite` 0.4.2 (PG17 in WASM). `pushSchema` from `drizzle-kit/api` applies schema without migration files. `pg_uuidv7` extension + `uuidv7()` alias. 31 tests across 2 store files. Driver-agnostic `Database` type (`PgDatabase<PgQueryResultHKT>`) eliminates `as any` casts. |
+| 2026-03-29 | Replace `pg` driver with `postgres.js` — pure JS, faster, modern. Swap `drizzle-orm/node-postgres` → `drizzle-orm/postgres-js` across 5 files. Zero API changes needed — Drizzle's connection pattern and `$client.end()` work identically. |
 | 2026-03-29 | CLI entrypoint (`src/cli.ts`) — `serve` and `seed` commands. Seed script (`src/seed.ts`) extracted from app startup, runs independently with only `DATABASE_URL`. Dockerfile uses `ENTRYPOINT ["node", "dist/cli.js"]`. App fails fast if seed hasn't run. |
 | 2026-03-29 | Channel registry — table-driven adapter discovery. `AdapterModule` contract (`channelType` + `setup()`) with `satisfies` barrel enforcement. Registry reads `channels` table, starts matching adapters, creates generic respond functions. No per-adapter respond files. |
 | 2026-03-29 | Direct channel adapter — replaces old CLI adapter. Event-driven via Inngest (`adapter/direct/inbound`, `adapter/direct/outbound`). Console script (`scripts/console.ts`) for dev interaction. No in-process stdin/stdout. |

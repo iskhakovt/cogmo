@@ -113,6 +113,10 @@ Each domain module owns its DB access in a `store/` subdirectory:
 
 **Interface boundary, not table boundary.** A store implementation can import schemas from any module — JOINs and cross-table transactions are fine. Consumers depend on the store interface and mock it in tests. The schema defines ownership (who creates/migrates the table); the interface defines access (who can read/write what).
 
+## Commits & PRs
+
+- **Conventional Commits** — all commit messages and PR titles must follow the [Conventional Commits](https://www.conventionalcommits.org/) spec. Format: `type(scope): description`. Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `ci`, `perf`, `build`. Scope is optional but encouraged (e.g., `feat(transport): add Slack adapter`). This drives semantic-release — wrong format means no release.
+
 ## Code Style
 
 - **Idiomatic TypeScript** — use classes, interfaces, enums where they make the domain clear. Prefer `interface` over `type` for object shapes (extendable). Use generics for reusable components.
@@ -132,12 +136,48 @@ Each domain module owns its DB access in a `store/` subdirectory:
 
 ## Testing
 
+### Principles
+
 - **One module per test file** — each `.test.ts` tests exactly one source module. Mock everything outside that module.
 - **Design for testability** — accept interfaces, not concrete classes. Pass dependencies (db, provider) as parameters, not imports. If something is hard to test, the design is wrong — fix the design, not the test.
 - **Test contracts, not internals** — test the interface a consumer depends on. If changing an implementation detail breaks a test, the test is too coupled. If a contract changes and no test breaks, there's a gap.
 - **Boundary behavior matters** — defensive copies, error propagation, unknown/missing inputs, edge cases at module boundaries. This is where real bugs live.
 - **Test helpers for readability** — factory functions (`mockProvider()`, `textResponse()`) keep tests scannable. Prefer building test data declaratively over inline object literals repeated across tests.
-- **Framework:** Vitest. See `design/testing.md` for integration and LLM test patterns.
+- **Framework:** Vitest. See `design/testing.md` for full details.
+
+### Three-Tier Structure
+
+| Tier | Infra | App | LLM | What it proves |
+|-|-|-|-|-|
+| **unit** `.test.ts` | PGlite (in-process) | mocked / direct | mocked | Module logic, store queries, contracts |
+| **integration** `.integration.test.ts` | Docker (PG, Redis, Inngest, Hindsight) + llmock | in-process | llmock fixtures | Pipeline orchestration, memory round-trip, event routing |
+| **e2e** `.e2e.test.ts` | Docker (full stack) + llmock | subprocess | llmock fixtures | Binary boots, migrations apply, full stack smoke |
+
+Commands: `pnpm test` (unit), `pnpm test:integration`, `pnpm test:e2e`, `pnpm test:all`.
+
+### Store Tests with PGlite
+
+Store implementations (`DrizzleAgentStore`, `DrizzleTransportStore`) are tested against real SQL via PGlite — an in-memory WASM PostgreSQL (PG17). No Docker needed.
+
+- **Schema:** Applied via `pushSchema()` from `drizzle-kit/api` — no migration files in tests.
+- **UUIDs:** `pg_uuidv7` PGlite extension + `uuidv7()` SQL alias (the extension exposes `uuid_generate_v7()`).
+- **Type:** `Database` is `PgDatabase<PgQueryResultHKT, schema>` — driver-agnostic. Works with postgres-js, PGlite, or any Drizzle PG driver. No `as any` casts needed.
+- **Cleanup:** Truncate all tables via `db.execute(sql\`...\`)` between tests. One PGlite instance per test file.
+- **Helper:** `src/test/pglite.ts` — `createTestDatabase()` and `truncateAll()`.
+
+### LLM Mocking with llmock
+
+`@copilotkit/llmock` provides a deterministic mock LLM HTTP server. Single instance serves both Anthropic Messages API (`POST /v1/messages`) and OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/embeddings`) for Hindsight. Fixture-based routing, request journal for assertions. Replaces both `mock-anthropic` container and Ollama.
+
+### Integration Test Env Injection
+
+`process.env` mutations in Vitest `globalSetup` propagate to test workers (worker env = `{ ...process.env, ...config.env }`). Dynamic values (container URLs) are set via `process.env` in globalSetup. Static values (`NODE_ENV`, `ANTHROPIC_API_KEY`) go in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
+
+### Telegram Testing
+
+- **Unit:** grammY transformers + `handleUpdate()` for testing adapter logic without network. Current tests use `vi.mock("grammy")` — future enhancement to use grammY's built-in test primitives.
+- **Integration:** Not tested — integration tier uses Direct adapter.
+- **E2e (future):** Telegram Test DC + tgintegration (TypeScript/mtcute). Real user account on Telegram's test servers.
 
 ## Working with Tools
 

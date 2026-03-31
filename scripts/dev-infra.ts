@@ -12,7 +12,7 @@
  */
 import { spawn } from "node:child_process";
 import { Network } from "testcontainers";
-import * as c from "../test/containers.js";
+import * as c from "../dev/containers.js";
 
 async function main() {
   const infraOnly = process.argv.includes("--only");
@@ -68,7 +68,7 @@ async function main() {
   // Run seed (applies migrations + creates default data, idempotent)
   console.log("\nRunning seed...");
   const { execSync } = await import("node:child_process");
-  execSync("tsx src/cli.ts seed", {
+  execSync("tsx src/main.ts seed", {
     stdio: "inherit",
     env: { ...process.env, DATABASE_URL: databaseUrl },
   });

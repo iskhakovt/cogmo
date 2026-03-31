@@ -122,14 +122,116 @@ Cost: `reflect()` makes its own LLM calls inside Hindsight (configurable budget:
 
 Decision: start with `memory_recall` and `memory_retain` tools. Add `memory_reflect` if `recall()` proves insufficient for synthesis-heavy queries.
 
-## Embedding Model `[research]`
+## Hindsight Provider Configuration `[proposed]`
 
-Hindsight handles embedding internally — model choice is a config option.
+Hindsight uses three external capabilities: LLM (fact extraction), embeddings (vector search), and reranking (result quality). Each is independently configurable.
 
-| Tier | Model | Cost | Notes |
+### Docker Images
+
+| Image | Size | Local ML | Use case |
 |-|-|-|-|
-| Cloud | gemini-embedding-001 (suggested from research, not confirmed) | $0.006/MTok | #1 MTEB ranking |
-| Local (Mac Mini tier) | nomic-embed-text-v2-moe (suggested from research, not confirmed) | $0 | Best open-source, Ollama-compatible |
+| `hindsight:latest` | ~9 GB | PyTorch + bge-small + ms-marco reranker | Production (if running local models) |
+| `hindsight:latest-slim` | ~500 MB | None | Tests, or when using external providers for everything |
+
+Slim image requires external embeddings and reranker — no PyTorch, no model downloads, ~5s startup.
+
+### LLM (Fact Extraction)
+
+Used by `retain()` for structured fact extraction. Needs structured output / JSON mode.
+
+| Provider | Model | Input $/M | Output $/M | Notes |
+|-|-|-|-|-|
+| OpenRouter | gpt-5-nano | $0.05 | $0.40 | Best quality-to-cost. Hindsight `provider=openai` with OpenRouter base URL |
+| OpenRouter | gpt-oss-20b | $0.03 | $0.11 | Cheapest. Adequate for extraction |
+| Google | gemini-2.5-flash-lite | $0.10 | $0.40 | 1000 req/day free tier |
+| Anthropic | claude-haiku-4.5 | $1.00 | $5.00 | Hindsight default for `provider=anthropic`. Tested. |
+| Local (Ollama) | qwen2.5:3b | Free | Free | Slow (60-90s per extraction). Needs full image. |
+
+**Chosen:** gpt-5-nano via OpenRouter for production. Anthropic Haiku for test fixture recording (llmock proxy to `api.anthropic.com` works; OpenRouter's `/api/v1` path breaks llmock's URL resolution — PR submitted: CopilotKit/llmock#57).
+
+### Embeddings
+
+Used by `recall()` for semantic search. API is standardized (`POST /v1/embeddings`). Hindsight auto-detects dimensions — probes the API at startup for unknown models, hardcoded lookup for known OpenAI/Cohere models.
+
+**Dimension lock-in:** Once memories are stored, changing to a model with different dimensions requires wiping the memory DB.
+
+| Provider | Model | MTEB | $/M tokens | Dims | Context | Free tier |
+|-|-|-|-|-|-|-|
+| OpenRouter | qwen3-embedding-8b | 75.2 (English v2) | $0.01 | 1024 | 32K | None |
+| Voyage AI | voyage-4 | 68.6 (vendor RTEB) | $0.06 | 1024 | 32K | 200M tokens |
+| Voyage AI | voyage-4-lite | ~65 | $0.02 | 1024 | 32K | 200M tokens |
+| OpenAI | text-embedding-3-small | ~62 | $0.02 | 1536 | 8K | None |
+| Local (Hindsight default) | BAAI/bge-small-en-v1.5 | ~62 | Free | 384 | 512 | Needs full image |
+
+**Chosen:** qwen3-embedding-8b via OpenRouter — best quality, cheapest. Benchmarks not directly comparable across MTEB tracks, but English v2 score of 75.2 is strong. Note: not in Hindsight's tested model list, but embedding API is standardized — confirmed to auto-detect dimensions via probe call.
+
+**For tests:** `text-embedding-3-small` model name → Hindsight skips probe (hardcoded 1536 dims) → llmock returns deterministic vectors. No real API needed.
+
+### Reranking
+
+Used by `recall()` to reorder retrieved results. Quality affects recall precision.
+
+| Provider | Model | Agentset ELO | Cost | Hindsight provider | Notes |
+|-|-|-|-|-|-|
+| ZeroEntropy | zerank-2 | 1638 (highest) | $0.025/M tokens | `zeroentropy` (native) | Seed-stage startup, alpha SDK |
+| Voyage AI | rerank-2.5 | 1544 | $0.05/M tokens | `litellm-sdk` | MongoDB-backed, 200M free tokens |
+| Voyage AI | rerank-2.5-lite | 1520 | $0.02/M tokens | `litellm-sdk` | Same free pool as rerank-2.5 |
+| Cohere | rerank-3.5 | 1451 | $2.00/1K searches | `cohere` (native) | Expensive at scale |
+| Local (Hindsight default) | ms-marco-MiniLM-L-6-v2 | ~1327 | Free | `local` | Needs full image (PyTorch) |
+| RRF | Math only | ~3-4% below cross-encoders | Free | `rrf` | No model, no API, no dependencies |
+
+**Chosen:** zerank-2 for production — highest quality, native Hindsight provider. RRF for tests — zero dependencies, sufficient for "did recall find the fact" assertions.
+
+### Production Config
+
+```bash
+# LLM — gpt-5-nano via OpenRouter
+HINDSIGHT_API_LLM_PROVIDER=openai
+HINDSIGHT_API_LLM_BASE_URL=https://openrouter.ai/api/v1
+HINDSIGHT_API_LLM_API_KEY=$OPENROUTER_API_KEY
+HINDSIGHT_API_LLM_MODEL=openai/gpt-5-nano
+
+# Embeddings — qwen3-embedding-8b via OpenRouter
+HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai
+HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL=https://openrouter.ai/api/v1
+HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=$OPENROUTER_API_KEY
+HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL=qwen/qwen3-embedding-8b
+
+# Reranker — zerank-2
+HINDSIGHT_API_RERANKER_PROVIDER=zeroentropy
+HINDSIGHT_API_RERANKER_ZEROENTROPY_API_KEY=$ZEROENTROPY_API_KEY
+```
+
+### Test Config (slim image + llmock)
+
+```bash
+# LLM — llmock replays recorded fixtures
+HINDSIGHT_API_LLM_PROVIDER=openai
+HINDSIGHT_API_LLM_BASE_URL=http://host.docker.internal:$LLMOCK_PORT/v1
+HINDSIGHT_API_LLM_API_KEY=test-key
+HINDSIGHT_API_LLM_MODEL=openai/gpt-5-nano
+
+# Embeddings — llmock deterministic vectors (no real API)
+HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai
+HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL=http://host.docker.internal:$LLMOCK_PORT/v1
+HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=test-key
+HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL=text-embedding-3-small
+
+# Reranker — RRF (math only, no model)
+HINDSIGHT_API_RERANKER_PROVIDER=rrf
+
+# Skip startup verification call
+HINDSIGHT_API_SKIP_LLM_VERIFICATION=true
+```
+
+### Estimated Monthly Cost (Production, 500 queries/day)
+
+| Component | Provider | Monthly |
+|-|-|-|
+| LLM (extraction) | OpenRouter gpt-5-nano | ~$2 |
+| Embeddings | OpenRouter qwen3-embedding-8b | ~$0.15 |
+| Reranker | ZeroEntropy zerank-2 | ~$4 |
+| **Total** | | **~$6** |
 
 ## Retrieval Strategy `[proposed]`
 
