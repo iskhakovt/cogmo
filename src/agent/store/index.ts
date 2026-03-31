@@ -91,17 +91,19 @@ export class DrizzleAgentStore implements AgentStore {
   async getConversation(
     conversationId: string,
   ): Promise<{ id: string; userId: string; profileId: string; isPrivate: boolean } | null> {
-    const rows = await this.#db
-      .select({
-        id: conversations.id,
-        userId: conversations.userId,
-        profileId: conversations.profileId,
-        isPrivate: conversations.isPrivate,
-      })
-      .from(conversations)
-      .where(eq(conversations.id, conversationId))
-      .limit(1);
-    return rows[0] ?? null;
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: conversations.id,
+          userId: conversations.userId,
+          profileId: conversations.profileId,
+          isPrivate: conversations.isPrivate,
+        })
+        .from(conversations)
+        .where(eq(conversations.id, conversationId))
+        .limit(1);
+      return rows[0] ?? null;
+    });
   }
 
   async insertMessage(params: {
@@ -118,55 +120,65 @@ export class DrizzleAgentStore implements AgentStore {
   async getLastAssistantMessage(
     conversationId: string,
   ): Promise<{ id: string; lastInboundMessageId: string } | null> {
-    const rows = await this.#db
-      .select({
-        id: messages.id,
-        lastInboundMessageId: messages.lastInboundMessageId,
-      })
-      .from(messages)
-      .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
-      .orderBy(desc(messages.id))
-      .limit(1);
-    return rows[0] ?? null;
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: messages.id,
+          lastInboundMessageId: messages.lastInboundMessageId,
+        })
+        .from(messages)
+        .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
+        .orderBy(desc(messages.id))
+        .limit(1);
+      return rows[0] ?? null;
+    });
   }
 
   async getHistory(
     conversationId: string,
   ): Promise<ReadonlyArray<{ role: "user" | "assistant"; content: JsonValue }>> {
-    const rows = await this.#db
-      .select({ role: messages.role, content: messages.content })
-      .from(messages)
-      .where(eq(messages.conversationId, conversationId))
-      .orderBy(asc(messages.id));
-    return rows as ReadonlyArray<{ role: "user" | "assistant"; content: JsonValue }>;
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ role: messages.role, content: messages.content })
+        .from(messages)
+        .where(eq(messages.conversationId, conversationId))
+        .orderBy(asc(messages.id));
+      return rows as ReadonlyArray<{ role: "user" | "assistant"; content: JsonValue }>;
+    });
   }
 
   async getProfile(
     profileId: string,
   ): Promise<{ id: string; basePrompt: string; model: string; toolSet: JsonValue } | null> {
-    const rows = await this.#db
-      .select({
-        id: profiles.id,
-        basePrompt: profiles.basePrompt,
-        model: profiles.model,
-        toolSet: profiles.toolSet,
-      })
-      .from(profiles)
-      .where(eq(profiles.id, profileId))
-      .limit(1);
-    return (
-      (rows[0] as { id: string; basePrompt: string; model: string; toolSet: JsonValue }) ?? null
-    );
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: profiles.id,
+          basePrompt: profiles.basePrompt,
+          model: profiles.model,
+          toolSet: profiles.toolSet,
+        })
+        .from(profiles)
+        .where(eq(profiles.id, profileId))
+        .limit(1);
+      return (
+        (rows[0] as { id: string; basePrompt: string; model: string; toolSet: JsonValue }) ?? null
+      );
+    });
   }
 
   async getFirstUser(): Promise<{ id: string } | null> {
-    const rows = await this.#db.select({ id: users.id }).from(users).limit(1);
-    return rows[0] ?? null;
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx.select({ id: users.id }).from(users).limit(1);
+      return rows[0] ?? null;
+    });
   }
 
   async getDefaultProfile(): Promise<{ id: string } | null> {
-    const rows = await this.#db.select({ id: profiles.id }).from(profiles).limit(1);
-    return rows[0] ?? null;
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx.select({ id: profiles.id }).from(profiles).limit(1);
+      return rows[0] ?? null;
+    });
   }
 
   async createProfile(params: {
@@ -183,24 +195,28 @@ export class DrizzleAgentStore implements AgentStore {
   async getMessage(
     messageId: string,
   ): Promise<{ id: string; role: string; content: JsonValue } | null> {
-    const rows = await this.#db
-      .select({ id: messages.id, role: messages.role, content: messages.content })
-      .from(messages)
-      .where(eq(messages.id, messageId))
-      .limit(1);
-    return (rows[0] as { id: string; role: string; content: JsonValue }) ?? null;
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ id: messages.id, role: messages.role, content: messages.content })
+        .from(messages)
+        .where(eq(messages.id, messageId))
+        .limit(1);
+      return (rows[0] as { id: string; role: string; content: JsonValue }) ?? null;
+    });
   }
 
   async getActiveRules(profileId: string): Promise<ReadonlyArray<{ rule: string }>> {
-    return this.#db
-      .select({ rule: steeringRules.rule })
-      .from(steeringRules)
-      .where(
-        and(
-          eq(steeringRules.active, true),
-          or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
-        ),
-      )
-      .orderBy(asc(steeringRules.priority));
+    return this.#db.transaction(async (tx) => {
+      return tx
+        .select({ rule: steeringRules.rule })
+        .from(steeringRules)
+        .where(
+          and(
+            eq(steeringRules.active, true),
+            or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
+          ),
+        )
+        .orderBy(asc(steeringRules.priority));
+    });
   }
 }

@@ -82,31 +82,35 @@ export class DrizzleTransportStore implements TransportStore {
   async getAllChannels(): Promise<
     ReadonlyArray<{ id: string; type: string; credentials: JsonValue; identityMode: string }>
   > {
-    return this.#db
-      .select({
-        id: channels.id,
-        type: channels.type,
-        credentials: channels.credentials,
-        identityMode: channels.identityMode,
-      })
-      .from(channels) as Promise<
-      ReadonlyArray<{ id: string; type: string; credentials: JsonValue; identityMode: string }>
-    >;
+    return this.#db.transaction(async (tx) => {
+      return tx
+        .select({
+          id: channels.id,
+          type: channels.type,
+          credentials: channels.credentials,
+          identityMode: channels.identityMode,
+        })
+        .from(channels) as Promise<
+        ReadonlyArray<{ id: string; type: string; credentials: JsonValue; identityMode: string }>
+      >;
+    });
   }
 
   async getChannelByType(
     type: string,
   ): Promise<{ id: string; identityMode: string; credentials: JsonValue } | null> {
-    const rows = await this.#db
-      .select({
-        id: channels.id,
-        identityMode: channels.identityMode,
-        credentials: channels.credentials,
-      })
-      .from(channels)
-      .where(eq(channels.type, type))
-      .limit(1);
-    return (rows[0] as { id: string; identityMode: string; credentials: JsonValue }) ?? null;
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: channels.id,
+          identityMode: channels.identityMode,
+          credentials: channels.credentials,
+        })
+        .from(channels)
+        .where(eq(channels.type, type))
+        .limit(1);
+      return (rows[0] as { id: string; identityMode: string; credentials: JsonValue }) ?? null;
+    });
   }
 
   async createChannel(params: {
@@ -120,27 +124,29 @@ export class DrizzleTransportStore implements TransportStore {
   }
 
   async resolveSession(channelId: string, platformAddress: string): Promise<Session | null> {
-    const rows = await this.#db
-      .select({
-        id: channelSessions.id,
-        channelId: channelSessions.channelId,
-        platformAddress: channelSessions.platformAddress,
-        conversationId: channelSessions.conversationId,
-        status: channelSessions.status,
-        receive: channelSessions.receive,
-      })
-      .from(channelSessions)
-      .where(
-        and(
-          eq(channelSessions.channelId, channelId),
-          eq(channelSessions.platformAddress, platformAddress),
-          eq(channelSessions.status, "active"),
-          or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
-        ),
-      )
-      .orderBy(desc(channelSessions.id))
-      .limit(1);
-    return rows[0] ?? null;
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: channelSessions.id,
+          channelId: channelSessions.channelId,
+          platformAddress: channelSessions.platformAddress,
+          conversationId: channelSessions.conversationId,
+          status: channelSessions.status,
+          receive: channelSessions.receive,
+        })
+        .from(channelSessions)
+        .where(
+          and(
+            eq(channelSessions.channelId, channelId),
+            eq(channelSessions.platformAddress, platformAddress),
+            eq(channelSessions.status, "active"),
+            or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
+          ),
+        )
+        .orderBy(desc(channelSessions.id))
+        .limit(1);
+      return rows[0] ?? null;
+    });
   }
 
   async createSession(params: {
@@ -181,74 +187,82 @@ export class DrizzleTransportStore implements TransportStore {
     conversationId: string,
     afterId: string | null,
   ): Promise<ReadonlyArray<{ id: string; content: JsonValue }>> {
-    const conditions = [eq(inboundMessages.conversationId, conversationId)];
-    if (afterId) {
-      conditions.push(gt(inboundMessages.id, afterId));
-    }
-    return this.#db
-      .select({ id: inboundMessages.id, content: inboundMessages.content })
-      .from(inboundMessages)
-      .where(and(...conditions))
-      .orderBy(inboundMessages.id) as Promise<ReadonlyArray<{ id: string; content: JsonValue }>>;
+    return this.#db.transaction(async (tx) => {
+      const conditions = [eq(inboundMessages.conversationId, conversationId)];
+      if (afterId) {
+        conditions.push(gt(inboundMessages.id, afterId));
+      }
+      return tx
+        .select({ id: inboundMessages.id, content: inboundMessages.content })
+        .from(inboundMessages)
+        .where(and(...conditions))
+        .orderBy(inboundMessages.id) as Promise<ReadonlyArray<{ id: string; content: JsonValue }>>;
+    });
   }
 
   async getSession(sessionId: string): Promise<Session | null> {
-    const rows = await this.#db
-      .select({
-        id: channelSessions.id,
-        channelId: channelSessions.channelId,
-        platformAddress: channelSessions.platformAddress,
-        conversationId: channelSessions.conversationId,
-        status: channelSessions.status,
-        receive: channelSessions.receive,
-      })
-      .from(channelSessions)
-      .where(eq(channelSessions.id, sessionId))
-      .limit(1);
-    return rows[0] ?? null;
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: channelSessions.id,
+          channelId: channelSessions.channelId,
+          platformAddress: channelSessions.platformAddress,
+          conversationId: channelSessions.conversationId,
+          status: channelSessions.status,
+          receive: channelSessions.receive,
+        })
+        .from(channelSessions)
+        .where(eq(channelSessions.id, sessionId))
+        .limit(1);
+      return rows[0] ?? null;
+    });
   }
 
   async getActiveSessionsForConversation(conversationId: string): Promise<ReadonlyArray<Session>> {
-    return this.#db
-      .select({
-        id: channelSessions.id,
-        channelId: channelSessions.channelId,
-        platformAddress: channelSessions.platformAddress,
-        conversationId: channelSessions.conversationId,
-        status: channelSessions.status,
-        receive: channelSessions.receive,
-      })
-      .from(channelSessions)
-      .where(
-        and(
-          eq(channelSessions.conversationId, conversationId),
-          eq(channelSessions.status, "active"),
-          or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
-        ),
-      );
+    return this.#db.transaction(async (tx) => {
+      return tx
+        .select({
+          id: channelSessions.id,
+          channelId: channelSessions.channelId,
+          platformAddress: channelSessions.platformAddress,
+          conversationId: channelSessions.conversationId,
+          status: channelSessions.status,
+          receive: channelSessions.receive,
+        })
+        .from(channelSessions)
+        .where(
+          and(
+            eq(channelSessions.conversationId, conversationId),
+            eq(channelSessions.status, "active"),
+            or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
+          ),
+        );
+    });
   }
 
   async resolveUser(channelId: string, platformHandle: string): Promise<{ userId: string } | null> {
-    // Check wildcard first
-    const wildcard = await this.#db
-      .select({ userId: userIdentities.userId })
-      .from(userIdentities)
-      .where(and(eq(userIdentities.channelId, channelId), eq(userIdentities.isWildcard, true)))
-      .limit(1);
-    if (wildcard[0]) return wildcard[0];
+    return this.#db.transaction(async (tx) => {
+      // Check wildcard first
+      const wildcard = await tx
+        .select({ userId: userIdentities.userId })
+        .from(userIdentities)
+        .where(and(eq(userIdentities.channelId, channelId), eq(userIdentities.isWildcard, true)))
+        .limit(1);
+      if (wildcard[0]) return wildcard[0];
 
-    // Then exact match
-    const exact = await this.#db
-      .select({ userId: userIdentities.userId })
-      .from(userIdentities)
-      .where(
-        and(
-          eq(userIdentities.channelId, channelId),
-          eq(userIdentities.platformHandle, platformHandle),
-        ),
-      )
-      .limit(1);
-    return exact[0] ?? null;
+      // Then exact match
+      const exact = await tx
+        .select({ userId: userIdentities.userId })
+        .from(userIdentities)
+        .where(
+          and(
+            eq(userIdentities.channelId, channelId),
+            eq(userIdentities.platformHandle, platformHandle),
+          ),
+        )
+        .limit(1);
+      return exact[0] ?? null;
+    });
   }
 
   async createWildcardIdentity(params: {

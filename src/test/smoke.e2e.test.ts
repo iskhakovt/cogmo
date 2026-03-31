@@ -1,4 +1,5 @@
 /// <reference path="../../test/vitest.d.ts" />
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
 import { conversations, messages, profiles, users } from "../agent/store/schema.js";
@@ -78,10 +79,7 @@ describe("e2e smoke", () => {
     const start = Date.now();
     let assistantMsg = null;
     while (Date.now() - start < 30_000) {
-      const rows = await db
-        .select()
-        .from(messages)
-        .where((await import("drizzle-orm")).eq(messages.conversationId, conv!.id));
+      const rows = await db.select().from(messages).where(eq(messages.conversationId, conv!.id));
       assistantMsg = rows.find((r) => r.role === "assistant");
       if (assistantMsg) break;
       await new Promise((r) => setTimeout(r, 500));

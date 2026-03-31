@@ -1,6 +1,4 @@
 import { migrate } from "drizzle-orm/postgres-js/migrator";
-import { connect } from "inngest/connect";
-import { createServer as createInngestServer } from "inngest/node";
 import { createHandleMessage } from "./agent/handle-message.js";
 import { runAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
@@ -73,41 +71,3 @@ export async function bootstrap() {
     memory,
   };
 }
-
-async function main() {
-  const { functions, adapters } = await bootstrap();
-
-  if (env.INNGEST_MODE === "serve") {
-    const server = createInngestServer({ client: inngest, functions });
-    await new Promise<void>((resolve) => server.listen(env.INNGEST_SERVE_PORT, resolve));
-    logger.info({ port: env.INNGEST_SERVE_PORT }, "inngest connected");
-
-    await new Promise<void>((resolve) => {
-      const shutdown = () => {
-        server.close();
-        resolve();
-      };
-      process.on("SIGTERM", shutdown);
-      process.on("SIGINT", shutdown);
-    });
-  } else {
-    const connection = await connect({
-      apps: [{ client: inngest, functions }],
-      handleShutdownSignals: ["SIGTERM", "SIGINT"],
-    });
-    logger.info({ connectionId: connection.connectionId }, "inngest connected");
-    logger.info("assistant ready — use `pnpm console` to interact");
-    await connection.closed;
-  }
-
-  for (const adapter of adapters) {
-    await adapter.stop();
-  }
-
-  logger.info("assistant stopped");
-}
-
-main().catch((err) => {
-  logger.fatal({ err }, "fatal error");
-  process.exit(1);
-});

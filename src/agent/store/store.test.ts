@@ -118,6 +118,28 @@ describe("DrizzleAgentStore", () => {
     it("returns null for unknown conversation", async () => {
       expect(await store.getConversation("019d0000-0000-7000-8000-000000000000")).toBeNull();
     });
+
+    it("rejects conversation with nonexistent userId", async () => {
+      const profileId = await seedProfile();
+      await expect(
+        store.createConversation({
+          userId: "019d0000-0000-7000-8000-ffffffffffff",
+          profileId,
+          isPrivate: true,
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("rejects conversation with nonexistent profileId", async () => {
+      const userId = await seedUser();
+      await expect(
+        store.createConversation({
+          userId,
+          profileId: "019d0000-0000-7000-8000-ffffffffffff",
+          isPrivate: true,
+        }),
+      ).rejects.toThrow();
+    });
   });
 
   describe("messages", () => {

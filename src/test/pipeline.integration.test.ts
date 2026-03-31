@@ -1,5 +1,6 @@
 /// <reference path="../../test/vitest.d.ts" />
 
+import { eq } from "drizzle-orm";
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
 import { conversations, messages, profiles } from "../agent/store/schema.js";
@@ -22,7 +23,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (connection) connection.close();
+  if (connection) await connection.close();
 });
 
 async function sendEvent(name: string, data: Record<string, unknown>) {
@@ -38,10 +39,13 @@ async function sendEvent(name: string, data: Record<string, unknown>) {
   return res.json();
 }
 
-async function waitForAssistantMessage(timeoutMs = 30_000) {
+async function waitForAssistantMessage(conversationId: string, timeoutMs = 30_000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const rows = await db.select().from(messages);
+    const rows = await db
+      .select()
+      .from(messages)
+      .where(eq(messages.conversationId, conversationId));
     const match = rows.find((r) => r.role === "assistant");
     if (match) return match;
     await new Promise((r) => setTimeout(r, 500));
@@ -92,10 +96,10 @@ describe("message pipeline", () => {
       inboundMessageId: inbound!.id,
     });
 
-    const assistantMsg = await waitForAssistantMessage();
+    const assistantMsg = await waitForAssistantMessage(conv!.id);
     expect(assistantMsg.content).toBeDefined();
 
-    const allMsgs = await db.select().from(messages);
+    const allMsgs = await db.select().from(messages).where(eq(messages.conversationId, conv!.id));
     const userMsg = allMsgs.find((r) => r.role === "user");
     expect(userMsg).toBeDefined();
   });
