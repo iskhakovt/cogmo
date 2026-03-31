@@ -31,10 +31,10 @@ export async function setup({ provide }: GlobalSetupContext) {
   const hindsightContainer = await c
     .hindsightSlim(network, {
       llmBaseUrl: llmockUrl,
-      llmApiKey: "test-key",
+      llmApiKey: process.env.OPENAI_API_KEY ?? "test-key",
       llmModel: "gpt-5-nano",
       embeddingsBaseUrl: llmockUrl,
-      embeddingsApiKey: "test-key",
+      embeddingsApiKey: process.env.OPENAI_API_KEY ?? "test-key",
       embeddingsModel: "text-embedding-3-small",
     })
     .start();
@@ -83,7 +83,7 @@ export async function setup({ provide }: GlobalSetupContext) {
     .withCommand(["serve"])
     .withEnvironment({
       DATABASE_URL: "postgresql://assistant@postgres:5432/assistant",
-      ANTHROPIC_API_KEY: "test-key",
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "test-key",
       ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}`,
       INNGEST_BASE_URL: "http://inngest:8288",
       INNGEST_CONNECT_GATEWAY_URL: "ws://inngest:8289/v0/connect",
