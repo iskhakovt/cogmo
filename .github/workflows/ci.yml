@@ -46,7 +46,19 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test
+      - run: pnpm test --coverage
+      - uses: codecov/codecov-action@v5
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: unit
+          files: coverage/lcov.info
+      - uses: dorny/test-reporter@v2
+        if: always()
+        with:
+          name: Unit Test Results
+          path: test-results/junit.xml
+          reporter: java-junit
 
   integration:
     name: Integration Tests
@@ -62,6 +74,12 @@ jobs:
       - run: pnpm test:integration
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
+      - uses: dorny/test-reporter@v2
+        if: always()
+        with:
+          name: Integration Test Results
+          path: test-results/junit.xml
+          reporter: java-junit
 
   e2e:
     name: E2E Tests
@@ -86,6 +104,12 @@ jobs:
         env:
           E2E_IMAGE: assistant:ci
           TESTCONTAINERS_RYUK_DISABLED: "true"
+      - uses: dorny/test-reporter@v2
+        if: always()
+        with:
+          name: E2E Test Results
+          path: test-results/junit.xml
+          reporter: java-junit
 
   release:
     name: Release
