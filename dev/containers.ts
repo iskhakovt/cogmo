@@ -135,14 +135,6 @@ export function hindsightSlim(
     .withExposedPorts(8888)
     .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withEnvironment(env)
-    .withCopyFilesToContainer([
-      // Patched files — adds ZEROENTROPY_BASE_URL support (PR vectorize-io/hindsight#766)
-      { source: "./dev/hindsight-patches/config.py", target: "/app/api/hindsight_api/config.py" },
-      {
-        source: "./dev/hindsight-patches/cross_encoder.py",
-        target: "/app/api/hindsight_api/engine/cross_encoder.py",
-      },
-    ])
     .withWaitStrategy(Wait.forHttp("/health", 8888))
     .withStartupTimeout(300_000);
 }
