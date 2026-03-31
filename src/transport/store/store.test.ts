@@ -203,6 +203,8 @@ describe("DrizzleTransportStore", () => {
         content: "first",
         platformTs: now,
       });
+      // UUIDv7 is time-ordered per millisecond — ensure distinct timestamps
+      await new Promise((r) => setTimeout(r, 2));
       await store.persistInbound({
         channelSessionId: sessionId,
         conversationId,
