@@ -61,7 +61,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   process.env.INNGEST_CONNECT_GATEWAY_URL = gatewayUrl;
 
   console.log("Running seed...");
-  execSync("tsx src/cli.ts seed", { stdio: "inherit" });
+  execSync("tsx src/main.ts seed", { stdio: "inherit" });
   console.log("Seed complete.");
 
   const postgres = (await import("postgres")).default;

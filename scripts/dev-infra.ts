@@ -68,7 +68,7 @@ async function main() {
   // Run seed (applies migrations + creates default data, idempotent)
   console.log("\nRunning seed...");
   const { execSync } = await import("node:child_process");
-  execSync("tsx src/cli.ts seed", {
+  execSync("tsx src/main.ts seed", {
     stdio: "inherit",
     env: { ...process.env, DATABASE_URL: databaseUrl },
   });

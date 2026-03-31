@@ -13,6 +13,6 @@ switch (command) {
   }
   default:
     console.error(`Unknown command: ${command}`);
-    console.error("Usage: cli.js [serve|seed]");
+    console.error("Usage: main.js [serve|seed]");
     process.exit(1);
 }

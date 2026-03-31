@@ -58,7 +58,7 @@ describe("e2e smoke", () => {
       .values({
         channelSessionId: session!.id,
         conversationId: conv!.id,
-        content: "Hello smoke test",
+        content: "Hello integration test",
         platformTs: new Date(),
       })
       .returning({ id: inboundMessages.id });
