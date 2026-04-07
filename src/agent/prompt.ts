@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "../llm/types.js";
+import { SERVICE_PROMPT_GUIDANCE } from "./service.js";
 import type { AgentStore } from "./store/index.js";
 
 /**
@@ -20,17 +21,6 @@ Be direct and genuine. Skip filler ("Great question!", "I'd be happy to help!").
 Be concise when the user wants a quick answer. Be thorough when the topic is complex or the user is exploring. Match their energy.`;
 
 const ONBOARDING = `You don't know your user yet. In your first interaction, introduce yourself briefly and learn about them: their name, what they do, their timezone, and how they prefer to communicate. Store what you learn using memory_retain.`;
-
-/** Service-level guidance — keyed by Service namespace. */
-const SERVICE_GUIDANCE: Record<string, string> = {
-  memory: `You have persistent memory across conversations. Use it well:
-- **Recall first**: At the start of a conversation or when a topic comes up, check if you already know relevant context.
-- **Retain important things**: Facts about the user, their preferences, decisions made, commitments, project context. Ask yourself: "would knowing this help me in a future conversation?"
-- **Don't over-retain**: Skip greetings, small talk, information already saved in files, and things the user said are temporary.
-- **Update, don't duplicate**: If you learn something that contradicts a previous memory, retain the new version with context about the change.`,
-
-  files: `You have a persistent file workspace. Use it proactively — save meeting notes, draft emails, keep project summaries. Files persist across conversations.`,
-};
 
 export interface PromptSourceConfig {
   timezone?: string;
@@ -87,7 +77,9 @@ export class DefaultPromptSource implements PromptSource {
     }
 
     // Service guidance — keyed by active namespaces
-    const serviceGuidance = this.#activeServices.map((ns) => SERVICE_GUIDANCE[ns]).filter(Boolean);
+    const serviceGuidance = this.#activeServices
+      .map((ns) => SERVICE_PROMPT_GUIDANCE[ns])
+      .filter(Boolean);
     if (serviceGuidance.length > 0) {
       parts.push(`# Capabilities\n\n${serviceGuidance.join("\n\n")}`);
     }

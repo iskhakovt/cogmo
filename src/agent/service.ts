@@ -36,6 +36,23 @@ export interface Service {
 }
 
 /**
+ * Prompt guidance per Service namespace.
+ *
+ * Collocated with the Service definition so adding a namespace
+ * means adding both the interface and the guidance in one place.
+ * The prompt assembler reads this to build the Capabilities section.
+ */
+export const SERVICE_PROMPT_GUIDANCE: Record<string, string> = {
+  memory: `You have persistent memory across conversations. Use it well:
+- **Recall first**: At the start of a conversation or when a topic comes up, check if you already know relevant context.
+- **Retain important things**: Facts about the user, their preferences, decisions made, commitments, project context. Ask yourself: "would knowing this help me in a future conversation?"
+- **Don't over-retain**: Skip greetings, small talk, information already saved in files, and things the user said are temporary.
+- **Update, don't duplicate**: If you learn something that contradicts a previous memory, retain the new version with context about the change.`,
+
+  files: `You have a persistent file workspace. Use it proactively — save meeting notes, draft emails, keep project summaries. Files persist across conversations.`,
+};
+
+/**
  * Create a scoped Service for a conversation turn.
  *
  * Wraps a MemoryProvider, scoping all operations to the given bank
