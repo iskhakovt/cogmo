@@ -78,12 +78,12 @@ describe("DefaultPromptSource", () => {
       getActiveRules: vi.fn().mockResolvedValue([]),
     });
     const prompt = await new DefaultPromptSource({
-      activeServices: ["memory", "files"],
+      serviceGuidance: ["Test memory guidance.", "Test files guidance."],
     }).assemble(store, "p1");
 
     expect(prompt).toContain("# Capabilities");
-    expect(prompt).toContain("persistent memory");
-    expect(prompt).toContain("file workspace");
+    expect(prompt).toContain("Test memory guidance.");
+    expect(prompt).toContain("Test files guidance.");
   });
 
   it("omits capabilities section when no services active", async () => {
@@ -92,7 +92,7 @@ describe("DefaultPromptSource", () => {
       getActiveRules: vi.fn().mockResolvedValue([]),
     });
     const prompt = await new DefaultPromptSource({
-      activeServices: [],
+      serviceGuidance: [],
     }).assemble(store, "p1");
 
     expect(prompt).not.toContain("# Capabilities");
@@ -153,7 +153,7 @@ describe("DefaultPromptSource", () => {
     const prompt = await new DefaultPromptSource({
       timezone: "UTC",
       toolDefinitions: () => testTools,
-      activeServices: ["memory"],
+      serviceGuidance: ["Test memory guidance."],
       getUserContext: async () => "Name: Tim",
     }).assemble(store, "p1");
 
