@@ -6,10 +6,12 @@ import { ok } from "neverthrow";
 import { vi } from "vitest";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
+import type { LlmProvider } from "../llm/provider.js";
 import type { MemoryProvider } from "../memory/provider.js";
+import type { DeliveryHandle, DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import type { Transport } from "../transport/transport.js";
-import type { Adapter } from "../transport/types.js";
+import type { Adapter, StreamHandle, StreamingAdapter } from "../transport/types.js";
 
 export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
   return {
@@ -106,5 +108,55 @@ export function mockStep() {
   return {
     run: vi.fn((_id: string, fn: () => unknown) => fn()),
     sendEvent: vi.fn(),
+  };
+}
+
+export function mockProvider(overrides?: Partial<LlmProvider>): LlmProvider {
+  return {
+    name: "mock",
+    chat: vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "mock response" }],
+      stopReason: "end_turn",
+      model: "mock-model",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    }),
+    chatStream() {
+      throw new Error("chatStream not implemented in mock");
+    },
+    ...overrides,
+  };
+}
+
+export function mockStreamHandle(overrides?: Partial<StreamHandle>): StreamHandle {
+  return {
+    push: vi.fn().mockResolvedValue(undefined),
+    finish: vi.fn().mockResolvedValue(undefined),
+    abort: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  };
+}
+
+export function mockStreamingAdapter(overrides?: Partial<StreamingAdapter>): StreamingAdapter {
+  return {
+    stop: vi.fn().mockResolvedValue(undefined),
+    openStream: vi.fn().mockResolvedValue(mockStreamHandle()),
+    ...overrides,
+  };
+}
+
+export function mockDeliveryHandle(overrides?: Partial<DeliveryHandle>): DeliveryHandle {
+  return {
+    push: vi.fn().mockResolvedValue(undefined),
+    finish: vi.fn().mockResolvedValue(undefined),
+    abort: vi.fn().mockResolvedValue(undefined),
+    deliverBatch: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  };
+}
+
+export function mockDeliveryRouter(overrides?: Partial<DeliveryRouter>): DeliveryRouter {
+  return {
+    prepare: vi.fn().mockResolvedValue(mockDeliveryHandle()),
+    ...overrides,
   };
 }

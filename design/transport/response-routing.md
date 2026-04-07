@@ -2,7 +2,9 @@
 
 How agent responses reach the right platform chats.
 
-## Flow
+> **Note:** The per-channel respond function pattern described here is superseded by the unified `DeliveryRouter` in [streaming.md](streaming.md). The `DeliveryRouter` resolves targets once and handles both streaming and batch delivery inline in the orchestrator. `response/ready` becomes a notification event (Observer, metrics), not a delivery trigger. The routing strategies and source routing logic below remain valid — they're extracted into `resolveRoutingTargets()` used by the `DeliveryRouter`.
+
+## Flow (legacy — see streaming.md for unified flow)
 
 ```
 response/ready { conversationId, messageId }

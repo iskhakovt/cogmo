@@ -1,14 +1,16 @@
 import { Bot } from "grammy";
 import type { JsonValue } from "type-fest";
+import type { StreamEvent } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import type { AdapterDeps, AdapterModule, AdapterSetupResult } from "../adapter-module.js";
 import { contentToText } from "../content.js";
-import type { Adapter } from "../types.js";
+import type { Adapter, StreamHandle, StreamingAdapter } from "../types.js";
 
 export const channelType = "telegram";
 
-class TelegramAdapter implements Adapter {
+class TelegramAdapter implements Adapter, StreamingAdapter {
   #bot: Bot;
+  #activeStreams = new Map<string, TelegramStreamHandle>();
 
   constructor(bot: Bot) {
     this.#bot = bot;
@@ -18,8 +20,93 @@ class TelegramAdapter implements Adapter {
     await this.#bot.api.sendMessage(Number(platformAddress), contentToText(content));
   }
 
+  async openStream(platformAddress: string, runId: string): Promise<StreamHandle> {
+    const existing = this.#activeStreams.get(runId);
+    if (existing) return existing;
+
+    const handle = new TelegramStreamHandle(this.#bot, Number(platformAddress), () => {
+      this.#activeStreams.delete(runId);
+    });
+    this.#activeStreams.set(runId, handle);
+    return handle;
+  }
+
   async stop(): Promise<void> {
     this.#bot.stop();
+  }
+}
+
+/**
+ * Stream handle for Telegram — sends an initial message on first push,
+ * then edits it progressively with throttling to respect rate limits.
+ */
+class TelegramStreamHandle implements StreamHandle {
+  #bot: Bot;
+  #chatId: number;
+  #messageId: number | null = null;
+  #accumulated = "";
+  #lastEditTime = 0;
+  #editInterval = 500; // ms between edits
+  #onDone: () => void;
+  #pending: Promise<void> = Promise.resolve();
+
+  constructor(bot: Bot, chatId: number, onDone: () => void) {
+    this.#bot = bot;
+    this.#chatId = chatId;
+    this.#onDone = onDone;
+  }
+
+  async push(event: StreamEvent): Promise<void> {
+    if (event.type === "text_delta") {
+      this.#accumulated += event.text;
+    } else if (event.type === "tool_start") {
+      this.#accumulated += `\n🔍 ${event.name}...\n`;
+    }
+    // tool_result: skip — LLM will summarize
+
+    await this.#throttledEdit();
+  }
+
+  async finish(): Promise<void> {
+    await this.#pending;
+    if (this.#accumulated) {
+      await this.#edit(this.#accumulated);
+    }
+    this.#onDone();
+  }
+
+  async abort(error: string): Promise<void> {
+    await this.#pending;
+    const text = this.#accumulated ? `${this.#accumulated}\n\n⚠️ ${error}` : `⚠️ ${error}`;
+    await this.#edit(text);
+    this.#onDone();
+  }
+
+  async #throttledEdit(): Promise<void> {
+    const now = Date.now();
+    if (now - this.#lastEditTime < this.#editInterval) return;
+    await this.#edit(this.#accumulated);
+  }
+
+  async #edit(text: string): Promise<void> {
+    if (!text) return;
+    // Serialize edits — no two in flight at once
+    this.#pending = this.#pending.then(async () => {
+      try {
+        if (!this.#messageId) {
+          const msg = await this.#bot.api.sendMessage(this.#chatId, text);
+          this.#messageId = msg.message_id;
+        } else {
+          await this.#bot.api.editMessageText(this.#chatId, this.#messageId, text);
+        }
+        this.#lastEditTime = Date.now();
+      } catch (err: unknown) {
+        // Telegram returns 400 "message is not modified" for no-op edits — ignore
+        const msg = err instanceof Error ? err.message : "";
+        if (!msg.includes("message is not modified")) throw err;
+      }
+    });
+    await this.#pending;
   }
 }
 
