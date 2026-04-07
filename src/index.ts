@@ -1,3 +1,4 @@
+import { S3Client } from "@aws-sdk/client-s3";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { fileTools } from "./agent/file-tools.js";
 import { createFileService } from "./agent/files.js";
@@ -44,7 +45,6 @@ export async function bootstrap() {
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL);
 
   // S3-compatible file storage (MinIO locally, AWS S3 / R2 in production)
-  const { S3Client } = await import("@aws-sdk/client-s3");
   const s3Client = new S3Client({
     ...(env.S3_ENDPOINT ? { endpoint: env.S3_ENDPOINT, forcePathStyle: true } : {}),
     region: env.S3_REGION,

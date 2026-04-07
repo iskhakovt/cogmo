@@ -1,6 +1,7 @@
 import {
   GetObjectCommand,
   ListObjectsV2Command,
+  NoSuchKey,
   PutObjectCommand,
   type S3Client,
 } from "@aws-sdk/client-s3";
@@ -15,12 +16,16 @@ import type { FileEntry, Service } from "./service.js";
 export function createFileService(client: S3Client, bucket: string): Service["files"] {
   return {
     async read(path: string): Promise<string> {
-      const command = new GetObjectCommand({ Bucket: bucket, Key: path });
-      const response = await client.send(command);
-      if (!response.Body) {
-        throw new Error(`File not found: ${path}`);
+      try {
+        const command = new GetObjectCommand({ Bucket: bucket, Key: path });
+        const response = await client.send(command);
+        const body = response.Body;
+        if (!body) throw new Error(`Empty response for: ${path}`);
+        return await body.transformToString("utf-8");
+      } catch (err) {
+        if (err instanceof NoSuchKey) throw new Error(`File not found: ${path}`);
+        throw err;
       }
-      return response.Body.transformToString("utf-8");
     },
 
     async write(path: string, content: string): Promise<void> {
@@ -33,6 +38,7 @@ export function createFileService(client: S3Client, bucket: string): Service["fi
       await client.send(command);
     },
 
+    // TODO: handle pagination for >1000 files (ListObjectsV2 returns max 1000 per call)
     async list(prefix?: string): Promise<FileEntry[]> {
       const command = new ListObjectsV2Command({
         Bucket: bucket,

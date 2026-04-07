@@ -132,13 +132,12 @@ export function createDefaultTools(
 }
 
 function getUtcOffset(date: Date, timezone: string): string {
-  const utcStr = date.toLocaleString("en-US", { timeZone: "UTC" });
-  const tzStr = date.toLocaleString("en-US", { timeZone: timezone });
-  const diffMs = new Date(tzStr).getTime() - new Date(utcStr).getTime();
-  const diffHours = diffMs / (1000 * 60 * 60);
-  const sign = diffHours >= 0 ? "+" : "-";
-  const abs = Math.abs(diffHours);
-  const h = Math.floor(abs);
-  const m = Math.round((abs - h) * 60);
-  return `UTC${sign}${h}${m > 0 ? `:${String(m).padStart(2, "0")}` : ""}`;
+  const offsetStr = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    timeZoneName: "shortOffset",
+  })
+    .formatToParts(date)
+    .find((p) => p.type === "timeZoneName")?.value;
+  // shortOffset returns "GMT", "GMT+3", "GMT-5:30", etc.
+  return offsetStr?.replace("GMT", "UTC") ?? "UTC";
 }

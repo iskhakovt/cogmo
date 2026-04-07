@@ -180,7 +180,8 @@ function validateUrl(url: string): void {
     throw new Error(`Unsupported protocol: ${parsed.protocol}`);
   }
 
-  // Reject private/internal IPs
+  // Reject private/internal IPs (string-level check — does not resolve DNS,
+  // so a public hostname resolving to a private IP bypasses this).
   const hostname = parsed.hostname;
   if (
     hostname === "localhost" ||
@@ -188,11 +189,18 @@ function validateUrl(url: string): void {
     hostname === "0.0.0.0" ||
     hostname.startsWith("10.") ||
     hostname.startsWith("192.168.") ||
-    hostname.startsWith("172.") ||
+    isPrivate172(hostname) ||
     hostname === "::1" ||
     hostname.endsWith(".local") ||
     hostname.endsWith(".internal")
   ) {
     throw new Error("Fetching private/internal URLs is not allowed.");
   }
+}
+
+/** 172.16.0.0/12 = 172.16.x.x through 172.31.x.x */
+function isPrivate172(hostname: string): boolean {
+  if (!hostname.startsWith("172.")) return false;
+  const second = Number.parseInt(hostname.split(".")[1] ?? "", 10);
+  return second >= 16 && second <= 31;
 }
