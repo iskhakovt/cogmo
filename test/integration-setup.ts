@@ -20,12 +20,13 @@ export async function setup({ provide }: GlobalSetupContext) {
   console.log(`llmock at ${mock.url}`);
 
   console.log("Starting containers...");
-  const [pg, _rd, inn] = await Promise.all([
+  const [pg, _rd, inn, mn] = await Promise.all([
     c.postgres(network).start(),
     c.redis(network).start(),
     c.inngest(network).start(),
+    c.minio(network).start(),
   ]);
-  containers.push(pg, _rd, inn);
+  containers.push(pg, _rd, inn, mn);
 
   // Slim Hindsight — external LLM + embeddings via llmock (replays recorded fixtures)
   const llmockUrl = `http://host.docker.internal:${mock.port}/v1`;
@@ -41,12 +42,25 @@ export async function setup({ provide }: GlobalSetupContext) {
     .start();
   containers.push(hindsightContainer);
 
-  const { hindsightUrl, ...urls } = c.getUrls({
+  const { hindsightUrl, s3Endpoint, ...urls } = c.getUrls({
     postgres: pg,
     inngest: inn,
     hindsight: hindsightContainer,
+    minio: mn,
   });
   if (!hindsightUrl) throw new Error("hindsight is required for integration tests");
+  if (!s3Endpoint) throw new Error("minio is required for integration tests");
+
+  // Create the S3 bucket in MinIO
+  const { S3Client, CreateBucketCommand } = await import("@aws-sdk/client-s3");
+  const s3 = new S3Client({
+    endpoint: s3Endpoint,
+    region: "us-east-1",
+    forcePathStyle: true,
+    credentials: { accessKeyId: "minioadmin", secretAccessKey: "minioadmin" },
+  });
+  await s3.send(new CreateBucketCommand({ Bucket: "assistant-files" }));
+  s3.destroy();
 
   // Set process.env — propagates to Vitest test workers.
   process.env.DATABASE_URL = urls.databaseUrl;
@@ -55,6 +69,10 @@ export async function setup({ provide }: GlobalSetupContext) {
   process.env.HINDSIGHT_URL = hindsightUrl;
   process.env.INNGEST_BASE_URL = urls.inngestBaseUrl;
   process.env.INNGEST_DEV = "true";
+  process.env.S3_ENDPOINT = s3Endpoint;
+  process.env.S3_ACCESS_KEY = "minioadmin";
+  process.env.S3_SECRET_KEY = "minioadmin";
+  process.env.S3_BUCKET = "assistant-files";
   process.env.LOG_LEVEL = "warn";
 
   const gatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;

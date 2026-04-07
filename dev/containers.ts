@@ -51,6 +51,20 @@ export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
     .withStartupTimeout(60_000);
 }
 
+export function minio(network: StartedNetwork) {
+  return new GenericContainer("minio/minio:latest")
+    .withNetwork(network)
+    .withNetworkAliases("minio")
+    .withExposedPorts(9000)
+    .withEnvironment({
+      MINIO_ROOT_USER: "minioadmin",
+      MINIO_ROOT_PASSWORD: "minioadmin",
+    })
+    .withCommand(["server", "/data"])
+    .withWaitStrategy(Wait.forHttp("/minio/health/live", 9000))
+    .withStartupTimeout(30_000);
+}
+
 export function ollama(network: StartedNetwork) {
   return new OllamaContainer("ollama/ollama:latest")
     .withNetwork(network)
@@ -163,6 +177,7 @@ export function getUrls(containers: {
   inngest: ContainerEndpoint;
   hindsight?: ContainerEndpoint;
   ollama?: ContainerEndpoint;
+  minio?: ContainerEndpoint;
 }) {
   return {
     databaseUrl: `postgresql://assistant@${containers.postgres.getHost()}:${containers.postgres.getMappedPort(5432)}/assistant`,
@@ -172,6 +187,9 @@ export function getUrls(containers: {
     }),
     ...(containers.ollama && {
       ollamaUrl: `http://${containers.ollama.getHost()}:${containers.ollama.getMappedPort(11434)}`,
+    }),
+    ...(containers.minio && {
+      s3Endpoint: `http://${containers.minio.getHost()}:${containers.minio.getMappedPort(9000)}`,
     }),
   };
 }
