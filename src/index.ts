@@ -1,11 +1,12 @@
 import { S3Client } from "@aws-sdk/client-s3";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { fileTools } from "./agent/file-tools.js";
-import { createFileService } from "./agent/files.js";
+import { createFileService, FILES_PROMPT_GUIDANCE } from "./agent/files.js";
 import { createHandleMessage } from "./agent/handle-message.js";
 import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
+import { MEMORY_PROMPT_GUIDANCE } from "./agent/service.js";
 import { DrizzleAgentStore } from "./agent/store/index.js";
 import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
@@ -44,7 +45,7 @@ export async function bootstrap() {
   const promptSource = new DefaultPromptSource({
     timezone: env.USER_TIMEZONE,
     toolDefinitions: () => tools.definitions(),
-    activeServices: ["memory", "files"],
+    serviceGuidance: [MEMORY_PROMPT_GUIDANCE, FILES_PROMPT_GUIDANCE],
   });
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL);
 

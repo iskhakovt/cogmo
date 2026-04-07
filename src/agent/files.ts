@@ -7,6 +7,10 @@ import {
 } from "@aws-sdk/client-s3";
 import type { FileEntry, Service } from "./service.js";
 
+/** Prompt guidance for the files Service namespace. */
+export const FILES_PROMPT_GUIDANCE =
+  "You have a persistent file workspace. Use it proactively — save meeting notes, draft emails, keep project summaries. Files persist across conversations.";
+
 /**
  * Create an S3-backed file service.
  *

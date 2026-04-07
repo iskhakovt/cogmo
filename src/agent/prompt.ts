@@ -1,5 +1,4 @@
 import type { ToolDefinition } from "../llm/types.js";
-import { SERVICE_PROMPT_GUIDANCE } from "./service.js";
 import type { AgentStore } from "./store/index.js";
 
 /**
@@ -26,7 +25,7 @@ export interface PromptSourceConfig {
   timezone?: string;
   getUserContext?: () => Promise<string | null>;
   toolDefinitions?: () => ToolDefinition[];
-  activeServices?: string[];
+  serviceGuidance?: string[];
 }
 
 /**
@@ -34,20 +33,21 @@ export interface PromptSourceConfig {
  * + service guidance + steering rules + current time.
  *
  * Tool guidance is compiled from the tool registry — adding a tool
- * automatically updates the system prompt. Service guidance is keyed
- * by namespace — adding a Service namespace requires one guidance entry.
+ * automatically updates the system prompt. Service guidance is provided
+ * by each namespace implementation — adding a namespace means exporting
+ * a guidance string from the implementation file.
  */
 export class DefaultPromptSource implements PromptSource {
   #timezone: string;
   #getUserContext: () => Promise<string | null>;
   #toolDefinitions: () => ToolDefinition[];
-  #activeServices: string[];
+  #serviceGuidance: string[];
 
   constructor(config: PromptSourceConfig = {}) {
     this.#timezone = config.timezone ?? "UTC";
     this.#getUserContext = config.getUserContext ?? (async () => null);
     this.#toolDefinitions = config.toolDefinitions ?? (() => []);
-    this.#activeServices = config.activeServices ?? [];
+    this.#serviceGuidance = config.serviceGuidance ?? [];
   }
 
   async assemble(store: AgentStore, profileId: string): Promise<string> {
@@ -76,12 +76,9 @@ export class DefaultPromptSource implements PromptSource {
       );
     }
 
-    // Service guidance — keyed by active namespaces
-    const serviceGuidance = this.#activeServices
-      .map((ns) => SERVICE_PROMPT_GUIDANCE[ns])
-      .filter(Boolean);
-    if (serviceGuidance.length > 0) {
-      parts.push(`# Capabilities\n\n${serviceGuidance.join("\n\n")}`);
+    // Service guidance — provided by each namespace implementation
+    if (this.#serviceGuidance.length > 0) {
+      parts.push(`# Capabilities\n\n${this.#serviceGuidance.join("\n\n")}`);
     }
 
     // Steering rules from DB
