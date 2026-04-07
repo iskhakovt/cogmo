@@ -9,6 +9,11 @@ const stubService: Service = {
     recall: async () => ({ memories: [] }),
     retain: async () => {},
   },
+  files: {
+    read: async () => "",
+    write: async () => {},
+    list: async () => [],
+  },
 };
 
 describe("ToolRegistry", () => {
@@ -120,14 +125,28 @@ describe("defineTool", () => {
 });
 
 describe("createDefaultTools", () => {
-  it("get_current_time returns ISO date string", async () => {
+  it("get_current_time returns structured time JSON", async () => {
     const registry = createDefaultTools();
     const spec = registry.get("get_current_time");
     expect(spec).toBeDefined();
     const result = await spec!.handler({}, stubService);
+    const parsed = JSON.parse(result);
 
-    expect(() => new Date(result)).not.toThrow();
-    expect(result).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(parsed.iso).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(parsed.dayOfWeek).toBeTruthy();
+    expect(parsed.timezone).toBe("UTC");
+    expect(parsed.utcOffset).toBe("UTC+0");
+    expect(parsed.date).toMatch(/\w+, \w+ \d+, \d{4}/);
+    expect(parsed.time).toMatch(/^\d{2}:\d{2}$/);
+  });
+
+  it("get_current_time respects timezone parameter", async () => {
+    const registry = createDefaultTools([], "America/New_York");
+    const spec = registry.get("get_current_time");
+    const result = await spec!.handler({}, stubService);
+    const parsed = JSON.parse(result);
+
+    expect(parsed.timezone).toBe("America/New_York");
   });
 
   it("accepts extra tools", () => {

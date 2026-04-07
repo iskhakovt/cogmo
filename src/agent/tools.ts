@@ -72,16 +72,55 @@ export class ToolRegistry {
 
 /**
  * Create a registry with built-in tools.
+ *
+ * @param defaultTimezone IANA timezone for the current_time tool (e.g. "Europe/Moscow")
  */
-export function createDefaultTools(extraTools: ToolSpec[] = []): ToolRegistry {
+export function createDefaultTools(
+  extraTools: ToolSpec[] = [],
+  defaultTimezone = "UTC",
+): ToolRegistry {
   const registry = new ToolRegistry();
 
   registry.register(
     defineTool({
       name: "get_current_time",
-      description: "Returns the current date and time in ISO 8601 format.",
-      schema: z.object({}),
-      handler: async () => new Date().toISOString(),
+      description:
+        "Returns the current date, time, day of week, and timezone. " +
+        "Use this when the conversation needs current temporal context, " +
+        "especially for long-running sessions where the system prompt time may be stale.",
+      schema: z.object({
+        timezone: z
+          .string()
+          .optional()
+          .describe("IANA timezone name (e.g. 'America/New_York'). Defaults to user's timezone."),
+      }),
+      handler: async (input) => {
+        const tz = input.timezone ?? defaultTimezone;
+        const now = new Date();
+        const formatter = new Intl.DateTimeFormat("en-US", {
+          timeZone: tz,
+          weekday: "long",
+          year: "numeric",
+          month: "long",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        });
+        const parts = Object.fromEntries(
+          formatter.formatToParts(now).map((p) => [p.type, p.value]),
+        );
+        const offset = getUtcOffset(now, tz);
+
+        return JSON.stringify({
+          iso: now.toISOString(),
+          date: `${parts.weekday}, ${parts.month} ${parts.day}, ${parts.year}`,
+          time: `${parts.hour}:${parts.minute}`,
+          dayOfWeek: parts.weekday,
+          timezone: tz,
+          utcOffset: offset,
+        });
+      },
     }),
   );
 
@@ -90,4 +129,16 @@ export function createDefaultTools(extraTools: ToolSpec[] = []): ToolRegistry {
   }
 
   return registry;
+}
+
+function getUtcOffset(date: Date, timezone: string): string {
+  const utcStr = date.toLocaleString("en-US", { timeZone: "UTC" });
+  const tzStr = date.toLocaleString("en-US", { timeZone: timezone });
+  const diffMs = new Date(tzStr).getTime() - new Date(utcStr).getTime();
+  const diffHours = diffMs / (1000 * 60 * 60);
+  const sign = diffHours >= 0 ? "+" : "-";
+  const abs = Math.abs(diffHours);
+  const h = Math.floor(abs);
+  const m = Math.round((abs - h) * 60);
+  return `UTC${sign}${h}${m > 0 ? `:${String(m).padStart(2, "0")}` : ""}`;
 }

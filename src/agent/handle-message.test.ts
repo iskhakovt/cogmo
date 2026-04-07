@@ -20,6 +20,11 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     tools: mockToolRegistry(),
     memory: mockMemoryProvider(),
     promptSource: { assemble: vi.fn().mockResolvedValue("system prompt") },
+    fileService: {
+      read: vi.fn().mockResolvedValue(""),
+      write: vi.fn().mockResolvedValue(undefined),
+      list: vi.fn().mockResolvedValue([]),
+    },
     deliveryRouter: mockDeliveryRouter(),
     runStreamingAgentLoop: vi.fn().mockResolvedValue({
       text: "Hello from assistant",
