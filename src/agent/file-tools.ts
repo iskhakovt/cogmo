@@ -6,8 +6,8 @@ const MAX_READ_LENGTH = 100_000;
 export const readFile = defineTool({
   name: "read_file",
   description:
-    "Read the contents of a file from the workspace. " +
-    "Use this to review notes, drafts, or any previously saved content.",
+    "Read a file from the workspace. " +
+    "Use to review notes, drafts, or any previously saved content.",
   schema: z.object({
     path: z.string().describe("File path (e.g. 'notes/meeting.md')"),
   }),
@@ -23,9 +23,8 @@ export const readFile = defineTool({
 export const writeFile = defineTool({
   name: "write_file",
   description:
-    "Write content to a file in the workspace. Creates the file if it doesn't exist, " +
-    "overwrites if it does. Use this to save notes, drafts, summaries, or any content " +
-    "the user wants to keep.",
+    "Write content to a file in the workspace. Creates or overwrites. " +
+    "Use proactively to save notes, drafts, summaries, or anything the user wants to keep.",
   schema: z.object({
     path: z.string().describe("File path (e.g. 'notes/meeting.md')"),
     content: z.string().describe("Content to write"),
@@ -40,8 +39,8 @@ export const writeFile = defineTool({
 export const listFiles = defineTool({
   name: "list_files",
   description:
-    "List files in the workspace, optionally filtered by a path prefix. " +
-    "Use this to see what files exist before reading or to find a specific file.",
+    "List files in the workspace, optionally filtered by path prefix. " +
+    "Use to see what files exist before reading or to find a specific file.",
   schema: z.object({
     prefix: z
       .string()

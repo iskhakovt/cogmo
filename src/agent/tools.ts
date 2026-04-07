@@ -86,8 +86,8 @@ export function createDefaultTools(
       name: "get_current_time",
       description:
         "Returns the current date, time, day of week, and timezone. " +
-        "Use this when the conversation needs current temporal context, " +
-        "especially for long-running sessions where the system prompt time may be stale.",
+        "Use for scheduling, deadlines, or time questions. The system prompt includes the time " +
+        "when the conversation started — call this tool for long-running sessions or exact time.",
       schema: z.object({
         timezone: z
           .string()
