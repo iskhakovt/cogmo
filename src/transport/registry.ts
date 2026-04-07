@@ -3,10 +3,9 @@ import type { AgentStore } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import { adaptersByType } from "./adapters/index.js";
-import { createRespond } from "./respond.js";
 import type { TransportStore } from "./store/index.js";
 import { createTransport } from "./transport.js";
-import type { Adapter } from "./types.js";
+import type { Adapter, StreamingAdapter } from "./types.js";
 
 export interface RegistryDeps {
   defaultUserId: string;
@@ -21,6 +20,7 @@ export interface RegistryResult {
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   functions: any[];
   adapters: Adapter[];
+  adapterMap: Map<string, Adapter | StreamingAdapter>;
 }
 
 /**
@@ -28,13 +28,14 @@ export interface RegistryResult {
  *
  * Table-driven — matches channel.type to registered adapter modules.
  * Each adapter provides an Adapter instance + optional Inngest functions.
- * The registry creates a generic respond function per channel.
+ * Returns an adapterMap for the DeliveryRouter.
  */
 export async function startChannels(deps: RegistryDeps): Promise<RegistryResult> {
   const { transportStore, agentStore } = deps;
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [];
   const adapters: Adapter[] = [];
+  const adapterMap = new Map<string, Adapter | StreamingAdapter>();
 
   const channels = await transportStore.getAllChannels();
 
@@ -64,20 +65,10 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
     });
 
     adapters.push(result.adapter);
+    adapterMap.set(channel.id, result.adapter);
     functions.push(...result.functions);
-
-    // Generic respond function — same for every channel
-    functions.push(
-      createRespond({
-        id: `${channel.type}-respond`,
-        channelId: channel.id,
-        agentStore,
-        transportStore,
-        deliver: (addr, text) => result.adapter.deliver(addr, text),
-      }),
-    );
   }
 
   logger.info({ count: channels.length }, "channel adapters started");
-  return { functions, adapters };
+  return { functions, adapters, adapterMap };
 }

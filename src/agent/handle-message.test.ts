@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   mockAgentStore,
+  mockDeliveryHandle,
+  mockDeliveryRouter,
   mockMemoryProvider,
+  mockProvider,
   mockStep,
   mockToolRegistry,
   mockTransportStore,
@@ -13,11 +16,12 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
   return {
     agentStore: mockAgentStore(),
     transportStore: mockTransportStore(),
-    provider: { name: "mock", chat: vi.fn() },
+    provider: mockProvider(),
     tools: mockToolRegistry(),
     memory: mockMemoryProvider(),
     promptSource: { assemble: vi.fn().mockResolvedValue("system prompt") },
-    runAgentLoop: vi.fn().mockResolvedValue({
+    deliveryRouter: mockDeliveryRouter(),
+    runStreamingAgentLoop: vi.fn().mockResolvedValue({
       text: "Hello from assistant",
       messages: [],
       usage: { inputTokens: 10, outputTokens: 5 },
@@ -32,35 +36,53 @@ const testEvent = {
   data: { conversationId: "conv-1", inboundMessageId: "inbound-1" },
 };
 
+const testRunId = "run-123";
+
 describe("createHandleMessage", () => {
   it("loads unbatched inbound messages via transportStore", async () => {
     const deps = mockDeps();
-    await (createHandleMessage(deps) as any).fn({ event: testEvent, step: mockStep() });
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
 
     expect(deps.transportStore.getUnbatchedInbound).toHaveBeenCalledWith("conv-1", null);
   });
 
   it("calls promptSource.assemble with agentStore and profileId", async () => {
     const deps = mockDeps();
-    await (createHandleMessage(deps) as any).fn({ event: testEvent, step: mockStep() });
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
 
     expect(deps.promptSource.assemble).toHaveBeenCalledWith(deps.agentStore, "profile-1");
   });
 
   it("uses model from profile", async () => {
     const deps = mockDeps();
-    await (createHandleMessage(deps) as any).fn({ event: testEvent, step: mockStep() });
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
 
-    expect(deps.runAgentLoop).toHaveBeenCalledWith(
+    expect(deps.runStreamingAgentLoop).toHaveBeenCalledWith(
       expect.objectContaining({ model: "test-model" }),
     );
   });
 
   it("creates service with memory recall and retain", async () => {
     const deps = mockDeps();
-    await (createHandleMessage(deps) as any).fn({ event: testEvent, step: mockStep() });
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
 
-    expect(deps.runAgentLoop).toHaveBeenCalledWith(
+    expect(deps.runStreamingAgentLoop).toHaveBeenCalledWith(
       expect.objectContaining({
         service: expect.objectContaining({
           memory: expect.objectContaining({
@@ -74,7 +96,11 @@ describe("createHandleMessage", () => {
 
   it("inserts user and assistant messages via agentStore", async () => {
     const deps = mockDeps();
-    await (createHandleMessage(deps) as any).fn({ event: testEvent, step: mockStep() });
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
 
     expect(deps.agentStore.insertMessage).toHaveBeenCalledTimes(2);
     expect(deps.agentStore.insertMessage).toHaveBeenCalledWith(
@@ -88,7 +114,11 @@ describe("createHandleMessage", () => {
   it("emits response/ready with conversationId and messageId", async () => {
     const deps = mockDeps();
     const step = mockStep();
-    await (createHandleMessage(deps) as any).fn({ event: testEvent, step });
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step,
+      runId: testRunId,
+    });
 
     expect(step.sendEvent).toHaveBeenCalledWith(
       "send-response",
@@ -97,5 +127,90 @@ describe("createHandleMessage", () => {
         data: { conversationId: "conv-1", messageId: "msg-1" },
       }),
     );
+  });
+
+  it("calls deliveryRouter.prepare with conversationId and runId", async () => {
+    const deps = mockDeps();
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.deliveryRouter.prepare).toHaveBeenCalledWith("conv-1", "run-123");
+  });
+
+  it("passes onEvent that calls delivery.push", async () => {
+    const handle = mockDeliveryHandle();
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+        await params.onEvent({ type: "text_delta", text: "hi" });
+        return {
+          text: "hi",
+          messages: [],
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: "mock",
+          iterations: 1,
+        };
+      }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(handle.push).toHaveBeenCalledWith({ type: "text_delta", text: "hi" });
+  });
+
+  it("calls delivery.finish on success", async () => {
+    const handle = mockDeliveryHandle();
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(handle.finish).toHaveBeenCalled();
+  });
+
+  it("calls delivery.abort on error and re-throws", async () => {
+    const handle = mockDeliveryHandle();
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn().mockRejectedValue(new Error("LLM failed")),
+    });
+
+    await expect(
+      (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      }),
+    ).rejects.toThrow("LLM failed");
+
+    expect(handle.abort).toHaveBeenCalledWith("LLM failed");
+    expect(handle.finish).not.toHaveBeenCalled();
+  });
+
+  it("calls delivery.deliverBatch after persist", async () => {
+    const handle = mockDeliveryHandle();
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(handle.deliverBatch).toHaveBeenCalledWith("Hello from assistant");
   });
 });

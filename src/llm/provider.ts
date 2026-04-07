@@ -1,4 +1,4 @@
-import type { ChatParams, LlmResponse } from "./types.js";
+import type { ChatParams, ChatStreamResult, LlmResponse } from "./types.js";
 
 /**
  * Provider-agnostic LLM interface.
@@ -9,4 +9,5 @@ import type { ChatParams, LlmResponse } from "./types.js";
 export interface LlmProvider {
   readonly name: string;
   chat(params: ChatParams): Promise<LlmResponse>;
+  chatStream(params: ChatParams): ChatStreamResult;
 }

@@ -70,6 +70,27 @@ export interface LlmResponse {
   usage: Usage;
 }
 
+// --- Stream events ---
+
+export type StreamEvent =
+  | { type: "text_delta"; text: string }
+  | { type: "tool_start"; id: string; name: string; input: unknown }
+  | { type: "tool_result"; name: string; output: string; isError?: boolean };
+
+/**
+ * Result of a streaming LLM call.
+ *
+ * `events` yields stream events as they arrive (text deltas, tool starts).
+ * `response` resolves after the stream completes with final metadata.
+ *
+ * The provider adapter accumulates tool input deltas internally —
+ * `tool_start` events always contain complete parsed input.
+ */
+export interface ChatStreamResult {
+  events: AsyncIterable<StreamEvent>;
+  response: Promise<{ stopReason: StopReason; model: string; usage: Usage }>;
+}
+
 // --- Chat params ---
 
 export interface ChatParams {

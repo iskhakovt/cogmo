@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AnthropicProvider } from "./anthropic.js";
+import type { StreamEvent } from "./types.js";
 
 // Mock the Anthropic SDK — use a class so `new Anthropic()` works
 const mockCreate = vi.fn();
@@ -10,6 +11,21 @@ vi.mock("@anthropic-ai/sdk", () => {
     },
   };
 });
+
+/** Create a mock async iterable that yields Anthropic stream events. */
+function mockStream(events: unknown[]): AsyncIterable<unknown> {
+  return {
+    [Symbol.asyncIterator]() {
+      let i = 0;
+      return {
+        async next() {
+          if (i < events.length) return { value: events[i++], done: false };
+          return { value: undefined, done: true };
+        },
+      };
+    },
+  };
+}
 
 function createProvider(): AnthropicProvider {
   mockCreate.mockReset();
@@ -229,5 +245,181 @@ describe("AnthropicProvider", () => {
     });
 
     expect(result.stopReason).toBe("max_tokens");
+  });
+
+  describe("chatStream", () => {
+    const defaultParams = {
+      model: "claude-sonnet-4-20250514",
+      system: "sys",
+      messages: [{ role: "user" as const, content: "hi" }],
+    };
+
+    it("yields text_delta events for text content", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: {
+              model: "claude-sonnet-4-20250514",
+              usage: { input_tokens: 10, output_tokens: 0 },
+            },
+          },
+          { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+          { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello" } },
+          { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " world" } },
+          { type: "content_block_stop", index: 0 },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 5 },
+          },
+          { type: "message_stop" },
+        ]),
+      );
+
+      const { events, response } = provider.chatStream(defaultParams);
+      const collected: StreamEvent[] = [];
+      for await (const event of events) {
+        collected.push(event);
+      }
+
+      expect(collected).toEqual([
+        { type: "text_delta", text: "Hello" },
+        { type: "text_delta", text: " world" },
+      ]);
+
+      const meta = await response;
+      expect(meta.stopReason).toBe("end_turn");
+      expect(meta.model).toBe("claude-sonnet-4-20250514");
+      expect(meta.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
+    });
+
+    it("accumulates tool input and yields tool_start on block stop", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: {
+              model: "claude-sonnet-4-20250514",
+              usage: { input_tokens: 10, output_tokens: 0 },
+            },
+          },
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "tool_use", id: "tu_1", name: "web_search" },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "input_json_delta", partial_json: '{"quer' },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "input_json_delta", partial_json: 'y":"weather"}' },
+          },
+          { type: "content_block_stop", index: 0 },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "tool_use" },
+            usage: { output_tokens: 12 },
+          },
+          { type: "message_stop" },
+        ]),
+      );
+
+      const { events, response } = provider.chatStream(defaultParams);
+      const collected: StreamEvent[] = [];
+      for await (const event of events) {
+        collected.push(event);
+      }
+
+      expect(collected).toEqual([
+        { type: "tool_start", id: "tu_1", name: "web_search", input: { query: "weather" } },
+      ]);
+
+      const meta = await response;
+      expect(meta.stopReason).toBe("tool_use");
+    });
+
+    it("handles mixed text and tool_use in correct order", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: {
+              model: "claude-sonnet-4-20250514",
+              usage: { input_tokens: 10, output_tokens: 0 },
+            },
+          },
+          { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "Let me search." },
+          },
+          { type: "content_block_stop", index: 0 },
+          {
+            type: "content_block_start",
+            index: 1,
+            content_block: { type: "tool_use", id: "tu_1", name: "search" },
+          },
+          {
+            type: "content_block_delta",
+            index: 1,
+            delta: { type: "input_json_delta", partial_json: '{"q":"test"}' },
+          },
+          { type: "content_block_stop", index: 1 },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "tool_use" },
+            usage: { output_tokens: 15 },
+          },
+          { type: "message_stop" },
+        ]),
+      );
+
+      const { events } = provider.chatStream(defaultParams);
+      const types: string[] = [];
+      for await (const event of events) {
+        types.push(event.type);
+      }
+
+      expect(types).toEqual(["text_delta", "tool_start"]);
+    });
+
+    it("passes stream: true to the API", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: {
+              model: "claude-sonnet-4-20250514",
+              usage: { input_tokens: 5, output_tokens: 0 },
+            },
+          },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 0 },
+          },
+          { type: "message_stop" },
+        ]),
+      );
+
+      const { events } = provider.chatStream(defaultParams);
+      // Drain the iterator
+      for await (const _ of events) {
+        /* noop */
+      }
+
+      const callArgs = mockCreate.mock.calls[0]![0];
+      expect(callArgs.stream).toBe(true);
+    });
   });
 });

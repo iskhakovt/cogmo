@@ -1,6 +1,6 @@
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { createHandleMessage } from "./agent/handle-message.js";
-import { runAgentLoop } from "./agent/loop.js";
+import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
 import { DrizzleAgentStore } from "./agent/store/index.js";
@@ -11,6 +11,7 @@ import { inboundArrived, inngest } from "./inngest/index.js";
 import { AnthropicProvider } from "./llm/anthropic.js";
 import { logger } from "./logger.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
+import { createDeliveryRouter } from "./transport/delivery-router.js";
 import { startChannels } from "./transport/registry.js";
 import { DrizzleTransportStore } from "./transport/store/index.js";
 
@@ -38,6 +39,21 @@ export async function bootstrap() {
   const promptSource = new DefaultPromptSource();
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL);
 
+  const {
+    functions: channelFunctions,
+    adapters,
+    adapterMap,
+  } = await startChannels({
+    defaultUserId: user.id,
+    defaultProfileId: profile.id,
+    transportStore,
+    agentStore,
+    inngest,
+    inboundArrived,
+  });
+
+  const deliveryRouter = createDeliveryRouter({ adapters: adapterMap, transportStore });
+
   const handleMessage = createHandleMessage({
     agentStore,
     transportStore,
@@ -45,16 +61,8 @@ export async function bootstrap() {
     tools,
     memory,
     promptSource,
-    runAgentLoop,
-  });
-
-  const { functions: channelFunctions, adapters } = await startChannels({
-    defaultUserId: user.id,
-    defaultProfileId: profile.id,
-    transportStore,
-    agentStore,
-    inngest,
-    inboundArrived,
+    deliveryRouter,
+    runStreamingAgentLoop,
   });
 
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger

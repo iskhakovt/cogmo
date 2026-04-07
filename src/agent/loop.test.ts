@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { LlmProvider } from "../llm/provider.js";
-import type { LlmResponse } from "../llm/types.js";
-import { runAgentLoop } from "./loop.js";
+import type { ChatStreamResult, LlmResponse, StopReason, StreamEvent } from "../llm/types.js";
+import { runAgentLoop, runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
 import { defineTool, ToolRegistry } from "./tools.js";
 
@@ -20,7 +20,13 @@ function mockProvider(responses: LlmResponse[]): LlmProvider {
   for (const r of responses) {
     chat.mockResolvedValueOnce(r);
   }
-  return { name: "mock", chat };
+  return {
+    name: "mock",
+    chat,
+    chatStream() {
+      throw new Error("chatStream not implemented in mock");
+    },
+  };
 }
 
 function textResponse(text: string): LlmResponse {
@@ -303,5 +309,213 @@ describe("runAgentLoop", () => {
     });
 
     expect(receivedService).toBe(svc);
+  });
+});
+
+// --- Streaming agent loop tests ---
+
+interface MockStreamTurn {
+  events: StreamEvent[];
+  stopReason: StopReason;
+}
+
+function mockStreamProvider(turns: MockStreamTurn[]): LlmProvider {
+  const chatStream = vi.fn();
+  for (const turn of turns) {
+    chatStream.mockReturnValueOnce({
+      events: (async function* () {
+        for (const e of turn.events) yield e;
+      })(),
+      response: Promise.resolve({
+        stopReason: turn.stopReason,
+        model: "mock-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    } satisfies ChatStreamResult);
+  }
+  return {
+    name: "mock-stream",
+    chat: vi.fn(),
+    chatStream,
+  };
+}
+
+describe("runStreamingAgentLoop", () => {
+  it("streams text and returns result", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [
+          { type: "text_delta", text: "Hello" },
+          { type: "text_delta", text: " world" },
+        ],
+        stopReason: "end_turn",
+      },
+    ]);
+    const tools = new ToolRegistry();
+    const collected: StreamEvent[] = [];
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+      service: stubService(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+    });
+
+    expect(result.text).toBe("Hello world");
+    expect(result.iterations).toBe(1);
+    expect(collected).toEqual([
+      { type: "text_delta", text: "Hello" },
+      { type: "text_delta", text: " world" },
+    ]);
+  });
+
+  it("handles tool use across turns", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [
+          { type: "text_delta", text: "Let me search." },
+          { type: "tool_start", id: "t1", name: "echo", input: { text: "ping" } },
+        ],
+        stopReason: "tool_use",
+      },
+      {
+        events: [{ type: "text_delta", text: "Got: pong" }],
+        stopReason: "end_turn",
+      },
+    ]);
+
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echoes",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => `pong from ${input.text}`,
+      }),
+    );
+
+    const collected: StreamEvent[] = [];
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "echo ping" }],
+      tools,
+      service: stubService(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+    });
+
+    expect(result.text).toBe("Got: pong");
+    expect(result.iterations).toBe(2);
+
+    // Events: text_delta, tool_start, tool_result, text_delta
+    const types = collected.map((e) => e.type);
+    expect(types).toEqual(["text_delta", "tool_start", "tool_result", "text_delta"]);
+
+    // tool_result should have the handler's output
+    const toolResult = collected.find((e) => e.type === "tool_result");
+    expect(toolResult).toMatchObject({
+      type: "tool_result",
+      name: "echo",
+      output: "pong from ping",
+    });
+  });
+
+  it("emits onEvent for every event in order", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [
+          { type: "text_delta", text: "A" },
+          { type: "text_delta", text: "B" },
+          { type: "text_delta", text: "C" },
+        ],
+        stopReason: "end_turn",
+      },
+    ]);
+    const tools = new ToolRegistry();
+    const order: string[] = [];
+
+    await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+      service: stubService(),
+      onEvent: async (e) => {
+        if (e.type === "text_delta") order.push(e.text);
+      },
+    });
+
+    expect(order).toEqual(["A", "B", "C"]);
+  });
+
+  it("does not mutate the original messages array", async () => {
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    const original = [{ role: "user" as const, content: "hi" }];
+
+    await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: original,
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(original).toHaveLength(1);
+  });
+
+  it("respects maxIterations", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: {} }],
+        stopReason: "tool_use",
+      },
+      {
+        events: [{ type: "tool_start", id: "t2", name: "echo", input: {} }],
+        stopReason: "tool_use",
+      },
+      {
+        events: [{ type: "tool_start", id: "t3", name: "echo", input: {} }],
+        stopReason: "tool_use",
+      },
+    ]);
+
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({}),
+        handler: async () => "ok",
+      }),
+    );
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "loop" }],
+      tools,
+      service: stubService(),
+      maxIterations: 2,
+      onEvent: async () => {},
+    });
+
+    expect(result.iterations).toBe(2);
+    expect(provider.chatStream).toHaveBeenCalledTimes(2);
   });
 });

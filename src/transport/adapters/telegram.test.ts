@@ -1,13 +1,15 @@
 import { ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockTransport } from "../../test/factories.js";
+import type { StreamingAdapter } from "../types.js";
 import { setup } from "./telegram.js";
 
 // Mock grammy
 const handlers = new Map<string, any>();
 const mockBotApi = {
-  sendMessage: vi.fn().mockResolvedValue({}),
+  sendMessage: vi.fn().mockResolvedValue({ message_id: 100 }),
   sendChatAction: vi.fn().mockResolvedValue(true),
+  editMessageText: vi.fn().mockResolvedValue({}),
 };
 
 vi.mock("grammy", () => {
@@ -117,5 +119,91 @@ describe("telegram adapter", () => {
     await adapter.deliver("12345", "response");
 
     expect(mockBotApi.sendMessage).toHaveBeenCalledWith(12345, "response");
+  });
+
+  describe("streaming", () => {
+    async function createStreamingAdapter() {
+      const { adapter } = await createAdapter();
+      return adapter as unknown as StreamingAdapter;
+    }
+
+    it("openStream sends initial message on first push", async () => {
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "Hello" });
+
+      expect(mockBotApi.sendMessage).toHaveBeenCalledWith(42, "Hello");
+    });
+
+    it("subsequent pushes edit the message", async () => {
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "Hello" });
+      // Advance time past throttle interval
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 600);
+      await handle.push({ type: "text_delta", text: " world" });
+
+      expect(mockBotApi.editMessageText).toHaveBeenCalledWith(42, 100, "Hello world");
+    });
+
+    it("finish sends final edit", async () => {
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "done" });
+      mockBotApi.editMessageText.mockClear();
+      await handle.finish();
+
+      expect(mockBotApi.editMessageText).toHaveBeenCalledWith(42, 100, "done");
+    });
+
+    it("abort appends error to message", async () => {
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "partial" });
+      mockBotApi.editMessageText.mockClear();
+      await handle.abort("LLM failed");
+
+      expect(mockBotApi.editMessageText).toHaveBeenCalledWith(42, 100, "partial\n\n⚠️ LLM failed");
+    });
+
+    it("retry dedup returns same handle for same runId", async () => {
+      const adapter = await createStreamingAdapter();
+      const handle1 = await adapter.openStream("42", "run-1");
+      const handle2 = await adapter.openStream("42", "run-1");
+
+      expect(handle1).toBe(handle2);
+    });
+
+    it("different runId creates different handle", async () => {
+      const adapter = await createStreamingAdapter();
+      const handle1 = await adapter.openStream("42", "run-1");
+      const handle2 = await adapter.openStream("42", "run-2");
+
+      expect(handle1).not.toBe(handle2);
+    });
+
+    it("tool_start appends tool indicator", async () => {
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "Let me search." });
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 600);
+      await handle.push({
+        type: "tool_start",
+        id: "t1",
+        name: "web_search",
+        input: {},
+      });
+
+      expect(mockBotApi.editMessageText).toHaveBeenCalledWith(
+        42,
+        100,
+        "Let me search.\n🔍 web_search...\n",
+      );
+    });
   });
 });

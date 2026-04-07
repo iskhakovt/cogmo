@@ -2,11 +2,14 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { LlmProvider } from "./provider.js";
 import type {
   ChatParams,
+  ChatStreamResult,
   ContentBlock,
   LlmResponse,
   Message,
   StopReason,
+  StreamEvent,
   ToolDefinition,
+  Usage,
 } from "./types.js";
 
 const DEFAULT_MAX_TOKENS = 8192;
@@ -25,14 +28,80 @@ export class AnthropicProvider implements LlmProvider {
     this.#client = new Anthropic({ apiKey, ...(baseURL ? { baseURL } : {}) });
   }
 
+  chatStream(params: ChatParams): ChatStreamResult {
+    const anthropicParams = buildCreateParams(params);
+    let resolveResponse: (v: { stopReason: StopReason; model: string; usage: Usage }) => void;
+    const response = new Promise<{ stopReason: StopReason; model: string; usage: Usage }>(
+      (resolve) => {
+        resolveResponse = resolve;
+      },
+    );
+
+    const client = this.#client;
+
+    async function* generateEvents(): AsyncIterable<StreamEvent> {
+      const stream = await client.messages.create({ ...anthropicParams, stream: true });
+
+      // Track tool_use blocks by index for input accumulation
+      const toolBlocks = new Map<number, { id: string; name: string; jsonChunks: string[] }>();
+      let model = "";
+      let stopReason: StopReason = "end_turn";
+      const usage: Usage = { inputTokens: 0, outputTokens: 0 };
+
+      for await (const event of stream) {
+        switch (event.type) {
+          case "message_start":
+            model = event.message.model;
+            usage.inputTokens = event.message.usage.input_tokens;
+            usage.outputTokens = event.message.usage.output_tokens;
+            break;
+
+          case "content_block_start":
+            if (event.content_block.type === "tool_use") {
+              toolBlocks.set(event.index, {
+                id: event.content_block.id,
+                name: event.content_block.name,
+                jsonChunks: [],
+              });
+            }
+            break;
+
+          case "content_block_delta":
+            if (event.delta.type === "text_delta") {
+              yield { type: "text_delta", text: event.delta.text };
+            } else if (event.delta.type === "input_json_delta") {
+              const block = toolBlocks.get(event.index);
+              if (block) {
+                block.jsonChunks.push(event.delta.partial_json);
+              }
+            }
+            break;
+
+          case "content_block_stop": {
+            const block = toolBlocks.get(event.index);
+            if (block) {
+              const input = JSON.parse(block.jsonChunks.join(""));
+              yield { type: "tool_start", id: block.id, name: block.name, input };
+              toolBlocks.delete(event.index);
+            }
+            break;
+          }
+
+          case "message_delta":
+            stopReason = fromAnthropicStopReason(event.delta.stop_reason);
+            usage.outputTokens = event.usage.output_tokens;
+            break;
+        }
+      }
+
+      resolveResponse({ stopReason, model, usage });
+    }
+
+    return { events: generateEvents(), response };
+  }
+
   async chat(params: ChatParams): Promise<LlmResponse> {
-    const response = await this.#client.messages.create({
-      model: params.model,
-      max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
-      system: params.system,
-      messages: params.messages.map(toAnthropicMessage),
-      ...(params.tools?.length && { tools: params.tools.map(toAnthropicTool) }),
-    });
+    const response = await this.#client.messages.create(buildCreateParams(params));
 
     return {
       content: response.content.flatMap(fromAnthropicBlock),
@@ -44,6 +113,18 @@ export class AnthropicProvider implements LlmProvider {
       },
     };
   }
+}
+
+// --- Params builder ---
+
+function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNonStreaming {
+  return {
+    model: params.model,
+    max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
+    system: params.system,
+    messages: params.messages.map(toAnthropicMessage),
+    ...(params.tools?.length && { tools: params.tools.map(toAnthropicTool) }),
+  };
 }
 
 // --- To Anthropic format ---
