@@ -12,6 +12,11 @@ function stubService(): Service {
       recall: vi.fn().mockResolvedValue({ memories: [] }),
       retain: vi.fn().mockResolvedValue(undefined),
     },
+    files: {
+      read: vi.fn().mockResolvedValue(""),
+      write: vi.fn().mockResolvedValue(undefined),
+      list: vi.fn().mockResolvedValue([]),
+    },
   };
 }
 

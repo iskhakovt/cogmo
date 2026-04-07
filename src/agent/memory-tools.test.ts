@@ -9,6 +9,11 @@ function mockService(overrides?: Partial<Service["memory"]>): Service {
       retain: vi.fn().mockResolvedValue(undefined),
       ...overrides,
     },
+    files: {
+      read: vi.fn().mockResolvedValue(""),
+      write: vi.fn().mockResolvedValue(undefined),
+      list: vi.fn().mockResolvedValue([]),
+    },
   };
 }
 

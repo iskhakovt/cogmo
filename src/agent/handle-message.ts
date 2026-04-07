@@ -9,6 +9,7 @@ import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
+import type { Service } from "./service.js";
 import { createService } from "./service.js";
 import type { AgentStore } from "./store/index.js";
 import type { ToolRegistry } from "./tools.js";
@@ -20,6 +21,7 @@ export interface HandleMessageDeps {
   tools: ToolRegistry;
   memory: MemoryProvider;
   promptSource: PromptSource;
+  fileService: Service["files"];
   deliveryRouter: DeliveryRouter;
   runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>;
 }
@@ -41,6 +43,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
     tools,
     memory,
     promptSource,
+    fileService,
     deliveryRouter,
     runStreamingAgentLoop,
   } = deps;
@@ -98,7 +101,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // ──── NON-DURABLE: resolve targets + stream ────
 
       const profile = await agentStore.getProfile(profileId);
-      const service = createService(memory, userId, []);
+      const service = createService(memory, userId, [], fileService);
       const delivery = await deliveryRouter.prepare(conversationId, runId);
 
       let result: AgentLoopResult;

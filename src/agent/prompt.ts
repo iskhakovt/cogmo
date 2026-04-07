@@ -16,20 +16,46 @@ You have access to tools — use them when they help answer the user's question.
 If you don't know something and don't have a tool for it, say so honestly.`;
 
 /**
- * Default prompt source: profile base prompt + steering rules from DB.
+ * Default prompt source: profile base prompt + steering rules + current time from DB.
  */
 export class DefaultPromptSource implements PromptSource {
+  #timezone: string;
+
+  constructor(timezone = "UTC") {
+    this.#timezone = timezone;
+  }
+
   async assemble(store: AgentStore, profileId: string): Promise<string> {
     const profile = await store.getProfile(profileId);
     const basePrompt = profile?.basePrompt ?? DEFAULT_BASE_PROMPT;
 
     const rules = await store.getActiveRules(profileId);
 
-    if (rules.length === 0) {
-      return basePrompt;
+    const parts = [basePrompt];
+
+    if (rules.length > 0) {
+      const rulesList = rules.map((r) => `- ${r.rule}`).join("\n");
+      parts.push(`Rules:\n${rulesList}`);
     }
 
-    const rulesList = rules.map((r) => `- ${r.rule}`).join("\n");
-    return `${basePrompt}\n\nRules:\n${rulesList}`;
+    parts.push(formatCurrentTime(this.#timezone));
+
+    return parts.join("\n\n");
   }
+}
+
+function formatCurrentTime(timezone: string): string {
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = Object.fromEntries(formatter.formatToParts(now).map((p) => [p.type, p.value]));
+  return `Current time: ${parts.weekday}, ${parts.month} ${parts.day}, ${parts.year}, ${parts.hour}:${parts.minute} (${timezone})`;
 }

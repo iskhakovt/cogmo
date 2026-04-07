@@ -17,10 +17,21 @@ import type {
  * a bridge implements Service by routing calls across the boundary.
  * Tools always see the same interface regardless of execution environment.
  */
+export interface FileEntry {
+  path: string;
+  size: number;
+  lastModified: Date;
+}
+
 export interface Service {
   memory: {
     recall(query: string, opts?: RecallOptions): Promise<RecallResult>;
     retain(content: string, opts?: RetainOptions): Promise<void>;
+  };
+  files: {
+    read(path: string): Promise<string>;
+    write(path: string, content: string): Promise<void>;
+    list(prefix?: string): Promise<FileEntry[]>;
   };
 }
 
@@ -35,6 +46,7 @@ export function createService(
   memory: MemoryProvider,
   bankId: string,
   profileTags: readonly string[],
+  files: Service["files"],
 ): Service {
   return {
     memory: {
@@ -49,5 +61,6 @@ export function createService(
           tags: [...profileTags, ...(opts?.tags ?? [])],
         }),
     },
+    files,
   };
 }
