@@ -144,4 +144,29 @@ describe("DefaultPromptSource", () => {
 
     expect(prompt).not.toContain("# Rules");
   });
+
+  it("assembles sections in correct order", async () => {
+    const store = mockAgentStore({
+      getProfile: vi.fn().mockResolvedValue(null),
+      getActiveRules: vi.fn().mockResolvedValue([{ rule: "Be kind" }]),
+    });
+    const prompt = await new DefaultPromptSource({
+      timezone: "UTC",
+      toolDefinitions: () => testTools,
+      activeServices: ["memory"],
+      getUserContext: async () => "Name: Tim",
+    }).assemble(store, "p1");
+
+    const userIdx = prompt.indexOf("# User");
+    const toolsIdx = prompt.indexOf("# Tools");
+    const capsIdx = prompt.indexOf("# Capabilities");
+    const rulesIdx = prompt.indexOf("# Rules");
+    const timeIdx = prompt.indexOf("Current time:");
+
+    expect(userIdx).toBeGreaterThan(0);
+    expect(toolsIdx).toBeGreaterThan(userIdx);
+    expect(capsIdx).toBeGreaterThan(toolsIdx);
+    expect(rulesIdx).toBeGreaterThan(capsIdx);
+    expect(timeIdx).toBeGreaterThan(rulesIdx);
+  });
 });
