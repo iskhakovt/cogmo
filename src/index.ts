@@ -41,7 +41,11 @@ export async function bootstrap() {
   const provider = new AnthropicProvider(env.ANTHROPIC_API_KEY, env.ANTHROPIC_BASE_URL);
   const webTools = createWebTools(env.TAVILY_API_KEY, env.OPENROUTER_API_KEY);
   const tools = createDefaultTools([...memoryTools, ...webTools, ...fileTools], env.USER_TIMEZONE);
-  const promptSource = new DefaultPromptSource(env.USER_TIMEZONE);
+  const promptSource = new DefaultPromptSource({
+    timezone: env.USER_TIMEZONE,
+    toolDefinitions: () => tools.definitions(),
+    activeServices: ["memory", "files"],
+  });
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL);
 
   // S3-compatible file storage (MinIO locally, AWS S3 / R2 in production)
