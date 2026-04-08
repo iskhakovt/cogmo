@@ -3,6 +3,7 @@ import { err, ok, type Result } from "neverthrow";
 import type { JsonValue } from "type-fest";
 import type { AgentStore } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
+import { logger } from "../logger.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { Session, TransportStore } from "./store/index.js";
 
@@ -72,6 +73,10 @@ export function createTransport(deps: {
         const lastActivity = await agentStore.getLastMessageTime(session.conversationId);
         if (lastActivity && Date.now() - lastActivity.getTime() > idleTimeoutMs) {
           await transportStore.closeSession(session.id);
+          logger.warn(
+            { sessionId: session.id, conversationId: session.conversationId },
+            "session idle-expired via safety net (idle timer may have failed)",
+          );
           return null;
         }
       }
