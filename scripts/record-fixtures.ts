@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { LLMock } from "@copilotkit/llmock";
+import { LLMock } from "@copilotkit/aimock";
 import { HindsightClient } from "@vectorize-io/hindsight-client";
 /**
  * Record Hindsight's LLM interactions as llmock fixtures.

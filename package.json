@@ -54,7 +54,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.8",
-    "@copilotkit/llmock": "github:iskhakovt/llmock#patched",
+    "@copilotkit/aimock": "^1.8.0",
     "@electric-sql/pglite": "^0.4.2",
     "@inngest/test": "^1.0.0",
     "@testcontainers/ollama": "^11.13.0",
