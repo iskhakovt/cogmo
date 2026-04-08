@@ -20,12 +20,14 @@ export function createIdleTimer(deps: { idleTimeoutMs: number; transportStore: T
     {
       id: "idle-timer",
       triggers: [responseReady],
-      cancelOn: [{ event: inboundArrived.name, match: "data.conversationId" }],
+      cancelOn: [{ event: inboundArrived, match: "data.conversationId" }],
+      concurrency: { limit: 1, key: "event.data.conversationId" },
     },
     async ({ event, step }) => {
       const { conversationId } = event.data;
 
-      await step.sleep("idle-wait", `${idleTimeoutMs}ms`);
+      const minutes = Math.round(idleTimeoutMs / 60_000);
+      await step.sleep("idle-wait", `${minutes}m`);
 
       // Timer fired — conversation is idle
       await step.run("close-sessions", async () => {
