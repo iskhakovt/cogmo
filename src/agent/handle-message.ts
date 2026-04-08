@@ -104,9 +104,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         );
       });
 
+      // No unbatched messages — nothing to process (e.g., flush with no new input)
+      if (inboundMessages.length === 0) {
+        return { status: "skipped", reason: "no_messages" };
+      }
+
       const inboundBlocks = inboundMessages.flatMap((m) => contentToBlocks(m.content));
       const userContentText = inboundMessages.map((m) => contentToText(m.content)).join("\n");
-      const maxInboundId = inboundMessages.at(-1)?.id ?? triggerInboundId ?? "";
+      // Safe — guarded by length check above
+      const maxInboundId = inboundMessages.at(-1)?.id ?? "";
 
       await step.run("create-user-message", async () => {
         await agentStore.insertMessage({

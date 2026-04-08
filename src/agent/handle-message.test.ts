@@ -223,4 +223,81 @@ describe("createHandleMessage", () => {
 
     expect(handle.deliverBatch).toHaveBeenCalledWith("Hello from assistant");
   });
+
+  it("skips processing when triggerInboundId is stale", async () => {
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getLastAssistantMessage: vi
+          .fn()
+          .mockResolvedValue({ id: "msg-2", lastInboundMessageId: "inbound-5" }),
+      }),
+    });
+
+    const result = await (createHandleMessage(deps) as any).fn({
+      event: { data: { conversationId: "conv-1", triggerInboundId: "inbound-3" } },
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(result).toEqual({ status: "skipped", reason: "stale" });
+    expect(deps.runStreamingAgentLoop).not.toHaveBeenCalled();
+  });
+
+  it("skips with null triggerInboundId (flush) — does NOT trigger staleness guard", async () => {
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getLastAssistantMessage: vi
+          .fn()
+          .mockResolvedValue({ id: "msg-2", lastInboundMessageId: "inbound-5" }),
+      }),
+    });
+
+    const result = await (createHandleMessage(deps) as any).fn({
+      event: { data: { conversationId: "conv-1", triggerInboundId: null } },
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    // Should process, not skip — null trigger bypasses staleness guard
+    expect(result).toEqual({ status: "processed", conversationId: "conv-1" });
+  });
+
+  it("emits flush event when resume policy is flush", async () => {
+    const step = mockStep();
+    const deps = mockDeps({
+      debounceConfig: { idleTimeoutMs: 3000, maxWaitMs: 30000, resumePolicy: "flush" as const },
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step,
+      runId: testRunId,
+    });
+
+    // Should have called sendEvent twice: send-response + flush
+    expect(step.sendEvent).toHaveBeenCalledWith(
+      "flush",
+      expect.objectContaining({
+        name: "inbound/ready",
+        data: { conversationId: "conv-1", triggerInboundId: null },
+      }),
+    );
+  });
+
+  it("does not emit flush when resume policy is debounce", async () => {
+    const step = mockStep();
+    const deps = mockDeps({
+      debounceConfig: { idleTimeoutMs: 3000, maxWaitMs: 30000, resumePolicy: "debounce" as const },
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step,
+      runId: testRunId,
+    });
+
+    // Only send-response, no flush
+    const flushCalls = step.sendEvent.mock.calls.filter(([id]: any) => id === "flush");
+    expect(flushCalls).toHaveLength(0);
+  });
 });
