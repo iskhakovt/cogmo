@@ -134,6 +134,19 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     await ctx.reply("New conversation started.");
   });
 
+  async function resolveOrCreateSession(addr: string, handle: string) {
+    let session = await transport.resolveSession(addr);
+    if (!session) {
+      const result = await transport.createConversation(addr, handle, { isPrivate: true });
+      if (result.isErr()) {
+        logger.error({ error: result.error }, "failed to create conversation");
+        return null;
+      }
+      session = result.value;
+    }
+    return session;
+  }
+
   bot.on("message:text", async (ctx) => {
     await ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => {});
 
@@ -141,18 +154,49 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     const handle = String(ctx.from.id);
     const platformTs = new Date(ctx.message.date * 1000);
 
-    let session = await transport.resolveSession(addr);
-    if (!session) {
-      const result = await transport.createConversation(addr, handle, { isPrivate: true });
-      if (result.isErr()) {
-        logger.error({ error: result.error }, "failed to create conversation");
-        return;
-      }
-      session = result.value;
-    }
+    const session = await resolveOrCreateSession(addr, handle);
+    if (!session) return;
+
     const emitResult = await transport.emit(session.id, ctx.message.text, platformTs);
     if (emitResult.isErr()) {
       logger.error({ error: emitResult.error }, "failed to emit message");
+    }
+  });
+
+  bot.on("message:photo", async (ctx) => {
+    await ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => {});
+
+    const addr = String(ctx.chat.id);
+    const handle = String(ctx.from.id);
+    const platformTs = new Date(ctx.message.date * 1000);
+
+    const session = await resolveOrCreateSession(addr, handle);
+    if (!session) return;
+
+    try {
+      // Get the largest photo (last in array)
+      const photo = ctx.message.photo.at(-1);
+      if (!photo) return;
+
+      const file = await ctx.api.getFile(photo.file_id);
+      const url = `https://api.telegram.org/file/bot${creds.token}/${file.file_path}`;
+      const response = await fetch(url);
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const base64 = buffer.toString("base64");
+
+      const path = await transport.uploadAttachment(base64, "image/jpeg");
+      const caption = ctx.message.caption ?? "";
+
+      const content: JsonValue[] = [];
+      if (caption) content.push({ type: "text", text: caption });
+      content.push({ type: "image", path, mediaType: "image/jpeg" });
+
+      const emitResult = await transport.emit(session.id, content, platformTs);
+      if (emitResult.isErr()) {
+        logger.error({ error: emitResult.error }, "failed to emit photo message");
+      }
+    } catch (err) {
+      logger.error({ err }, "failed to process photo");
     }
   });
 

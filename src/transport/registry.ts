@@ -1,4 +1,5 @@
 import type { Inngest } from "inngest";
+import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
@@ -14,6 +15,7 @@ export interface RegistryDeps {
   agentStore: AgentStore;
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
+  files: Service["files"];
 }
 
 export interface RegistryResult {
@@ -56,6 +58,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       agentStore,
       inngest: deps.inngest,
       inboundArrived: deps.inboundArrived,
+      files: deps.files,
     });
 
     const result = await mod.setup({

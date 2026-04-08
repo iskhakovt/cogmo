@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { JsonValue } from "type-fest";
+import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import type { Session, TransportStore } from "./store/index.js";
@@ -31,6 +33,8 @@ export interface Transport {
     content: JsonValue,
     platformTs: Date,
   ): Promise<Result<void, TransportError>>;
+  /** Upload an attachment (image, file) to storage. Returns the storage path. */
+  uploadAttachment(data: string, mediaType: string): Promise<string>;
 }
 
 /**
@@ -44,6 +48,7 @@ export function createTransport(deps: {
   agentStore: AgentStore;
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
+  files: Service["files"];
 }): Transport {
   const {
     channelId,
@@ -53,6 +58,7 @@ export function createTransport(deps: {
     agentStore,
     inngest,
     inboundArrived,
+    files,
   } = deps;
 
   return {
@@ -103,6 +109,13 @@ export function createTransport(deps: {
       );
 
       return ok(undefined);
+    },
+
+    async uploadAttachment(data: string, mediaType: string): Promise<string> {
+      const ext = mediaType.split("/")[1] ?? "bin";
+      const path = `inbound/${randomUUID()}.${ext}`;
+      await files.write(path, data);
+      return path;
     },
   };
 }

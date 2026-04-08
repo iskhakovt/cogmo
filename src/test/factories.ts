@@ -76,6 +76,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
     ),
     closeSession: vi.fn().mockResolvedValue(undefined),
     emit: vi.fn().mockResolvedValue(ok(undefined)),
+    uploadAttachment: vi.fn().mockResolvedValue("inbound/test.jpg"),
     ...overrides,
   };
 }
