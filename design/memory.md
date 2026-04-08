@@ -147,7 +147,7 @@ Used by `retain()` for structured fact extraction. Needs structured output / JSO
 | Anthropic | claude-haiku-4.5 | $1.00 | $5.00 | Hindsight default for `provider=anthropic`. Tested. |
 | Local (Ollama) | qwen2.5:3b | Free | Free | Slow (60-90s per extraction). Needs full image. |
 
-**Chosen:** gpt-5-nano via OpenRouter for production. Anthropic Haiku for test fixture recording (llmock proxy to `api.anthropic.com` works; OpenRouter's `/api/v1` path breaks llmock's URL resolution — PR submitted: CopilotKit/llmock#57).
+**Chosen:** gpt-5-nano via OpenRouter for production. Test fixtures recorded via aimock (`@copilotkit/aimock`) — URL path prefix fix merged (CopilotKit/llmock#57).
 
 ### Embeddings
 
