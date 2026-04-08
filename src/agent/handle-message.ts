@@ -4,6 +4,7 @@ import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, Message, StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
+import type { AttachmentStore } from "../transport/attachment-store.js";
 import { contentToBlocks, contentToText } from "../transport/content.js";
 import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
@@ -22,6 +23,7 @@ export interface HandleMessageDeps {
   memory: MemoryProvider;
   promptSource: PromptSource;
   fileService: Service["files"];
+  attachments: AttachmentStore;
   deliveryRouter: DeliveryRouter;
   runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>;
 }
@@ -44,6 +46,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
     memory,
     promptSource,
     fileService,
+    attachments,
     deliveryRouter,
     runStreamingAgentLoop,
   } = deps;
@@ -101,12 +104,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       // ──── NON-DURABLE: resolve images + auto-recall + stream ────
 
-      // Resolve ImageRefs from S3 into actual ImageBlocks
+      // Resolve ImageRefs from S3 into actual ImageBlocks (read bytes, base64-encode)
       const resolvedBlocks: ContentBlock[] = await Promise.all(
         inboundBlocks.map(async (block): Promise<ContentBlock> => {
           if (block.type === "image_ref") {
-            const data = await fileService.read(block.path);
-            return { type: "image", source: "base64", data, mediaType: block.mediaType };
+            const bytes = await attachments.download(block.path);
+            return {
+              type: "image",
+              source: "base64",
+              data: bytes.toString("base64"),
+              mediaType: block.mediaType,
+            };
           }
           return block;
         }),
@@ -134,11 +142,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         ? `${systemPrompt}\n\n# Recalled Context\n\n${recalledContext}`
         : systemPrompt;
 
-      // Build message history, replacing the last user message with resolved content
+      // Build message history, replacing the last user message with resolved content.
+      // Safe because: getHistory runs after create-user-message (durable step ordering),
+      // and concurrency lock on conversationId prevents concurrent writes.
       const historyMessages = [...history] as Message[];
       const hasImages = resolvedBlocks.some((b) => b.type === "image");
       if (hasImages && historyMessages.length > 0) {
-        // Replace the last user message (just persisted as text) with full content blocks
         const lastIdx = historyMessages.length - 1;
         if (historyMessages[lastIdx]?.role === "user") {
           historyMessages[lastIdx] = { role: "user", content: resolvedBlocks };

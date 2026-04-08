@@ -10,6 +10,7 @@ const mockBotApi = {
   sendMessage: vi.fn().mockResolvedValue({ message_id: 100 }),
   sendChatAction: vi.fn().mockResolvedValue(true),
   editMessageText: vi.fn().mockResolvedValue({}),
+  getFile: vi.fn().mockResolvedValue({ file_path: "photos/file_1.jpg" }),
 };
 
 vi.mock("grammy", () => {
@@ -31,6 +32,25 @@ function makeCtx(fromId: number, text = "hello", chatId = 42) {
     message: { text, date: 1700000000 },
     reply: vi.fn().mockResolvedValue({}),
     api: { sendChatAction: vi.fn().mockResolvedValue(true) },
+  };
+}
+
+function makePhotoCtx(fromId: number, caption?: string, chatId = 42) {
+  return {
+    from: { id: fromId },
+    chat: { id: chatId },
+    message: {
+      date: 1700000000,
+      caption,
+      photo: [
+        { file_id: "small_id", width: 90, height: 90 },
+        { file_id: "large_id", width: 800, height: 600 },
+      ],
+    },
+    api: {
+      sendChatAction: vi.fn().mockResolvedValue(true),
+      getFile: vi.fn().mockResolvedValue({ file_path: "photos/file_1.jpg" }),
+    },
   };
 }
 
@@ -119,6 +139,51 @@ describe("telegram adapter", () => {
     await adapter.deliver("12345", "response");
 
     expect(mockBotApi.sendMessage).toHaveBeenCalledWith(12345, "response");
+  });
+
+  describe("photos", () => {
+    const mockFetch = vi.fn();
+
+    beforeEach(() => {
+      mockFetch.mockResolvedValue({
+        arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+      });
+      vi.stubGlobal("fetch", mockFetch);
+    });
+
+    it("uploads photo to S3 and emits structured content", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makePhotoCtx(111);
+      await handlers.get("on:message:photo")!(ctx);
+
+      // Gets the largest photo (last in array)
+      expect(ctx.api.getFile).toHaveBeenCalledWith("large_id");
+
+      // Uploads to S3 via transport
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "image/jpeg");
+
+      // Emits structured content with image reference
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "image", path: "inbound/test.jpg", mediaType: "image/jpeg" }],
+        expect.any(Date),
+      );
+    });
+
+    it("includes caption as text block when present", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makePhotoCtx(111, "Look at this!");
+      await handlers.get("on:message:photo")!(ctx);
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "Look at this!" },
+          { type: "image", path: "inbound/test.jpg", mediaType: "image/jpeg" },
+        ],
+        expect.any(Date),
+      );
+    });
   });
 
   describe("streaming", () => {

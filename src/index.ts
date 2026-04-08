@@ -17,6 +17,7 @@ import { inboundArrived, inngest } from "./inngest/index.js";
 import { AnthropicProvider } from "./llm/anthropic.js";
 import { logger } from "./logger.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
+import { createAttachmentStore } from "./transport/attachment-store.js";
 import { createDeliveryRouter } from "./transport/delivery-router.js";
 import { startChannels } from "./transport/registry.js";
 import { DrizzleTransportStore } from "./transport/store/index.js";
@@ -67,6 +68,7 @@ export async function bootstrap() {
       : {}),
   });
   const fileService = createFileService(s3Client, env.S3_BUCKET);
+  const attachmentStore = createAttachmentStore(s3Client, env.S3_BUCKET);
 
   const {
     functions: channelFunctions,
@@ -79,7 +81,7 @@ export async function bootstrap() {
     agentStore,
     inngest,
     inboundArrived,
-    files: fileService,
+    attachments: attachmentStore,
   });
 
   const deliveryRouter = createDeliveryRouter({ adapters: adapterMap, transportStore });
@@ -92,6 +94,7 @@ export async function bootstrap() {
     memory,
     promptSource,
     fileService,
+    attachments: attachmentStore,
     deliveryRouter,
     runStreamingAgentLoop,
   });

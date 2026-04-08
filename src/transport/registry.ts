@@ -1,9 +1,9 @@
 import type { Inngest } from "inngest";
-import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import { adaptersByType } from "./adapters/index.js";
+import type { AttachmentStore } from "./attachment-store.js";
 import type { TransportStore } from "./store/index.js";
 import { createTransport } from "./transport.js";
 import type { Adapter, StreamingAdapter } from "./types.js";
@@ -15,7 +15,7 @@ export interface RegistryDeps {
   agentStore: AgentStore;
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
-  files: Service["files"];
+  attachments: AttachmentStore;
 }
 
 export interface RegistryResult {
@@ -58,7 +58,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       agentStore,
       inngest: deps.inngest,
       inboundArrived: deps.inboundArrived,
-      files: deps.files,
+      attachments: deps.attachments,
     });
 
     const result = await mod.setup({
