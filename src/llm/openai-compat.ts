@@ -8,7 +8,10 @@ import type {
   Message,
   StopReason,
   StreamEvent,
+  TextBlock,
   ToolDefinition,
+  ToolResultBlock,
+  ToolUseBlock,
   Usage,
 } from "./types.js";
 
@@ -158,46 +161,43 @@ function buildMessages(system: string, messages: Message[]): OpenAI.ChatCompleti
 
     // Content blocks — handle tool_use and tool_result specially
     if (msg.role === "assistant") {
-      const textParts = msg.content
-        .filter((b) => b.type === "text")
-        .map((b) => (b as { text: string }).text)
-        .join("");
-      const toolCalls = msg.content
-        .filter((b) => b.type === "tool_use")
-        .map((b) => ({
-          id: (b as { id: string }).id,
-          type: "function" as const,
-          function: {
-            name: (b as { name: string }).name,
-            arguments: JSON.stringify((b as { input: unknown }).input),
-          },
-        }));
+      const textBlocks = msg.content.filter((b): b is TextBlock => b.type === "text");
+      const toolUseBlocks = msg.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
+
+      const textContent = textBlocks.map((b) => b.text).join("");
+      const toolCalls = toolUseBlocks.map((b) => ({
+        id: b.id,
+        type: "function" as const,
+        function: {
+          name: b.name,
+          arguments: JSON.stringify(b.input),
+        },
+      }));
 
       result.push({
         role: "assistant",
-        content: textParts || null,
+        content: textContent || null,
         ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
       });
     } else {
       // User message — may contain tool_result blocks
-      const toolResults = msg.content.filter((b) => b.type === "tool_result");
-      const textParts = msg.content.filter((b) => b.type === "text");
+      const toolResults = msg.content.filter((b): b is ToolResultBlock => b.type === "tool_result");
+      const textBlocks = msg.content.filter((b): b is TextBlock => b.type === "text");
 
       // Tool results become separate "tool" role messages
       for (const tr of toolResults) {
-        const block = tr as { toolUseId: string; content: string };
         result.push({
           role: "tool",
-          tool_call_id: block.toolUseId,
-          content: block.content,
+          tool_call_id: tr.toolUseId,
+          content: tr.content,
         });
       }
 
       // Regular text content
-      if (textParts.length > 0) {
+      if (textBlocks.length > 0) {
         result.push({
           role: "user",
-          content: textParts.map((b) => (b as { text: string }).text).join(""),
+          content: textBlocks.map((b) => b.text).join(""),
         });
       }
     }
