@@ -79,6 +79,7 @@ export async function bootstrap() {
     agentStore,
     inngest,
     inboundArrived,
+    files: fileService,
   });
 
   const deliveryRouter = createDeliveryRouter({ adapters: adapterMap, transportStore });

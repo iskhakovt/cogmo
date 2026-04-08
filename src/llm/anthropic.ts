@@ -146,6 +146,22 @@ function toAnthropicBlock(
   switch (block.type) {
     case "text":
       return { type: "text", text: block.text };
+    case "image":
+      return {
+        type: "image",
+        source:
+          block.source === "base64"
+            ? {
+                type: "base64",
+                data: block.data,
+                media_type: block.mediaType as
+                  | "image/jpeg"
+                  | "image/png"
+                  | "image/gif"
+                  | "image/webp",
+              }
+            : { type: "url", url: block.data },
+      };
     case "tool_use":
       return { type: "tool_use", id: block.id, name: block.name, input: block.input };
     case "tool_result": {

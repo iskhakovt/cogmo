@@ -4,6 +4,7 @@ import type {
   ChatParams,
   ChatStreamResult,
   ContentBlock,
+  ImageBlock,
   LlmResponse,
   Message,
   StopReason,
@@ -180,9 +181,10 @@ function buildMessages(system: string, messages: Message[]): OpenAI.ChatCompleti
         ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
       });
     } else {
-      // User message — may contain tool_result blocks
+      // User message — may contain tool_result, text, and image blocks
       const toolResults = msg.content.filter((b): b is ToolResultBlock => b.type === "tool_result");
       const textBlocks = msg.content.filter((b): b is TextBlock => b.type === "text");
+      const imageBlocks = msg.content.filter((b): b is ImageBlock => b.type === "image");
 
       // Tool results become separate "tool" role messages
       for (const tr of toolResults) {
@@ -193,11 +195,19 @@ function buildMessages(system: string, messages: Message[]): OpenAI.ChatCompleti
         });
       }
 
-      // Regular text content
-      if (textBlocks.length > 0) {
+      // Text + images → multipart content array
+      if (textBlocks.length > 0 || imageBlocks.length > 0) {
+        const parts: OpenAI.ChatCompletionContentPart[] = [];
+        for (const tb of textBlocks) {
+          parts.push({ type: "text", text: tb.text });
+        }
+        for (const ib of imageBlocks) {
+          const url = ib.source === "url" ? ib.data : `data:${ib.mediaType};base64,${ib.data}`;
+          parts.push({ type: "image_url", image_url: { url } });
+        }
         result.push({
           role: "user",
-          content: textBlocks.map((b) => b.text).join(""),
+          content: imageBlocks.length > 0 ? parts : textBlocks.map((b) => b.text).join(""),
         });
       }
     }

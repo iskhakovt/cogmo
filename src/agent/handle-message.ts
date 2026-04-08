@@ -1,10 +1,10 @@
 import { inngest } from "../inngest/client.js";
 import { inboundArrived, responseReady } from "../inngest/events.js";
 import type { LlmProvider } from "../llm/provider.js";
-import type { Message, StreamEvent } from "../llm/types.js";
+import type { ContentBlock, Message, StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
-import { contentToText } from "../transport/content.js";
+import { contentToBlocks, contentToText } from "../transport/content.js";
 import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
@@ -78,14 +78,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         );
       });
 
-      const userContent = inboundMessages.map((m) => contentToText(m.content)).join("\n");
+      const inboundBlocks = inboundMessages.flatMap((m) => contentToBlocks(m.content));
+      const userContentText = inboundMessages.map((m) => contentToText(m.content)).join("\n");
       const maxInboundId = inboundMessages.at(-1)?.id ?? inboundMessageId;
 
       await step.run("create-user-message", async () => {
         await agentStore.insertMessage({
           conversationId,
           role: "user",
-          content: userContent,
+          content: userContentText,
           lastInboundMessageId: maxInboundId,
         });
       });
@@ -98,10 +99,21 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return promptSource.assemble(agentStore, profileId);
       });
 
-      // ──── NON-DURABLE: auto-recall + resolve targets + stream ────
+      // ──── NON-DURABLE: resolve images + auto-recall + stream ────
+
+      // Resolve ImageRefs from S3 into actual ImageBlocks
+      const resolvedBlocks: ContentBlock[] = await Promise.all(
+        inboundBlocks.map(async (block): Promise<ContentBlock> => {
+          if (block.type === "image_ref") {
+            const data = await fileService.read(block.path);
+            return { type: "image", source: "base64", data, mediaType: block.mediaType };
+          }
+          return block;
+        }),
+      );
 
       // Auto-recall: search memory for context relevant to this message
-      const recallResult = await memory.recall(userId, userContent, { maxTokens: 2000 });
+      const recallResult = await memory.recall(userId, userContentText, { maxTokens: 2000 });
       const recalledContext =
         recallResult.memories.length > 0
           ? recallResult.memories.map((m) => m.content).join("\n")
@@ -122,13 +134,24 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         ? `${systemPrompt}\n\n# Recalled Context\n\n${recalledContext}`
         : systemPrompt;
 
+      // Build message history, replacing the last user message with resolved content
+      const historyMessages = [...history] as Message[];
+      const hasImages = resolvedBlocks.some((b) => b.type === "image");
+      if (hasImages && historyMessages.length > 0) {
+        // Replace the last user message (just persisted as text) with full content blocks
+        const lastIdx = historyMessages.length - 1;
+        if (historyMessages[lastIdx]?.role === "user") {
+          historyMessages[lastIdx] = { role: "user", content: resolvedBlocks };
+        }
+      }
+
       let result: AgentLoopResult;
       try {
         result = await runStreamingAgentLoop({
           provider,
           model: profile?.model ?? DEFAULT_MODEL,
           systemPrompt: fullPrompt,
-          messages: [...history] as Message[],
+          messages: historyMessages,
           tools,
           service,
           onEvent: (event: StreamEvent) => delivery.push(event),
