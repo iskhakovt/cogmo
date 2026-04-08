@@ -4,6 +4,7 @@ import { coreMemoryTools } from "./agent/core-memory-tools.js";
 import { fileTools } from "./agent/file-tools.js";
 import { createFileService, FILES_PROMPT_GUIDANCE } from "./agent/files.js";
 import { createHandleMessage } from "./agent/handle-message.js";
+import { createIdleTimer } from "./agent/idle-timer.js";
 import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
@@ -59,6 +60,8 @@ export async function bootstrap() {
   });
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL);
 
+  const idleTimeoutMs = env.SESSION_IDLE_TIMEOUT_MINUTES * 60 * 1000;
+
   // S3-compatible file storage (MinIO locally, AWS S3 / R2 in production)
   const s3Client = new S3Client({
     ...(env.S3_ENDPOINT ? { endpoint: env.S3_ENDPOINT, forcePathStyle: true } : {}),
@@ -82,9 +85,11 @@ export async function bootstrap() {
     inngest,
     inboundArrived,
     attachments: attachmentStore,
+    idleTimeoutMs,
   });
 
   const deliveryRouter = createDeliveryRouter({ adapters: adapterMap, transportStore });
+  const idleTimer = createIdleTimer({ idleTimeoutMs, transportStore });
 
   const handleMessage = createHandleMessage({
     agentStore,
@@ -100,7 +105,7 @@ export async function bootstrap() {
   });
 
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
-  const functions: any[] = [handleMessage, ...channelFunctions];
+  const functions: any[] = [handleMessage, idleTimer, ...channelFunctions];
 
   return {
     db,

@@ -75,6 +75,9 @@ export interface AgentStore {
 
   /** Upsert a core memory block. Creates if key doesn't exist, updates if it does. */
   upsertCoreMemoryBlock(params: { userId: string; key: string; content: string }): Promise<void>;
+
+  /** Get the timestamp of the most recent message in a conversation (any role). */
+  getLastMessageTime(conversationId: string): Promise<Date | null>;
 }
 
 export class DrizzleAgentStore implements AgentStore {
@@ -258,6 +261,18 @@ export class DrizzleAgentStore implements AgentStore {
           target: [coreMemoryBlocks.userId, coreMemoryBlocks.key],
           set: { content: params.content, updatedAt: new Date() },
         });
+    });
+  }
+
+  async getLastMessageTime(conversationId: string): Promise<Date | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ createdAt: messages.createdAt })
+        .from(messages)
+        .where(eq(messages.conversationId, conversationId))
+        .orderBy(desc(messages.id))
+        .limit(1);
+      return rows[0]?.createdAt ?? null;
     });
   }
 }

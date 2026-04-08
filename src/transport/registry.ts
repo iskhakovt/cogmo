@@ -16,6 +16,7 @@ export interface RegistryDeps {
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
+  idleTimeoutMs: number;
 }
 
 export interface RegistryResult {
@@ -59,6 +60,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       inngest: deps.inngest,
       inboundArrived: deps.inboundArrived,
       attachments: deps.attachments,
+      idleTimeoutMs: deps.idleTimeoutMs,
     });
 
     const result = await mod.setup({

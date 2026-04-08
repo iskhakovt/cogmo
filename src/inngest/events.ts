@@ -27,6 +27,17 @@ export const responseReady = eventType("response/ready", {
 });
 
 /**
+ * Fired when a conversation goes idle (no new messages after timeout).
+ * The idle timer runs after each response/ready, cancelled by next inbound/arrived.
+ * Consumed by: Observer (future) for memory extraction and evolution signals.
+ */
+export const conversationIdle = eventType("conversation/idle", {
+  schema: z.object({
+    conversationId: z.string(),
+  }),
+});
+
+/**
  * Direct channel — external clients emit this to send messages.
  * The direct-inbound Inngest function translates to inbound/arrived.
  */

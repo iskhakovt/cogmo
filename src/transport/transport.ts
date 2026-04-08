@@ -48,6 +48,7 @@ export function createTransport(deps: {
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
+  idleTimeoutMs: number;
 }): Transport {
   const {
     channelId,
@@ -58,11 +59,24 @@ export function createTransport(deps: {
     inngest,
     inboundArrived,
     attachments,
+    idleTimeoutMs,
   } = deps;
 
   return {
     async resolveSession(platformAddress) {
-      return transportStore.resolveSession(channelId, platformAddress);
+      const session = await transportStore.resolveSession(channelId, platformAddress);
+      if (!session) return null;
+
+      // Safety net: expire stale sessions missed by idle timer
+      if (idleTimeoutMs > 0) {
+        const lastActivity = await agentStore.getLastMessageTime(session.conversationId);
+        if (lastActivity && Date.now() - lastActivity.getTime() > idleTimeoutMs) {
+          await transportStore.closeSession(session.id);
+          return null;
+        }
+      }
+
+      return session;
     },
 
     async createConversation(platformAddress, _platformUserHandle, opts) {
