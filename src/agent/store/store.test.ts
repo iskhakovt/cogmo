@@ -274,4 +274,43 @@ describe("DrizzleAgentStore", () => {
       expect(await store.getActiveRules(profileId)).toEqual([]);
     });
   });
+
+  describe("core memory blocks", () => {
+    it("upsert creates a new block", async () => {
+      const userId = await seedUser();
+      await store.upsertCoreMemoryBlock({ userId, key: "user_profile", content: "Name: Tim" });
+
+      const blocks = await store.getCoreMemoryBlocks(userId);
+      expect(blocks).toEqual([{ key: "user_profile", content: "Name: Tim" }]);
+    });
+
+    it("upsert updates existing block", async () => {
+      const userId = await seedUser();
+      await store.upsertCoreMemoryBlock({ userId, key: "user_profile", content: "Name: Tim" });
+      await store.upsertCoreMemoryBlock({
+        userId,
+        key: "user_profile",
+        content: "Name: Tim\nRole: Engineer",
+      });
+
+      const blocks = await store.getCoreMemoryBlocks(userId);
+      expect(blocks).toHaveLength(1);
+      expect(blocks[0]!.content).toBe("Name: Tim\nRole: Engineer");
+    });
+
+    it("returns blocks ordered by key", async () => {
+      const userId = await seedUser();
+      await store.upsertCoreMemoryBlock({ userId, key: "preferences", content: "Dark mode" });
+      await store.upsertCoreMemoryBlock({ userId, key: "active_projects", content: "Assistant" });
+      await store.upsertCoreMemoryBlock({ userId, key: "user_profile", content: "Tim" });
+
+      const blocks = await store.getCoreMemoryBlocks(userId);
+      expect(blocks.map((b) => b.key)).toEqual(["active_projects", "preferences", "user_profile"]);
+    });
+
+    it("returns empty array for unknown user", async () => {
+      const blocks = await store.getCoreMemoryBlocks("00000000-0000-0000-0000-000000000000");
+      expect(blocks).toEqual([]);
+    });
+  });
 });
