@@ -47,12 +47,8 @@
           "name": "conversations_user_id_users_id_fk",
           "tableFrom": "conversations",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -60,12 +56,8 @@
           "name": "conversations_profile_id_profiles_id_fk",
           "tableFrom": "conversations",
           "tableTo": "profiles",
-          "columnsFrom": [
-            "profile_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["profile_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -126,12 +118,8 @@
           "name": "core_memory_blocks_user_id_users_id_fk",
           "tableFrom": "core_memory_blocks",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -141,10 +129,7 @@
         "uq_core_memory_user_key": {
           "name": "uq_core_memory_user_key",
           "nullsNotDistinct": false,
-          "columns": [
-            "user_id",
-            "key"
-          ]
+          "columns": ["user_id", "key"]
         }
       },
       "policies": {},
@@ -222,12 +207,8 @@
           "name": "messages_conversation_id_conversations_id_fk",
           "tableFrom": "messages",
           "tableTo": "conversations",
-          "columnsFrom": [
-            "conversation_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["conversation_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -288,9 +269,7 @@
         "uq_profiles_name": {
           "name": "uq_profiles_name",
           "nullsNotDistinct": false,
-          "columns": [
-            "name"
-          ]
+          "columns": ["name"]
         }
       },
       "policies": {},
@@ -364,12 +343,8 @@
           "name": "steering_rules_profile_id_profiles_id_fk",
           "tableFrom": "steering_rules",
           "tableTo": "profiles",
-          "columnsFrom": [
-            "profile_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["profile_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -512,12 +487,8 @@
           "name": "channel_sessions_channel_id_channels_id_fk",
           "tableFrom": "channel_sessions",
           "tableTo": "channels",
-          "columnsFrom": [
-            "channel_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["channel_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -525,12 +496,8 @@
           "name": "channel_sessions_conversation_id_conversations_id_fk",
           "tableFrom": "channel_sessions",
           "tableTo": "conversations",
-          "columnsFrom": [
-            "conversation_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["conversation_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -635,12 +602,8 @@
           "name": "inbound_messages_channel_session_id_channel_sessions_id_fk",
           "tableFrom": "inbound_messages",
           "tableTo": "channel_sessions",
-          "columnsFrom": [
-            "channel_session_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["channel_session_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -648,12 +611,8 @@
           "name": "inbound_messages_conversation_id_conversations_id_fk",
           "tableFrom": "inbound_messages",
           "tableTo": "conversations",
-          "columnsFrom": [
-            "conversation_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["conversation_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -719,12 +678,8 @@
           "name": "user_identities_user_id_users_id_fk",
           "tableFrom": "user_identities",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -732,12 +687,8 @@
           "name": "user_identities_channel_id_channels_id_fk",
           "tableFrom": "user_identities",
           "tableTo": "channels",
-          "columnsFrom": [
-            "channel_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["channel_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -747,10 +698,7 @@
         "uq_identities_channel_handle": {
           "name": "uq_identities_channel_handle",
           "nullsNotDistinct": true,
-          "columns": [
-            "channel_id",
-            "platform_handle"
-          ]
+          "columns": ["channel_id", "platform_handle"]
         }
       },
       "policies": {},
