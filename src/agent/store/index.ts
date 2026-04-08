@@ -2,7 +2,14 @@ import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
 import type { JsonValue } from "type-fest";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
-import { conversations, messages, profiles, steeringRules, users } from "./schema.js";
+import {
+  conversations,
+  coreMemoryBlocks,
+  messages,
+  profiles,
+  steeringRules,
+  users,
+} from "./schema.js";
 
 export interface AgentStore {
   /** Create a new user. */
@@ -62,6 +69,12 @@ export interface AgentStore {
 
   /** Load active steering rules for a profile (global + profile-specific, ordered by priority). */
   getActiveRules(profileId: string): Promise<ReadonlyArray<{ rule: string }>>;
+
+  /** Get all core memory blocks for a user, ordered by key. */
+  getCoreMemoryBlocks(userId: string): Promise<ReadonlyArray<{ key: string; content: string }>>;
+
+  /** Upsert a core memory block. Creates if key doesn't exist, updates if it does. */
+  upsertCoreMemoryBlock(params: { userId: string; key: string; content: string }): Promise<void>;
 }
 
 export class DrizzleAgentStore implements AgentStore {
@@ -217,6 +230,34 @@ export class DrizzleAgentStore implements AgentStore {
           ),
         )
         .orderBy(asc(steeringRules.priority));
+    });
+  }
+
+  async getCoreMemoryBlocks(
+    userId: string,
+  ): Promise<ReadonlyArray<{ key: string; content: string }>> {
+    return this.#db.transaction(async (tx) => {
+      return tx
+        .select({ key: coreMemoryBlocks.key, content: coreMemoryBlocks.content })
+        .from(coreMemoryBlocks)
+        .where(eq(coreMemoryBlocks.userId, userId))
+        .orderBy(asc(coreMemoryBlocks.key));
+    });
+  }
+
+  async upsertCoreMemoryBlock(params: {
+    userId: string;
+    key: string;
+    content: string;
+  }): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      await tx
+        .insert(coreMemoryBlocks)
+        .values(params)
+        .onConflictDoUpdate({
+          target: [coreMemoryBlocks.userId, coreMemoryBlocks.key],
+          set: { content: params.content, updatedAt: new Date() },
+        });
     });
   }
 }
