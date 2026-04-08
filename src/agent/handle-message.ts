@@ -98,18 +98,36 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return promptSource.assemble(agentStore, profileId);
       });
 
-      // ──── NON-DURABLE: resolve targets + stream ────
+      // ──── NON-DURABLE: auto-recall + resolve targets + stream ────
+
+      // Auto-recall: search memory for context relevant to this message
+      const recallResult = await memory.recall(userId, userContent, { maxTokens: 2000 });
+      const recalledContext =
+        recallResult.memories.length > 0
+          ? recallResult.memories.map((m) => m.content).join("\n")
+          : null;
+
+      // Build scoped service for this turn
+      const coreMemoryService: Service["coreMemory"] = {
+        get: () => agentStore.getCoreMemoryBlocks(userId),
+        update: (key, content) => agentStore.upsertCoreMemoryBlock({ userId, key, content }),
+      };
 
       const profile = await agentStore.getProfile(profileId);
-      const service = createService(memory, userId, [], fileService);
+      const service = createService(memory, userId, [], fileService, coreMemoryService);
       const delivery = await deliveryRouter.prepare(conversationId, runId);
+
+      // Append recalled context to system prompt
+      const fullPrompt = recalledContext
+        ? `${systemPrompt}\n\n# Recalled Context\n\n${recalledContext}`
+        : systemPrompt;
 
       let result: AgentLoopResult;
       try {
         result = await runStreamingAgentLoop({
           provider,
           model: profile?.model ?? DEFAULT_MODEL,
-          systemPrompt,
+          systemPrompt: fullPrompt,
           messages: [...history] as Message[],
           tools,
           service,

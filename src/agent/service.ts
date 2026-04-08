@@ -30,6 +30,14 @@ export const MEMORY_PROMPT_GUIDANCE = `You have persistent memory across convers
 - **Don't over-retain**: Skip greetings, small talk, information already saved in files, and things the user said are temporary.
 - **Update, don't duplicate**: If you learn something that contradicts a previous memory, retain the new version with context about the change.`;
 
+/** Prompt guidance for the coreMemory Service namespace. */
+export const CORE_MEMORY_PROMPT_GUIDANCE = `You have core memory blocks — structured notes about your user and ongoing context that are always visible to you. Update them as you learn new things. Current blocks are shown in the User section of your instructions.`;
+
+export interface CoreMemoryBlock {
+  key: string;
+  content: string;
+}
+
 export interface Service {
   memory: {
     recall(query: string, opts?: RecallOptions): Promise<RecallResult>;
@@ -39,6 +47,10 @@ export interface Service {
     read(path: string): Promise<string>;
     write(path: string, content: string): Promise<void>;
     list(prefix?: string): Promise<FileEntry[]>;
+  };
+  coreMemory: {
+    get(): Promise<ReadonlyArray<CoreMemoryBlock>>;
+    update(key: string, content: string): Promise<void>;
   };
 }
 
@@ -54,6 +66,7 @@ export function createService(
   bankId: string,
   profileTags: readonly string[],
   files: Service["files"],
+  coreMemory: Service["coreMemory"],
 ): Service {
   return {
     memory: {
@@ -69,5 +82,6 @@ export function createService(
         }),
     },
     files,
+    coreMemory,
   };
 }

@@ -1,4 +1,14 @@
-import { boolean, index, integer, jsonb, pgTable, text, unique, uuid } from "drizzle-orm/pg-core";
+import {
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  unique,
+  uuid,
+} from "drizzle-orm/pg-core";
 import { pk, ts } from "../../db/helpers.js";
 
 // --- Tables ---
@@ -46,6 +56,21 @@ export const messages = pgTable(
     createdAt: ts(),
   },
   (t) => [index("idx_messages_conv_id").on(t.conversationId, t.id)],
+);
+
+export const coreMemoryBlocks = pgTable(
+  "core_memory_blocks",
+  {
+    id: pk(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    key: text("key").notNull(), // 'user_profile', 'active_projects', etc.
+    content: text("content").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: ts(),
+  },
+  (t) => [unique("uq_core_memory_user_key").on(t.userId, t.key)],
 );
 
 export const steeringRules = pgTable("steering_rules", {

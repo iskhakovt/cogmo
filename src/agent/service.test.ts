@@ -9,6 +9,11 @@ const stubFiles: Service["files"] = {
   list: async () => [],
 };
 
+const stubCoreMemory: Service["coreMemory"] = {
+  get: async () => [],
+  update: async () => {},
+};
+
 function mockMemory(): MemoryProvider {
   return {
     name: "mock",
@@ -21,7 +26,7 @@ function mockMemory(): MemoryProvider {
 describe("createService", () => {
   it("delegates recall to MemoryProvider with correct bankId", async () => {
     const memory = mockMemory();
-    const svc = createService(memory, "user-123", [], stubFiles);
+    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory);
 
     await svc.memory.recall("some query");
 
@@ -30,7 +35,7 @@ describe("createService", () => {
 
   it("delegates retain to MemoryProvider with correct bankId", async () => {
     const memory = mockMemory();
-    const svc = createService(memory, "user-123", [], stubFiles);
+    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory);
 
     await svc.memory.retain("a fact");
 
@@ -39,7 +44,13 @@ describe("createService", () => {
 
   it("merges profileTags with caller-provided tags on recall", async () => {
     const memory = mockMemory();
-    const svc = createService(memory, "user-123", ["network:world", "network:opinion"], stubFiles);
+    const svc = createService(
+      memory,
+      "user-123",
+      ["network:world", "network:opinion"],
+      stubFiles,
+      stubCoreMemory,
+    );
 
     await svc.memory.recall("query", { tags: ["extra"] });
 
@@ -50,7 +61,7 @@ describe("createService", () => {
 
   it("merges profileTags with caller-provided tags on retain", async () => {
     const memory = mockMemory();
-    const svc = createService(memory, "user-123", ["network:world"], stubFiles);
+    const svc = createService(memory, "user-123", ["network:world"], stubFiles, stubCoreMemory);
 
     await svc.memory.retain("fact", { tags: ["custom"] });
 
@@ -61,7 +72,7 @@ describe("createService", () => {
 
   it("preserves non-tag options on recall", async () => {
     const memory = mockMemory();
-    const svc = createService(memory, "user-123", [], stubFiles);
+    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory);
 
     await svc.memory.recall("query", { maxTokens: 500 });
 
@@ -73,7 +84,7 @@ describe("createService", () => {
 
   it("preserves non-tag options on retain", async () => {
     const memory = mockMemory();
-    const svc = createService(memory, "user-123", [], stubFiles);
+    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory);
 
     await svc.memory.retain("fact", {
       context: "from conversation",
@@ -89,7 +100,7 @@ describe("createService", () => {
 
   it("works with no opts provided", async () => {
     const memory = mockMemory();
-    const svc = createService(memory, "bank-1", ["tag-a"], stubFiles);
+    const svc = createService(memory, "bank-1", ["tag-a"], stubFiles, stubCoreMemory);
 
     await svc.memory.recall("q");
     await svc.memory.retain("f");

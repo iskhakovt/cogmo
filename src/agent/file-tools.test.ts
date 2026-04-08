@@ -16,6 +16,10 @@ function mockService(filesOverrides?: Partial<Service["files"]>): Service {
       list: vi.fn().mockResolvedValue([]),
       ...filesOverrides,
     },
+    coreMemory: {
+      get: vi.fn().mockResolvedValue([]),
+      update: vi.fn().mockResolvedValue(undefined),
+    },
   };
 }
 

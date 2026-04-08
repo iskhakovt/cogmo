@@ -14,6 +14,10 @@ const stubService: Service = {
     write: async () => {},
     list: async () => [],
   },
+  coreMemory: {
+    get: async () => [],
+    update: async () => {},
+  },
 };
 
 describe("ToolRegistry", () => {

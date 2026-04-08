@@ -1,12 +1,13 @@
 import { S3Client } from "@aws-sdk/client-s3";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
+import { coreMemoryTools } from "./agent/core-memory-tools.js";
 import { fileTools } from "./agent/file-tools.js";
 import { createFileService, FILES_PROMPT_GUIDANCE } from "./agent/files.js";
 import { createHandleMessage } from "./agent/handle-message.js";
 import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
-import { MEMORY_PROMPT_GUIDANCE } from "./agent/service.js";
+import { CORE_MEMORY_PROMPT_GUIDANCE, MEMORY_PROMPT_GUIDANCE } from "./agent/service.js";
 import { DrizzleAgentStore } from "./agent/store/index.js";
 import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
@@ -41,11 +42,19 @@ export async function bootstrap() {
 
   const provider = new AnthropicProvider(env.ANTHROPIC_API_KEY, env.ANTHROPIC_BASE_URL);
   const webTools = createWebTools(env.TAVILY_API_KEY, env.OPENROUTER_API_KEY);
-  const tools = createDefaultTools([...memoryTools, ...webTools, ...fileTools], env.USER_TIMEZONE);
+  const tools = createDefaultTools(
+    [...memoryTools, ...webTools, ...fileTools, ...coreMemoryTools],
+    env.USER_TIMEZONE,
+  );
   const promptSource = new DefaultPromptSource({
     timezone: env.USER_TIMEZONE,
     toolDefinitions: () => tools.definitions(),
-    serviceGuidance: [MEMORY_PROMPT_GUIDANCE, FILES_PROMPT_GUIDANCE],
+    serviceGuidance: [MEMORY_PROMPT_GUIDANCE, FILES_PROMPT_GUIDANCE, CORE_MEMORY_PROMPT_GUIDANCE],
+    getUserContext: async () => {
+      const blocks = await agentStore.getCoreMemoryBlocks(user.id);
+      if (blocks.length === 0) return null;
+      return blocks.map((b) => `## ${b.key}\n${b.content}`).join("\n\n");
+    },
   });
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL);
 

@@ -17,6 +17,10 @@ function stubService(): Service {
       write: vi.fn().mockResolvedValue(undefined),
       list: vi.fn().mockResolvedValue([]),
     },
+    coreMemory: {
+      get: vi.fn().mockResolvedValue([]),
+      update: vi.fn().mockResolvedValue(undefined),
+    },
   };
 }
 
