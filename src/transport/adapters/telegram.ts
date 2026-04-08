@@ -182,9 +182,8 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       const url = `https://api.telegram.org/file/bot${creds.token}/${file.file_path}`;
       const response = await fetch(url);
       const buffer = Buffer.from(await response.arrayBuffer());
-      const base64 = buffer.toString("base64");
 
-      const path = await transport.uploadAttachment(base64, "image/jpeg");
+      const path = await transport.uploadAttachment(buffer, "image/jpeg");
       const caption = ctx.message.caption ?? "";
 
       const content: JsonValue[] = [];

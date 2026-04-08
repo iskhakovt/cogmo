@@ -25,6 +25,10 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
       write: vi.fn().mockResolvedValue(undefined),
       list: vi.fn().mockResolvedValue([]),
     },
+    attachments: {
+      upload: vi.fn().mockResolvedValue("inbound/test.jpg"),
+      download: vi.fn().mockResolvedValue(Buffer.from("fake-image")),
+    },
     deliveryRouter: mockDeliveryRouter(),
     runStreamingAgentLoop: vi.fn().mockResolvedValue({
       text: "Hello from assistant",
