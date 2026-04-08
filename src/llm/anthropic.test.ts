@@ -422,4 +422,75 @@ describe("AnthropicProvider", () => {
       expect(callArgs.stream).toBe(true);
     });
   });
+
+  describe("prompt caching", () => {
+    it("sends system as content block array with cache_control", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-4-20250514",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+
+      await provider.chat({
+        model: "claude-sonnet-4-20250514",
+        system: "Be helpful",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      const callArgs = mockCreate.mock.calls[0]![0];
+      expect(callArgs.system).toEqual([
+        { type: "text", text: "Be helpful", cache_control: { type: "ephemeral" } },
+      ]);
+    });
+
+    it("adds cache_control to the last tool", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-4-20250514",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+
+      await provider.chat({
+        model: "claude-sonnet-4-20250514",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        tools: [
+          { name: "a", description: "first", parameters: { type: "object" } },
+          { name: "b", description: "second", parameters: { type: "object" } },
+        ],
+      });
+
+      const callArgs = mockCreate.mock.calls[0]![0];
+      expect(callArgs.tools[0].cache_control).toBeUndefined();
+      expect(callArgs.tools[1].cache_control).toEqual({ type: "ephemeral" });
+    });
+
+    it("reports cache tokens in usage", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-4-20250514",
+        usage: {
+          input_tokens: 50,
+          output_tokens: 10,
+          cache_read_input_tokens: 5000,
+          cache_creation_input_tokens: 0,
+        },
+      });
+
+      const result = await provider.chat({
+        model: "claude-sonnet-4-20250514",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      expect(result.usage.cacheReadTokens).toBe(5000);
+      expect(result.usage.cacheCreationTokens).toBe(0);
+    });
+  });
 });
