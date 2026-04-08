@@ -22,6 +22,8 @@ export interface OpenAICompatibleConfig {
   apiKey: string;
   baseURL: string;
   headers?: Record<string, string>;
+  /** Add Anthropic-style cache_control hints for OpenRouter routing to Claude models. */
+  promptCaching?: boolean;
 }
 
 /**
@@ -33,9 +35,11 @@ export interface OpenAICompatibleConfig {
 export class OpenAICompatibleProvider implements LlmProvider {
   readonly name: string;
   #client: OpenAI;
+  #promptCaching: boolean;
 
   constructor(name: string, config: OpenAICompatibleConfig) {
     this.name = name;
+    this.#promptCaching = config.promptCaching ?? false;
     this.#client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseURL,
@@ -47,7 +51,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
     const response = await this.#client.chat.completions.create({
       model: params.model,
       max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
-      messages: buildMessages(params.system, params.messages),
+      messages: buildMessages(params.system, params.messages, this.#promptCaching),
       ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
     });
 
@@ -74,12 +78,13 @@ export class OpenAICompatibleProvider implements LlmProvider {
     );
 
     const client = this.#client;
+    const caching = this.#promptCaching;
 
     async function* generateEvents(): AsyncIterable<StreamEvent> {
       const stream = await client.chat.completions.create({
         model: params.model,
         max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
-        messages: buildMessages(params.system, params.messages),
+        messages: buildMessages(params.system, params.messages, caching),
         ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
         stream: true,
         stream_options: { include_usage: true },
@@ -151,8 +156,20 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
 // --- Message building ---
 
-function buildMessages(system: string, messages: Message[]): OpenAI.ChatCompletionMessageParam[] {
-  const result: OpenAI.ChatCompletionMessageParam[] = [{ role: "system", content: system }];
+function buildMessages(
+  system: string,
+  messages: Message[],
+  promptCaching: boolean,
+): OpenAI.ChatCompletionMessageParam[] {
+  // When promptCaching is enabled (OpenRouter → Anthropic), add cache_control
+  // on the system message content block. OpenRouter passes it through to Claude.
+  const systemMsg: OpenAI.ChatCompletionMessageParam = promptCaching
+    ? {
+        role: "system",
+        content: [{ type: "text", text: system, cache_control: { type: "ephemeral" } } as any],
+      }
+    : { role: "system", content: system };
+  const result: OpenAI.ChatCompletionMessageParam[] = [systemMsg];
 
   for (const msg of messages) {
     if (typeof msg.content === "string") {
