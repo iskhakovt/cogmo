@@ -315,4 +315,27 @@ describe("DrizzleAgentStore", () => {
       expect(blocks).toEqual([]);
     });
   });
+
+  describe("getLastMessageTime", () => {
+    it("returns the most recent message timestamp", async () => {
+      const { conversationId } = await seedConversation();
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+
+      await store.insertMessage({
+        conversationId,
+        role: "user",
+        content: "hello",
+        lastInboundMessageId: inboundId,
+      });
+
+      const time = await store.getLastMessageTime(conversationId);
+      expect(time).toBeInstanceOf(Date);
+    });
+
+    it("returns null for conversation with no messages", async () => {
+      const { conversationId } = await seedConversation();
+      const time = await store.getLastMessageTime(conversationId);
+      expect(time).toBeNull();
+    });
+  });
 });

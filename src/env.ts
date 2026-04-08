@@ -23,6 +23,7 @@ export const env = createEnv({
     S3_ACCESS_KEY: z.string().optional(),
     S3_SECRET_KEY: z.string().optional(),
     S3_REGION: z.string().default("us-east-1"),
+    SESSION_IDLE_TIMEOUT_MINUTES: z.coerce.number().default(60),
     TELEGRAM_BOT_TOKEN: z.string().optional(),
     TELEGRAM_ALLOWED_USERS: z.string().optional(),
   },

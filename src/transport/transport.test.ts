@@ -6,6 +6,7 @@ import { createTransport } from "./transport.js";
 function setup(overrides?: {
   transportStore?: ReturnType<typeof mockTransportStore>;
   agentStore?: ReturnType<typeof mockAgentStore>;
+  idleTimeoutMs?: number;
 }) {
   const transportStore = overrides?.transportStore ?? mockTransportStore();
   const agentStore = overrides?.agentStore ?? mockAgentStore();
@@ -23,6 +24,8 @@ function setup(overrides?: {
     agentStore,
     inngest,
     inboundArrived: mockEvent,
+    attachments: { upload: vi.fn(), download: vi.fn() } as any,
+    idleTimeoutMs: overrides?.idleTimeoutMs ?? 0,
   });
 
   return { transport, transportStore, agentStore, inngestSend, mockEvent };
@@ -108,6 +111,90 @@ describe("createTransport", () => {
       if (result.isErr()) {
         expect(result.error.code).toBe("session_not_found");
       }
+    });
+  });
+
+  describe("idle timeout", () => {
+    const activeSession = {
+      id: "session-1",
+      channelId: "ch-1",
+      platformAddress: "addr-1",
+      conversationId: "conv-1",
+      status: "active",
+      receive: "routed",
+    };
+
+    it("returns null and closes stale session", async () => {
+      const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2 hours ago
+      const ts = mockTransportStore({
+        resolveSession: vi.fn().mockResolvedValue(activeSession),
+      });
+      const as = mockAgentStore({
+        getLastMessageTime: vi.fn().mockResolvedValue(staleTime),
+      });
+
+      const { transport } = setup({
+        transportStore: ts,
+        agentStore: as,
+        idleTimeoutMs: 60 * 60 * 1000, // 1 hour
+      });
+
+      const result = await transport.resolveSession("addr-1");
+      expect(result).toBeNull();
+      expect(ts.closeSession).toHaveBeenCalledWith("session-1");
+    });
+
+    it("returns session when within timeout", async () => {
+      const recentTime = new Date(Date.now() - 5 * 60 * 1000); // 5 min ago
+      const ts = mockTransportStore({
+        resolveSession: vi.fn().mockResolvedValue(activeSession),
+      });
+      const as = mockAgentStore({
+        getLastMessageTime: vi.fn().mockResolvedValue(recentTime),
+      });
+
+      const { transport } = setup({
+        transportStore: ts,
+        agentStore: as,
+        idleTimeoutMs: 60 * 60 * 1000, // 1 hour
+      });
+
+      const result = await transport.resolveSession("addr-1");
+      expect(result).toEqual(activeSession);
+      expect(ts.closeSession).not.toHaveBeenCalled();
+    });
+
+    it("skips check when timeout is 0 (disabled)", async () => {
+      const ts = mockTransportStore({
+        resolveSession: vi.fn().mockResolvedValue(activeSession),
+      });
+
+      const { transport, agentStore } = setup({
+        transportStore: ts,
+        idleTimeoutMs: 0,
+      });
+
+      const result = await transport.resolveSession("addr-1");
+      expect(result).toEqual(activeSession);
+      expect(agentStore.getLastMessageTime).not.toHaveBeenCalled();
+    });
+
+    it("returns session when no messages yet (new conversation)", async () => {
+      const ts = mockTransportStore({
+        resolveSession: vi.fn().mockResolvedValue(activeSession),
+      });
+      const as = mockAgentStore({
+        getLastMessageTime: vi.fn().mockResolvedValue(null),
+      });
+
+      const { transport } = setup({
+        transportStore: ts,
+        agentStore: as,
+        idleTimeoutMs: 60 * 60 * 1000,
+      });
+
+      const result = await transport.resolveSession("addr-1");
+      expect(result).toEqual(activeSession);
     });
   });
 });
