@@ -54,9 +54,9 @@ export class AnthropicProvider implements LlmProvider {
             model = event.message.model;
             usage.inputTokens = event.message.usage.input_tokens;
             usage.outputTokens = event.message.usage.output_tokens;
-            if (event.message.usage.cache_read_input_tokens)
+            if (event.message.usage.cache_read_input_tokens != null)
               usage.cacheReadTokens = event.message.usage.cache_read_input_tokens;
-            if (event.message.usage.cache_creation_input_tokens)
+            if (event.message.usage.cache_creation_input_tokens != null)
               usage.cacheCreationTokens = event.message.usage.cache_creation_input_tokens;
             break;
 
@@ -114,10 +114,10 @@ export class AnthropicProvider implements LlmProvider {
       usage: {
         inputTokens: response.usage.input_tokens,
         outputTokens: response.usage.output_tokens,
-        ...(response.usage.cache_read_input_tokens && {
+        ...(response.usage.cache_read_input_tokens != null && {
           cacheReadTokens: response.usage.cache_read_input_tokens,
         }),
-        ...(response.usage.cache_creation_input_tokens && {
+        ...(response.usage.cache_creation_input_tokens != null && {
           cacheCreationTokens: response.usage.cache_creation_input_tokens,
         }),
       },

@@ -296,4 +296,53 @@ describe("OpenAICompatibleProvider", () => {
       expect(args.stream).toBe(true);
     });
   });
+
+  describe("prompt caching", () => {
+    it("adds cache_control to system when promptCaching enabled", async () => {
+      mockCreate.mockReset();
+      const provider = new OpenAICompatibleProvider("openrouter", {
+        apiKey: "key",
+        baseURL: "http://test",
+        promptCaching: true,
+      });
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "m",
+        usage: { prompt_tokens: 10, completion_tokens: 1 },
+      });
+
+      await provider.chat({
+        model: "anthropic/claude-sonnet-4",
+        system: "Be helpful",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      expect(args.messages[0].content).toEqual([
+        expect.objectContaining({
+          type: "text",
+          text: "Be helpful",
+          cache_control: { type: "ephemeral" },
+        }),
+      ]);
+    });
+
+    it("sends plain system string when promptCaching disabled", async () => {
+      const provider = createProvider(); // promptCaching defaults to false
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "m",
+        usage: { prompt_tokens: 10, completion_tokens: 1 },
+      });
+
+      await provider.chat({
+        model: "m",
+        system: "Be helpful",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      expect(args.messages[0].content).toBe("Be helpful");
+    });
+  });
 });

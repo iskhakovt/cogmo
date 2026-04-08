@@ -166,6 +166,7 @@ function buildMessages(
   const systemMsg: OpenAI.ChatCompletionMessageParam = promptCaching
     ? {
         role: "system",
+        // cache_control is an OpenRouter extension, not in OpenAI's types
         content: [{ type: "text", text: system, cache_control: { type: "ephemeral" } } as any],
       }
     : { role: "system", content: system };
