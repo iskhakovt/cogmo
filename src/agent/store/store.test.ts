@@ -153,6 +153,8 @@ describe("DrizzleAgentStore", () => {
         content: "Hello",
         lastInboundMessageId: inboundId,
       });
+      // 2ms sleep — PGlite's pg_uuidv7 uses random bits, not monotonic counter
+      await new Promise((r) => setTimeout(r, 2));
       await store.insertMessage({
         conversationId,
         role: "assistant",
