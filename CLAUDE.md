@@ -167,7 +167,7 @@ Store implementations (`DrizzleAgentStore`, `DrizzleTransportStore`) are tested 
 
 ### LLM Mocking with llmock
 
-`@copilotkit/llmock` provides a deterministic mock LLM HTTP server. Single instance serves both Anthropic Messages API (`POST /v1/messages`) and OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/embeddings`) for Hindsight. Fixture-based routing, request journal for assertions. Replaces both `mock-anthropic` container and Ollama.
+`@copilotkit/aimock` provides a deterministic mock LLM HTTP server. Single instance serves both Anthropic Messages API (`POST /v1/messages`) and OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/embeddings`) for Hindsight. Fixture-based routing, request journal for assertions. Replaces both `mock-anthropic` container and Ollama.
 
 **Re-record when requests change.** When adding features that change what LLM or embedding requests are made during integration/e2e tests (new tools in the system prompt, auto-recall, different prompt structure), re-record fixtures via `pnpm test:record` before pushing. CI runs in strict mode — unmatched requests return 503.
 

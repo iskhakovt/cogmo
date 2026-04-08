@@ -1,4 +1,4 @@
-import { type ChatCompletionRequest, LLMock } from "@copilotkit/llmock";
+import { type ChatCompletionRequest, LLMock } from "@copilotkit/aimock";
 
 const FIXTURE_DIR = "./test/fixtures/recorded";
 

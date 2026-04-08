@@ -73,9 +73,9 @@ importers:
       '@biomejs/biome':
         specifier: ^2.4.8
         version: 2.4.8
-      '@copilotkit/llmock':
-        specifier: github:iskhakovt/llmock#patched
-        version: https://codeload.github.com/iskhakovt/llmock/tar.gz/75d5a01253677903246d002efdfc0a941c805720
+      '@copilotkit/aimock':
+        specifier: ^1.8.0
+        version: 1.8.0
       '@electric-sql/pglite':
         specifier: ^0.4.2
         version: 0.4.2
@@ -397,9 +397,8 @@ packages:
   '@bufbuild/protobuf@2.11.0':
     resolution: {integrity: sha512-sBXGT13cpmPR5BMgHE6UEEfEaShh5Ror6rfN3yEK5si7QVrtZg8LEPQb0VVhiLRUslD2yLnXtnRzG035J/mZXQ==}
 
-  '@copilotkit/llmock@https://codeload.github.com/iskhakovt/llmock/tar.gz/75d5a01253677903246d002efdfc0a941c805720':
-    resolution: {tarball: https://codeload.github.com/iskhakovt/llmock/tar.gz/75d5a01253677903246d002efdfc0a941c805720}
-    version: 1.6.0
+  '@copilotkit/aimock@1.8.0':
+    resolution: {integrity: sha512-zrkHAkDKARKgueb6rJffSVxpHC5wSwuBd5CVo43RV7UrOCNdNocppbL/ncahnJX0hJOjLxb3KknGaYwnB2t2fQ==}
     engines: {node: '>=20.15.0'}
     hasBin: true
 
@@ -4517,7 +4516,7 @@ snapshots:
 
   '@bufbuild/protobuf@2.11.0': {}
 
-  '@copilotkit/llmock@https://codeload.github.com/iskhakovt/llmock/tar.gz/75d5a01253677903246d002efdfc0a941c805720': {}
+  '@copilotkit/aimock@1.8.0': {}
 
   '@csstools/color-helpers@6.0.2': {}
 

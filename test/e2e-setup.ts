@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { loadEnvFile } from "node:process";
-import type { LLMock } from "@copilotkit/llmock";
+import type { LLMock } from "@copilotkit/aimock";
 import type { StartedTestContainer } from "testcontainers";
 import { GenericContainer, Network, Wait } from "testcontainers";
 import type { GlobalSetupContext } from "vitest/node";
