@@ -74,6 +74,8 @@ export async function setup({ provide }: GlobalSetupContext) {
   process.env.HINDSIGHT_URL = hindsightUrl;
   process.env.INNGEST_BASE_URL = urls.inngestBaseUrl;
   process.env.INNGEST_DEV = "true";
+  process.env.DEBOUNCE_IDLE_SECONDS = "0";
+  process.env.DEBOUNCE_MAXWAIT_SECONDS = "0";
   process.env.S3_ENDPOINT = s3Endpoint;
   process.env.S3_ACCESS_KEY = "minioadmin";
   process.env.S3_SECRET_KEY = "minioadmin";

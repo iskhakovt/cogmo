@@ -1,6 +1,7 @@
 import { S3Client } from "@aws-sdk/client-s3";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { coreMemoryTools } from "./agent/core-memory-tools.js";
+import { createDebounceFunctions, type DebounceConfig } from "./agent/debounce.js";
 import { fileTools } from "./agent/file-tools.js";
 import { createFileService, FILES_PROMPT_GUIDANCE } from "./agent/files.js";
 import { createHandleMessage } from "./agent/handle-message.js";
@@ -61,6 +62,11 @@ export async function bootstrap() {
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL);
 
   const idleTimeoutMs = env.SESSION_IDLE_TIMEOUT_MINUTES * 60 * 1000;
+  const debounceConfig: DebounceConfig = {
+    idleTimeoutMs: env.DEBOUNCE_IDLE_SECONDS * 1000,
+    maxWaitMs: env.DEBOUNCE_MAXWAIT_SECONDS * 1000,
+    resumePolicy: env.DEBOUNCE_RESUME_POLICY,
+  };
 
   // S3-compatible file storage (MinIO locally, AWS S3 / R2 in production)
   const s3Client = new S3Client({
@@ -90,6 +96,7 @@ export async function bootstrap() {
 
   const deliveryRouter = createDeliveryRouter({ adapters: adapterMap, transportStore });
   const idleTimer = createIdleTimer({ idleTimeoutMs, transportStore });
+  const debounceFunctions = createDebounceFunctions(debounceConfig);
 
   const handleMessage = createHandleMessage({
     agentStore,
@@ -100,12 +107,13 @@ export async function bootstrap() {
     promptSource,
     fileService,
     attachments: attachmentStore,
+    debounceConfig,
     deliveryRouter,
     runStreamingAgentLoop,
   });
 
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
-  const functions: any[] = [handleMessage, idleTimer, ...channelFunctions];
+  const functions: any[] = [handleMessage, idleTimer, ...debounceFunctions, ...channelFunctions];
 
   return {
     db,

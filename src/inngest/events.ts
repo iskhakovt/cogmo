@@ -37,6 +37,35 @@ export const conversationIdle = eventType("conversation/idle", {
   }),
 });
 
+// --- Debounce events ---
+
+export const debounceIdle = eventType("debounce/idle", {
+  schema: z.object({
+    conversationId: z.string(),
+    inboundMessageId: z.string(),
+    timeoutMs: z.number(),
+  }),
+});
+
+export const debounceMaxwait = eventType("debounce/maxwait", {
+  schema: z.object({
+    conversationId: z.string(),
+    inboundMessageId: z.string(),
+    timeoutMs: z.number(),
+  }),
+});
+
+export const debounceCancel = eventType("debounce/cancel", {
+  schema: z.object({ conversationId: z.string() }),
+});
+
+export const inboundReady = eventType("inbound/ready", {
+  schema: z.object({
+    conversationId: z.string(),
+    triggerInboundId: z.string().nullable(),
+  }),
+});
+
 /**
  * Direct channel — external clients emit this to send messages.
  * The direct-inbound Inngest function translates to inbound/arrived.

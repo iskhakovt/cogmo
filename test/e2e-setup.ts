@@ -112,6 +112,8 @@ export async function setup({ provide }: GlobalSetupContext) {
       S3_SECRET_KEY: "minioadmin",
       S3_BUCKET: "assistant-files",
       INNGEST_DEV: "true",
+      DEBOUNCE_IDLE_SECONDS: "0",
+      DEBOUNCE_MAXWAIT_SECONDS: "0",
       LOG_LEVEL: "info",
     })
     .withWaitStrategy(Wait.forLogMessage(/inngest connected/i))

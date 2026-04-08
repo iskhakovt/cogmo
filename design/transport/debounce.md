@@ -1,4 +1,4 @@
-# Debounce & Message Batching `[proposed]`
+# Debounce & Message Batching `[confirmed]`
 
 ## Problem
 

@@ -1,5 +1,5 @@
 import { inngest } from "../inngest/client.js";
-import { inboundArrived, responseReady } from "../inngest/events.js";
+import { inboundReady, responseReady } from "../inngest/events.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, Message, StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
@@ -8,6 +8,7 @@ import type { AttachmentStore } from "../transport/attachment-store.js";
 import { contentToBlocks, contentToText } from "../transport/content.js";
 import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
+import type { DebounceConfig } from "./debounce.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
 import type { Service } from "./service.js";
@@ -24,6 +25,7 @@ export interface HandleMessageDeps {
   promptSource: PromptSource;
   fileService: Service["files"];
   attachments: AttachmentStore;
+  debounceConfig: DebounceConfig;
   deliveryRouter: DeliveryRouter;
   runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>;
 }
@@ -33,9 +35,9 @@ const DEFAULT_MODEL = "claude-sonnet-4-20250514";
 /**
  * Main message pipeline — thin orchestration only.
  *
- * Receives inbound/arrived events (adapter has already persisted the inbound
- * message and resolved the session). Loads context, streams the agent response
- * to streaming adapters, persists, delivers to batch adapters, emits notification.
+ * Receives inbound/ready events (debounce router has decided it's time to process).
+ * Loads context, streams the agent response to streaming adapters, persists,
+ * delivers to batch adapters, emits notification, applies resume policy.
  */
 export function createHandleMessage(deps: HandleMessageDeps) {
   const {
@@ -47,6 +49,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
     promptSource,
     fileService,
     attachments,
+    debounceConfig,
     deliveryRouter,
     runStreamingAgentLoop,
   } = deps;
@@ -54,14 +57,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
   return inngest.createFunction(
     {
       id: "handle-message",
-      triggers: [inboundArrived],
+      triggers: [inboundReady],
       retries: 2,
       concurrency: { limit: 1, key: "event.data.conversationId" },
     },
     async ({ event, step, runId }) => {
-      const { conversationId, inboundMessageId } = event.data;
+      const { conversationId, triggerInboundId } = event.data;
 
-      // ──── DURABLE: load context ────
+      // ──── DURABLE: load context + entry guards ────
 
       const conv = await step.run("load-conversation", async () => {
         return agentStore.getConversation(conversationId);
@@ -74,6 +77,26 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return agentStore.getLastAssistantMessage(conversationId);
       });
 
+      // Guard 1 — Staleness: trigger was already batched into a previous turn.
+      // null trigger = flush, skip this check.
+      if (
+        triggerInboundId !== null &&
+        lastAssistant?.lastInboundMessageId &&
+        triggerInboundId <= lastAssistant.lastInboundMessageId
+      ) {
+        return { status: "skipped", reason: "stale" };
+      }
+
+      // Guard 2 — Await_input: trigger was created before the last response.
+      if (
+        debounceConfig.resumePolicy === "await_input" &&
+        triggerInboundId !== null &&
+        lastAssistant &&
+        triggerInboundId < lastAssistant.id
+      ) {
+        return { status: "skipped", reason: "await_input" };
+      }
+
       const inboundMessages = await step.run("load-inbound", async () => {
         return transportStore.getUnbatchedInbound(
           conversationId,
@@ -83,7 +106,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       const inboundBlocks = inboundMessages.flatMap((m) => contentToBlocks(m.content));
       const userContentText = inboundMessages.map((m) => contentToText(m.content)).join("\n");
-      const maxInboundId = inboundMessages.at(-1)?.id ?? inboundMessageId;
+      const maxInboundId = inboundMessages.at(-1)?.id ?? triggerInboundId ?? "";
 
       await step.run("create-user-message", async () => {
         await agentStore.insertMessage({
@@ -205,6 +228,20 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           messageId: assistantMsg.id,
         }),
       );
+
+      // ──── RESUME POLICY ────
+
+      if (debounceConfig.resumePolicy === "flush") {
+        // Process any remaining unbatched messages immediately (no debounce wait)
+        await step.sendEvent(
+          "flush",
+          inboundReady.create({ conversationId, triggerInboundId: null }),
+        );
+      }
+      // "debounce": queued inbound/ready events fire naturally when concurrency lock releases
+      // "await_input": guard 2 catches all buffered events; new input triggers fresh debounce
+
+      return { status: "processed", conversationId };
     },
   );
 }

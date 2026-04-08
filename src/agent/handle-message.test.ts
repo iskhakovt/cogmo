@@ -29,6 +29,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
       upload: vi.fn().mockResolvedValue("inbound/test.jpg"),
       download: vi.fn().mockResolvedValue(Buffer.from("fake-image")),
     },
+    debounceConfig: { idleTimeoutMs: 0, maxWaitMs: 0, resumePolicy: "debounce" as const },
     deliveryRouter: mockDeliveryRouter(),
     runStreamingAgentLoop: vi.fn().mockResolvedValue({
       text: "Hello from assistant",
@@ -42,7 +43,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
 }
 
 const testEvent = {
-  data: { conversationId: "conv-1", inboundMessageId: "inbound-1" },
+  data: { conversationId: "conv-1", triggerInboundId: "inbound-1" },
 };
 
 const testRunId = "run-123";
