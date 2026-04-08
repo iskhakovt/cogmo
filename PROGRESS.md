@@ -33,6 +33,8 @@ The minimum useful system: talk to it, it remembers things.
 - [ ] Memory: 4 networks (world, bank, opinion, observation)
 - [ ] Memory: route intention gate — "does this query need memory?"
 - [x] `memory_recall` and `memory_retain` tools for the agent
+- [x] Core memory blocks — DB table, `core_memory_update`/`core_memory_read` tools, injected into system prompt
+- [x] Auto-recall — embed user message each turn, inject as `# Recalled Context` in system prompt
 - [ ] Post-conversation Observer — Inngest function triggered by `conversation/idle` event
 - [ ] Instruction file (Stage 1 evolution) — corrections append to JSON, loaded into system prompt
 - [x] Steering rules table in PostgreSQL — injected into system prompt per invocation
@@ -42,10 +44,15 @@ The minimum useful system: talk to it, it remembers things.
 - [ ] Context window management — token counting, truncate oldest messages at ~80% capacity
 - [ ] Message batching — debounce rapid consecutive messages
 - [x] Telegram auth — user ID allowlist via env var
-- [x] System prompt assembly — base prompt + steering rules from DB
+- [x] System prompt assembly — auto-generated from tool registry + service guidance + conditional onboarding
+- [x] Streaming responses — unified DeliveryRouter, StreamingAdapter/StreamHandle, TelegramStreamHandle
+- [x] Web tools — web_search (Tavily), web_answer (Perplexity Sonar), fetch_url (readability + SSRF)
+- [x] File tools — read_file/write_file/list_files via S3 (MinIO), Service.files namespace
+- [x] Image support — ImageBlock type, Anthropic + OpenAI adapters, Telegram photo handler, AttachmentStore
+- [x] OpenAI-compatible LLM adapter — covers OpenAI, xAI, OpenRouter via official SDK
 - [x] Store pattern — `agent/store/` and `transport/store/` with interfaces + Drizzle implementations
 - [x] Transport layer — `Adapter`, `Transport` interfaces, event-driven inbound pipeline (`inbound/arrived`, `response/ready`)
-- [x] Shared respond factory — `createRespond()`, generic per-channel respond created by registry
+- [x] Unified delivery — `DeliveryRouter` replaces per-channel respond functions, handles streaming + batch
 - [x] neverthrow at Transport boundary — `emit()` and `createConversation()` return `Result<T, TransportError>`
 - [x] `#private` fields + `private constructor` + `static async create()` on all classes
 - [x] Console script — `scripts/console.ts`, standalone readline + DB polling client

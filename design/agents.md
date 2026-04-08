@@ -20,9 +20,19 @@ interface Service {
     recall(query: string, opts?: RecallOptions): Promise<RecallResult>;
     retain(content: string, opts?: RetainOptions): Promise<void>;
   };
-  // future namespaces: http, attachment, etc.
+  files: {
+    read(path: string): Promise<string>;
+    write(path: string, content: string): Promise<void>;
+    list(prefix?: string): Promise<FileEntry[]>;
+  };
+  coreMemory: {
+    get(): Promise<ReadonlyArray<CoreMemoryBlock>>;
+    update(key: string, content: string): Promise<void>;
+  };
 }
 ```
+
+Binary attachments (images, PDFs) are handled by a separate `AttachmentStore` interface in the transport layer, not exposed to agent tools. See `src/transport/attachment-store.ts`.
 
 The orchestrator creates scoped capabilities by wrapping real services:
 

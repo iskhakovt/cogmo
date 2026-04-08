@@ -2,6 +2,18 @@
 
 | Date | Change |
 |-|-|
+| 2026-04-05 | AttachmentStore — separate binary storage from text workspace (Service.files). S3-backed upload/download with proper MIME types. Telegram photo handler stores raw bytes. |
+| 2026-04-05 | ImageBlock — canonical type in ContentBlock union. Both Anthropic (base64/URL source) and OpenAI (image_url/data URI) adapters. Telegram `message:photo` handler downloads, stores in S3, orchestrator resolves before LLM. `contentToBlocks()` parser with ImageRef pattern. |
+| 2026-04-05 | OpenAI-compatible LLM adapter — `OpenAICompatibleProvider` using official OpenAI SDK. Covers OpenAI, xAI (Grok), OpenRouter, DeepSeek, Groq, Together. Chat + streaming + tool calling. |
+| 2026-04-05 | Core memory blocks — `core_memory_blocks` DB table (user_id + key, upsert). `core_memory_update`/`core_memory_read` tools via Service.coreMemory. `getUserContext` callback reads blocks into system prompt. Conditional onboarding (shown only when empty). |
+| 2026-04-05 | Auto-recall — before each agent turn, embed user message via Hindsight recall, inject top results as `# Recalled Context` in system prompt. Agent still has explicit `memory_recall` for deeper searches. |
+| 2026-04-05 | System prompt overhaul — auto-generated Tools section from tool registry (adding a tool updates the prompt). Service guidance per namespace (MEMORY, FILES, CORE_MEMORY). Conditional onboarding. Identity prompt inspired by OpenClaw SOUL.md. |
+| 2026-04-05 | V0 tools — `web_search` (Tavily), `web_answer` (Perplexity Sonar via OpenRouter), `fetch_url` (@mozilla/readability + SSRF protection), `read_file`/`write_file`/`list_files` (S3/MinIO). Enhanced `get_current_time` (structured JSON, timezone, day of week). |
+| 2026-04-05 | MinIO container in dev-infra and test setups — S3-compatible object storage for file tools and attachments. |
+| 2026-04-01 | Streaming design doc (`design/transport/streaming.md`) — DeliveryRouter, StreamingAdapter, StreamHandle, agent loop streaming, Telegram throttled edits, Inngest Realtime research. |
+| 2026-04-01 | Streaming implementation — unified DeliveryRouter replaces per-channel respond functions. `chatStream()` on LlmProvider with ChatStreamResult. `runStreamingAgentLoop()` with onEvent callback. TelegramStreamHandle with 500ms throttled edits. LLM call outside step.run() for real-time streaming. `response/ready` demoted to notification. |
+| 2026-04-01 | V0 milestone tracking — `v0.md` created with Infrastructure, LLM Provider, Tools, Memory, Prompts sections. Research: OpenClaw, Letta, memU, Nanobot, ZeroClaw, Grip AI. |
+| 2026-04-01 | llmock recording enabled for e2e tests — pass real API keys through, add `test:record:e2e` script. |
 | 2026-03-31 | CI: Codecov coverage reporting, JUnit test reports via `dorny/test-reporter`, `checks:write` permissions. `@vitest/coverage-v8` for v8 coverage provider. |
 | 2026-03-31 | Docker-based e2e — builds from Dockerfile, runs app as container (tests real production artifact). Pre-built image in CI via `docker/build-push-action` with GHA cache. `E2E_IMAGE` env var for pre-built images. |
 | 2026-03-31 | Rename `cli.ts` → `main.ts`, add to tsup entry points. Fix distroless ENTRYPOINT (`/nodejs/bin/node`). |

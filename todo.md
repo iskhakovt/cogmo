@@ -4,13 +4,11 @@
 
 - [ ] `p2` Typed LLM calls with Zod schemas + retry with feedback injection
 - [ ] `p2` Session lifecycle — idle detection, debounce, new session on `/new`
-- [ ] `p2` Steering rules table — injected into system prompt per invocation
 - [ ] `p2` Post-conversation Observer — Inngest function triggered by `conversation/idle` event
 - [ ] `p2` Instruction file (Stage 1 evolution) — corrections append to JSON, loaded into system prompt
 - [ ] `p2` Context window management — token counting, truncate oldest messages
 - [ ] `p2` Message batching — debounce rapid consecutive messages
 - [ ] `p2` Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
-- [ ] `p2` Additional LlmProvider implementations — OpenRouter, OpenAI, Grok (pluggable via profile config)
 - [ ] `p2` Batch API support for async evolution tasks — 50% cost reduction for reflection, extraction, optimization
 - [ ] `p2` Define InboundContent schema (Zod) — structured message content type instead of raw JsonValue everywhere
 - [ ] `p2` CLI channel management commands — `main.ts channel add telegram --token=...`, `channel list`, `channel remove`
@@ -91,3 +89,13 @@
 - [x] Rename `cli.ts` → `main.ts`, fix Dockerfile entrypoint
 - [x] CI: Codecov coverage, JUnit test reports, `dorny/test-reporter` job summaries
 - [x] Hindsight provider config — production (OpenRouter + zerank-2) vs test (slim + llmock)
+- [x] Streaming — unified DeliveryRouter, StreamingAdapter/StreamHandle, TelegramStreamHandle, chatStream() on LlmProvider
+- [x] Web tools — web_search (Tavily), web_answer (Perplexity Sonar), fetch_url (readability + SSRF)
+- [x] File tools — read_file/write_file/list_files via S3 (MinIO), Service.files namespace
+- [x] Enhanced get_current_time — structured JSON, timezone, day of week, UTC offset
+- [x] MinIO container in dev-infra and test setups
+- [x] System prompt overhaul — auto-generated tools section, per-service guidance, conditional onboarding
+- [x] Core memory blocks — DB table, core_memory_update/read tools, auto-recall, getUserContext callback
+- [x] OpenAI-compatible LLM adapter — OpenAICompatibleProvider via official SDK
+- [x] ImageBlock — canonical type, both adapters, Telegram photo handler, AttachmentStore (separate binary storage)
+- [x] Steering rules table — already existed, injected into system prompt per invocation
