@@ -19,6 +19,7 @@ Tables are documented in the design doc that owns their domain:
 | `channel_sessions` | [transport/sessions.md](transport/sessions.md) | Platform address → conversation mapping |
 | `inbound_messages` | [transport/debounce.md](transport/debounce.md) | Raw input staging buffer for debounce batching |
 | `steering_rules` | [agents.md](agents.md) | Dynamic behavioral rules injected into system prompts |
+| `core_memory_blocks` | [agents.md](agents.md) | Structured persistent notes (user profile, projects). Upsert by (user_id, key). Always in system prompt. |
 
 ## Deferred Tables `[proposed]`
 

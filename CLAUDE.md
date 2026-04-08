@@ -79,7 +79,7 @@ Other tracking docs:
 ## Stack
 
 - **Language:** TypeScript on Node.js
-- **Framework:** None — raw Anthropic SDK
+- **Framework:** None — raw Anthropic SDK + OpenAI SDK (for OpenAI-compatible providers)
 - **Memory:** Hindsight (self-hosted server + HTTP client) — PostgreSQL + pgvector managed by Hindsight
 - **Orchestration:** Inngest (self-hosted) — event-driven durable execution, scheduling, queues
 - **Interface:** Telegram (primary), adapter pattern for others
@@ -89,11 +89,11 @@ Other tracking docs:
 
 | Module | Responsibility | Rule |
 |-|-|-|
-| `src/agent/` | Agentic loop, tool registry, service interface, prompt assembly, memory tools | Domain logic — how the agent thinks and acts |
-| `src/transport/` | Channel adapters (CLI, Telegram), respond functions, session management, identity | Transport — how messages arrive and responses are delivered |
+| `src/agent/` | Agentic loop, tool registry, service interface, prompt assembly, tools (memory, web, file, core memory) | Domain logic — how the agent thinks and acts |
+| `src/transport/` | Channel adapters (Direct, Telegram), delivery router, attachment store, session management, identity | Transport — how messages arrive and responses are delivered |
 | `src/db/` | Connection pool, transaction helper | Pure infrastructure — no schemas, no business logic |
 | `src/inngest/` | Inngest client, event definitions | Orchestration infrastructure — client setup and event schemas only, no business logic |
-| `src/llm/` | LLM provider interface, SDK adapters (Anthropic), canonical types | Single LLM call — provider abstraction, request/response translation |
+| `src/llm/` | LLM provider interface, SDK adapters (Anthropic, OpenAI-compatible), canonical types (ContentBlock, StreamEvent, ImageBlock) | Single LLM call — provider abstraction, request/response translation |
 | `src/memory/` | Memory provider interface, Hindsight adapter | Memory access — provider abstraction, HTTP client |
 
 **Infrastructure modules (`db/`, `inngest/`, `llm/`, `memory/`) contain only core setup and abstractions.** Business logic that uses them lives in domain modules (`agent/`, `transport/`). Example: the Inngest event definitions live in `src/inngest/events.ts`, but the `handle-message` orchestrator function that uses them lives in `src/agent/`. Respond functions live in `src/transport/`, not `src/inngest/functions/`.
@@ -108,7 +108,7 @@ Each domain module owns its DB access in a `store/` subdirectory:
 
 | Store | Tables |
 |-|-|
-| `agent/store/` | conversations, messages, steering_rules, profiles |
+| `agent/store/` | conversations, messages, steering_rules, profiles, core_memory_blocks |
 | `transport/store/` | channels, channel_sessions, inbound_messages, user_identities |
 
 **Interface boundary, not table boundary.** A store implementation can import schemas from any module — JOINs and cross-table transactions are fine. Consumers depend on the store interface and mock it in tests. The schema defines ownership (who creates/migrates the table); the interface defines access (who can read/write what).
