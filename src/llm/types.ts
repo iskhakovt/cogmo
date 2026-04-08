@@ -68,6 +68,8 @@ export type StopReason = "end_turn" | "tool_use" | "max_tokens";
 export interface Usage {
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
 }
 
 export interface LlmResponse {

@@ -54,6 +54,10 @@ export class AnthropicProvider implements LlmProvider {
             model = event.message.model;
             usage.inputTokens = event.message.usage.input_tokens;
             usage.outputTokens = event.message.usage.output_tokens;
+            if (event.message.usage.cache_read_input_tokens)
+              usage.cacheReadTokens = event.message.usage.cache_read_input_tokens;
+            if (event.message.usage.cache_creation_input_tokens)
+              usage.cacheCreationTokens = event.message.usage.cache_creation_input_tokens;
             break;
 
           case "content_block_start":
@@ -110,6 +114,12 @@ export class AnthropicProvider implements LlmProvider {
       usage: {
         inputTokens: response.usage.input_tokens,
         outputTokens: response.usage.output_tokens,
+        ...(response.usage.cache_read_input_tokens && {
+          cacheReadTokens: response.usage.cache_read_input_tokens,
+        }),
+        ...(response.usage.cache_creation_input_tokens && {
+          cacheCreationTokens: response.usage.cache_creation_input_tokens,
+        }),
       },
     };
   }
@@ -118,12 +128,25 @@ export class AnthropicProvider implements LlmProvider {
 // --- Params builder ---
 
 function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNonStreaming {
+  // System prompt as content block array with cache_control on the last block.
+  // Tools + system are static per conversation — caching saves 90% on reads.
+  const systemBlocks: Anthropic.TextBlockParam[] = [
+    { type: "text", text: params.system, cache_control: { type: "ephemeral" } },
+  ];
+
+  // Add cache_control to the last tool (caches all tools as a prefix)
+  const tools = params.tools?.length ? params.tools.map(toAnthropicTool) : undefined;
+  if (tools && tools.length > 0) {
+    const last = tools[tools.length - 1];
+    if (last) tools[tools.length - 1] = { ...last, cache_control: { type: "ephemeral" } };
+  }
+
   return {
     model: params.model,
     max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
-    system: params.system,
+    system: systemBlocks,
     messages: params.messages.map(toAnthropicMessage),
-    ...(params.tools?.length && { tools: params.tools.map(toAnthropicTool) }),
+    ...(tools && { tools }),
   };
 }
 
