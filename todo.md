@@ -2,7 +2,6 @@
 
 ## Next
 
-- [ ] `p2` Typed LLM calls with Zod schemas + retry with feedback injection
 - [ ] `p2` Post-conversation Observer — Inngest function triggered by `conversation/idle` event
 - [ ] `p2` Instruction file (Stage 1 evolution) — corrections append to JSON, loaded into system prompt
 - [ ] `p2` Context fast path — account for output tokens in `shouldSkipCounting` (currently only tracks `inputTokens`, underestimates by one response worth)
@@ -42,6 +41,7 @@
 
 ## Done
 
+- [x] Typed LLM calls — `chatTyped()` with Zod schemas, `responseFormat` on ChatParams, `ThinkingBlock` + extended thinking, `clearOldThinking` pre-pass, retry with feedback injection
 - [x] Response routing — source routing per `design/transport/response-routing.md`
 - [x] Initialize Node.js project (package.json, tsconfig, Biome, Vitest)
 - [x] Set up TypeScript build (tsx watch, tsup production)

@@ -36,6 +36,36 @@ export interface AgentLoopResult {
 const DEFAULT_MAX_ITERATIONS = 20;
 
 /**
+ * Clear thinking content from all assistant messages except the most recent.
+ *
+ * Anthropic requires thinking blocks in history but the content is only useful
+ * for the model's immediate next response. Replacing with empty string preserves
+ * the block structure while freeing tokens.
+ */
+export function clearOldThinking(messages: ReadonlyArray<Message>): Message[] {
+  let lastAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "assistant") {
+      lastAssistantIdx = i;
+      break;
+    }
+  }
+
+  return messages.map((msg, idx) => {
+    if (msg.role !== "assistant" || idx === lastAssistantIdx) return msg;
+    if (typeof msg.content === "string") return msg;
+
+    const hasThinking = msg.content.some((b) => b.type === "thinking");
+    if (!hasThinking) return msg;
+
+    return {
+      ...msg,
+      content: msg.content.map((b) => (b.type === "thinking" ? { ...b, thinking: "" } : b)),
+    };
+  });
+}
+
+/**
  * Run the agentic loop: call LLM → execute tools → repeat until done.
  *
  * Each iteration calls the LLM. If the response contains tool_use blocks,
@@ -51,7 +81,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     service,
     maxIterations = DEFAULT_MAX_ITERATIONS,
   } = params;
-  const messages = [...params.messages];
+  const messages = clearOldThinking(params.messages);
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };
   let iterations = 0;
@@ -181,7 +211,7 @@ export async function runStreamingAgentLoop(
     onEvent,
     maxIterations = DEFAULT_MAX_ITERATIONS,
   } = params;
-  const messages = [...params.messages];
+  const messages = clearOldThinking(params.messages);
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };
   let iterations = 0;
@@ -206,10 +236,24 @@ export async function runStreamingAgentLoop(
     let currentText = "";
 
     for await (const event of events) {
-      await onEvent(event);
+      // Don't forward thinking events to the delivery layer — they're internal
+      if (event.type !== "thinking_delta") {
+        await onEvent(event);
+      }
 
       if (event.type === "text_delta") {
         currentText += event.text;
+      } else if (event.type === "thinking_delta") {
+        // Flush any accumulated text before inserting thinking block
+        if (currentText) {
+          contentBlocks.push({ type: "text", text: currentText });
+          currentText = "";
+        }
+        contentBlocks.push({
+          type: "thinking",
+          thinking: event.thinking,
+          signature: event.signature,
+        });
       } else if (event.type === "tool_start") {
         // Flush accumulated text as a block
         if (currentText) {
