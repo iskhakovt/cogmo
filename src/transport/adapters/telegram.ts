@@ -61,6 +61,8 @@ class TelegramStreamHandle implements StreamHandle {
       this.#accumulated += event.text;
     } else if (event.type === "tool_start") {
       this.#accumulated += `\n🔍 ${event.name}...\n`;
+    } else if (event.type === "status") {
+      this.#accumulated += `\n⏳ ${event.message}\n`;
     }
     // tool_result: skip — LLM will summarize
 

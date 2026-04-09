@@ -1,9 +1,11 @@
+import { getEncoding, type Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
 import type { LlmProvider } from "./provider.js";
 import type {
   ChatParams,
   ChatStreamResult,
   ContentBlock,
+  CountTokensParams,
   ImageBlock,
   LlmResponse,
   Message,
@@ -17,6 +19,13 @@ import type {
 } from "./types.js";
 
 const DEFAULT_MAX_TOKENS = 8192;
+
+// Lazy-init singleton — cl100k_base covers GPT-4, GPT-4o, GPT-3.5-turbo
+let encoder: Tiktoken | null = null;
+function getEncoder(): Tiktoken {
+  if (!encoder) encoder = getEncoding("cl100k_base");
+  return encoder;
+}
 
 export interface OpenAICompatibleConfig {
   apiKey: string;
@@ -45,6 +54,56 @@ export class OpenAICompatibleProvider implements LlmProvider {
       baseURL: config.baseURL,
       defaultHeaders: config.headers,
     });
+  }
+
+  async countTokens(params: CountTokensParams): Promise<number> {
+    const enc = getEncoder();
+    const msgs = buildMessages(params.system, params.messages, this.#promptCaching);
+    let tokens = 0;
+
+    for (const msg of msgs) {
+      tokens += 4; // message framing overhead (role, separators)
+
+      if (typeof msg.content === "string") {
+        tokens += enc.encode(msg.content).length;
+      } else if (Array.isArray(msg.content)) {
+        for (const part of msg.content as Array<{ type: string; text?: string }>) {
+          if (part.type === "text" && part.text) {
+            tokens += enc.encode(part.text).length;
+          }
+          // Images: ~85 tokens base for low-detail, more for high-detail.
+          // Conservative estimate since we don't know the detail setting.
+          if (part.type === "image_url") tokens += 85;
+        }
+      }
+
+      // Tool calls on assistant messages
+      const toolCalls = (msg as unknown as Record<string, unknown>).tool_calls as
+        | Array<{ function: { name: string; arguments: string } }>
+        | undefined;
+      if (toolCalls) {
+        for (const tc of toolCalls) {
+          tokens += enc.encode(tc.function.name).length;
+          tokens += enc.encode(tc.function.arguments).length;
+        }
+      }
+
+      // Tool role messages (tool results)
+      if ((msg as { role: string }).role === "tool") {
+        const toolContent = (msg as { content?: string }).content;
+        if (toolContent) tokens += enc.encode(toolContent).length;
+      }
+    }
+
+    // Tool definitions
+    if (params.tools?.length) {
+      for (const tool of params.tools) {
+        tokens += enc.encode(JSON.stringify(tool)).length;
+      }
+    }
+
+    tokens += 3; // reply priming
+    return tokens;
   }
 
   async chat(params: ChatParams): Promise<LlmResponse> {

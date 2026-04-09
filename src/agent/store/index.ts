@@ -33,6 +33,7 @@ export interface AgentStore {
     role: "user" | "assistant";
     content: JsonValue;
     lastInboundMessageId: string;
+    inputTokens?: number;
   }): Promise<{ id: string }>;
 
   /** Get the most recent assistant message for a conversation (for cursor chain). */
@@ -78,6 +79,9 @@ export interface AgentStore {
 
   /** Get the timestamp of the most recent message in a conversation (any role). */
   getLastMessageTime(conversationId: string): Promise<Date | null>;
+
+  /** Get inputTokens from the most recent assistant message (for fast-path budget estimation). */
+  getLastInputTokens(conversationId: string): Promise<number | null>;
 }
 
 export class DrizzleAgentStore implements AgentStore {
@@ -127,9 +131,21 @@ export class DrizzleAgentStore implements AgentStore {
     role: "user" | "assistant";
     content: JsonValue;
     lastInboundMessageId: string;
+    inputTokens?: number;
   }): Promise<{ id: string }> {
     return this.#db.transaction(async (tx) => {
-      return single(await tx.insert(messages).values(params).returning({ id: messages.id }));
+      return single(
+        await tx
+          .insert(messages)
+          .values({
+            conversationId: params.conversationId,
+            role: params.role,
+            content: params.content,
+            lastInboundMessageId: params.lastInboundMessageId,
+            ...(params.inputTokens != null && { inputTokens: params.inputTokens }),
+          })
+          .returning({ id: messages.id }),
+      );
     });
   }
 
@@ -261,6 +277,18 @@ export class DrizzleAgentStore implements AgentStore {
           target: [coreMemoryBlocks.userId, coreMemoryBlocks.key],
           set: { content: params.content, updatedAt: new Date() },
         });
+    });
+  }
+
+  async getLastInputTokens(conversationId: string): Promise<number | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ inputTokens: messages.inputTokens })
+        .from(messages)
+        .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
+        .orderBy(desc(messages.id))
+        .limit(1);
+      return rows[0]?.inputTokens ?? null;
     });
   }
 

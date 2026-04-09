@@ -345,4 +345,65 @@ describe("OpenAICompatibleProvider", () => {
       expect(args.messages[0].content).toBe("Be helpful");
     });
   });
+
+  describe("countTokens", () => {
+    it("returns a positive token count for simple messages", async () => {
+      const provider = createProvider();
+      const count = await provider.countTokens({
+        model: "gpt-4o",
+        system: "You are helpful.",
+        messages: [{ role: "user", content: "Hello, world!" }],
+      });
+
+      expect(count).toBeGreaterThan(0);
+    });
+
+    it("increases count when tools are provided", async () => {
+      const provider = createProvider();
+      const base = await provider.countTokens({
+        model: "gpt-4o",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      const withTools = await provider.countTokens({
+        model: "gpt-4o",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        tools: [
+          {
+            name: "web_search",
+            description: "Search the web for information",
+            parameters: { type: "object", properties: { query: { type: "string" } } },
+          },
+        ],
+      });
+
+      expect(withTools).toBeGreaterThan(base);
+    });
+
+    it("counts tool_result content in messages", async () => {
+      const provider = createProvider();
+      const withShortResult = await provider.countTokens({
+        model: "gpt-4o",
+        system: "sys",
+        messages: [
+          { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "short" }] },
+        ],
+      });
+
+      const withLongResult = await createProvider().countTokens({
+        model: "gpt-4o",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "tool_result", toolUseId: "t1", content: "x".repeat(500) }],
+          },
+        ],
+      });
+
+      expect(withLongResult).toBeGreaterThan(withShortResult);
+    });
+  });
 });

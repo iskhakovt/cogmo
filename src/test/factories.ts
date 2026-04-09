@@ -30,7 +30,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     getProfile: vi.fn().mockResolvedValue({
       id: "profile-1",
       basePrompt: "test",
-      model: "test-model",
+      model: "claude-sonnet-4-20250514",
       toolSet: [],
     }),
     getDefaultProfile: vi.fn().mockResolvedValue({ id: "profile-1" }),
@@ -40,6 +40,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     getCoreMemoryBlocks: vi.fn().mockResolvedValue([]),
     upsertCoreMemoryBlock: vi.fn().mockResolvedValue(undefined),
     getLastMessageTime: vi.fn().mockResolvedValue(null),
+    getLastInputTokens: vi.fn().mockResolvedValue(null),
     ...overrides,
   };
 }
@@ -127,6 +128,7 @@ export function mockProvider(overrides?: Partial<LlmProvider>): LlmProvider {
     chatStream() {
       throw new Error("chatStream not implemented in mock");
     },
+    countTokens: vi.fn().mockResolvedValue(100),
     ...overrides,
   };
 }

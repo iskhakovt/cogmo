@@ -4,6 +4,7 @@ import type {
   ChatParams,
   ChatStreamResult,
   ContentBlock,
+  CountTokensParams,
   LlmResponse,
   Message,
   StopReason,
@@ -102,6 +103,18 @@ export class AnthropicProvider implements LlmProvider {
     }
 
     return { events: generateEvents(), response };
+  }
+
+  async countTokens(params: CountTokensParams): Promise<number> {
+    const built = buildCreateParams({ ...params, maxTokens: 1 });
+    const countParams: Anthropic.MessageCountTokensParams = {
+      model: built.model,
+      messages: built.messages,
+    };
+    if (built.system) countParams.system = built.system;
+    if (built.tools) countParams.tools = built.tools;
+    const result = await this.#client.messages.countTokens(countParams);
+    return result.input_tokens;
   }
 
   async chat(params: ChatParams): Promise<LlmResponse> {

@@ -53,6 +53,7 @@ export const messages = pgTable(
     role: text("role").notNull(), // 'user' | 'assistant'
     content: jsonb("content").notNull(),
     lastInboundMessageId: uuid("last_inbound_message_id").notNull(),
+    inputTokens: integer("input_tokens"), // nullable — only set on assistant messages
     createdAt: ts(),
   },
   (t) => [index("idx_messages_conv_id").on(t.conversationId, t.id)],
