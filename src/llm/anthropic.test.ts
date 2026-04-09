@@ -79,11 +79,35 @@ describe("AnthropicProvider", () => {
     ]);
   });
 
+  it("maps thinking blocks in response", async () => {
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce({
+      content: [
+        { type: "thinking", thinking: "hmm...", signature: "sig123" },
+        { type: "text", text: "answer", citations: null },
+      ],
+      stop_reason: "end_turn",
+      model: "claude-sonnet-4-20250514",
+      usage: { input_tokens: 10, output_tokens: 5 },
+    });
+
+    const result = await provider.chat({
+      model: "claude-sonnet-4-20250514",
+      system: "sys",
+      messages: [{ role: "user", content: "think" }],
+    });
+
+    expect(result.content).toEqual([
+      { type: "thinking", thinking: "hmm...", signature: "sig123" },
+      { type: "text", text: "answer" },
+    ]);
+  });
+
   it("skips unknown block types", async () => {
     const provider = createProvider();
     mockCreate.mockResolvedValueOnce({
       content: [
-        { type: "thinking", thinking: "hmm..." },
+        { type: "server_tool_use", id: "stu_1", name: "analyze", input: {} },
         { type: "text", text: "answer", citations: null },
       ],
       stop_reason: "end_turn",
@@ -546,6 +570,193 @@ describe("AnthropicProvider", () => {
 
       const callArgs = mockCountTokens.mock.calls[0][0];
       expect(callArgs.tools).toBeUndefined();
+    });
+  });
+
+  describe("thinking", () => {
+    it("passes thinking config to the API", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [
+          { type: "thinking", thinking: "Let me reason...", signature: "sig" },
+          { type: "text", text: "answer", citations: null },
+        ],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-4-20250514",
+        usage: { input_tokens: 50, output_tokens: 30 },
+      });
+
+      await provider.chat({
+        model: "claude-sonnet-4-20250514",
+        system: "sys",
+        messages: [{ role: "user", content: "think hard" }],
+        thinking: { budgetTokens: 10000 },
+      });
+
+      const callArgs = mockCreate.mock.calls[0]![0];
+      expect(callArgs.thinking).toEqual({ type: "enabled", budget_tokens: 10000 });
+      // max_tokens = budgetTokens + default (8192)
+      expect(callArgs.max_tokens).toBe(10000 + 8192);
+    });
+
+    it("translates thinking blocks in history back to Anthropic format", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-4-20250514",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+
+      await provider.chat({
+        model: "claude-sonnet-4-20250514",
+        system: "sys",
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "previous reasoning", signature: "sig" },
+              { type: "text", text: "previous answer" },
+            ],
+          },
+          { role: "user", content: "follow up" },
+        ],
+      });
+
+      const callArgs = mockCreate.mock.calls[0]![0];
+      const assistantMsg = callArgs.messages[0];
+      expect(assistantMsg.content[0]).toEqual({
+        type: "thinking",
+        thinking: "previous reasoning",
+        signature: "sig",
+      });
+    });
+
+    it("accumulates thinking in stream and emits as thinking_delta", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: {
+              model: "claude-sonnet-4-20250514",
+              usage: { input_tokens: 10, output_tokens: 0 },
+            },
+          },
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "thinking", thinking: "", signature: "sig-stream" },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "Step 1: " },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "analyze." },
+          },
+          { type: "content_block_stop", index: 0 },
+          {
+            type: "content_block_start",
+            index: 1,
+            content_block: { type: "text", text: "" },
+          },
+          {
+            type: "content_block_delta",
+            index: 1,
+            delta: { type: "text_delta", text: "Answer" },
+          },
+          { type: "content_block_stop", index: 1 },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 20 },
+          },
+        ]),
+      );
+
+      const { events, response } = provider.chatStream({
+        model: "claude-sonnet-4-20250514",
+        system: "sys",
+        messages: [{ role: "user", content: "think" }],
+        thinking: { budgetTokens: 5000 },
+      });
+
+      const collected: StreamEvent[] = [];
+      for await (const event of events) collected.push(event);
+
+      expect(collected).toEqual([
+        { type: "thinking_delta", thinking: "Step 1: analyze.", signature: "sig-stream" },
+        { type: "text_delta", text: "Answer" },
+      ]);
+
+      const meta = await response;
+      expect(meta.stopReason).toBe("end_turn");
+    });
+  });
+
+  describe("responseFormat", () => {
+    it("converts responseFormat to tool_use trick", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [
+          {
+            type: "tool_use",
+            id: "tu_1",
+            name: "extract_data",
+            input: { name: "Alice", age: 30 },
+          },
+        ],
+        stop_reason: "tool_use",
+        model: "claude-sonnet-4-20250514",
+        usage: { input_tokens: 50, output_tokens: 20 },
+      });
+
+      const result = await provider.chat({
+        model: "claude-sonnet-4-20250514",
+        system: "Extract structured data",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        responseFormat: {
+          type: "json_schema",
+          name: "extract_data",
+          schema: {
+            type: "object",
+            properties: { name: { type: "string" }, age: { type: "number" } },
+            required: ["name", "age"],
+          },
+        },
+      });
+
+      // Response normalized to TextBlock with JSON
+      expect(result.content).toEqual([{ type: "text", text: '{"name":"Alice","age":30}' }]);
+      expect(result.stopReason).toBe("end_turn");
+
+      // Verify synthetic tool + tool_choice sent to API
+      const callArgs = mockCreate.mock.calls[0]![0];
+      expect(callArgs.tools).toHaveLength(1);
+      expect(callArgs.tools[0].name).toBe("extract_data");
+      expect(callArgs.tool_choice).toEqual({ type: "tool", name: "extract_data" });
+    });
+
+    it("throws when both responseFormat and tools are provided", async () => {
+      const provider = createProvider();
+
+      await expect(
+        provider.chat({
+          model: "claude-sonnet-4-20250514",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+          responseFormat: {
+            type: "json_schema",
+            name: "result",
+            schema: { type: "object" },
+          },
+          tools: [{ name: "search", description: "search", parameters: { type: "object" } }],
+        }),
+      ).rejects.toThrow("mutually exclusive");
     });
   });
 });

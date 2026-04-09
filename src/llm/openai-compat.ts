@@ -107,12 +107,32 @@ export class OpenAICompatibleProvider implements LlmProvider {
   }
 
   async chat(params: ChatParams): Promise<LlmResponse> {
-    const response = await this.#client.chat.completions.create({
+    if (params.responseFormat && params.tools?.length) {
+      throw new Error("responseFormat and tools are mutually exclusive");
+    }
+
+    const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming = {
       model: params.model,
       max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
       messages: buildMessages(params.system, params.messages, this.#promptCaching),
-      ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
-    });
+    };
+
+    if (params.tools?.length) {
+      createParams.tools = params.tools.map(toOpenAITool);
+    }
+
+    if (params.responseFormat) {
+      createParams.response_format = {
+        type: "json_schema",
+        json_schema: {
+          name: params.responseFormat.name,
+          schema: params.responseFormat.schema,
+          strict: true,
+        },
+      };
+    }
+
+    const response = await this.#client.chat.completions.create(createParams);
 
     const choice = response.choices[0];
     if (!choice) throw new Error("No choices in response");
@@ -129,6 +149,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
   }
 
   chatStream(params: ChatParams): ChatStreamResult {
+    if (params.responseFormat && params.tools?.length) {
+      throw new Error("responseFormat and tools are mutually exclusive");
+    }
+
     let resolveResponse: (v: { stopReason: StopReason; model: string; usage: Usage }) => void;
     const response = new Promise<{ stopReason: StopReason; model: string; usage: Usage }>(
       (resolve) => {
@@ -239,6 +263,7 @@ function buildMessages(
 
     // Content blocks — handle tool_use and tool_result specially
     if (msg.role === "assistant") {
+      // Skip ThinkingBlock — not supported by OpenAI-compatible endpoints
       const textBlocks = msg.content.filter((b): b is TextBlock => b.type === "text");
       const toolUseBlocks = msg.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
 

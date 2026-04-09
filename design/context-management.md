@@ -169,7 +169,7 @@ This data is essential for tuning thresholds — if summarization fires too ofte
 - **Anthropic server-side compaction** (`compact_20260112`) — powerful but beta and Anthropic-only. Our pipeline is provider-agnostic. Can layer server-side APIs on top later.
 - **Relevance-based retrieval** — embedding conversation turns and retrieving by similarity. Hindsight handles this for cross-session; within-session relevance scoring is a future enhancement.
 - **Agent-directed memory** (MemGPT/Letta style) — the agent decides what to keep/evict via tool calls. Our core memory blocks are a simpler version of this.
-- **Thinking block management** — Anthropic's `clear_thinking` strategy. Relevant when we add extended thinking support.
+- **Thinking block management** — Handled by `clearOldThinking()` pre-pass in the agent loop (not the compaction pipeline). Replaces thinking content with empty string in all assistant messages except the most recent. Runs unconditionally every turn — cheaper and more reliable than a budget-triggered strategy.
 
 ## Industry Context
 

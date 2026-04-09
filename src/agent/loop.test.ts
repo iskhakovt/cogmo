@@ -1,8 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { LlmProvider } from "../llm/provider.js";
-import type { ChatStreamResult, LlmResponse, StopReason, StreamEvent } from "../llm/types.js";
-import { runAgentLoop, runStreamingAgentLoop } from "./loop.js";
+import type {
+  ChatStreamResult,
+  LlmResponse,
+  Message,
+  StopReason,
+  StreamEvent,
+} from "../llm/types.js";
+import { clearOldThinking, runAgentLoop, runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
 import { defineTool, ToolRegistry } from "./tools.js";
 
@@ -35,6 +41,7 @@ function mockProvider(responses: LlmResponse[]): LlmProvider {
     chatStream() {
       throw new Error("chatStream not implemented in mock");
     },
+    countTokens: vi.fn(),
   };
 }
 
@@ -346,6 +353,7 @@ function mockStreamProvider(turns: MockStreamTurn[]): LlmProvider {
     name: "mock-stream",
     chat: vi.fn(),
     chatStream,
+    countTokens: vi.fn(),
   };
 }
 
@@ -526,5 +534,130 @@ describe("runStreamingAgentLoop", () => {
 
     expect(result.iterations).toBe(2);
     expect(provider.chatStream).toHaveBeenCalledTimes(2);
+  });
+
+  it("captures thinking_delta into content blocks but does not forward to onEvent", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [
+          { type: "thinking_delta", thinking: "Let me think...", signature: "sig" },
+          { type: "text_delta", text: "Answer" },
+        ],
+        stopReason: "end_turn",
+      },
+    ]);
+    const tools = new ToolRegistry();
+    const collected: StreamEvent[] = [];
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "think" }],
+      tools,
+      service: stubService(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+    });
+
+    // thinking_delta NOT forwarded to onEvent
+    expect(collected).toEqual([{ type: "text_delta", text: "Answer" }]);
+
+    // But thinking block IS in the message content
+    const lastAssistant = result.messages[result.messages.length - 1]!;
+    expect(lastAssistant.content).toEqual([
+      { type: "thinking", thinking: "Let me think...", signature: "sig" },
+      { type: "text", text: "Answer" },
+    ]);
+  });
+});
+
+describe("clearOldThinking", () => {
+  it("clears thinking content in older assistant messages", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "old reasoning", signature: "sig1" },
+          { type: "text", text: "old answer" },
+        ],
+      },
+      { role: "user", content: "follow up" },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "current reasoning", signature: "sig2" },
+          { type: "text", text: "current answer" },
+        ],
+      },
+    ];
+
+    const result = clearOldThinking(messages);
+
+    // First assistant: thinking cleared, signature preserved
+    expect(result[0]!.content).toEqual([
+      { type: "thinking", thinking: "", signature: "sig1" },
+      { type: "text", text: "old answer" },
+    ]);
+
+    // Last assistant: thinking preserved
+    expect(result[2]!.content).toEqual([
+      { type: "thinking", thinking: "current reasoning", signature: "sig2" },
+      { type: "text", text: "current answer" },
+    ]);
+  });
+
+  it("returns messages unchanged when no thinking blocks exist", () => {
+    const messages: Message[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: [{ type: "text", text: "hello" }] },
+    ];
+
+    const result = clearOldThinking(messages);
+    expect(result).toEqual(messages);
+  });
+
+  it("handles string content messages", () => {
+    const messages: Message[] = [
+      { role: "assistant", content: "plain text" },
+      { role: "user", content: "follow up" },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "reasoning", signature: "sig" },
+          { type: "text", text: "answer" },
+        ],
+      },
+    ];
+
+    const result = clearOldThinking(messages);
+    // String content passes through unchanged
+    expect(result[0]!.content).toBe("plain text");
+    // Last assistant preserved
+    expect(result[2]!.content).toEqual([
+      { type: "thinking", thinking: "reasoning", signature: "sig" },
+      { type: "text", text: "answer" },
+    ]);
+  });
+
+  it("does not mutate original messages", () => {
+    const original: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "old", signature: "sig" },
+          { type: "text", text: "answer" },
+        ],
+      },
+      { role: "user", content: "next" },
+      { role: "assistant", content: [{ type: "text", text: "latest" }] },
+    ];
+
+    clearOldThinking(original);
+
+    // Original thinking content unchanged
+    const blocks = original[0]!.content as Array<{ type: string; thinking?: string }>;
+    expect(blocks[0]!.thinking).toBe("old");
   });
 });

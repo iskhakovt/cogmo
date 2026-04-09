@@ -406,4 +406,99 @@ describe("OpenAICompatibleProvider", () => {
       expect(withLongResult).toBeGreaterThan(withShortResult);
     });
   });
+
+  describe("responseFormat", () => {
+    it("passes native json_schema response_format", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: '{"name":"Alice","age":30}' }, finish_reason: "stop" }],
+        model: "gpt-4o",
+        usage: { prompt_tokens: 20, completion_tokens: 10 },
+      });
+
+      const result = await provider.chat({
+        model: "gpt-4o",
+        system: "Extract data",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        responseFormat: {
+          type: "json_schema",
+          name: "extract_data",
+          schema: {
+            type: "object",
+            properties: { name: { type: "string" }, age: { type: "number" } },
+            required: ["name", "age"],
+          },
+        },
+      });
+
+      expect(result.content).toEqual([{ type: "text", text: '{"name":"Alice","age":30}' }]);
+
+      const args = mockCreate.mock.calls[0][0];
+      expect(args.response_format).toEqual({
+        type: "json_schema",
+        json_schema: {
+          name: "extract_data",
+          schema: {
+            type: "object",
+            properties: { name: { type: "string" }, age: { type: "number" } },
+            required: ["name", "age"],
+          },
+          strict: true,
+        },
+      });
+      // No tools when using responseFormat
+      expect(args.tools).toBeUndefined();
+    });
+
+    it("throws when both responseFormat and tools are provided", async () => {
+      const provider = createProvider();
+
+      await expect(
+        provider.chat({
+          model: "gpt-4o",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+          responseFormat: {
+            type: "json_schema",
+            name: "result",
+            schema: { type: "object" },
+          },
+          tools: [{ name: "search", description: "search", parameters: { type: "object" } }],
+        }),
+      ).rejects.toThrow("mutually exclusive");
+    });
+  });
+
+  describe("thinking blocks in messages", () => {
+    it("skips thinking blocks when building messages", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "m",
+        usage: { prompt_tokens: 10, completion_tokens: 1 },
+      });
+
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "internal reasoning", signature: "sig" },
+              { type: "text", text: "visible answer" },
+            ],
+          },
+          { role: "user", content: "follow up" },
+        ],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      const assistantMsg = args.messages[1]; // [0] is system
+      // Text extracted, thinking blocks filtered out
+      expect(assistantMsg.content).toBe("visible answer");
+      // No thinking content leaked into the message
+      expect(JSON.stringify(assistantMsg)).not.toContain("internal reasoning");
+    });
+  });
 });

@@ -33,7 +33,14 @@ export interface ImageBlock {
   mediaType: string; // e.g. "image/jpeg", "image/png"
 }
 
-export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | ImageBlock;
+export interface ThinkingBlock {
+  type: "thinking";
+  thinking: string;
+  /** Opaque signature for multi-turn thinking continuity (Anthropic). Must be preserved in history. */
+  signature: string;
+}
+
+export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | ImageBlock | ThinkingBlock;
 
 // --- Messages ---
 
@@ -83,6 +90,7 @@ export interface LlmResponse {
 
 export type StreamEvent =
   | { type: "text_delta"; text: string }
+  | { type: "thinking_delta"; thinking: string; signature: string }
   | { type: "tool_start"; id: string; name: string; input: unknown }
   | { type: "tool_result"; name: string; output: string; isError?: boolean }
   | { type: "status"; message: string };
@@ -101,13 +109,12 @@ export interface ChatStreamResult {
   response: Promise<{ stopReason: StopReason; model: string; usage: Usage }>;
 }
 
-// --- Token counting ---
+// --- Structured output ---
 
-export interface CountTokensParams {
-  model: string;
-  system: string;
-  messages: Message[];
-  tools?: ToolDefinition[];
+export interface ResponseFormat {
+  type: "json_schema";
+  name: string;
+  schema: JsonSchema;
 }
 
 // --- Chat params ---
@@ -118,4 +125,13 @@ export interface ChatParams {
   messages: Message[];
   tools?: ToolDefinition[];
   maxTokens?: number;
+  /** Enable extended thinking. Provider support varies — Anthropic native, others ignore. */
+  thinking?: { budgetTokens: number };
+  /** Request structured JSON output. Mutually exclusive with tools. */
+  responseFormat?: ResponseFormat;
 }
+
+// --- Token counting ---
+
+/** Same shape as ChatParams minus maxTokens — if you can chat(), you can count tokens for it. */
+export type CountTokensParams = Omit<ChatParams, "maxTokens">;

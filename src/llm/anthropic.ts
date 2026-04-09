@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { logger } from "../logger.js";
 import type { LlmProvider } from "./provider.js";
 import type {
   ChatParams,
@@ -30,6 +31,10 @@ export class AnthropicProvider implements LlmProvider {
   }
 
   chatStream(params: ChatParams): ChatStreamResult {
+    if (params.responseFormat && params.tools?.length) {
+      throw new Error("responseFormat and tools are mutually exclusive");
+    }
+
     const anthropicParams = buildCreateParams(params);
     let resolveResponse: (v: { stopReason: StopReason; model: string; usage: Usage }) => void;
     const response = new Promise<{ stopReason: StopReason; model: string; usage: Usage }>(
@@ -45,6 +50,8 @@ export class AnthropicProvider implements LlmProvider {
 
       // Track tool_use blocks by index for input accumulation
       const toolBlocks = new Map<number, { id: string; name: string; jsonChunks: string[] }>();
+      // Track thinking blocks by index for content accumulation
+      const thinkingBlocks = new Map<number, { signature: string; chunks: string[] }>();
       let model = "";
       let stopReason: StopReason = "end_turn";
       const usage: Usage = { inputTokens: 0, outputTokens: 0 };
@@ -68,6 +75,11 @@ export class AnthropicProvider implements LlmProvider {
                 name: event.content_block.name,
                 jsonChunks: [],
               });
+            } else if (event.content_block.type === "thinking") {
+              thinkingBlocks.set(event.index, {
+                signature: event.content_block.signature,
+                chunks: [],
+              });
             }
             break;
 
@@ -79,15 +91,31 @@ export class AnthropicProvider implements LlmProvider {
               if (block) {
                 block.jsonChunks.push(event.delta.partial_json);
               }
+            } else if (event.delta.type === "thinking_delta") {
+              const block = thinkingBlocks.get(event.index);
+              if (block) {
+                block.chunks.push(event.delta.thinking);
+              }
             }
             break;
 
           case "content_block_stop": {
-            const block = toolBlocks.get(event.index);
-            if (block) {
-              const input = JSON.parse(block.jsonChunks.join(""));
-              yield { type: "tool_start", id: block.id, name: block.name, input };
+            const toolBlock = toolBlocks.get(event.index);
+            if (toolBlock) {
+              const input = JSON.parse(toolBlock.jsonChunks.join(""));
+              yield { type: "tool_start", id: toolBlock.id, name: toolBlock.name, input };
               toolBlocks.delete(event.index);
+            }
+            const thinkingBlock = thinkingBlocks.get(event.index);
+            if (thinkingBlock) {
+              // Emit as a thinking_delta with the full accumulated text + signature.
+              // The agent loop captures this into a ThinkingBlock.
+              yield {
+                type: "thinking_delta",
+                thinking: thinkingBlock.chunks.join(""),
+                signature: thinkingBlock.signature,
+              };
+              thinkingBlocks.delete(event.index);
             }
             break;
           }
@@ -118,22 +146,43 @@ export class AnthropicProvider implements LlmProvider {
   }
 
   async chat(params: ChatParams): Promise<LlmResponse> {
+    if (params.responseFormat && params.tools?.length) {
+      throw new Error("responseFormat and tools are mutually exclusive");
+    }
+
     const response = await this.#client.messages.create(buildCreateParams(params));
+
+    const usage: Usage = {
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+      ...(response.usage.cache_read_input_tokens != null && {
+        cacheReadTokens: response.usage.cache_read_input_tokens,
+      }),
+      ...(response.usage.cache_creation_input_tokens != null && {
+        cacheCreationTokens: response.usage.cache_creation_input_tokens,
+      }),
+    };
+
+    // When responseFormat is set, the model is forced to call a synthetic tool.
+    // Normalize: extract tool input as JSON text, set stopReason to end_turn.
+    if (params.responseFormat) {
+      const toolUse = response.content.find((b) => b.type === "tool_use");
+      if (toolUse && toolUse.type === "tool_use") {
+        return {
+          content: [{ type: "text", text: JSON.stringify(toolUse.input) }],
+          stopReason: "end_turn",
+          model: response.model,
+          usage,
+        };
+      }
+      logger.warn("responseFormat set but no tool_use block in response");
+    }
 
     return {
       content: response.content.flatMap(fromAnthropicBlock),
       stopReason: fromAnthropicStopReason(response.stop_reason),
       model: response.model,
-      usage: {
-        inputTokens: response.usage.input_tokens,
-        outputTokens: response.usage.output_tokens,
-        ...(response.usage.cache_read_input_tokens != null && {
-          cacheReadTokens: response.usage.cache_read_input_tokens,
-        }),
-        ...(response.usage.cache_creation_input_tokens != null && {
-          cacheCreationTokens: response.usage.cache_creation_input_tokens,
-        }),
-      },
+      usage,
     };
   }
 }
@@ -147,6 +196,27 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
     { type: "text", text: params.system, cache_control: { type: "ephemeral" } },
   ];
 
+  // When responseFormat is set, use the tool_use trick: define a synthetic tool
+  // with the schema and force the model to call it via tool_choice.
+  if (params.responseFormat) {
+    const syntheticTool = toAnthropicTool({
+      name: params.responseFormat.name,
+      description: "Respond with structured data matching the schema.",
+      parameters: params.responseFormat.schema,
+    });
+    syntheticTool.cache_control = { type: "ephemeral" };
+
+    const maxTokens = params.maxTokens ?? DEFAULT_MAX_TOKENS;
+    return {
+      model: params.model,
+      max_tokens: maxTokens,
+      system: systemBlocks,
+      messages: params.messages.map(toAnthropicMessage),
+      tools: [syntheticTool],
+      tool_choice: { type: "tool", name: params.responseFormat.name },
+    };
+  }
+
   // Add cache_control to the last tool (caches all tools as a prefix)
   const tools = params.tools?.length ? params.tools.map(toAnthropicTool) : undefined;
   if (tools && tools.length > 0) {
@@ -154,13 +224,21 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
     if (last) tools[tools.length - 1] = { ...last, cache_control: { type: "ephemeral" } };
   }
 
-  return {
+  const maxTokens = params.maxTokens ?? DEFAULT_MAX_TOKENS;
+
+  const result: Anthropic.MessageCreateParamsNonStreaming = {
     model: params.model,
-    max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
+    max_tokens: params.thinking ? params.thinking.budgetTokens + maxTokens : maxTokens,
     system: systemBlocks,
     messages: params.messages.map(toAnthropicMessage),
     ...(tools && { tools }),
   };
+
+  if (params.thinking) {
+    result.thinking = { type: "enabled", budget_tokens: params.thinking.budgetTokens };
+  }
+
+  return result;
 }
 
 // --- To Anthropic format ---
@@ -182,6 +260,8 @@ function toAnthropicBlock(
   switch (block.type) {
     case "text":
       return { type: "text", text: block.text };
+    case "thinking":
+      return { type: "thinking", thinking: block.thinking, signature: block.signature };
     case "image":
       return {
         type: "image",
@@ -239,8 +319,10 @@ function fromAnthropicBlock(block: Anthropic.ContentBlock): ContentBlock[] {
       return [{ type: "text", text: block.text }];
     case "tool_use":
       return [{ type: "tool_use", id: block.id, name: block.name, input: block.input }];
+    case "thinking":
+      return [{ type: "thinking", thinking: block.thinking, signature: block.signature }];
     default:
-      // Skip block types we don't handle (thinking, server_tool_use, etc.)
+      // Skip block types we don't handle (server_tool_use, etc.)
       return [];
   }
 }

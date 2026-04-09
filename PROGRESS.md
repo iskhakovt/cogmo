@@ -25,7 +25,7 @@
 The minimum useful system: talk to it, it remembers things.
 
 - [x] Agentic loop as Inngest function — event-driven, durable steps per Claude call + tool execution
-- [ ] Typed LLM calls with Zod schemas + retry with feedback injection (Stage 3, day 1)
+- [x] Typed LLM calls — `chatTyped()` with Zod schemas, `responseFormat`, `ThinkingBlock`, retry with feedback injection
 - [x] Telegram adapter — grammY, long polling, DMs only, `AdapterModule` contract
 - [x] Channel registry — table-driven adapter discovery via `AdapterModule` + `satisfies` barrel
 - [x] Direct channel adapter — event-driven via Inngest (`adapter/direct/inbound`, `adapter/direct/outbound`)
@@ -40,9 +40,10 @@ The minimum useful system: talk to it, it remembers things.
 - [x] Steering rules table in PostgreSQL — injected into system prompt per invocation
 - [ ] Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
 - [ ] Crash recovery — handled by Inngest durable steps (automatic resume from last checkpoint)
-- [ ] Session lifecycle — idle detection (~5 min), debounce, new session on `/new`
-- [ ] Context window management — token counting, truncate oldest messages at ~80% capacity
-- [ ] Message batching — debounce rapid consecutive messages
+- [x] Session lifecycle — Inngest idle timer, resolveSession staleness, `/new` command, debounce wiring
+- [x] Context window management — countTokens() on LlmProvider, model registry, three-layer compaction pipeline
+- [x] Message batching — debounce-router, debounce-idle, debounce-maxwait with entry guards and resume policy
+- [x] Response routing — source routing via DeliveryRouter, getSourceSessions + getReceiveAllSessions
 - [x] Telegram auth — user ID allowlist via env var
 - [x] System prompt assembly — auto-generated from tool registry + service guidance + conditional onboarding
 - [x] Streaming responses — unified DeliveryRouter, StreamingAdapter/StreamHandle, TelegramStreamHandle
