@@ -3,11 +3,11 @@
 ## Next
 
 - [ ] `p2` Typed LLM calls with Zod schemas + retry with feedback injection
-- [ ] `p2` Session lifecycle — idle detection, debounce, new session on `/new`
+- [ ] `p2` Response routing — source routing per `design/transport/response-routing.md`
 - [ ] `p2` Post-conversation Observer — Inngest function triggered by `conversation/idle` event
 - [ ] `p2` Instruction file (Stage 1 evolution) — corrections append to JSON, loaded into system prompt
-- [ ] `p2` Context window management — token counting, truncate oldest messages
-- [ ] `p2` Message batching — debounce rapid consecutive messages
+- [ ] `p2` Context fast path — account for output tokens in `shouldSkipCounting` (currently only tracks `inputTokens`, underestimates by one response worth)
+- [ ] `p2` Background compaction — run summarization after response (while user reads) instead of before next turn, store pre-computed summary to eliminate compaction latency
 - [ ] `p2` Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
 - [ ] `p2` Batch API support for async evolution tasks — 50% cost reduction for reflection, extraction, optimization
 - [ ] `p2` Define InboundContent schema (Zod) — structured message content type instead of raw JsonValue everywhere
@@ -99,3 +99,7 @@
 - [x] OpenAI-compatible LLM adapter — OpenAICompatibleProvider via official SDK
 - [x] ImageBlock — canonical type, both adapters, Telegram photo handler, AttachmentStore (separate binary storage)
 - [x] Steering rules table — already existed, injected into system prompt per invocation
+- [x] Context window management — `countTokens()` on LlmProvider, model registry, three-layer compaction pipeline, usage tracking
+- [x] Debounce wiring — debounce-router, debounce-idle, debounce-maxwait, entry guards, resume policy
+- [x] Prompt caching — Anthropic cache_control, OpenRouter passthrough
+- [x] Session lifecycle — Inngest idle timer, resolveSession staleness, `/new` command

@@ -110,6 +110,7 @@ export async function bootstrap() {
     debounceConfig,
     deliveryRouter,
     runStreamingAgentLoop,
+    ...(env.SUMMARIZATION_MODEL && { summarizationModel: env.SUMMARIZATION_MODEL }),
   });
 
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger

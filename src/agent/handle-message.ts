@@ -1,5 +1,6 @@
 import { inngest } from "../inngest/client.js";
 import { inboundReady, responseReady } from "../inngest/events.js";
+import { computeBudget } from "../llm/models.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, Message, StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
@@ -8,6 +9,7 @@ import type { AttachmentStore } from "../transport/attachment-store.js";
 import { contentToBlocks, contentToText } from "../transport/content.js";
 import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
+import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
 import type { DebounceConfig } from "./debounce.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
@@ -28,6 +30,7 @@ export interface HandleMessageDeps {
   debounceConfig: DebounceConfig;
   deliveryRouter: DeliveryRouter;
   runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>;
+  summarizationModel?: string;
 }
 
 const DEFAULT_MODEL = "claude-sonnet-4-20250514";
@@ -174,7 +177,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // Build message history, replacing the last user message with resolved content.
       // Safe because: getHistory runs after create-user-message (durable step ordering),
       // and concurrency lock on conversationId prevents concurrent writes.
-      const historyMessages = [...history] as Message[];
+      let historyMessages = [...history] as Message[];
       const hasImages = resolvedBlocks.some((b) => b.type === "image");
       if (hasImages && historyMessages.length > 0) {
         const lastIdx = historyMessages.length - 1;
@@ -183,11 +186,44 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         }
       }
 
+      // ──── Context window management ────
+
+      const model = profile?.model ?? DEFAULT_MODEL;
+      const budget = computeBudget(model);
+      const toolDefs = tools.definitions();
+
+      const lastInputTokens = await agentStore.getLastInputTokens(conversationId);
+      const skip = shouldSkipCounting(lastInputTokens, userContentText.length, budget);
+
+      if (!skip) {
+        const compactResult = await compactMessages(fullPrompt, historyMessages, toolDefs, {
+          countTokens: (params) => provider.countTokens({ ...params, model }),
+          budget,
+          summarize: async (system, msgs) => {
+            const sumModel = deps.summarizationModel ?? model;
+            const response = await provider.chat({
+              model: sumModel,
+              system,
+              messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
+              maxTokens: 4096,
+            });
+            return response.content
+              .filter((b) => b.type === "text")
+              .map((b) => (b as { text: string }).text)
+              .join("");
+          },
+          onStatus: (message) => {
+            delivery.push({ type: "status", message });
+          },
+        });
+        historyMessages = compactResult.messages;
+      }
+
       let result: AgentLoopResult;
       try {
         result = await runStreamingAgentLoop({
           provider,
-          model: profile?.model ?? DEFAULT_MODEL,
+          model,
           systemPrompt: fullPrompt,
           messages: historyMessages,
           tools,
@@ -218,6 +254,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           role: "assistant",
           content: result.text,
           lastInboundMessageId: maxInboundId,
+          inputTokens: result.usage.inputTokens,
         });
       });
 

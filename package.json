@@ -40,6 +40,7 @@
     "drizzle-orm": "^0.45.1",
     "grammy": "^1.41.1",
     "inngest": "^4.0.5",
+    "js-tiktoken": "^1.0.21",
     "jsdom": "^29.0.2",
     "neverthrow": "^8.2.0",
     "openai": "^6.33.0",

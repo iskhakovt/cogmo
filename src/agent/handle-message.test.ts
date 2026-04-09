@@ -80,7 +80,7 @@ describe("createHandleMessage", () => {
     });
 
     expect(deps.runStreamingAgentLoop).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "test-model" }),
+      expect.objectContaining({ model: "claude-sonnet-4-20250514" }),
     );
   });
 
@@ -299,5 +299,110 @@ describe("createHandleMessage", () => {
     // Only send-response, no flush
     const flushCalls = step.sendEvent.mock.calls.filter(([id]: any) => id === "flush");
     expect(flushCalls).toHaveLength(0);
+  });
+
+  it("skips countTokens when fast path detects under budget", async () => {
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getLastInputTokens: vi.fn().mockResolvedValue(1000),
+      }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    // countTokens should NOT be called — fast path skips it
+    expect(deps.provider.countTokens).not.toHaveBeenCalled();
+  });
+
+  it("persists inputTokens on assistant message", async () => {
+    const deps = mockDeps();
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    // The assistant insertMessage call should include inputTokens
+    const assistantCall = (
+      deps.agentStore.insertMessage as ReturnType<typeof vi.fn>
+    ).mock.calls.find(([params]: any) => params.role === "assistant");
+    expect(assistantCall).toBeDefined();
+    expect(assistantCall![0].inputTokens).toBeDefined();
+  });
+
+  it("runs compaction when countTokens reports over threshold", async () => {
+    // countTokens returns over 60% of budget (173_616 * 0.6 ≈ 104_170)
+    // First call: over threshold. Second call (after clearing): under.
+    const countTokens = vi.fn().mockResolvedValueOnce(120_000).mockResolvedValueOnce(50_000);
+    const deps = mockDeps({
+      provider: mockProvider({ countTokens }),
+      agentStore: mockAgentStore({
+        // No prior input tokens → fast path won't skip
+        getLastInputTokens: vi.fn().mockResolvedValue(null),
+      }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    // countTokens should have been called (compaction ran)
+    expect(countTokens).toHaveBeenCalled();
+    // Agent loop should still have been called
+    expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
+  });
+
+  it("pushes status event through delivery when summarization runs", async () => {
+    // Over 80% of budget → triggers summarization
+    const countTokens = vi
+      .fn()
+      .mockResolvedValueOnce(150_000) // initial: over 80%
+      .mockResolvedValueOnce(150_000) // after tool clearing (nothing to clear): still over
+      .mockResolvedValueOnce(50_000); // after summarization: under
+    const handle = mockDeliveryHandle();
+    const deps = mockDeps({
+      provider: mockProvider({
+        countTokens,
+        // Summarization uses provider.chat — return a text response
+        chat: vi.fn().mockResolvedValue({
+          content: [{ type: "text", text: "Summary of conversation" }],
+          stopReason: "end_turn",
+          model: "mock",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        }),
+      }),
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      agentStore: mockAgentStore({
+        getLastInputTokens: vi.fn().mockResolvedValue(null),
+        // Need history with enough messages to trigger summarization (> keepTurns=6)
+        getHistory: vi.fn().mockResolvedValue([
+          { role: "user", content: "m1" },
+          { role: "assistant", content: "r1" },
+          { role: "user", content: "m2" },
+          { role: "assistant", content: "r2" },
+          { role: "user", content: "m3" },
+          { role: "assistant", content: "r3" },
+          { role: "user", content: "m4" },
+          { role: "assistant", content: "r4" },
+        ]),
+      }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    // Should have pushed a status event for summarization
+    const statusCalls = handle.push.mock.calls.filter(([event]: any) => event.type === "status");
+    expect(statusCalls).toHaveLength(1);
+    expect(statusCalls[0][0].message).toBe("Summarizing conversation...");
   });
 });

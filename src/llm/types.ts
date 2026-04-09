@@ -84,7 +84,8 @@ export interface LlmResponse {
 export type StreamEvent =
   | { type: "text_delta"; text: string }
   | { type: "tool_start"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; name: string; output: string; isError?: boolean };
+  | { type: "tool_result"; name: string; output: string; isError?: boolean }
+  | { type: "status"; message: string };
 
 /**
  * Result of a streaming LLM call.
@@ -98,6 +99,15 @@ export type StreamEvent =
 export interface ChatStreamResult {
   events: AsyncIterable<StreamEvent>;
   response: Promise<{ stopReason: StopReason; model: string; usage: Usage }>;
+}
+
+// --- Token counting ---
+
+export interface CountTokensParams {
+  model: string;
+  system: string;
+  messages: Message[];
+  tools?: ToolDefinition[];
 }
 
 // --- Chat params ---

@@ -31,7 +31,7 @@ async function seedProfile(): Promise<string> {
     await store.createProfile({
       name: "test",
       basePrompt: "You are a test assistant.",
-      model: "test-model",
+      model: "claude-sonnet-4-20250514",
       toolSet: ["tool_a"],
     })
   ).id;
@@ -216,6 +216,64 @@ describe("DrizzleAgentStore", () => {
     it("getHistory returns empty array for no messages", async () => {
       const { conversationId } = await seedConversation();
       expect(await store.getHistory(conversationId)).toEqual([]);
+    });
+
+    it("persists and retrieves inputTokens on assistant messages", async () => {
+      const { conversationId } = await seedConversation();
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+
+      await store.insertMessage({
+        conversationId,
+        role: "assistant",
+        content: "response",
+        lastInboundMessageId: inboundId,
+        inputTokens: 5432,
+      });
+
+      const tokens = await store.getLastInputTokens(conversationId);
+      expect(tokens).toBe(5432);
+    });
+
+    it("getLastInputTokens returns null when no assistant messages", async () => {
+      const { conversationId } = await seedConversation();
+      expect(await store.getLastInputTokens(conversationId)).toBeNull();
+    });
+
+    it("getLastInputTokens returns most recent assistant's tokens", async () => {
+      const { conversationId } = await seedConversation();
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+
+      await store.insertMessage({
+        conversationId,
+        role: "assistant",
+        content: "first",
+        lastInboundMessageId: inboundId,
+        inputTokens: 1000,
+      });
+      await new Promise((r) => setTimeout(r, 2));
+      await store.insertMessage({
+        conversationId,
+        role: "assistant",
+        content: "second",
+        lastInboundMessageId: inboundId,
+        inputTokens: 2000,
+      });
+
+      expect(await store.getLastInputTokens(conversationId)).toBe(2000);
+    });
+
+    it("insertMessage without inputTokens leaves it null", async () => {
+      const { conversationId } = await seedConversation();
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+
+      await store.insertMessage({
+        conversationId,
+        role: "assistant",
+        content: "no tokens",
+        lastInboundMessageId: inboundId,
+      });
+
+      expect(await store.getLastInputTokens(conversationId)).toBeNull();
     });
   });
 

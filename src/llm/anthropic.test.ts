@@ -4,10 +4,11 @@ import type { StreamEvent } from "./types.js";
 
 // Mock the Anthropic SDK — use a class so `new Anthropic()` works
 const mockCreate = vi.fn();
+const mockCountTokens = vi.fn();
 vi.mock("@anthropic-ai/sdk", () => {
   return {
     default: class MockAnthropic {
-      messages = { create: mockCreate };
+      messages = { create: mockCreate, countTokens: mockCountTokens };
     },
   };
 });
@@ -29,6 +30,7 @@ function mockStream(events: unknown[]): AsyncIterable<unknown> {
 
 function createProvider(): AnthropicProvider {
   mockCreate.mockReset();
+  mockCountTokens.mockReset();
   return new AnthropicProvider("test-key");
 }
 
@@ -491,6 +493,59 @@ describe("AnthropicProvider", () => {
 
       expect(result.usage.cacheReadTokens).toBe(5000);
       expect(result.usage.cacheCreationTokens).toBe(0);
+    });
+  });
+
+  describe("countTokens", () => {
+    it("calls the Anthropic countTokens API and returns input_tokens", async () => {
+      const provider = createProvider();
+      mockCountTokens.mockResolvedValueOnce({ input_tokens: 1234 });
+
+      const count = await provider.countTokens({
+        model: "claude-sonnet-4-20250514",
+        system: "You are helpful.",
+        messages: [{ role: "user", content: "hello" }],
+      });
+
+      expect(count).toBe(1234);
+      expect(mockCountTokens).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: "claude-sonnet-4-20250514",
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      );
+    });
+
+    it("passes tools through when provided", async () => {
+      const provider = createProvider();
+      mockCountTokens.mockResolvedValueOnce({ input_tokens: 500 });
+
+      await provider.countTokens({
+        model: "claude-sonnet-4-20250514",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ name: "search", description: "Search the web", parameters: { type: "object" } }],
+      });
+
+      expect(mockCountTokens).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tools: expect.arrayContaining([expect.objectContaining({ name: "search" })]),
+        }),
+      );
+    });
+
+    it("omits tools when not provided", async () => {
+      const provider = createProvider();
+      mockCountTokens.mockResolvedValueOnce({ input_tokens: 100 });
+
+      await provider.countTokens({
+        model: "claude-sonnet-4-20250514",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      const callArgs = mockCountTokens.mock.calls[0][0];
+      expect(callArgs.tools).toBeUndefined();
     });
   });
 });
