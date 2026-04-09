@@ -3,6 +3,11 @@
 | Date | Change |
 |-|-|
 | 2026-04-09 | Response source routing — DeliveryRouter resolves targets via inbound message cursor chain instead of broadcasting to all sessions. `getSourceSessions()` + `getReceiveAllSessions()` on TransportStore. Private conversations merge receive-all observers; non-private forced to source only. Design doc upgraded to `[confirmed]`. |
+| 2026-04-09 | Context window management — `countTokens()` on LlmProvider (Anthropic native API, js-tiktoken for OpenAI-compatible). Model registry with budget computation. Three-layer compaction pipeline: clear old tool results (60%), summarize prefix (80%), truncate (95%). Fast-path skips counting when under 50% budget. `inputTokens` persisted on assistant messages. Status events for user feedback during summarization. |
+| 2026-04-08 | Debounce wiring — `debounce-router`, `debounce-idle`, `debounce-maxwait` Inngest functions. Entry guards (staleness, await_input). Resume policy (flush/debounce/await_input). Per-conversation concurrency lock. |
+| 2026-04-08 | Session lifecycle — Inngest idle timer closes sessions after configurable timeout. `resolveSession` staleness safety net. `/new` command closes current session and creates fresh conversation. |
+| 2026-04-07 | Prompt caching — Anthropic `cache_control` on system blocks and tool definitions. OpenRouter passthrough via `cache_control` extension. Reduces input token costs on multi-turn conversations. |
+| 2026-04-07 | Switch from llmock fork to official `@copilotkit/aimock` 1.8.0 — all upstream PRs merged (#57, #58, #63, #64). |
 | 2026-04-05 | AttachmentStore — separate binary storage from text workspace (Service.files). S3-backed upload/download with proper MIME types. Telegram photo handler stores raw bytes. |
 | 2026-04-05 | ImageBlock — canonical type in ContentBlock union. Both Anthropic (base64/URL source) and OpenAI (image_url/data URI) adapters. Telegram `message:photo` handler downloads, stores in S3, orchestrator resolves before LLM. `contentToBlocks()` parser with ImageRef pattern. |
 | 2026-04-05 | OpenAI-compatible LLM adapter — `OpenAICompatibleProvider` using official OpenAI SDK. Covers OpenAI, xAI (Grok), OpenRouter, DeepSeek, Groq, Together. Chat + streaming + tool calling. |
