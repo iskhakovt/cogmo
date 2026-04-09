@@ -1,6 +1,35 @@
+import type http from "node:http";
 import { type ChatCompletionRequest, LLMock } from "@copilotkit/aimock";
 
 const FIXTURE_DIR = "./test/fixtures/recorded";
+
+/**
+ * Stub handler for Anthropic's /v1/messages/count_tokens endpoint.
+ *
+ * aimock doesn't support this endpoint natively. Without this stub,
+ * the Anthropic SDK gets a 404 and the context management pipeline crashes.
+ * Returns a rough token estimate based on JSON-stringified request body length.
+ */
+const countTokensHandler = {
+  async handleRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    _pathname: string,
+  ): Promise<boolean> {
+    if (req.method !== "POST") return false;
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    const bodyLength = Buffer.concat(chunks).length;
+
+    // ~4 chars per token, rough estimate — good enough for test compaction decisions
+    const inputTokens = Math.ceil(bodyLength / 4);
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ input_tokens: inputTokens }));
+    return true;
+  },
+};
 
 /**
  * Strip timestamps, UUIDs, and date strings from LLM prompts for deterministic matching.
@@ -53,6 +82,7 @@ export function createMock(): LLMock {
   });
 
   mock.loadFixtureDir(FIXTURE_DIR);
+  mock.mount("/v1/messages/count_tokens", countTokensHandler);
 
   return mock;
 }

@@ -5,12 +5,7 @@
         "userMessage": "Hello integration test"
       },
       "response": {
-        "toolCalls": [
-          {
-            "name": "get_current_time",
-            "arguments": "{}"
-          }
-        ]
+        "content": "Hello! I'm your AI assistant. How can I help you today?"
       }
     }
   ]
