@@ -143,7 +143,9 @@ export function hindsightSlim(
       env.HINDSIGHT_API_RERANKER_ZEROENTROPY_BASE_URL = opts.rerankerBaseUrl;
   }
 
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight:latest-slim")
+  // Pin version — floating `latest-slim` breaks llmock fixtures when Hindsight
+  // changes its LLM request format. Update version + re-record fixtures together.
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight:0.4.22-slim")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)

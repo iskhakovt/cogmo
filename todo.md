@@ -12,6 +12,7 @@
 - [ ] `p2` CLI channel management commands — `main.ts channel add telegram --token=...`, `channel list`, `channel remove`
 - [ ] `p2` Pass transaction function to stores instead of full Database — makes transactions inescapable, narrows the interface
 - [ ] `p3` Consider dropping Inngest serve mode — only connect mode is used (tests, production, local dev)
+- [ ] `p3` Upgrade Hindsight to v0.5.0 — 3-phase retain pipeline, new consolidation prompts. Re-record llmock fixtures after upgrade.
 - [ ] `p3` Stale llmock fixture cleanup — detect unused fixtures after test run, auto-delete
 - [ ] `p3` Telegram response formatting — HTML or MarkdownV2 with escape function
 - [ ] `p3` Interactive bootstrap — guided setup for new deployments (choose channels, configure credentials)
