@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { JsonValue } from "type-fest";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
@@ -63,8 +63,18 @@ export interface TransportStore {
   /** Get a session by ID. */
   getSession(sessionId: string): Promise<Session | null>;
 
-  /** Find all active sessions for a conversation (for response delivery). */
+  /** Find all active sessions for a conversation (for lifecycle management). */
   getActiveSessionsForConversation(conversationId: string): Promise<ReadonlyArray<Session>>;
+
+  /** Find sessions that contributed inbound messages in the given range (source routing). */
+  getSourceSessions(params: {
+    conversationId: string;
+    prevCursor: string | null;
+    maxInboundId: string;
+  }): Promise<ReadonlyArray<Session>>;
+
+  /** Find active sessions with receive='all' for a conversation. */
+  getReceiveAllSessions(conversationId: string): Promise<ReadonlyArray<Session>>;
 
   /** Resolve user by platform handle on a channel. Stub — identity resolution is a future feature. */
   resolveUser(channelId: string, platformHandle: string): Promise<{ userId: string } | null>;
@@ -234,6 +244,60 @@ export class DrizzleTransportStore implements TransportStore {
           and(
             eq(channelSessions.conversationId, conversationId),
             eq(channelSessions.status, "active"),
+            or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
+          ),
+        );
+    });
+  }
+
+  async getSourceSessions(params: {
+    conversationId: string;
+    prevCursor: string | null;
+    maxInboundId: string;
+  }): Promise<ReadonlyArray<Session>> {
+    return this.#db.transaction(async (tx) => {
+      const conditions = [
+        eq(inboundMessages.conversationId, params.conversationId),
+        lte(inboundMessages.id, params.maxInboundId),
+        eq(channelSessions.status, "active"),
+        ne(channelSessions.receive, "none"),
+        or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
+      ];
+      if (params.prevCursor) {
+        conditions.push(gt(inboundMessages.id, params.prevCursor));
+      }
+      return tx
+        .selectDistinctOn([channelSessions.id], {
+          id: channelSessions.id,
+          channelId: channelSessions.channelId,
+          platformAddress: channelSessions.platformAddress,
+          conversationId: channelSessions.conversationId,
+          status: channelSessions.status,
+          receive: channelSessions.receive,
+        })
+        .from(inboundMessages)
+        .innerJoin(channelSessions, eq(inboundMessages.channelSessionId, channelSessions.id))
+        .where(and(...conditions));
+    });
+  }
+
+  async getReceiveAllSessions(conversationId: string): Promise<ReadonlyArray<Session>> {
+    return this.#db.transaction(async (tx) => {
+      return tx
+        .select({
+          id: channelSessions.id,
+          channelId: channelSessions.channelId,
+          platformAddress: channelSessions.platformAddress,
+          conversationId: channelSessions.conversationId,
+          status: channelSessions.status,
+          receive: channelSessions.receive,
+        })
+        .from(channelSessions)
+        .where(
+          and(
+            eq(channelSessions.conversationId, conversationId),
+            eq(channelSessions.status, "active"),
+            eq(channelSessions.receive, "all"),
             or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
           ),
         );

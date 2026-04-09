@@ -223,6 +223,216 @@ describe("DrizzleTransportStore", () => {
     });
   });
 
+  describe("getSourceSessions", () => {
+    it("returns sessions that sent inbound messages in the range", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const sessionId = await seedSession(channelId, conversationId, "addr-1");
+
+      const { id: inboundId } = await store.persistInbound({
+        channelSessionId: sessionId,
+        conversationId,
+        content: "hello",
+        platformTs: new Date(),
+      });
+
+      const result = await store.getSourceSessions({
+        conversationId,
+        prevCursor: null,
+        maxInboundId: inboundId,
+      });
+      expect(result).toHaveLength(1);
+      expect(result[0]?.id).toBe(sessionId);
+    });
+
+    it("excludes sessions with receive='none'", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+
+      const { channelSessions: csTable } = await import("./schema.js");
+      const [mutedSession] = await db
+        .insert(csTable)
+        .values({
+          channelId,
+          platformAddress: "muted-addr",
+          conversationId,
+          status: "active",
+          receive: "none",
+        })
+        .returning({ id: csTable.id });
+
+      const { id: inboundId } = await store.persistInbound({
+        channelSessionId: mutedSession!.id,
+        conversationId,
+        content: "hello",
+        platformTs: new Date(),
+      });
+
+      const result = await store.getSourceSessions({
+        conversationId,
+        prevCursor: null,
+        maxInboundId: inboundId,
+      });
+      expect(result).toHaveLength(0);
+    });
+
+    it("excludes closed sessions", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const sessionId = await seedSession(channelId, conversationId);
+
+      const { id: inboundId } = await store.persistInbound({
+        channelSessionId: sessionId,
+        conversationId,
+        content: "hello",
+        platformTs: new Date(),
+      });
+
+      await store.closeSession(sessionId);
+
+      const result = await store.getSourceSessions({
+        conversationId,
+        prevCursor: null,
+        maxInboundId: inboundId,
+      });
+      expect(result).toHaveLength(0);
+    });
+
+    it("excludes expired sessions", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+
+      const { channelSessions: csTable } = await import("./schema.js");
+      const [expiredSession] = await db
+        .insert(csTable)
+        .values({
+          channelId,
+          platformAddress: "addr-expired",
+          conversationId,
+          status: "active",
+          receive: "routed",
+          expiresAt: new Date("2020-01-01"),
+        })
+        .returning({ id: csTable.id });
+
+      const { id: inboundId } = await store.persistInbound({
+        channelSessionId: expiredSession!.id,
+        conversationId,
+        content: "hello",
+        platformTs: new Date(),
+      });
+
+      const result = await store.getSourceSessions({
+        conversationId,
+        prevCursor: null,
+        maxInboundId: inboundId,
+      });
+      expect(result).toHaveLength(0);
+    });
+
+    it("respects prevCursor lower bound", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const s1 = await seedSession(channelId, conversationId, "addr-1");
+      const s2 = await seedSession(channelId, conversationId, "addr-2");
+
+      const { id: firstInbound } = await store.persistInbound({
+        channelSessionId: s1,
+        conversationId,
+        content: "first",
+        platformTs: new Date(),
+      });
+      await new Promise((r) => setTimeout(r, 2));
+      const { id: secondInbound } = await store.persistInbound({
+        channelSessionId: s2,
+        conversationId,
+        content: "second",
+        platformTs: new Date(),
+      });
+
+      // With prevCursor = firstInbound, only s2's message is in range
+      const result = await store.getSourceSessions({
+        conversationId,
+        prevCursor: firstInbound,
+        maxInboundId: secondInbound,
+      });
+      expect(result).toHaveLength(1);
+      expect(result[0]?.platformAddress).toBe("addr-2");
+    });
+
+    it("returns distinct sessions when one session has multiple messages", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const sessionId = await seedSession(channelId, conversationId);
+
+      await store.persistInbound({
+        channelSessionId: sessionId,
+        conversationId,
+        content: "first",
+        platformTs: new Date(),
+      });
+      await new Promise((r) => setTimeout(r, 2));
+      const { id: lastInbound } = await store.persistInbound({
+        channelSessionId: sessionId,
+        conversationId,
+        content: "second",
+        platformTs: new Date(),
+      });
+
+      const result = await store.getSourceSessions({
+        conversationId,
+        prevCursor: null,
+        maxInboundId: lastInbound,
+      });
+      expect(result).toHaveLength(1);
+    });
+  });
+
+  describe("getReceiveAllSessions", () => {
+    it("returns only receive='all' sessions", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+
+      // Routed session — should NOT appear
+      await seedSession(channelId, conversationId, "addr-routed");
+
+      // All session — should appear
+      const { channelSessions: csTable } = await import("./schema.js");
+      const [allSession] = await db
+        .insert(csTable)
+        .values({
+          channelId,
+          platformAddress: "addr-all",
+          conversationId,
+          status: "active",
+          receive: "all",
+        })
+        .returning({ id: csTable.id });
+
+      const result = await store.getReceiveAllSessions(conversationId);
+      expect(result).toHaveLength(1);
+      expect(result[0]?.id).toBe(allSession!.id);
+    });
+
+    it("excludes expired sessions", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+
+      const { channelSessions: csTable } = await import("./schema.js");
+      await db.insert(csTable).values({
+        channelId,
+        platformAddress: "addr-expired",
+        conversationId,
+        status: "active",
+        receive: "all",
+        expiresAt: new Date("2020-01-01"),
+      });
+
+      const result = await store.getReceiveAllSessions(conversationId);
+      expect(result).toHaveLength(0);
+    });
+  });
+
   describe("identity resolution", () => {
     it("resolves wildcard identity", async () => {
       const userId = (await agentStore.createUser()).id;
