@@ -139,7 +139,7 @@ describe("createHandleMessage", () => {
     );
   });
 
-  it("calls deliveryRouter.prepare with conversationId and runId", async () => {
+  it("calls deliveryRouter.prepare with full routing context", async () => {
     const deps = mockDeps();
     await (createHandleMessage(deps) as any).fn({
       event: testEvent,
@@ -147,7 +147,13 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    expect(deps.deliveryRouter.prepare).toHaveBeenCalledWith("conv-1", "run-123");
+    expect(deps.deliveryRouter.prepare).toHaveBeenCalledWith({
+      conversationId: "conv-1",
+      runId: "run-123",
+      isPrivate: true,
+      maxInboundId: "inbound-1",
+      prevCursor: null,
+    });
   });
 
   it("passes onEvent that calls delivery.push", async () => {

@@ -1,4 +1,5 @@
 import type { StreamEvent } from "../llm/types.js";
+import { logger } from "../logger.js";
 import type { TransportStore } from "./store/index.js";
 import {
   type Adapter,
@@ -6,6 +7,19 @@ import {
   type StreamHandle,
   type StreamingAdapter,
 } from "./types.js";
+
+/**
+ * Routing context for target resolution — passed from the orchestrator.
+ */
+export interface RoutingContext {
+  conversationId: string;
+  runId: string;
+  isPrivate: boolean;
+  /** Last inbound message ID included in this response. */
+  maxInboundId: string;
+  /** Previous assistant message's lastInboundMessageId (null for first response). */
+  prevCursor: string | null;
+}
 
 /**
  * Handle to an in-progress delivery — fans out to both streaming and batch targets.
@@ -23,11 +37,11 @@ export interface DeliveryHandle {
 /**
  * Unified delivery for both streaming and batch.
  *
- * prepare() resolves all routing targets, partitions by adapter type,
+ * prepare() resolves source routing targets, partitions by adapter type,
  * opens stream handles for StreamingAdapters, and returns a DeliveryHandle.
  */
 export interface DeliveryRouter {
-  prepare(conversationId: string, runId: string): Promise<DeliveryHandle>;
+  prepare(ctx: RoutingContext): Promise<DeliveryHandle>;
 }
 
 export interface DeliveryRouterDeps {
@@ -36,15 +50,36 @@ export interface DeliveryRouterDeps {
 }
 
 /**
- * Create a delivery router that resolves routing targets and partitions
- * them into streaming (real-time) and batch (after persist) paths.
+ * Create a delivery router that resolves routing targets via source routing
+ * and partitions them into streaming (real-time) and batch (after persist) paths.
  */
 export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
   const { adapters, transportStore } = deps;
 
   return {
-    async prepare(conversationId: string, runId: string): Promise<DeliveryHandle> {
-      const sessions = await transportStore.getActiveSessionsForConversation(conversationId);
+    async prepare(ctx: RoutingContext): Promise<DeliveryHandle> {
+      // Source routing — find sessions that contributed inbound messages for this turn
+      const sourceSessions = await transportStore.getSourceSessions({
+        conversationId: ctx.conversationId,
+        prevCursor: ctx.prevCursor,
+        maxInboundId: ctx.maxInboundId,
+      });
+
+      // Receive-all sessions — private conversations only
+      const receiveAllSessions = ctx.isPrivate
+        ? await transportStore.getReceiveAllSessions(ctx.conversationId)
+        : [];
+
+      // Merge + dedup by session ID
+      const sessionMap = new Map(sourceSessions.map((s) => [s.id, s]));
+      for (const s of receiveAllSessions) {
+        sessionMap.set(s.id, s);
+      }
+      const sessions = [...sessionMap.values()];
+
+      if (sessions.length === 0) {
+        logger.warn({ conversationId: ctx.conversationId }, "no routing targets found");
+      }
 
       const streamHandles: StreamHandle[] = [];
       const batchTargets: Array<{ platformAddress: string; adapter: Adapter }> = [];
@@ -54,7 +89,7 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
         if (!adapter) continue;
 
         if (isStreamingAdapter(adapter)) {
-          const handle = await adapter.openStream(session.platformAddress, runId);
+          const handle = await adapter.openStream(session.platformAddress, ctx.runId);
           streamHandles.push(handle);
         } else {
           batchTargets.push({ platformAddress: session.platformAddress, adapter });

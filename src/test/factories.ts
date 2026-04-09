@@ -57,6 +57,8 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     persistInbound: vi.fn().mockResolvedValue({ id: "inbound-1" }),
     getUnbatchedInbound: vi.fn().mockResolvedValue([{ id: "inbound-1", content: "hello" }]),
     getActiveSessionsForConversation: vi.fn().mockResolvedValue([]),
+    getSourceSessions: vi.fn().mockResolvedValue([]),
+    getReceiveAllSessions: vi.fn().mockResolvedValue([]),
     resolveUser: vi.fn().mockResolvedValue(null),
     createWildcardIdentity: vi.fn().mockResolvedValue({ id: "identity-1" }),
     ...overrides,

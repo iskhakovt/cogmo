@@ -1,4 +1,4 @@
-# Response Routing `[proposed]`
+# Response Routing `[confirmed]`
 
 How agent responses reach the right platform chats.
 

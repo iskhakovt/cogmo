@@ -2,6 +2,7 @@
 
 | Date | Change |
 |-|-|
+| 2026-04-09 | Response source routing — DeliveryRouter resolves targets via inbound message cursor chain instead of broadcasting to all sessions. `getSourceSessions()` + `getReceiveAllSessions()` on TransportStore. Private conversations merge receive-all observers; non-private forced to source only. Design doc upgraded to `[confirmed]`. |
 | 2026-04-05 | AttachmentStore — separate binary storage from text workspace (Service.files). S3-backed upload/download with proper MIME types. Telegram photo handler stores raw bytes. |
 | 2026-04-05 | ImageBlock — canonical type in ContentBlock union. Both Anthropic (base64/URL source) and OpenAI (image_url/data URI) adapters. Telegram `message:photo` handler downloads, stores in S3, orchestrator resolves before LLM. `contentToBlocks()` parser with ImageRef pattern. |
 | 2026-04-05 | OpenAI-compatible LLM adapter — `OpenAICompatibleProvider` using official OpenAI SDK. Covers OpenAI, xAI (Grok), OpenRouter, DeepSeek, Groq, Together. Chat + streaming + tool calling. |

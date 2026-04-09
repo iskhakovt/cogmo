@@ -167,7 +167,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       const profile = await agentStore.getProfile(profileId);
       const service = createService(memory, userId, [], fileService, coreMemoryService);
-      const delivery = await deliveryRouter.prepare(conversationId, runId);
+      const delivery = await deliveryRouter.prepare({
+        conversationId,
+        runId,
+        isPrivate: conv.isPrivate,
+        maxInboundId,
+        prevCursor: lastAssistant?.lastInboundMessageId ?? null,
+      });
 
       // Append recalled context to system prompt
       const fullPrompt = recalledContext
