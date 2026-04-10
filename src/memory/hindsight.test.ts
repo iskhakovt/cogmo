@@ -35,7 +35,6 @@ describe("HindsightMemoryProvider", () => {
     expect(mockRetain).toHaveBeenCalledWith("bank-1", "user likes coffee", {
       async: true,
       context: "morning chat",
-      metadata: undefined,
       tags: ["preference"],
     });
   });

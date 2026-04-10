@@ -13,6 +13,7 @@
 - [ ] `p2` Pass transaction function to stores instead of full Database — makes transactions inescapable, narrows the interface
 - [ ] `p3` Consider dropping Inngest serve mode — only connect mode is used (tests, production, local dev)
 - [ ] `p3` Switch Hindsight LLM to gpt-5-nano — blocked on Hindsight emitting `max_completion_tokens` for GPT-5 models. Currently on gpt-4o-mini (~$10/mo vs ~$6/mo target). See `design/memory.md` → Known Gaps.
+- [ ] `p3` Hindsight retain failure monitoring — `async: true` means background pipeline errors are invisible to caller. Poll `operation_id` status or wire webhooks; surface failures to logs/metrics.
 - [ ] `p3` Adopt `recallResponseToPromptString()` — richer memory injection with temporal fields, entity summaries
 - [ ] `p3` Use native OpenRouter provider for prod Hindsight — replaces `openai` + custom base URL workaround
 - [ ] `p3` Stale llmock fixture cleanup — detect unused fixtures after test run, auto-delete
