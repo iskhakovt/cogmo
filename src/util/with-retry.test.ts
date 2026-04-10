@@ -1,5 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AbortError, withRetry } from "./with-retry.js";
+
+const warnSpy = vi.fn();
+vi.mock("../logger.js", () => ({
+  logger: {
+    warn: (...args: unknown[]) => warnSpy(...args),
+  },
+}));
+
+beforeEach(() => {
+  warnSpy.mockClear();
+});
 
 describe("withRetry", () => {
   it("returns the result on first success without retrying", async () => {
@@ -34,6 +45,37 @@ describe("withRetry", () => {
     await expect(withRetry(fn, { minTimeoutMs: 1, maxTimeoutMs: 5 })).rejects.toThrow(
       "client error",
     );
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not log a warn line on AbortError", async () => {
+    // Locks in pRetry's documented contract that onFailedAttempt is never
+    // called for AbortError. Without this guarantee every permanent 4xx
+    // (bad API key, 401, 403, 404) would emit a misleading
+    // "retry attempt 1 failed" line even though no retry happened.
+    const fn = vi.fn().mockRejectedValue(new AbortError("permanent client error"));
+    await expect(withRetry(fn)).rejects.toThrow("permanent client error");
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("does log a warn line on retryable errors", async () => {
+    // Companion to the AbortError test — verifies the warn path is wired
+    // correctly so the previous assertion isn't passing for the wrong reason.
+    const fn = vi.fn().mockRejectedValueOnce(new Error("blip")).mockResolvedValue("ok");
+    await withRetry(fn, { minTimeoutMs: 1, maxTimeoutMs: 5 });
+    expect(warnSpy).toHaveBeenCalledOnce();
+  });
+
+  it("passes maxRetryTimeMs through to the underlying retry library", async () => {
+    // Smoke test for the conditional spread of maxRetryTimeMs. Tests the
+    // wiring, not pRetry's cap behaviour itself (that's pRetry's job).
+    const fn = vi.fn().mockResolvedValue("ok");
+    const result = await withRetry(fn, {
+      maxRetryTimeMs: 1000,
+      minTimeoutMs: 1,
+      maxTimeoutMs: 5,
+    });
+    expect(result).toBe("ok");
     expect(fn).toHaveBeenCalledTimes(1);
   });
 

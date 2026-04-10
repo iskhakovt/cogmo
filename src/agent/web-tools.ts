@@ -63,10 +63,12 @@ function createWebSearch(apiKey: string | undefined): ToolSpec {
             }),
           });
           if (r.status >= 500) {
-            throw new Error(`Tavily API server error: ${r.status} ${await r.text()}`);
+            throw new Error(
+              `Tavily API server error: ${r.status} ${(await r.text()).slice(0, 200)}`,
+            );
           }
           if (!r.ok) {
-            throw new AbortError(`Tavily API error: ${r.status} ${await r.text()}`);
+            throw new AbortError(`Tavily API error: ${r.status} ${(await r.text()).slice(0, 200)}`);
           }
           return r;
         },
@@ -114,10 +116,14 @@ function createWebAnswer(apiKey: string | undefined): ToolSpec {
             }),
           });
           if (r.status >= 500) {
-            throw new Error(`OpenRouter API server error: ${r.status} ${await r.text()}`);
+            throw new Error(
+              `OpenRouter API server error: ${r.status} ${(await r.text()).slice(0, 200)}`,
+            );
           }
           if (!r.ok) {
-            throw new AbortError(`OpenRouter API error: ${r.status} ${await r.text()}`);
+            throw new AbortError(
+              `OpenRouter API error: ${r.status} ${(await r.text()).slice(0, 200)}`,
+            );
           }
           return r;
         },

@@ -13,10 +13,12 @@ import type {
 /**
  * Hindsight memory provider — talks to a self-hosted Hindsight server via HTTP.
  *
- * All methods wrap the underlying HindsightClient call in withRetry with
- * the default 3 retries (no override). Hindsight is self-hosted and
- * expected to blip during restarts/OOMs/image bumps, so retrying more
- * aggressively than for external rate-limited APIs is appropriate.
+ * Retry budgets are split by user-visibility:
+ * - retain is async (fire-and-forget) — uses the default 3 retries with
+ *   no time cap, since the user never waits for it.
+ * - recall and reflect are on the interactive path — the agent can't
+ *   respond until they return — so they cap at 2 retries / 5s total
+ *   wall-clock to bound user-visible latency on a flaky Hindsight.
  */
 export class HindsightMemoryProvider implements MemoryProvider {
   readonly name = "hindsight";
@@ -47,6 +49,8 @@ export class HindsightMemoryProvider implements MemoryProvider {
     if (options?.tags !== undefined) opts.tags = options.tags;
 
     const response = await withRetry(() => this.#client.recall(bankId, query, opts), {
+      retries: 2,
+      maxRetryTimeMs: 5000,
       context: `hindsight.recall[${bankId}]`,
     });
 
@@ -65,6 +69,8 @@ export class HindsightMemoryProvider implements MemoryProvider {
     if (options?.tags !== undefined) opts.tags = options.tags;
 
     const response = await withRetry(() => this.#client.reflect(bankId, query, opts), {
+      retries: 2,
+      maxRetryTimeMs: 5000,
       context: `hindsight.reflect[${bankId}]`,
     });
     return { answer: response.text };
