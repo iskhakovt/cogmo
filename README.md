@@ -1,58 +1,77 @@
 # Assistant
 
+[![Release](https://img.shields.io/github/v/release/iskhakovt/ai-assistant?label=release&color=blue)](https://github.com/iskhakovt/ai-assistant/releases)
+[![ghcr](https://img.shields.io/github/v/release/iskhakovt/ai-assistant?label=ghcr&logo=docker&color=2496ED)](https://github.com/iskhakovt/ai-assistant/pkgs/container/ai-assistant)
+[![CI](https://github.com/iskhakovt/ai-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/iskhakovt/ai-assistant/actions/workflows/ci.yml)
+
 Personal AI assistant runtime — modular agent system with persistent memory and self-evolution.
 
 ## What
 
-An event-driven AI assistant built on the Anthropic SDK and Inngest. Processes messages through a durable pipeline: channel adapters receive input, an orchestrator routes through an agentic loop (LLM calls + tool execution), and responses flow back via event fan-out. No channel knows about any other channel. No framework — just typed interfaces and dependency injection.
+An event-driven AI assistant built on raw provider SDKs and Inngest. Messages flow through a durable pipeline: channel adapters receive input, an orchestrator routes through an agentic loop (LLM calls + tool execution), and responses fan back out via events. No channel knows about any other channel. No framework — just typed interfaces and dependency injection.
+
+See `design/` for the full architecture.
 
 ## Stack
 
-- **TypeScript** on Node.js 24
-- **Anthropic SDK** — provider-agnostic LLM layer (Anthropic first, others plug in)
-- **Inngest** — event-driven durable execution (self-hosted, dev mode)
-- **PostgreSQL** + pgvector — conversations, messages, steering rules, vector memory
-- **Drizzle** — ORM, schema-as-code, forward migrations
-- **Vitest** — unit + integration tests with testcontainers
+- **TypeScript** on Node.js 24+
+- **Anthropic SDK** + **OpenAI SDK** behind a provider-agnostic LLM interface
+- **Inngest** (self-hosted) — event-driven durable execution, scheduling, queues
+- **Hindsight** — self-hosted memory server (vector + extraction)
+- **PostgreSQL 18+** with pgvector — application state and Hindsight storage. PG 18 ships native `uuidv7()`; older versions fall back to a SQL polyfill in `scripts/init-db.sql`.
+- **Drizzle** — schema-as-code, forward migrations
+- **Vitest** — three-tier tests (unit / integration / e2e) with PGlite and testcontainers
 
 ## Quick Start
 
+Infra runs via testcontainers (no `docker-compose.yml`). `pnpm dev` starts Postgres, Redis, Inngest, and Hindsight, applies migrations, then runs the app:
+
 ```bash
-# Start infrastructure (postgres, redis, inngest)
-docker compose up -d
-
-# Apply migrations
-pnpm db:migrate
-
-# Run the assistant (needs ANTHROPIC_API_KEY)
 ANTHROPIC_API_KEY=sk-... pnpm dev
+```
+
+Or run infra only and start the app yourself in another terminal:
+
+```bash
+ANTHROPIC_API_KEY=sk-... pnpm dev:infra   # prints env vars, leaves containers running
+pnpm dev:app                              # tsx watch src/index.ts
+```
+
+Containers use `withReuse()` and survive across restarts. Stop them with `docker stop` when done.
+
+Talk to the running assistant from a separate terminal:
+
+```bash
+pnpm console
 ```
 
 ## Testing
 
 ```bash
-# Unit tests (fast, no Docker needed)
-pnpm test
+pnpm test              # unit (PGlite, mocked LLM)
+pnpm test:integration  # in-process pipeline + testcontainers + llmock
+pnpm test:e2e          # app as subprocess against full container stack
+pnpm test:all          # everything
 
-# E2E tests (spins up all containers via testcontainers)
-pnpm test:e2e
-
-# Everything
-pnpm test:all
+pnpm typecheck && pnpm lint && pnpm test   # full local check
 ```
+
+LLM calls in integration/e2e are served by `@copilotkit/aimock` from recorded fixtures. Re-record with `pnpm test:record` after changing prompts or tools.
 
 ## Architecture
 
 ```
-CLI / Telegram / API
-  → Inngest event: message/received
-    → handle-message (orchestrator)
-      → load context → assemble prompt → agentic loop → persist
-      → emit: message/response
-    → cli-respond / telegram-respond (channel adapters)
+Telegram / Direct / future channels
+  → src/transport/    (channel adapters, sessions, debounce)
+    → Inngest event: inbound/arrived
+      → src/agent/    (orchestrator: prompt assembly + agentic loop)
+        → src/llm/    (provider abstraction)
+        → src/memory/ (Hindsight client)
+      → Inngest event: response/ready
+    → src/transport/  (delivery router → adapter)
 ```
 
-Domain logic in `src/agent/`, `src/llm/`, `src/channels/`. Inngest functions in `src/inngest/` are thin wiring — zero business logic. See `design/` for the full architecture docs.
+Domain logic lives in `src/agent/`, `src/transport/`, `src/llm/`, `src/memory/`. Inngest functions in `src/inngest/` are thin wiring — zero business logic. See `design/architecture.md` and `design/transport/` for details.
 
 ## License
 

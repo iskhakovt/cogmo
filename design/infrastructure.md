@@ -4,7 +4,8 @@
 
 | Dependency | Version | Purpose |
 |-|-|-|
-| PostgreSQL | 14+ (18+ recommended for native uuidv7) | Application state (Drizzle) + Hindsight server storage (pgvector) |
+| PostgreSQL | 18+ recommended (14+ supported via SQL polyfill) | Application state (Drizzle) + Hindsight server storage (pgvector). PG 18 ships native `uuidv7()`; older versions get a `plpgsql` fallback from `scripts/init-db.sql` that is non-monotonic and lower quality — fine for dev, avoid in production. |
+| pgvector | latest | PostgreSQL extension for vector storage. Dev/test uses the `pgvector/pgvector:pg18` image. |
 | Hindsight | latest | Self-hosted memory server (`ghcr.io/vectorize-io/hindsight`), HTTP API on port 8888 |
 | Redis | 7+ | Inngest queue + state store (production); not needed in dev mode |
 | Inngest | latest | Event-driven orchestration — `inngest dev` locally, `inngest start` in production |
