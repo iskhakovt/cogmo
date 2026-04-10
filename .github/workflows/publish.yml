@@ -1,34 +1,17 @@
 name: Publish
 
 on:
-  # Invoked from ci.yml's `publish` job after semantic-release cuts a
-  # new version. Tag-push triggers don't work here because semantic-release
-  # uses GITHUB_TOKEN to create the tag, and GITHUB_TOKEN-created events
-  # do not trigger downstream workflows. workflow_call runs in the same
-  # workflow run as the caller, so the limitation doesn't apply.
   workflow_call:
-  # Manual backfill against any ref via the GitHub UI — pick a tag in
-  # the ref dropdown and dunamai derives the version from there.
   workflow_dispatch:
 
 jobs:
   docker:
     name: Build & Push Image
     runs-on: ubuntu-latest
-    # Don't cancel in-flight publishes — let an active build finish even
-    # if a newer CI run starts. Atomicity over iteration speed: cancelling
-    # mid-push leaves a tagged release with no image (the exact failure
-    # mode this PR fixes). Group is static so the constraint applies
-    # across both workflow_call entry points (CI release) and manual
-    # workflow_dispatch invocations.
     concurrency:
       group: publish-image
       cancel-in-progress: false
-    # Kept in sync with the calling job in ci.yml — there is no
-    # `permissions: inherit` for reusable workflows. The caller's
-    # permissions are a ceiling and the callee declares its request;
-    # the effective set is the intersection. Both blocks must match
-    # (or this one must be a strict subset of the caller's).
+    # Keep in sync with the calling job in ci.yml.
     permissions:
       contents: read
       packages: write
@@ -67,7 +50,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # No secrets in build-args. Use BuildKit secrets if needed.
           build-args: VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
