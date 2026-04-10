@@ -6,6 +6,28 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore(deps)"
+    # Group updates so the lockfile only has one merge state to validate
+    # at a time. Multiple overlapping PRs touching pnpm-lock.yaml can
+    # produce a corrupted lockfile because GitHub's textual auto-rebase
+    # runs on each merge in sequence and isn't lockfile-aware. Grouping
+    # collapses that scenario into a single PR with one semantically-
+    # resolved lockfile.
+    #
+    # Majors stay ungrouped — they deserve individual review.
+    # Security and version updates can't share a group (Dependabot rule),
+    # hence the third group.
+    groups:
+      npm-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["patch"]
+      npm-minor:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["minor"]
+      npm-security:
+        applies-to: security-updates
+        patterns: ["*"]
   - package-ecosystem: docker
     directory: /
     schedule:
@@ -14,9 +36,10 @@ updates:
       prefix: "chore(deps)"
     ignore:
       # Block Node major bumps. Dependabot has no LTS awareness and will
-      # happily PR odd-numbered releases (which never become LTS) — see
-      # PR #2 (node 24-slim → 25-slim) where corepack was removed from
-      # the v25 image and broke the Docker build. Bump Node majors by
-      # hand once a year when the next even-numbered LTS ships.
+      # happily PR odd-numbered releases (which never become LTS), and
+      # base-image majors tend to bring breaking changes (e.g. corepack
+      # being removed from the distribution) that need human review.
+      # Bump Node majors by hand once a year when the next even-numbered
+      # LTS ships.
       - dependency-name: node
         update-types: ["version-update:semver-major"]
