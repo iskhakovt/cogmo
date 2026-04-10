@@ -116,7 +116,7 @@ Each domain module owns its DB access in a `store/` subdirectory:
 
 ## Commits & PRs
 
-- **Conventional Commits** — all commit messages and PR titles must follow the [Conventional Commits](https://www.conventionalcommits.org/) spec. Format: `type(scope): description`. Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `ci`, `perf`, `build`. Scope is optional but encouraged (e.g., `feat(transport): add Slack adapter`). This drives semantic-release — wrong format means no release.
+- **Conventional Commits** — all commit messages and PR titles must follow the [Conventional Commits](https://www.conventionalcommits.org/) spec. Format: `type(scope): description`. This drives semantic-release — wrong format means no release. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full type→version-bump table, examples, and the CI/release workflow.
 
 ## Code Style
 
