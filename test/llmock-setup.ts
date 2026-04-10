@@ -49,8 +49,9 @@ function normalizeContent(text: string): string {
         "[DATE]",
       )
       // Test bank IDs (`test-1775815196908`) — Hindsight bakes the bank ID
-      // into extraction prompts as the narrator name
-      .replace(/test-\d{10,}/g, "test-[ID]")
+      // into extraction prompts as the narrator name. Word boundary prevents
+      // accidentally matching `test-` substrings inside other tokens.
+      .replace(/\btest-\d{10,}\b/g, "test-[ID]")
   );
 }
 
