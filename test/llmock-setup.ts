@@ -32,24 +32,35 @@ const countTokensHandler = {
 };
 
 /**
- * Strip timestamps, UUIDs, and date strings from LLM prompts for deterministic matching.
- * With requestTransform set, llmock uses exact match (===) instead of substring (includes).
+ * Strip timestamps, UUIDs, and other dynamic content from LLM prompts for
+ * deterministic matching. With requestTransform set, llmock uses exact match
+ * (===) instead of substring (includes).
  */
+function normalizeContent(text: string): string {
+  return (
+    text
+      // ISO 8601 timestamps → [TS]
+      .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+(\+[\d:]+|Z)/g, "[TS]")
+      // UUIDs → [UUID]
+      .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "[UUID]")
+      // Weekday + long-form dates ("Monday, January 1, 2026") → [DATE]
+      .replace(
+        /\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+\w+\s+\d{1,2},\s+\d{4}\b/g,
+        "[DATE]",
+      )
+      // Test bank IDs (`test-1775815196908`) — Hindsight bakes the bank ID
+      // into extraction prompts as the narrator name. Word boundary prevents
+      // accidentally matching `test-` substrings inside other tokens.
+      .replace(/\btest-\d{10,}\b/g, "test-[ID]")
+  );
+}
+
 function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {
   return {
     ...req,
     messages: req.messages.map((m) => ({
       ...m,
-      content:
-        typeof m.content === "string"
-          ? m.content
-              .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+(\+[\d:]+|Z)/g, "")
-              .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "")
-              .replace(
-                /\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+\w+\s+\d{1,2},\s+\d{4}\b/g,
-                "",
-              )
-          : m.content,
+      content: typeof m.content === "string" ? normalizeContent(m.content) : m.content,
     })),
     embeddingInput: req.embeddingInput?.split(" | ")[0],
   };
