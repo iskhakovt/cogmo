@@ -3,10 +3,11 @@
 ## Prerequisites
 
 - Docker
-- PostgreSQL 14+ with pgvector
+- PostgreSQL 18+ recommended (14+ supported via the `uuidv7()` polyfill in `scripts/init-db.sql`, but PG 18 ships native, monotonic UUIDv7 — prefer it in production)
+- pgvector extension on the same Postgres instance
 - [Hindsight](https://github.com/vectorize-io/hindsight) memory server
 - [Inngest](https://www.inngest.com/) (self-hosted or cloud)
-- Redis 7+ (production only, required by Inngest)
+- Redis 7+ (required by Inngest in production)
 
 ## Configuration
 
@@ -57,37 +58,3 @@ docker run -d \
 ```
 
 The app runs as `nonroot` inside a distroless container. Entrypoint is `node dist/cli.js serve`.
-
-## CI/CD
-
-Two GitHub Actions workflows handle testing and publishing.
-
-### CI (`.github/workflows/ci.yml`)
-
-Runs on push to `main` and pull requests:
-
-1. **PR Title** — enforces Conventional Commits format
-2. **Typecheck & Lint** — `pnpm typecheck && pnpm lint`
-3. **Unit Tests** — PGlite (in-process), mocked deps
-4. **Integration Tests** — testcontainers (PG, Redis, Inngest, Hindsight) + llmock
-5. **E2E Tests** — builds Docker image, tests against it
-6. **Release** — `semantic-release` creates GitHub release + `vX.Y.Z` tag (main only, after all jobs pass)
-
-### Publish (`.github/workflows/publish.yml`)
-
-Triggered by `v*` tag (created by semantic-release):
-
-1. Derives version from git tag (Dunamai)
-2. Builds image with `VERSION` build arg (cache hit from CI)
-3. Pushes to `ghcr.io/<owner>/assistant:<version>`
-
-### Conventional Commits
-
-All commit messages and PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/):
-
-| Prefix | Version bump |
-|-|-|
-| `fix:` | Patch |
-| `feat:` | Minor |
-| `feat!:` / `BREAKING CHANGE:` | Major |
-| `chore:`, `ci:`, `docs:`, `refactor:`, `test:` | No release |
