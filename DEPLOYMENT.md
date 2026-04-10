@@ -58,5 +58,3 @@ docker run -d \
 ```
 
 The app runs as `nonroot` inside a distroless container. Entrypoint is `node dist/cli.js serve`.
-
-Release engineering (CI workflows, commit conventions, semantic-release, image publishing) lives in [CONTRIBUTING.md](CONTRIBUTING.md).
