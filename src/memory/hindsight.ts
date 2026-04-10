@@ -12,6 +12,11 @@ import type {
 
 /**
  * Hindsight memory provider — talks to a self-hosted Hindsight server via HTTP.
+ *
+ * All methods wrap the underlying HindsightClient call in withRetry with
+ * the default 3 retries (no override). Hindsight is self-hosted and
+ * expected to blip during restarts/OOMs/image bumps, so retrying more
+ * aggressively than for external rate-limited APIs is appropriate.
  */
 export class HindsightMemoryProvider implements MemoryProvider {
   readonly name = "hindsight";

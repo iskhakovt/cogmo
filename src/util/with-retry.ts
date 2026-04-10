@@ -22,17 +22,24 @@ import { logger } from "../logger.js";
 export interface RetryOptions {
   /** Number of retry attempts after the initial call. Default: 3. */
   retries?: number;
-  /** Initial backoff in ms before the first retry. Default: 1000. */
-  minTimeout?: number;
-  /** Maximum backoff in ms between retries. Default: 10000. */
-  maxTimeout?: number;
+  /** Initial backoff before the first retry. Default: 1000ms. */
+  minTimeoutMs?: number;
+  /** Maximum backoff between retries. Default: 10000ms. */
+  maxTimeoutMs?: number;
+  /**
+   * Hard wall-clock cap — retries stop once total elapsed time
+   * exceeds this. Use this when individual attempts can be long
+   * (e.g. fetch with its own timeout) and you want to bound the
+   * total user-visible wait. Default: no cap.
+   */
+  maxRetryTimeMs?: number;
   /** Label included in retry log lines for observability. */
   context?: string;
 }
 
 const DEFAULT_RETRIES = 3;
-const DEFAULT_MIN_TIMEOUT = 1000;
-const DEFAULT_MAX_TIMEOUT = 10_000;
+const DEFAULT_MIN_TIMEOUT_MS = 1000;
+const DEFAULT_MAX_TIMEOUT_MS = 10_000;
 
 export function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise<T> {
   // Tests opt out via RETRY_DISABLED so transient failures surface as
@@ -46,8 +53,9 @@ export function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise
 
   return pRetry(fn, {
     retries: opts?.retries ?? DEFAULT_RETRIES,
-    minTimeout: opts?.minTimeout ?? DEFAULT_MIN_TIMEOUT,
-    maxTimeout: opts?.maxTimeout ?? DEFAULT_MAX_TIMEOUT,
+    minTimeout: opts?.minTimeoutMs ?? DEFAULT_MIN_TIMEOUT_MS,
+    maxTimeout: opts?.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS,
+    ...(opts?.maxRetryTimeMs != null && { maxRetryTime: opts.maxRetryTimeMs }),
     factor: 2,
     randomize: true,
     onFailedAttempt: ({ error, attemptNumber, retriesLeft }) => {
@@ -64,4 +72,7 @@ export function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise
   });
 }
 
+// Re-exported so callers always import AbortError from this module —
+// importing directly from p-retry would bypass any future wrapper-level
+// logic we add (custom classification, metrics, etc).
 export { AbortError };

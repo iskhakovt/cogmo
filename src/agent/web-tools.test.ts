@@ -5,6 +5,14 @@ import { createWebTools } from "./web-tools.js";
 // branches (5xx → throw, 4xx → AbortError) without paying the real
 // retry backoff delays. The retry behaviour itself is covered in
 // src/util/with-retry.test.ts.
+//
+// Limitation: this passthrough does NOT preserve pRetry's AbortError
+// opt-out logic — both regular Errors and AbortErrors propagate
+// identically here. That's fine for current tests (we only need the
+// error branches to fire), but if a future test needs to assert
+// "withRetry stopped retrying because of AbortError", it must use the
+// real withRetry with vi.useFakeTimers() or run against the integration
+// tier where RETRY_DISABLED already flattens retry behaviour.
 vi.mock("../util/with-retry.js", async () => {
   const actual =
     await vi.importActual<typeof import("../util/with-retry.js")>("../util/with-retry.js");

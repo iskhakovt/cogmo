@@ -70,6 +70,7 @@ function createWebSearch(apiKey: string | undefined): ToolSpec {
           }
           return r;
         },
+        // retries: 2 — external rate-limited API, don't hammer.
         { retries: 2, context: "tavily.search" },
       );
 
@@ -120,6 +121,7 @@ function createWebAnswer(apiKey: string | undefined): ToolSpec {
           }
           return r;
         },
+        // retries: 2 — external rate-limited API, don't hammer.
         { retries: 2, context: "openrouter.sonar" },
       );
 
@@ -169,7 +171,16 @@ function createFetchUrl(): ToolSpec {
           }
           return r;
         },
-        { retries: 2, context: `fetch_url ${input.url}` },
+        // retries: 2 — fetch_url is user-facing through the agent, cap
+        // total wall-clock at 20s so a slow upstream can't make the
+        // user wait through three full 15s timeouts. Context uses only
+        // the hostname so query-string secrets (api keys, signed URLs)
+        // don't end up in the logs.
+        {
+          retries: 2,
+          maxRetryTimeMs: 20_000,
+          context: `fetch_url ${new URL(input.url).hostname}`,
+        },
       );
 
       const contentType = res.headers.get("content-type") ?? "";

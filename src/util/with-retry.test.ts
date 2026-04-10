@@ -15,14 +15,14 @@ describe("withRetry", () => {
       .mockRejectedValueOnce(new Error("transient 1"))
       .mockRejectedValueOnce(new Error("transient 2"))
       .mockResolvedValue("ok");
-    const result = await withRetry(fn, { minTimeout: 1, maxTimeout: 5 });
+    const result = await withRetry(fn, { minTimeoutMs: 1, maxTimeoutMs: 5 });
     expect(result).toBe("ok");
     expect(fn).toHaveBeenCalledTimes(3);
   });
 
   it("gives up after configured retries and throws the last error", async () => {
     const fn = vi.fn().mockRejectedValue(new Error("permanent failure"));
-    await expect(withRetry(fn, { retries: 2, minTimeout: 1, maxTimeout: 5 })).rejects.toThrow(
+    await expect(withRetry(fn, { retries: 2, minTimeoutMs: 1, maxTimeoutMs: 5 })).rejects.toThrow(
       "permanent failure",
     );
     // 1 initial attempt + 2 retries = 3 calls
@@ -31,7 +31,9 @@ describe("withRetry", () => {
 
   it("does not retry AbortError", async () => {
     const fn = vi.fn().mockRejectedValue(new AbortError("client error"));
-    await expect(withRetry(fn, { minTimeout: 1, maxTimeout: 5 })).rejects.toThrow("client error");
+    await expect(withRetry(fn, { minTimeoutMs: 1, maxTimeoutMs: 5 })).rejects.toThrow(
+      "client error",
+    );
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
@@ -41,7 +43,7 @@ describe("withRetry", () => {
       .mockRejectedValueOnce(new Error("first"))
       .mockRejectedValueOnce(new Error("second"))
       .mockRejectedValue(new Error("third"));
-    await expect(withRetry(fn, { retries: 2, minTimeout: 1, maxTimeout: 5 })).rejects.toThrow(
+    await expect(withRetry(fn, { retries: 2, minTimeoutMs: 1, maxTimeoutMs: 5 })).rejects.toThrow(
       "third",
     );
   });
@@ -53,8 +55,8 @@ describe("withRetry", () => {
     // is set, which is enough to cover the conditional template branch.
     const fn = vi.fn().mockRejectedValueOnce(new Error("flake")).mockResolvedValue("ok");
     const result = await withRetry(fn, {
-      minTimeout: 1,
-      maxTimeout: 5,
+      minTimeoutMs: 1,
+      maxTimeoutMs: 5,
       context: "test.context",
     });
     expect(result).toBe("ok");
@@ -67,7 +69,7 @@ describe("withRetry", () => {
     vi.stubEnv("RETRY_DISABLED", "true");
     try {
       const fn = vi.fn().mockRejectedValue(new Error("transient"));
-      await expect(withRetry(fn, { retries: 5, minTimeout: 1, maxTimeout: 5 })).rejects.toThrow(
+      await expect(withRetry(fn, { retries: 5, minTimeoutMs: 1, maxTimeoutMs: 5 })).rejects.toThrow(
         "transient",
       );
       // Called once, not retried — without RETRY_DISABLED this would be 6 calls.
