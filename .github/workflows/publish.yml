@@ -1,8 +1,15 @@
 name: Publish
 
 on:
-  push:
-    tags: ["v*"]
+  # Invoked from ci.yml's `publish` job after semantic-release cuts a
+  # new version. Tag-push triggers don't work here because semantic-release
+  # uses GITHUB_TOKEN to create the tag, and GITHUB_TOKEN-created events
+  # do not trigger downstream workflows. workflow_call runs in the same
+  # workflow run as the caller, so the limitation doesn't apply.
+  workflow_call:
+  # Manual backfill against any ref via the GitHub UI — pick a tag in
+  # the ref dropdown and dunamai derives the version from there.
+  workflow_dispatch:
 
 jobs:
   docker:
@@ -49,3 +56,11 @@ jobs:
           build-args: VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # SLSA build provenance: signed metadata describing how this
+          # image was built (source repo, commit SHA, builder identity,
+          # workflow run). Verifiable via cosign / slsa-verifier.
+          provenance: true
+          # Software Bill of Materials: machine-readable inventory of
+          # every package inside the image. Used by container vuln
+          # scanners and supply-chain auditors. Format: SPDX.
+          sbom: true
