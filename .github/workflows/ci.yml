@@ -135,15 +135,27 @@ jobs:
       issues: write
       pull-requests: write
     outputs:
-      new_release_published: ${{ steps.semantic.outputs.new_release_published }}
+      new_release_published: ${{ steps.semantic.outputs.published }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
       - id: semantic
-        uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx --yes \
+            -p semantic-release@25.0.3 \
+            -p @semantic-release/commit-analyzer@13.0.1 \
+            -p @semantic-release/release-notes-generator@14.1.0 \
+            -p @semantic-release/github@12.0.6 \
+            semantic-release
+          if tag=$(git describe --exact-match HEAD 2>/dev/null); then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
 
   publish:
     name: Publish Image
