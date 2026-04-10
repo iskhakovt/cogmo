@@ -142,9 +142,24 @@ jobs:
 
   publish:
     name: Publish Image
+    # Both `needs:` and `if:` are required, not redundant:
+    #   - `needs: [release]` declares the DAG edge so the release job
+    #     runs first AND its outputs context is populated. Without it,
+    #     `needs.release.outputs.*` evaluates to empty and the `if:`
+    #     below silently becomes false — the publish job parses fine
+    #     but never fires. (Worst possible failure mode.)
+    #   - `if: needs.release.outputs.new_release_published == 'true'`
+    #     handles the case where release ran but didn't actually publish
+    #     (e.g. docs-only commit on main → semantic-release no-op).
     needs: [release]
     if: needs.release.outputs.new_release_published == 'true'
     uses: ./.github/workflows/publish.yml
+    # Kept in sync with the docker job in publish.yml — there is no
+    # `permissions: inherit` for reusable workflows. The caller's
+    # permissions are a ceiling and the callee declares its request;
+    # the effective set is the intersection. Both blocks must match
+    # (or this caller block must grant a strict superset of what the
+    # callee requests).
     permissions:
       contents: read
       packages: write
