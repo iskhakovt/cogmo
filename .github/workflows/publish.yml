@@ -27,10 +27,10 @@ jobs:
         with:
           python-version: "3.x"
 
-      - uses: mtkennerly/dunamai-action@fb7a58a2c84fe67534ae7da7beced3e84af7d7ce # v1
-        id: version
-        with:
-          args: --style semver
+      - id: version
+        run: |
+          pip install dunamai==1.27.0
+          echo "version=$(dunamai from any --style semver)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
         with:
