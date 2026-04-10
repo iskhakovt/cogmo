@@ -45,4 +45,19 @@ describe("withRetry", () => {
       "third",
     );
   });
+
+  it("includes context in failure logs when provided", async () => {
+    // Exercises the truthy branch of the context label in the log line.
+    // We don't assert the log output (the logger is a real pino instance);
+    // we just verify the call still completes successfully when context
+    // is set, which is enough to cover the conditional template branch.
+    const fn = vi.fn().mockRejectedValueOnce(new Error("flake")).mockResolvedValue("ok");
+    const result = await withRetry(fn, {
+      minTimeout: 1,
+      maxTimeout: 5,
+      context: "test.context",
+    });
+    expect(result).toBe("ok");
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
 });
