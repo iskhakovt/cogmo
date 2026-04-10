@@ -115,6 +115,9 @@ export async function setup({ provide }: GlobalSetupContext) {
       DEBOUNCE_IDLE_SECONDS: "0",
       DEBOUNCE_MAXWAIT_SECONDS: "0",
       LOG_LEVEL: "info",
+      // Surface transient container/network blips as hard failures
+      // instead of letting withRetry mask them. See src/util/with-retry.ts.
+      RETRY_DISABLED: "true",
     })
     .withWaitStrategy(Wait.forLogMessage(/inngest connected/i))
     .withStartupTimeout(60_000)

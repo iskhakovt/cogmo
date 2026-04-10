@@ -60,4 +60,20 @@ describe("withRetry", () => {
     expect(result).toBe("ok");
     expect(fn).toHaveBeenCalledTimes(2);
   });
+
+  it("skips retries entirely when RETRY_DISABLED env var is set", async () => {
+    // Integration and e2e tests opt out of retries via this env var so
+    // transient failures surface as hard failures instead of being masked.
+    vi.stubEnv("RETRY_DISABLED", "true");
+    try {
+      const fn = vi.fn().mockRejectedValue(new Error("transient"));
+      await expect(withRetry(fn, { retries: 5, minTimeout: 1, maxTimeout: 5 })).rejects.toThrow(
+        "transient",
+      );
+      // Called once, not retried — without RETRY_DISABLED this would be 6 calls.
+      expect(fn).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });

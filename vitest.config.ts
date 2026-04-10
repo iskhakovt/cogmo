@@ -28,6 +28,9 @@ export default defineConfig({
           hookTimeout: 600_000,
           env: {
             NODE_ENV: "test",
+            // Surface transient container/network blips as hard failures
+            // instead of letting withRetry mask them. See src/util/with-retry.ts.
+            RETRY_DISABLED: "true",
           },
         },
       },

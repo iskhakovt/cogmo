@@ -35,6 +35,15 @@ const DEFAULT_MIN_TIMEOUT = 1000;
 const DEFAULT_MAX_TIMEOUT = 10_000;
 
 export function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise<T> {
+  // Tests opt out via RETRY_DISABLED so transient failures surface as
+  // hard test failures instead of being silently smoothed over by a
+  // retry. Retry behaviour itself is exercised in with-retry.test.ts;
+  // integration and e2e tests verify the pipeline, not the retry layer.
+  // Production never sets this var.
+  if (process.env.RETRY_DISABLED === "true") {
+    return fn();
+  }
+
   return pRetry(fn, {
     retries: opts?.retries ?? DEFAULT_RETRIES,
     minTimeout: opts?.minTimeout ?? DEFAULT_MIN_TIMEOUT,
