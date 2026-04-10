@@ -25,6 +25,8 @@
 - [ ] `p3` Consider web interface adapter for e2e testing
 - [ ] `p3` Evaluate DI library (ditox/awilix) when adapter count exceeds 5
 - [ ] `p3` Consider Renovate over Dependabot — Renovate has a built-in `node-lts` preset that genuinely tracks the Node LTS schedule, which Dependabot lacks. Currently using a workaround in `.github/dependabot.yml` (ignore all Node major bumps, manual yearly upgrade). Switch only if the manual cadence becomes annoying or if other LTS-tracking gaps appear.
+- [ ] `p3` Hindsight error classification — wrap `HindsightClient` calls in `HindsightMemoryProvider` with `AbortError` logic for known-permanent failures (4xx auth/validation). Currently retries indiscriminately, wasting up to ~10s on every misconfigured request. Requires investigating `HindsightClient`'s error shape (is it `e.status`? `e.response.status`? `e.code`?) before classifying safely.
+- [ ] `p3` Consider ISO 8601 PT durations for time-valued config — instead of `minTimeoutMs: 1000`, `SESSION_IDLE_TIMEOUT_MINUTES=60`, `DEBOUNCE_IDLE_SECONDS=3` etc, use `"PT1S"`, `"PT1H"`, `"PT3S"` parsed by `date-fns` or a tiny helper. Eliminates the unit-suffix bikeshed and prevents seconds-vs-milliseconds bugs at API boundaries. Would touch `RetryOptions`, `env.ts`, and any caller passing durations. Defer until we add a third unit (anything other than ms/s/min) or until the unit-suffix maintenance becomes annoying.
 - [ ] `p3` fetch_url SSRF hardening — dns.resolve() + IP check before fetch (current check is string-level only)
 - [ ] `p3` Verify Perplexity Sonar citations structure via real OpenRouter API response — may need to adjust parsing
 

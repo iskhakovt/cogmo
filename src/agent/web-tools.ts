@@ -1,6 +1,7 @@
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
 import { z } from "zod";
+import { AbortError, withRetry } from "../util/with-retry.js";
 import type { ToolSpec } from "./tools.js";
 import { defineTool } from "./tools.js";
 
@@ -47,22 +48,33 @@ function createWebSearch(apiKey: string | undefined): ToolSpec {
     handler: async (input) => {
       if (!apiKey) return "Error: web_search is not configured (TAVILY_API_KEY missing).";
 
-      const res = await fetch("https://api.tavily.com/search", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
+      const res = await withRetry(
+        async () => {
+          const r = await fetch("https://api.tavily.com/search", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              query: input.query,
+              max_results: input.maxResults,
+              include_raw_content: false,
+            }),
+          });
+          if (r.status >= 500) {
+            throw new Error(
+              `Tavily API server error: ${r.status} ${(await r.text()).slice(0, 200)}`,
+            );
+          }
+          if (!r.ok) {
+            throw new AbortError(`Tavily API error: ${r.status} ${(await r.text()).slice(0, 200)}`);
+          }
+          return r;
         },
-        body: JSON.stringify({
-          query: input.query,
-          max_results: input.maxResults,
-          include_raw_content: false,
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error(`Tavily API error: ${res.status} ${await res.text()}`);
-      }
+        // retries: 2 — external rate-limited API, don't hammer.
+        { retries: 2, context: "tavily.search" },
+      );
 
       const data = (await res.json()) as {
         results: Array<{ title: string; url: string; content: string }>;
@@ -90,21 +102,34 @@ function createWebAnswer(apiKey: string | undefined): ToolSpec {
     handler: async (input) => {
       if (!apiKey) return "Error: web_answer is not configured (OPENROUTER_API_KEY missing).";
 
-      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
+      const res = await withRetry(
+        async () => {
+          const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              model: "perplexity/sonar",
+              messages: [{ role: "user", content: input.question }],
+            }),
+          });
+          if (r.status >= 500) {
+            throw new Error(
+              `OpenRouter API server error: ${r.status} ${(await r.text()).slice(0, 200)}`,
+            );
+          }
+          if (!r.ok) {
+            throw new AbortError(
+              `OpenRouter API error: ${r.status} ${(await r.text()).slice(0, 200)}`,
+            );
+          }
+          return r;
         },
-        body: JSON.stringify({
-          model: "perplexity/sonar",
-          messages: [{ role: "user", content: input.question }],
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error(`OpenRouter API error: ${res.status} ${await res.text()}`);
-      }
+        // retries: 2 — external rate-limited API, don't hammer.
+        { retries: 2, context: "openrouter.sonar" },
+      );
 
       const data = (await res.json()) as {
         choices: Array<{ message: { content: string } }>;
@@ -137,15 +162,32 @@ function createFetchUrl(): ToolSpec {
     handler: async (input) => {
       validateUrl(input.url);
 
-      const res = await fetch(input.url, {
-        headers: BROWSER_HEADERS,
-        redirect: "follow",
-        signal: AbortSignal.timeout(15_000),
-      });
-
-      if (!res.ok) {
-        throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
-      }
+      const res = await withRetry(
+        async () => {
+          const r = await fetch(input.url, {
+            headers: BROWSER_HEADERS,
+            redirect: "follow",
+            signal: AbortSignal.timeout(15_000),
+          });
+          if (r.status >= 500) {
+            throw new Error(`Fetch failed: ${r.status} ${r.statusText}`);
+          }
+          if (!r.ok) {
+            throw new AbortError(`Fetch failed: ${r.status} ${r.statusText}`);
+          }
+          return r;
+        },
+        // retries: 2 — fetch_url is user-facing through the agent, cap
+        // total wall-clock at 20s so a slow upstream can't make the
+        // user wait through three full 15s timeouts. Context uses only
+        // the hostname so query-string secrets (api keys, signed URLs)
+        // don't end up in the logs.
+        {
+          retries: 2,
+          maxRetryTimeMs: 20_000,
+          context: `fetch_url ${new URL(input.url).hostname}`,
+        },
+      );
 
       const contentType = res.headers.get("content-type") ?? "";
       const body = await res.text();
