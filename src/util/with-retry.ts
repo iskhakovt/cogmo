@@ -74,5 +74,6 @@ export function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise
 
 // Re-exported so callers always import AbortError from this module —
 // importing directly from p-retry would bypass any future wrapper-level
-// logic we add (custom classification, metrics, etc).
+// logic we add (custom classification, metrics, etc). Enforced by
+// biome's noRestrictedImports rule on the "p-retry" path.
 export { AbortError };
