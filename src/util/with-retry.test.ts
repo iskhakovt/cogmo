@@ -1,0 +1,48 @@
+import { describe, expect, it, vi } from "vitest";
+import { AbortError, withRetry } from "./with-retry.js";
+
+describe("withRetry", () => {
+  it("returns the result on first success without retrying", async () => {
+    const fn = vi.fn().mockResolvedValue("ok");
+    const result = await withRetry(fn);
+    expect(result).toBe("ok");
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries on failure and eventually succeeds", async () => {
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("transient 1"))
+      .mockRejectedValueOnce(new Error("transient 2"))
+      .mockResolvedValue("ok");
+    const result = await withRetry(fn, { minTimeout: 1, maxTimeout: 5 });
+    expect(result).toBe("ok");
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
+  it("gives up after configured retries and throws the last error", async () => {
+    const fn = vi.fn().mockRejectedValue(new Error("permanent failure"));
+    await expect(withRetry(fn, { retries: 2, minTimeout: 1, maxTimeout: 5 })).rejects.toThrow(
+      "permanent failure",
+    );
+    // 1 initial attempt + 2 retries = 3 calls
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not retry AbortError", async () => {
+    const fn = vi.fn().mockRejectedValue(new AbortError("client error"));
+    await expect(withRetry(fn, { minTimeout: 1, maxTimeout: 5 })).rejects.toThrow("client error");
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates the latest error after exhausting retries", async () => {
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("first"))
+      .mockRejectedValueOnce(new Error("second"))
+      .mockRejectedValue(new Error("third"));
+    await expect(withRetry(fn, { retries: 2, minTimeout: 1, maxTimeout: 5 })).rejects.toThrow(
+      "third",
+    );
+  });
+});
