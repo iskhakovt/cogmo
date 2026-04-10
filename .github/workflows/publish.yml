@@ -25,6 +25,7 @@ jobs:
 
       - id: version
         run: |
+          set -euo pipefail
           echo "version=$(pipx run dunamai==1.27.0 from any --style semver)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
