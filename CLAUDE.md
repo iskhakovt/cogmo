@@ -186,7 +186,8 @@ Store implementations (`DrizzleAgentStore`, `DrizzleTransportStore`) are tested 
 ## Working with Tools
 
 - **IMPORTANT: Research the documented approach first.** Before implementing anything that involves infrastructure, library integration, testing patterns, or deployment — search for the official docs and best practices. The documented approach is almost always better than a workaround. This has been validated repeatedly: Docker Compose profiles, Inngest connect mode for testing, testcontainers patterns. Don't debug symptoms when the root cause is "we're not using the tool the way it was designed." If you catch yourself iterating through trial-and-error, stop and google.
-- **Check versions** — before adding a dependency, check the latest version on npm and read the official setup/migration guide. Don't assume versions or config from memory — they go stale fast. Check both the latest release and the latest LTS. If they differ, ask the user which to use.
+- **Check versions** — before adding a dependency, check the latest version on the registry and read the official setup/migration guide. Don't assume versions or config from memory — they go stale and may not exist. Verify the specific version you pin actually exists upstream before committing. Check both the latest release and the latest LTS; if they differ, ask the user which to use.
+- **Verify runtime compatibility** — when a pinned tool has runtime requirements (engine fields, etc.), check that the execution environment provides what it needs. Don't assume CI runners, dev machines, or base images have a compatible runtime by default.
 - **Review existing tools** — before committing to a bespoke implementation, check if a maintained library or built-in feature covers the use case. Prefer battle-tested solutions.
 
 ## Autonomy
