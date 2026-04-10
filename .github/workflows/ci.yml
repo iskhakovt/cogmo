@@ -140,6 +140,11 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.npm
+          key: semantic-release-25.0.3-13.0.1-14.1.0-12.0.6
+          restore-keys: semantic-release-
       - id: semantic
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -150,11 +155,8 @@ jobs:
             -p @semantic-release/release-notes-generator@14.1.0 \
             -p @semantic-release/github@12.0.6 \
             semantic-release
-          if tag=$(git describe --exact-match HEAD 2>/dev/null); then
+          if git describe --exact-match HEAD >/dev/null 2>&1; then
             echo "published=true" >> "$GITHUB_OUTPUT"
-            echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
           fi
 
   publish:
