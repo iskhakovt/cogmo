@@ -24,6 +24,7 @@
 - [ ] `p3` Telegram e2e via Test DC + tgintegration — real user on Telegram test servers, TypeScript/mtcute client
 - [ ] `p3` Consider web interface adapter for e2e testing
 - [ ] `p3` Evaluate DI library (ditox/awilix) when adapter count exceeds 5
+- [ ] `p3` Consider Renovate over Dependabot — Renovate has a built-in `node-lts` preset that genuinely tracks the Node LTS schedule, which Dependabot lacks. Currently using a workaround in `.github/dependabot.yml` (ignore all Node major bumps, manual yearly upgrade). Switch only if the manual cadence becomes annoying or if other LTS-tracking gaps appear.
 - [ ] `p3` fetch_url SSRF hardening — dns.resolve() + IP check before fetch (current check is string-level only)
 - [ ] `p3` Verify Perplexity Sonar citations structure via real OpenRouter API response — may need to adjust parsing
 
