@@ -1,6 +1,27 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWebTools } from "./web-tools.js";
 
+// Mock withRetry as a passthrough so we can exercise web-tools' error
+// branches (5xx → throw, 4xx → AbortError) without paying the real
+// retry backoff delays. The retry behaviour itself is covered in
+// src/util/with-retry.test.ts.
+//
+// Limitation: this passthrough does NOT preserve pRetry's AbortError
+// opt-out logic — both regular Errors and AbortErrors propagate
+// identically here. That's fine for current tests (we only need the
+// error branches to fire), but if a future test needs to assert
+// "withRetry stopped retrying because of AbortError", it must use the
+// real withRetry with vi.useFakeTimers() or run against the integration
+// tier where RETRY_DISABLED already flattens retry behaviour.
+vi.mock("../util/with-retry.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("../util/with-retry.js")>("../util/with-retry.js");
+  return {
+    ...actual,
+    withRetry: <T>(fn: () => Promise<T>) => fn(),
+  };
+});
+
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
@@ -70,6 +91,15 @@ describe("web_search", () => {
     await expect(search!.handler({ query: "test" }, stubService())).rejects.toThrow("429");
   });
 
+  it("throws on server error (5xx)", async () => {
+    const [search] = createWebTools("key", undefined);
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503, text: async () => "down" });
+
+    await expect(search!.handler({ query: "test" }, stubService())).rejects.toThrow(
+      "Tavily API server error: 503",
+    );
+  });
+
   it("handles empty results", async () => {
     const [search] = createWebTools("key", undefined);
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ results: [] }) });
@@ -124,6 +154,26 @@ describe("web_answer", () => {
     const result = await answer.handler({ question: "test" }, stubService());
 
     expect(result).toContain("not configured");
+  });
+
+  it("throws on server error (5xx)", async () => {
+    const tools = createWebTools(undefined, "or-key");
+    const answer = tools[1]!;
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 502, text: async () => "bad gateway" });
+
+    await expect(answer.handler({ question: "test" }, stubService())).rejects.toThrow(
+      "OpenRouter API server error: 502",
+    );
+  });
+
+  it("throws on client error (4xx)", async () => {
+    const tools = createWebTools(undefined, "or-key");
+    const answer = tools[1]!;
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 401, text: async () => "unauthorized" });
+
+    await expect(answer.handler({ question: "test" }, stubService())).rejects.toThrow(
+      "OpenRouter API error: 401",
+    );
   });
 });
 
@@ -217,5 +267,20 @@ describe("fetch_url", () => {
     await expect(
       fetchUrl.handler({ url: "https://example.com/missing" }, stubService()),
     ).rejects.toThrow("404");
+  });
+
+  it("throws on server error (5xx)", async () => {
+    const tools = createWebTools(undefined, undefined);
+    const fetchUrl = tools[2]!;
+
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+    });
+
+    await expect(
+      fetchUrl.handler({ url: "https://example.com/down" }, stubService()),
+    ).rejects.toThrow("Fetch failed: 503");
   });
 });

@@ -1,4 +1,5 @@
 import { HindsightClient } from "@vectorize-io/hindsight-client";
+import { withRetry } from "../util/with-retry.js";
 import type {
   Memory,
   MemoryProvider,
@@ -11,6 +12,13 @@ import type {
 
 /**
  * Hindsight memory provider — talks to a self-hosted Hindsight server via HTTP.
+ *
+ * Retry budgets are split by user-visibility:
+ * - retain is async (fire-and-forget) — uses the default 3 retries with
+ *   no time cap, since the user never waits for it.
+ * - recall and reflect are on the interactive path — the agent can't
+ *   respond until they return — so they cap at 2 retries / 5s total
+ *   wall-clock to bound user-visible latency on a flaky Hindsight.
  */
 export class HindsightMemoryProvider implements MemoryProvider {
   readonly name = "hindsight";
@@ -30,7 +38,9 @@ export class HindsightMemoryProvider implements MemoryProvider {
     if (options?.context !== undefined) opts.context = options.context;
     if (options?.metadata !== undefined) opts.metadata = options.metadata;
     if (options?.tags !== undefined) opts.tags = options.tags;
-    await this.#client.retain(bankId, content, opts);
+    await withRetry(() => this.#client.retain(bankId, content, opts), {
+      context: `hindsight.retain[${bankId}]`,
+    });
   }
 
   async recall(bankId: string, query: string, options?: RecallOptions): Promise<RecallResult> {
@@ -38,7 +48,11 @@ export class HindsightMemoryProvider implements MemoryProvider {
     if (options?.maxTokens !== undefined) opts.maxTokens = options.maxTokens;
     if (options?.tags !== undefined) opts.tags = options.tags;
 
-    const response = await this.#client.recall(bankId, query, opts);
+    const response = await withRetry(() => this.#client.recall(bankId, query, opts), {
+      retries: 2,
+      maxRetryTimeMs: 5000,
+      context: `hindsight.recall[${bankId}]`,
+    });
 
     const memories: Memory[] = (response.results ?? []).map((r) => {
       const memory: Memory = { content: r.text, type: r.type ?? "unknown" };
@@ -54,7 +68,11 @@ export class HindsightMemoryProvider implements MemoryProvider {
     if (options?.context !== undefined) opts.context = options.context;
     if (options?.tags !== undefined) opts.tags = options.tags;
 
-    const response = await this.#client.reflect(bankId, query, opts);
+    const response = await withRetry(() => this.#client.reflect(bankId, query, opts), {
+      retries: 2,
+      maxRetryTimeMs: 5000,
+      context: `hindsight.reflect[${bankId}]`,
+    });
     return { answer: response.text };
   }
 }
