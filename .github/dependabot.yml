@@ -12,3 +12,11 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      # Block Node major bumps. Dependabot has no LTS awareness and will
+      # happily PR odd-numbered releases (which never become LTS) — see
+      # PR #2 (node 24-slim → 25-slim) where corepack was removed from
+      # the v25 image and broke the Docker build. Bump Node majors by
+      # hand once a year when the next even-numbered LTS ships.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
