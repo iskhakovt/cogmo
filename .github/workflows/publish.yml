@@ -67,34 +67,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # WARNING: do NOT add secrets to build-args — `provenance: true`
-          # below uses mode=max which embeds the build-args list into the
-          # SLSA provenance attestation forever. Use BuildKit secrets
-          # (--mount=type=secret) for anything sensitive.
+          # No secrets in build-args. Use BuildKit secrets if needed.
           build-args: VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # SLSA build provenance: in-manifest metadata describing how
-          # this image was built (source repo, commit SHA, builder
-          # identity, workflow run). Stored as a separate OCI manifest
-          # linked to the image. UNSIGNED — verifiable by content but
-          # not cryptographically attested to a workflow identity.
           provenance: true
-          # Software Bill of Materials: in-manifest SPDX inventory of
-          # every package inside the image. Used by container vuln
-          # scanners and supply-chain auditors. Also unsigned.
           sbom: true
-
-      # TODO: when the repo goes public, add signed attestations via
-      # `actions/attest-build-provenance` and `actions/attest-sbom`. They
-      # use the GitHub Actions OIDC token + Sigstore Fulcio + Rekor to
-      # produce DSSE-signed attestations bound to the workflow identity,
-      # verifiable via `gh attestation verify oci://...`. Requires
-      # `id-token: write` and `attestations: write` permissions added to
-      # both the calling job in ci.yml AND the docker job here. Currently
-      # gated on the repo being public — `actions/attest-build-provenance`
-      # only supports private repos on GitHub Enterprise Cloud, not on
-      # Free/Pro/Team plans, so signing on a private repo would silently
-      # no-op or fail. See:
-      #   https://github.com/actions/attest-build-provenance
-      #   https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds
