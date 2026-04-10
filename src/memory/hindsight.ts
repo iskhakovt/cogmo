@@ -21,7 +21,10 @@ export class HindsightMemoryProvider implements MemoryProvider {
   }
 
   async retain(bankId: string, content: string, options?: RetainOptions): Promise<void> {
-    const opts: Parameters<HindsightClient["retain"]>[2] = {};
+    // async: true returns immediately; Hindsight processes the 3-phase pipeline
+    // (chunk → extract → consolidate) in the background. Memories become
+    // searchable when processing completes — typically a few seconds.
+    const opts: Parameters<HindsightClient["retain"]>[2] = { async: true };
     if (options?.context !== undefined) opts.context = options.context;
     if (options?.metadata !== undefined) opts.metadata = options.metadata;
     if (options?.tags !== undefined) opts.tags = options.tags;
