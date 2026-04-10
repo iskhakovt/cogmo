@@ -38,7 +38,7 @@
     "@t3-oss/env-core": "^0.13.11",
     "@vectorize-io/hindsight-client": "^0.5.0",
     "date-fns": "^4.1.0",
-    "drizzle-orm": "^0.45.1",
+    "drizzle-orm": "^0.45.2",
     "grammy": "^1.41.1",
     "inngest": "^4.0.5",
     "js-tiktoken": "^1.0.21",
