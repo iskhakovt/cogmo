@@ -147,7 +147,7 @@ Used by `retain()` for structured fact extraction. Needs structured output / JSO
 | Anthropic | claude-haiku-4.5 | $1.00 | $5.00 | Hindsight default for `provider=anthropic`. Tested. |
 | Local (Ollama) | qwen2.5:3b | Free | Free | Slow (60-90s per extraction). Needs full image. |
 
-**Chosen:** gpt-5-nano via OpenRouter for production. Test fixtures recorded via aimock (`@copilotkit/aimock`) — URL path prefix fix merged (CopilotKit/llmock#57).
+**Chosen:** gpt-4o-mini via OpenRouter for production (target was gpt-5-nano — see "Known Gaps"). Test fixtures recorded via aimock (`@copilotkit/aimock`).
 
 ### Embeddings
 
@@ -185,11 +185,11 @@ Used by `recall()` to reorder retrieved results. Quality affects recall precisio
 ### Production Config
 
 ```bash
-# LLM — gpt-5-nano via OpenRouter
+# LLM — gpt-4o-mini via OpenRouter (gpt-5-nano blocked, see "Known Gaps")
 HINDSIGHT_API_LLM_PROVIDER=openai
 HINDSIGHT_API_LLM_BASE_URL=https://openrouter.ai/api/v1
 HINDSIGHT_API_LLM_API_KEY=$OPENROUTER_API_KEY
-HINDSIGHT_API_LLM_MODEL=openai/gpt-5-nano
+HINDSIGHT_API_LLM_MODEL=openai/gpt-4o-mini
 
 # Embeddings — qwen3-embedding-8b via OpenRouter
 HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai
@@ -209,7 +209,7 @@ HINDSIGHT_API_RERANKER_ZEROENTROPY_API_KEY=$ZEROENTROPY_API_KEY
 HINDSIGHT_API_LLM_PROVIDER=openai
 HINDSIGHT_API_LLM_BASE_URL=http://host.docker.internal:$LLMOCK_PORT/v1
 HINDSIGHT_API_LLM_API_KEY=test-key
-HINDSIGHT_API_LLM_MODEL=openai/gpt-5-nano
+HINDSIGHT_API_LLM_MODEL=gpt-4o-mini  # NOT gpt-5-nano — see "Known Gaps" below
 
 # Embeddings — llmock deterministic vectors (no real API)
 HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai
@@ -224,14 +224,29 @@ HINDSIGHT_API_RERANKER_PROVIDER=rrf
 HINDSIGHT_API_SKIP_LLM_VERIFICATION=true
 ```
 
+### Known Gaps
+
+**Production-vs-test model divergence (gpt-5-nano vs gpt-4o-mini).** Production targets `gpt-5-nano` for cost ($0.05/$0.40 per 1M tokens). Tests use `gpt-4o-mini` ($0.15/$0.60). Both are functionally equivalent for fact extraction.
+
+The reason: OpenAI deprecated `max_tokens` for the entire GPT-5 series — `max_completion_tokens` is now required. Hindsight v0.5.0 explicitly uses `max_tokens` for Mistral compatibility ([vectorize-io/hindsight#858](https://github.com/vectorize-io/hindsight/pull/858)), so any GPT-5 call returns `400 Unsupported parameter`. This affects the entire ecosystem ([vercel/ai#7863](https://github.com/vercel/ai/issues/7863), [BerriAI/litellm#13381](https://github.com/BerriAI/litellm/issues/13381), [stanfordnlp/dspy#8612](https://github.com/stanfordnlp/dspy/issues/8612)).
+
+**Implications:**
+- **Production must also use `gpt-4o-mini`** until Hindsight emits `max_completion_tokens` for GPT-5 models. Production cost rises from ~$2/mo to ~$6/mo for the LLM line item — total memory cost ~$10/mo instead of $6/mo.
+- **Recorded test fixtures use `gpt-4o-mini` request shape.** When Hindsight fixes this, we re-record fixtures and switch both prod + test back to `gpt-5-nano`.
+- **No way to use `gpt-5-nano` today** without forking Hindsight or running a translation proxy. Not worth the complexity for a temporary issue.
+
+Tracked in `todo.md`. Re-evaluate when Hindsight ships GPT-5 support.
+
 ### Estimated Monthly Cost (Production, 500 queries/day)
 
 | Component | Provider | Monthly |
 |-|-|-|
-| LLM (extraction) | OpenRouter gpt-5-nano | ~$2 |
+| LLM (extraction) | OpenRouter gpt-4o-mini | ~$6 |
 | Embeddings | OpenRouter qwen3-embedding-8b | ~$0.15 |
 | Reranker | ZeroEntropy zerank-2 | ~$4 |
-| **Total** | | **~$6** |
+| **Total** | | **~$10** |
+
+Cost will drop to ~$6/mo when Hindsight ships GPT-5 support — see "Known Gaps".
 
 ## Retrieval Strategy `[proposed]`
 

@@ -39,7 +39,7 @@ export async function setup({ provide }: GlobalSetupContext) {
     .hindsightSlim(network, {
       llmBaseUrl: llmockUrl,
       llmApiKey: process.env.OPENAI_API_KEY ?? "test-key",
-      llmModel: "gpt-5-nano",
+      llmModel: "gpt-4o-mini",
       embeddingsBaseUrl: llmockUrl,
       embeddingsApiKey: process.env.OPENAI_API_KEY ?? "test-key",
       embeddingsModel: "text-embedding-3-small",
