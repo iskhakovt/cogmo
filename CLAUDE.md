@@ -42,6 +42,7 @@ Read `design/` for the full picture. Key docs:
 | [evolution.md](design/evolution.md) | 6-stage self-evolution ladder, safety patterns |
 | [scheduling.md](design/scheduling.md) | Inngest, event-driven orchestration, job types, agent self-scheduling |
 | [agents.md](design/agents.md) | Agentic loop, sub-agents, crash recovery |
+| [crash-recovery.md](design/crash-recovery.md) | Durability map of `handle-message`, what re-executes on retry, test contract |
 | [context-management.md](design/context-management.md) | Token counting, compaction pipeline, model registry |
 | [transport/](design/transport/) | Messaging architecture — adapters, sessions, debounce, routing, identity |
 | [integrations.md](design/integrations.md) | MCP, Telegram adapter, skill library |

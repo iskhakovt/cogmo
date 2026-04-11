@@ -134,6 +134,46 @@ describe("compactMessages", () => {
     expect(result.messages).toHaveLength(7);
   });
 
+  // Locks the contract documented on `ContextManagerDeps.summarize`. The
+  // hardcoded `summarize-prefix` step ID in `handle-message.ts` depends on
+  // this — Inngest throws on duplicate step IDs, so a future change that
+  // calls `summarize` twice (e.g., segmented summarization) would surface
+  // only at runtime under specific conversation lengths. This test catches
+  // it at unit-test time.
+  it("calls summarize at most once even when all three strategies fire", async () => {
+    // Build a conversation with enough tool results to clear AND enough
+    // messages to summarize a prefix.
+    const messages: Message[] = [];
+    for (let i = 0; i < 8; i++) {
+      messages.push(msg("user", `q${i}`));
+      messages.push(toolCallMsg(`t${i}`, "search"));
+      messages.push(toolResultMsg([{ id: `t${i}`, content: "x".repeat(500) }]));
+      messages.push(msg("assistant", `a${i}`));
+    }
+
+    // Stay above the 95% truncate threshold through every strategy so all
+    // three fire in sequence: clear → summarize → truncate.
+    const countTokens = vi
+      .fn()
+      .mockResolvedValueOnce(980) // initial: over 95%
+      .mockResolvedValueOnce(970) // after clearing: still over 95%
+      .mockResolvedValueOnce(960) // after summarization: still over 95%
+      .mockResolvedValueOnce(200); // after truncation: under
+    const summarize = vi.fn().mockResolvedValue("Summary of old messages");
+
+    const result = await compactMessages("system", messages, undefined, {
+      countTokens,
+      budget: 1000,
+      summarize,
+    });
+
+    // All three strategies fired …
+    expect(result.event?.strategies).toEqual(["clear_tool_results", "summarize", "truncate"]);
+    // … but summarize was still called exactly once.
+    expect(summarize.mock.calls.length).toBeLessThanOrEqual(1);
+    expect(summarize).toHaveBeenCalledOnce();
+  });
+
   it("falls through to truncation when summarization fails", async () => {
     const messages = [
       msg("user", "m1"),
