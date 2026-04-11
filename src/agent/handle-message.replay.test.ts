@@ -21,7 +21,7 @@
  */
 
 import { InngestTestEngine } from "@inngest/test";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { inngest } from "../inngest/client.js";
 import {
   mockAgentStore,
@@ -49,6 +49,12 @@ beforeEach(() => {
   vi.spyOn(inngest as unknown as { _send: () => Promise<unknown> }, "_send").mockResolvedValue({
     ids: [],
   });
+});
+
+afterEach(() => {
+  // Restore the singleton spy so it doesn't leak into other test files that
+  // share the worker process.
+  vi.restoreAllMocks();
 });
 
 function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
@@ -140,18 +146,36 @@ describe("handle-message — crash recovery / step replay", () => {
     expect(assistantInserts).toHaveLength(0);
   });
 
-  it("does not re-run the summarization LLM call when compact-context is cached", async () => {
-    // Force compaction to want to run on first execution: large lastInputTokens
-    // would normally trigger countTokens + maybe summarize. We provide a
-    // cached compact-context step → the body is bypassed entirely, so chat()
-    // for summarization is never called.
-    const deliveryHandle = mockDeliveryHandle();
+  it("does not re-run the summarization LLM call when summarize-prefix is cached", async () => {
+    // To exercise the summarize step, we need the compaction pipeline to
+    // actually call its `summarize` callback. That requires:
+    //   - getLastInputTokens past the fast-path threshold so countTokens runs
+    //   - countTokens reporting > 80% of budget so the SUMMARIZE strategy fires
+    //   - history with more than DEFAULT_KEEP_TURNS messages (6) so there's
+    //     a prefix to summarize
+    // Then we cache `summarize-prefix` and assert provider.chat is never
+    // called for the summarization round trip.
+    const countTokens = vi.fn().mockResolvedValue(150_000); // always over 80% of any sane budget
+    const chat = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "fresh summary" }],
+      stopReason: "end_turn",
+      model: "mock-model",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
     const deps = mockDeps({
+      provider: mockProvider({ countTokens, chat }),
       agentStore: mockAgentStore({
-        getLastInputTokens: vi.fn().mockResolvedValue(150_000), // would force compaction
-      }),
-      deliveryRouter: mockDeliveryRouter({
-        prepare: vi.fn().mockResolvedValue(deliveryHandle),
+        getLastInputTokens: vi.fn().mockResolvedValue(150_000),
+        getHistory: vi.fn().mockResolvedValue([
+          { role: "user", content: "m1" },
+          { role: "assistant", content: "r1" },
+          { role: "user", content: "m2" },
+          { role: "assistant", content: "r2" },
+          { role: "user", content: "m3" },
+          { role: "assistant", content: "r3" },
+          { role: "user", content: "m4" },
+          { role: "assistant", content: "r4" },
+        ]),
       }),
     });
     const fn = createHandleMessage(deps);
@@ -161,31 +185,32 @@ describe("handle-message — crash recovery / step replay", () => {
       events: [event],
       steps: [
         {
-          id: "compact-context",
-          // Cached value: the compacted message history. Empty array is fine
-          // for the assertion (we're not checking what the agent loop receives).
-          handler: () => [],
+          id: "summarize-prefix",
+          // Cached value: the summary text from a prior attempt.
+          handler: () => "[cached summary from prior attempt]",
         },
       ],
     });
 
     await engine.execute();
 
-    // The summarization path inside compactMessages calls provider.chat().
-    // With compact-context cached, the body never runs, so chat is not called.
-    expect(deps.provider.chat).not.toHaveBeenCalled();
-    // Token counting (which compactMessages uses repeatedly) also never runs.
-    expect(deps.provider.countTokens).not.toHaveBeenCalled();
-    // And the DB read for last input tokens stays inside the step, so it's
-    // skipped on cached replay too.
-    expect(deps.agentStore.getLastInputTokens).not.toHaveBeenCalled();
-    // The "Summarizing conversation..." status push lives inside the step's
-    // closure (via onStatus → delivery.push). On cached replay it must NOT
-    // fire — the user already saw it on the first attempt.
-    const statusPushes = (deliveryHandle.push as ReturnType<typeof vi.fn>).mock.calls.filter(
-      ([ev]) => ev?.type === "status",
+    // The summarization round trip lives inside the cached step. On replay,
+    // the step body never runs, so provider.chat is never called for it.
+    expect(chat).not.toHaveBeenCalled();
+
+    // Non-vacuity check: prove summarize was actually invoked and the cached
+    // value reached the agent loop. compactMessages threads the summary into
+    // the message history as a synthetic user message ("[Previous conversation
+    // summary]\n\n…"). If we see our cached marker in the history passed to
+    // the agent loop, the cached step was hit.
+    const loopCalls = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls;
+    expect(loopCalls.length).toBeGreaterThanOrEqual(1);
+    const messages = loopCalls[0]?.[0]?.messages as Array<{ content: unknown }>;
+    const summaryMessage = messages.find(
+      (m) =>
+        typeof m.content === "string" && m.content.includes("[cached summary from prior attempt]"),
     );
-    expect(statusPushes).toHaveLength(0);
+    expect(summaryMessage).toBeDefined();
   });
 
   it("re-invokes the streaming agent loop on resume even when all durable steps are cached", async () => {
@@ -219,7 +244,9 @@ describe("handle-message — crash recovery / step replay", () => {
         { id: "create-user-message", handler: () => undefined },
         { id: "load-history", handler: () => [] },
         { id: "assemble-prompt", handler: () => "system prompt" },
-        { id: "compact-context", handler: () => [] },
+        // `summarize-prefix` is conditional — only created when compaction
+        // decides to summarize. The default mock countTokens stays under
+        // threshold, so the step is never invoked here and we don't list it.
         { id: "persist-assistant-message", handler: () => ({ id: "asst-1" }) },
       ],
     });

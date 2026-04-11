@@ -192,48 +192,49 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         }
       }
 
-      // ──── DURABLE: context window compaction ────
+      // ──── Context window compaction ────
       //
-      // Wrapped in a step so the (potentially expensive) summarization LLM call
-      // is not re-run on Inngest retry. The status push to `delivery` is a
-      // streaming side effect that fires only on first execution; on resume
-      // (within the same worker process) the step returns the cached compacted
-      // history and the user has already seen the prior status update on the
-      // same Telegram message via the runId-keyed dedup map. Cross-process
-      // retries lose the dedup map — see design/crash-recovery.md → "Process
-      // death".
+      // compactMessages runs on every invocation — token counting and the
+      // threshold decision are cheap and depend on `fullPrompt` /
+      // `historyMessages`, which are partially built from non-durable reads
+      // (memory.recall, image resolution). Only the expensive summarization
+      // LLM call is wrapped in a `summarize-prefix` step (inside the
+      // `summarize` callback) so it's exactly-once on Inngest retry. The
+      // cached value is just the summary string — no large image payloads
+      // in step state. See design/crash-recovery.md.
 
       const model = profile?.model ?? DEFAULT_MODEL;
       const budget = computeBudget(model);
       const toolDefs = tools.definitions();
 
-      historyMessages = await step.run("compact-context", async () => {
-        const lastInputTokens = await agentStore.getLastInputTokens(conversationId);
-        const skip = shouldSkipCounting(lastInputTokens, userContentText.length, budget);
-        if (skip) return historyMessages;
+      const lastInputTokens = await agentStore.getLastInputTokens(conversationId);
+      const skip = shouldSkipCounting(lastInputTokens, userContentText.length, budget);
 
+      if (!skip) {
         const compactResult = await compactMessages(fullPrompt, historyMessages, toolDefs, {
           countTokens: (params) => provider.countTokens({ ...params, model }),
           budget,
           summarize: async (system, msgs) => {
-            const sumModel = deps.summarizationModel ?? model;
-            const response = await provider.chat({
-              model: sumModel,
-              system,
-              messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
-              maxTokens: 4096,
+            return step.run("summarize-prefix", async () => {
+              const sumModel = deps.summarizationModel ?? model;
+              const response = await provider.chat({
+                model: sumModel,
+                system,
+                messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
+                maxTokens: 4096,
+              });
+              return response.content
+                .filter((b) => b.type === "text")
+                .map((b) => (b as { text: string }).text)
+                .join("");
             });
-            return response.content
-              .filter((b) => b.type === "text")
-              .map((b) => (b as { text: string }).text)
-              .join("");
           },
           onStatus: (message) => {
             delivery.push({ type: "status", message });
           },
         });
-        return compactResult.messages;
-      });
+        historyMessages = compactResult.messages;
+      }
 
       let result: AgentLoopResult;
       try {
