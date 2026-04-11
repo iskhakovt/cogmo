@@ -41,14 +41,21 @@ import { createHandleMessage } from "./handle-message.js";
 // `inngest._send` (not the public `send`). Without this stub each test waits
 // ~2s for an ECONNREFUSED retry.
 //
-// Reaching into a private member of an upstream class is fragile — if `_send`
-// is renamed in a future inngest release the spy silently no-ops and the tests
-// slow down. Worth tracking whether @inngest/test eventually intercepts at
-// this layer so the stub can be removed.
+// Failure modes:
+//   - If Inngest renames or removes `_send`, `vi.spyOn` throws synchronously
+//     in `beforeEach` ("property is not defined on the object") — Vitest
+//     handles this loudly, no extra guard needed.
+//   - The one residual risk: `_send` still exists but the engine stops calling
+//     it (e.g., a future release moves to a different internal code path).
+//     The first test below has an `expect(sendSpy).toHaveBeenCalled()` anchor
+//     to catch this — it would otherwise reintroduce the ECONNREFUSED delay
+//     silently.
+let sendSpy: ReturnType<typeof vi.spyOn>;
+
 beforeEach(() => {
-  vi.spyOn(inngest as unknown as { _send: () => Promise<unknown> }, "_send").mockResolvedValue({
-    ids: [],
-  });
+  sendSpy = vi
+    .spyOn(inngest as unknown as { _send: () => Promise<unknown> }, "_send")
+    .mockResolvedValue({ ids: [] });
 });
 
 afterEach(() => {
@@ -109,6 +116,13 @@ describe("handle-message — crash recovery / step replay", () => {
     });
 
     await engine.execute();
+
+    // Anchor: confirm the singleton `_send` spy was actually invoked. If
+    // Inngest ever moves to a different internal code path that bypasses
+    // `_send`, this assertion catches it before the silent ECONNREFUSED
+    // slowdown returns. (Vitest already throws if `_send` is removed, so
+    // this only needs to live in one test.)
+    expect(sendSpy).toHaveBeenCalled();
 
     // Assistant message is still inserted (its step was not cached), but the
     // user message is NOT — that step's body never runs.
