@@ -64,7 +64,7 @@ export async function setup({ provide }: GlobalSetupContext) {
     forcePathStyle: true,
     credentials: { accessKeyId: "minioadmin", secretAccessKey: "minioadmin" },
   });
-  await s3.send(new CreateBucketCommand({ Bucket: "assistant-files" }));
+  await s3.send(new CreateBucketCommand({ Bucket: "cogmo-files" }));
   s3.destroy();
 
   // Set process.env — propagates to Vitest test workers.
@@ -79,7 +79,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   process.env.S3_ENDPOINT = s3Endpoint;
   process.env.S3_ACCESS_KEY = "minioadmin";
   process.env.S3_SECRET_KEY = "minioadmin";
-  process.env.S3_BUCKET = "assistant-files";
+  process.env.S3_BUCKET = "cogmo-files";
   process.env.LOG_LEVEL = "warn";
 
   const gatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;

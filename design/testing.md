@@ -50,7 +50,7 @@ Docker services + app wired in-process. Tests the orchestration pipeline — deb
 
 ## E2E Tests `[confirmed]`
 
-Full deployment-like stack — assistant as a subprocess in connect mode. Smoke test.
+Full deployment-like stack — cogmo as a subprocess in connect mode. Smoke test.
 
 **Infrastructure:**
 - Testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`

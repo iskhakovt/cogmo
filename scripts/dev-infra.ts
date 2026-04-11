@@ -61,7 +61,7 @@ async function main() {
   console.log("  Hindsight ready");
 
   // Build env vars
-  const databaseUrl = `postgresql://assistant@${pg.getHost()}:${pg.getMappedPort(5432)}/assistant`;
+  const databaseUrl = `postgresql://cogmo@${pg.getHost()}:${pg.getMappedPort(5432)}/cogmo`;
   const inngestBaseUrl = `http://${inn.getHost()}:${inn.getMappedPort(8288)}`;
   const hindsightUrl = `http://${hindsightContainer.getHost()}:${hindsightContainer.getMappedPort(8888)}`;
 
