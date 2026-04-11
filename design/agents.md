@@ -143,7 +143,9 @@ steering_rules (
 
 ## Crash Recovery `[confirmed]`
 
-Handled by Inngest durable steps — each `step.run()` checkpoints. Crash between steps resumes from last completed step. No application-level cursor needed.
+Inngest durable steps checkpoint between boundaries; on retry, cached steps replay from state without re-executing their bodies. The streaming section of `handle-message` is intentionally non-durable (you can't stream out of `step.run`) and re-executes on every retry — this is a deliberate tradeoff.
+
+See [crash-recovery.md](crash-recovery.md) for the full durability map of `handle-message`, the per-tool re-execution table, the streaming dedup story, and the test contract.
 
 ## Internal Tag Stripping `[confirmed]`
 

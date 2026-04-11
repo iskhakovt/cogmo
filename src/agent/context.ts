@@ -19,7 +19,15 @@ export interface ContextManagerDeps {
   countTokens: (params: CountTokensParams) => Promise<number>;
   /** Maximum input tokens before rejection (contextWindow - maxOutputTokens - safetyBuffer). */
   budget: number;
-  /** Make a summarization LLM call. Receives system prompt + messages to summarize. */
+  /**
+   * Make a summarization LLM call. Receives system prompt + messages to summarize.
+   *
+   * Contract: called **at most once** per `compactMessages` invocation. Callers
+   * (notably `handle-message`) rely on this to wrap the call in a single Inngest
+   * step with a fixed step ID (`summarize-prefix`). If a future strategy ever
+   * needs segmented summarization, this contract — and the hardcoded step ID at
+   * the call site — must change in lockstep.
+   */
   summarize?: (system: string, messages: Message[]) => Promise<string>;
   /** Called when summarization starts (for user feedback via stream events). */
   onStatus?: (message: string) => void;

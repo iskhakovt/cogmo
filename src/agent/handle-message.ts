@@ -192,7 +192,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         }
       }
 
-      // ──── Context window management ────
+      // ──── Context window compaction ────
+      //
+      // compactMessages runs on every invocation — token counting and the
+      // threshold decision are cheap and depend on `fullPrompt` /
+      // `historyMessages`, which are partially built from non-durable reads
+      // (memory.recall, image resolution). Only the expensive summarization
+      // LLM call is wrapped in a `summarize-prefix` step (inside the
+      // `summarize` callback) so it's exactly-once on Inngest retry. The
+      // cached value is just the summary string — no large image payloads
+      // in step state. See design/crash-recovery.md.
 
       const model = profile?.model ?? DEFAULT_MODEL;
       const budget = computeBudget(model);
@@ -206,17 +215,24 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           countTokens: (params) => provider.countTokens({ ...params, model }),
           budget,
           summarize: async (system, msgs) => {
-            const sumModel = deps.summarizationModel ?? model;
-            const response = await provider.chat({
-              model: sumModel,
-              system,
-              messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
-              maxTokens: 4096,
+            // Step ID is hardcoded — relies on `compactMessages` calling
+            // `summarize` at most once per invocation (contract on
+            // ContextManagerDeps.summarize). If that ever changes, switch to
+            // a counter-based ID like `summarize-prefix-${i}` to avoid
+            // Inngest's duplicate-step-id error.
+            return step.run("summarize-prefix", async () => {
+              const sumModel = deps.summarizationModel ?? model;
+              const response = await provider.chat({
+                model: sumModel,
+                system,
+                messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
+                maxTokens: 4096,
+              });
+              return response.content
+                .filter((b) => b.type === "text")
+                .map((b) => (b as { text: string }).text)
+                .join("");
             });
-            return response.content
-              .filter((b) => b.type === "text")
-              .map((b) => (b as { text: string }).text)
-              .join("");
           },
           onStatus: (message) => {
             delivery.push({ type: "status", message });
