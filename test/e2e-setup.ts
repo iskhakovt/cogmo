@@ -63,11 +63,11 @@ export async function setup({ provide }: GlobalSetupContext) {
     forcePathStyle: true,
     credentials: { accessKeyId: "minioadmin", secretAccessKey: "minioadmin" },
   });
-  await s3.send(new CreateBucketCommand({ Bucket: "assistant-files" }));
+  await s3.send(new CreateBucketCommand({ Bucket: "cogmo-files" }));
   s3.destroy();
 
   // Use pre-built Docker image if available (CI builds it), otherwise build from Dockerfile.
-  const imageName = process.env.E2E_IMAGE ?? "assistant-e2e";
+  const imageName = process.env.E2E_IMAGE ?? "cogmo-e2e";
   let appImage: GenericContainer;
   if (process.env.E2E_IMAGE) {
     console.log(`Using pre-built image: ${imageName}`);
@@ -77,11 +77,15 @@ export async function setup({ provide }: GlobalSetupContext) {
     appImage = await GenericContainer.fromDockerfile(".", "Dockerfile").build(imageName);
   }
 
+  // Same DB URL is used by both the seed container and the long-running app container,
+  // both reaching Postgres via the testcontainers network alias.
+  const inNetworkDatabaseUrl = "postgresql://cogmo@postgres:5432/cogmo";
+
   console.log("Running seed...");
   const seedContainer = await appImage
     .withNetwork(network)
     .withCommand(["seed"])
-    .withEnvironment({ DATABASE_URL: "postgresql://assistant@postgres:5432/assistant" })
+    .withEnvironment({ DATABASE_URL: inNetworkDatabaseUrl })
     .withWaitStrategy(Wait.forLogMessage(/seed complete/i))
     .withStartupTimeout(60_000)
     .start();
@@ -101,7 +105,7 @@ export async function setup({ provide }: GlobalSetupContext) {
     .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withCommand(["serve"])
     .withEnvironment({
-      DATABASE_URL: "postgresql://assistant@postgres:5432/assistant",
+      DATABASE_URL: inNetworkDatabaseUrl,
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "test-key",
       ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}`,
       INNGEST_BASE_URL: "http://inngest:8288",
@@ -110,7 +114,7 @@ export async function setup({ provide }: GlobalSetupContext) {
       S3_ENDPOINT: "http://minio:9000",
       S3_ACCESS_KEY: "minioadmin",
       S3_SECRET_KEY: "minioadmin",
-      S3_BUCKET: "assistant-files",
+      S3_BUCKET: "cogmo-files",
       INNGEST_DEV: "true",
       DEBOUNCE_IDLE_SECONDS: "0",
       DEBOUNCE_MAXWAIT_SECONDS: "0",

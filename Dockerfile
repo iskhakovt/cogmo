@@ -10,7 +10,7 @@ COPY tsconfig.json tsup.config.ts ./
 COPY src/ src/
 COPY migrations/ migrations/
 RUN pnpm build
-RUN pnpm --filter assistant deploy --prod /deploy
+RUN pnpm --filter cogmo deploy --prod /deploy
 
 FROM gcr.io/distroless/nodejs24-debian13
 ARG VERSION=dev

@@ -100,7 +100,7 @@ Releases are fully automated. There is no manual version bump.
 3. The tag triggers `.github/workflows/publish.yml`:
    - Derives the version from the tag (Dunamai).
    - Builds the Docker image (cache hit from CI).
-   - Pushes to `ghcr.io/<owner>/assistant:<version>`.
+   - Pushes to `ghcr.io/<owner>/cogmo:<version>`.
 
 `chore:`/`docs:`/`refactor:`/etc. commits land in `main` without cutting a release. The next `feat:` or `fix:` will pick them up in the release notes.
 

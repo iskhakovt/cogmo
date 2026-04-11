@@ -1,9 +1,9 @@
 #!/usr/bin/env tsx
 /**
- * Interactive console for the assistant.
+ * Interactive console for cogmo.
  *
  * Sends messages via Inngest events (adapter/direct/inbound),
- * polls the database for assistant responses.
+ * polls the database for assistant-role responses.
  *
  * Usage:
  *   pnpm console
@@ -19,7 +19,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { messages } from "../src/agent/store/schema.js";
 import { channelSessions, channels } from "../src/transport/store/schema.js";
 
-const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://assistant@localhost/assistant";
+const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://cogmo@localhost/cogmo";
 const INNGEST_BASE_URL = process.env.INNGEST_BASE_URL ?? "http://localhost:8288";
 const INNGEST_EVENT_KEY = process.env.INNGEST_EVENT_KEY ?? "test";
 const PLATFORM_ADDRESS = `console-${process.pid}`;

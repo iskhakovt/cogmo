@@ -16,14 +16,14 @@ export function postgres(network: StartedNetwork) {
     .withNetworkAliases("postgres")
     .withExposedPorts(5432)
     .withEnvironment({
-      POSTGRES_USER: "assistant",
-      POSTGRES_DB: "assistant",
+      POSTGRES_USER: "cogmo",
+      POSTGRES_DB: "cogmo",
       POSTGRES_HOST_AUTH_METHOD: "trust",
     })
     .withCopyFilesToContainer([
       { source: "./scripts/init-db.sql", target: "/docker-entrypoint-initdb.d/init.sql" },
     ])
-    .withWaitStrategy(Wait.forSuccessfulCommand("pg_isready -U assistant"))
+    .withWaitStrategy(Wait.forSuccessfulCommand("pg_isready -U cogmo"))
     .withStartupTimeout(60_000);
 }
 
@@ -182,7 +182,7 @@ export function getUrls(containers: {
   minio?: ContainerEndpoint;
 }) {
   return {
-    databaseUrl: `postgresql://assistant@${containers.postgres.getHost()}:${containers.postgres.getMappedPort(5432)}/assistant`,
+    databaseUrl: `postgresql://cogmo@${containers.postgres.getHost()}:${containers.postgres.getMappedPort(5432)}/cogmo`,
     inngestBaseUrl: `http://${containers.inngest.getHost()}:${containers.inngest.getMappedPort(8288)}`,
     ...(containers.hindsight && {
       hindsightUrl: `http://${containers.hindsight.getHost()}:${containers.hindsight.getMappedPort(8888)}`,
