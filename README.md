@@ -4,11 +4,11 @@
 [![ghcr](https://img.shields.io/github/v/release/iskhakovt/cogmo?label=ghcr&logo=docker&color=2496ED)](https://github.com/iskhakovt/cogmo/pkgs/container/cogmo)
 [![CI](https://github.com/iskhakovt/cogmo/actions/workflows/ci.yml/badge.svg)](https://github.com/iskhakovt/cogmo/actions/workflows/ci.yml)
 
-Personal AI assistant runtime — modular agent system with persistent memory and self-evolution.
+Personal agent runtime — modular system with persistent memory and self-evolution.
 
 ## What
 
-An event-driven AI assistant built on raw provider SDKs and Inngest. Messages flow through a durable pipeline: channel adapters receive input, an orchestrator routes through an agentic loop (LLM calls + tool execution), and responses fan back out via events. No channel knows about any other channel. No framework — just typed interfaces and dependency injection.
+An event-driven personal agent runtime built on raw provider SDKs and Inngest. Messages flow through a durable pipeline: channel adapters receive input, an orchestrator routes through an agentic loop (LLM calls + tool execution), and responses fan back out via events. No channel knows about any other channel. No framework — just typed interfaces and dependency injection.
 
 See `design/` for the full architecture.
 

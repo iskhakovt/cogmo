@@ -1,6 +1,6 @@
 # Cogmo
 
-Personal AI assistant runtime — modular agent system with persistent memory and self-evolution.
+Personal agent runtime — modular system with persistent memory and self-evolution.
 
 ## Glossary
 
