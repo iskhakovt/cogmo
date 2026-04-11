@@ -257,9 +257,15 @@ describe("handle-message — crash recovery / step replay", () => {
     // full-cache replay. (This is the canary: if a developer wraps the agent
     // loop in a step.run, this assertion stays true but the surrounding
     // streaming behavior breaks.)
-    expect(
-      (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls.length,
-    ).toBeGreaterThanOrEqual(1);
+    //
+    // Lower bound: ≥1 proves the non-durable contract.
+    // Upper bound: <10 catches a regression where the loop runs on every step
+    // boundary (8 step.run calls + 1 sendEvent currently → would explode if
+    // someone added expensive setup to the function body). Currently 2.
+    const loopCallCount = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(loopCallCount).toBeGreaterThanOrEqual(1);
+    expect(loopCallCount).toBeLessThan(10);
     // No DB writes happened — every persist step was cached.
     expect(deps.agentStore.insertMessage).not.toHaveBeenCalled();
   });

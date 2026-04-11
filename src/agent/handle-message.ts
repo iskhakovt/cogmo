@@ -215,6 +215,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           countTokens: (params) => provider.countTokens({ ...params, model }),
           budget,
           summarize: async (system, msgs) => {
+            // Step ID is hardcoded — relies on `compactMessages` calling
+            // `summarize` at most once per invocation (contract on
+            // ContextManagerDeps.summarize). If that ever changes, switch to
+            // a counter-based ID like `summarize-prefix-${i}` to avoid
+            // Inngest's duplicate-step-id error.
             return step.run("summarize-prefix", async () => {
               const sumModel = deps.summarizationModel ?? model;
               const response = await provider.chat({

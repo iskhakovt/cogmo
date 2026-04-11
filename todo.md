@@ -29,6 +29,7 @@
 - [ ] `p3` Consider ISO 8601 PT durations for time-valued config — instead of `minTimeoutMs: 1000`, `SESSION_IDLE_TIMEOUT_MINUTES=60`, `DEBOUNCE_IDLE_SECONDS=3` etc, use `"PT1S"`, `"PT1H"`, `"PT3S"` parsed by `date-fns` or a tiny helper. Eliminates the unit-suffix bikeshed and prevents seconds-vs-milliseconds bugs at API boundaries. Would touch `RetryOptions`, `env.ts`, and any caller passing durations. Defer until we add a third unit (anything other than ms/s/min) or until the unit-suffix maintenance becomes annoying.
 - [ ] `p3` fetch_url SSRF hardening — dns.resolve() + IP check before fetch (current check is string-level only)
 - [ ] `p3` Verify Perplexity Sonar citations structure via real OpenRouter API response — may need to adjust parsing
+- [ ] `p3` Streaming retry-dedup test — `TelegramAdapter` `#activeStreams` map is documented in `design/crash-recovery.md` ("Streaming dedup across the same process") and `design/transport/streaming.md` but no test enforces that a retry with the same Inngest `runId` reuses the existing `TelegramStreamHandle` instead of opening a second Telegram message. Regression would ship silently until a user sees duplicate bubbles. Needs either a real adapter instance or a new test seam.
 
 ## Later
 

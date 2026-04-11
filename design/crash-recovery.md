@@ -123,6 +123,8 @@ The four cases:
 
 The fourth test is the regression guard for the bug class. If a developer ever wraps the agent loop in `step.run` to "make it durable", the test still passes — but the streaming behavior breaks at runtime. The inverse mistake (moving a side effect *out* of a step) would be caught by tests 1-3 because the side effect would suddenly be observable.
 
+**Why only side-effectful steps get individual tests.** Tests 1-3 cover the steps where re-execution would cause concrete harm (duplicate DB writes, duplicate LLM round trips). The pure-read steps (`load-conversation`, `last-assistant`, `load-inbound`, `load-history`, `assemble-prompt`) are exercised collectively by test 4 and aren't worth individual coverage: if one of them accidentally moved out of `step.run`, the only consequence on retry would be a wasted DB query, not corruption. The cost-of-bug is too low to justify a test per read.
+
 For **wire-level** crash recovery (real Inngest server, real retries, side-effect counters across actual HTTP re-invocations) we rely on Inngest itself — that path is library-tested upstream and our integration test in `pipeline.integration.test.ts` proves the full end-to-end works against a real dev server. We do not currently simulate a forced crash there; if recovery bugs surface in practice, the right escalation is an integration test that throws on first attempt and asserts the second attempt completes.
 
 ## State serialization `[confirmed]`
