@@ -1,9 +1,9 @@
 #!/usr/bin/env tsx
 /**
- * Interactive console for the assistant.
+ * Interactive console for cogmo.
  *
  * Sends messages via Inngest events (adapter/direct/inbound),
- * polls the database for assistant responses.
+ * polls the database for assistant-role responses.
  *
  * Usage:
  *   pnpm console

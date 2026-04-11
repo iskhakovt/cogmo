@@ -43,7 +43,7 @@ Seed the database (creates default user and profile):
 ```bash
 docker run --rm \
   -e DATABASE_URL=postgresql://... \
-  assistant seed
+  cogmo seed
 ```
 
 ## Running
@@ -54,7 +54,7 @@ docker run -d \
   -e ANTHROPIC_API_KEY=sk-... \
   -e HINDSIGHT_URL=http://hindsight:8888 \
   -e INNGEST_BASE_URL=http://inngest:8288 \
-  assistant
+  cogmo
 ```
 
 The app runs as `nonroot` inside a distroless container. Entrypoint is `node dist/cli.js serve`.

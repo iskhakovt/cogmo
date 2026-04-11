@@ -38,7 +38,7 @@ export async function seed(): Promise<void> {
     existingProfile?.id ??
     (
       await agentStore.createProfile({
-        name: "cogmo",
+        name: "assistant",
         basePrompt: DEFAULT_BASE_PROMPT,
         model: "claude-sonnet-4-20250514",
         toolSet: ["get_current_time", "memory_recall", "memory_retain"],

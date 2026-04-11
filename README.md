@@ -39,7 +39,7 @@ pnpm dev:app                              # tsx watch src/index.ts
 
 Containers use `withReuse()` and survive across restarts. Stop them with `docker stop` when done.
 
-Talk to the running assistant from a separate terminal:
+Talk to the running cogmo from a separate terminal:
 
 ```bash
 pnpm console
