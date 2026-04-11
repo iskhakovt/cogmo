@@ -77,11 +77,15 @@ export async function setup({ provide }: GlobalSetupContext) {
     appImage = await GenericContainer.fromDockerfile(".", "Dockerfile").build(imageName);
   }
 
+  // Same DB URL is used by both the seed container and the long-running app container,
+  // both reaching Postgres via the testcontainers network alias.
+  const inNetworkDatabaseUrl = "postgresql://cogmo@postgres:5432/cogmo";
+
   console.log("Running seed...");
   const seedContainer = await appImage
     .withNetwork(network)
     .withCommand(["seed"])
-    .withEnvironment({ DATABASE_URL: "postgresql://cogmo@postgres:5432/cogmo" })
+    .withEnvironment({ DATABASE_URL: inNetworkDatabaseUrl })
     .withWaitStrategy(Wait.forLogMessage(/seed complete/i))
     .withStartupTimeout(60_000)
     .start();
@@ -101,7 +105,7 @@ export async function setup({ provide }: GlobalSetupContext) {
     .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withCommand(["serve"])
     .withEnvironment({
-      DATABASE_URL: "postgresql://cogmo@postgres:5432/cogmo",
+      DATABASE_URL: inNetworkDatabaseUrl,
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "test-key",
       ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}`,
       INNGEST_BASE_URL: "http://inngest:8288",

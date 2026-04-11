@@ -57,4 +57,4 @@ docker run -d \
   cogmo
 ```
 
-The app runs as `nonroot` inside a distroless container. Entrypoint is `node dist/cli.js serve`.
+The app runs as `nonroot` inside a distroless container. Entrypoint is `node dist/main.js serve`.

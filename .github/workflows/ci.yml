@@ -134,7 +134,8 @@ jobs:
 
   release:
     name: Release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'iskhakovt/cogmo'
+    # Transitional during the rename — remove the ai-assistant clause after the GH repo rename is complete.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (github.repository == 'iskhakovt/ai-assistant' || github.repository == 'iskhakovt/cogmo')
     needs: [check, unit, integration, e2e]
     runs-on: ubuntu-latest
     permissions:
