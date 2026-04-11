@@ -30,6 +30,8 @@
 - [ ] `p3` fetch_url SSRF hardening — dns.resolve() + IP check before fetch (current check is string-level only)
 - [ ] `p3` Verify Perplexity Sonar citations structure via real OpenRouter API response — may need to adjust parsing
 - [ ] `p3` Streaming retry-dedup test — `TelegramAdapter` `#activeStreams` map is documented in `design/crash-recovery.md` ("Streaming dedup across the same process") and `design/transport/streaming.md` but no test enforces that a retry with the same Inngest `runId` reuses the existing `TelegramStreamHandle` instead of opening a second Telegram message. Regression would ship silently until a user sees duplicate bubbles. Needs either a real adapter instance or a new test seam.
+- [ ] `p3` Replace `as any` at `src/llm/openai-compat.ts:253` with a local `CachedTextPart extends OpenAI.Chat.ChatCompletionContentPartText` interface + `satisfies` cast. OpenRouter's `cache_control` extension isn't in OpenAI's types; the ecosystem winner (Qwen, wave-agent, et al.) is local interface extension — no double-cast needed because of width subtyping. Include `ttl?: "5m" | "1h"` for forward compat with OpenRouter's 1h cache variant.
+- [ ] `p3` Replace `(b as { text: string }).text` casts with type-guard predicate filters — pattern at `src/agent/handle-message.ts:233` (and likely also `src/llm/anthropic.ts`, `src/llm/openai-compat.ts`). TypeScript doesn't narrow through `.filter((b) => b.type === "text")` because the predicate signature is `(value: T) => boolean`, not `(value: T) => value is U`. Switching to `.filter((b): b is TextBlock => b.type === "text")` lets `.map((b) => b.text)` work without the cast. Cosmetic, pre-existing pattern.
 
 ## Later
 

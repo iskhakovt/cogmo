@@ -53,6 +53,8 @@ Wrapping only the summarize callback avoids both. The cached value is just the s
 
 The summarization step does close over `system` (the `fullPrompt` at call time) and `msgs` (the prefix slice), so the cached summary may technically have been generated against a slightly different system prompt than the current attempt. In practice this is fine: the prefix messages are stable (`history` is durable), and the summary content depends on those messages — not on the persona variation in the system prompt.
 
+**Failure mode: when summarization itself fails.** If the summarize step body throws (LLM error, timeout), Inngest's per-step retries fire first. Once those exhaust, the rejection bubbles into `compactMessages`, which catches it (`context.ts`), logs a warning, and falls through to the truncation strategy. The function-level `retries: 2` does **not** see this failure — the function never throws. This is the deliberate design: truncation is a safe fallback (degraded context beats a failed turn), and the user gets a response on the same attempt. The honest framing of the contract is therefore "summarization is exactly-once **if it ever succeeds**" — if every retry fails, the conversation downgrades silently to truncation. If silent downgrade ever becomes a debugging problem, the fix is to surface compaction events (`logger.info` already emits `strategies` per turn) to a metrics sink.
+
 ## What this means in practice `[confirmed]`
 
 ### When the streaming section crashes
