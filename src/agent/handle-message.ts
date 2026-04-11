@@ -192,16 +192,24 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         }
       }
 
-      // ──── Context window management ────
+      // ──── DURABLE: context window compaction ────
+      //
+      // Wrapped in a step so the (potentially expensive) summarization LLM call
+      // is not re-run on Inngest retry. The status push to `delivery` is a
+      // streaming side effect that fires only on first execution; on resume the
+      // step returns the cached compacted history and the user has already seen
+      // the prior status update on the same Telegram message.
+      // See design/crash-recovery.md.
 
       const model = profile?.model ?? DEFAULT_MODEL;
       const budget = computeBudget(model);
       const toolDefs = tools.definitions();
 
-      const lastInputTokens = await agentStore.getLastInputTokens(conversationId);
-      const skip = shouldSkipCounting(lastInputTokens, userContentText.length, budget);
+      historyMessages = await step.run("compact-context", async () => {
+        const lastInputTokens = await agentStore.getLastInputTokens(conversationId);
+        const skip = shouldSkipCounting(lastInputTokens, userContentText.length, budget);
+        if (skip) return historyMessages;
 
-      if (!skip) {
         const compactResult = await compactMessages(fullPrompt, historyMessages, toolDefs, {
           countTokens: (params) => provider.countTokens({ ...params, model }),
           budget,
@@ -222,8 +230,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             delivery.push({ type: "status", message });
           },
         });
-        historyMessages = compactResult.messages;
-      }
+        return compactResult.messages;
+      });
 
       let result: AgentLoopResult;
       try {
