@@ -107,6 +107,16 @@ The fourth test is the regression guard for the bug class. If a developer ever w
 
 For **wire-level** crash recovery (real Inngest server, real retries, side-effect counters across actual HTTP re-invocations) we rely on Inngest itself — that path is library-tested upstream and our integration test in `pipeline.integration.test.ts` proves the full end-to-end works against a real dev server. We do not currently simulate a forced crash there; if recovery bugs surface in practice, the right escalation is an integration test that throws on first attempt and asserts the second attempt completes.
 
+## State serialization
+
+Inngest stores step return values via JSON, so anything returned from a `step.run` body must round-trip through `JSON.stringify` / `JSON.parse` losslessly. The `compact-context` step returns `Message[]`, where every value is structurally JSON-safe by the type contract:
+
+- `ImageBlock.data` is `string` (base64 or URL), never a `Buffer` — `attachments.download()` returns a Buffer but `handle-message` immediately calls `.toString("base64")` before placing the bytes in any block.
+- `ToolUseBlock.input` is `unknown` but only ever holds JSON-parsed LLM output.
+- `ToolResultBlock.content` is `string`.
+
+If a future change introduces a binary field anywhere in `ContentBlock`, it must be encoded to a string before reaching any `step.run` return path. The type system will not catch this — `unknown` accepts anything — so the rule lives here.
+
 ## Adding a new durable boundary
 
 Wrap a side effect in `step.run` when **all** of these are true:

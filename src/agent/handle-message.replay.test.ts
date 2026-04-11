@@ -40,6 +40,11 @@ import { createHandleMessage } from "./handle-message.js";
 // @inngest/test mocks step.* on the ctx, but the engine internally invokes
 // `inngest._send` (not the public `send`). Without this stub each test waits
 // ~2s for an ECONNREFUSED retry.
+//
+// Reaching into a private member of an upstream class is fragile — if `_send`
+// is renamed in a future inngest release the spy silently no-ops and the tests
+// slow down. Worth tracking whether @inngest/test eventually intercepts at
+// this layer so the stub can be removed.
 beforeEach(() => {
   vi.spyOn(inngest as unknown as { _send: () => Promise<unknown> }, "_send").mockResolvedValue({
     ids: [],
@@ -140,9 +145,13 @@ describe("handle-message — crash recovery / step replay", () => {
     // would normally trigger countTokens + maybe summarize. We provide a
     // cached compact-context step → the body is bypassed entirely, so chat()
     // for summarization is never called.
+    const deliveryHandle = mockDeliveryHandle();
     const deps = mockDeps({
       agentStore: mockAgentStore({
         getLastInputTokens: vi.fn().mockResolvedValue(150_000), // would force compaction
+      }),
+      deliveryRouter: mockDeliveryRouter({
+        prepare: vi.fn().mockResolvedValue(deliveryHandle),
       }),
     });
     const fn = createHandleMessage(deps);
@@ -170,6 +179,13 @@ describe("handle-message — crash recovery / step replay", () => {
     // And the DB read for last input tokens stays inside the step, so it's
     // skipped on cached replay too.
     expect(deps.agentStore.getLastInputTokens).not.toHaveBeenCalled();
+    // The "Summarizing conversation..." status push lives inside the step's
+    // closure (via onStatus → delivery.push). On cached replay it must NOT
+    // fire — the user already saw it on the first attempt.
+    const statusPushes = (deliveryHandle.push as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev?.type === "status",
+    );
+    expect(statusPushes).toHaveLength(0);
   });
 
   it("re-invokes the streaming agent loop on resume even when all durable steps are cached", async () => {

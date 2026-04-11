@@ -196,10 +196,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       //
       // Wrapped in a step so the (potentially expensive) summarization LLM call
       // is not re-run on Inngest retry. The status push to `delivery` is a
-      // streaming side effect that fires only on first execution; on resume the
-      // step returns the cached compacted history and the user has already seen
-      // the prior status update on the same Telegram message.
-      // See design/crash-recovery.md.
+      // streaming side effect that fires only on first execution; on resume
+      // (within the same worker process) the step returns the cached compacted
+      // history and the user has already seen the prior status update on the
+      // same Telegram message via the runId-keyed dedup map. Cross-process
+      // retries lose the dedup map — see design/crash-recovery.md → "Process
+      // death".
 
       const model = profile?.model ?? DEFAULT_MODEL;
       const budget = computeBudget(model);
