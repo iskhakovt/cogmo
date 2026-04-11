@@ -1,4 +1,4 @@
-# Assistant
+# Cogmo
 
 Personal AI assistant runtime — modular agent system with persistent memory and self-evolution.
 

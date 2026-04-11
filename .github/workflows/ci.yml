@@ -112,7 +112,7 @@ jobs:
         with:
           context: .
           load: true
-          tags: assistant:ci
+          tags: cogmo:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
@@ -123,7 +123,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:e2e
         env:
-          E2E_IMAGE: assistant:ci
+          E2E_IMAGE: cogmo:ci
           TESTCONTAINERS_RYUK_DISABLED: "true"
       - uses: dorny/test-reporter@4a2e97665d5fa767581ef38eca97b9694bd4eef4 # v2
         if: always()
@@ -134,7 +134,7 @@ jobs:
 
   release:
     name: Release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'iskhakovt/ai-assistant'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'iskhakovt/cogmo'
     needs: [check, unit, integration, e2e]
     runs-on: ubuntu-latest
     permissions:

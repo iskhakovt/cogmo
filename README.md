@@ -1,8 +1,8 @@
-# Assistant
+# Cogmo
 
-[![Release](https://img.shields.io/github/v/release/iskhakovt/ai-assistant?label=release&color=blue)](https://github.com/iskhakovt/ai-assistant/releases)
-[![ghcr](https://img.shields.io/github/v/release/iskhakovt/ai-assistant?label=ghcr&logo=docker&color=2496ED)](https://github.com/iskhakovt/ai-assistant/pkgs/container/ai-assistant)
-[![CI](https://github.com/iskhakovt/ai-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/iskhakovt/ai-assistant/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/iskhakovt/cogmo?label=release&color=blue)](https://github.com/iskhakovt/cogmo/releases)
+[![ghcr](https://img.shields.io/github/v/release/iskhakovt/cogmo?label=ghcr&logo=docker&color=2496ED)](https://github.com/iskhakovt/cogmo/pkgs/container/cogmo)
+[![CI](https://github.com/iskhakovt/cogmo/actions/workflows/ci.yml/badge.svg)](https://github.com/iskhakovt/cogmo/actions/workflows/ci.yml)
 
 Personal AI assistant runtime — modular agent system with persistent memory and self-evolution.
 

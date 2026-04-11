@@ -5,7 +5,7 @@ export const env = createEnv({
   server: {
     NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
-    DATABASE_URL: z.string().default("postgresql://assistant@localhost/assistant"),
+    DATABASE_URL: z.string().default("postgresql://cogmo@localhost/cogmo"),
     ANTHROPIC_API_KEY: z.string(),
     ANTHROPIC_BASE_URL: z.string().optional(),
     HINDSIGHT_URL: z.string().default("http://localhost:8888"),
@@ -19,7 +19,7 @@ export const env = createEnv({
     OPENROUTER_API_KEY: z.string().optional(),
     USER_TIMEZONE: z.string().default("UTC"),
     S3_ENDPOINT: z.string().optional(),
-    S3_BUCKET: z.string().default("assistant-files"),
+    S3_BUCKET: z.string().default("cogmo-files"),
     S3_ACCESS_KEY: z.string().optional(),
     S3_SECRET_KEY: z.string().optional(),
     S3_REGION: z.string().default("us-east-1"),

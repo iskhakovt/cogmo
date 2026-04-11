@@ -46,7 +46,7 @@ async function main() {
         handleShutdownSignals: ["SIGTERM", "SIGINT"],
       });
       logger.info({ connectionId: connection.connectionId }, "inngest connected");
-      logger.info("assistant ready — use `pnpm console` to interact");
+      logger.info("cogmo ready — use `pnpm console` to interact");
       await connection.closed;
     }
   } finally {
@@ -55,5 +55,5 @@ async function main() {
     }
   }
 
-  logger.info("assistant stopped");
+  logger.info("cogmo stopped");
 }

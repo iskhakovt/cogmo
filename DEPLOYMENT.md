@@ -16,7 +16,7 @@ All configuration via environment variables. Full schema in `src/env.ts`.
 | Variable | Required | Default |
 |-|-|-|
 | `ANTHROPIC_API_KEY` | Yes | — |
-| `DATABASE_URL` | No | `postgresql://assistant@localhost/assistant` |
+| `DATABASE_URL` | No | `postgresql://cogmo@localhost/cogmo` |
 | `HINDSIGHT_URL` | No | `http://localhost:8888` |
 | `INNGEST_BASE_URL` | No | `http://localhost:8288` |
 | `INNGEST_MODE` | No | `connect` |
@@ -30,11 +30,11 @@ Secrets must never be in env files or git. Use host secret management (sops-nix,
 ## Building
 
 ```bash
-docker build -t assistant .
-docker build --build-arg VERSION=1.2.0 -t assistant .
+docker build -t cogmo .
+docker build --build-arg VERSION=1.2.0 -t cogmo .
 ```
 
-Images are published to `ghcr.io/<owner>/assistant:<version>` on every release.
+Images are published to `ghcr.io/<owner>/cogmo:<version>` on every release.
 
 ## First Run
 

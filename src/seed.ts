@@ -19,7 +19,7 @@ If you don't know something and don't have a tool for it, say so honestly.`;
  * Only requires DATABASE_URL — no other env vars needed.
  */
 export async function seed(): Promise<void> {
-  const databaseUrl = process.env.DATABASE_URL ?? "postgresql://assistant@localhost/assistant";
+  const databaseUrl = process.env.DATABASE_URL ?? "postgresql://cogmo@localhost/cogmo";
   const db = drizzle({ connection: databaseUrl, schema });
 
   await migrate(db, { migrationsFolder: "./migrations" });
@@ -38,7 +38,7 @@ export async function seed(): Promise<void> {
     existingProfile?.id ??
     (
       await agentStore.createProfile({
-        name: "assistant",
+        name: "cogmo",
         basePrompt: DEFAULT_BASE_PROMPT,
         model: "claude-sonnet-4-20250514",
         toolSet: ["get_current_time", "memory_recall", "memory_retain"],

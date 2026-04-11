@@ -123,7 +123,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
 
   bot.command("start", async (ctx) => {
     await ctx.reply(
-      "Assistant ready. Send a message to start chatting.\n\n/new — start a new conversation",
+      "Cogmo ready. Send a message to start chatting.\n\n/new — start a new conversation",
     );
   });
 

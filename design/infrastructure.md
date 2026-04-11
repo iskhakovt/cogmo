@@ -28,7 +28,7 @@ All configuration via environment variables. See `src/env.ts` for the schema.
 
 | Variable | Default | Purpose |
 |-|-|-|
-| `DATABASE_URL` | `postgresql://assistant@localhost/assistant` | PostgreSQL connection |
+| `DATABASE_URL` | `postgresql://cogmo@localhost/cogmo` | PostgreSQL connection |
 | `REDIS_HOST` | `127.0.0.1` | Redis host |
 | `REDIS_PORT` | `6380` | Redis port |
 | `NODE_ENV` | `development` | Environment |

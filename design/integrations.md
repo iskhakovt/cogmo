@@ -34,7 +34,7 @@ const transport = new StdioClientTransport({
   command: "npx",
   args: ["hindsight-mcp-server"],
 });
-const client = new Client({ name: "assistant", version: "1.0.0" });
+const client = new Client({ name: "cogmo", version: "1.0.0" });
 await client.connect(transport);
 
 // List available tools
