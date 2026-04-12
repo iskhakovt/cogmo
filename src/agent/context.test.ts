@@ -345,6 +345,28 @@ describe("snapToPairBoundary", () => {
   });
 });
 
+/** Assert no message in the array has a tool_result without a matching tool_use in the preceding assistant. */
+function assertNoOrphanedToolResults(messages: ReadonlyArray<Message>): void {
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]!;
+    if (typeof m.content !== "string" && m.content.some((b) => b.type === "tool_result")) {
+      expect(i).toBeGreaterThan(0);
+      const prev = messages[i - 1]!;
+      expect(prev.role).toBe("assistant");
+      expect(typeof prev.content).not.toBe("string");
+      const toolUseIds = (prev.content as ContentBlock[])
+        .filter((b): b is ToolUseBlock => b.type === "tool_use")
+        .map((b) => b.id);
+      const toolResultIds = (m.content as ContentBlock[])
+        .filter((b): b is ToolResultBlock => b.type === "tool_result")
+        .map((b) => b.toolUseId);
+      for (const id of toolResultIds) {
+        expect(toolUseIds).toContain(id);
+      }
+    }
+  }
+}
+
 describe("compactMessages — pair-aware", () => {
   it("truncation never orphans a tool_use/tool_result pair", async () => {
     // 13 messages → 30% = 3.9 → ceil = 4 → naïve cut at index 4 (a tool_result user message)
@@ -373,26 +395,7 @@ describe("compactMessages — pair-aware", () => {
       budget: 1000,
     });
 
-    // Verify no message in result has orphaned tool_result
-    for (let i = 0; i < result.messages.length; i++) {
-      const m = result.messages[i]!;
-      if (typeof m.content !== "string" && m.content.some((b) => b.type === "tool_result")) {
-        // This user message has tool_results — the preceding message must be an assistant with matching tool_uses
-        expect(i).toBeGreaterThan(0);
-        const prev = result.messages[i - 1]!;
-        expect(prev.role).toBe("assistant");
-        expect(typeof prev.content).not.toBe("string");
-        const toolUseIds = (prev.content as ContentBlock[])
-          .filter((b): b is ToolUseBlock => b.type === "tool_use")
-          .map((b) => b.id);
-        const toolResultIds = (m.content as ContentBlock[])
-          .filter((b): b is ToolResultBlock => b.type === "tool_result")
-          .map((b) => b.toolUseId);
-        for (const id of toolResultIds) {
-          expect(toolUseIds).toContain(id);
-        }
-      }
-    }
+    assertNoOrphanedToolResults(result.messages);
   });
 
   it("summarization never orphans a tool_use/tool_result pair", async () => {
@@ -420,15 +423,7 @@ describe("compactMessages — pair-aware", () => {
 
     expect(result.didCompact).toBe(true);
 
-    // Same invariant check: no orphaned tool_results
-    for (let i = 0; i < result.messages.length; i++) {
-      const m = result.messages[i]!;
-      if (typeof m.content !== "string" && m.content.some((b) => b.type === "tool_result")) {
-        expect(i).toBeGreaterThan(0);
-        const prev = result.messages[i - 1]!;
-        expect(prev.role).toBe("assistant");
-      }
-    }
+    assertNoOrphanedToolResults(result.messages);
   });
 });
 
