@@ -102,6 +102,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   provide("inngestEventKey", "test");
   provide("hindsightUrl", hindsightUrl);
   provide("defaultUserId", defaultUserId);
+  provide("llmockBaseUrl", mock.url);
 
   console.log(`Integration test environment ready — ${JSON.stringify({ ...urls, hindsightUrl })}`);
 }
