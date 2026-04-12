@@ -161,10 +161,13 @@ export class DrizzleAgentStore implements AgentStore {
 
   async insertMessages(params: {
     conversationId: string;
-    messages: ReadonlyArray<Message>;
+    messages: ReadonlyArray<Message>; // must be non-empty
     lastInboundMessageId: string;
     lastMessageInputTokens?: number;
   }): Promise<{ id: string }> {
+    if (params.messages.length === 0) {
+      throw new Error("insertMessages requires at least one message");
+    }
     return this.#db.transaction(async (tx) => {
       let lastId = "";
       for (let i = 0; i < params.messages.length; i++) {
