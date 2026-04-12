@@ -45,7 +45,7 @@ The minimum useful system: talk to it, it remembers things.
 - [x] Full tool invocation history — messages.content stores ContentBlock[] (text, tool_use, tool_result, image, thinking), not just final text
 - [x] Message batching — debounce-router, debounce-idle, debounce-maxwait with entry guards and resume policy
 - [x] Response routing — source routing via DeliveryRouter, getSourceSessions + getReceiveAllSessions
-- [x] Telegram auth — user ID allowlist via env var
+- [x] Telegram auth — user ID allowlist via `user_identities` DB rows, enforced in adapter via `resolveUser`
 - [x] System prompt assembly — auto-generated from tool registry + service guidance + conditional onboarding
 - [x] Streaming responses — unified DeliveryRouter, StreamingAdapter/StreamHandle, TelegramStreamHandle
 - [x] Web tools — web_search (Tavily), web_answer (Perplexity Sonar), fetch_url (readability + SSRF)
@@ -58,6 +58,11 @@ The minimum useful system: talk to it, it remembers things.
 - [x] neverthrow at Transport boundary — `emit()` and `createConversation()` return `Result<T, TransportError>`
 - [x] `#private` fields + `private constructor` + `static async create()` on all classes
 - [x] Console script — `scripts/console.ts`, standalone readline + DB polling client
+- [x] Encrypted secrets at rest — `secrets` table, AES-256-GCM via `@noble/ciphers`, HKDF key derivation via `@noble/hashes`, `_FILE` Docker secrets convention, `ConfigResolver` (DB-first env-fallback), `gen-key` CLI
+- [x] Multi-provider LLM — `llm_providers` table, `model_providers` routing table (position-based priority), provider dispatch in bootstrap via model → provider resolution, Anthropic + OpenAI-compatible adapters
+- [x] Channel management — `createIdentity`, `updateChannelCredentials`, `removeChannel` on transport store, identity resolution wired in `createConversation`
+- [x] Seed refactor — `src/setup/seed.ts` with named exports, reusable by wizard and CLI
+- [x] Guided setup wizard — `cogmo setup` via `@clack/prompts`, provider validation (`/v1/models`, `getMe`), Telegram channel + allowlist, re-runnable (Keep/Modify/Skip), `--reset` scopes, `--non-interactive` mode
 
 ## Phase 2: Scheduling + Ingestion
 

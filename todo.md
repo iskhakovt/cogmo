@@ -2,11 +2,6 @@
 
 ## Next
 
-- [ ] `p1` Secrets infrastructure — `secrets` table, `@noble/ciphers` + `@noble/hashes`, `EncryptionService`, `SecretsStore`, `_FILE` env support in `env.ts`, `gen-key` subcommand, encrypt `channels.credentials` (migration re-encrypts), `ConfigResolver` (DB-first env-fallback), refactor all providers to use resolver, `.dockerignore` `.env*`. See `design/infrastructure.md` → Secrets.
-- [ ] `p1` Multi-provider LLM — `llm_providers` table + migration, `profiles.provider_id` FK migration, provider dispatch in bootstrap (construct adapter from DB row), remove hard-coded `AnthropicProvider`. See `design/providers.md`.
-- [ ] `p1` Channel CRUD + allowlist enforcement — `createTelegramChannel` / `updateChannelCredentials` / `removeChannel` on transport store, Telegram adapter enforces identity check via `resolveUser`, migrate `TELEGRAM_ALLOWED_USERS` env to `user_identities` rows. See `design/transport/identity.md`.
-- [ ] `p1` Seed refactor — move `src/seed.ts` → `src/setup/seed.ts` with named exports (`ensureDefaultUser`, `ensureDefaultProfile`, `ensureDirectChannel`), re-export from `src/seed.ts` for back-compat.
-- [ ] `p1` Setup wizard — `@clack/prompts` dep, `src/setup/` module, `main.ts setup` subcommand, re-runnable interactive flow (Keep/Modify/Skip), `--reset` and `--non-interactive` flags, inline help with click paths. See `design/setup.md`.
 - [ ] `p2` Post-conversation Observer — Inngest function triggered by `conversation/idle` event
 - [ ] `p2` Instruction file (Stage 1 evolution) — corrections append to JSON, loaded into system prompt. Prerequisite met: full tool invocation history now persisted in messages.
 - [ ] `p2` Context fast path — account for output tokens in `shouldSkipCounting` (currently only tracks `inputTokens`, underestimates by one response worth)
@@ -55,6 +50,11 @@
 
 ## Done
 
+- [x] Secrets infrastructure — `secrets` table, `@noble/ciphers` + `@noble/hashes`, AES-256-GCM + HKDF, `SecretsStore`, `_FILE` env support, `gen-key` subcommand, `ConfigResolver` (DB-first env-fallback), `.dockerignore` deny-all
+- [x] Multi-provider LLM — `llm_providers` + `model_providers` routing table, provider dispatch via model → provider resolution, `ANTHROPIC_API_KEY` removed from env (DB-only)
+- [x] Channel CRUD + allowlist enforcement — `createIdentity` / `updateChannelCredentials` / `removeChannel`, Telegram adapter enforces identity via `resolveUser`, `user_identities` rows replace `TELEGRAM_ALLOWED_USERS` env
+- [x] Seed refactor — `src/setup/seed.ts` with named exports, `src/seed.ts` delegates
+- [x] Setup wizard — `@clack/prompts`, `src/setup/` module, `main.ts setup`, re-runnable, `--reset`, `--non-interactive`, inline help
 - [x] Typed LLM calls — `chatTyped()` with Zod schemas, `responseFormat` on ChatParams, `ThinkingBlock` + extended thinking, `clearOldThinking` pre-pass, retry with feedback injection
 - [x] Response routing — source routing per `design/transport/response-routing.md`
 - [x] Initialize Node.js project (package.json, tsconfig, Biome, Vitest)
