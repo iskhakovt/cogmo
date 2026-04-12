@@ -1,9 +1,11 @@
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "../../db/index.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "./index.js";
+import { messages } from "./schema.js";
 
 let db: Database;
 let close: () => Promise<void>;
@@ -181,16 +183,98 @@ describe("DrizzleAgentStore", () => {
       const { id } = await store.insertMessage({
         conversationId,
         role: "user",
-        content: { text: "structured" },
+        content: [{ type: "text", text: "structured" }],
         lastInboundMessageId: inboundId,
       });
 
       const msg = await store.getMessage(id);
-      expect(msg).toEqual({ id, role: "user", content: { text: "structured" } });
+      expect(msg).toEqual({ id, role: "user", content: [{ type: "text", text: "structured" }] });
     });
 
     it("returns null for unknown message", async () => {
       expect(await store.getMessage("019d0000-0000-7000-8000-000000000000")).toBeNull();
+    });
+
+    it("insertMessages batch inserts with tool_use/tool_result pairing", async () => {
+      const { conversationId } = await seedConversation();
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+
+      const result = await store.insertMessages({
+        conversationId,
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "t1", name: "search", input: { q: "test" } }],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", toolUseId: "t1", content: "search result" }],
+          },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "Here is the answer" }],
+          },
+        ],
+        lastInboundMessageId: inboundId,
+        lastMessageInputTokens: 500,
+      });
+
+      expect(result.id).toBeDefined();
+      expect(result.id).not.toBe("");
+
+      const history = await store.getHistory(conversationId);
+      expect(history).toHaveLength(3);
+      // PGlite's pg_uuidv7 uses random bits (not monotonic counter), so
+      // batch-inserted rows may sort in any order. Check content regardless of position.
+      const contents = history.map((m) => m.content);
+      expect(contents).toContainEqual([
+        { type: "tool_use", id: "t1", name: "search", input: { q: "test" } },
+      ]);
+      expect(contents).toContainEqual([
+        { type: "tool_result", toolUseId: "t1", content: "search result" },
+      ]);
+      expect(contents).toContainEqual([{ type: "text", text: "Here is the answer" }]);
+    });
+
+    it("insertMessages throws on empty array", async () => {
+      const { conversationId } = await seedConversation();
+      await expect(
+        store.insertMessages({
+          conversationId,
+          messages: [],
+          lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+        }),
+      ).rejects.toThrow("insertMessages requires at least one message");
+    });
+
+    it("insertMessages sets inputTokens only on the last message", async () => {
+      const { conversationId } = await seedConversation();
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+
+      await store.insertMessages({
+        conversationId,
+        messages: [
+          { role: "assistant", content: [{ type: "text", text: "first" }] },
+          { role: "user", content: "follow-up" },
+          { role: "assistant", content: [{ type: "text", text: "second" }] },
+        ],
+        lastInboundMessageId: inboundId,
+        lastMessageInputTokens: 42,
+      });
+
+      // Query raw table — don't rely on UUID ordering (PGlite's pg_uuidv7
+      // uses random bits, so ORDER BY id is non-deterministic within a batch)
+      const rows = await db
+        .select({ role: messages.role, inputTokens: messages.inputTokens })
+        .from(messages)
+        .where(eq(messages.conversationId, conversationId));
+
+      const withTokens = rows.filter((r) => r.inputTokens != null);
+      expect(withTokens).toHaveLength(1);
+      expect(withTokens[0]!.inputTokens).toBe(42);
+
+      const withoutTokens = rows.filter((r) => r.inputTokens == null);
+      expect(withoutTokens).toHaveLength(2);
     });
 
     it("getLastAssistantMessage returns most recent", async () => {

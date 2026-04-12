@@ -9,7 +9,8 @@
  * See design/context-management.md for full design.
  */
 
-import type { CountTokensParams, Message, ToolDefinition } from "../llm/types.js";
+import * as R from "remeda";
+import type { ContentBlock, CountTokensParams, Message, ToolDefinition } from "../llm/types.js";
 import { logger } from "../logger.js";
 
 // --- Public interface ---
@@ -157,40 +158,43 @@ function clearToolResults(
   messages: Message[],
   keep: number,
 ): { messages: Message[]; clearedCount: number } {
-  // Count total tool_result blocks to know which ones to keep
-  const toolResultPositions: Array<{ msgIdx: number; blockIdx: number }> = [];
-
-  for (let i = 0; i < messages.length; i++) {
-    const content = messages[i]?.content;
-    if (typeof content === "string" || !content || !Array.isArray(content)) continue;
-    for (let j = 0; j < content.length; j++) {
-      const block = content[j];
-      if (block?.type === "tool_result" && block.content !== CLEARED_PLACEHOLDER) {
-        toolResultPositions.push({ msgIdx: i, blockIdx: j });
-      }
-    }
-  }
+  // Collect all tool_result positions across all messages
+  const toolResultPositions = R.pipe(
+    messages,
+    R.flatMap((msg, msgIdx) => {
+      if (typeof msg.content === "string") return [];
+      return R.pipe(
+        msg.content,
+        R.map((block, blockIdx) => ({ block, msgIdx, blockIdx })),
+        R.filter(
+          ({ block }) => block.type === "tool_result" && block.content !== CLEARED_PLACEHOLDER,
+        ),
+        R.map(({ msgIdx, blockIdx }) => ({ msgIdx, blockIdx })),
+      );
+    }),
+  );
 
   // Keep the last `keep` tool results intact
   const clearCount = Math.max(0, toolResultPositions.length - keep);
   if (clearCount === 0) return { messages, clearedCount: 0 };
 
   const toClear = new Set(
-    toolResultPositions.slice(0, clearCount).map((p) => `${p.msgIdx}:${p.blockIdx}`),
+    R.pipe(
+      toolResultPositions,
+      R.take(clearCount),
+      R.map((p) => `${p.msgIdx}:${p.blockIdx}`),
+    ),
   );
 
-  const result = messages.map((msg, msgIdx) => {
-    if (typeof msg.content === "string" || !msg.content) return msg;
+  const result = R.map(messages, (msg, msgIdx) => {
+    if (typeof msg.content === "string") return msg;
 
-    let modified = false;
-    const newContent = msg.content.map((block, blockIdx) => {
-      if (block.type === "tool_result" && toClear.has(`${msgIdx}:${blockIdx}`)) {
-        modified = true;
-        return { ...block, content: CLEARED_PLACEHOLDER };
-      }
-      return block;
-    });
-
+    const newContent = R.map(msg.content, (block, blockIdx) =>
+      block.type === "tool_result" && toClear.has(`${msgIdx}:${blockIdx}`)
+        ? { ...block, content: CLEARED_PLACEHOLDER }
+        : block,
+    );
+    const modified = newContent.some((b, i) => b !== (msg.content as ContentBlock[])[i]);
     return modified ? { ...msg, content: newContent } : msg;
   });
 
@@ -204,7 +208,10 @@ async function summarizePrefix(
   keepTurns: number,
 ): Promise<{ messages: Message[]; summarizedCount: number }> {
   // Keep the last keepTurns messages (user/assistant pairs)
-  const splitIdx = Math.max(0, messages.length - keepTurns);
+  const rawSplit = Math.max(0, messages.length - keepTurns);
+  if (rawSplit <= 0) return { messages, summarizedCount: 0 };
+
+  const splitIdx = snapToPairBoundary(messages, rawSplit);
   if (splitIdx <= 0) return { messages, summarizedCount: 0 };
 
   const prefix = messages.slice(0, splitIdx);
@@ -227,8 +234,12 @@ function truncateOldest(messages: Message[]): Message[] {
   // Drop the oldest 30% of messages. This is a rough heuristic — the pipeline
   // re-counts after truncation, so overshooting is harmless (just drops a bit more).
   // Undershooting is caught by the re-count triggering another pass next turn.
-  const dropCount = Math.min(Math.max(Math.ceil(messages.length * 0.3), 2), messages.length - 2);
-  const result = messages.slice(dropCount);
+  const dropCount = Math.max(
+    0,
+    Math.min(Math.max(Math.ceil(messages.length * 0.3), 2), messages.length - 2),
+  );
+  const snapped = Math.max(0, snapToPairBoundary(messages, dropCount));
+  const result = messages.slice(snapped);
 
   // Ensure alternation — first message must be user role
   if (result.length > 0 && result[0]?.role !== "user") {
@@ -239,4 +250,33 @@ function truncateOldest(messages: Message[]): Message[] {
   }
 
   return result;
+}
+
+// --- Pair-aware helpers ---
+
+function hasToolResults(content: string | ContentBlock[]): boolean {
+  if (typeof content === "string") return false;
+  return content.some((b) => b.type === "tool_result");
+}
+
+/**
+ * Adjust a split index so the suffix (messages[idx:]) never starts with
+ * orphaned tool_result blocks. Snaps backward to include the preceding
+ * assistant message that produced the tool_uses.
+ *
+ * Used by both summarize (snap = summarize less, keep more) and truncate
+ * (snap = drop less, keep more) — both prefer keeping an extra pair over
+ * violating Anthropic's pairing invariant.
+ */
+export function snapToPairBoundary(messages: ReadonlyArray<Message>, splitIdx: number): number {
+  let idx = splitIdx;
+  while (idx > 0 && idx < messages.length) {
+    const msg = messages[idx];
+    if (msg && msg.role === "user" && hasToolResults(msg.content)) {
+      idx--;
+    } else {
+      break;
+    }
+  }
+  return idx;
 }

@@ -15,7 +15,7 @@ Tables are documented in the design doc that owns their domain:
 | `channels` | [transport/overview.md](transport/overview.md) | Platform connections (credentials, identity mode) |
 | `profiles` | [transport/overview.md](transport/overview.md) | Agent configurations (prompt, model, tools). Org-scoped. |
 | `conversations` | [transport/overview.md](transport/overview.md) | Dialogue threads. No lifecycle — go idle naturally. |
-| `messages` | [transport/overview.md](transport/overview.md) | Conversation turns. Immutable. Carry `lastInboundMessageId` cursor. |
+| `messages` | [transport/overview.md](transport/overview.md) | Conversation turns. Immutable. Content stored as full `ContentBlock[]` (text, tool_use, tool_result, image, thinking). Carry `lastInboundMessageId` cursor. |
 | `channel_sessions` | [transport/sessions.md](transport/sessions.md) | Platform address → conversation mapping |
 | `inbound_messages` | [transport/debounce.md](transport/debounce.md) | Raw input staging buffer for debounce batching |
 | `steering_rules` | [agents.md](agents.md) | Dynamic behavioral rules injected into system prompts |

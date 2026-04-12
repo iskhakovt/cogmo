@@ -1,0 +1,4 @@
+reviews:
+  auto_review:
+    enabled: false
+    labels: ["review-ready"]
