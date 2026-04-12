@@ -11,6 +11,16 @@ switch (command) {
     await seed();
     break;
   }
+  case "setup": {
+    const { runSetup } = await import("./setup/index.js");
+    const args = process.argv.slice(3);
+    const resetIdx = args.indexOf("--reset");
+    const reset =
+      resetIdx >= 0 ? (args[resetIdx + 1] as "secrets" | "channels" | "all") : undefined;
+    const nonInteractive = args.includes("--non-interactive");
+    await runSetup({ ...(reset && { reset }), ...(nonInteractive && { nonInteractive }) });
+    break;
+  }
   case "gen-key": {
     const { generateMasterKey } = await import("./secrets/encryption.js");
     const key = generateMasterKey();
@@ -25,7 +35,7 @@ switch (command) {
   }
   default:
     console.error(`Unknown command: ${command}`);
-    console.error("Usage: main.js [serve|seed|gen-key]");
+    console.error("Usage: main.js [serve|seed|setup|gen-key]");
     process.exit(1);
 }
 
