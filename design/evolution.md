@@ -9,6 +9,7 @@ First-class feature from day one. Six stages, each a complete working system. St
 **What:** Corrections saved to persistent instruction file, loaded next session (CLAUDE.md pattern).
 **Implementation:** JSON/YAML file in data dir. Agent appends corrections. Orchestrator loads into system prompt.
 **Graduation:** Rule graduation — observation seen 2+ times promoted from "learning" to "rule". Consolidation at 30+ entries (Claude summarizes).
+**Prerequisite:** Full tool invocation history in `messages` table (landed) — correction extraction inspects `tool_use` blocks, not just text.
 
 ### Stage 2: Skill Library `[research]`
 **Trigger:** When agent repeatedly does the same multi-step task

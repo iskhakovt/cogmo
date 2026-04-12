@@ -183,7 +183,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // Build message history, replacing the last user message with resolved content.
       // Safe because: getHistory runs after create-user-message (durable step ordering),
       // and concurrency lock on conversationId prevents concurrent writes.
-      let historyMessages = [...history] as Message[];
+      let historyMessages: Message[] = [...history];
       const hasImages = resolvedBlocks.some((b) => b.type === "image");
       if (hasImages && historyMessages.length > 0) {
         const lastIdx = historyMessages.length - 1;
@@ -268,15 +268,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         "agent loop complete",
       );
 
-      // ──── DURABLE: persist ────
+      // ──── DURABLE: persist all new messages (tool turns + final assistant) ────
 
-      const assistantMsg = await step.run("persist-assistant-message", async () => {
-        return agentStore.insertMessage({
+      const assistantMsg = await step.run("persist-new-messages", async () => {
+        return agentStore.insertMessages({
           conversationId,
-          role: "assistant",
-          content: result.text,
+          messages: result.newMessages,
           lastInboundMessageId: maxInboundId,
-          inputTokens: result.usage.inputTokens,
+          lastMessageInputTokens: result.usage.inputTokens,
         });
       });
 

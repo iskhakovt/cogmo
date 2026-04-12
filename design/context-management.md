@@ -111,6 +111,10 @@ Emergency fallback. Drop oldest message pairs until under budget. Maintains user
 
 Should rarely fire if strategies 1-2 work correctly.
 
+### Pair-Aware Compaction `[confirmed]`
+
+Anthropic requires every `tool_result` block (on a user message) to have a matching `tool_use` block on the immediately preceding assistant message. Both the summarize and truncate strategies respect this invariant via `snapToPairBoundary()` — if a proposed cut point would leave an orphaned `tool_result` at the start of the kept suffix, the cut snaps backward to include the preceding assistant message with the matching `tool_use`. Prefers keeping an extra pair over violating the API contract. Strategy 1 (clear tool results) replaces content with a placeholder but preserves the block structure — pairing is always intact.
+
 ## Pipeline Execution
 
 ```
