@@ -108,18 +108,23 @@ export async function setup({ provide }: GlobalSetupContext) {
   const defaultUserId = rows[0]?.id;
   if (!defaultUserId) throw new Error("Default user not found after seed");
 
-  // Insert encrypted secret + provider + link to profile
+  // Insert encrypted secret + provider + model routing
   const [secret] = await sql<{ id: string }[]>`
     INSERT INTO secrets (id, name, ciphertext, nonce, description)
     VALUES (uuidv7(), 'anthropic_api_key', ${toBase64(ciphertext)}, ${toBase64(nonce)}, 'E2e test key')
     RETURNING id
   `;
   const [provider] = await sql<{ id: string }[]>`
-    INSERT INTO llm_providers (id, name, type, base_url, secret_id, attrs, is_valid)
-    VALUES (uuidv7(), 'anthropic', 'anthropic', ${`http://host.docker.internal:${mock.port}`}, ${secret!.id}, '{}', true)
+    INSERT INTO llm_providers (id, name, type, base_url, secret_id, attrs)
+    VALUES (uuidv7(), 'anthropic', 'anthropic', ${`http://host.docker.internal:${mock.port}`}, ${secret!.id}, '{}')
     RETURNING id
   `;
-  await sql`UPDATE profiles SET provider_id = ${provider!.id} WHERE id = (SELECT id FROM profiles LIMIT 1)`;
+  // Route the default profile's model to this provider
+  const [profileRow] = await sql<{ model: string }[]>`SELECT model FROM profiles LIMIT 1`;
+  await sql`
+    INSERT INTO model_providers (id, model, provider_id, position)
+    VALUES (uuidv7(), ${profileRow!.model}, ${provider!.id}, 0)
+  `;
   await sql.end();
 
   console.log("Starting app container (connect mode)...");

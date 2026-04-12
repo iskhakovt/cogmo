@@ -57,7 +57,8 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     throw new Error("default profile disappeared — database inconsistency");
   }
 
-  const provider = opts.providerOverride ?? (await resolveProvider({ profile, agentStore }));
+  const provider =
+    opts.providerOverride ?? (await resolveProviderForModel(profile.model, agentStore));
   const webTools = createWebTools(env.TAVILY_API_KEY, env.OPENROUTER_API_KEY);
   const tools = createDefaultTools(
     [...memoryTools, ...webTools, ...fileTools, ...coreMemoryTools],
@@ -124,7 +125,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     debounceConfig,
     deliveryRouter,
     runStreamingAgentLoop,
-    ...(env.SUMMARIZATION_MODEL && { summarizationModel: env.SUMMARIZATION_MODEL }),
+    ...(profile.summarizationModel && { summarizationModel: profile.summarizationModel }),
   });
 
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
@@ -143,21 +144,22 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
 }
 
 /**
- * Resolve the LLM provider from DB config.
+ * Resolve the LLM provider for a model via the model_providers routing table.
  *
- * Reads the profile's provider_id FK → loads provider row → decrypts
+ * Looks up the best provider for the model (lowest position) → decrypts
  * API key from secrets store → constructs the correct adapter class.
  *
  * Requires COGMO_MASTER_KEY to be set (for secrets decryption).
  */
-async function resolveProvider(deps: {
-  profile: { id: string; providerId: string | null };
-  agentStore: AgentStore;
-}): Promise<LlmProvider> {
-  const { profile, agentStore } = deps;
-
-  if (!profile.providerId) {
-    throw new Error("No LLM provider configured. Run `cogmo setup` to configure one.");
+async function resolveProviderForModel(
+  model: string,
+  agentStore: AgentStore,
+): Promise<LlmProvider> {
+  const row = await agentStore.resolveProviderForModel(model);
+  if (!row) {
+    throw new Error(
+      `No provider configured for model "${model}". Run \`cogmo setup\` to configure one.`,
+    );
   }
 
   if (!env.COGMO_MASTER_KEY) {
@@ -171,14 +173,10 @@ async function resolveProvider(deps: {
   const encryptionKey = deriveMasterKey(masterKey, "cogmo/secrets-at-rest/v1");
   const secretsStore = new DrizzleSecretsStore(db, encryptionKey);
 
-  const row = await agentStore.getProvider(profile.providerId);
-  if (!row) {
-    throw new Error(`LLM provider ${profile.providerId} not found in database`);
-  }
   const apiKey = await secretsStore.getSecretById(row.secretId);
   if (!apiKey) {
     throw new Error(
-      `Secret for LLM provider "${row.name}" not found. Re-run \`cogmo setup\` to reconfigure.`,
+      `Secret for provider "${row.name}" not found. Re-run \`cogmo setup\` to reconfigure.`,
     );
   }
 
@@ -190,7 +188,7 @@ async function resolveProvider(deps: {
     case "openai_compatible": {
       if (!row.baseUrl) {
         throw new Error(
-          `LLM provider "${row.name}" (openai_compatible) requires a base URL. Re-run \`cogmo setup\` to reconfigure.`,
+          `Provider "${row.name}" (openai_compatible) requires a base URL. Re-run \`cogmo setup\` to reconfigure.`,
         );
       }
       return new OpenAICompatibleProvider(row.name, {
@@ -201,6 +199,6 @@ async function resolveProvider(deps: {
       });
     }
     default:
-      throw new Error(`Unknown LLM provider type: ${row.type}`);
+      throw new Error(`Unknown provider type: ${row.type}`);
   }
 }

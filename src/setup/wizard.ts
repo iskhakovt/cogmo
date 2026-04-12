@@ -180,16 +180,22 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     ...(baseUrl && { baseUrl }),
     secretId,
     attrs: attrs as import("type-fest").JsonValue,
-    isValid: result.valid,
   });
 
-  // Link to default profile
+  // Register this provider for the default profile's model
   const defaultProfile = await deps.agentStore.getDefaultProfile();
   if (defaultProfile) {
-    await deps.agentStore.setProfileProvider(defaultProfile.id, providerId);
+    const profile = await deps.agentStore.getProfile(defaultProfile.id);
+    if (profile) {
+      await deps.agentStore.addModelProvider({
+        model: profile.model,
+        providerId,
+        position: 0,
+      });
+    }
   }
 
-  p.log.success(`Provider "${providerName}" configured and linked to default profile.`);
+  p.log.success(`Provider "${providerName}" configured for model routing.`);
 }
 
 async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<void> {
@@ -326,9 +332,7 @@ async function stepSummary(deps: WizardDeps): Promise<void> {
   const telegramChannel = await deps.transportStore.getChannelByType("telegram");
 
   const lines: string[] = [];
-  lines.push(
-    `Providers: ${providers.map((p) => `${p.name} (${p.isValid ? "valid" : "unvalidated"})`).join(", ") || "none"}`,
-  );
+  lines.push(`Providers: ${providers.map((p) => p.name).join(", ") || "none"}`);
   lines.push(`Secrets: ${secrets.length} stored`);
   lines.push(`Telegram: ${telegramChannel ? "configured" : "not configured"}`);
 

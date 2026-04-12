@@ -32,8 +32,8 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       id: "profile-1",
       basePrompt: "test",
       model: "claude-sonnet-4-20250514",
+      summarizationModel: null,
       toolSet: [],
-      providerId: null,
     }),
     getDefaultProfile: vi.fn().mockResolvedValue({ id: "profile-1" }),
     createProfile: vi.fn().mockResolvedValue({ id: "profile-1" }),
@@ -45,10 +45,11 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     getLastInputTokens: vi.fn().mockResolvedValue(null),
     createProvider: vi.fn().mockResolvedValue({ id: "provider-1" }),
     getProvider: vi.fn().mockResolvedValue(null),
-    getProfileProvider: vi.fn().mockResolvedValue(null),
-    setProfileProvider: vi.fn().mockResolvedValue(undefined),
     listProviders: vi.fn().mockResolvedValue([]),
     deleteProvider: vi.fn().mockResolvedValue(undefined),
+    addModelProvider: vi.fn().mockResolvedValue({ id: "mp-1" }),
+    resolveProviderForModel: vi.fn().mockResolvedValue(null),
+    removeModelProvidersByProvider: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }

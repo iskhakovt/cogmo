@@ -1,5 +1,5 @@
 {
-  "id": "827f9c58-ea29-4cdd-9e59-19901aefad81",
+  "id": "9206ed41-fe8b-4f95-834b-373904cd04db",
   "prevId": "24602515-0e20-4fbc-b537-db5fb767be6c",
   "version": "7",
   "dialect": "postgresql",
@@ -177,18 +177,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "is_valid": {
-          "name": "is_valid",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "validated_at": {
-          "name": "validated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -310,6 +298,72 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.model_providers": {
+      "name": "model_providers",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "uuidv7()"
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider_id": {
+          "name": "provider_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "position": {
+          "name": "position",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "model_providers_provider_id_llm_providers_id_fk": {
+          "name": "model_providers_provider_id_llm_providers_id_fk",
+          "tableFrom": "model_providers",
+          "tableTo": "llm_providers",
+          "columnsFrom": ["provider_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_model_provider": {
+          "name": "uq_model_provider",
+          "nullsNotDistinct": false,
+          "columns": ["model", "provider_id"]
+        },
+        "uq_model_position": {
+          "name": "uq_model_position",
+          "nullsNotDistinct": false,
+          "columns": ["model", "position"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.profiles": {
       "name": "profiles",
       "schema": "",
@@ -339,17 +393,17 @@
           "primaryKey": false,
           "notNull": true
         },
+        "summarization_model": {
+          "name": "summarization_model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "tool_set": {
           "name": "tool_set",
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true
-        },
-        "provider_id": {
-          "name": "provider_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -360,17 +414,7 @@
         }
       },
       "indexes": {},
-      "foreignKeys": {
-        "profiles_provider_id_llm_providers_id_fk": {
-          "name": "profiles_provider_id_llm_providers_id_fk",
-          "tableFrom": "profiles",
-          "tableTo": "llm_providers",
-          "columnsFrom": ["provider_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "uq_profiles_name": {

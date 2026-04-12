@@ -28,10 +28,26 @@ export const llmProviders = pgTable("llm_providers", {
     .notNull()
     .references(() => secrets.id),
   attrs: jsonb("attrs").notNull(), // { promptCaching?: boolean, headers?: Record<string, string> }
-  isValid: boolean("is_valid").notNull(),
-  validatedAt: timestamp("validated_at", { withTimezone: true }),
   createdAt: ts(),
 });
+
+/** For a given model, which providers can serve it and in what order. */
+export const modelProviders = pgTable(
+  "model_providers",
+  {
+    id: pk(),
+    model: text("model").notNull(),
+    providerId: uuid("provider_id")
+      .notNull()
+      .references(() => llmProviders.id, { onDelete: "cascade" }),
+    position: integer("position").notNull(), // 0 = primary, 1 = first fallback, ...
+    createdAt: ts(),
+  },
+  (t) => [
+    unique("uq_model_provider").on(t.model, t.providerId),
+    unique("uq_model_position").on(t.model, t.position),
+  ],
+);
 
 export const profiles = pgTable(
   "profiles",
@@ -40,8 +56,8 @@ export const profiles = pgTable(
     name: text("name").notNull(),
     basePrompt: text("base_prompt").notNull(),
     model: text("model").notNull(),
+    summarizationModel: text("summarization_model"), // null = use main model
     toolSet: jsonb("tool_set").notNull(),
-    providerId: uuid("provider_id").references(() => llmProviders.id), // nullable for env fallback
     createdAt: ts(),
   },
   (t) => [unique("uq_profiles_name").on(t.name)],

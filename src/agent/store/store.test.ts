@@ -80,8 +80,8 @@ describe("DrizzleAgentStore", () => {
         id,
         basePrompt: "Be helpful.",
         model: "claude-test",
+        summarizationModel: null,
         toolSet: ["memory_recall"],
-        providerId: null,
       });
     });
 
