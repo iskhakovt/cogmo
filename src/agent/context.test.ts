@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Message } from "../llm/types.js";
+import type { ContentBlock, Message, ToolResultBlock, ToolUseBlock } from "../llm/types.js";
 import { compactMessages, shouldSkipCounting, snapToPairBoundary } from "./context.js";
 
 /** Helper: create a simple text message. */
@@ -382,12 +382,12 @@ describe("compactMessages — pair-aware", () => {
         const prev = result.messages[i - 1]!;
         expect(prev.role).toBe("assistant");
         expect(typeof prev.content).not.toBe("string");
-        const toolUseIds = (prev.content as any[])
-          .filter((b: any) => b.type === "tool_use")
-          .map((b: any) => b.id);
-        const toolResultIds = (m.content as any[])
-          .filter((b: any) => b.type === "tool_result")
-          .map((b: any) => b.toolUseId);
+        const toolUseIds = (prev.content as ContentBlock[])
+          .filter((b): b is ToolUseBlock => b.type === "tool_use")
+          .map((b) => b.id);
+        const toolResultIds = (m.content as ContentBlock[])
+          .filter((b): b is ToolResultBlock => b.type === "tool_result")
+          .map((b) => b.toolUseId);
         for (const id of toolResultIds) {
           expect(toolUseIds).toContain(id);
         }

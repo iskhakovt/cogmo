@@ -9,6 +9,7 @@
  * See design/context-management.md for full design.
  */
 
+import * as R from "remeda";
 import type { ContentBlock, CountTokensParams, Message, ToolDefinition } from "../llm/types.js";
 import { logger } from "../logger.js";
 
@@ -157,40 +158,43 @@ function clearToolResults(
   messages: Message[],
   keep: number,
 ): { messages: Message[]; clearedCount: number } {
-  // Count total tool_result blocks to know which ones to keep
-  const toolResultPositions: Array<{ msgIdx: number; blockIdx: number }> = [];
-
-  for (let i = 0; i < messages.length; i++) {
-    const content = messages[i]?.content;
-    if (typeof content === "string" || !content || !Array.isArray(content)) continue;
-    for (let j = 0; j < content.length; j++) {
-      const block = content[j];
-      if (block?.type === "tool_result" && block.content !== CLEARED_PLACEHOLDER) {
-        toolResultPositions.push({ msgIdx: i, blockIdx: j });
-      }
-    }
-  }
+  // Collect all tool_result positions across all messages
+  const toolResultPositions = R.pipe(
+    messages,
+    R.flatMap((msg, msgIdx) => {
+      if (typeof msg.content === "string") return [];
+      return R.pipe(
+        msg.content,
+        R.map((block, blockIdx) => ({ block, msgIdx, blockIdx })),
+        R.filter(
+          ({ block }) => block.type === "tool_result" && block.content !== CLEARED_PLACEHOLDER,
+        ),
+        R.map(({ msgIdx, blockIdx }) => ({ msgIdx, blockIdx })),
+      );
+    }),
+  );
 
   // Keep the last `keep` tool results intact
   const clearCount = Math.max(0, toolResultPositions.length - keep);
   if (clearCount === 0) return { messages, clearedCount: 0 };
 
   const toClear = new Set(
-    toolResultPositions.slice(0, clearCount).map((p) => `${p.msgIdx}:${p.blockIdx}`),
+    R.pipe(
+      toolResultPositions,
+      R.take(clearCount),
+      R.map((p) => `${p.msgIdx}:${p.blockIdx}`),
+    ),
   );
 
-  const result = messages.map((msg, msgIdx) => {
-    if (typeof msg.content === "string" || !msg.content) return msg;
+  const result = R.map(messages, (msg, msgIdx) => {
+    if (typeof msg.content === "string") return msg;
 
-    let modified = false;
-    const newContent = msg.content.map((block, blockIdx) => {
-      if (block.type === "tool_result" && toClear.has(`${msgIdx}:${blockIdx}`)) {
-        modified = true;
-        return { ...block, content: CLEARED_PLACEHOLDER };
-      }
-      return block;
-    });
-
+    const newContent = R.map(msg.content, (block, blockIdx) =>
+      block.type === "tool_result" && toClear.has(`${msgIdx}:${blockIdx}`)
+        ? { ...block, content: CLEARED_PLACEHOLDER }
+        : block,
+    );
+    const modified = newContent.some((b, i) => b !== (msg.content as ContentBlock[])[i]);
     return modified ? { ...msg, content: newContent } : msg;
   });
 

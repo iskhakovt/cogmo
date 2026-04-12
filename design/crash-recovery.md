@@ -26,7 +26,7 @@ The bug class to catch is #2. The contract below makes #1 vs #2 explicit for `ha
 | **Compact** | *(none — runs on every invocation)* | `compactMessages` (token count, clear, summarize, truncate) | token counting + decision | ✗ |
 | Compact | `summarize-prefix` (conditional) | `provider.chat` for prefix summarization | **LLM call** | ✓ |
 | **Streaming** | *(none — not in a step)* | image resolution, `memory.recall`, `getProfile`, `deliveryRouter.prepare`, `runStreamingAgentLoop`, tool execution, `delivery.finish` | **LLM stream + tool side effects** | ✗ |
-| Persist | `persist-new-messages` | `agentStore.insertMessage` × N (all new messages: intermediate tool turns + final assistant) | **DB write** | ✓ |
+| Persist | `persist-new-messages` | `agentStore.insertMessages` (batch INSERT: intermediate tool turns + final assistant, single transaction) | **DB write** | ✓ |
 | Deliver | *(none — not in a step)* | `delivery.deliverBatch` | **Network send to batch adapters** | ✗ |
 | Notify | `send-response` | `step.sendEvent("response/ready")` | Inngest event | ✓ |
 | Resume | `flush` (conditional) | `step.sendEvent("inbound/ready")` | Inngest event | ✓ |

@@ -178,7 +178,10 @@ function buildResult(
     text = lastAssistant.content;
   }
 
-  // Defensive copy — don't leak the mutable internal array through the interface
+  // Defensive copy — don't leak the mutable internal array through the interface.
+  // newMessages is guaranteed non-empty: the loop always pushes at least one
+  // assistant message before reaching buildResult (either via end_turn/max_tokens
+  // or the iteration-limit fallback).
   return {
     text,
     messages: [...messages],
