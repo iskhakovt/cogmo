@@ -5,6 +5,7 @@ import type { Database } from "../../db/index.js";
 import {
   conversations,
   coreMemoryBlocks,
+  llmProviders,
   messages,
   profiles,
   steeringRules,
@@ -47,9 +48,13 @@ export interface AgentStore {
   ): Promise<ReadonlyArray<{ role: "user" | "assistant"; content: JsonValue }>>;
 
   /** Load a profile by ID. */
-  getProfile(
-    profileId: string,
-  ): Promise<{ id: string; basePrompt: string; model: string; toolSet: JsonValue } | null>;
+  getProfile(profileId: string): Promise<{
+    id: string;
+    basePrompt: string;
+    model: string;
+    toolSet: JsonValue;
+    providerId: string | null;
+  } | null>;
 
   /** Get the first user (for bootstrapping). */
   getFirstUser(): Promise<{ id: string } | null>;
@@ -82,6 +87,56 @@ export interface AgentStore {
 
   /** Get inputTokens from the most recent assistant message (for fast-path budget estimation). */
   getLastInputTokens(conversationId: string): Promise<number | null>;
+
+  // --- LLM Providers ---
+
+  /** Create an LLM provider configuration. */
+  createProvider(params: {
+    name: string;
+    type: string;
+    baseUrl?: string;
+    secretId: string;
+    attrs: JsonValue;
+    isValid: boolean;
+  }): Promise<{ id: string }>;
+
+  /** Get a provider by ID. */
+  getProvider(providerId: string): Promise<{
+    id: string;
+    name: string;
+    type: string;
+    baseUrl: string | null;
+    secretId: string;
+    attrs: JsonValue;
+    isValid: boolean;
+  } | null>;
+
+  /** Get the provider linked to a profile (via provider_id FK). */
+  getProfileProvider(profileId: string): Promise<{
+    id: string;
+    name: string;
+    type: string;
+    baseUrl: string | null;
+    secretId: string;
+    attrs: JsonValue;
+  } | null>;
+
+  /** Link a profile to a provider. */
+  setProfileProvider(profileId: string, providerId: string): Promise<void>;
+
+  /** List all providers. */
+  listProviders(): Promise<
+    ReadonlyArray<{
+      id: string;
+      name: string;
+      type: string;
+      isValid: boolean;
+      validatedAt: Date | null;
+    }>
+  >;
+
+  /** Delete a provider by ID. */
+  deleteProvider(providerId: string): Promise<void>;
 }
 
 export class DrizzleAgentStore implements AgentStore {
@@ -179,9 +234,13 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getProfile(
-    profileId: string,
-  ): Promise<{ id: string; basePrompt: string; model: string; toolSet: JsonValue } | null> {
+  async getProfile(profileId: string): Promise<{
+    id: string;
+    basePrompt: string;
+    model: string;
+    toolSet: JsonValue;
+    providerId: string | null;
+  } | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -189,12 +248,19 @@ export class DrizzleAgentStore implements AgentStore {
           basePrompt: profiles.basePrompt,
           model: profiles.model,
           toolSet: profiles.toolSet,
+          providerId: profiles.providerId,
         })
         .from(profiles)
         .where(eq(profiles.id, profileId))
         .limit(1);
       return (
-        (rows[0] as { id: string; basePrompt: string; model: string; toolSet: JsonValue }) ?? null
+        (rows[0] as {
+          id: string;
+          basePrompt: string;
+          model: string;
+          toolSet: JsonValue;
+          providerId: string | null;
+        }) ?? null
       );
     });
   }
@@ -301,6 +367,120 @@ export class DrizzleAgentStore implements AgentStore {
         .orderBy(desc(messages.id))
         .limit(1);
       return rows[0]?.createdAt ?? null;
+    });
+  }
+
+  // --- LLM Providers ---
+
+  async createProvider(params: {
+    name: string;
+    type: string;
+    baseUrl?: string;
+    secretId: string;
+    attrs: JsonValue;
+    isValid: boolean;
+  }): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      return single(
+        await tx
+          .insert(llmProviders)
+          .values({
+            name: params.name,
+            type: params.type,
+            baseUrl: params.baseUrl,
+            secretId: params.secretId,
+            attrs: params.attrs,
+            isValid: params.isValid,
+          })
+          .returning({ id: llmProviders.id }),
+      );
+    });
+  }
+
+  async getProvider(providerId: string): Promise<{
+    id: string;
+    name: string;
+    type: string;
+    baseUrl: string | null;
+    secretId: string;
+    attrs: JsonValue;
+    isValid: boolean;
+  } | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: llmProviders.id,
+          name: llmProviders.name,
+          type: llmProviders.type,
+          baseUrl: llmProviders.baseUrl,
+          secretId: llmProviders.secretId,
+          attrs: llmProviders.attrs,
+          isValid: llmProviders.isValid,
+        })
+        .from(llmProviders)
+        .where(eq(llmProviders.id, providerId))
+        .limit(1);
+      return (rows[0] as (typeof rows)[0] & { attrs: JsonValue }) ?? null;
+    });
+  }
+
+  async getProfileProvider(profileId: string): Promise<{
+    id: string;
+    name: string;
+    type: string;
+    baseUrl: string | null;
+    secretId: string;
+    attrs: JsonValue;
+  } | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: llmProviders.id,
+          name: llmProviders.name,
+          type: llmProviders.type,
+          baseUrl: llmProviders.baseUrl,
+          secretId: llmProviders.secretId,
+          attrs: llmProviders.attrs,
+        })
+        .from(profiles)
+        .innerJoin(llmProviders, eq(profiles.providerId, llmProviders.id))
+        .where(eq(profiles.id, profileId))
+        .limit(1);
+      return (rows[0] as (typeof rows)[0] & { attrs: JsonValue }) ?? null;
+    });
+  }
+
+  async setProfileProvider(profileId: string, providerId: string): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      await tx.update(profiles).set({ providerId }).where(eq(profiles.id, profileId));
+    });
+  }
+
+  async listProviders(): Promise<
+    ReadonlyArray<{
+      id: string;
+      name: string;
+      type: string;
+      isValid: boolean;
+      validatedAt: Date | null;
+    }>
+  > {
+    return this.#db.transaction(async (tx) => {
+      return tx
+        .select({
+          id: llmProviders.id,
+          name: llmProviders.name,
+          type: llmProviders.type,
+          isValid: llmProviders.isValid,
+          validatedAt: llmProviders.validatedAt,
+        })
+        .from(llmProviders);
+    });
+  }
+
+  async deleteProvider(providerId: string): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      await tx.delete(llmProviders).where(eq(llmProviders.id, providerId));
     });
   }
 }

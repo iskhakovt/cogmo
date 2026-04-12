@@ -10,11 +10,26 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { pk, ts } from "../../db/helpers.js";
+import { secrets } from "../../secrets/store/schema.js";
 
 // --- Tables ---
 
 export const users = pgTable("users", {
   id: pk(),
+  createdAt: ts(),
+});
+
+export const llmProviders = pgTable("llm_providers", {
+  id: pk(),
+  name: text("name").notNull().unique(),
+  type: text("type").notNull(), // 'anthropic' | 'openai_compatible'
+  baseUrl: text("base_url"), // NULL = SDK default endpoint
+  secretId: uuid("secret_id")
+    .notNull()
+    .references(() => secrets.id),
+  attrs: jsonb("attrs").notNull(), // { promptCaching?: boolean, headers?: Record<string, string> }
+  isValid: boolean("is_valid").notNull(),
+  validatedAt: timestamp("validated_at", { withTimezone: true }),
   createdAt: ts(),
 });
 
@@ -26,6 +41,7 @@ export const profiles = pgTable(
     basePrompt: text("base_prompt").notNull(),
     model: text("model").notNull(),
     toolSet: jsonb("tool_set").notNull(),
+    providerId: uuid("provider_id").references(() => llmProviders.id), // nullable for env fallback
     createdAt: ts(),
   },
   (t) => [unique("uq_profiles_name").on(t.name)],

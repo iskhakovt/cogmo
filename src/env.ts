@@ -15,7 +15,7 @@ export const env = createEnv({
     NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
     DATABASE_URL: z.string().default("postgresql://cogmo@localhost/cogmo"),
-    ANTHROPIC_API_KEY: z.string(),
+    ANTHROPIC_API_KEY: z.string().optional(),
     ANTHROPIC_BASE_URL: z.string().optional(),
     HINDSIGHT_URL: z.string().default("http://localhost:8888"),
     INNGEST_MODE: z.enum(["connect", "serve"]).default("connect"),

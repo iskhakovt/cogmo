@@ -10,6 +10,7 @@ import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
 import { CORE_MEMORY_PROMPT_GUIDANCE, MEMORY_PROMPT_GUIDANCE } from "./agent/service.js";
+import type { AgentStore } from "./agent/store/index.js";
 import { DrizzleAgentStore } from "./agent/store/index.js";
 import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
@@ -17,8 +18,12 @@ import { db } from "./db/index.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
 import { AnthropicProvider } from "./llm/anthropic.js";
+import { OpenAICompatibleProvider } from "./llm/openai-compat.js";
+import type { LlmProvider } from "./llm/provider.js";
 import { logger } from "./logger.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
+import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
+import { DrizzleSecretsStore, type SecretsStore } from "./secrets/store/index.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
 import { createDeliveryRouter } from "./transport/delivery-router.js";
 import { startChannels } from "./transport/registry.js";
@@ -37,13 +42,25 @@ export async function bootstrap() {
   const agentStore = new DrizzleAgentStore(db);
   const transportStore = new DrizzleTransportStore(db);
 
-  const user = await agentStore.getFirstUser();
-  const profile = await agentStore.getDefaultProfile();
-  if (!user || !profile) {
-    throw new Error("no user or profile found — run `seed` first");
+  // Secrets store — only available if master key is configured
+  let secretsStore: SecretsStore | null = null;
+  if (env.COGMO_MASTER_KEY) {
+    const masterKey = parseMasterKey(env.COGMO_MASTER_KEY);
+    const encryptionKey = deriveMasterKey(masterKey, "cogmo/secrets-at-rest/v1");
+    secretsStore = new DrizzleSecretsStore(db, encryptionKey);
   }
 
-  const provider = new AnthropicProvider(env.ANTHROPIC_API_KEY, env.ANTHROPIC_BASE_URL);
+  const user = await agentStore.getFirstUser();
+  const defaultProfile = await agentStore.getDefaultProfile();
+  if (!user || !defaultProfile) {
+    throw new Error("no user or profile found — run `cogmo setup` or `cogmo seed` first");
+  }
+  const profile = await agentStore.getProfile(defaultProfile.id);
+  if (!profile) {
+    throw new Error("default profile disappeared — database inconsistency");
+  }
+
+  const provider = await resolveProvider({ profile, agentStore, secretsStore });
   const webTools = createWebTools(env.TAVILY_API_KEY, env.OPENROUTER_API_KEY);
   const tools = createDefaultTools(
     [...memoryTools, ...webTools, ...fileTools, ...coreMemoryTools],
@@ -126,4 +143,61 @@ export async function bootstrap() {
     provider,
     memory,
   };
+}
+
+/**
+ * Resolve the LLM provider from DB config or env fallback.
+ *
+ * Path 1 (DB): profile has provider_id FK → load provider row → decrypt
+ * API key from secrets store → construct the correct adapter class.
+ *
+ * Path 2 (env fallback): no DB provider configured → fall back to
+ * ANTHROPIC_API_KEY env var. Backward compatible with pre-setup-wizard
+ * deployments.
+ */
+async function resolveProvider(deps: {
+  profile: { id: string; providerId: string | null };
+  agentStore: AgentStore;
+  secretsStore: SecretsStore | null;
+}): Promise<LlmProvider> {
+  const { profile, agentStore, secretsStore } = deps;
+
+  // Path 1: DB-configured provider
+  if (profile.providerId && secretsStore) {
+    const row = await agentStore.getProvider(profile.providerId);
+    if (!row) {
+      throw new Error(`LLM provider ${profile.providerId} not found in database`);
+    }
+    const apiKey = await secretsStore.getSecretById(row.secretId);
+    if (!apiKey) {
+      throw new Error(
+        `Secret for LLM provider "${row.name}" not found. Re-run \`cogmo setup\` to reconfigure.`,
+      );
+    }
+
+    const attrs = row.attrs as Record<string, unknown>;
+
+    switch (row.type) {
+      case "anthropic":
+        return new AnthropicProvider(apiKey, row.baseUrl ?? undefined);
+      case "openai_compatible":
+        return new OpenAICompatibleProvider(row.name, {
+          apiKey,
+          baseURL: row.baseUrl ?? "",
+          headers: (attrs.headers as Record<string, string>) ?? undefined,
+          promptCaching: (attrs.promptCaching as boolean) ?? false,
+        });
+      default:
+        throw new Error(`Unknown LLM provider type: ${row.type}`);
+    }
+  }
+
+  // Path 2: env fallback (backward compatible)
+  if (env.ANTHROPIC_API_KEY) {
+    return new AnthropicProvider(env.ANTHROPIC_API_KEY, env.ANTHROPIC_BASE_URL);
+  }
+
+  throw new Error(
+    "No LLM provider configured. Run `cogmo setup` or set ANTHROPIC_API_KEY in your environment.",
+  );
 }
