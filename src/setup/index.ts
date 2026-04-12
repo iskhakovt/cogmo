@@ -69,8 +69,14 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     }
 
     if (opts.nonInteractive) {
+      // TODO: read COGMO_LLM_PROVIDER_TYPE, COGMO_LLM_API_KEY, COGMO_LLM_BASE_URL,
+      // COGMO_TELEGRAM_BOT_TOKEN, COGMO_TELEGRAM_ALLOWED_USERS from env. Validate
+      // each, write to secrets + llm_providers + model_providers + channels.
+      // Currently only seeds defaults — cogmo serve will fail without a provider.
       await seedDefaults(agentStore, transportStore);
-      logger.info("non-interactive setup complete (seed only)");
+      logger.warn(
+        "non-interactive mode only seeds defaults — provider configuration not yet implemented. Run interactive `cogmo setup` to configure a provider.",
+      );
       return;
     }
 

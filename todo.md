@@ -2,6 +2,7 @@
 
 ## Next
 
+- [ ] `p2` Non-interactive setup — `cogmo setup --non-interactive` reads `COGMO_LLM_*` env vars, validates, writes provider + model_providers to DB. Currently only seeds defaults. Needed for CI/IaC.
 - [ ] `p2` Post-conversation Observer — Inngest function triggered by `conversation/idle` event
 - [ ] `p2` Instruction file (Stage 1 evolution) — corrections append to JSON, loaded into system prompt. Prerequisite met: full tool invocation history now persisted in messages.
 - [ ] `p2` Context fast path — account for output tokens in `shouldSkipCounting` (currently only tracks `inputTokens`, underestimates by one response worth)

@@ -89,6 +89,8 @@ For CI, IaC, or Docker entrypoint scripts. Reads from env vars with `COGMO_` pre
 
 Validates each, writes to DB, exits 0 on success, non-zero on missing required values. No prompts.
 
+**Status:** not yet implemented. Current `--non-interactive` only runs `seedDefaults` (user + profile + direct channel). Provider configuration requires the interactive wizard. Tracked as a future enhancement.
+
 ### Library
 
 `@clack/prompts` — modern CLI TUI with masked input, spinners, confirm prompts, multi-select. ~30 KB, MIT.
