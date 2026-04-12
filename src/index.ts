@@ -47,14 +47,16 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const agentStore = new DrizzleAgentStore(db);
   const transportStore = new DrizzleTransportStore(db);
 
-  // Secrets store — constructed early for use by provider resolution and channel startup.
-  // Only available if master key is configured.
-  let secretsStore: InstanceType<typeof DrizzleSecretsStore> | undefined;
-  if (env.COGMO_MASTER_KEY) {
-    const masterKey = parseMasterKey(env.COGMO_MASTER_KEY);
-    const encryptionKey = deriveMasterKey(masterKey, "cogmo/secrets-at-rest/v1");
-    secretsStore = new DrizzleSecretsStore(db, encryptionKey);
+  // Secrets store — required for decrypting provider credentials and channel tokens.
+  if (!env.COGMO_MASTER_KEY) {
+    throw new Error(
+      "COGMO_MASTER_KEY is required. Generate one with: cogmo gen-key\n" + "Then run: cogmo setup",
+    );
   }
+  const secretsStore = new DrizzleSecretsStore(
+    db,
+    deriveMasterKey(parseMasterKey(env.COGMO_MASTER_KEY), "cogmo/secrets-at-rest/v1"),
+  );
 
   const user = await agentStore.getFirstUser();
   const defaultProfile = await agentStore.getDefaultProfile();
@@ -117,7 +119,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     inboundArrived,
     attachments: attachmentStore,
     idleTimeoutMs,
-    ...(secretsStore && { secretsStore }),
+    secretsStore,
   });
 
   const deliveryRouter = createDeliveryRouter({ adapters: adapterMap, transportStore });
@@ -165,19 +167,12 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
 async function resolveProviderForModel(
   model: string,
   agentStore: AgentStore,
-  secretsStore?: InstanceType<typeof DrizzleSecretsStore>,
+  secretsStore: InstanceType<typeof DrizzleSecretsStore>,
 ): Promise<LlmProvider> {
   const row = await agentStore.resolveProviderForModel(model);
   if (!row) {
     throw new Error(
       `No provider configured for model "${model}". Run \`cogmo setup\` to configure one.`,
-    );
-  }
-
-  if (!secretsStore) {
-    throw new Error(
-      "COGMO_MASTER_KEY is required to decrypt provider credentials.\n" +
-        "Generate one with: cogmo gen-key",
     );
   }
 

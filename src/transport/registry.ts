@@ -19,8 +19,8 @@ export interface RegistryDeps {
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
   idleTimeoutMs: number;
-  /** If provided, resolves secret references in channel credentials before passing to adapters. */
-  secretsStore?: SecretsStore;
+  /** Resolves secret references in channel credentials before passing to adapters. */
+  secretsStore: SecretsStore;
 }
 
 export interface RegistryResult {
@@ -99,14 +99,9 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
  */
 async function resolveCredentialSecrets(
   credentials: JsonValue,
-  secretsStore?: SecretsStore,
+  secretsStore: SecretsStore,
 ): Promise<JsonValue> {
-  if (
-    !secretsStore ||
-    typeof credentials !== "object" ||
-    credentials === null ||
-    Array.isArray(credentials)
-  ) {
+  if (typeof credentials !== "object" || credentials === null || Array.isArray(credentials)) {
     return credentials;
   }
 
