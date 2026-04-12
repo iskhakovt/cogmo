@@ -35,7 +35,7 @@ llm_providers (
   type          TEXT NOT NULL,                  -- 'anthropic' | 'openai_compatible'
   base_url      TEXT,                           -- NULL = SDK default endpoint
   secret_id     UUID NOT NULL FK → secrets,     -- encrypted API key
-  attrs         JSONB NOT NULL DEFAULT '{}',    -- provider-specific config
+  attrs         JSONB NOT NULL,                 -- provider-specific config
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 ```

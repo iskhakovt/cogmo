@@ -181,7 +181,7 @@ Store implementations (`DrizzleAgentStore`, `DrizzleTransportStore`) are tested 
 
 ### Integration Test Env Injection
 
-`process.env` mutations in Vitest `globalSetup` propagate to test workers (worker env = `{ ...process.env, ...config.env }`). Dynamic values (container URLs) are set via `process.env` in globalSetup. Static values (`NODE_ENV`, `ANTHROPIC_API_KEY`) go in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
+`process.env` mutations in Vitest `globalSetup` propagate to test workers (worker env = `{ ...process.env, ...config.env }`). Dynamic values (container URLs, `COGMO_MASTER_KEY`) are set via `process.env` in globalSetup. Static values (`NODE_ENV`) go in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
 
 ### Telegram Testing
 

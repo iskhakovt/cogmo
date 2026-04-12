@@ -21,7 +21,7 @@ Tables are documented in the design doc that owns their domain:
 | `steering_rules` | [agents.md](agents.md) | Dynamic behavioral rules injected into system prompts |
 | `core_memory_blocks` | [agents.md](agents.md) | Structured persistent notes (user profile, projects). Upsert by (user_id, key). Always in system prompt. |
 
-## New Tables (Setup Infrastructure) `[proposed]`
+## New Tables (Setup Infrastructure) `[confirmed]`
 
 | Table | Doc | Notes |
 |-|-|-|

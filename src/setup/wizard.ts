@@ -8,6 +8,7 @@
  */
 
 import * as p from "@clack/prompts";
+import type { JsonValue } from "type-fest";
 import type { AgentStore } from "../agent/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore, type SecretsStore } from "../secrets/store/index.js";
@@ -193,7 +194,7 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     type: adapterType,
     ...(baseUrl && { baseUrl }),
     secretId,
-    attrs: attrs as import("type-fest").JsonValue,
+    attrs: attrs as JsonValue,
   });
 
   // Register this provider for the default profile's model
