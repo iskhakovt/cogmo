@@ -84,10 +84,16 @@ export function createTransport(deps: {
       return session;
     },
 
-    async createConversation(platformAddress, _platformUserHandle, opts) {
-      // TODO: identity resolution — for now, use defaultUserId
+    async createConversation(platformAddress, platformUserHandle, opts) {
+      // Identity resolution: check user_identities for this channel.
+      // Wildcard identities (direct channel) accept everyone.
+      // Explicit identities (Telegram with allowlist) reject unknown handles.
+      const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+      if (!identity) {
+        return err({ code: "identity_rejected" as const });
+      }
       const conv = await agentStore.createConversation({
-        userId: defaultUserId,
+        userId: identity.userId,
         profileId: defaultProfileId,
         isPrivate: opts.isPrivate,
       });

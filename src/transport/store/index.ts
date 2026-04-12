@@ -81,6 +81,19 @@ export interface TransportStore {
 
   /** Create a wildcard identity for a channel. */
   createWildcardIdentity(params: { userId: string; channelId: string }): Promise<{ id: string }>;
+
+  /** Create an explicit (non-wildcard) identity for a user on a channel. */
+  createIdentity(params: {
+    userId: string;
+    channelId: string;
+    platformHandle: string;
+  }): Promise<{ id: string }>;
+
+  /** Update channel credentials (e.g., token rotation). */
+  updateChannelCredentials(channelId: string, credentials: JsonValue): Promise<void>;
+
+  /** Remove a channel and its sessions/identities. */
+  removeChannel(channelId: string): Promise<void>;
 }
 
 export class DrizzleTransportStore implements TransportStore {
@@ -344,6 +357,42 @@ export class DrizzleTransportStore implements TransportStore {
           })
           .returning({ id: userIdentities.id }),
       );
+    });
+  }
+
+  async createIdentity(params: {
+    userId: string;
+    channelId: string;
+    platformHandle: string;
+  }): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      return single(
+        await tx
+          .insert(userIdentities)
+          .values({
+            userId: params.userId,
+            channelId: params.channelId,
+            platformHandle: params.platformHandle,
+            isWildcard: false,
+            autoCreated: false,
+          })
+          .returning({ id: userIdentities.id }),
+      );
+    });
+  }
+
+  async updateChannelCredentials(channelId: string, credentials: JsonValue): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      await tx.update(channels).set({ credentials }).where(eq(channels.id, channelId));
+    });
+  }
+
+  async removeChannel(channelId: string): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      // Delete identities and sessions first (FK constraints)
+      await tx.delete(userIdentities).where(eq(userIdentities.channelId, channelId));
+      await tx.delete(channelSessions).where(eq(channelSessions.channelId, channelId));
+      await tx.delete(channels).where(eq(channels.id, channelId));
     });
   }
 }

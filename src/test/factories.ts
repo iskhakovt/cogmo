@@ -67,8 +67,11 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     getActiveSessionsForConversation: vi.fn().mockResolvedValue([]),
     getSourceSessions: vi.fn().mockResolvedValue([]),
     getReceiveAllSessions: vi.fn().mockResolvedValue([]),
-    resolveUser: vi.fn().mockResolvedValue(null),
+    resolveUser: vi.fn().mockResolvedValue({ userId: "user-1" }),
     createWildcardIdentity: vi.fn().mockResolvedValue({ id: "identity-1" }),
+    createIdentity: vi.fn().mockResolvedValue({ id: "identity-1" }),
+    updateChannelCredentials: vi.fn().mockResolvedValue(undefined),
+    removeChannel: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
