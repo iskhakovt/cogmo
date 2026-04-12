@@ -3,51 +3,72 @@
  *
  * These are our canonical representations — domain code only touches these.
  * Each provider adapter translates to/from its SDK types.
+ *
+ * Content blocks and messages are defined as Zod schemas (single source of
+ * truth) with TypeScript types derived via `z.infer`. This enables runtime
+ * validation on DB writes without maintaining two representations.
  */
 
-// --- Content blocks ---
+import { z } from "zod";
 
-export interface TextBlock {
-  type: "text";
-  text: string;
-}
+// --- Content blocks (Zod → inferred types) ---
 
-export interface ToolUseBlock {
-  type: "tool_use";
-  id: string;
-  name: string;
-  input: unknown;
-}
+const TextBlockSchema = z.object({
+  type: z.literal("text"),
+  text: z.string(),
+});
 
-export interface ToolResultBlock {
-  type: "tool_result";
-  toolUseId: string;
-  content: string;
-  isError?: boolean;
-}
+const ToolUseBlockSchema = z.object({
+  type: z.literal("tool_use"),
+  id: z.string(),
+  name: z.string(),
+  input: z.unknown(),
+});
 
-export interface ImageBlock {
-  type: "image";
-  source: "base64" | "url";
-  data: string; // base64-encoded bytes or URL string
-  mediaType: string; // e.g. "image/jpeg", "image/png"
-}
+const ToolResultBlockSchema = z.object({
+  type: z.literal("tool_result"),
+  toolUseId: z.string(),
+  content: z.string(),
+  isError: z.boolean().optional(),
+});
 
-export interface ThinkingBlock {
-  type: "thinking";
-  thinking: string;
+const ImageBlockSchema = z.object({
+  type: z.literal("image"),
+  source: z.enum(["base64", "url"]),
+  data: z.string(),
+  mediaType: z.string(),
+});
+
+const ThinkingBlockSchema = z.object({
+  type: z.literal("thinking"),
+  thinking: z.string(),
   /** Opaque signature for multi-turn thinking continuity (Anthropic). Must be preserved in history. */
-  signature: string;
-}
+  signature: z.string(),
+});
 
-export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | ImageBlock | ThinkingBlock;
+export const ContentBlockSchema = z.discriminatedUnion("type", [
+  TextBlockSchema,
+  ToolUseBlockSchema,
+  ToolResultBlockSchema,
+  ImageBlockSchema,
+  ThinkingBlockSchema,
+]);
+
+export type TextBlock = z.infer<typeof TextBlockSchema>;
+export type ToolUseBlock = z.infer<typeof ToolUseBlockSchema>;
+export type ToolResultBlock = z.infer<typeof ToolResultBlockSchema>;
+export type ImageBlock = z.infer<typeof ImageBlockSchema>;
+export type ThinkingBlock = z.infer<typeof ThinkingBlockSchema>;
+export type ContentBlock = z.infer<typeof ContentBlockSchema>;
 
 // --- Messages ---
 
-export interface Message {
+export const MessageContentSchema = z.union([z.string(), z.array(ContentBlockSchema)]);
+
+export type Message = {
   role: "user" | "assistant";
   content: string | ContentBlock[];
-}
+};
 
 // --- Tools ---
 
