@@ -187,13 +187,19 @@ async function resolveProvider(deps: {
   switch (row.type) {
     case "anthropic":
       return new AnthropicProvider(apiKey, row.baseUrl ?? undefined);
-    case "openai_compatible":
+    case "openai_compatible": {
+      if (!row.baseUrl) {
+        throw new Error(
+          `LLM provider "${row.name}" (openai_compatible) requires a base URL. Re-run \`cogmo setup\` to reconfigure.`,
+        );
+      }
       return new OpenAICompatibleProvider(row.name, {
         apiKey,
-        baseURL: row.baseUrl ?? "",
+        baseURL: row.baseUrl,
         headers: (attrs.headers as Record<string, string>) ?? undefined,
         promptCaching: (attrs.promptCaching as boolean) ?? false,
       });
+    }
     default:
       throw new Error(`Unknown LLM provider type: ${row.type}`);
   }
