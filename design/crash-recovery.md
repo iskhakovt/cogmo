@@ -119,7 +119,7 @@ This is documented as accepted in `transport/streaming.md`. Cross-process stream
 The four cases:
 
 1. `create-user-message` cached → no user-role `insertMessage` call.
-2. `persist-new-messages` cached → no `insertMessage` calls for any new messages (tool turns + assistant).
+2. `persist-new-messages` cached → no `insertMessages` call (no persistence of any new messages: tool turns + assistant).
 3. `summarize-prefix` cached → no `provider.chat` call for summarization, and the cached summary text appears in the history passed to the agent loop (non-vacuity check).
 4. All listed durable steps cached → `runStreamingAgentLoop` is still called (canary for the non-durable contract).
 
