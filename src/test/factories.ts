@@ -42,6 +42,10 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     upsertCoreMemoryBlock: vi.fn().mockResolvedValue(undefined),
     getLastMessageTime: vi.fn().mockResolvedValue(null),
     getLastInputTokens: vi.fn().mockResolvedValue(null),
+    getCorrections: vi.fn().mockResolvedValue([]),
+    upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
+    countActiveRules: vi.fn().mockResolvedValue(0),
+    replaceRules: vi.fn().mockResolvedValue({ id: "rule-1" }),
     ...overrides,
   };
 }
