@@ -4,90 +4,125 @@ How cogmo routes LLM calls to different providers and manages their credentials.
 
 ## Problem
 
-A user may want to call Claude via Anthropic directly, via OpenRouter (cheaper, different rate limits), or use OpenAI/xAI/DeepSeek entirely. The provider choice, credentials, and endpoint differ — but the agent loop, prompt assembly, and tool system are provider-agnostic. The gap is configuration: today `bootstrap()` hard-codes `AnthropicProvider`. There's no way to choose a provider at setup time, and no way to use multiple providers across profiles.
+A user may want to call Claude via Anthropic directly, via OpenRouter (cheaper, different rate limits), or use OpenAI/xAI/DeepSeek entirely. The provider choice, credentials, and endpoint differ — but the agent loop, prompt assembly, and tool system are provider-agnostic. The system needs a config layer that maps "profile wants model X" → "call provider Y with credentials Z."
 
 ## Architecture
 
-Two provider adapters already exist and are fully implemented:
+Two provider adapters exist:
 
 | Adapter | Class | Covers |
 |-|-|-|
 | `AnthropicProvider` | Native Anthropic SDK | Anthropic direct (best feature support: prompt caching, extended thinking, native token counting) |
 | `OpenAICompatibleProvider` | OpenAI SDK with configurable `baseURL` | OpenRouter, OpenAI, xAI, Together, Groq, DeepSeek, any Chat-Completions-compatible endpoint |
 
-Both implement `LlmProvider` — the agent loop and orchestrator are already provider-agnostic. The missing piece is a **config layer** that maps "which provider to use" to "construct this adapter with these credentials."
+Both implement `LlmProvider` — the agent loop and orchestrator are provider-agnostic.
 
 ## Data Model
+
+Three concerns, three tables:
+
+```
+profiles.model ──→ model_providers.model ──→ llm_providers ──→ secrets
+  "what I want"     "who serves it"           "credentials"     "encrypted key"
+```
+
+### Provider table
 
 ```sql
 llm_providers (
   id            UUID v7 PK,
-  name          TEXT NOT NULL UNIQUE,           -- 'anthropic-direct', 'openrouter-main'
+  name          TEXT NOT NULL UNIQUE,           -- 'anthropic-direct', 'openrouter'
   type          TEXT NOT NULL,                  -- 'anthropic' | 'openai_compatible'
   base_url      TEXT,                           -- NULL = SDK default endpoint
   secret_id     UUID NOT NULL FK → secrets,     -- encrypted API key
   attrs         JSONB NOT NULL DEFAULT '{}',    -- provider-specific config
-  is_valid      BOOLEAN NOT NULL DEFAULT false, -- set after successful validation call
-  validated_at  TIMESTAMPTZ,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 ```
 
-### Column rationale
-
 **`type`** is the adapter discriminator — maps to which class to instantiate. Two values today; a third (e.g., `"google"` for Gemini) adds one constructor branch, not a schema change.
 
-**`base_url`** is NULL for providers that use their SDK's default endpoint (Anthropic, OpenAI). Non-NULL for OpenRouter (`https://openrouter.ai/api/v1`), self-hosted endpoints, or proxies.
+**`base_url`** is NULL for providers that use their SDK's default endpoint (Anthropic). Required for OpenAI-compatible providers (OpenRouter, xAI, custom).
 
-**`secret_id`** references the `secrets` table (see [infrastructure.md](infrastructure.md) → Secrets). Decoupled from the provider row so the same key can serve multiple providers (e.g., one OpenRouter key for both a Claude-via-OpenRouter and a GPT-via-OpenRouter provider).
+**`secret_id`** references the `secrets` table (see [infrastructure.md](infrastructure.md) → Secrets). Decoupled from the provider row so the same key can serve multiple providers (e.g., one OpenRouter key for both Claude-via-OpenRouter and GPT-via-OpenRouter).
 
-**`attrs`** JSONB for provider-specific config that doesn't warrant its own column:
-- `promptCaching: true` — OpenRouter → Claude (passes `cache_control` extension)
-- `headers: { "HTTP-Referer": "..." }` — OpenRouter app attribution
-- `organization: "..."` — OpenAI org ID
+**`attrs`** JSONB for provider-specific config: `promptCaching`, `headers`, `organization`.
 
-**`is_valid` + `validated_at`** — set by the setup wizard after a successful `GET /v1/models` call. Lets re-run show "Validated 3 days ago."
-
-### Profile → Provider
+### Model → Provider routing
 
 ```sql
-ALTER TABLE profiles ADD COLUMN provider_id UUID REFERENCES llm_providers(id);
+model_providers (
+  id            UUID v7 PK,
+  model         TEXT NOT NULL,                          -- 'claude-sonnet-4-20250514'
+  provider_id   UUID NOT NULL FK → llm_providers CASCADE,
+  position      INT NOT NULL,                           -- 0 = primary, 1 = fallback
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (model, provider_id),                          -- one entry per pair
+  UNIQUE (model, position)                              -- ordered, no ties
+)
 ```
 
-The profile's existing `model` field stays a **plain model string** (`claude-sonnet-4-20250514`, `gpt-4o`). The FK `provider_id` determines which API to call. Changing the provider for a profile is a FK update — the model string doesn't change.
+Provider routing is a **system-level concern**, not a per-profile setting. The routing table maps models to providers with explicit ordering:
 
-This decouples "which model" from "which provider." The same model via Anthropic vs. OpenRouter is a `provider_id` change, not a model rename. The LiteLLM convention of `provider/model` prefixes conflates two concerns — we avoid it.
+- A profile says "I want `claude-sonnet-4`" (via `profiles.model`)
+- `model_providers` says "`claude-sonnet-4` is served by `anthropic-direct` at position 0, `openrouter` at position 1"
+- The system picks the lowest-position provider
 
-### Provider dispatch
+The `UNIQUE (model, position)` constraint prevents ambiguous ties. Adding a fallback provider = inserting at position 1. Reordering = updating the position column. The wizard auto-assigns `MAX(position) + 1` for new entries.
 
-At bootstrap, read all configured providers and construct adapter instances:
+**Why not on the profile:** Provider routing changes for operational reasons (key rotation, provider outage, cost optimization), not behavioral reasons. Coupling it to profiles would require updating every profile to switch providers. The routing table changes once and affects all profiles using that model.
+
+**Why not on the provider:** A provider doesn't know about other providers — priority is a relative ranking across providers for a given model. It belongs on the relationship, not on either entity.
+
+### Profile model configuration
+
+```sql
+profiles (
+  ...
+  model               TEXT NOT NULL,      -- main conversational model
+  summarization_model  TEXT,              -- null = use main model
+  ...
+)
+```
+
+Profiles declare **what model** they want, not **which provider** serves it. Named columns for well-known roles (default, summarization). Adding a role = adding a nullable column. If roles proliferate beyond 3-4, promote to a `profile_models` join table.
+
+`summarization_model` replaces the `SUMMARIZATION_MODEL` env var — it's a per-profile concern, not a system-wide one.
+
+## Provider dispatch
+
+At bootstrap, resolve the model → provider → credentials chain:
 
 ```typescript
-const providerRow = await store.getProvider(profile.providerId);
-const apiKey = await resolver.getSecret(providerRow.secretName);
+async function resolveProviderForModel(model: string, store: AgentStore): Promise<LlmProvider> {
+  // 1. Find the best provider for this model (lowest position)
+  const row = await store.resolveProviderForModel(model);
+  // → SELECT lp.* FROM model_providers mp
+  //   JOIN llm_providers lp ON mp.provider_id = lp.id
+  //   WHERE mp.model = $model ORDER BY mp.position LIMIT 1
 
-const provider = providerRow.type === "anthropic"
-  ? new AnthropicProvider(apiKey, providerRow.baseUrl)
-  : new OpenAICompatibleProvider(providerRow.name, {
-      apiKey,
-      baseURL: providerRow.baseUrl!,
-      headers: providerRow.attrs.headers,
-      promptCaching: providerRow.attrs.promptCaching,
-    });
+  // 2. Decrypt the API key
+  const apiKey = await secretsStore.getSecretById(row.secretId);
+
+  // 3. Construct the adapter
+  return row.type === "anthropic"
+    ? new AnthropicProvider(apiKey, row.baseUrl)
+    : new OpenAICompatibleProvider(row.name, { apiKey, baseURL: row.baseUrl, ... });
+}
 ```
 
-Provider instances are constructed per bootstrap, not per turn. If hot-swap is needed later, a lazy-loading wrapper can reconstruct on DB change without touching the dispatch logic.
-
-### Model registry
-
-`MODEL_REGISTRY` in `src/llm/models.ts` maps model strings → context window limits. It stays provider-agnostic and code-level — a model's limits don't depend on which provider serves it. If the set of supported models grows beyond a small hardcoded map, promote to DB rows. Not in scope for this work.
+Provider instances are constructed per bootstrap, not per turn. If hot-swap is needed later, a lazy-loading wrapper can reconstruct on DB change.
 
 ## Validation
 
-The setup wizard validates each provider by calling `GET /v1/models` (standard across OpenAI-compatible APIs) or Anthropic's equivalent. This is free (no tokens consumed), confirms the API key works, and returns the list of available models — useful for confirming the user's chosen model is accessible on their key.
+The setup wizard validates each provider by calling `GET /v1/models` (standard across OpenAI-compatible APIs) or Anthropic's equivalent. This is free (no tokens consumed), confirms the API key works, and returns the list of available models — which the wizard uses to auto-populate `model_providers` entries.
 
-For Telegram channels, validation uses `GET /bot<TOKEN>/getMe` — free, returns the bot username for UX confirmation.
+Validation status is tracked on the **secret** (`secrets.validated_at`), not on the provider row — the credential is what gets validated, not the provider config.
+
+## Model registry
+
+`MODEL_REGISTRY` in `src/llm/models.ts` maps model strings → context window limits. It stays provider-agnostic and code-level — a model's limits don't depend on which provider serves it. If the set of supported models grows beyond a small hardcoded map, promote to DB rows.
 
 ## Ecosystem context
 
-This design follows the pattern used by **LiteLLM** (when `store_model_in_db` is enabled), **n8n** (credential system), and **Dify** (provider table). All three store provider configs in DB rows with encrypted credentials, referenced by the consuming entity (LiteLLM model deployment, n8n workflow node, Dify app). Cogmo's schema is the minimal single-user variant — no multi-tenant columns, no quota tracking, no model-per-provider tables.
+The routing table pattern follows **LiteLLM** (`model_list` with provider-prefixed model strings and priority), **OpenRouter** (request-time `provider.order` for the same model across upstream providers), and **Dify** (separate `provider_models` table per tenant). Cogmo's schema is the minimal single-user variant — one `model_providers` table with position-based ordering replaces LiteLLM's YAML config and Dify's 7-table schema.

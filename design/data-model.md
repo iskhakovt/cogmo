@@ -26,9 +26,10 @@ Tables are documented in the design doc that owns their domain:
 | Table | Doc | Notes |
 |-|-|-|
 | `secrets` | [infrastructure.md](infrastructure.md) | Encrypted credentials (AES-256-GCM). Name-keyed. |
-| `llm_providers` | [providers.md](providers.md) | Provider config (type, base_url, secret FK, attrs, validation status) |
+| `llm_providers` | [providers.md](providers.md) | Provider config (type, base_url, secret FK, attrs) |
+| `model_providers` | [providers.md](providers.md) | Model → provider routing with position-based priority. UNIQUE(model, position) prevents ties. |
 
-`profiles` gains `provider_id UUID FK → llm_providers` — see [providers.md](providers.md).
+`profiles` gains `summarization_model TEXT` (nullable, replaces `SUMMARIZATION_MODEL` env var).
 
 ## Deferred Tables `[proposed]`
 
