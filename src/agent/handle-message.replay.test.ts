@@ -127,17 +127,14 @@ describe("handle-message — crash recovery / step replay", () => {
     // this only needs to live in one test.)
     expect(sendSpy).toHaveBeenCalled();
 
-    // Assistant message is still inserted (its step was not cached), but the
+    // Assistant messages are still inserted (via insertMessages, not cached), but the
     // user message is NOT — that step's body never runs.
     const userInserts = (
       deps.agentStore.insertMessage as ReturnType<typeof vi.fn>
     ).mock.calls.filter(([params]) => params.role === "user");
     expect(userInserts).toHaveLength(0);
 
-    const assistantInserts = (
-      deps.agentStore.insertMessage as ReturnType<typeof vi.fn>
-    ).mock.calls.filter(([params]) => params.role === "assistant");
-    expect(assistantInserts).toHaveLength(1);
+    expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
   });
 
   it("does not re-insert the assistant message when persist-new-messages is cached", async () => {
@@ -157,10 +154,8 @@ describe("handle-message — crash recovery / step replay", () => {
 
     await engine.execute();
 
-    const assistantInserts = (
-      deps.agentStore.insertMessage as ReturnType<typeof vi.fn>
-    ).mock.calls.filter(([params]) => params.role === "assistant");
-    expect(assistantInserts).toHaveLength(0);
+    // insertMessages was not called — the persist step was cached
+    expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
   });
 
   it("does not re-run the summarization LLM call when summarize-prefix is cached", async () => {
@@ -285,5 +280,6 @@ describe("handle-message — crash recovery / step replay", () => {
     expect(loopCallCount).toBeLessThan(10);
     // No DB writes happened — every persist step was cached.
     expect(deps.agentStore.insertMessage).not.toHaveBeenCalled();
+    expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
   });
 });

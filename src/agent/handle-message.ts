@@ -271,21 +271,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // ──── DURABLE: persist all new messages (tool turns + final assistant) ────
 
       const assistantMsg = await step.run("persist-new-messages", async () => {
-        let lastId = "";
-        for (let i = 0; i < result.newMessages.length; i++) {
-          const msg = result.newMessages[i];
-          if (!msg) continue;
-          const isLast = i === result.newMessages.length - 1;
-          const inserted = await agentStore.insertMessage({
-            conversationId,
-            role: msg.role,
-            content: msg.content,
-            lastInboundMessageId: maxInboundId,
-            ...(isLast && { inputTokens: result.usage.inputTokens }),
-          });
-          lastId = inserted.id;
-        }
-        return { id: lastId };
+        return agentStore.insertMessages({
+          conversationId,
+          messages: result.newMessages,
+          lastInboundMessageId: maxInboundId,
+          lastMessageInputTokens: result.usage.inputTokens,
+        });
       });
 
       // ──── NON-DURABLE: batch delivery ────

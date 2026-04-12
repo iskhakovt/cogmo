@@ -115,14 +115,17 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    expect(deps.agentStore.insertMessage).toHaveBeenCalledTimes(2);
+    // User message via insertMessage
+    expect(deps.agentStore.insertMessage).toHaveBeenCalledTimes(1);
     expect(deps.agentStore.insertMessage).toHaveBeenCalledWith(
       expect.objectContaining({ role: "user", lastInboundMessageId: "inbound-1" }),
     );
-    expect(deps.agentStore.insertMessage).toHaveBeenCalledWith(
+    // Assistant + tool turns via insertMessages (atomic batch)
+    expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
+    expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
       expect.objectContaining({
-        role: "assistant",
-        content: [{ type: "text", text: "Hello from assistant" }],
+        conversationId: "conv-1",
+        lastInboundMessageId: "inbound-1",
       }),
     );
   });
@@ -339,12 +342,10 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    // The assistant insertMessage call should include inputTokens
-    const assistantCall = (
-      deps.agentStore.insertMessage as ReturnType<typeof vi.fn>
-    ).mock.calls.find(([params]: any) => params.role === "assistant");
-    expect(assistantCall).toBeDefined();
-    expect(assistantCall![0].inputTokens).toBeDefined();
+    // The insertMessages call should include lastMessageInputTokens
+    expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
+      expect.objectContaining({ lastMessageInputTokens: 10 }),
+    );
   });
 
   it("runs compaction when countTokens reports over threshold", async () => {

@@ -37,6 +37,14 @@ export interface AgentStore {
     inputTokens?: number;
   }): Promise<{ id: string }>;
 
+  /** Insert multiple messages atomically in a single transaction. Returns the last inserted ID. */
+  insertMessages(params: {
+    conversationId: string;
+    messages: ReadonlyArray<Message>;
+    lastInboundMessageId: string;
+    lastMessageInputTokens?: number;
+  }): Promise<{ id: string }>;
+
   /** Get the most recent assistant message for a conversation (for cursor chain). */
   getLastAssistantMessage(
     conversationId: string,
@@ -147,6 +155,39 @@ export class DrizzleAgentStore implements AgentStore {
           })
           .returning({ id: messages.id }),
       );
+    });
+  }
+
+  async insertMessages(params: {
+    conversationId: string;
+    messages: ReadonlyArray<Message>;
+    lastInboundMessageId: string;
+    lastMessageInputTokens?: number;
+  }): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      let lastId = "";
+      for (let i = 0; i < params.messages.length; i++) {
+        const msg = params.messages[i];
+        if (!msg) continue;
+        const isLast = i === params.messages.length - 1;
+        const row = single(
+          await tx
+            .insert(messages)
+            .values({
+              conversationId: params.conversationId,
+              role: msg.role,
+              content: msg.content,
+              lastInboundMessageId: params.lastInboundMessageId,
+              ...(isLast &&
+                params.lastMessageInputTokens != null && {
+                  inputTokens: params.lastMessageInputTokens,
+                }),
+            })
+            .returning({ id: messages.id }),
+        );
+        lastId = row.id;
+      }
+      return { id: lastId };
     });
   }
 

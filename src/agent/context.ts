@@ -230,8 +230,11 @@ function truncateOldest(messages: Message[]): Message[] {
   // Drop the oldest 30% of messages. This is a rough heuristic — the pipeline
   // re-counts after truncation, so overshooting is harmless (just drops a bit more).
   // Undershooting is caught by the re-count triggering another pass next turn.
-  const dropCount = Math.min(Math.max(Math.ceil(messages.length * 0.3), 2), messages.length - 2);
-  const snapped = snapToPairBoundary(messages, dropCount);
+  const dropCount = Math.max(
+    0,
+    Math.min(Math.max(Math.ceil(messages.length * 0.3), 2), messages.length - 2),
+  );
+  const snapped = Math.max(0, snapToPairBoundary(messages, dropCount));
   const result = messages.slice(snapped);
 
   // Ensure alternation — first message must be user role
