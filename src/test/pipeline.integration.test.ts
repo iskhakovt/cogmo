@@ -16,7 +16,10 @@ beforeAll(async () => {
 
   // Wire app in-process and register Inngest functions via connect mode (WebSocket).
   // Connect mode self-registers with the Inngest dev server — no discovery needed.
-  const { inngest, functions } = await bootstrap();
+  // providerOverride: tests use llmock fixtures, not a real LLM provider from DB.
+  const { AnthropicProvider } = await import("../llm/anthropic.js");
+  const provider = new AnthropicProvider(process.env.ANTHROPIC_API_KEY ?? "test-key");
+  const { inngest, functions } = await bootstrap({ providerOverride: provider });
   connection = await connect({
     apps: [{ client: inngest, functions }],
   });
