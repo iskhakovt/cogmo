@@ -1,15 +1,20 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "../../db/index.js";
+import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
+import { DrizzleSecretsStore } from "../../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "./index.js";
 
 let db: Database;
 let close: () => Promise<void>;
 let store: DrizzleAgentStore;
+let secretsStore: DrizzleSecretsStore;
 
 beforeAll(async () => {
   ({ db, close } = await createTestDatabase());
   store = new DrizzleAgentStore(db);
+  const key = deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/secrets-at-rest/v1");
+  secretsStore = new DrizzleSecretsStore(db, key);
 });
 
 afterEach(async () => {
@@ -395,6 +400,100 @@ describe("DrizzleAgentStore", () => {
       const { conversationId } = await seedConversation();
       const time = await store.getLastMessageTime(conversationId);
       expect(time).toBeNull();
+    });
+  });
+
+  describe("providers", () => {
+    async function seedProvider(name = "test-provider") {
+      const { id: secretId } = await secretsStore.putSecret({
+        name: `${name}_key`,
+        plaintext: "sk-test",
+      });
+      return store.createProvider({
+        name,
+        type: "anthropic",
+        secretId,
+        attrs: {},
+      });
+    }
+
+    it("creates and retrieves a provider", async () => {
+      const { id } = await seedProvider();
+      const provider = await store.getProvider(id);
+      expect(provider).toMatchObject({ name: "test-provider", type: "anthropic" });
+    });
+
+    it("lists providers", async () => {
+      await seedProvider("p1");
+      await seedProvider("p2");
+      const list = await store.listProviders();
+      expect(list.map((p) => p.name).sort()).toEqual(["p1", "p2"]);
+    });
+
+    it("deleteProvider cascades to model_providers", async () => {
+      const { id: providerId } = await seedProvider();
+      await store.addModelProvider({ model: "claude-test", providerId, position: 0 });
+
+      await store.deleteProvider(providerId);
+
+      expect(await store.getProvider(providerId)).toBeNull();
+      expect(await store.resolveProviderForModel("claude-test")).toBeNull();
+    });
+  });
+
+  describe("model_providers", () => {
+    async function seedProviderWithSecret(name: string) {
+      const { id: secretId } = await secretsStore.putSecret({
+        name: `${name}_key`,
+        plaintext: "sk-test",
+      });
+      return store.createProvider({ name, type: "anthropic", secretId, attrs: {} });
+    }
+
+    it("resolves the lowest-position provider for a model", async () => {
+      const { id: fallbackId } = await seedProviderWithSecret("fallback");
+      const { id: primaryId } = await seedProviderWithSecret("primary");
+
+      await store.addModelProvider({
+        model: "claude-sonnet-4",
+        providerId: fallbackId,
+        position: 1,
+      });
+      await store.addModelProvider({
+        model: "claude-sonnet-4",
+        providerId: primaryId,
+        position: 0,
+      });
+
+      const resolved = await store.resolveProviderForModel("claude-sonnet-4");
+      expect(resolved?.name).toBe("primary");
+    });
+
+    it("returns null when no provider is registered for a model", async () => {
+      const resolved = await store.resolveProviderForModel("nonexistent-model");
+      expect(resolved).toBeNull();
+    });
+
+    it("removes model_providers by provider", async () => {
+      const { id: providerId } = await seedProviderWithSecret("removable");
+      await store.addModelProvider({ model: "model-a", providerId, position: 0 });
+      await store.addModelProvider({ model: "model-b", providerId, position: 0 });
+
+      await store.removeModelProvidersByProvider(providerId);
+
+      expect(await store.resolveProviderForModel("model-a")).toBeNull();
+      expect(await store.resolveProviderForModel("model-b")).toBeNull();
+    });
+
+    it("enforces unique (model, position)", async () => {
+      const { id: p1 } = await seedProviderWithSecret("p1");
+      const { id: p2 } = await seedProviderWithSecret("p2");
+
+      await store.addModelProvider({ model: "claude-test", providerId: p1, position: 0 });
+
+      await expect(
+        store.addModelProvider({ model: "claude-test", providerId: p2, position: 0 }),
+      ).rejects.toThrow();
     });
   });
 });

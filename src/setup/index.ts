@@ -6,7 +6,7 @@ import { logger } from "../logger.js";
 import { resolveEnvFile } from "../secrets/env-file.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
 import { seedDefaults } from "./seed.js";
-import { runWizard } from "./wizard.js";
+import { runWizard, WizardCancelled } from "./wizard.js";
 
 export interface SetupOptions {
   reset?: "secrets" | "channels" | "all";
@@ -75,6 +75,12 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     }
 
     await runWizard({ db, agentStore, transportStore, masterKey });
+  } catch (err) {
+    if (err instanceof WizardCancelled) {
+      logger.info("setup cancelled by user");
+      return;
+    }
+    throw err;
   } finally {
     await db.$client.end();
   }

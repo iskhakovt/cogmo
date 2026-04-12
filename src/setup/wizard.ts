@@ -21,6 +21,19 @@ import {
   validateTelegramToken,
 } from "./validate.js";
 
+/** Thrown when the user cancels a prompt. Caught by runSetup to exit cleanly. */
+export class WizardCancelled extends Error {
+  constructor() {
+    super("Setup cancelled by user");
+    this.name = "WizardCancelled";
+  }
+}
+
+function cancelGuard<T>(value: T | symbol): T {
+  if (p.isCancel(value)) throw new WizardCancelled();
+  return value;
+}
+
 // --- Types ---
 
 interface WizardDeps {
@@ -93,7 +106,7 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
         { value: "replace", label: "Replace existing provider" },
       ],
     });
-    if (p.isCancel(action)) process.exit(0);
+    cancelGuard(action);
     if (action === "keep") return;
     if (action === "replace") {
       for (const prov of existing) {
@@ -106,7 +119,7 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     message: "Choose your LLM provider:",
     options: [...PROVIDER_TYPES],
   });
-  if (p.isCancel(providerType)) process.exit(0);
+  cancelGuard(providerType);
 
   const help = PROVIDER_HELP[providerType as string];
   if (help) {
@@ -119,25 +132,26 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
   let baseUrl = PROVIDER_BASE_URLS[providerType as string];
 
   if (providerType === "custom") {
-    const url = await p.text({
-      message: "Base URL (e.g., https://api.example.com/v1):",
-      validate: (v = "") => {
-        if (!v.startsWith("http")) return "Must start with http:// or https://";
-        return undefined;
-      },
-    });
-    if (p.isCancel(url)) process.exit(0);
-    baseUrl = url;
+    baseUrl = cancelGuard(
+      await p.text({
+        message: "Base URL (e.g., https://api.example.com/v1):",
+        validate: (v = "") => {
+          if (!v.startsWith("http")) return "Must start with http:// or https://";
+          return undefined;
+        },
+      }),
+    );
   }
 
-  const apiKey = await p.password({
-    message: "Paste your API key:",
-    validate: (v) => {
-      if (!v || v.length < 10) return "API key seems too short";
-      return undefined;
-    },
-  });
-  if (p.isCancel(apiKey)) process.exit(0);
+  const apiKey = cancelGuard(
+    await p.password({
+      message: "Paste your API key:",
+      validate: (v) => {
+        if (!v || v.length < 10) return "API key seems too short";
+        return undefined;
+      },
+    }),
+  );
 
   // Validate
   const s = p.spinner();
@@ -153,7 +167,7 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
   if (!result.valid) {
     s.stop(`Validation failed: ${result.error}`);
     const retry = await p.confirm({ message: "Save anyway?" });
-    if (p.isCancel(retry) || !retry) return;
+    if (!cancelGuard(retry)) return;
   } else {
     s.stop("API key validated.");
   }
@@ -209,12 +223,12 @@ async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<
         { value: "replace", label: "Reconfigure" },
       ],
     });
-    if (p.isCancel(action)) process.exit(0);
+    cancelGuard(action);
     if (action === "keep") return;
     await deps.transportStore.removeChannel(existing.id);
   } else {
     const add = await p.confirm({ message: "Add a Telegram channel? (optional)" });
-    if (p.isCancel(add) || !add) return;
+    if (!cancelGuard(add)) return;
   }
 
   p.note(
@@ -222,14 +236,15 @@ async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<
     "How to get a Telegram bot token",
   );
 
-  const token = await p.password({
-    message: "Paste your bot token:",
-    validate: (v) => {
-      if (!v || !v.includes(":")) return "Token should contain a colon (e.g., 123:ABC)";
-      return undefined;
-    },
-  });
-  if (p.isCancel(token)) process.exit(0);
+  const token = cancelGuard(
+    await p.password({
+      message: "Paste your bot token:",
+      validate: (v) => {
+        if (!v || !v.includes(":")) return "Token should contain a colon (e.g., 123:ABC)";
+        return undefined;
+      },
+    }),
+  );
 
   const s = p.spinner();
   s.start("Validating bot token...");
@@ -254,18 +269,19 @@ async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<
     "How to get your Telegram user ID",
   );
 
-  const allowlist = await p.text({
-    message: "Telegram user IDs to allow (comma-separated):",
-    validate: (v) => {
-      if (!v) return "At least one user ID is required";
-      const ids = v.split(",").map((s) => s.trim());
-      for (const id of ids) {
-        if (!/^\d+$/.test(id)) return `"${id}" is not a valid numeric user ID`;
-      }
-      return undefined;
-    },
-  });
-  if (p.isCancel(allowlist)) process.exit(0);
+  const allowlist = cancelGuard(
+    await p.text({
+      message: "Telegram user IDs to allow (comma-separated):",
+      validate: (v) => {
+        if (!v) return "At least one user ID is required";
+        const ids = v.split(",").map((s: string) => s.trim());
+        for (const id of ids) {
+          if (!/^\d+$/.test(id)) return `"${id}" is not a valid numeric user ID`;
+        }
+        return undefined;
+      },
+    }),
+  );
 
   const userIds = allowlist
     .split(",")
@@ -290,11 +306,11 @@ async function stepConfigureOptionalTools(deps: WizardDeps): Promise<void> {
     message: "Configure optional web tools? (Tavily search, etc.)",
     initialValue: false,
   });
-  if (p.isCancel(addTools) || !addTools) return;
+  if (!cancelGuard(addTools)) return;
 
   // Tavily
-  const tavilyKey = await p.password({ message: "Tavily API key (Enter to skip):" });
-  if (!p.isCancel(tavilyKey) && tavilyKey) {
+  const tavilyKey = cancelGuard(await p.password({ message: "Tavily API key (Enter to skip):" }));
+  if (tavilyKey) {
     const s = p.spinner();
     s.start("Validating Tavily key...");
     const result = await validateTavilyKey(tavilyKey);

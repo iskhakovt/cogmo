@@ -187,10 +187,12 @@ export class DrizzleTransportStore implements TransportStore {
   }
 
   async closeSession(sessionId: string): Promise<void> {
-    await this.#db
-      .update(channelSessions)
-      .set({ status: "closed" })
-      .where(eq(channelSessions.id, sessionId));
+    await this.#db.transaction(async (tx) => {
+      await tx
+        .update(channelSessions)
+        .set({ status: "closed" })
+        .where(eq(channelSessions.id, sessionId));
+    });
   }
 
   async persistInbound(params: {

@@ -23,7 +23,7 @@ import type { LlmProvider } from "./llm/provider.js";
 import { logger } from "./logger.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
-import { DrizzleSecretsStore, type SecretsStore } from "./secrets/store/index.js";
+import { DrizzleSecretsStore } from "./secrets/store/index.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
 import { createDeliveryRouter } from "./transport/delivery-router.js";
 import { startChannels } from "./transport/registry.js";
