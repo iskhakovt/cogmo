@@ -1,7 +1,9 @@
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "../../db/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "./index.js";
+import { messages } from "./schema.js";
 
 let db: Database;
 let close: () => Promise<void>;
@@ -254,8 +256,19 @@ describe("DrizzleAgentStore", () => {
         lastMessageInputTokens: 42,
       });
 
-      const lastTokens = await store.getLastInputTokens(conversationId);
-      expect(lastTokens).toBe(42);
+      // Query raw table — don't rely on UUID ordering (PGlite's pg_uuidv7
+      // uses random bits, so ORDER BY id is non-deterministic within a batch)
+      const rows = await db
+        .select({ role: messages.role, inputTokens: messages.inputTokens })
+        .from(messages)
+        .where(eq(messages.conversationId, conversationId));
+
+      const withTokens = rows.filter((r) => r.inputTokens != null);
+      expect(withTokens).toHaveLength(1);
+      expect(withTokens[0]!.inputTokens).toBe(42);
+
+      const withoutTokens = rows.filter((r) => r.inputTokens == null);
+      expect(withoutTokens).toHaveLength(2);
     });
 
     it("getLastAssistantMessage returns most recent", async () => {
