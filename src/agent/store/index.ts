@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
+import * as R from "remeda";
 import type { JsonValue } from "type-fest";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
@@ -169,30 +170,21 @@ export class DrizzleAgentStore implements AgentStore {
       throw new Error("insertMessages requires at least one message");
     }
     return this.#db.transaction(async (tx) => {
-      let lastId = "";
-      for (let i = 0; i < params.messages.length; i++) {
-        const msg = params.messages[i];
-        if (!msg) continue;
-        const isLast = i === params.messages.length - 1;
-        const content = MessageContentSchema.parse(msg.content);
-        const row = single(
-          await tx
-            .insert(messages)
-            .values({
-              conversationId: params.conversationId,
-              role: msg.role,
-              content,
-              lastInboundMessageId: params.lastInboundMessageId,
-              ...(isLast &&
-                params.lastMessageInputTokens != null && {
-                  inputTokens: params.lastMessageInputTokens,
-                }),
-            })
-            .returning({ id: messages.id }),
-        );
-        lastId = row.id;
-      }
-      return { id: lastId };
+      const lastIdx = params.messages.length - 1;
+      const values = R.map(params.messages, (msg, i) => ({
+        conversationId: params.conversationId,
+        role: msg.role,
+        content: MessageContentSchema.parse(msg.content),
+        lastInboundMessageId: params.lastInboundMessageId,
+        ...(i === lastIdx &&
+          params.lastMessageInputTokens != null && {
+            inputTokens: params.lastMessageInputTokens,
+          }),
+      }));
+      const rows = await tx.insert(messages).values(values).returning({ id: messages.id });
+      const last = R.last(rows);
+      if (!last) throw new Error("insertMessages: no rows returned");
+      return last;
     });
   }
 
