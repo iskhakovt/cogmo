@@ -61,6 +61,14 @@ user_identities (
 
 The `user_identities` table IS the allowlist. No separate allowlist mechanism needed.
 
+### Allowlist enforcement `[proposed]`
+
+Channel adapters check identity on each inbound message before routing to the orchestrator. For channels in `mapped` mode (e.g., Telegram with a configured allowlist), the adapter calls `transportStore.resolveUser(channelId, platformHandle)`. If no identity row matches, the message is rejected with a user-facing reply ("Not authorized").
+
+For `fixed` mode channels (e.g., Direct), the wildcard identity accepts all messages — no per-message check needed.
+
+The setup wizard populates `user_identities` rows for each Telegram user ID in the allowlist. The `TELEGRAM_ALLOWED_USERS` env var is superseded by these DB rows.
+
 ## User Attribution
 
 The userId lives on the conversation (`conversations.userId`). The conversation owner is the user who created it — resolved from identity at conversation creation time.

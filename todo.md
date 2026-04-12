@@ -2,6 +2,11 @@
 
 ## Next
 
+- [ ] `p1` Secrets infrastructure — `secrets` table, `@noble/ciphers` + `@noble/hashes`, `EncryptionService`, `SecretsStore`, `_FILE` env support in `env.ts`, `gen-key` subcommand, encrypt `channels.credentials` (migration re-encrypts), `ConfigResolver` (DB-first env-fallback), refactor all providers to use resolver, `.dockerignore` `.env*`. See `design/infrastructure.md` → Secrets.
+- [ ] `p1` Multi-provider LLM — `llm_providers` table + migration, `profiles.provider_id` FK migration, provider dispatch in bootstrap (construct adapter from DB row), remove hard-coded `AnthropicProvider`. See `design/providers.md`.
+- [ ] `p1` Channel CRUD + allowlist enforcement — `createTelegramChannel` / `updateChannelCredentials` / `removeChannel` on transport store, Telegram adapter enforces identity check via `resolveUser`, migrate `TELEGRAM_ALLOWED_USERS` env to `user_identities` rows. See `design/transport/identity.md`.
+- [ ] `p1` Seed refactor — move `src/seed.ts` → `src/setup/seed.ts` with named exports (`ensureDefaultUser`, `ensureDefaultProfile`, `ensureDirectChannel`), re-export from `src/seed.ts` for back-compat.
+- [ ] `p1` Setup wizard — `@clack/prompts` dep, `src/setup/` module, `main.ts setup` subcommand, re-runnable interactive flow (Keep/Modify/Skip), `--reset` and `--non-interactive` flags, inline help with click paths. See `design/setup.md`.
 - [ ] `p2` Post-conversation Observer — Inngest function triggered by `conversation/idle` event
 - [ ] `p2` Instruction file (Stage 1 evolution) — corrections append to JSON, loaded into system prompt
 - [ ] `p2` Context fast path — account for output tokens in `shouldSkipCounting` (currently only tracks `inputTokens`, underestimates by one response worth)
@@ -9,7 +14,7 @@
 - [ ] `p2` Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
 - [ ] `p2` Batch API support for async evolution tasks — 50% cost reduction for reflection, extraction, optimization
 - [ ] `p2` Define InboundContent schema (Zod) — structured message content type instead of raw JsonValue everywhere
-- [ ] `p2` CLI channel management commands — `main.ts channel add telegram --token=...`, `channel list`, `channel remove`
+- [ ] `p2` CLI channel management commands — `main.ts channel add telegram --token=...`, `channel list`, `channel remove` (store layer covered by `p1` Channel CRUD; this is the CLI surface)
 - [ ] `p2` Pass transaction function to stores instead of full Database — makes transactions inescapable, narrows the interface
 - [ ] `p3` Consider dropping Inngest serve mode — only connect mode is used (tests, production, local dev)
 - [ ] `p3` Switch Hindsight LLM to gpt-5-nano — blocked on Hindsight emitting `max_completion_tokens` for GPT-5 models. Currently on gpt-4o-mini (~$10/mo vs ~$6/mo target). See `design/memory.md` → Known Gaps.
@@ -18,7 +23,6 @@
 - [ ] `p3` Use native OpenRouter provider for prod Hindsight — replaces `openai` + custom base URL workaround
 - [ ] `p3` Stale llmock fixture cleanup — detect unused fixtures after test run, auto-delete
 - [ ] `p3` Telegram response formatting — HTML or MarkdownV2 with escape function
-- [ ] `p3` Interactive bootstrap — guided setup for new deployments (choose channels, configure credentials)
 - [ ] `p3` Basic health check endpoint (HTTP)
 - [ ] `p3` grammY native test primitives — use `bot.handleUpdate()` + `bot.api.config.use(transformer)` instead of `vi.mock("grammy")`
 - [ ] `p3` Telegram e2e via Test DC + tgintegration — real user on Telegram test servers, TypeScript/mtcute client
