@@ -256,10 +256,19 @@ async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<
   }
   s.stop(`Connected as @${result.meta?.botUsername}`);
 
-  // Create channel
+  // Store bot token as an encrypted secret, reference by name in channel credentials.
+  // The adapter resolves the secret at startup via the secrets store.
+  const tokenSecretName = "telegram_bot_token";
+  await deps.secretsStore.putSecret({
+    name: tokenSecretName,
+    plaintext: token,
+    description: `Telegram bot token (@${result.meta?.botUsername})`,
+  });
+  await deps.secretsStore.markValidated(tokenSecretName);
+
   const { id: channelId } = await deps.transportStore.createChannel({
     type: "telegram",
-    credentials: { token },
+    credentials: { tokenSecretName },
     identityMode: "mapped",
   });
 

@@ -47,6 +47,15 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const agentStore = new DrizzleAgentStore(db);
   const transportStore = new DrizzleTransportStore(db);
 
+  // Secrets store — constructed early for use by provider resolution and channel startup.
+  // Only available if master key is configured.
+  let secretsStore: InstanceType<typeof DrizzleSecretsStore> | undefined;
+  if (env.COGMO_MASTER_KEY) {
+    const masterKey = parseMasterKey(env.COGMO_MASTER_KEY);
+    const encryptionKey = deriveMasterKey(masterKey, "cogmo/secrets-at-rest/v1");
+    secretsStore = new DrizzleSecretsStore(db, encryptionKey);
+  }
+
   const user = await agentStore.getFirstUser();
   const defaultProfile = await agentStore.getDefaultProfile();
   if (!user || !defaultProfile) {
@@ -58,7 +67,8 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   }
 
   const provider =
-    opts.providerOverride ?? (await resolveProviderForModel(profile.model, agentStore));
+    opts.providerOverride ??
+    (await resolveProviderForModel(profile.model, agentStore, secretsStore));
   const webTools = createWebTools(env.TAVILY_API_KEY, env.OPENROUTER_API_KEY);
   const tools = createDefaultTools(
     [...memoryTools, ...webTools, ...fileTools, ...coreMemoryTools],
@@ -107,6 +117,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     inboundArrived,
     attachments: attachmentStore,
     idleTimeoutMs,
+    ...(secretsStore && { secretsStore }),
   });
 
   const deliveryRouter = createDeliveryRouter({ adapters: adapterMap, transportStore });
@@ -154,6 +165,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
 async function resolveProviderForModel(
   model: string,
   agentStore: AgentStore,
+  secretsStore?: InstanceType<typeof DrizzleSecretsStore>,
 ): Promise<LlmProvider> {
   const row = await agentStore.resolveProviderForModel(model);
   if (!row) {
@@ -162,16 +174,12 @@ async function resolveProviderForModel(
     );
   }
 
-  if (!env.COGMO_MASTER_KEY) {
+  if (!secretsStore) {
     throw new Error(
       "COGMO_MASTER_KEY is required to decrypt provider credentials.\n" +
         "Generate one with: cogmo gen-key",
     );
   }
-
-  const masterKey = parseMasterKey(env.COGMO_MASTER_KEY);
-  const encryptionKey = deriveMasterKey(masterKey, "cogmo/secrets-at-rest/v1");
-  const secretsStore = new DrizzleSecretsStore(db, encryptionKey);
 
   const apiKey = await secretsStore.getSecretById(row.secretId);
   if (!apiKey) {
