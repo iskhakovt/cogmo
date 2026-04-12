@@ -2,7 +2,7 @@ import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
 import type { JsonValue } from "type-fest";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
-import type { ContentBlock, Message } from "../../llm/types.js";
+import { type ContentBlock, type Message, MessageContentSchema } from "../../llm/types.js";
 import {
   conversations,
   coreMemoryBlocks,
@@ -143,13 +143,14 @@ export class DrizzleAgentStore implements AgentStore {
     inputTokens?: number;
   }): Promise<{ id: string }> {
     return this.#db.transaction(async (tx) => {
+      const content = MessageContentSchema.parse(params.content);
       return single(
         await tx
           .insert(messages)
           .values({
             conversationId: params.conversationId,
             role: params.role,
-            content: params.content,
+            content,
             lastInboundMessageId: params.lastInboundMessageId,
             ...(params.inputTokens != null && { inputTokens: params.inputTokens }),
           })
@@ -170,13 +171,14 @@ export class DrizzleAgentStore implements AgentStore {
         const msg = params.messages[i];
         if (!msg) continue;
         const isLast = i === params.messages.length - 1;
+        const content = MessageContentSchema.parse(msg.content);
         const row = single(
           await tx
             .insert(messages)
             .values({
               conversationId: params.conversationId,
               role: msg.role,
-              content: msg.content,
+              content,
               lastInboundMessageId: params.lastInboundMessageId,
               ...(isLast &&
                 params.lastMessageInputTokens != null && {

@@ -175,12 +175,12 @@ describe("DrizzleAgentStore", () => {
       const { id } = await store.insertMessage({
         conversationId,
         role: "user",
-        content: { text: "structured" },
+        content: [{ type: "text", text: "structured" }],
         lastInboundMessageId: inboundId,
       });
 
       const msg = await store.getMessage(id);
-      expect(msg).toEqual({ id, role: "user", content: { text: "structured" } });
+      expect(msg).toEqual({ id, role: "user", content: [{ type: "text", text: "structured" }] });
     });
 
     it("returns null for unknown message", async () => {
