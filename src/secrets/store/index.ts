@@ -80,6 +80,7 @@ export class DrizzleSecretsStore implements SecretsStore {
             set: {
               ciphertext: toBase64(ciphertext),
               nonce: toBase64(nonce),
+              validatedAt: null, // clear stale validation on rotation
               ...(params.description !== undefined && { description: params.description }),
             },
           })

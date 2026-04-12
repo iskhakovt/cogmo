@@ -480,6 +480,11 @@ export class DrizzleAgentStore implements AgentStore {
 
   async deleteProvider(providerId: string): Promise<void> {
     await this.#db.transaction(async (tx) => {
+      // Nullify profile FKs before deleting (ON DELETE NO ACTION)
+      await tx
+        .update(profiles)
+        .set({ providerId: null })
+        .where(eq(profiles.providerId, providerId));
       await tx.delete(llmProviders).where(eq(llmProviders.id, providerId));
     });
   }

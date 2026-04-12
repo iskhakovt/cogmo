@@ -358,8 +358,16 @@ export async function runWizard(deps: {
   // Step 1: Seed defaults
   const { userId } = await stepSeedDefaults(wizardDeps);
 
-  // Step 2: LLM provider
-  await stepConfigureProvider(wizardDeps);
+  // Step 2: LLM provider (required — loop until configured)
+  let hasProvider = false;
+  while (!hasProvider) {
+    await stepConfigureProvider(wizardDeps);
+    const providers = await wizardDeps.agentStore.listProviders();
+    hasProvider = providers.length > 0;
+    if (!hasProvider) {
+      p.log.warn("At least one LLM provider is required. Let's try again.");
+    }
+  }
 
   // Step 3: Telegram (optional)
   await stepConfigureTelegram(wizardDeps, userId);

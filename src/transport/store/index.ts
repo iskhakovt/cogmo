@@ -389,9 +389,18 @@ export class DrizzleTransportStore implements TransportStore {
 
   async removeChannel(channelId: string): Promise<void> {
     await this.#db.transaction(async (tx) => {
-      // Delete identities and sessions first (FK constraints)
-      await tx.delete(userIdentities).where(eq(userIdentities.channelId, channelId));
+      // Delete in FK order: inbound_messages → channel_sessions → identities → channel
+      const sessionIds = await tx
+        .select({ id: channelSessions.id })
+        .from(channelSessions)
+        .where(eq(channelSessions.channelId, channelId));
+      if (sessionIds.length > 0) {
+        for (const { id } of sessionIds) {
+          await tx.delete(inboundMessages).where(eq(inboundMessages.channelSessionId, id));
+        }
+      }
       await tx.delete(channelSessions).where(eq(channelSessions.channelId, channelId));
+      await tx.delete(userIdentities).where(eq(userIdentities.channelId, channelId));
       await tx.delete(channels).where(eq(channels.id, channelId));
     });
   }

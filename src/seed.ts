@@ -18,14 +18,16 @@ export async function seed(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL ?? "postgresql://cogmo@localhost/cogmo";
   const db = drizzle({ connection: databaseUrl, schema });
 
-  await migrate(db, { migrationsFolder: "./migrations" });
-  logger.info("migrations applied");
+  try {
+    await migrate(db, { migrationsFolder: "./migrations" });
+    logger.info("migrations applied");
 
-  const agentStore = new DrizzleAgentStore(db);
-  const transportStore = new DrizzleTransportStore(db);
+    const agentStore = new DrizzleAgentStore(db);
+    const transportStore = new DrizzleTransportStore(db);
 
-  await seedDefaults(agentStore, transportStore);
-
-  logger.info("seed complete");
-  await db.$client.end();
+    await seedDefaults(agentStore, transportStore);
+    logger.info("seed complete");
+  } finally {
+    await db.$client.end();
+  }
 }

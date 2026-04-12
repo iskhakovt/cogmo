@@ -13,6 +13,8 @@ export interface SetupOptions {
   nonInteractive?: boolean;
 }
 
+const VALID_RESETS = new Set(["secrets", "channels", "all"]);
+
 /**
  * Run the setup wizard or non-interactive setup.
  *
@@ -20,6 +22,11 @@ export interface SetupOptions {
  * then delegates to the interactive wizard or non-interactive mode.
  */
 export async function runSetup(opts: SetupOptions = {}): Promise<void> {
+  if (opts.reset && !VALID_RESETS.has(opts.reset)) {
+    console.error(`Invalid --reset value: "${opts.reset}". Use: secrets, channels, or all`);
+    process.exit(1);
+  }
+
   // Master key is required for setup
   const masterKey = resolveEnvFile(process.env, "COGMO_MASTER_KEY");
   if (!masterKey) {
@@ -35,43 +42,42 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     resolveEnvFile(process.env, "DATABASE_URL") ?? "postgresql://cogmo@localhost/cogmo";
   const db = drizzle({ connection: databaseUrl, schema });
 
-  await migrate(db, { migrationsFolder: "./migrations" });
-  logger.info("migrations applied");
+  try {
+    await migrate(db, { migrationsFolder: "./migrations" });
+    logger.info("migrations applied");
 
-  const agentStore = new DrizzleAgentStore(db);
-  const transportStore = new DrizzleTransportStore(db);
+    const agentStore = new DrizzleAgentStore(db);
+    const transportStore = new DrizzleTransportStore(db);
 
-  if (opts.nonInteractive) {
-    // Non-interactive: seed defaults and exit
-    // Full non-interactive provider setup is a future enhancement
-    await seedDefaults(agentStore, transportStore);
-    logger.info("non-interactive setup complete (seed only)");
-    await db.$client.end();
-    return;
-  }
-
-  // Handle --reset
-  if (opts.reset === "all" || opts.reset === "secrets") {
-    const { deriveMasterKey, parseMasterKey } = await import("../secrets/encryption.js");
-    const { DrizzleSecretsStore } = await import("../secrets/store/index.js");
-    const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
-    const secretsStore = new DrizzleSecretsStore(db, encryptionKey);
-    await secretsStore.deleteAllSecrets();
-    logger.info("all secrets deleted");
-  }
-  if (opts.reset === "all" || opts.reset === "channels") {
-    // Remove all non-direct channels
-    const allChannels = await transportStore.getAllChannels();
-    for (const ch of allChannels) {
-      if (ch.type !== "direct") {
-        await transportStore.removeChannel(ch.id);
-      }
+    // Handle --reset before anything else (including non-interactive)
+    if (opts.reset === "all" || opts.reset === "secrets") {
+      const { deriveMasterKey, parseMasterKey } = await import("../secrets/encryption.js");
+      const { DrizzleSecretsStore } = await import("../secrets/store/index.js");
+      const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
+      const secretsStore = new DrizzleSecretsStore(db, encryptionKey);
+      await secretsStore.deleteAllSecrets();
+      logger.info("all secrets deleted");
     }
-    logger.info("non-direct channels removed");
-  }
+    if (opts.reset === "all" || opts.reset === "channels") {
+      const allChannels = await transportStore.getAllChannels();
+      for (const ch of allChannels) {
+        if (ch.type !== "direct") {
+          await transportStore.removeChannel(ch.id);
+        }
+      }
+      logger.info("non-direct channels removed");
+    }
 
-  await runWizard({ db, agentStore, transportStore, masterKey });
-  await db.$client.end();
+    if (opts.nonInteractive) {
+      await seedDefaults(agentStore, transportStore);
+      logger.info("non-interactive setup complete (seed only)");
+      return;
+    }
+
+    await runWizard({ db, agentStore, transportStore, masterKey });
+  } finally {
+    await db.$client.end();
+  }
 }
 
 export { seedDefaults } from "./seed.js";
