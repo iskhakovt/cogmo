@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { JsonValue } from "type-fest";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
@@ -396,10 +396,9 @@ export class DrizzleTransportStore implements TransportStore {
         .select({ id: channelSessions.id })
         .from(channelSessions)
         .where(eq(channelSessions.channelId, channelId));
-      if (sessionIds.length > 0) {
-        for (const { id } of sessionIds) {
-          await tx.delete(inboundMessages).where(eq(inboundMessages.channelSessionId, id));
-        }
+      const ids = sessionIds.map((s) => s.id);
+      if (ids.length > 0) {
+        await tx.delete(inboundMessages).where(inArray(inboundMessages.channelSessionId, ids));
       }
       await tx.delete(channelSessions).where(eq(channelSessions.channelId, channelId));
       await tx.delete(userIdentities).where(eq(userIdentities.channelId, channelId));
