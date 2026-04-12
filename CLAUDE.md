@@ -119,6 +119,7 @@ Each domain module owns its DB access in a `store/` subdirectory:
 ## Commits & PRs
 
 - **Conventional Commits** — all commit messages and PR titles must follow the [Conventional Commits](https://www.conventionalcommits.org/) spec. Format: `type(scope): description`. This drives semantic-release — wrong format means no release. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full type→version-bump table, examples, and the CI/release workflow.
+- **No force pushes** — always create new commits to address review feedback. Force pushes erase review context, break comment threading, and make it impossible to see what changed between rounds. Amending is only acceptable before the first push of a branch.
 
 ## Code Style
 
