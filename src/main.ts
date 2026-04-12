@@ -11,9 +11,21 @@ switch (command) {
     await seed();
     break;
   }
+  case "gen-key": {
+    const { generateMasterKey } = await import("./secrets/encryption.js");
+    const key = generateMasterKey();
+    console.log(`COGMO_MASTER_KEY=${key}`);
+    console.log(
+      "# Add this to your docker-compose.yml environment block,\n" +
+        "# or write to a Docker secret and set COGMO_MASTER_KEY_FILE.\n" +
+        "# This key encrypts all credentials in the database.\n" +
+        "# Store it securely — losing it means re-entering all credentials.",
+    );
+    break;
+  }
   default:
     console.error(`Unknown command: ${command}`);
-    console.error("Usage: main.js [serve|seed]");
+    console.error("Usage: main.js [serve|seed|gen-key]");
     process.exit(1);
 }
 

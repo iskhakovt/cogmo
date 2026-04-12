@@ -5,9 +5,10 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import * as agentSchema from "../agent/store/schema.js";
 import type { Database } from "../db/index.js";
+import * as secretsSchema from "../secrets/store/schema.js";
 import * as transportSchema from "../transport/store/schema.js";
 
-const schema = { ...agentSchema, ...transportSchema };
+const schema = { ...agentSchema, ...transportSchema, ...secretsSchema };
 
 /**
  * Boot an in-memory PGlite instance with the full schema applied.

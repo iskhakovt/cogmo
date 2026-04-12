@@ -1,5 +1,14 @@
 import { createEnv } from "@t3-oss/env-core";
 import { z } from "zod";
+import { resolveEnvFile } from "./secrets/env-file.js";
+
+// Apply _FILE convention for Docker secrets before Zod validation.
+// Only specific vars support this — not a global wrapper.
+const resolved: Record<string, string | undefined> = { ...process.env };
+for (const name of ["COGMO_MASTER_KEY", "DATABASE_URL"]) {
+  const val = resolveEnvFile(process.env, name);
+  if (val !== undefined) resolved[name] = val;
+}
 
 export const env = createEnv({
   server: {
@@ -30,7 +39,8 @@ export const env = createEnv({
     SUMMARIZATION_MODEL: z.string().optional(),
     TELEGRAM_BOT_TOKEN: z.string().optional(),
     TELEGRAM_ALLOWED_USERS: z.string().optional(),
+    COGMO_MASTER_KEY: z.string().optional(),
   },
-  runtimeEnv: process.env,
+  runtimeEnv: resolved,
   emptyStringAsUndefined: true,
 });

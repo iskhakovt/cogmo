@@ -8,6 +8,7 @@ import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type { MemoryProvider } from "../memory/provider.js";
+import type { SecretsStore } from "../secrets/store/index.js";
 import type { DeliveryHandle, DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import type { Transport } from "../transport/transport.js";
@@ -165,6 +166,20 @@ export function mockDeliveryHandle(overrides?: Partial<DeliveryHandle>): Deliver
 export function mockDeliveryRouter(overrides?: Partial<DeliveryRouter>): DeliveryRouter {
   return {
     prepare: vi.fn().mockResolvedValue(mockDeliveryHandle()),
+    ...overrides,
+  };
+}
+
+export function mockSecretsStore(overrides?: Partial<SecretsStore>): SecretsStore {
+  return {
+    putSecret: vi.fn().mockResolvedValue({ id: "secret-1" }),
+    getSecret: vi.fn().mockResolvedValue(null),
+    getSecretById: vi.fn().mockResolvedValue(null),
+    getSecretMeta: vi.fn().mockResolvedValue(null),
+    listSecrets: vi.fn().mockResolvedValue([]),
+    markValidated: vi.fn().mockResolvedValue(undefined),
+    deleteSecret: vi.fn().mockResolvedValue(undefined),
+    deleteAllSecrets: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
