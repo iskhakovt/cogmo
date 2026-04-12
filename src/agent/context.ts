@@ -9,7 +9,7 @@
  * See design/context-management.md for full design.
  */
 
-import type { CountTokensParams, Message, ToolDefinition } from "../llm/types.js";
+import type { ContentBlock, CountTokensParams, Message, ToolDefinition } from "../llm/types.js";
 import { logger } from "../logger.js";
 
 // --- Public interface ---
@@ -204,7 +204,10 @@ async function summarizePrefix(
   keepTurns: number,
 ): Promise<{ messages: Message[]; summarizedCount: number }> {
   // Keep the last keepTurns messages (user/assistant pairs)
-  const splitIdx = Math.max(0, messages.length - keepTurns);
+  const rawSplit = Math.max(0, messages.length - keepTurns);
+  if (rawSplit <= 0) return { messages, summarizedCount: 0 };
+
+  const splitIdx = snapToPairBoundary(messages, rawSplit);
   if (splitIdx <= 0) return { messages, summarizedCount: 0 };
 
   const prefix = messages.slice(0, splitIdx);
@@ -228,7 +231,8 @@ function truncateOldest(messages: Message[]): Message[] {
   // re-counts after truncation, so overshooting is harmless (just drops a bit more).
   // Undershooting is caught by the re-count triggering another pass next turn.
   const dropCount = Math.min(Math.max(Math.ceil(messages.length * 0.3), 2), messages.length - 2);
-  const result = messages.slice(dropCount);
+  const snapped = snapToPairBoundary(messages, dropCount);
+  const result = messages.slice(snapped);
 
   // Ensure alternation — first message must be user role
   if (result.length > 0 && result[0]?.role !== "user") {
@@ -239,4 +243,33 @@ function truncateOldest(messages: Message[]): Message[] {
   }
 
   return result;
+}
+
+// --- Pair-aware helpers ---
+
+function hasToolResults(content: string | ContentBlock[]): boolean {
+  if (typeof content === "string") return false;
+  return content.some((b) => b.type === "tool_result");
+}
+
+/**
+ * Adjust a split index so the suffix (messages[idx:]) never starts with
+ * orphaned tool_result blocks. Snaps backward to include the preceding
+ * assistant message that produced the tool_uses.
+ *
+ * Used by both summarize (snap = summarize less, keep more) and truncate
+ * (snap = drop less, keep more) — both prefer keeping an extra pair over
+ * violating Anthropic's pairing invariant.
+ */
+export function snapToPairBoundary(messages: ReadonlyArray<Message>, splitIdx: number): number {
+  let idx = splitIdx;
+  while (idx > 0 && idx < messages.length) {
+    const msg = messages[idx];
+    if (msg && msg.role === "user" && hasToolResults(msg.content)) {
+      idx--;
+    } else {
+      break;
+    }
+  }
+  return idx;
 }

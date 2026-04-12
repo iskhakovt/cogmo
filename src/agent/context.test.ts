@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Message } from "../llm/types.js";
-import { compactMessages, shouldSkipCounting } from "./context.js";
+import { compactMessages, shouldSkipCounting, snapToPairBoundary } from "./context.js";
 
 /** Helper: create a simple text message. */
 function msg(role: "user" | "assistant", text: string): Message {
@@ -285,6 +285,150 @@ describe("compactMessages", () => {
     expect(result.event!.tokensAfter).toBe(400);
     expect(result.event!.toolResultsCleared).toBe(3); // 8 - 5 = 3
     expect(result.event!.strategies).toEqual(["clear_tool_results", "summarize"]);
+  });
+});
+
+describe("snapToPairBoundary", () => {
+  it("returns splitIdx unchanged when suffix starts with a text user message", () => {
+    const messages: Message[] = [
+      msg("user", "old"),
+      msg("assistant", "old reply"),
+      msg("user", "recent"),
+      msg("assistant", "recent reply"),
+    ];
+    expect(snapToPairBoundary(messages, 2)).toBe(2);
+  });
+
+  it("snaps backward when suffix starts with orphaned tool_result", () => {
+    const messages: Message[] = [
+      msg("user", "question"),
+      toolCallMsg("t1", "search"),
+      toolResultMsg([{ id: "t1", content: "result" }]),
+      msg("assistant", "final answer"),
+    ];
+    // Cutting at index 2 would orphan tool_result — snap back to 1 (the assistant with tool_use)
+    expect(snapToPairBoundary(messages, 2)).toBe(1);
+  });
+
+  it("snaps past multiple consecutive tool rounds", () => {
+    const messages: Message[] = [
+      msg("user", "start"),
+      toolCallMsg("t1", "search"), // 1: assistant
+      toolResultMsg([{ id: "t1", content: "r1" }]), // 2: user (tool_result)
+      toolCallMsg("t2", "fetch"), // 3: assistant (second tool call)
+      toolResultMsg([{ id: "t2", content: "r2" }]), // 4: user (tool_result)
+      msg("assistant", "done"), // 5
+    ];
+    // Cutting at 4 → snaps to 3, then 3 is assistant (no tool_result) → stop at 3
+    expect(snapToPairBoundary(messages, 4)).toBe(3);
+    // Cutting at 2 → snaps to 1
+    expect(snapToPairBoundary(messages, 2)).toBe(1);
+  });
+
+  it("returns 0 when all messages are tool rounds", () => {
+    const messages: Message[] = [
+      toolCallMsg("t1", "search"),
+      toolResultMsg([{ id: "t1", content: "r1" }]),
+      toolCallMsg("t2", "fetch"),
+      toolResultMsg([{ id: "t2", content: "r2" }]),
+    ];
+    // Cutting at 1 → user with tool_result → snap to 0 (assistant, stops because idx=0)
+    expect(snapToPairBoundary(messages, 1)).toBe(0);
+    // Cutting at 3 → snap to 2 (assistant with tool_use, no tool_result)
+    expect(snapToPairBoundary(messages, 3)).toBe(2);
+  });
+
+  it("handles splitIdx at array boundaries", () => {
+    const messages: Message[] = [msg("user", "hi"), msg("assistant", "hey")];
+    expect(snapToPairBoundary(messages, 0)).toBe(0);
+    expect(snapToPairBoundary(messages, 2)).toBe(2);
+  });
+});
+
+describe("compactMessages — pair-aware", () => {
+  it("truncation never orphans a tool_use/tool_result pair", async () => {
+    // 13 messages → 30% = 3.9 → ceil = 4 → naïve cut at index 4 (a tool_result user message)
+    const msgs13: Message[] = [
+      msg("user", "a"),
+      msg("assistant", "b"),
+      msg("user", "c"),
+      toolCallMsg("t1", "search"), // 3
+      toolResultMsg([{ id: "t1", content: "result" }]), // 4 ← naïve cut lands here
+      msg("assistant", "d"),
+      msg("user", "e"),
+      msg("assistant", "f"),
+      msg("user", "g"),
+      msg("assistant", "h"),
+      msg("user", "i"),
+      msg("assistant", "j"),
+      msg("user", "k"),
+    ];
+    // 30% of 13 = 3.9 → ceil = 4 → drop first 4, keep from index 4
+    // messages[4] is user with tool_result → snapToPairBoundary snaps to 3
+
+    const countTokens = vi.fn().mockResolvedValueOnce(960).mockResolvedValueOnce(400);
+
+    const result = await compactMessages("system", msgs13, undefined, {
+      countTokens,
+      budget: 1000,
+    });
+
+    // Verify no message in result has orphaned tool_result
+    for (let i = 0; i < result.messages.length; i++) {
+      const m = result.messages[i]!;
+      if (typeof m.content !== "string" && m.content.some((b) => b.type === "tool_result")) {
+        // This user message has tool_results — the preceding message must be an assistant with matching tool_uses
+        expect(i).toBeGreaterThan(0);
+        const prev = result.messages[i - 1]!;
+        expect(prev.role).toBe("assistant");
+        expect(typeof prev.content).not.toBe("string");
+        const toolUseIds = (prev.content as any[])
+          .filter((b: any) => b.type === "tool_use")
+          .map((b: any) => b.id);
+        const toolResultIds = (m.content as any[])
+          .filter((b: any) => b.type === "tool_result")
+          .map((b: any) => b.toolUseId);
+        for (const id of toolResultIds) {
+          expect(toolUseIds).toContain(id);
+        }
+      }
+    }
+  });
+
+  it("summarization never orphans a tool_use/tool_result pair", async () => {
+    // Place a tool pair right at the summarize boundary
+    // keepTurns=6 → splitIdx = messages.length - 6
+    const messages: Message[] = [
+      msg("user", "old1"), // 0
+      msg("assistant", "old2"), // 1
+      toolCallMsg("t1", "search"), // 2: assistant with tool_use
+      toolResultMsg([{ id: "t1", content: "result" }]), // 3: user with tool_result
+      msg("assistant", "used the result"), // 4
+      msg("user", "q1"), // 5 ← raw splitIdx = 9-6 = 3, snaps to 2
+      msg("assistant", "a1"), // 6
+      msg("user", "q2"), // 7
+      msg("assistant", "a2"), // 8
+    ];
+
+    const countTokens = vi.fn().mockResolvedValueOnce(850).mockResolvedValueOnce(300);
+
+    const result = await compactMessages("system", messages, undefined, {
+      countTokens,
+      budget: 1000,
+      summarize: vi.fn().mockResolvedValue("summary of old conversation"),
+    });
+
+    expect(result.didCompact).toBe(true);
+
+    // Same invariant check: no orphaned tool_results
+    for (let i = 0; i < result.messages.length; i++) {
+      const m = result.messages[i]!;
+      if (typeof m.content !== "string" && m.content.some((b) => b.type === "tool_result")) {
+        expect(i).toBeGreaterThan(0);
+        const prev = result.messages[i - 1]!;
+        expect(prev.role).toBe("assistant");
+      }
+    }
   });
 });
 

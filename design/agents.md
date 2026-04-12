@@ -4,7 +4,7 @@
 
 No framework. Raw SDK while loop + tool dispatch. Implemented in `src/agent/loop.ts`.
 
-The loop takes a system prompt, message history, tools, and an LLM provider. It calls the LLM, executes any tool calls, appends results, and repeats until the LLM returns `end_turn` or `max_tokens`. Returns the final text, full message history (defensive copy), and usage stats.
+The loop takes a system prompt, message history, tools, and an LLM provider. It calls the LLM, executes any tool calls, appends results, and repeats until the LLM returns `end_turn` or `max_tokens`. Returns the final text, full message history (defensive copy), `newMessages` (only the messages produced this invocation — intermediate tool_use/tool_result turns + final assistant), and usage stats. The orchestrator persists all `newMessages` with full `ContentBlock[]` content — tool invocations are available in the conversation history for replay, compaction, and Stage 1 correction extraction.
 
 Provider-agnostic — depends on the `LlmProvider` interface, not the Anthropic SDK directly. See `src/llm/provider.ts`.
 

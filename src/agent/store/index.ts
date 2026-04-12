@@ -2,6 +2,7 @@ import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
 import type { JsonValue } from "type-fest";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
+import type { ContentBlock, Message } from "../../llm/types.js";
 import {
   conversations,
   coreMemoryBlocks,
@@ -31,7 +32,7 @@ export interface AgentStore {
   insertMessage(params: {
     conversationId: string;
     role: "user" | "assistant";
-    content: JsonValue;
+    content: string | ContentBlock[];
     lastInboundMessageId: string;
     inputTokens?: number;
   }): Promise<{ id: string }>;
@@ -42,9 +43,7 @@ export interface AgentStore {
   ): Promise<{ id: string; lastInboundMessageId: string } | null>;
 
   /** Load full message history for a conversation, ordered by id. */
-  getHistory(
-    conversationId: string,
-  ): Promise<ReadonlyArray<{ role: "user" | "assistant"; content: JsonValue }>>;
+  getHistory(conversationId: string): Promise<ReadonlyArray<Message>>;
 
   /** Load a profile by ID. */
   getProfile(
@@ -66,7 +65,9 @@ export interface AgentStore {
   }): Promise<{ id: string }>;
 
   /** Load a single message by ID. */
-  getMessage(messageId: string): Promise<{ id: string; role: string; content: JsonValue } | null>;
+  getMessage(
+    messageId: string,
+  ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | null>;
 
   /** Load active steering rules for a profile (global + profile-specific, ordered by priority). */
   getActiveRules(profileId: string): Promise<ReadonlyArray<{ rule: string }>>;
@@ -129,7 +130,7 @@ export class DrizzleAgentStore implements AgentStore {
   async insertMessage(params: {
     conversationId: string;
     role: "user" | "assistant";
-    content: JsonValue;
+    content: string | ContentBlock[];
     lastInboundMessageId: string;
     inputTokens?: number;
   }): Promise<{ id: string }> {
@@ -166,16 +167,14 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getHistory(
-    conversationId: string,
-  ): Promise<ReadonlyArray<{ role: "user" | "assistant"; content: JsonValue }>> {
+  async getHistory(conversationId: string): Promise<ReadonlyArray<Message>> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({ role: messages.role, content: messages.content })
         .from(messages)
         .where(eq(messages.conversationId, conversationId))
         .orderBy(asc(messages.id));
-      return rows as ReadonlyArray<{ role: "user" | "assistant"; content: JsonValue }>;
+      return rows as ReadonlyArray<Message>;
     });
   }
 
@@ -226,14 +225,14 @@ export class DrizzleAgentStore implements AgentStore {
 
   async getMessage(
     messageId: string,
-  ): Promise<{ id: string; role: string; content: JsonValue } | null> {
+  ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({ id: messages.id, role: messages.role, content: messages.content })
         .from(messages)
         .where(eq(messages.id, messageId))
         .limit(1);
-      return (rows[0] as { id: string; role: string; content: JsonValue }) ?? null;
+      return (rows[0] as { id: string; role: string; content: string | ContentBlock[] }) ?? null;
     });
   }
 

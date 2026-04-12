@@ -1,11 +1,5 @@
 import type { LlmProvider } from "../llm/provider.js";
-import type {
-  ContentBlock,
-  LlmResponse,
-  Message,
-  StreamEvent,
-  ToolUseBlock,
-} from "../llm/types.js";
+import type { ContentBlock, Message, StreamEvent, TextBlock, ToolUseBlock } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { Service } from "./service.js";
 import type { ToolRegistry } from "./tools.js";
@@ -25,6 +19,8 @@ export interface AgentLoopResult {
   text: string;
   /** Full message history including tool calls/results */
   messages: Message[];
+  /** Messages produced this invocation (intermediate tool turns + final assistant). */
+  newMessages: Message[];
   /** Aggregated usage across all LLM calls */
   usage: { inputTokens: number; outputTokens: number };
   /** Which model was used */
@@ -82,6 +78,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     maxIterations = DEFAULT_MAX_ITERATIONS,
   } = params;
   const messages = clearOldThinking(params.messages);
+  const initialLength = messages.length;
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };
   let iterations = 0;
@@ -109,7 +106,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
 
     // If not a tool_use stop, we're done
     if (response.stopReason !== "tool_use") {
-      return buildResult(messages, response, totalUsage, finalModel, iterations);
+      return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
     }
 
     // Execute tool calls and append results
@@ -120,7 +117,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   }
 
   logger.warn({ maxIterations }, "agent loop hit iteration limit");
-  return buildResult(messages, null, totalUsage, finalModel, iterations);
+  return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
 }
 
 async function executeToolCalls(
@@ -164,7 +161,7 @@ async function executeToolCalls(
 
 function buildResult(
   messages: Message[],
-  _lastResponse: LlmResponse | null,
+  initialLength: number,
   usage: { inputTokens: number; outputTokens: number },
   model: string,
   iterations: number,
@@ -174,15 +171,22 @@ function buildResult(
   let text = "";
   if (lastAssistant && Array.isArray(lastAssistant.content)) {
     text = lastAssistant.content
-      .filter((b) => b.type === "text")
-      .map((b) => (b as { text: string }).text)
+      .filter((b): b is TextBlock => b.type === "text")
+      .map((b) => b.text)
       .join("");
   } else if (lastAssistant && typeof lastAssistant.content === "string") {
     text = lastAssistant.content;
   }
 
   // Defensive copy — don't leak the mutable internal array through the interface
-  return { text, messages: [...messages], usage, model, iterations };
+  return {
+    text,
+    messages: [...messages],
+    newMessages: messages.slice(initialLength),
+    usage,
+    model,
+    iterations,
+  };
 }
 
 // --- Streaming variant ---
@@ -212,6 +216,7 @@ export async function runStreamingAgentLoop(
     maxIterations = DEFAULT_MAX_ITERATIONS,
   } = params;
   const messages = clearOldThinking(params.messages);
+  const initialLength = messages.length;
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };
   let iterations = 0;
@@ -285,7 +290,7 @@ export async function runStreamingAgentLoop(
 
     // If not a tool_use stop, we're done
     if (meta.stopReason !== "tool_use") {
-      return buildResult(messages, null, totalUsage, finalModel, iterations);
+      return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
     }
 
     // Execute tool calls, emit results, append to messages
@@ -315,5 +320,5 @@ export async function runStreamingAgentLoop(
   }
 
   logger.warn({ maxIterations }, "streaming agent loop hit iteration limit");
-  return buildResult(messages, null, totalUsage, finalModel, iterations);
+  return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
 }

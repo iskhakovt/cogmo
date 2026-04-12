@@ -88,6 +88,9 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     runStreamingAgentLoop: vi.fn().mockResolvedValue({
       text: "Hello from assistant",
       messages: [],
+      newMessages: [
+        { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
+      ],
       usage: { inputTokens: 10, outputTokens: 5 },
       model: "mock-model",
       iterations: 1,
@@ -137,7 +140,7 @@ describe("handle-message — crash recovery / step replay", () => {
     expect(assistantInserts).toHaveLength(1);
   });
 
-  it("does not re-insert the assistant message when persist-assistant-message is cached", async () => {
+  it("does not re-insert the assistant message when persist-new-messages is cached", async () => {
     const deps = mockDeps();
     const fn = createHandleMessage(deps);
 
@@ -146,7 +149,7 @@ describe("handle-message — crash recovery / step replay", () => {
       events: [event],
       steps: [
         {
-          id: "persist-assistant-message",
+          id: "persist-new-messages",
           handler: () => ({ id: "cached-assistant-msg-id" }),
         },
       ],
@@ -261,7 +264,7 @@ describe("handle-message — crash recovery / step replay", () => {
         // `summarize-prefix` is conditional — only created when compaction
         // decides to summarize. The default mock countTokens stays under
         // threshold, so the step is never invoked here and we don't list it.
-        { id: "persist-assistant-message", handler: () => ({ id: "asst-1" }) },
+        { id: "persist-new-messages", handler: () => ({ id: "asst-1" }) },
       ],
     });
 

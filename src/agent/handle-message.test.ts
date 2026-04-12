@@ -34,6 +34,9 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     runStreamingAgentLoop: vi.fn().mockResolvedValue({
       text: "Hello from assistant",
       messages: [],
+      newMessages: [
+        { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
+      ],
       usage: { inputTokens: 10, outputTokens: 5 },
       model: "mock-model",
       iterations: 1,
@@ -117,7 +120,10 @@ describe("createHandleMessage", () => {
       expect.objectContaining({ role: "user", lastInboundMessageId: "inbound-1" }),
     );
     expect(deps.agentStore.insertMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ role: "assistant", content: "Hello from assistant" }),
+      expect.objectContaining({
+        role: "assistant",
+        content: [{ type: "text", text: "Hello from assistant" }],
+      }),
     );
   });
 
@@ -165,6 +171,7 @@ describe("createHandleMessage", () => {
         return {
           text: "hi",
           messages: [],
+          newMessages: [{ role: "assistant", content: [{ type: "text", text: "hi" }] }],
           usage: { inputTokens: 10, outputTokens: 5 },
           model: "mock",
           iterations: 1,

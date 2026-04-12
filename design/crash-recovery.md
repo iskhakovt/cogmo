@@ -26,7 +26,7 @@ The bug class to catch is #2. The contract below makes #1 vs #2 explicit for `ha
 | **Compact** | *(none — runs on every invocation)* | `compactMessages` (token count, clear, summarize, truncate) | token counting + decision | ✗ |
 | Compact | `summarize-prefix` (conditional) | `provider.chat` for prefix summarization | **LLM call** | ✓ |
 | **Streaming** | *(none — not in a step)* | image resolution, `memory.recall`, `getProfile`, `deliveryRouter.prepare`, `runStreamingAgentLoop`, tool execution, `delivery.finish` | **LLM stream + tool side effects** | ✗ |
-| Persist | `persist-assistant-message` | `agentStore.insertMessage` (assistant) | **DB write** | ✓ |
+| Persist | `persist-new-messages` | `agentStore.insertMessage` × N (all new messages: intermediate tool turns + final assistant) | **DB write** | ✓ |
 | Deliver | *(none — not in a step)* | `delivery.deliverBatch` | **Network send to batch adapters** | ✗ |
 | Notify | `send-response` | `step.sendEvent("response/ready")` | Inngest event | ✓ |
 | Resume | `flush` (conditional) | `step.sendEvent("inbound/ready")` | Inngest event | ✓ |
@@ -69,7 +69,7 @@ If `runStreamingAgentLoop` throws (network blip, API error, OOM):
    - `memory.recall` runs again (idempotent — pure read).
    - `attachments.download` re-fetches images (idempotent — pure read).
    - `runStreamingAgentLoop` makes new LLM calls and re-executes any tools the LLM picks.
-4. If it succeeds this time, `persist-assistant-message` runs, the response is delivered, and the function resolves.
+4. If it succeeds this time, `persist-new-messages` runs (inserts all intermediate tool turns + final assistant), the response is delivered, and the function resolves.
 
 The user observes a message that took longer than usual (one extra round of tool calls and LLM tokens), but never sees a corrupted conversation, never sees a duplicate user message, and never gets billed twice for summarization.
 
@@ -119,7 +119,7 @@ This is documented as accepted in `transport/streaming.md`. Cross-process stream
 The four cases:
 
 1. `create-user-message` cached → no user-role `insertMessage` call.
-2. `persist-assistant-message` cached → no assistant-role `insertMessage` call.
+2. `persist-new-messages` cached → no `insertMessage` calls for any new messages (tool turns + assistant).
 3. `summarize-prefix` cached → no `provider.chat` call for summarization, and the cached summary text appears in the history passed to the agent loop (non-vacuity check).
 4. All listed durable steps cached → `runStreamingAgentLoop` is still called (canary for the non-durable contract).
 
