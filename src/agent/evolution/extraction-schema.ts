@@ -10,7 +10,7 @@ import { z } from "zod";
 
 // --- Extraction output schema ---
 
-export const CorrectionItemSchema = z.object({
+const CorrectionBaseSchema = z.object({
   rule: z.string().describe("The behavioral rule, generalized and context-free"),
   category: z
     .enum(["style", "domain", "memory"])
@@ -20,14 +20,22 @@ export const CorrectionItemSchema = z.object({
   reasoning: z
     .string()
     .describe("Why this was identified as a correction — for observability, not stored"),
-  matchedExistingRuleId: z
-    .string()
-    .nullable()
-    .describe("ID of existing rule this reinforces, or null if new"),
-  action: z
-    .enum(["new", "reinforce", "contradiction"])
-    .describe("Whether this is new, reinforces an existing rule, or contradicts one"),
 });
+
+export const CorrectionItemSchema = z.discriminatedUnion("action", [
+  CorrectionBaseSchema.extend({
+    action: z.literal("new"),
+    matchedExistingRuleId: z.null(),
+  }),
+  CorrectionBaseSchema.extend({
+    action: z.literal("reinforce"),
+    matchedExistingRuleId: z.string(),
+  }),
+  CorrectionBaseSchema.extend({
+    action: z.literal("contradiction"),
+    matchedExistingRuleId: z.string(),
+  }),
+]);
 
 export const CorrectionExtractionSchema = z.object({
   corrections: z.array(CorrectionItemSchema),

@@ -1,21 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
+import { mockProvider } from "../../test/factories.js";
 import { type ConsolidationDeps, consolidateRules } from "./consolidate-rules.js";
 
 function mockConsolidationDeps(
   chatTypedResponse: { groups: Array<Record<string, unknown>> },
   storeOverrides?: Partial<ConsolidationDeps["store"]>,
 ): ConsolidationDeps {
-  const provider = {
-    name: "mock",
+  const provider = mockProvider({
     chat: vi.fn().mockResolvedValue({
       content: [{ type: "text", text: JSON.stringify(chatTypedResponse) }],
       stopReason: "end_turn",
       model: "mock",
       usage: { inputTokens: 10, outputTokens: 5 },
     }),
-    chatStream: vi.fn(),
-    countTokens: vi.fn().mockResolvedValue(100),
-  };
+  });
 
   return {
     provider,
@@ -92,6 +90,42 @@ describe("consolidateRules", () => {
 
     expect(result.mergedGroups).toBe(0);
     // chatTyped should not have been called
+    expect(deps.provider.chat).not.toHaveBeenCalled();
+  });
+
+  it("skips invalid merge groups from LLM", async () => {
+    const deps = mockConsolidationDeps({
+      groups: [
+        {
+          originalIds: ["r1", "unknown-id"],
+          mergedRule: "Bad merge",
+          category: "style",
+        },
+      ],
+    });
+
+    const result = await consolidateRules("profile-1", deps);
+
+    expect(result.mergedGroups).toBe(0);
+    expect(result.rulesRemoved).toBe(0);
+    expect(deps.store.replaceRules).not.toHaveBeenCalled();
+  });
+
+  it("skips only inactive rules before consolidating", async () => {
+    const deps = mockConsolidationDeps(
+      { groups: [] },
+      {
+        getCorrections: vi.fn().mockResolvedValue([
+          { id: "r1", rule: "Active", category: "style", active: true, observationCount: 2 },
+          { id: "r2", rule: "Learning", category: "style", active: false, observationCount: 1 },
+        ]),
+      },
+    );
+
+    const result = await consolidateRules("profile-1", deps);
+
+    // Only 1 active rule — below threshold of 2, skips LLM call
+    expect(result.mergedGroups).toBe(0);
     expect(deps.provider.chat).not.toHaveBeenCalled();
   });
 });

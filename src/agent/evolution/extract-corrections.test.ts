@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Message } from "../../llm/types.js";
+import { mockProvider } from "../../test/factories.js";
 import {
   type ExtractionDeps,
   extractCorrections,
@@ -89,18 +90,14 @@ function mockExtractionDeps(
   chatTypedResponse: { corrections: Array<Record<string, unknown>> },
   storeOverrides?: Partial<ExtractionDeps["store"]>,
 ): ExtractionDeps {
-  // Mock the chatTyped module
-  const provider = {
-    name: "mock",
+  const provider = mockProvider({
     chat: vi.fn().mockResolvedValue({
       content: [{ type: "text", text: JSON.stringify(chatTypedResponse) }],
       stopReason: "end_turn",
       model: "mock",
       usage: { inputTokens: 10, outputTokens: 5 },
     }),
-    chatStream: vi.fn(),
-    countTokens: vi.fn().mockResolvedValue(100),
-  };
+  });
 
   return {
     provider,
@@ -290,5 +287,27 @@ describe("extractCorrections", () => {
     expect(result.contradictions).toBe(1);
     // 2 upsert calls (new + reinforce), contradiction skipped
     expect(deps.store.upsertCorrection).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips extraction for empty transcript", async () => {
+    const deps = mockExtractionDeps({ corrections: [] });
+    const thinkingOnly: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "hmm", signature: "sig" }],
+      },
+    ];
+
+    const result = await extractCorrections(thinkingOnly, "profile-1", deps);
+
+    expect(result).toEqual({
+      extracted: 0,
+      reinforced: 0,
+      contradictions: 0,
+      promoted: 0,
+      consolidationNeeded: false,
+    });
+    // chatTyped should not have been called
+    expect(deps.provider.chat).not.toHaveBeenCalled();
   });
 });

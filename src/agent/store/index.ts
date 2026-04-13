@@ -400,7 +400,7 @@ export class DrizzleAgentStore implements AgentStore {
         .from(steeringRules)
         .where(
           and(
-            eq(steeringRules.source, "correction"),
+            inArray(steeringRules.source, ["correction", "evolution"]),
             or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
           ),
         )

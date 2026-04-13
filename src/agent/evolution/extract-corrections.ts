@@ -46,9 +46,21 @@ export async function extractCorrections(
   profileId: string,
   deps: ExtractionDeps,
 ): Promise<ExtractionResult> {
+  const transcript = formatTranscript(history);
+
+  if (transcript.length === 0) {
+    logger.debug("empty transcript — skipping extraction");
+    return {
+      extracted: 0,
+      reinforced: 0,
+      contradictions: 0,
+      promoted: 0,
+      consolidationNeeded: false,
+    };
+  }
+
   const existingRules = await deps.store.getCorrections(profileId);
   const systemPrompt = buildExtractionPrompt(existingRules);
-  const transcript = formatTranscript(history);
 
   const { data } = await chatTyped({
     provider: deps.provider,

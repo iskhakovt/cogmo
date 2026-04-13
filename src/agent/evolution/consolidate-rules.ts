@@ -75,7 +75,8 @@ export async function consolidateRules(
   profileId: string,
   deps: ConsolidationDeps,
 ): Promise<ConsolidationResult> {
-  const rules = await deps.store.getCorrections(profileId);
+  const allRules = await deps.store.getCorrections(profileId);
+  const rules = allRules.filter((r) => r.active);
 
   if (rules.length < 2) {
     return { mergedGroups: 0, rulesRemoved: 0 };
@@ -92,11 +93,26 @@ export async function consolidateRules(
     name: "rule-consolidation",
   });
 
+  let mergedGroups = 0;
   let rulesRemoved = 0;
+  const consumedIds = new Set<string>();
 
   for (const group of data.groups) {
-    // Sum observation counts from the originals being merged
     const originals = rules.filter((r) => group.originalIds.includes(r.id));
+
+    // Validate: all IDs exist, no overlaps, category matches
+    if (
+      originals.length !== group.originalIds.length ||
+      originals.some((r) => r.category !== group.category) ||
+      group.originalIds.some((id) => consumedIds.has(id))
+    ) {
+      logger.warn({ group }, "invalid merge group from LLM — skipped");
+      continue;
+    }
+    for (const id of group.originalIds) {
+      consumedIds.add(id);
+    }
+
     const totalObservations = originals.reduce((sum, r) => sum + r.observationCount, 0);
 
     await deps.store.replaceRules({
@@ -110,10 +126,11 @@ export async function consolidateRules(
       },
     });
 
+    mergedGroups++;
     rulesRemoved += group.originalIds.length - 1; // each group replaces N rules with 1
   }
 
-  logger.info({ mergedGroups: data.groups.length, rulesRemoved }, "rule consolidation complete");
+  logger.info({ mergedGroups, rulesRemoved }, "rule consolidation complete");
 
-  return { mergedGroups: data.groups.length, rulesRemoved };
+  return { mergedGroups, rulesRemoved };
 }

@@ -56,6 +56,36 @@ describe("CorrectionExtractionSchema", () => {
     const input = { corrections: [{ rule: "test" }] };
     expect(() => CorrectionExtractionSchema.parse(input)).toThrow();
   });
+
+  it("rejects reinforce with null matchedExistingRuleId", () => {
+    const input = {
+      corrections: [
+        {
+          rule: "Be concise",
+          category: "style",
+          reasoning: "test",
+          matchedExistingRuleId: null,
+          action: "reinforce",
+        },
+      ],
+    };
+    expect(() => CorrectionExtractionSchema.parse(input)).toThrow();
+  });
+
+  it("rejects contradiction with null matchedExistingRuleId", () => {
+    const input = {
+      corrections: [
+        {
+          rule: "Be verbose",
+          category: "style",
+          reasoning: "test",
+          matchedExistingRuleId: null,
+          action: "contradiction",
+        },
+      ],
+    };
+    expect(() => CorrectionExtractionSchema.parse(input)).toThrow();
+  });
 });
 
 describe("buildExtractionPrompt", () => {
