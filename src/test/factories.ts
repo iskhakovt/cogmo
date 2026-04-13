@@ -8,6 +8,7 @@ import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type { MemoryProvider } from "../memory/provider.js";
+import type { SecretsStore } from "../secrets/store/index.js";
 import type { DeliveryHandle, DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import type { Transport } from "../transport/transport.js";
@@ -32,6 +33,8 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       id: "profile-1",
       basePrompt: "test",
       model: "claude-sonnet-4-20250514",
+      summarizationModel: null,
+      extractionModel: null,
       toolSet: [],
     }),
     getDefaultProfile: vi.fn().mockResolvedValue({ id: "profile-1" }),
@@ -42,6 +45,14 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     upsertCoreMemoryBlock: vi.fn().mockResolvedValue(undefined),
     getLastMessageTime: vi.fn().mockResolvedValue(null),
     getLastInputTokens: vi.fn().mockResolvedValue(null),
+    createProvider: vi.fn().mockResolvedValue({ id: "provider-1" }),
+    getProvider: vi.fn().mockResolvedValue(null),
+    listProviders: vi.fn().mockResolvedValue([]),
+    deleteProvider: vi.fn().mockResolvedValue(undefined),
+    addModelProvider: vi.fn().mockResolvedValue({ id: "mp-1" }),
+    resolveProviderForModel: vi.fn().mockResolvedValue(null),
+    getNextModelProviderPosition: vi.fn().mockResolvedValue(0),
+    removeModelProvidersByProvider: vi.fn().mockResolvedValue(undefined),
     getCorrections: vi.fn().mockResolvedValue([]),
     upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
     countActiveRules: vi.fn().mockResolvedValue(0),
@@ -64,8 +75,11 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     getActiveSessionsForConversation: vi.fn().mockResolvedValue([]),
     getSourceSessions: vi.fn().mockResolvedValue([]),
     getReceiveAllSessions: vi.fn().mockResolvedValue([]),
-    resolveUser: vi.fn().mockResolvedValue(null),
+    resolveUser: vi.fn().mockResolvedValue({ userId: "user-1" }),
     createWildcardIdentity: vi.fn().mockResolvedValue({ id: "identity-1" }),
+    createIdentity: vi.fn().mockResolvedValue({ id: "identity-1" }),
+    updateChannelCredentials: vi.fn().mockResolvedValue(undefined),
+    removeChannel: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -170,6 +184,20 @@ export function mockDeliveryHandle(overrides?: Partial<DeliveryHandle>): Deliver
 export function mockDeliveryRouter(overrides?: Partial<DeliveryRouter>): DeliveryRouter {
   return {
     prepare: vi.fn().mockResolvedValue(mockDeliveryHandle()),
+    ...overrides,
+  };
+}
+
+export function mockSecretsStore(overrides?: Partial<SecretsStore>): SecretsStore {
+  return {
+    putSecret: vi.fn().mockResolvedValue({ id: "secret-1" }),
+    getSecret: vi.fn().mockResolvedValue(null),
+    getSecretById: vi.fn().mockResolvedValue(null),
+    getSecretMeta: vi.fn().mockResolvedValue(null),
+    listSecrets: vi.fn().mockResolvedValue([]),
+    markValidated: vi.fn().mockResolvedValue(undefined),
+    deleteSecret: vi.fn().mockResolvedValue(undefined),
+    deleteAllSecrets: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }

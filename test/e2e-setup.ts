@@ -92,12 +92,40 @@ export async function setup({ provide }: GlobalSetupContext) {
   await seedContainer.stop();
   console.log("Seed complete.");
 
+  // Seed an LLM provider into the DB so bootstrap() can resolve it.
+  // Uses raw SQL to avoid importing the store layer into the e2e setup.
+  const { generateMasterKey, parseMasterKey, deriveMasterKey, encrypt, toBase64 } = await import(
+    "../src/secrets/encryption.js"
+  );
+  const masterKey = generateMasterKey();
+  const encKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? "test-key";
+  const { ciphertext, nonce } = encrypt(encKey, apiKey);
+
   const postgres = (await import("postgres")).default;
   const sql = postgres(urls.databaseUrl);
   const rows = await sql<{ id: string }[]>`SELECT id FROM users LIMIT 1`;
-  await sql.end();
   const defaultUserId = rows[0]?.id;
   if (!defaultUserId) throw new Error("Default user not found after seed");
+
+  // Insert encrypted secret + provider + model routing
+  const [secret] = await sql<{ id: string }[]>`
+    INSERT INTO secrets (id, name, ciphertext, nonce, description)
+    VALUES (uuidv7(), 'anthropic_api_key', ${toBase64(ciphertext)}, ${toBase64(nonce)}, 'E2e test key')
+    RETURNING id
+  `;
+  const [provider] = await sql<{ id: string }[]>`
+    INSERT INTO llm_providers (id, name, type, base_url, secret_id, attrs)
+    VALUES (uuidv7(), 'anthropic', 'anthropic', ${`http://host.docker.internal:${mock.port}`}, ${secret!.id}, '{}')
+    RETURNING id
+  `;
+  // Route the default profile's model to this provider
+  const [profileRow] = await sql<{ model: string }[]>`SELECT model FROM profiles LIMIT 1`;
+  await sql`
+    INSERT INTO model_providers (id, model, provider_id, position)
+    VALUES (uuidv7(), ${profileRow!.model}, ${provider!.id}, 0)
+  `;
+  await sql.end();
 
   console.log("Starting app container (connect mode)...");
   const appContainer = await appImage
@@ -106,8 +134,7 @@ export async function setup({ provide }: GlobalSetupContext) {
     .withCommand(["serve"])
     .withEnvironment({
       DATABASE_URL: inNetworkDatabaseUrl,
-      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "test-key",
-      ANTHROPIC_BASE_URL: `http://host.docker.internal:${mock.port}`,
+      COGMO_MASTER_KEY: masterKey,
       INNGEST_BASE_URL: "http://inngest:8288",
       INNGEST_CONNECT_GATEWAY_URL: "ws://inngest:8289/v0/connect",
       HINDSIGHT_URL: "http://hindsight:8888",

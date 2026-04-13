@@ -1,11 +1,16 @@
-node_modules
-dist
-.git
-.claude
-*.md
-!README.md
+# Deny all, allow only what the Dockerfile COPYs.
+# Keeps the build context small and prevents accidental secret inclusion.
+*
+
+# Build inputs (must match Dockerfile COPY lines)
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.json
+!tsup.config.ts
+!src/
+!migrations/
+
+# Exclude test files that live inside src/
 src/**/*.test.ts
 src/test/
-test/
-dev/
-scripts/

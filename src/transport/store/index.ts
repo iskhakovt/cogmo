@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { JsonValue } from "type-fest";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
@@ -81,6 +81,19 @@ export interface TransportStore {
 
   /** Create a wildcard identity for a channel. */
   createWildcardIdentity(params: { userId: string; channelId: string }): Promise<{ id: string }>;
+
+  /** Create an explicit (non-wildcard) identity for a user on a channel. */
+  createIdentity(params: {
+    userId: string;
+    channelId: string;
+    platformHandle: string;
+  }): Promise<{ id: string }>;
+
+  /** Update channel credentials (e.g., token rotation). */
+  updateChannelCredentials(channelId: string, credentials: JsonValue): Promise<void>;
+
+  /** Remove a channel and its sessions/identities. */
+  removeChannel(channelId: string): Promise<void>;
 }
 
 export class DrizzleTransportStore implements TransportStore {
@@ -174,10 +187,12 @@ export class DrizzleTransportStore implements TransportStore {
   }
 
   async closeSession(sessionId: string): Promise<void> {
-    await this.#db
-      .update(channelSessions)
-      .set({ status: "closed" })
-      .where(eq(channelSessions.id, sessionId));
+    await this.#db.transaction(async (tx) => {
+      await tx
+        .update(channelSessions)
+        .set({ status: "closed" })
+        .where(eq(channelSessions.id, sessionId));
+    });
   }
 
   async persistInbound(params: {
@@ -344,6 +359,50 @@ export class DrizzleTransportStore implements TransportStore {
           })
           .returning({ id: userIdentities.id }),
       );
+    });
+  }
+
+  async createIdentity(params: {
+    userId: string;
+    channelId: string;
+    platformHandle: string;
+  }): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      return single(
+        await tx
+          .insert(userIdentities)
+          .values({
+            userId: params.userId,
+            channelId: params.channelId,
+            platformHandle: params.platformHandle,
+            isWildcard: false,
+            autoCreated: false,
+          })
+          .returning({ id: userIdentities.id }),
+      );
+    });
+  }
+
+  async updateChannelCredentials(channelId: string, credentials: JsonValue): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      await tx.update(channels).set({ credentials }).where(eq(channels.id, channelId));
+    });
+  }
+
+  async removeChannel(channelId: string): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      // Delete in FK order: inbound_messages → channel_sessions → identities → channel
+      const sessionIds = await tx
+        .select({ id: channelSessions.id })
+        .from(channelSessions)
+        .where(eq(channelSessions.channelId, channelId));
+      const ids = sessionIds.map((s) => s.id);
+      if (ids.length > 0) {
+        await tx.delete(inboundMessages).where(inArray(inboundMessages.channelSessionId, ids));
+      }
+      await tx.delete(channelSessions).where(eq(channelSessions.channelId, channelId));
+      await tx.delete(userIdentities).where(eq(userIdentities.channelId, channelId));
+      await tx.delete(channels).where(eq(channels.id, channelId));
     });
   }
 }

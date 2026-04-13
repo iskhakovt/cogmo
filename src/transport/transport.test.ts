@@ -65,6 +65,33 @@ describe("createTransport", () => {
         expect(session.value.channelId).toBe("ch-1");
       }
     });
+
+    it("returns identity_rejected when resolveUser returns null", async () => {
+      const ts = mockTransportStore({
+        resolveUser: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ transportStore: ts });
+
+      const result = await transport.createConversation("addr-1", "unknown-user", {
+        isPrivate: true,
+      });
+
+      expect(result.isErr()).toBe(true);
+      if (result.isErr()) {
+        expect(result.error.code).toBe("identity_rejected");
+      }
+    });
+
+    it("uses resolved userId from identity (not defaultUserId)", async () => {
+      const ts = mockTransportStore({
+        resolveUser: vi.fn().mockResolvedValue({ userId: "resolved-user-42" }),
+      });
+      const { transport } = setup({ transportStore: ts, agentStore: mockAgentStore() });
+
+      await transport.createConversation("addr-1", "handle-1", { isPrivate: true });
+
+      expect(ts.resolveUser).toHaveBeenCalledWith("ch-1", "handle-1");
+    });
   });
 
   describe("closeSession", () => {

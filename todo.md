@@ -2,15 +2,16 @@
 
 ## Next
 
-- [ ] `p3` Observer unit test — mock `step.run` to cover min-message guard, conditional consolidation, return shape
-- [ ] `p3` Idempotent correction inserts — dedup key (rule text hash + category + source) to prevent duplicate rules on step retry
+- [ ] `p2` Non-interactive setup — `cogmo setup --non-interactive` reads `COGMO_LLM_*` env vars, validates, writes provider + model_providers to DB. Currently only seeds defaults. Needed for CI/IaC.
 - [ ] `p2` Context fast path — account for output tokens in `shouldSkipCounting` (currently only tracks `inputTokens`, underestimates by one response worth)
 - [ ] `p2` Background compaction — run summarization after response (while user reads) instead of before next turn, store pre-computed summary to eliminate compaction latency
 - [ ] `p2` Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
 - [ ] `p2` Batch API support for async evolution tasks — 50% cost reduction for reflection, extraction, optimization
 - [ ] `p2` Define InboundContent schema (Zod) — structured message content type instead of raw JsonValue everywhere
-- [ ] `p2` CLI channel management commands — `main.ts channel add telegram --token=...`, `channel list`, `channel remove`
+- [ ] `p2` CLI channel management commands — `main.ts channel add telegram --token=...`, `channel list`, `channel remove` (store layer covered by `p1` Channel CRUD; this is the CLI surface)
 - [ ] `p2` Pass transaction function to stores instead of full Database — makes transactions inescapable, narrows the interface
+- [ ] `p3` Observer unit test — mock `step.run` to cover min-message guard, conditional consolidation, return shape
+- [ ] `p3` Idempotent correction inserts — dedup key (rule text hash + category + source) to prevent duplicate rules on step retry
 - [ ] `p3` Consider dropping Inngest serve mode — only connect mode is used (tests, production, local dev)
 - [ ] `p3` Switch Hindsight LLM to gpt-5-nano — blocked on Hindsight emitting `max_completion_tokens` for GPT-5 models. Currently on gpt-4o-mini (~$10/mo vs ~$6/mo target). See `design/memory.md` → Known Gaps.
 - [ ] `p3` Hindsight retain failure monitoring — `async: true` means background pipeline errors are invisible to caller. Poll `operation_id` status or wire webhooks; surface failures to logs/metrics.
@@ -18,7 +19,6 @@
 - [ ] `p3` Use native OpenRouter provider for prod Hindsight — replaces `openai` + custom base URL workaround
 - [ ] `p3` Stale llmock fixture cleanup — detect unused fixtures after test run, auto-delete
 - [ ] `p3` Telegram response formatting — HTML or MarkdownV2 with escape function
-- [ ] `p3` Interactive bootstrap — guided setup for new deployments (choose channels, configure credentials)
 - [ ] `p3` Basic health check endpoint (HTTP)
 - [ ] `p3` grammY native test primitives — use `bot.handleUpdate()` + `bot.api.config.use(transformer)` instead of `vi.mock("grammy")`
 - [ ] `p3` Telegram e2e via Test DC + tgintegration — real user on Telegram test servers, TypeScript/mtcute client
@@ -51,7 +51,12 @@
 
 ## Done
 
-- [x] Stage 1 evolution — Observer extracts corrections from conversation/idle, persists to steeringRules with graduation (2+ observations → active), consolidation at 30+ rules, global scope, formatted transcript
+- [x] Secrets infrastructure — `secrets` table, `@noble/ciphers` + `@noble/hashes`, AES-256-GCM + HKDF, `SecretsStore`, `_FILE` env support, `gen-key` subcommand, `ConfigResolver` (DB-first env-fallback), `.dockerignore` deny-all
+- [x] Multi-provider LLM — `llm_providers` + `model_providers` routing table, provider dispatch via model → provider resolution, `ANTHROPIC_API_KEY` removed from env (DB-only)
+- [x] Channel CRUD + allowlist enforcement — `createIdentity` / `updateChannelCredentials` / `removeChannel`, Telegram adapter enforces identity via `resolveUser`, `user_identities` rows replace `TELEGRAM_ALLOWED_USERS` env
+- [x] Seed refactor — `src/setup/seed.ts` with named exports, `src/seed.ts` delegates
+- [x] Setup wizard — `@clack/prompts`, `src/setup/` module, `main.ts setup`, re-runnable, `--reset`, `--non-interactive`, inline help
+- [x] Stage 1 evolution — Observer extracts corrections from conversation/idle, persists to steeringRules with graduation (2+ observations → active), consolidation at 30+ rules
 - [x] Typed LLM calls — `chatTyped()` with Zod schemas, `responseFormat` on ChatParams, `ThinkingBlock` + extended thinking, `clearOldThinking` pre-pass, retry with feedback injection
 - [x] Response routing — source routing per `design/transport/response-routing.md`
 - [x] Initialize Node.js project (package.json, tsconfig, Biome, Vitest)
