@@ -18,7 +18,7 @@ Tables are documented in the design doc that owns their domain:
 | `messages` | [transport/overview.md](transport/overview.md) | Conversation turns. Immutable. Content stored as full `ContentBlock[]` (text, tool_use, tool_result, image, thinking). Carry `lastInboundMessageId` cursor. |
 | `channel_sessions` | [transport/sessions.md](transport/sessions.md) | Platform address → conversation mapping |
 | `inbound_messages` | [transport/debounce.md](transport/debounce.md) | Raw input staging buffer for debounce batching |
-| `steering_rules` | [agents.md](agents.md) | Dynamic behavioral rules injected into system prompts |
+| `steering_rules` | [agents.md](agents.md) | Dynamic behavioral rules injected into system prompts. Written by manual insertion and automated correction extraction (Stage 1 evolution). |
 | `core_memory_blocks` | [agents.md](agents.md) | Structured persistent notes (user profile, projects). Upsert by (user_id, key). Always in system prompt. |
 
 ## New Tables (Setup Infrastructure) `[confirmed]`

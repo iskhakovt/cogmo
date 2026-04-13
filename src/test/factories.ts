@@ -52,6 +52,10 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     resolveProviderForModel: vi.fn().mockResolvedValue(null),
     getNextModelProviderPosition: vi.fn().mockResolvedValue(0),
     removeModelProvidersByProvider: vi.fn().mockResolvedValue(undefined),
+    getCorrections: vi.fn().mockResolvedValue([]),
+    upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
+    countActiveRules: vi.fn().mockResolvedValue(0),
+    replaceRules: vi.fn().mockResolvedValue({ id: "rule-1" }),
     ...overrides,
   };
 }

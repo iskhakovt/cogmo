@@ -35,8 +35,8 @@ The minimum useful system: talk to it, it remembers things.
 - [x] `memory_recall` and `memory_retain` tools for the agent
 - [x] Core memory blocks — DB table, `core_memory_update`/`core_memory_read` tools, injected into system prompt
 - [x] Auto-recall — embed user message each turn, inject as `# Recalled Context` in system prompt
-- [ ] Post-conversation Observer — Inngest function triggered by `conversation/idle` event
-- [ ] Instruction file (Stage 1 evolution) — corrections append to JSON, loaded into system prompt
+- [x] Post-conversation Observer — Inngest function triggered by `conversation/idle` event (Stage 1 evolution)
+- [x] Instruction file (Stage 1 evolution) — correction extraction via chatTyped(), persisted to steeringRules with graduation + consolidation
 - [x] Steering rules table in PostgreSQL — injected into system prompt per invocation
 - [ ] Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
 - [x] Crash recovery — handled by Inngest durable steps (automatic resume from last checkpoint); summarization LLM call wrapped in `step.run`, replay test via `@inngest/test`, contract documented in `design/crash-recovery.md`

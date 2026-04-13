@@ -2,6 +2,7 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { coreMemoryTools } from "./agent/core-memory-tools.js";
 import { createDebounceFunctions, type DebounceConfig } from "./agent/debounce.js";
+import { createObserver } from "./agent/evolution/index.js";
 import { fileTools } from "./agent/file-tools.js";
 import { createFileService, FILES_PROMPT_GUIDANCE } from "./agent/files.js";
 import { createHandleMessage } from "./agent/handle-message.js";
@@ -145,8 +146,20 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     ...(profile.summarizationModel && { summarizationModel: profile.summarizationModel }),
   });
 
+  const observer = createObserver({
+    agentStore,
+    provider,
+    ...(env.EXTRACTION_MODEL && { extractionModel: env.EXTRACTION_MODEL }),
+  });
+
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
-  const functions: any[] = [handleMessage, idleTimer, ...debounceFunctions, ...channelFunctions];
+  const functions: any[] = [
+    handleMessage,
+    idleTimer,
+    observer,
+    ...debounceFunctions,
+    ...channelFunctions,
+  ];
 
   return {
     db,
