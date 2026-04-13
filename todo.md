@@ -3,7 +3,7 @@
 ## Next
 
 - [ ] `p2` Post-conversation Observer — Inngest function triggered by `conversation/idle` event
-- [ ] `p2` Instruction file (Stage 1 evolution) — corrections append to JSON, loaded into system prompt
+- [ ] `p2` Instruction file (Stage 1 evolution) — corrections append to JSON, loaded into system prompt. Prerequisite met: full tool invocation history now persisted in messages.
 - [ ] `p2` Context fast path — account for output tokens in `shouldSkipCounting` (currently only tracks `inputTokens`, underestimates by one response worth)
 - [ ] `p2` Background compaction — run summarization after response (while user reads) instead of before next turn, store pre-computed summary to eliminate compaction latency
 - [ ] `p2` Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
@@ -110,6 +110,7 @@
 - [x] ImageBlock — canonical type, both adapters, Telegram photo handler, AttachmentStore (separate binary storage)
 - [x] Steering rules table — already existed, injected into system prompt per invocation
 - [x] Context window management — `countTokens()` on LlmProvider, model registry, three-layer compaction pipeline, usage tracking
+- [x] Full tool invocation history — `messages.content` stores `ContentBlock[]`, `AgentLoopResult.newMessages`, pair-aware compaction (`snapToPairBoundary`)
 - [x] Debounce wiring — debounce-router, debounce-idle, debounce-maxwait, entry guards, resume policy
 - [x] Prompt caching — Anthropic cache_control, OpenRouter passthrough
 - [x] Session lifecycle — Inngest idle timer, resolveSession staleness, `/new` command

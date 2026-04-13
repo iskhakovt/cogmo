@@ -63,7 +63,7 @@ messages (
   id                       UUID v7 PK,
   conversation_id          UUID FK → conversations NOT NULL,
   role                     TEXT NOT NULL,       -- 'user' | 'assistant'
-  content                  JSONB NOT NULL,      -- text, images, files, voice transcripts
+  content                  JSONB NOT NULL,      -- ContentBlock[] (text, tool_use, tool_result, image, thinking)
   last_inbound_message_id  UUID NOT NULL,        -- attribution cursor. See debounce.md.
   created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -115,7 +115,7 @@ Shared core — same for all platforms. The agent never knows which platform the
 4. Load conversation history
 5. Assemble system prompt (profile base prompt + steering rules + memories)
 6. Run agentic loop
-7. Persist assistant `messages` row (set `lastInboundMessageId` = same)
+7. Persist all new messages produced by the loop (intermediate tool_use/tool_result turns + final assistant), each as a `messages` row with full `ContentBlock[]` content. All carry the same `lastInboundMessageId`.
 8. Emit `response/ready` event
 
 Concurrency: `limit: 1, key: conversationId` — one batch at a time per conversation. Second batch queues in Inngest until the first completes.
