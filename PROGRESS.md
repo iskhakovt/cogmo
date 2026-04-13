@@ -38,7 +38,7 @@ The minimum useful system: talk to it, it remembers things.
 - [x] Post-conversation Observer — Inngest function triggered by `conversation/idle` event (Stage 1 evolution)
 - [x] Instruction file (Stage 1 evolution) — correction extraction via chatTyped(), persisted to steeringRules with graduation + consolidation
 - [x] Steering rules table in PostgreSQL — injected into system prompt per invocation
-- [ ] Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
+- [x] ~~Internal tag stripping~~ — removed; native thinking blocks + tool calls cover the use cases
 - [x] Crash recovery — handled by Inngest durable steps (automatic resume from last checkpoint); summarization LLM call wrapped in `step.run`, replay test via `@inngest/test`, contract documented in `design/crash-recovery.md`
 - [x] Session lifecycle — Inngest idle timer, resolveSession staleness, `/new` command, debounce wiring
 - [x] Context window management — countTokens() on LlmProvider, model registry, three-layer compaction pipeline, pair-aware compaction

@@ -147,16 +147,6 @@ Inngest durable steps checkpoint between boundaries; on retry, cached steps repl
 
 See [crash-recovery.md](crash-recovery.md) for the full durability map of `handle-message`, the per-tool re-execution table, the streaming dedup story, and the test contract.
 
-## Internal Tag Stripping `[confirmed]`
-
-Agent uses `<internal>` tags for reasoning visible to orchestrator but not user:
-
-```typescript
-function stripInternalTags(text: string): string {
-  return text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-}
-```
-
 ## Activity-Based Timeouts `[proposed]`
 
 From NanoClaw. Timeout resets on every tool call or partial response. Only kill truly stuck agents, not long-running ones that are making progress.
