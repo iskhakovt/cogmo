@@ -4,12 +4,14 @@ First-class feature from day one. Six stages, each a complete working system. St
 
 ## 6-Stage Ladder
 
-### Stage 1: Instruction Evolution `[proposed]`
+### Stage 1: Instruction Evolution `[confirmed]`
 **Trigger:** Day 1
-**What:** Corrections saved to persistent instruction file, loaded next session (CLAUDE.md pattern).
-**Implementation:** JSON/YAML file in data dir. Agent appends corrections. Orchestrator loads into system prompt.
-**Graduation:** Rule graduation — observation seen 2+ times promoted from "learning" to "rule". Consolidation at 30+ entries (Claude summarizes).
-**Prerequisite:** Full tool invocation history in `messages` table (landed) — correction extraction inspects `tool_use` blocks, not just text.
+**What:** Post-conversation correction extraction → steering rules with graduation model.
+**Implementation:** Observer Inngest function (`src/agent/evolution/observer.ts`) triggered by `conversation/idle`. Loads transcript, calls `chatTyped()` to extract corrections, persists to `steeringRules` table. Transcript formatted as readable text (tool calls as `[Tool: name(input)] → result`). Global scope (`profileId: null`) — industry standard for personal assistants.
+**Graduation:** `observationCount >= 2` promotes from learning (`active: false`) to rule (`active: true`). Active rules auto-injected into system prompt via `getActiveRules()`.
+**Consolidation:** When active rule count exceeds 30, LLM merges semantically similar rules via `consolidateRules()`. Observation counts summed on merge.
+**Safety:** Contradictions logged but not applied. Safety-category rules excluded from extraction (manual only). New corrections start at priority 100 (below manual rules).
+**Prerequisite:** Full tool invocation history in `messages` table (landed PR #34) — correction extraction inspects `tool_use` blocks, not just text.
 
 ### Stage 2: Skill Library `[research]`
 **Trigger:** When agent repeatedly does the same multi-step task

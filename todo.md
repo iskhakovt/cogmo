@@ -2,8 +2,7 @@
 
 ## Next
 
-- [ ] `p2` Post-conversation Observer — Inngest function triggered by `conversation/idle` event
-- [ ] `p2` Instruction file (Stage 1 evolution) — corrections append to JSON, loaded into system prompt. Prerequisite met: full tool invocation history now persisted in messages.
+
 - [ ] `p2` Context fast path — account for output tokens in `shouldSkipCounting` (currently only tracks `inputTokens`, underestimates by one response worth)
 - [ ] `p2` Background compaction — run summarization after response (while user reads) instead of before next turn, store pre-computed summary to eliminate compaction latency
 - [ ] `p2` Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
@@ -51,6 +50,7 @@
 
 ## Done
 
+- [x] Stage 1 evolution — Observer extracts corrections from conversation/idle, persists to steeringRules with graduation (2+ observations → active), consolidation at 30+ rules, global scope, formatted transcript
 - [x] Typed LLM calls — `chatTyped()` with Zod schemas, `responseFormat` on ChatParams, `ThinkingBlock` + extended thinking, `clearOldThinking` pre-pass, retry with feedback injection
 - [x] Response routing — source routing per `design/transport/response-routing.md`
 - [x] Initialize Node.js project (package.json, tsconfig, Biome, Vitest)
