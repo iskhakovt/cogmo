@@ -59,7 +59,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",
-    "@copilotkit/aimock": "^1.8.0",
+    "@copilotkit/aimock": "^1.13.0",
     "@electric-sql/pglite": "^0.4.4",
     "@inngest/test": "^1.0.0",
     "@testcontainers/ollama": "^11.13.0",
