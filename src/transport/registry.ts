@@ -97,7 +97,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
  * If no secrets store is provided (tests, dev without master key), credentials
  * pass through unchanged — adapters must handle both resolved and raw formats.
  */
-async function resolveCredentialSecrets(
+export async function resolveCredentialSecrets(
   credentials: JsonValue,
   secretsStore: SecretsStore,
 ): Promise<JsonValue> {

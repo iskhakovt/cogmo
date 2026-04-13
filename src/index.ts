@@ -24,7 +24,7 @@ import type { LlmProvider } from "./llm/provider.js";
 import { logger } from "./logger.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
-import { DrizzleSecretsStore } from "./secrets/store/index.js";
+import { DrizzleSecretsStore, type SecretsStore } from "./secrets/store/index.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
 import { createDeliveryRouter } from "./transport/delivery-router.js";
 import { startChannels } from "./transport/registry.js";
@@ -184,7 +184,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
 async function resolveProviderForModel(
   model: string,
   agentStore: AgentStore,
-  secretsStore: InstanceType<typeof DrizzleSecretsStore>,
+  secretsStore: SecretsStore,
 ): Promise<LlmProvider> {
   const row = await agentStore.resolveProviderForModel(model);
   if (!row) {
