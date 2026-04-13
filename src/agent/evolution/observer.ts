@@ -26,6 +26,8 @@ const MIN_MESSAGES_FOR_EXTRACTION = 4; // 2 turns minimum
 export interface ObserverDeps {
   agentStore: AgentStore;
   provider: LlmProvider;
+  // TODO: Route through Service.memory once retainBatch is on the Service interface (ACL boundary).
+  // Currently called directly on the provider — safe because the Observer is a trusted internal consumer.
   memory: Pick<MemoryProvider, "retainBatch">;
   extractionModel?: string;
 }

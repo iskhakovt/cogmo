@@ -129,4 +129,20 @@ describe("extractMemories", () => {
 
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("ti", expect.any(Array));
   });
+
+  it("catches chatTyped failure and returns zeros", async () => {
+    const deps = mockExtractionDeps(
+      { memories: [] },
+      {
+        provider: mockProvider({
+          chat: vi.fn().mockRejectedValue(new Error("LLM timeout")),
+        }),
+      },
+    );
+
+    const result = await extractMemories(sampleHistory, "user-1", deps);
+
+    expect(result).toEqual({ extracted: 0, byNetwork: {} });
+    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
+  });
 });

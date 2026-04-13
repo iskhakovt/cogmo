@@ -1,5 +1,5 @@
 {
-  "id": "7f87c66c-ed71-421e-b802-d93b450a5864",
+  "id": "5fa3eef2-fd54-427f-9961-4d3e8c360234",
   "prevId": "5773164a-b4c8-4771-9433-4cc8e271260a",
   "version": "7",
   "dialect": "postgresql",
@@ -407,7 +407,8 @@
         },
         "auto_recall": {
           "name": "auto_recall",
-          "type": "text",
+          "type": "auto_recall_mode",
+          "typeSchema": "public",
           "primaryKey": false,
           "notNull": true,
           "default": "'heuristic'"
@@ -938,7 +939,13 @@
       "isRLSEnabled": false
     }
   },
-  "enums": {},
+  "enums": {
+    "public.auto_recall_mode": {
+      "name": "auto_recall_mode",
+      "schema": "public",
+      "values": ["off", "always", "heuristic", "llm"]
+    }
+  },
   "schemas": {},
   "sequences": {},
   "roles": {},

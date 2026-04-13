@@ -6,13 +6,18 @@
  * with network tags and per-tag observation scoping.
  */
 
+import * as R from "remeda";
 import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
 import type { Message } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
 import { formatTranscript } from "./extract-corrections.js";
-import { MEMORY_EXTRACTION_PROMPT, MemoryExtractionSchema } from "./memory-extraction-schema.js";
+import {
+  MEMORY_EXTRACTION_PROMPT,
+  type MemoryExtraction,
+  MemoryExtractionSchema,
+} from "./memory-extraction-schema.js";
 
 export interface MemoryExtractionDeps {
   provider: LlmProvider;
@@ -42,14 +47,20 @@ export async function extractMemories(
     return { extracted: 0, byNetwork: {} };
   }
 
-  const { data } = await chatTyped({
-    provider: deps.provider,
-    model: deps.model,
-    system: MEMORY_EXTRACTION_PROMPT,
-    messages: [{ role: "user", content: transcript }],
-    schema: MemoryExtractionSchema,
-    name: "memory-extraction",
-  });
+  let data: MemoryExtraction;
+  try {
+    ({ data } = await chatTyped({
+      provider: deps.provider,
+      model: deps.model,
+      system: MEMORY_EXTRACTION_PROMPT,
+      messages: [{ role: "user", content: transcript }],
+      schema: MemoryExtractionSchema,
+      name: "memory-extraction",
+    }));
+  } catch (err) {
+    logger.warn({ err, bankId }, "memory extraction failed — skipping");
+    return { extracted: 0, byNetwork: {} };
+  }
 
   if (data.memories.length === 0) {
     logger.debug("no memories extracted from transcript");
@@ -66,10 +77,7 @@ export async function extractMemories(
 
   await deps.memory.retainBatch(bankId, items);
 
-  const byNetwork: Record<string, number> = {};
-  for (const mem of data.memories) {
-    byNetwork[mem.network] = (byNetwork[mem.network] ?? 0) + 1;
-  }
+  const byNetwork = R.countBy(data.memories, (m) => m.network);
 
   logger.info({ extracted: data.memories.length, byNetwork, bankId }, "memory extraction complete");
 

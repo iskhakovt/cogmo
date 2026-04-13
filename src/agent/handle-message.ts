@@ -13,7 +13,7 @@ import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./con
 import type { DebounceConfig } from "./debounce.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
-import { type AutoRecallMode, shouldSkipRecall } from "./recall-gate.js";
+import { shouldSkipRecall } from "./recall-gate.js";
 import type { Service } from "./service.js";
 import { createService } from "./service.js";
 import type { AgentStore } from "./store/index.js";
@@ -157,7 +157,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const profile = await agentStore.getProfile(profileId);
 
       // Auto-recall: search memory for context relevant to this message
-      const autoRecallMode = (profile?.autoRecall as AutoRecallMode) ?? "heuristic";
+      const autoRecallMode = profile?.autoRecall ?? "heuristic";
       const recallResult = shouldSkipRecall(autoRecallMode, userContentText)
         ? { memories: [] }
         : await memory.recall(userId, userContentText, { maxTokens: 2000 });

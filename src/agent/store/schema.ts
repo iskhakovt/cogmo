@@ -3,6 +3,7 @@ import {
   index,
   integer,
   jsonb,
+  pgEnum,
   pgTable,
   text,
   timestamp,
@@ -11,6 +12,10 @@ import {
 } from "drizzle-orm/pg-core";
 import { pk, ts } from "../../db/helpers.js";
 import { secrets } from "../../secrets/store/schema.js";
+
+// --- Enums ---
+
+export const autoRecallMode = pgEnum("auto_recall_mode", ["off", "always", "heuristic", "llm"]);
 
 // --- Tables ---
 
@@ -58,7 +63,7 @@ export const profiles = pgTable(
     model: text("model").notNull(),
     summarizationModel: text("summarization_model"), // null = use main model
     extractionModel: text("extraction_model"), // null = use main model
-    autoRecall: text("auto_recall").notNull().default("heuristic"), // 'off' | 'always' | 'heuristic' | 'llm'
+    autoRecall: autoRecallMode("auto_recall").notNull().default("heuristic"),
     toolSet: jsonb("tool_set").notNull(),
     createdAt: ts(),
   },

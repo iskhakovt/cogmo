@@ -1,1 +1,0 @@
-ALTER TABLE "profiles" ADD COLUMN "auto_recall" text DEFAULT 'heuristic' NOT NULL;

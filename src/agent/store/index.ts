@@ -4,6 +4,7 @@ import type { JsonValue } from "type-fest";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
 import { type ContentBlock, type Message, MessageContentSchema } from "../../llm/types.js";
+import type { AutoRecallMode } from "../recall-gate.js";
 import {
   conversations,
   coreMemoryBlocks,
@@ -63,7 +64,7 @@ export interface AgentStore {
     model: string;
     summarizationModel: string | null;
     extractionModel: string | null;
-    autoRecall: string;
+    autoRecall: AutoRecallMode;
     toolSet: JsonValue;
   } | null>;
 
@@ -324,7 +325,7 @@ export class DrizzleAgentStore implements AgentStore {
     model: string;
     summarizationModel: string | null;
     extractionModel: string | null;
-    autoRecall: string;
+    autoRecall: AutoRecallMode;
     toolSet: JsonValue;
   } | null> {
     return this.#db.transaction(async (tx) => {
@@ -348,7 +349,7 @@ export class DrizzleAgentStore implements AgentStore {
           model: string;
           summarizationModel: string | null;
           extractionModel: string | null;
-          autoRecall: string;
+          autoRecall: AutoRecallMode;
           toolSet: JsonValue;
         }) ?? null
       );
