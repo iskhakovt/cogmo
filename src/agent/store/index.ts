@@ -151,6 +151,9 @@ export interface AgentStore {
     attrs: JsonValue;
   } | null>;
 
+  /** Get the next available position for a model (MAX(position) + 1, or 0 if none). */
+  getNextModelProviderPosition(model: string): Promise<number>;
+
   /** Remove all model_providers entries for a given provider. */
   removeModelProvidersByProvider(providerId: string): Promise<void>;
 }
@@ -526,6 +529,18 @@ export class DrizzleAgentStore implements AgentStore {
         .orderBy(asc(modelProviders.position))
         .limit(1);
       return (rows[0] as (typeof rows)[0] & { attrs: JsonValue }) ?? null;
+    });
+  }
+
+  async getNextModelProviderPosition(model: string): Promise<number> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ position: modelProviders.position })
+        .from(modelProviders)
+        .where(eq(modelProviders.model, model))
+        .orderBy(desc(modelProviders.position))
+        .limit(1);
+      return rows[0] ? rows[0].position + 1 : 0;
     });
   }
 

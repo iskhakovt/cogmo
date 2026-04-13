@@ -201,18 +201,16 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
   });
 
   // Register this provider for the default profile's model.
-  // If another provider already serves this model (e.g., "add another"),
-  // use the next available position instead of colliding at 0.
+  // Use next available position to avoid UNIQUE(model, position) collision.
   const defaultProfile = await deps.agentStore.getDefaultProfile();
   if (defaultProfile) {
     const profile = await deps.agentStore.getProfile(defaultProfile.id);
     if (profile) {
-      const existing = await deps.agentStore.resolveProviderForModel(profile.model);
-      const position = existing ? 1 : 0; // primary if first, fallback if second
+      const nextPosition = await deps.agentStore.getNextModelProviderPosition(profile.model);
       await deps.agentStore.addModelProvider({
         model: profile.model,
         providerId,
-        position,
+        position: nextPosition,
       });
     }
   }
