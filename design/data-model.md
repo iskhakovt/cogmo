@@ -21,6 +21,16 @@ Tables are documented in the design doc that owns their domain:
 | `steering_rules` | [agents.md](agents.md) | Dynamic behavioral rules injected into system prompts. Written by manual insertion and automated correction extraction (Stage 1 evolution). |
 | `core_memory_blocks` | [agents.md](agents.md) | Structured persistent notes (user profile, projects). Upsert by (user_id, key). Always in system prompt. |
 
+## New Tables (Setup Infrastructure) `[confirmed]`
+
+| Table | Doc | Notes |
+|-|-|-|
+| `secrets` | [infrastructure.md](infrastructure.md) | Encrypted credentials (AES-256-GCM). Name-keyed. |
+| `llm_providers` | [providers.md](providers.md) | Provider config (type, base_url, secret FK, attrs) |
+| `model_providers` | [providers.md](providers.md) | Model → provider routing with position-based priority. UNIQUE(model, position) prevents ties. |
+
+`profiles` gains `summarization_model TEXT` (nullable, replaces `SUMMARIZATION_MODEL` env var).
+
 ## Deferred Tables `[proposed]`
 
 Design sketches — added via Drizzle migrations when their phase begins.

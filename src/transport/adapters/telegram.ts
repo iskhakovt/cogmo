@@ -141,7 +141,11 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     if (!session) {
       const result = await transport.createConversation(addr, handle, { isPrivate: true });
       if (result.isErr()) {
-        logger.error({ error: result.error }, "failed to create conversation");
+        if (result.error.code === "identity_rejected") {
+          logger.info({ handle }, "telegram: rejected unauthorized user");
+        } else {
+          logger.error({ error: result.error }, "failed to create conversation");
+        }
         return null;
       }
       session = result.value;

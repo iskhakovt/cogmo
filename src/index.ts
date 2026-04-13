@@ -11,6 +11,7 @@ import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
 import { CORE_MEMORY_PROMPT_GUIDANCE, MEMORY_PROMPT_GUIDANCE } from "./agent/service.js";
+import type { AgentStore } from "./agent/store/index.js";
 import { DrizzleAgentStore } from "./agent/store/index.js";
 import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
@@ -18,12 +19,21 @@ import { db } from "./db/index.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
 import { AnthropicProvider } from "./llm/anthropic.js";
+import { OpenAICompatibleProvider } from "./llm/openai-compat.js";
+import type { LlmProvider } from "./llm/provider.js";
 import { logger } from "./logger.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
+import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
+import { DrizzleSecretsStore, type SecretsStore } from "./secrets/store/index.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
 import { createDeliveryRouter } from "./transport/delivery-router.js";
 import { startChannels } from "./transport/registry.js";
 import { DrizzleTransportStore } from "./transport/store/index.js";
+
+export interface BootstrapOptions {
+  /** Inject a provider directly — skips DB resolution. Used by tests. */
+  providerOverride?: LlmProvider;
+}
 
 /**
  * Wire all application dependencies — stores, providers, tools, adapters, Inngest functions.
@@ -31,21 +41,42 @@ import { DrizzleTransportStore } from "./transport/store/index.js";
  * Returns the assembled pieces so callers can choose how to run them
  * (serve mode, connect mode, or in-process for tests).
  */
-export async function bootstrap() {
+export async function bootstrap(opts: BootstrapOptions = {}) {
   await migrate(db, { migrationsFolder: "./migrations" });
   logger.info("database migrations applied");
 
   const agentStore = new DrizzleAgentStore(db);
   const transportStore = new DrizzleTransportStore(db);
 
+  // Secrets store — required for decrypting provider credentials and channel tokens.
+  if (!env.COGMO_MASTER_KEY) {
+    throw new Error(
+      "COGMO_MASTER_KEY is required. Generate one with: cogmo gen-key\n" + "Then run: cogmo setup",
+    );
+  }
+  const secretsStore = new DrizzleSecretsStore(
+    db,
+    deriveMasterKey(parseMasterKey(env.COGMO_MASTER_KEY), "cogmo/secrets-at-rest/v1"),
+  );
+
   const user = await agentStore.getFirstUser();
-  const profile = await agentStore.getDefaultProfile();
-  if (!user || !profile) {
-    throw new Error("no user or profile found — run `seed` first");
+  const defaultProfile = await agentStore.getDefaultProfile();
+  if (!user || !defaultProfile) {
+    throw new Error("no user or profile found — run `cogmo setup` first");
+  }
+  const profile = await agentStore.getProfile(defaultProfile.id);
+  if (!profile) {
+    throw new Error("default profile disappeared — database inconsistency");
   }
 
-  const provider = new AnthropicProvider(env.ANTHROPIC_API_KEY, env.ANTHROPIC_BASE_URL);
-  const webTools = createWebTools(env.TAVILY_API_KEY, env.OPENROUTER_API_KEY);
+  const provider =
+    opts.providerOverride ??
+    (await resolveProviderForModel(profile.model, agentStore, secretsStore));
+  // Web tool keys: DB first (wizard-configured), env fallback (dev convenience).
+  const tavilyKey = (await secretsStore.getSecret("tavily_api_key")) ?? env.TAVILY_API_KEY;
+  const openrouterKey =
+    (await secretsStore.getSecret("openrouter_api_key")) ?? env.OPENROUTER_API_KEY;
+  const webTools = createWebTools(tavilyKey, openrouterKey);
   const tools = createDefaultTools(
     [...memoryTools, ...webTools, ...fileTools, ...coreMemoryTools],
     env.USER_TIMEZONE,
@@ -93,6 +124,7 @@ export async function bootstrap() {
     inboundArrived,
     attachments: attachmentStore,
     idleTimeoutMs,
+    secretsStore,
   });
 
   const deliveryRouter = createDeliveryRouter({ adapters: adapterMap, transportStore });
@@ -111,13 +143,13 @@ export async function bootstrap() {
     debounceConfig,
     deliveryRouter,
     runStreamingAgentLoop,
-    ...(env.SUMMARIZATION_MODEL && { summarizationModel: env.SUMMARIZATION_MODEL }),
+    ...(profile.summarizationModel && { summarizationModel: profile.summarizationModel }),
   });
 
   const observer = createObserver({
     agentStore,
     provider,
-    ...(env.EXTRACTION_MODEL && { extractionModel: env.EXTRACTION_MODEL }),
+    ...(profile.extractionModel && { extractionModel: profile.extractionModel }),
   });
 
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
@@ -139,4 +171,54 @@ export async function bootstrap() {
     provider,
     memory,
   };
+}
+
+/**
+ * Resolve the LLM provider for a model via the model_providers routing table.
+ *
+ * Looks up the best provider for the model (lowest position) → decrypts
+ * API key from secrets store → constructs the correct adapter class.
+ *
+ * Requires COGMO_MASTER_KEY to be set (for secrets decryption).
+ */
+async function resolveProviderForModel(
+  model: string,
+  agentStore: AgentStore,
+  secretsStore: SecretsStore,
+): Promise<LlmProvider> {
+  const row = await agentStore.resolveProviderForModel(model);
+  if (!row) {
+    throw new Error(
+      `No provider configured for model "${model}". Run \`cogmo setup\` to configure one.`,
+    );
+  }
+
+  const apiKey = await secretsStore.getSecretById(row.secretId);
+  if (!apiKey) {
+    throw new Error(
+      `Secret for provider "${row.name}" not found. Re-run \`cogmo setup\` to reconfigure.`,
+    );
+  }
+
+  const attrs = row.attrs as Record<string, unknown>;
+
+  switch (row.type) {
+    case "anthropic":
+      return new AnthropicProvider(apiKey, row.baseUrl ?? undefined);
+    case "openai_compatible": {
+      if (!row.baseUrl) {
+        throw new Error(
+          `Provider "${row.name}" (openai_compatible) requires a base URL. Re-run \`cogmo setup\` to reconfigure.`,
+        );
+      }
+      return new OpenAICompatibleProvider(row.name, {
+        apiKey,
+        baseURL: row.baseUrl,
+        headers: (attrs.headers as Record<string, string>) ?? undefined,
+        promptCaching: (attrs.promptCaching as boolean) ?? false,
+      });
+    }
+    default:
+      throw new Error(`Unknown provider type: ${row.type}`);
+  }
 }

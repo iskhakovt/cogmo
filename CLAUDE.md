@@ -46,7 +46,9 @@ Read `design/` for the full picture. Key docs:
 | [context-management.md](design/context-management.md) | Token counting, compaction pipeline, model registry |
 | [transport/](design/transport/) | Messaging architecture — adapters, sessions, debounce, routing, identity |
 | [integrations.md](design/integrations.md) | MCP, Telegram adapter, skill library |
-| [infrastructure.md](design/infrastructure.md) | Runtime requirements, Docker Compose, secrets, deployment |
+| [providers.md](design/providers.md) | Multi-provider LLM routing, `llm_providers` table, profile FK, provider dispatch |
+| [setup.md](design/setup.md) | Guided setup wizard UX contract — interactive flow, re-runnable behavior, non-interactive mode |
+| [infrastructure.md](design/infrastructure.md) | Runtime requirements, Docker Compose, secrets (encrypted DB, master key, HKDF, `_FILE` convention), deployment |
 | [data-model.md](design/data-model.md) | Table index — points to schemas in domain docs, deferred tables, design decisions |
 | [testing.md](design/testing.md) | Local dev, unit/integration/LLM tests, mocking, evaluation dataset |
 | [tooling.md](design/tooling.md) | Dev stack — runtime, build, ORM, testing, logging, linting, Kotlin-feel patterns |
@@ -179,7 +181,7 @@ Store implementations (`DrizzleAgentStore`, `DrizzleTransportStore`) are tested 
 
 ### Integration Test Env Injection
 
-`process.env` mutations in Vitest `globalSetup` propagate to test workers (worker env = `{ ...process.env, ...config.env }`). Dynamic values (container URLs) are set via `process.env` in globalSetup. Static values (`NODE_ENV`, `ANTHROPIC_API_KEY`) go in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
+`process.env` mutations in Vitest `globalSetup` propagate to test workers (worker env = `{ ...process.env, ...config.env }`). Dynamic values (container URLs, `COGMO_MASTER_KEY`) are set via `process.env` in globalSetup. Static values (`NODE_ENV`) go in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
 
 ### Telegram Testing
 

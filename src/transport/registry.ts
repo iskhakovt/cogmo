@@ -1,7 +1,9 @@
 import type { Inngest } from "inngest";
+import type { JsonValue } from "type-fest";
 import type { AgentStore } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
+import type { SecretsStore } from "../secrets/store/index.js";
 import { adaptersByType } from "./adapters/index.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { TransportStore } from "./store/index.js";
@@ -17,6 +19,8 @@ export interface RegistryDeps {
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
   idleTimeoutMs: number;
+  /** Resolves secret references in channel credentials before passing to adapters. */
+  secretsStore: SecretsStore;
 }
 
 export interface RegistryResult {
@@ -63,9 +67,14 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       idleTimeoutMs: deps.idleTimeoutMs,
     });
 
+    // Resolve secret references in credentials before passing to adapter.
+    // Credentials like { tokenSecretName: "telegram_bot_token" } are resolved
+    // to { token: "actual-token-value" } so adapters never see secret names.
+    const credentials = await resolveCredentialSecrets(channel.credentials, deps.secretsStore);
+
     const result = await mod.setup({
       channelId: channel.id,
-      credentials: channel.credentials,
+      credentials,
       transport,
     });
 
@@ -76,4 +85,41 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
 
   logger.info({ count: channels.length }, "channel adapters started");
   return { functions, adapters, adapterMap };
+}
+
+/**
+ * Resolve secret references in channel credentials.
+ *
+ * Convention: any credential field ending in `SecretName` (e.g., `tokenSecretName`)
+ * is resolved to its plaintext value under the base field name (e.g., `token`).
+ * The `SecretName` field is removed from the result.
+ *
+ * If no secrets store is provided (tests, dev without master key), credentials
+ * pass through unchanged — adapters must handle both resolved and raw formats.
+ */
+export async function resolveCredentialSecrets(
+  credentials: JsonValue,
+  secretsStore: SecretsStore,
+): Promise<JsonValue> {
+  if (typeof credentials !== "object" || credentials === null || Array.isArray(credentials)) {
+    return credentials;
+  }
+
+  const resolved: Record<string, JsonValue> = { ...(credentials as Record<string, JsonValue>) };
+
+  for (const [key, value] of Object.entries(resolved)) {
+    if (key.endsWith("SecretName") && typeof value === "string") {
+      const baseKey = key.slice(0, -"SecretName".length);
+      const secret = await secretsStore.getSecret(value);
+      if (!secret) {
+        throw new Error(
+          `Channel credential references secret "${value}" but it was not found. Re-run \`cogmo setup\` to reconfigure.`,
+        );
+      }
+      resolved[baseKey] = secret;
+      delete resolved[key];
+    }
+  }
+
+  return resolved;
 }

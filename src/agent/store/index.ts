@@ -7,7 +7,9 @@ import { type ContentBlock, type Message, MessageContentSchema } from "../../llm
 import {
   conversations,
   coreMemoryBlocks,
+  llmProviders,
   messages,
+  modelProviders,
   profiles,
   steeringRules,
   users,
@@ -55,9 +57,14 @@ export interface AgentStore {
   getHistory(conversationId: string): Promise<ReadonlyArray<Message>>;
 
   /** Load a profile by ID. */
-  getProfile(
-    profileId: string,
-  ): Promise<{ id: string; basePrompt: string; model: string; toolSet: JsonValue } | null>;
+  getProfile(profileId: string): Promise<{
+    id: string;
+    basePrompt: string;
+    model: string;
+    summarizationModel: string | null;
+    extractionModel: string | null;
+    toolSet: JsonValue;
+  } | null>;
 
   /** Get the first user (for bootstrapping). */
   getFirstUser(): Promise<{ id: string } | null>;
@@ -92,6 +99,64 @@ export interface AgentStore {
 
   /** Get inputTokens from the most recent assistant message (for fast-path budget estimation). */
   getLastInputTokens(conversationId: string): Promise<number | null>;
+
+  // --- LLM Providers ---
+
+  /** Create an LLM provider configuration. */
+  createProvider(params: {
+    name: string;
+    type: string;
+    baseUrl?: string;
+    secretId: string;
+    attrs: JsonValue;
+  }): Promise<{ id: string }>;
+
+  /** Get a provider by ID. */
+  getProvider(providerId: string): Promise<{
+    id: string;
+    name: string;
+    type: string;
+    baseUrl: string | null;
+    secretId: string;
+    attrs: JsonValue;
+  } | null>;
+
+  /** List all providers. */
+  listProviders(): Promise<
+    ReadonlyArray<{
+      id: string;
+      name: string;
+      type: string;
+    }>
+  >;
+
+  /** Delete a provider by ID (cascades to model_providers). */
+  deleteProvider(providerId: string): Promise<void>;
+
+  // --- Model → Provider routing ---
+
+  /** Register a provider for a model at a given position (lower = preferred). */
+  addModelProvider(params: {
+    model: string;
+    providerId: string;
+    position: number;
+  }): Promise<{ id: string }>;
+
+  /** Resolve the best provider for a model (lowest position). */
+  resolveProviderForModel(model: string): Promise<{
+    id: string;
+    name: string;
+    type: string;
+    baseUrl: string | null;
+    secretId: string;
+    attrs: JsonValue;
+  } | null>;
+
+  /** Get the next available position for a model (MAX(position) + 1, or 0 if none). */
+  getNextModelProviderPosition(model: string): Promise<number>;
+
+  /** Remove all model_providers entries for a given provider. */
+  removeModelProvidersByProvider(providerId: string): Promise<void>;
 
   // --- Evolution: correction extraction ---
 
@@ -252,22 +317,36 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getProfile(
-    profileId: string,
-  ): Promise<{ id: string; basePrompt: string; model: string; toolSet: JsonValue } | null> {
+  async getProfile(profileId: string): Promise<{
+    id: string;
+    basePrompt: string;
+    model: string;
+    summarizationModel: string | null;
+    extractionModel: string | null;
+    toolSet: JsonValue;
+  } | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
           id: profiles.id,
           basePrompt: profiles.basePrompt,
           model: profiles.model,
+          summarizationModel: profiles.summarizationModel,
+          extractionModel: profiles.extractionModel,
           toolSet: profiles.toolSet,
         })
         .from(profiles)
         .where(eq(profiles.id, profileId))
         .limit(1);
       return (
-        (rows[0] as { id: string; basePrompt: string; model: string; toolSet: JsonValue }) ?? null
+        (rows[0] as {
+          id: string;
+          basePrompt: string;
+          model: string;
+          summarizationModel: string | null;
+          extractionModel: string | null;
+          toolSet: JsonValue;
+        }) ?? null
       );
     });
   }
@@ -377,6 +456,140 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
+  // --- LLM Providers ---
+
+  async createProvider(params: {
+    name: string;
+    type: string;
+    baseUrl?: string;
+    secretId: string;
+    attrs: JsonValue;
+  }): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      return single(
+        await tx
+          .insert(llmProviders)
+          .values({
+            name: params.name,
+            type: params.type,
+            baseUrl: params.baseUrl,
+            secretId: params.secretId,
+            attrs: params.attrs,
+          })
+          .returning({ id: llmProviders.id }),
+      );
+    });
+  }
+
+  async getProvider(providerId: string): Promise<{
+    id: string;
+    name: string;
+    type: string;
+    baseUrl: string | null;
+    secretId: string;
+    attrs: JsonValue;
+  } | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: llmProviders.id,
+          name: llmProviders.name,
+          type: llmProviders.type,
+          baseUrl: llmProviders.baseUrl,
+          secretId: llmProviders.secretId,
+          attrs: llmProviders.attrs,
+        })
+        .from(llmProviders)
+        .where(eq(llmProviders.id, providerId))
+        .limit(1);
+      return (rows[0] as (typeof rows)[0] & { attrs: JsonValue }) ?? null;
+    });
+  }
+
+  async listProviders(): Promise<
+    ReadonlyArray<{
+      id: string;
+      name: string;
+      type: string;
+    }>
+  > {
+    return this.#db.transaction(async (tx) => {
+      return tx
+        .select({
+          id: llmProviders.id,
+          name: llmProviders.name,
+          type: llmProviders.type,
+        })
+        .from(llmProviders);
+    });
+  }
+
+  async deleteProvider(providerId: string): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      // model_providers cascade-deletes via ON DELETE CASCADE
+      await tx.delete(llmProviders).where(eq(llmProviders.id, providerId));
+    });
+  }
+
+  // --- Model → Provider routing ---
+
+  async addModelProvider(params: {
+    model: string;
+    providerId: string;
+    position: number;
+  }): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      return single(
+        await tx.insert(modelProviders).values(params).returning({ id: modelProviders.id }),
+      );
+    });
+  }
+
+  async resolveProviderForModel(model: string): Promise<{
+    id: string;
+    name: string;
+    type: string;
+    baseUrl: string | null;
+    secretId: string;
+    attrs: JsonValue;
+  } | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: llmProviders.id,
+          name: llmProviders.name,
+          type: llmProviders.type,
+          baseUrl: llmProviders.baseUrl,
+          secretId: llmProviders.secretId,
+          attrs: llmProviders.attrs,
+        })
+        .from(modelProviders)
+        .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
+        .where(eq(modelProviders.model, model))
+        .orderBy(asc(modelProviders.position))
+        .limit(1);
+      return (rows[0] as (typeof rows)[0] & { attrs: JsonValue }) ?? null;
+    });
+  }
+
+  async getNextModelProviderPosition(model: string): Promise<number> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ position: modelProviders.position })
+        .from(modelProviders)
+        .where(eq(modelProviders.model, model))
+        .orderBy(desc(modelProviders.position))
+        .limit(1);
+      return rows[0] ? rows[0].position + 1 : 0;
+    });
+  }
+
+  async removeModelProvidersByProvider(providerId: string): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      await tx.delete(modelProviders).where(eq(modelProviders.providerId, providerId));
+    });
+  }
+
   // --- Evolution: correction extraction ---
 
   async getCorrections(profileId: string): Promise<
@@ -416,7 +629,6 @@ export class DrizzleAgentStore implements AgentStore {
   }): Promise<{ id: string; promoted: boolean }> {
     return this.#db.transaction(async (tx) => {
       if (params.existingRuleId) {
-        // Increment observation count; promote to active when reaching 2
         const rows = await tx
           .update(steeringRules)
           .set({
@@ -431,11 +643,9 @@ export class DrizzleAgentStore implements AgentStore {
           });
         const row = rows[0];
         if (!row) throw new Error(`upsertCorrection: rule not found: ${params.existingRuleId}`);
-        // promoted = just crossed the threshold (count is now 2 and active is true)
         return { id: row.id, promoted: row.observationCount === 2 && row.active };
       }
 
-      // New correction — inactive until observed again
       const row = single(
         await tx
           .insert(steeringRules)

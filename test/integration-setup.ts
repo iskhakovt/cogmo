@@ -69,8 +69,9 @@ export async function setup({ provide }: GlobalSetupContext) {
 
   // Set process.env — propagates to Vitest test workers.
   process.env.DATABASE_URL = urls.databaseUrl;
-  process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "test-key";
-  process.env.ANTHROPIC_BASE_URL = `http://localhost:${mock.port}`;
+  // Master key for secrets store — tests use providerOverride so no real
+  // credentials are stored, but bootstrap requires the key unconditionally.
+  process.env.COGMO_MASTER_KEY = "bSK9MVRqsqWnRcp4oNTQLQ+LmKJT+BvUvzytD5LH4AE="; // 32 bytes base64 (test-only)
   process.env.HINDSIGHT_URL = hindsightUrl;
   process.env.INNGEST_BASE_URL = urls.inngestBaseUrl;
   process.env.INNGEST_DEV = "true";
@@ -101,6 +102,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   provide("inngestEventKey", "test");
   provide("hindsightUrl", hindsightUrl);
   provide("defaultUserId", defaultUserId);
+  provide("llmockBaseUrl", mock.url);
 
   console.log(`Integration test environment ready — ${JSON.stringify({ ...urls, hindsightUrl })}`);
 }

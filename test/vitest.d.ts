@@ -5,5 +5,6 @@ declare module "vitest" {
     inngestEventKey: string;
     hindsightUrl: string;
     defaultUserId: string;
+    llmockBaseUrl: string;
   }
 }
