@@ -3,8 +3,6 @@
 ## Next
 
 - [ ] `p2` Non-interactive setup — `cogmo setup --non-interactive` reads `COGMO_LLM_*` env vars, validates, writes provider + model_providers to DB. Currently only seeds defaults. Needed for CI/IaC.
-- [ ] `p3` Observer unit test — mock `step.run` to cover min-message guard, conditional consolidation, return shape
-- [ ] `p3` Idempotent correction inserts — dedup key (rule text hash + category + source) to prevent duplicate rules on step retry
 - [ ] `p2` Context fast path — account for output tokens in `shouldSkipCounting` (currently only tracks `inputTokens`, underestimates by one response worth)
 - [ ] `p2` Background compaction — run summarization after response (while user reads) instead of before next turn, store pre-computed summary to eliminate compaction latency
 - [ ] `p2` Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user
@@ -12,6 +10,8 @@
 - [ ] `p2` Define InboundContent schema (Zod) — structured message content type instead of raw JsonValue everywhere
 - [ ] `p2` CLI channel management commands — `main.ts channel add telegram --token=...`, `channel list`, `channel remove` (store layer covered by `p1` Channel CRUD; this is the CLI surface)
 - [ ] `p2` Pass transaction function to stores instead of full Database — makes transactions inescapable, narrows the interface
+- [ ] `p3` Observer unit test — mock `step.run` to cover min-message guard, conditional consolidation, return shape
+- [ ] `p3` Idempotent correction inserts — dedup key (rule text hash + category + source) to prevent duplicate rules on step retry
 - [ ] `p3` Consider dropping Inngest serve mode — only connect mode is used (tests, production, local dev)
 - [ ] `p3` Switch Hindsight LLM to gpt-5-nano — blocked on Hindsight emitting `max_completion_tokens` for GPT-5 models. Currently on gpt-4o-mini (~$10/mo vs ~$6/mo target). See `design/memory.md` → Known Gaps.
 - [ ] `p3` Hindsight retain failure monitoring — `async: true` means background pipeline errors are invisible to caller. Poll `operation_id` status or wire webhooks; surface failures to logs/metrics.
