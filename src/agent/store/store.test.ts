@@ -480,4 +480,310 @@ describe("DrizzleAgentStore", () => {
       expect(time).toBeNull();
     });
   });
+
+  describe("evolution: corrections", () => {
+    it("getCorrections returns correction-sourced rules for profile + global", async () => {
+      const profileId = await seedProfile();
+
+      const { steeringRules } = await import("./schema.js");
+      await db.insert(steeringRules).values([
+        {
+          rule: "Be concise",
+          category: "style",
+          active: false,
+          source: "correction",
+          priority: 100,
+          observationCount: 1,
+          profileId: null,
+        },
+        {
+          rule: "Use tables for data",
+          category: "style",
+          active: true,
+          source: "correction",
+          priority: 100,
+          observationCount: 2,
+          profileId: null,
+        },
+        {
+          rule: "Manual rule",
+          category: "safety",
+          active: true,
+          source: "manual",
+          priority: 1,
+          observationCount: 0,
+          profileId: null,
+        },
+      ]);
+
+      const corrections = await store.getCorrections(profileId);
+      expect(corrections).toHaveLength(2);
+      expect(corrections.map((c) => c.rule)).toEqual(["Be concise", "Use tables for data"]);
+    });
+
+    it("upsertCorrection inserts new rule as inactive with observationCount 1", async () => {
+      const result = await store.upsertCorrection({
+        rule: "Prefer bullet points",
+        category: "style",
+        profileId: null,
+      });
+
+      expect(result.promoted).toBe(false);
+
+      const { steeringRules } = await import("./schema.js");
+      const rows = await db
+        .select({
+          rule: steeringRules.rule,
+          active: steeringRules.active,
+          source: steeringRules.source,
+          observationCount: steeringRules.observationCount,
+          priority: steeringRules.priority,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, result.id));
+
+      expect(rows[0]).toEqual({
+        rule: "Prefer bullet points",
+        active: false,
+        source: "correction",
+        observationCount: 1,
+        priority: 100,
+      });
+    });
+
+    it("upsertCorrection increments existing rule without promotion when count < 2", async () => {
+      // Insert a rule that's already been seen once but needs special handling
+      // (observationCount will go to 2 on increment, which triggers promotion)
+      // So for this test, we need a rule with observationCount = 0 (edge case)
+      const { steeringRules } = await import("./schema.js");
+      const [inserted] = await db
+        .insert(steeringRules)
+        .values({
+          rule: "Test rule",
+          category: "style",
+          active: false,
+          source: "correction",
+          priority: 100,
+          observationCount: 0,
+        })
+        .returning({ id: steeringRules.id });
+
+      const result = await store.upsertCorrection({
+        rule: "Test rule",
+        category: "style",
+        profileId: null,
+        existingRuleId: inserted!.id,
+      });
+
+      expect(result.promoted).toBe(false);
+
+      const rows = await db
+        .select({
+          observationCount: steeringRules.observationCount,
+          active: steeringRules.active,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, inserted!.id));
+
+      expect(rows[0]).toEqual({ observationCount: 1, active: false });
+    });
+
+    it("upsertCorrection graduates rule to active when observationCount reaches 2", async () => {
+      // Insert with observationCount = 1 — next increment crosses the threshold
+      const { steeringRules } = await import("./schema.js");
+      const [inserted] = await db
+        .insert(steeringRules)
+        .values({
+          rule: "Be concise",
+          category: "style",
+          active: false,
+          source: "correction",
+          priority: 100,
+          observationCount: 1,
+        })
+        .returning({ id: steeringRules.id });
+
+      const result = await store.upsertCorrection({
+        rule: "Be concise",
+        category: "style",
+        profileId: null,
+        existingRuleId: inserted!.id,
+      });
+
+      expect(result.promoted).toBe(true);
+
+      const rows = await db
+        .select({
+          observationCount: steeringRules.observationCount,
+          active: steeringRules.active,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, inserted!.id));
+
+      expect(rows[0]).toEqual({ observationCount: 2, active: true });
+    });
+
+    it("upsertCorrection does not re-promote already active rule", async () => {
+      const { steeringRules } = await import("./schema.js");
+      const [inserted] = await db
+        .insert(steeringRules)
+        .values({
+          rule: "Already active",
+          category: "domain",
+          active: true,
+          source: "correction",
+          priority: 100,
+          observationCount: 5,
+        })
+        .returning({ id: steeringRules.id });
+
+      const result = await store.upsertCorrection({
+        rule: "Already active",
+        category: "domain",
+        profileId: null,
+        existingRuleId: inserted!.id,
+      });
+
+      expect(result.promoted).toBe(false);
+
+      const rows = await db
+        .select({ observationCount: steeringRules.observationCount })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, inserted!.id));
+
+      expect(rows[0]!.observationCount).toBe(6);
+    });
+
+    it("countActiveRules counts global + profile-specific", async () => {
+      const profileId = await seedProfile();
+
+      const { steeringRules } = await import("./schema.js");
+      await db.insert(steeringRules).values([
+        {
+          rule: "Global rule",
+          category: "style",
+          active: true,
+          source: "manual",
+          priority: 1,
+          observationCount: 0,
+          profileId: null,
+        },
+        {
+          rule: "Profile rule",
+          category: "domain",
+          active: true,
+          source: "correction",
+          priority: 100,
+          observationCount: 2,
+          profileId,
+        },
+        {
+          rule: "Inactive rule",
+          category: "style",
+          active: false,
+          source: "correction",
+          priority: 100,
+          observationCount: 1,
+          profileId: null,
+        },
+      ]);
+
+      expect(await store.countActiveRules(profileId)).toBe(2);
+    });
+
+    it("replaceRules deletes old and inserts new atomically", async () => {
+      const { steeringRules } = await import("./schema.js");
+      const inserted = await db
+        .insert(steeringRules)
+        .values([
+          {
+            rule: "Rule A",
+            category: "style",
+            active: true,
+            source: "correction",
+            priority: 100,
+            observationCount: 3,
+          },
+          {
+            rule: "Rule B",
+            category: "style",
+            active: true,
+            source: "correction",
+            priority: 100,
+            observationCount: 2,
+          },
+        ])
+        .returning({ id: steeringRules.id });
+
+      const oldIds = inserted.map((r) => r.id);
+
+      const result = await store.replaceRules({
+        oldIds,
+        newRule: {
+          rule: "Combined rule A+B",
+          category: "style",
+          profileId: null,
+          priority: 100,
+          observationCount: 5,
+        },
+      });
+
+      // Old rules deleted
+      const remaining = await db.select({ id: steeringRules.id }).from(steeringRules);
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0]!.id).toBe(result.id);
+
+      // New rule has correct values
+      const rows = await db
+        .select({
+          rule: steeringRules.rule,
+          source: steeringRules.source,
+          active: steeringRules.active,
+          observationCount: steeringRules.observationCount,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, result.id));
+
+      expect(rows[0]).toEqual({
+        rule: "Combined rule A+B",
+        source: "evolution",
+        active: true,
+        observationCount: 5,
+      });
+    });
+
+    it("replaceRules result visible in getActiveRules", async () => {
+      const profileId = await seedProfile();
+
+      const { steeringRules } = await import("./schema.js");
+      const inserted = await db
+        .insert(steeringRules)
+        .values([
+          {
+            rule: "Old rule",
+            category: "style",
+            active: true,
+            source: "correction",
+            priority: 100,
+            observationCount: 2,
+            profileId: null,
+          },
+        ])
+        .returning({ id: steeringRules.id });
+
+      await store.replaceRules({
+        oldIds: [inserted[0]!.id],
+        newRule: {
+          rule: "New consolidated rule",
+          category: "style",
+          profileId: null,
+          priority: 100,
+          observationCount: 2,
+        },
+      });
+
+      const rules = await store.getActiveRules(profileId);
+      expect(rules).toEqual([{ rule: "New consolidated rule" }]);
+    });
+  });
 });
