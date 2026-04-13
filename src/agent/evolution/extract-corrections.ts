@@ -48,7 +48,7 @@ export async function extractCorrections(
 ): Promise<ExtractionResult> {
   const transcript = formatTranscript(history);
 
-  if (transcript.length === 0) {
+  if (transcript.trim().length === 0) {
     logger.debug("empty transcript — skipping extraction");
     return {
       extracted: 0,

@@ -29,7 +29,7 @@ export const responseReady = eventType("response/ready", {
 /**
  * Fired when a conversation goes idle (no new messages after timeout).
  * The idle timer runs after each response/ready, cancelled by next inbound/arrived.
- * Consumed by: Observer (future) for memory extraction and evolution signals.
+ * Consumed by: Observer (Stage 1 correction extraction, future memory extraction).
  */
 export const conversationIdle = eventType("conversation/idle", {
   schema: z.object({

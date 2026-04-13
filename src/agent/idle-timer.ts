@@ -10,8 +10,8 @@ import type { TransportStore } from "../transport/store/index.js";
  * Sleeps for the idle timeout, then closes sessions and emits conversation/idle.
  * Cancelled by inbound/arrived (user sends a new message) — resets the timer.
  *
- * The conversation/idle event will trigger the Observer (Phase 2) for
- * memory extraction and evolution signals.
+ * The conversation/idle event triggers the Observer for correction
+ * extraction (Stage 1) and future memory extraction.
  */
 export function createIdleTimer(deps: { idleTimeoutMs: number; transportStore: TransportStore }) {
   const { idleTimeoutMs, transportStore } = deps;
