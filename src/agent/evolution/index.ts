@@ -9,4 +9,9 @@ export {
   extractCorrections,
   formatTranscript,
 } from "./extract-corrections.js";
+export {
+  extractMemories,
+  type MemoryExtractionDeps,
+  type MemoryExtractionResult,
+} from "./extract-memories.js";
 export { createObserver, type ObserverDeps } from "./observer.js";

@@ -6,5 +6,7 @@ export type {
   RecallResult,
   ReflectOptions,
   ReflectResult,
+  RetainBatchItem,
   RetainOptions,
+  TagsMatch,
 } from "./provider.js";

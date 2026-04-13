@@ -89,6 +89,7 @@ describe("DrizzleAgentStore", () => {
         model: "claude-test",
         summarizationModel: null,
         extractionModel: null,
+        autoRecall: "heuristic",
         toolSet: ["memory_recall"],
       });
     });

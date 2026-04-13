@@ -35,6 +35,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       model: "claude-sonnet-4-20250514",
       summarizationModel: null,
       extractionModel: null,
+      autoRecall: "heuristic",
       toolSet: [],
     }),
     getDefaultProfile: vi.fn().mockResolvedValue({ id: "profile-1" }),
@@ -116,6 +117,7 @@ export function mockMemoryProvider(overrides?: Partial<MemoryProvider>): MemoryP
   return {
     name: "mock",
     retain: vi.fn().mockResolvedValue(undefined),
+    retainBatch: vi.fn().mockResolvedValue(undefined),
     recall: vi.fn().mockResolvedValue({ memories: [] }),
     reflect: vi.fn().mockResolvedValue({ answer: "" }),
     ...overrides,

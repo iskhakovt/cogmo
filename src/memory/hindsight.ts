@@ -1,3 +1,4 @@
+import type { MemoryItemInput } from "@vectorize-io/hindsight-client";
 import { HindsightClient } from "@vectorize-io/hindsight-client";
 import { withRetry } from "../util/with-retry.js";
 import type {
@@ -7,6 +8,7 @@ import type {
   RecallResult,
   ReflectOptions,
   ReflectResult,
+  RetainBatchItem,
   RetainOptions,
 } from "./provider.js";
 
@@ -43,10 +45,26 @@ export class HindsightMemoryProvider implements MemoryProvider {
     });
   }
 
+  async retainBatch(bankId: string, items: RetainBatchItem[]): Promise<void> {
+    const mapped: MemoryItemInput[] = items.map((item) => ({
+      content: item.content,
+      ...(item.context !== undefined && { context: item.context }),
+      ...(item.metadata !== undefined && { metadata: item.metadata }),
+      ...(item.tags !== undefined && { tags: item.tags }),
+      ...(item.observationScopes !== undefined && {
+        observation_scopes: item.observationScopes,
+      }),
+    }));
+    await withRetry(() => this.#client.retainBatch(bankId, mapped, { async: true }), {
+      context: `hindsight.retainBatch[${bankId}]`,
+    });
+  }
+
   async recall(bankId: string, query: string, options?: RecallOptions): Promise<RecallResult> {
     const opts: Parameters<HindsightClient["recall"]>[2] = {};
     if (options?.maxTokens !== undefined) opts.maxTokens = options.maxTokens;
     if (options?.tags !== undefined) opts.tags = options.tags;
+    if (options?.tagsMatch !== undefined) opts.tagsMatch = options.tagsMatch;
 
     const response = await withRetry(() => this.#client.recall(bankId, query, opts), {
       retries: 2,
@@ -67,6 +85,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
     const opts: Parameters<HindsightClient["reflect"]>[2] = {};
     if (options?.context !== undefined) opts.context = options.context;
     if (options?.tags !== undefined) opts.tags = options.tags;
+    if (options?.tagsMatch !== undefined) opts.tagsMatch = options.tagsMatch;
 
     const response = await withRetry(() => this.#client.reflect(bankId, query, opts), {
       retries: 2,

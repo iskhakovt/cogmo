@@ -5,12 +5,16 @@ import { HindsightMemoryProvider } from "./hindsight.js";
 const mockRetain = vi
   .fn()
   .mockResolvedValue({ success: true, bank_id: "test", items_count: 1, async: false });
+const mockRetainBatch = vi
+  .fn()
+  .mockResolvedValue({ success: true, bank_id: "test", items_count: 2, async: true });
 const mockRecall = vi.fn();
 const mockReflect = vi.fn();
 
 vi.mock("@vectorize-io/hindsight-client", () => ({
   HindsightClient: class {
     retain = mockRetain;
+    retainBatch = mockRetainBatch;
     recall = mockRecall;
     reflect = mockReflect;
   },
@@ -18,6 +22,7 @@ vi.mock("@vectorize-io/hindsight-client", () => ({
 
 function createProvider(): HindsightMemoryProvider {
   mockRetain.mockClear();
+  mockRetainBatch.mockClear();
   mockRecall.mockClear();
   mockReflect.mockClear();
   return new HindsightMemoryProvider("http://localhost:8888");
@@ -37,6 +42,42 @@ describe("HindsightMemoryProvider", () => {
       context: "morning chat",
       tags: ["preference"],
     });
+  });
+
+  it("retainBatch maps items to client with observation_scopes", async () => {
+    const provider = createProvider();
+
+    await provider.retainBatch("bank-1", [
+      {
+        content: "homelab IP is 10.0.10.10",
+        tags: ["network:world"],
+        observationScopes: "per_tag",
+      },
+      {
+        content: "user prefers tables over prose",
+        tags: ["network:bank"],
+        context: "style preference",
+        observationScopes: "per_tag",
+      },
+    ]);
+
+    expect(mockRetainBatch).toHaveBeenCalledWith(
+      "bank-1",
+      [
+        {
+          content: "homelab IP is 10.0.10.10",
+          tags: ["network:world"],
+          observation_scopes: "per_tag",
+        },
+        {
+          content: "user prefers tables over prose",
+          tags: ["network:bank"],
+          context: "style preference",
+          observation_scopes: "per_tag",
+        },
+      ],
+      { async: true },
+    );
   });
 
   it("recall maps response to Memory array", async () => {
@@ -93,6 +134,36 @@ describe("HindsightMemoryProvider", () => {
     expect(mockReflect).toHaveBeenCalledWith("bank-1", "query", {
       context: "conversation about food",
       tags: ["preference"],
+    });
+  });
+
+  it("recall passes tagsMatch to client", async () => {
+    const provider = createProvider();
+    mockRecall.mockResolvedValueOnce({ results: [] });
+
+    await provider.recall("bank-1", "query", {
+      tags: ["network:world"],
+      tagsMatch: "any_strict",
+    });
+
+    expect(mockRecall).toHaveBeenCalledWith("bank-1", "query", {
+      tags: ["network:world"],
+      tagsMatch: "any_strict",
+    });
+  });
+
+  it("reflect passes tagsMatch to client", async () => {
+    const provider = createProvider();
+    mockReflect.mockResolvedValueOnce({ text: "answer" });
+
+    await provider.reflect("bank-1", "query", {
+      tags: ["network:bank"],
+      tagsMatch: "all",
+    });
+
+    expect(mockReflect).toHaveBeenCalledWith("bank-1", "query", {
+      tags: ["network:bank"],
+      tagsMatch: "all",
     });
   });
 });
