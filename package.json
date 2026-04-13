@@ -62,7 +62,7 @@
     "@testcontainers/ollama": "^11.13.0",
     "@total-typescript/ts-reset": "^0.6.1",
     "@types/jsdom": "^28.0.1",
-    "@types/node": "^25.5.0",
+    "@types/node": "^25.6.0",
     "@vitest/coverage-v8": "^4.1.4",
     "dotenv": "^17.3.1",
     "drizzle-kit": "^0.31.10",
