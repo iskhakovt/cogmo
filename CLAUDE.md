@@ -229,5 +229,5 @@ After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 - Memory writes are always additive. Dedup runs async via `reflect()`.
 - Sub-agents never see API keys. Orchestrator makes all external calls.
 - Every LLM call uses typed contracts (Zod schema in, Zod schema out) with retry + feedback injection.
-- Self-evolution changes are gated: instruction file edits auto-apply, code/skill changes require human approval.
+- Self-evolution changes are gated: steering rule corrections auto-apply (graduation model), code/skill changes require human approval.
 - Secrets never in env files or git. Use host secret management in production.

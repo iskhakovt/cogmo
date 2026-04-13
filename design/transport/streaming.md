@@ -142,7 +142,7 @@ inngest.createFunction({
 });
 ```
 
-**`response/ready` is now a notification, not a delivery trigger.** It signals that the response is persisted — consumed by the Observer (future), metrics, logging. No per-channel respond functions needed.
+**`response/ready` is now a notification, not a delivery trigger.** It signals that the response is persisted — consumed by the Observer (correction extraction), metrics, logging. No per-channel respond functions needed.
 
 **Error handling:** The orchestrator wraps the streaming section in try/catch. On failure, calls `delivery.abort(error)` so adapters can show the error to the user.
 
@@ -416,7 +416,7 @@ If the LLM call fails mid-stream, the orchestrator calls `delivery.abort(error)`
 
 With unified delivery, `response/ready` no longer triggers per-channel respond functions. It becomes a pure signal that the response is persisted:
 
-- Observer (future) listens for idle detection
+- Observer listens for idle detection (correction extraction, future memory extraction)
 - Metrics/logging
 - External integrations
 

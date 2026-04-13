@@ -132,9 +132,9 @@ Add these incrementally as complexity demands:
 | Module credit assignment | Long multi-step pipelines | MIPROv2 |
 | Crossover/merge | Complementary strengths across lineages | DGM |
 
-## Build Order `[proposed]`
+## Build Order `[confirmed]`
 
-1. Stage 1 (instruction file) + Stage 3 (typed calls + retry) — ship together, day 1
+1. ~~Stage 1 (correction extraction) + Stage 3 (typed calls + retry)~~ — shipped
 2. Stage 2 (skill library) — when first repeated task appears
 3. Evaluation rubrics — define per task type as they emerge
 4. Bootstrapped few-shot — when ~20 real conversations exist

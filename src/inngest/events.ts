@@ -17,7 +17,7 @@ export const inboundArrived = eventType("inbound/arrived", {
 /**
  * Fired when the orchestrator has persisted an assistant response.
  * Notification only — delivery is handled inline by the DeliveryRouter.
- * Consumed by: Observer (future), metrics, logging.
+ * Consumed by: Observer (correction extraction), metrics, logging.
  */
 export const responseReady = eventType("response/ready", {
   schema: z.object({
