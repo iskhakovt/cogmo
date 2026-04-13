@@ -40,7 +40,7 @@
     "date-fns": "^4.1.0",
     "drizzle-orm": "^0.45.2",
     "grammy": "^1.41.1",
-    "inngest": "^4.2.0",
+    "inngest": "^4.2.1",
     "js-tiktoken": "^1.0.21",
     "jsdom": "^29.0.2",
     "neverthrow": "^8.2.0",
