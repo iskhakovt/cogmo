@@ -30,8 +30,8 @@ The minimum useful system: talk to it, it remembers things.
 - [x] Channel registry — table-driven adapter discovery via `AdapterModule` + `satisfies` barrel
 - [x] Direct channel adapter — event-driven via Inngest (`adapter/direct/inbound`, `adapter/direct/outbound`)
 - [x] Memory: Hindsight integration — `retain()`, `recall()`, `reflect()`
-- [ ] Memory: 4 networks (world, bank, opinion, observation)
-- [ ] Memory: route intention gate — "does this query need memory?"
+- [x] Memory: 4 networks (world, bank, opinion, observation) — tag-based classification (`network:world/bank/opinion/observation`), Observer extraction with `chatTyped()`, `retainBatch` with `observation_scopes: "per_tag"`
+- [x] Memory: route intention gate — profile-level `auto_recall` setting (`off/always/heuristic/llm`), heuristic gate skips greetings/acks/continuations
 - [x] `memory_recall` and `memory_retain` tools for the agent
 - [x] Core memory blocks — DB table, `core_memory_update`/`core_memory_read` tools, injected into system prompt
 - [x] Auto-recall — embed user message each turn, inject as `# Recalled Context` in system prompt

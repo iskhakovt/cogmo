@@ -68,7 +68,9 @@ describe("memory_retain", () => {
     const caps = mockService();
     await memoryRetain.handler({ content: "Alice likes coffee" }, caps);
 
-    expect(caps.memory.retain).toHaveBeenCalledWith("Alice likes coffee", undefined);
+    expect(caps.memory.retain).toHaveBeenCalledWith("Alice likes coffee", {
+      tags: ["network:world"],
+    });
   });
 
   it("passes context when provided", async () => {
@@ -80,6 +82,7 @@ describe("memory_retain", () => {
 
     expect(caps.memory.retain).toHaveBeenCalledWith("Alice likes coffee", {
       context: "mentioned during lunch chat",
+      tags: ["network:world"],
     });
   });
 

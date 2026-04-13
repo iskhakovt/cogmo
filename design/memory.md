@@ -27,7 +27,7 @@ One Hindsight bank per user, tags for memory networks. Networks are **not** sepa
 
 Usage: `bankId = userId` (e.g. `"ti"`), retain with `tags: ["network:world"]`, recall with tags to filter or omit for full-brain search. Hindsight's `tagsMatch` modes (`any`, `all`, `any_strict`, `all_strict`) and compound `tag_groups` provide fine-grained filtering.
 
-**Gap:** `MemoryProvider` interface doesn't yet expose `tagsMatch` or `tag_groups` — add when implementing memory tools.
+**Interface:** `MemoryProvider` exposes `tags` and `tagsMatch` on `RecallOptions` and `ReflectOptions`. `tag_groups` (compound boolean filters) deferred until compartment/trust ACL is implemented — simple `tags` + `tagsMatch` is sufficient for network filtering.
 
 ## Memory Access Control via Tags `[proposed]`
 
@@ -63,37 +63,84 @@ A memory about a date tagged `compartment:personal` is invisible to the coder pr
 
 **For MVP:** Document the mechanism, implement the tag filtering in `Service`, but start with no compartment restrictions. Add compartment/trust tagging when profiles with different access needs exist. The infrastructure (tags + capability scoping) is ready from day 1.
 
-## Four Memory Networks `[proposed]`
+## Four Memory Networks `[confirmed]`
 
-| Network | Contents | Examples |
+| Network | Tag | Contents | Examples |
+|-|-|-|-|
+| World | `network:world` | External facts | "homelab IP is 10.0.10.10", "Grafana runs on port 3000" |
+| Bank | `network:bank` | Personal facts/preferences | "prefers tables over prose", "allergic to peanuts", "wife's birthday March 15" |
+| Opinion | `network:opinion` | Agent's learned assessments | "user gets frustrated with verbose explanations", "email extraction v3 works better" |
+| Observation | `network:observation` | Behavioral patterns | "usually asks about homelab on weekends", "ignores morning briefings before 8am" |
+
+### Classification Strategy `[confirmed]`
+
+Networks are classified **at extraction time, not retain time**. No production memory system asks the agent to pick a category during conversation — classification is a post-processing concern.
+
+| Path | Who classifies | Tag |
 |-|-|-|
-| World | External facts | "homelab IP is 10.0.10.10", "Grafana runs on port 3000" |
-| Bank | Personal facts/preferences | "prefers tables over prose", "allergic to peanuts", "wife's birthday March 15" |
-| Opinion | Agent's learned assessments | "user gets frustrated with verbose explanations", "email extraction v3 works better" |
-| Observation | Behavioral patterns | "usually asks about homelab on weekends", "ignores morning briefings before 8am" |
+| **Observer extraction** (post-conversation) | Extraction prompt classifies each fact via `chatTyped()` structured output | `network:<type>` assigned per fact |
+| **`memory_retain` tool** (hot path) | No classification — agent stores what it's told | `network:world` default (explicit facts from user are world knowledge) |
+
+**Why not agent-chosen networks:** Adding a `network` enum parameter to `memory_retain` forces the agent to reason about taxonomy on every retain call — extra tokens, extra failure mode, no benefit since the Observer classifies the same conversation later with full context and the same accuracy. Letta, Mem0, and LangMem all treat classification as extraction-time, not retain-time.
+
+### Retrieval Strategy `[confirmed]`
+
+Auto-recall and `memory_recall` tool search **all networks** — no network filter. Hindsight's relevance scoring (vector + keyword + graph + temporal) handles ranking across networks. Filtering by network would require the system to predict which network contains the answer before searching, which is a harder problem than just searching everything.
+
+**Deferred:** Network-filtered recall (e.g., "search only my opinions") as an optional parameter on `memory_recall`. Add when there's evidence of cross-network noise in recall results.
 
 ## Observer Pattern (Post-Conversation Extraction) `[confirmed]`
 
-Adopted from Mastra's 94.87% LongMemEval approach. ~50 lines TypeScript.
+Adopted from Mastra's 94.87% LongMemEval approach. The Observer is an Inngest function triggered by `conversation/idle`. It has two extraction phases:
+
+1. **Correction extraction** (Stage 1 evolution) — already implemented. Extracts behavioral corrections, persists as steering rules with graduation.
+2. **Memory extraction** — extracts facts from conversation, classifies into networks, retains to Hindsight with tags.
+
+### Memory Extraction `[confirmed]`
+
+Added as a new step in the existing Observer function, after correction extraction. Uses `chatTyped()` with a Zod schema to extract structured facts.
 
 ```typescript
-// After conversation goes idle (~5 min no messages)
-async function extractMemories(transcript: Message[]): Promise<void> {
-  const response = await claude.messages.create({
-    model: "claude-sonnet-4-20250514",
-    system: EXTRACTION_PROMPT,
-    messages: [{ role: "user", content: formatTranscript(transcript) }],
-    // Structured output: array of {fact, network, confidence}
+// Extraction schema (chatTyped structured output)
+interface ExtractedMemory {
+  fact: string;                                        // the memory content
+  network: "world" | "bank" | "opinion" | "observation"; // classification
+  context?: string;                                    // when/why this was learned
+}
+
+// Observer step: extract-memories (after extract-corrections)
+const memories = await step.run("extract-memories", async () => {
+  const extracted = await chatTyped(provider, {
+    model,
+    system: MEMORY_EXTRACTION_PROMPT,
+    messages: [{ role: "user", content: formatTranscript(history) }],
+    schema: extractedMemoriesSchema,
   });
 
-  const memories = parseExtraction(response);
-  for (const mem of memories) {
-    // Consolidation (dedup, observation creation) runs automatically
-    // inside Hindsight after each retain() call — no separate step needed.
-    await hindsight.retain(mem.fact, mem.network);
+  // Retain each fact with network tag
+  for (const mem of extracted) {
+    await memory.retain(userId, mem.fact, {
+      tags: [`network:${mem.network}`],
+      context: mem.context,
+      metadata: { source: "conversation" },
+    });
   }
-}
+
+  return { count: extracted.length };
+});
 ```
+
+The extraction prompt instructs the LLM to:
+- Extract facts worth remembering from the conversation (skip greetings, small talk, transient discussion)
+- Classify each fact into a network (world/bank/opinion/observation)
+- Avoid extracting information the agent already stored via `memory_retain` during the conversation (dedup hint)
+- Apply memory admission criteria: future utility, factual confidence, semantic novelty
+
+Hindsight handles deduplication and consolidation automatically after each `retain()` call — if the same fact is extracted from multiple conversations, Hindsight merges them rather than creating duplicates.
+
+### Observation Scoping `[confirmed]`
+
+Retain calls use `observation_scopes: "per_tag"` so Hindsight creates separate consolidated observations per network. Without this, a world fact and a personal preference about the same entity would be merged into one observation — losing the network distinction at the observation layer.
 
 ### Why Post-Conversation, Not Real-Time `[confirmed]`
 
@@ -269,9 +316,59 @@ score = similarity * log(mention_count + 1) * exp(-0.693 * days_since_mentioned 
 
 Add `mention_count` and `last_mentioned_at` metadata to Hindsight memories.
 
-## Route Intention Gate `[research]`
+## Auto-Recall and Intention Gate `[confirmed]`
 
-From memU. Before retrieval, classify: "does this query need memory?" Saves ~30% of retrieval costs. Simple LLM call or keyword heuristic.
+Auto-recall searches Hindsight for memories relevant to the user's message and injects them into the system prompt as `# Recalled Context`. This runs before the agent loop — the agent sees recalled memories as context, not as tool output.
+
+### Profile Setting `[confirmed]`
+
+Auto-recall behavior is controlled by a profile-level setting:
+
+```sql
+ALTER TABLE profiles ADD COLUMN auto_recall TEXT NOT NULL DEFAULT 'heuristic';
+-- CHECK (auto_recall IN ('off', 'always', 'heuristic', 'llm'))
+```
+
+| Mode | Behavior | Use case |
+|-|-|-|
+| `off` | No auto-recall. Agent uses `memory_recall` tool explicitly. | Profiles where memory is irrelevant (utility bots, code-only). |
+| `always` | Recall on every message. Current behavior. | Maximum recall coverage, no risk of missing context. |
+| `heuristic` | Skip recall for messages that obviously don't need memory. **Default.** | Daily driver — low latency, catches 20-30% of messages as skippable. |
+| `llm` | LLM classifier decides whether to recall. | Higher accuracy gating (~50-60% skip rate), but adds ~200-500ms latency. |
+
+**Default is `heuristic`**, not `always`. The heuristic is conservative — it only skips obvious acks/greetings, so false negatives (skipping when recall would have helped) are rare. The cost of a false positive (unnecessary recall) is ~$0.01 + ~300ms — harmless. The cost of a false negative (missing context) is user-visible — harmful.
+
+### Heuristic Gate `[confirmed]`
+
+A pure function that returns `true` when the message is unlikely to benefit from memory recall. Rules checked in order:
+
+1. **Empty or too short** — message is whitespace-only or under 4 characters (emoji reactions, "ok", "k")
+2. **Greeting/ack pattern** — case-insensitive match against a set: "hi", "hello", "hey", "thanks", "thank you", "bye", "goodbye", "got it", "sure", "okay", "yes", "no", "yep", "nope", "np", "ty", "thx"
+3. **Continuation signal** — entire message (trimmed) is one of: "go ahead", "do it", "continue", "proceed", "sounds good", "lgtm", "perfect", "exactly", "agreed", "correct"
+
+This intentionally does **not** filter by message length — short messages like "what's my API key?" or "Alice's birthday?" are exactly the queries that need recall. The heuristic only catches messages with zero informational content.
+
+The function is stateless — no context from previous messages. It's a fast pre-filter, not a semantic classifier.
+
+### LLM Gate `[proposed]`
+
+A cheap LLM call (Haiku-class, ~100 tokens) that classifies: "does this message need information from long-term memory to answer well?"
+
+```typescript
+// Schema for the LLM gate response
+interface GateResult {
+  needs_recall: boolean;
+  reason?: string; // for debugging/logging
+}
+```
+
+**Why it exists alongside heuristic:** The heuristic catches syntactic patterns. The LLM understands intent — it knows "what's 2+2?" doesn't need memory but "what's that thing I mentioned yesterday?" does, even though both are short questions. At ~50 queries/day the cost difference is negligible ($0.25/day saved), but at higher volume the LLM gate's 50-60% skip rate vs heuristic's 20-30% matters.
+
+**Implementation:** Stub the `"llm"` path initially (log a warning, fall through to `always`). Implement when there's a concrete profile that benefits from it.
+
+### Error Handling `[confirmed]`
+
+If the gate function throws (LLM call fails, regex error), **fall through to always-recall**. Memory recall is the safe default — skipping it is the optimization, not the other way around.
 
 ## Tiered Retrieval `[research]`
 
@@ -280,6 +377,8 @@ From memU.
 1. Search relevant categories/networks first
 2. Check if results are sufficient (confidence threshold)
 3. Drill into other networks only if needed
+
+Deferred — current approach searches all networks in a single `recall()` call. Tiered retrieval adds complexity (multiple API calls, confidence thresholds) for marginal quality improvement at personal scale. Revisit if recall results become noisy as memory grows past ~10K facts.
 
 ## Memory Admission Control `[research]`
 

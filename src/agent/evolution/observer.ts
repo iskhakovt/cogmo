@@ -14,9 +14,11 @@ import { inngest } from "../../inngest/client.js";
 import { conversationIdle } from "../../inngest/events.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { logger } from "../../logger.js";
+import type { MemoryProvider } from "../../memory/provider.js";
 import type { AgentStore } from "../store/index.js";
 import { consolidateRules } from "./consolidate-rules.js";
 import { extractCorrections } from "./extract-corrections.js";
+import { extractMemories } from "./extract-memories.js";
 
 const DEFAULT_EXTRACTION_MODEL = "claude-sonnet-4-20250514";
 const MIN_MESSAGES_FOR_EXTRACTION = 4; // 2 turns minimum
@@ -24,6 +26,9 @@ const MIN_MESSAGES_FOR_EXTRACTION = 4; // 2 turns minimum
 export interface ObserverDeps {
   agentStore: AgentStore;
   provider: LlmProvider;
+  // TODO: Route through Service.memory once retainBatch is on the Service interface (ACL boundary).
+  // Currently called directly on the provider — safe because the Observer is a trusted internal consumer.
+  memory: Pick<MemoryProvider, "retainBatch">;
   extractionModel?: string;
 }
 
@@ -79,7 +84,21 @@ export function createObserver(deps: ObserverDeps) {
         });
       }
 
-      return { status: "processed", conversationId, ...result };
+      // Phase 2: extract facts into long-term memory
+      const memoryResult = await step.run("extract-memories", async () => {
+        return extractMemories(history, conv.userId, {
+          provider,
+          model,
+          memory: deps.memory,
+        });
+      });
+
+      return {
+        status: "processed",
+        conversationId,
+        corrections: result,
+        memories: memoryResult,
+      };
     },
   );
 }

@@ -1,0 +1,2 @@
+CREATE TYPE "public"."auto_recall_mode" AS ENUM('off', 'always', 'heuristic', 'llm');--> statement-breakpoint
+ALTER TABLE "profiles" ADD COLUMN "auto_recall" "auto_recall_mode" DEFAULT 'heuristic' NOT NULL;

@@ -13,6 +13,7 @@ import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./con
 import type { DebounceConfig } from "./debounce.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
+import { shouldSkipRecall } from "./recall-gate.js";
 import type { Service } from "./service.js";
 import { createService } from "./service.js";
 import type { AgentStore } from "./store/index.js";
@@ -152,8 +153,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         }),
       );
 
+      // Load profile early — needed for auto-recall gating and model selection
+      const profile = await agentStore.getProfile(profileId);
+
       // Auto-recall: search memory for context relevant to this message
-      const recallResult = await memory.recall(userId, userContentText, { maxTokens: 2000 });
+      const autoRecallMode = profile?.autoRecall ?? "heuristic";
+      const recallResult = shouldSkipRecall(autoRecallMode, userContentText)
+        ? { memories: [] }
+        : await memory.recall(userId, userContentText, { maxTokens: 2000 });
       const recalledContext =
         recallResult.memories.length > 0
           ? recallResult.memories.map((m) => m.content).join("\n")
@@ -165,7 +172,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         update: (key, content) => agentStore.upsertCoreMemoryBlock({ userId, key, content }),
       };
 
-      const profile = await agentStore.getProfile(profileId);
       const service = createService(memory, userId, [], fileService, coreMemoryService);
       const delivery = await deliveryRouter.prepare({
         conversationId,
