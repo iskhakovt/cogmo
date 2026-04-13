@@ -61,7 +61,7 @@ user_identities (
 
 The `user_identities` table IS the allowlist. No separate allowlist mechanism needed.
 
-### Allowlist enforcement `[proposed]`
+### Allowlist enforcement `[confirmed]`
 
 Channel adapters check identity on each inbound message before routing to the orchestrator. For channels in `mapped` mode (e.g., Telegram with a configured allowlist), the adapter calls `transportStore.resolveUser(channelId, platformHandle)`. If no identity row matches, the message is rejected with a user-facing reply ("Not authorized").
 
