@@ -19,10 +19,14 @@ export const MemoryNetworkSchema = z
 export const ExtractedMemorySchema = z.object({
   fact: z
     .string()
+    .trim()
+    .min(1)
     .describe("The fact or information to remember — clear, standalone, context-free"),
   network: MemoryNetworkSchema,
   context: z
     .string()
+    .trim()
+    .min(1)
     .optional()
     .describe("Optional: when or why this was learned, for temporal context"),
 });
@@ -56,6 +60,7 @@ Classify each fact into exactly one network:
 
 ## Rules for Extraction
 
+- **Source reliability**: Only extract facts explicitly stated by the user, confirmed by the user, or grounded in tool output. Do not extract unsupported assistant guesses, suggestions, or summaries — the assistant may be wrong.
 - **Extract standalone facts**: Each fact should be understandable without the conversation context. "Project X deadline is March 15" not "the deadline is in two weeks".
 - **Skip trivial content**: Don't extract greetings, small talk, acknowledgments, or transient discussion.
 - **Skip tool-retained facts**: If the assistant explicitly used a memory_retain tool during the conversation, don't re-extract those facts — they're already stored.

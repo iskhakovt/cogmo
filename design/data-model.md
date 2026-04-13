@@ -31,7 +31,7 @@ Tables are documented in the design doc that owns their domain:
 
 `profiles` gains:
 - `summarization_model TEXT` (nullable, replaces `SUMMARIZATION_MODEL` env var).
-- `auto_recall TEXT NOT NULL DEFAULT 'heuristic'` — controls auto-recall behavior: `off`, `always`, `heuristic`, `llm`. See [memory.md](memory.md) → Auto-Recall and Intention Gate.
+- `auto_recall auto_recall_mode NOT NULL DEFAULT 'heuristic'` — Postgres enum (`off`, `always`, `heuristic`, `llm`). Controls auto-recall behavior. See [memory.md](memory.md) → Auto-Recall and Intention Gate.
 
 ## Deferred Tables `[proposed]`
 

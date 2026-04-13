@@ -81,6 +81,15 @@ describe("shouldSkipRecall", () => {
       expect(shouldSkipRecall("heuristic", "  hi  ")).toBe(true);
       expect(shouldSkipRecall("heuristic", "  go ahead  ")).toBe(true);
     });
+
+    it("strips trailing punctuation before matching", () => {
+      expect(shouldSkipRecall("heuristic", "thanks!")).toBe(true);
+      expect(shouldSkipRecall("heuristic", "ok.")).toBe(true);
+      expect(shouldSkipRecall("heuristic", "go ahead...")).toBe(true); // dots stripped
+      expect(shouldSkipRecall("heuristic", "go ahead…")).toBe(true); // unicode ellipsis
+      expect(shouldSkipRecall("heuristic", "sure!")).toBe(true);
+      expect(shouldSkipRecall("heuristic", "yes!")).toBe(true);
+    });
   });
 
   describe("unknown mode", () => {

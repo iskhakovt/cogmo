@@ -68,9 +68,9 @@ function isLowInformationMessage(message: string): boolean {
   const trimmed = message.trim();
   if (trimmed.length < 4) return true;
 
-  const lower = trimmed.toLowerCase();
-  if (GREETING_ACK_SET.has(lower)) return true;
-  if (CONTINUATION_SET.has(lower)) return true;
+  const normalized = trimmed.toLowerCase().replace(/[.!?,;:…]+$/u, "");
+  if (GREETING_ACK_SET.has(normalized)) return true;
+  if (CONTINUATION_SET.has(normalized)) return true;
 
   return false;
 }
