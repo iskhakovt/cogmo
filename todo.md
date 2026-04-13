@@ -3,6 +3,8 @@
 ## Next
 
 - [ ] `p2` Non-interactive setup — `cogmo setup --non-interactive` reads `COGMO_LLM_*` env vars, validates, writes provider + model_providers to DB. Currently only seeds defaults. Needed for CI/IaC.
+- [ ] `p3` Observer unit test — mock `step.run` to cover min-message guard, conditional consolidation, return shape
+- [ ] `p3` Idempotent correction inserts — dedup key (rule text hash + category + source) to prevent duplicate rules on step retry
 - [ ] `p2` Context fast path — account for output tokens in `shouldSkipCounting` (currently only tracks `inputTokens`, underestimates by one response worth)
 - [ ] `p2` Background compaction — run summarization after response (while user reads) instead of before next turn, store pre-computed summary to eliminate compaction latency
 - [ ] `p2` Internal tag stripping — `<internal>` tags visible to orchestrator, stripped before user

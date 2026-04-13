@@ -17,7 +17,9 @@ import type { AgentStore } from "../store/index.js";
 const MergeGroupSchema = z.object({
   originalIds: z.array(z.string()).min(2).describe("IDs of rules to merge"),
   mergedRule: z.string().describe("The consolidated rule text"),
-  category: z.string().describe("Category of the merged rule (must match originals)"),
+  category: z
+    .enum(["style", "domain", "memory"])
+    .describe("Category of the merged rule (must match originals)"),
 });
 
 export const ConsolidationSchema = z.object({
