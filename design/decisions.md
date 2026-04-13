@@ -59,7 +59,7 @@
 
 | Source | Patterns |
 |-|-|
-| NanoClaw | Channel registry, cursor-based crash recovery, drift-resistant scheduling, activity-based timeouts, internal tag stripping, orchestrator-holds-secrets |
+| NanoClaw | Channel registry, cursor-based crash recovery, drift-resistant scheduling, activity-based timeouts, ~~internal tag stripping~~ (removed — thinking blocks + tool calls suffice), orchestrator-holds-secrets |
 | Mastra | Post-conversation Observer extraction, confidence-based network routing |
 
 ### From research papers — needs evaluation before adopting `[research]`
