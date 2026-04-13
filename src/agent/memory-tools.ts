@@ -30,8 +30,10 @@ export const memoryRetain = defineTool({
     context: z.string().optional().describe("Optional context about when/why this was learned"),
   }),
   handler: async (input, service) => {
-    const opts = input.context !== undefined ? { context: input.context } : undefined;
-    await service.memory.retain(input.content, opts);
+    await service.memory.retain(input.content, {
+      ...(input.context !== undefined && { context: input.context }),
+      tags: ["network:world"],
+    });
     return "Remembered.";
   },
 });

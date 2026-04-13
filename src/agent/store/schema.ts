@@ -58,6 +58,7 @@ export const profiles = pgTable(
     model: text("model").notNull(),
     summarizationModel: text("summarization_model"), // null = use main model
     extractionModel: text("extraction_model"), // null = use main model
+    autoRecall: text("auto_recall").notNull().default("heuristic"), // 'off' | 'always' | 'heuristic' | 'llm'
     toolSet: jsonb("tool_set").notNull(),
     createdAt: ts(),
   },

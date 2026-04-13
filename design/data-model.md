@@ -29,7 +29,9 @@ Tables are documented in the design doc that owns their domain:
 | `llm_providers` | [providers.md](providers.md) | Provider config (type, base_url, secret FK, attrs) |
 | `model_providers` | [providers.md](providers.md) | Model → provider routing with position-based priority. UNIQUE(model, position) prevents ties. |
 
-`profiles` gains `summarization_model TEXT` (nullable, replaces `SUMMARIZATION_MODEL` env var).
+`profiles` gains:
+- `summarization_model TEXT` (nullable, replaces `SUMMARIZATION_MODEL` env var).
+- `auto_recall TEXT NOT NULL DEFAULT 'heuristic'` — controls auto-recall behavior: `off`, `always`, `heuristic`, `llm`. See [memory.md](memory.md) → Auto-Recall and Intention Gate.
 
 ## Deferred Tables `[proposed]`
 

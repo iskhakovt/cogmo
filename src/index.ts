@@ -149,6 +149,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const observer = createObserver({
     agentStore,
     provider,
+    memory,
     ...(profile.extractionModel && { extractionModel: profile.extractionModel }),
   });
 
