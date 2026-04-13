@@ -34,7 +34,7 @@ All configuration via environment variables. See `src/env.ts` for the schema.
 | `NODE_ENV` | `development` | Environment |
 | `LOG_LEVEL` | `info` | Pino log level |
 
-## Secrets `[proposed]`
+## Secrets `[confirmed]`
 
 ### Encrypted DB storage
 

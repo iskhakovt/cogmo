@@ -71,7 +71,11 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const provider =
     opts.providerOverride ??
     (await resolveProviderForModel(profile.model, agentStore, secretsStore));
-  const webTools = createWebTools(env.TAVILY_API_KEY, env.OPENROUTER_API_KEY);
+  // Web tool keys: DB first (wizard-configured), env fallback (dev convenience).
+  const tavilyKey = (await secretsStore.getSecret("tavily_api_key")) ?? env.TAVILY_API_KEY;
+  const openrouterKey =
+    (await secretsStore.getSecret("openrouter_api_key")) ?? env.OPENROUTER_API_KEY;
+  const webTools = createWebTools(tavilyKey, openrouterKey);
   const tools = createDefaultTools(
     [...memoryTools, ...webTools, ...fileTools, ...coreMemoryTools],
     env.USER_TIMEZONE,

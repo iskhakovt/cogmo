@@ -111,9 +111,12 @@ async function resolveCredentialSecrets(
     if (key.endsWith("SecretName") && typeof value === "string") {
       const baseKey = key.slice(0, -"SecretName".length);
       const secret = await secretsStore.getSecret(value);
-      if (secret) {
-        resolved[baseKey] = secret;
+      if (!secret) {
+        throw new Error(
+          `Channel credential references secret "${value}" but it was not found. Re-run \`cogmo setup\` to reconfigure.`,
+        );
       }
+      resolved[baseKey] = secret;
       delete resolved[key];
     }
   }

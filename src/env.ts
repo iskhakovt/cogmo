@@ -34,8 +34,6 @@ export const env = createEnv({
     DEBOUNCE_IDLE_SECONDS: z.coerce.number().default(3),
     DEBOUNCE_MAXWAIT_SECONDS: z.coerce.number().default(30),
     DEBOUNCE_RESUME_POLICY: z.enum(["debounce", "flush", "await_input"]).default("debounce"),
-    TELEGRAM_BOT_TOKEN: z.string().optional(),
-    TELEGRAM_ALLOWED_USERS: z.string().optional(),
     COGMO_MASTER_KEY: z.string().optional(),
   },
   runtimeEnv: resolved,

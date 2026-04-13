@@ -160,10 +160,13 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
 
   const adapterType = providerType === "anthropic" ? "anthropic" : "openai_compatible";
 
-  const result =
-    adapterType === "anthropic"
-      ? await validateAnthropicKey(apiKey, baseUrl)
-      : await validateOpenAICompatibleKey(apiKey, baseUrl!);
+  let result: import("./validate.js").ValidationResult;
+  if (adapterType === "anthropic") {
+    result = await validateAnthropicKey(apiKey, baseUrl);
+  } else {
+    if (!baseUrl) throw new Error(`Base URL required for ${String(providerType)} but not set`);
+    result = await validateOpenAICompatibleKey(apiKey, baseUrl);
+  }
 
   if (!result.valid) {
     s.stop(`Validation failed: ${result.error}`);
@@ -197,15 +200,19 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     attrs: attrs as JsonValue,
   });
 
-  // Register this provider for the default profile's model
+  // Register this provider for the default profile's model.
+  // If another provider already serves this model (e.g., "add another"),
+  // use the next available position instead of colliding at 0.
   const defaultProfile = await deps.agentStore.getDefaultProfile();
   if (defaultProfile) {
     const profile = await deps.agentStore.getProfile(defaultProfile.id);
     if (profile) {
+      const existing = await deps.agentStore.resolveProviderForModel(profile.model);
+      const position = existing ? 1 : 0; // primary if first, fallback if second
       await deps.agentStore.addModelProvider({
         model: profile.model,
         providerId,
-        position: 0,
+        position,
       });
     }
   }
@@ -253,6 +260,7 @@ async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<
 
   if (!result.valid) {
     s.stop(`Validation failed: ${result.error}`);
+    p.log.warn("Skipping Telegram channel. Re-run `cogmo setup` to try again.");
     return;
   }
   s.stop(`Connected as @${result.meta?.botUsername}`);

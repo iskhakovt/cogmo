@@ -1,4 +1,4 @@
-# Guided Setup `[proposed]`
+# Guided Setup `[confirmed]`
 
 Interactive first-run wizard and re-runnable settings flow.
 

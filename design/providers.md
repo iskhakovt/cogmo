@@ -1,4 +1,4 @@
-# LLM Providers `[proposed]`
+# LLM Providers `[confirmed]`
 
 How cogmo routes LLM calls to different providers and manages their credentials.
 
