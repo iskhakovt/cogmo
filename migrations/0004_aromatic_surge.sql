@@ -20,5 +20,6 @@ CREATE TABLE "model_providers" (
 );
 --> statement-breakpoint
 ALTER TABLE "profiles" ADD COLUMN "summarization_model" text;--> statement-breakpoint
+ALTER TABLE "profiles" ADD COLUMN "extraction_model" text;--> statement-breakpoint
 ALTER TABLE "llm_providers" ADD CONSTRAINT "llm_providers_secret_id_secrets_id_fk" FOREIGN KEY ("secret_id") REFERENCES "public"."secrets"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "model_providers" ADD CONSTRAINT "model_providers_provider_id_llm_providers_id_fk" FOREIGN KEY ("provider_id") REFERENCES "public"."llm_providers"("id") ON DELETE cascade ON UPDATE no action;

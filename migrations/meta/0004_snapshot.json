@@ -1,5 +1,5 @@
 {
-  "id": "9206ed41-fe8b-4f95-834b-373904cd04db",
+  "id": "5773164a-b4c8-4771-9433-4cc8e271260a",
   "prevId": "24602515-0e20-4fbc-b537-db5fb767be6c",
   "version": "7",
   "dialect": "postgresql",
@@ -395,6 +395,12 @@
         },
         "summarization_model": {
           "name": "summarization_model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "extraction_model": {
+          "name": "extraction_model",
           "type": "text",
           "primaryKey": false,
           "notNull": false

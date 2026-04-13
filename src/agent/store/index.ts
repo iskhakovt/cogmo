@@ -62,6 +62,7 @@ export interface AgentStore {
     basePrompt: string;
     model: string;
     summarizationModel: string | null;
+    extractionModel: string | null;
     toolSet: JsonValue;
   } | null>;
 
@@ -321,6 +322,7 @@ export class DrizzleAgentStore implements AgentStore {
     basePrompt: string;
     model: string;
     summarizationModel: string | null;
+    extractionModel: string | null;
     toolSet: JsonValue;
   } | null> {
     return this.#db.transaction(async (tx) => {
@@ -330,6 +332,7 @@ export class DrizzleAgentStore implements AgentStore {
           basePrompt: profiles.basePrompt,
           model: profiles.model,
           summarizationModel: profiles.summarizationModel,
+          extractionModel: profiles.extractionModel,
           toolSet: profiles.toolSet,
         })
         .from(profiles)
@@ -341,6 +344,7 @@ export class DrizzleAgentStore implements AgentStore {
           basePrompt: string;
           model: string;
           summarizationModel: string | null;
+          extractionModel: string | null;
           toolSet: JsonValue;
         }) ?? null
       );

@@ -57,6 +57,7 @@ export const profiles = pgTable(
     basePrompt: text("base_prompt").notNull(),
     model: text("model").notNull(),
     summarizationModel: text("summarization_model"), // null = use main model
+    extractionModel: text("extraction_model"), // null = use main model
     toolSet: jsonb("tool_set").notNull(),
     createdAt: ts(),
   },

@@ -88,6 +88,7 @@ describe("DrizzleAgentStore", () => {
         basePrompt: "Be helpful.",
         model: "claude-test",
         summarizationModel: null,
+        extractionModel: null,
         toolSet: ["memory_recall"],
       });
     });

@@ -149,7 +149,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const observer = createObserver({
     agentStore,
     provider,
-    ...(env.EXTRACTION_MODEL && { extractionModel: env.EXTRACTION_MODEL }),
+    ...(profile.extractionModel && { extractionModel: profile.extractionModel }),
   });
 
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger

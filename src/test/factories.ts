@@ -34,6 +34,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       basePrompt: "test",
       model: "claude-sonnet-4-20250514",
       summarizationModel: null,
+      extractionModel: null,
       toolSet: [],
     }),
     getDefaultProfile: vi.fn().mockResolvedValue({ id: "profile-1" }),
