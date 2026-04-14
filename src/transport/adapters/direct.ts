@@ -61,11 +61,23 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   return {
     adapter: {
       deliver: async (platformAddress, content) => {
-        const text =
-          typeof content === "object" && content !== null && "parseMode" in content
-            ? (content as RenderedMessage).text
-            : contentToText(content as import("type-fest").JsonValue);
-        await inngest.send(directOutbound.create({ platformAddress, content: text }));
+        const isRendered = typeof content === "object" && content !== null && "text" in content;
+        const text = isRendered
+          ? (content as RenderedMessage).text
+          : contentToText(content as import("type-fest").JsonValue);
+        const images = isRendered
+          ? (content as RenderedMessage).images?.map((img) => ({
+              data: img.data.toString("base64"),
+              mediaType: img.mediaType,
+            }))
+          : undefined;
+        await inngest.send(
+          directOutbound.create({
+            platformAddress,
+            content: text,
+            ...(images && images.length > 0 && { images }),
+          }),
+        );
       },
       stop: async () => {},
     },

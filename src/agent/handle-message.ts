@@ -11,6 +11,7 @@ import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
 import type { DebounceConfig } from "./debounce.js";
+import { extractGeneratedImages } from "./extract-images.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
 import { shouldSkipRecall } from "./recall-gate.js";
@@ -291,7 +292,21 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       // ──── NON-DURABLE: batch delivery ────
 
-      await delivery.deliverBatch(result.text);
+      // Extract any images generated during the turn, resolve S3 paths to bytes.
+      // Streaming adapters (Telegram) already delivered these mid-stream via
+      // their stream handle; batch adapters receive them here.
+      const imageRefs = extractGeneratedImages(result.newMessages);
+      const outboundImages =
+        imageRefs.length > 0
+          ? await Promise.all(
+              imageRefs.map(async (ref) => ({
+                data: await attachments.download(ref.path),
+                mediaType: ref.mediaType,
+              })),
+            )
+          : undefined;
+
+      await delivery.deliverBatch(result.text, outboundImages);
 
       // ──── DURABLE: notify (Observer, metrics — not delivery) ────
 

@@ -1,4 +1,4 @@
-import { Bot } from "grammy";
+import { Bot, InputFile } from "grammy";
 import type { JsonValue } from "type-fest";
 import type { StreamEvent } from "../../../llm/types.js";
 import { logger } from "../../../logger.js";
@@ -8,6 +8,7 @@ import type {
   AdapterSetupResult,
   RenderedMessage,
 } from "../../adapter-module.js";
+import { type AttachmentStore, mediaTypeToExt } from "../../attachment-store.js";
 import { contentToText } from "../../content.js";
 import type { Adapter, StreamHandle, StreamingAdapter } from "../../types.js";
 import { renderTelegramHtml, stripHtmlTags } from "./render.js";
@@ -16,10 +17,12 @@ export const channelType = "telegram";
 
 class TelegramAdapter implements Adapter, StreamingAdapter {
   #bot: Bot;
+  #attachments: AttachmentStore;
   #activeStreams = new Map<string, TelegramStreamHandle>();
 
-  constructor(bot: Bot) {
+  constructor(bot: Bot, attachments: AttachmentStore) {
     this.#bot = bot;
+    this.#attachments = attachments;
   }
 
   async deliver(platformAddress: string, content: RenderedMessage | JsonValue): Promise<void> {
@@ -39,6 +42,13 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
           throw err;
         }
       }
+      // Send any attached images as separate photo messages after the text.
+      for (const img of rendered.images ?? []) {
+        await this.#bot.api.sendPhoto(
+          chatId,
+          new InputFile(img.data, `image.${mediaTypeToExt(img.mediaType)}`),
+        );
+      }
     } else {
       await this.#bot.api.sendMessage(chatId, contentToText(content as JsonValue));
     }
@@ -48,9 +58,15 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
     const existing = this.#activeStreams.get(runId);
     if (existing) return existing;
 
-    const handle = new TelegramStreamHandle(this.#bot, Number(platformAddress), () => {
-      this.#activeStreams.delete(runId);
-    });
+    const handle = new TelegramStreamHandle(
+      this.#bot,
+      this.#attachments,
+      Number(platformAddress),
+      runId,
+      () => {
+        this.#activeStreams.delete(runId);
+      },
+    );
     this.#activeStreams.set(runId, handle);
     return handle;
   }
@@ -63,20 +79,35 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
 /**
  * Stream handle for Telegram — sends an initial message on first push,
  * then edits it progressively with throttling to respect rate limits.
+ *
+ * Generated images (`tool_result` from `generate_image`) are delivered
+ * mid-stream via `sendPhoto`. Dedup is keyed on `runId + path` so Inngest
+ * retries of the same handle never send the image twice.
  */
 class TelegramStreamHandle implements StreamHandle {
   #bot: Bot;
+  #attachments: AttachmentStore;
   #chatId: number;
+  #runId: string;
   #messageId: number | null = null;
   #accumulated = "";
   #lastEditTime = 0;
   #editInterval = 500; // ms between edits
+  #sentImages = new Set<string>();
   #onDone: () => void;
   #pending: Promise<void> = Promise.resolve();
 
-  constructor(bot: Bot, chatId: number, onDone: () => void) {
+  constructor(
+    bot: Bot,
+    attachments: AttachmentStore,
+    chatId: number,
+    runId: string,
+    onDone: () => void,
+  ) {
     this.#bot = bot;
+    this.#attachments = attachments;
     this.#chatId = chatId;
+    this.#runId = runId;
     this.#onDone = onDone;
   }
 
@@ -87,10 +118,50 @@ class TelegramStreamHandle implements StreamHandle {
       this.#accumulated += `\n🔍 ${event.name}...\n`;
     } else if (event.type === "status") {
       this.#accumulated += `\n⏳ ${event.message}\n`;
+    } else if (event.type === "tool_result" && event.name === "generate_image" && !event.isError) {
+      await this.#sendGeneratedImage(event.output);
+      return;
     }
-    // tool_result: skip — LLM will summarize
+    // other tool_results: skip — LLM will summarize
 
     await this.#throttledEdit();
+  }
+
+  async #sendGeneratedImage(output: string): Promise<void> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(output);
+    } catch {
+      logger.warn({ runId: this.#runId }, "telegram: generate_image tool_result wasn't JSON");
+      return;
+    }
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      !("path" in parsed) ||
+      !("mediaType" in parsed) ||
+      typeof (parsed as { path: unknown }).path !== "string" ||
+      typeof (parsed as { mediaType: unknown }).mediaType !== "string"
+    ) {
+      return;
+    }
+    const { path, mediaType } = parsed as { path: string; mediaType: string };
+
+    // Dedup across Inngest retries — same run + path = already delivered.
+    const dedupKey = `${this.#runId}:${path}`;
+    if (this.#sentImages.has(dedupKey)) return;
+    this.#sentImages.add(dedupKey);
+
+    try {
+      const bytes = await this.#attachments.download(path);
+      await this.#bot.api.sendPhoto(
+        this.#chatId,
+        new InputFile(bytes, `image.${mediaTypeToExt(mediaType)}`),
+      );
+    } catch (err) {
+      // Don't crash the stream on a single image failure — user still gets the text.
+      logger.error({ err, path, runId: this.#runId }, "telegram: failed to send generated image");
+    }
   }
 
   async finish(): Promise<void> {
@@ -155,10 +226,10 @@ class TelegramStreamHandle implements StreamHandle {
  * Telegram adapter — long-polling bot, delivers via Bot API.
  */
 export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
-  const { credentials, transport } = deps;
+  const { credentials, transport, attachments } = deps;
   const creds = credentials as { token: string; apiRoot?: string };
   const bot = new Bot(creds.token, creds.apiRoot ? { client: { apiRoot: creds.apiRoot } } : {});
-  const adapter = new TelegramAdapter(bot);
+  const adapter = new TelegramAdapter(bot, attachments);
 
   bot.command("start", async (ctx) => {
     await ctx.reply(

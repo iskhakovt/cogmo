@@ -2,6 +2,7 @@
 
 ## Next
 
+- [ ] `p2` Image generation — integration + e2e tests via fal-mock (MSW handlers for `queue.fal.run` + CDN URLs, small reference PNG fixture, record mode via `FAL_API_KEY`, CI replay in strict mode). llmock can't handle fal's queue/CDN pattern — needs its own MSW setup wired into `test/integration-setup.ts`. End-to-end test asserts `generate_image` tool_use flows through the pipeline, image reaches `deliverBatch`/stream handle. Gated e2e test runs real fal calls when `FAL_API_KEY` is set locally.
 - [ ] `p2` Non-interactive setup — `cogmo setup --non-interactive` reads `COGMO_LLM_*` env vars, validates, writes provider + model_providers to DB. Currently only seeds defaults. Needed for CI/IaC.
 - [ ] `p2` Context fast path — account for output tokens in `shouldSkipCounting` (currently only tracks `inputTokens`, underestimates by one response worth)
 - [ ] `p2` Background compaction — run summarization after response (while user reads) instead of before next turn, store pre-computed summary to eliminate compaction latency

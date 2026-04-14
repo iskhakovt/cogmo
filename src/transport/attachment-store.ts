@@ -9,7 +9,12 @@ import { GetObjectCommand, NoSuchKey, PutObjectCommand, type S3Client } from "@a
  * which is the agent's text workspace.
  */
 export interface AttachmentStore {
-  upload(data: Buffer, mediaType: string): Promise<string>;
+  /**
+   * Upload bytes to storage. The `prefix` partitions the storage path
+   * (`inbound/` for platform uploads, `generated/` for agent-generated
+   * content, etc.). Defaults to `"inbound"` for backward compatibility.
+   */
+  upload(data: Buffer, mediaType: string, prefix?: string): Promise<string>;
   download(path: string): Promise<Buffer>;
 }
 
@@ -22,7 +27,7 @@ const MIME_EXT: Record<string, string> = {
   "application/pdf": "pdf",
 };
 
-function mediaTypeToExt(mediaType: string): string {
+export function mediaTypeToExt(mediaType: string): string {
   return MIME_EXT[mediaType] ?? mediaType.split("/")[1]?.split("+")[0] ?? "bin";
 }
 
@@ -31,9 +36,9 @@ function mediaTypeToExt(mediaType: string): string {
  */
 export function createAttachmentStore(client: S3Client, bucket: string): AttachmentStore {
   return {
-    async upload(data: Buffer, mediaType: string): Promise<string> {
+    async upload(data: Buffer, mediaType: string, prefix = "inbound"): Promise<string> {
       const ext = mediaTypeToExt(mediaType);
-      const path = `inbound/${randomUUID()}.${ext}`;
+      const path = `${prefix}/${randomUUID()}.${ext}`;
       await client.send(
         new PutObjectCommand({
           Bucket: bucket,

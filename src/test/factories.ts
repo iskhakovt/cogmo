@@ -9,6 +9,7 @@ import type { ToolRegistry } from "../agent/tools.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import type { AttachmentStore } from "../transport/attachment-store.js";
 import type { DeliveryHandle, DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import type { Transport } from "../transport/transport.js";
@@ -189,6 +190,14 @@ export function mockDeliveryHandle(overrides?: Partial<DeliveryHandle>): Deliver
 export function mockDeliveryRouter(overrides?: Partial<DeliveryRouter>): DeliveryRouter {
   return {
     prepare: vi.fn().mockResolvedValue(mockDeliveryHandle()),
+    ...overrides,
+  };
+}
+
+export function mockAttachmentStore(overrides?: Partial<AttachmentStore>): AttachmentStore {
+  return {
+    upload: vi.fn().mockResolvedValue("inbound/test.jpg"),
+    download: vi.fn().mockResolvedValue(Buffer.from([1, 2, 3])),
     ...overrides,
   };
 }

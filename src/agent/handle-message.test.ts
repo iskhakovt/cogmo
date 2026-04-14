@@ -240,7 +240,7 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    expect(handle.deliverBatch).toHaveBeenCalledWith("Hello from assistant");
+    expect(handle.deliverBatch).toHaveBeenCalledWith("Hello from assistant", undefined);
   });
 
   it("skips processing when triggerInboundId is stale", async () => {

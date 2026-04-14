@@ -1,6 +1,6 @@
 import type { StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
-import type { RenderedMessage } from "./adapter-module.js";
+import type { OutboundImage, RenderedMessage } from "./adapter-module.js";
 import type { TransportStore } from "./store/index.js";
 import {
   type Adapter,
@@ -32,7 +32,12 @@ export interface DeliveryHandle {
   push(event: StreamEvent): Promise<void>;
   finish(): Promise<void>;
   abort(error: string): Promise<void>;
-  deliverBatch(content: string): Promise<void>;
+  /**
+   * Deliver final content to batch (non-streaming) adapters after persist.
+   * No-op for sessions handled by streaming adapters — those receive content
+   * via `push` events during the loop.
+   */
+  deliverBatch(content: string, images?: readonly OutboundImage[]): Promise<void>;
 }
 
 /**
@@ -126,9 +131,16 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
             await handle.abort(error);
           }
         },
-        async deliverBatch(content: string): Promise<void> {
+        async deliverBatch(content, images): Promise<void> {
           for (const { platformAddress, adapter, renderOutput } of batchTargets) {
-            const rendered = renderOutput ? renderOutput(content) : content;
+            // When images are present, always produce a RenderedMessage so
+            // adapters can find them on `.images` — even if the channel has no
+            // renderOutput and would otherwise receive raw markdown.
+            const rendered: RenderedMessage | string = renderOutput
+              ? { ...renderOutput(content), ...(images && { images }) }
+              : images
+                ? { text: content, images }
+                : content;
             await adapter.deliver(platformAddress, rendered);
           }
         },

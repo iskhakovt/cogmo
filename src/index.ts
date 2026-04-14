@@ -1,3 +1,4 @@
+import { createFal } from "@ai-sdk/fal";
 import { S3Client } from "@aws-sdk/client-s3";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { coreMemoryTools } from "./agent/core-memory-tools.js";
@@ -7,6 +8,7 @@ import { fileTools } from "./agent/file-tools.js";
 import { createFileService, FILES_PROMPT_GUIDANCE } from "./agent/files.js";
 import { createHandleMessage } from "./agent/handle-message.js";
 import { createIdleTimer } from "./agent/idle-timer.js";
+import { createImageTools } from "./agent/image-tools.js";
 import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
@@ -72,13 +74,31 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const provider =
     opts.providerOverride ??
     (await resolveProviderForModel(profile.model, agentStore, secretsStore));
-  // Web tool keys: DB first (wizard-configured), env fallback (dev convenience).
+
+  // S3-compatible file storage (MinIO locally, AWS S3 / R2 in production).
+  // Constructed before tool registration because image-tools needs the
+  // attachment store injected at factory time.
+  const s3Client = new S3Client({
+    ...(env.S3_ENDPOINT ? { endpoint: env.S3_ENDPOINT, forcePathStyle: true } : {}),
+    region: env.S3_REGION,
+    ...(env.S3_ACCESS_KEY && env.S3_SECRET_KEY
+      ? { credentials: { accessKeyId: env.S3_ACCESS_KEY, secretAccessKey: env.S3_SECRET_KEY } }
+      : {}),
+  });
+  const fileService = createFileService(s3Client, env.S3_BUCKET);
+  const attachmentStore = createAttachmentStore(s3Client, env.S3_BUCKET);
+
+  // Tool credentials: DB first (wizard-configured), env fallback (dev convenience).
   const tavilyKey = (await secretsStore.getSecret("tavily_api_key")) ?? env.TAVILY_API_KEY;
   const openrouterKey =
     (await secretsStore.getSecret("openrouter_api_key")) ?? env.OPENROUTER_API_KEY;
+  const falKey = (await secretsStore.getSecret("fal_api_key")) ?? env.FAL_API_KEY;
+
   const webTools = createWebTools(tavilyKey, openrouterKey);
+  const falProvider = falKey ? createFal({ apiKey: falKey }) : undefined;
+  const imageTools = createImageTools(falProvider, attachmentStore);
   const tools = createDefaultTools(
-    [...memoryTools, ...webTools, ...fileTools, ...coreMemoryTools],
+    [...memoryTools, ...webTools, ...fileTools, ...coreMemoryTools, ...imageTools],
     env.USER_TIMEZONE,
   );
   const promptSource = new DefaultPromptSource({
@@ -99,17 +119,6 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     maxWaitMs: env.DEBOUNCE_MAXWAIT_SECONDS * 1000,
     resumePolicy: env.DEBOUNCE_RESUME_POLICY,
   };
-
-  // S3-compatible file storage (MinIO locally, AWS S3 / R2 in production)
-  const s3Client = new S3Client({
-    ...(env.S3_ENDPOINT ? { endpoint: env.S3_ENDPOINT, forcePathStyle: true } : {}),
-    region: env.S3_REGION,
-    ...(env.S3_ACCESS_KEY && env.S3_SECRET_KEY
-      ? { credentials: { accessKeyId: env.S3_ACCESS_KEY, secretAccessKey: env.S3_SECRET_KEY } }
-      : {}),
-  });
-  const fileService = createFileService(s3Client, env.S3_BUCKET);
-  const attachmentStore = createAttachmentStore(s3Client, env.S3_BUCKET);
 
   const {
     functions: channelFunctions,
