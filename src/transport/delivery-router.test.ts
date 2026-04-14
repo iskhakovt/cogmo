@@ -233,4 +233,67 @@ describe("createDeliveryRouter", () => {
     // Should deliver once, not twice
     expect(batch.deliver).toHaveBeenCalledTimes(1);
   });
+
+  it("calls renderOutput before deliver when present", async () => {
+    const batch = mockAdapter();
+    const renderOutput = vi.fn().mockReturnValue({ text: "<b>rendered</b>", parseMode: "HTML" });
+    const adapters = new Map([["ch-1", { adapter: batch, renderOutput }]]);
+    const transportStore = mockTransportStore({
+      getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+    });
+
+    const router = createDeliveryRouter({ adapters, transportStore });
+    const delivery = await router.prepare(ctx());
+
+    await delivery.deliverBatch("**rendered**");
+
+    expect(renderOutput).toHaveBeenCalledWith("**rendered**");
+    expect(batch.deliver).toHaveBeenCalledWith("addr-s1", {
+      text: "<b>rendered</b>",
+      parseMode: "HTML",
+    });
+  });
+
+  it("passes raw markdown when renderOutput is not set", async () => {
+    const batch = mockAdapter();
+    const adapters = new Map([["ch-1", { adapter: batch }]]);
+    const transportStore = mockTransportStore({
+      getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+    });
+
+    const router = createDeliveryRouter({ adapters, transportStore });
+    const delivery = await router.prepare(ctx());
+
+    await delivery.deliverBatch("plain markdown");
+
+    expect(batch.deliver).toHaveBeenCalledWith("addr-s1", "plain markdown");
+  });
+
+  it("renders per-adapter independently in multi-channel delivery", async () => {
+    const telegramAdapter = mockAdapter();
+    const directAdapter = mockAdapter();
+    const renderHtml = vi.fn().mockReturnValue({ text: "<b>hi</b>", parseMode: "HTML" });
+    const adapters = new Map<string, any>([
+      ["ch-tg", { adapter: telegramAdapter, renderOutput: renderHtml }],
+      ["ch-direct", { adapter: directAdapter }],
+    ]);
+    const transportStore = mockTransportStore({
+      getSourceSessions: vi
+        .fn()
+        .mockResolvedValue([session("s1", "ch-tg"), session("s2", "ch-direct")]),
+    });
+
+    const router = createDeliveryRouter({ adapters, transportStore });
+    const delivery = await router.prepare(ctx());
+
+    await delivery.deliverBatch("**hi**");
+
+    // Telegram gets rendered HTML
+    expect(telegramAdapter.deliver).toHaveBeenCalledWith("addr-s1", {
+      text: "<b>hi</b>",
+      parseMode: "HTML",
+    });
+    // Direct gets raw markdown
+    expect(directAdapter.deliver).toHaveBeenCalledWith("addr-s2", "**hi**");
+  });
 });

@@ -19,7 +19,6 @@
 - [ ] `p3` Adopt `recallResponseToPromptString()` — richer memory injection with temporal fields, entity summaries
 - [ ] `p3` Use native OpenRouter provider for prod Hindsight — replaces `openai` + custom base URL workaround
 - [ ] `p3` Stale llmock fixture cleanup — detect unused fixtures after test run, auto-delete
-- [ ] `p2` Integration test: Telegram rendering pipeline — full pipeline with Inngest: send message via Direct + Telegram mock sessions on same conversation, verify DeliveryRouter calls `renderOutput` for Telegram session (HTML parse_mode), delivers plain markdown to Direct session. Covers channel-scoped steering rules injected in prompt, cross-channel union.
 - [ ] `p2` Observer channel-scoped extraction — query conversation's active channels via `channel_sessions → channels`, pass to extraction prompt, extend Zod schema with optional `channelType`, let LLM decide if correction is channel-specific or general
 - [ ] `p3` Basic health check endpoint (HTTP)
 - [ ] `p3` grammY native test primitives — use `bot.handleUpdate()` + `bot.api.config.use(transformer)` instead of `vi.mock("grammy")`

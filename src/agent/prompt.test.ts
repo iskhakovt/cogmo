@@ -184,4 +184,19 @@ describe("DefaultPromptSource", () => {
     expect(rulesIdx).toBeGreaterThan(capsIdx);
     expect(timeIdx).toBeGreaterThan(rulesIdx);
   });
+
+  it("passes channelTypes to getActiveRules", async () => {
+    const getActiveRules = vi.fn().mockResolvedValue([{ rule: "Avoid tables" }]);
+    const store = mockAgentStore({
+      getProfile: vi.fn().mockResolvedValue(null),
+      getActiveRules,
+    });
+    const prompt = await new DefaultPromptSource().assemble(store, {
+      profileId: "p1",
+      channelTypes: ["telegram"],
+    });
+
+    expect(getActiveRules).toHaveBeenCalledWith("p1", ["telegram"]);
+    expect(prompt).toContain("- Avoid tables");
+  });
 });
