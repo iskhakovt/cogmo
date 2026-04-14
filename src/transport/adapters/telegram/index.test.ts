@@ -1,8 +1,8 @@
 import { ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mockTransport } from "../../test/factories.js";
-import type { StreamingAdapter } from "../types.js";
-import { setup } from "./telegram.js";
+import { mockTransport } from "../../../test/factories.js";
+import type { StreamingAdapter } from "../../types.js";
+import { setup } from "./index.js";
 
 // Mock grammy
 const handlers = new Map<string, any>();
@@ -221,7 +221,9 @@ describe("telegram adapter", () => {
       mockBotApi.editMessageText.mockClear();
       await handle.finish();
 
-      expect(mockBotApi.editMessageText).toHaveBeenCalledWith(42, 100, "done");
+      expect(mockBotApi.editMessageText).toHaveBeenCalledWith(42, 100, "done", {
+        parse_mode: "HTML",
+      });
     });
 
     it("abort appends error to message", async () => {

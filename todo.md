@@ -6,6 +6,7 @@
 - [ ] `p2` Context fast path — account for output tokens in `shouldSkipCounting` (currently only tracks `inputTokens`, underestimates by one response worth)
 - [ ] `p2` Background compaction — run summarization after response (while user reads) instead of before next turn, store pre-computed summary to eliminate compaction latency
 - [ ] `p3` Reconsider internal tag stripping — removed from Phase 1 (thinking blocks + tool calls cover current use cases). Revisit if a concrete need for inline orchestrator-only metadata emerges that tools can't express
+- [ ] `p3` Consider moving `IDENTITY`/`ONBOARDING` constants (`src/agent/prompt.ts`) out of code — they're defaults that `profile.basePrompt` can override, but if evolution ever wants to tune the baseline identity/onboarding tone we'd need them in a table. Not urgent — profile override path already exists.
 - [ ] `p2` Batch API support for async evolution tasks — 50% cost reduction for reflection, extraction, optimization
 - [ ] `p2` Define InboundContent schema (Zod) — structured message content type instead of raw JsonValue everywhere
 - [ ] `p2` CLI channel management commands — `main.ts channel add telegram --token=...`, `channel list`, `channel remove` (store layer covered by `p1` Channel CRUD; this is the CLI surface)
@@ -18,7 +19,7 @@
 - [ ] `p3` Adopt `recallResponseToPromptString()` — richer memory injection with temporal fields, entity summaries
 - [ ] `p3` Use native OpenRouter provider for prod Hindsight — replaces `openai` + custom base URL workaround
 - [ ] `p3` Stale llmock fixture cleanup — detect unused fixtures after test run, auto-delete
-- [ ] `p3` Telegram response formatting — HTML or MarkdownV2 with escape function
+- [ ] `p2` Observer channel-scoped extraction — query conversation's active channels via `channel_sessions → channels`, pass to extraction prompt, extend Zod schema with optional `channelType`, let LLM decide if correction is channel-specific or general
 - [ ] `p3` Basic health check endpoint (HTTP)
 - [ ] `p3` grammY native test primitives — use `bot.handleUpdate()` + `bot.api.config.use(transformer)` instead of `vi.mock("grammy")`
 - [ ] `p3` Telegram e2e via Test DC + tgintegration — real user on Telegram test servers, TypeScript/mtcute client

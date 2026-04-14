@@ -1,10 +1,16 @@
 import { Bot } from "grammy";
 import type { JsonValue } from "type-fest";
-import type { StreamEvent } from "../../llm/types.js";
-import { logger } from "../../logger.js";
-import type { AdapterDeps, AdapterModule, AdapterSetupResult } from "../adapter-module.js";
-import { contentToText } from "../content.js";
-import type { Adapter, StreamHandle, StreamingAdapter } from "../types.js";
+import type { StreamEvent } from "../../../llm/types.js";
+import { logger } from "../../../logger.js";
+import type {
+  AdapterDeps,
+  AdapterModule,
+  AdapterSetupResult,
+  RenderedMessage,
+} from "../../adapter-module.js";
+import { contentToText } from "../../content.js";
+import type { Adapter, StreamHandle, StreamingAdapter } from "../../types.js";
+import { renderTelegramHtml } from "./render.js";
 
 export const channelType = "telegram";
 
@@ -16,8 +22,26 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
     this.#bot = bot;
   }
 
-  async deliver(platformAddress: string, content: JsonValue): Promise<void> {
-    await this.#bot.api.sendMessage(Number(platformAddress), contentToText(content));
+  async deliver(platformAddress: string, content: RenderedMessage | JsonValue): Promise<void> {
+    const chatId = Number(platformAddress);
+    if (typeof content === "object" && content !== null && "parseMode" in content) {
+      const rendered = content as RenderedMessage;
+      try {
+        await this.#bot.api.sendMessage(chatId, rendered.text, {
+          ...(rendered.parseMode && { parse_mode: rendered.parseMode }),
+        });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "";
+        if (msg.includes("can't parse entities")) {
+          logger.warn("telegram: HTML parse failed, falling back to plain text");
+          await this.#bot.api.sendMessage(chatId, rendered.text);
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      await this.#bot.api.sendMessage(chatId, contentToText(content as JsonValue));
+    }
   }
 
   async openStream(platformAddress: string, runId: string): Promise<StreamHandle> {
@@ -71,7 +95,22 @@ class TelegramStreamHandle implements StreamHandle {
 
   async finish(): Promise<void> {
     await this.#pending;
-    if (this.#accumulated) {
+    if (this.#accumulated && this.#messageId) {
+      // Final edit with HTML formatting
+      const rendered = renderTelegramHtml(this.#accumulated);
+      try {
+        await this.#bot.api.editMessageText(this.#chatId, this.#messageId, rendered.text, {
+          ...(rendered.parseMode && { parse_mode: rendered.parseMode }),
+        });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "";
+        if (msg.includes("can't parse entities")) {
+          logger.warn("telegram: stream finish HTML parse failed, keeping plain text");
+        } else if (!msg.includes("message is not modified")) {
+          throw err;
+        }
+      }
+    } else if (this.#accumulated) {
       await this.#edit(this.#accumulated);
     }
     this.#onDone();
@@ -216,4 +255,5 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   return { adapter, functions: [] };
 }
 
-export default { channelType, setup } satisfies AdapterModule;
+export { renderTelegramHtml } from "./render.js";
+export default { channelType, setup, renderOutput: renderTelegramHtml } satisfies AdapterModule;

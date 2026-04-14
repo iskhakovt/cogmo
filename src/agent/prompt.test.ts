@@ -16,7 +16,10 @@ describe("DefaultPromptSource", () => {
         .mockResolvedValue({ id: "p1", basePrompt: "You are a coder.", model: "m", toolSet: [] }),
       getActiveRules: vi.fn().mockResolvedValue([]),
     });
-    const prompt = await new DefaultPromptSource().assemble(store, "p1");
+    const prompt = await new DefaultPromptSource().assemble(store, {
+      profileId: "p1",
+      channelTypes: [],
+    });
 
     expect(prompt).toContain("You are a coder.");
   });
@@ -26,7 +29,10 @@ describe("DefaultPromptSource", () => {
       getProfile: vi.fn().mockResolvedValue(null),
       getActiveRules: vi.fn().mockResolvedValue([]),
     });
-    const prompt = await new DefaultPromptSource().assemble(store, "nonexistent");
+    const prompt = await new DefaultPromptSource().assemble(store, {
+      profileId: "nonexistent",
+      channelTypes: [],
+    });
 
     expect(prompt).toContain("personal AI assistant");
   });
@@ -38,7 +44,10 @@ describe("DefaultPromptSource", () => {
         .fn()
         .mockResolvedValue([{ rule: "Be concise" }, { rule: "Use formal tone" }]),
     });
-    const prompt = await new DefaultPromptSource().assemble(store, "p1");
+    const prompt = await new DefaultPromptSource().assemble(store, {
+      profileId: "p1",
+      channelTypes: [],
+    });
 
     expect(prompt).toContain("# Rules");
     expect(prompt).toContain("- Be concise");
@@ -52,7 +61,7 @@ describe("DefaultPromptSource", () => {
     });
     const prompt = await new DefaultPromptSource({
       toolDefinitions: () => testTools,
-    }).assemble(store, "p1");
+    }).assemble(store, { profileId: "p1", channelTypes: [] });
 
     expect(prompt).toContain("# Tools");
     expect(prompt).toContain("**web_search**: Search the web");
@@ -67,7 +76,7 @@ describe("DefaultPromptSource", () => {
     });
     const prompt = await new DefaultPromptSource({
       toolDefinitions: () => [],
-    }).assemble(store, "p1");
+    }).assemble(store, { profileId: "p1", channelTypes: [] });
 
     expect(prompt).not.toContain("# Tools");
   });
@@ -79,7 +88,7 @@ describe("DefaultPromptSource", () => {
     });
     const prompt = await new DefaultPromptSource({
       serviceGuidance: ["Test memory guidance.", "Test files guidance."],
-    }).assemble(store, "p1");
+    }).assemble(store, { profileId: "p1", channelTypes: [] });
 
     expect(prompt).toContain("# Capabilities");
     expect(prompt).toContain("Test memory guidance.");
@@ -93,7 +102,7 @@ describe("DefaultPromptSource", () => {
     });
     const prompt = await new DefaultPromptSource({
       serviceGuidance: [],
-    }).assemble(store, "p1");
+    }).assemble(store, { profileId: "p1", channelTypes: [] });
 
     expect(prompt).not.toContain("# Capabilities");
   });
@@ -103,7 +112,10 @@ describe("DefaultPromptSource", () => {
       getProfile: vi.fn().mockResolvedValue(null),
       getActiveRules: vi.fn().mockResolvedValue([]),
     });
-    const prompt = await new DefaultPromptSource({ timezone: "UTC" }).assemble(store, "p1");
+    const prompt = await new DefaultPromptSource({ timezone: "UTC" }).assemble(store, {
+      profileId: "p1",
+      channelTypes: [],
+    });
 
     expect(prompt).toContain("Current time:");
     expect(prompt).toContain("(UTC)");
@@ -116,7 +128,7 @@ describe("DefaultPromptSource", () => {
     });
     const prompt = await new DefaultPromptSource({
       getUserContext: async () => null,
-    }).assemble(store, "p1");
+    }).assemble(store, { profileId: "p1", channelTypes: [] });
 
     expect(prompt).toContain("don't know your user yet");
   });
@@ -128,7 +140,7 @@ describe("DefaultPromptSource", () => {
     });
     const prompt = await new DefaultPromptSource({
       getUserContext: async () => "Name: Tim\nTimezone: Europe/Moscow",
-    }).assemble(store, "p1");
+    }).assemble(store, { profileId: "p1", channelTypes: [] });
 
     expect(prompt).toContain("# User");
     expect(prompt).toContain("Name: Tim");
@@ -140,7 +152,10 @@ describe("DefaultPromptSource", () => {
       getProfile: vi.fn().mockResolvedValue(null),
       getActiveRules: vi.fn().mockResolvedValue([]),
     });
-    const prompt = await new DefaultPromptSource().assemble(store, "p1");
+    const prompt = await new DefaultPromptSource().assemble(store, {
+      profileId: "p1",
+      channelTypes: [],
+    });
 
     expect(prompt).not.toContain("# Rules");
   });
@@ -155,7 +170,7 @@ describe("DefaultPromptSource", () => {
       toolDefinitions: () => testTools,
       serviceGuidance: ["Test memory guidance."],
       getUserContext: async () => "Name: Tim",
-    }).assemble(store, "p1");
+    }).assemble(store, { profileId: "p1", channelTypes: [] });
 
     const userIdx = prompt.indexOf("# User");
     const toolsIdx = prompt.indexOf("# Tools");

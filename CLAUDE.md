@@ -225,7 +225,7 @@ After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 - No frameworks — raw SDK only.
 - **All DB operations use transactions.** Use `db.transaction(async (tx) => { ... })`.
 - **Every table gets a UUIDv7 primary key (`id`, DB-generated) and `created_at TIMESTAMPTZ DEFAULT now()`.** No exceptions.
-- **Columns are NOT NULL unless explicitly nullable.** Drizzle defaults to nullable — always add `.notNull()`. Nullable columns must be justified (e.g., `expires_at` = never expires, `steering_rules.profile_id` = null means applies to all profiles).
+- **Columns are NOT NULL unless explicitly nullable.** Drizzle defaults to nullable — always add `.notNull()`. Nullable columns must be justified (e.g., `expires_at` = never expires, `steering_rules.profile_id` = null means applies to all profiles, `steering_rules.channel_type` = null means applies to all channels).
 - **Avoid default values** in DB columns and function parameters unless strongly justified (`id`, `created_at` are justified). Explicit values at the call site prevent hidden assumptions.
 - **No table design is final.** Schemas in `design/` docs are design intent, not frozen specs — they evolve as real usage reveals issues. When changing a table, update both the Drizzle schema (`<module>/store/schema.ts`) and the design doc that owns it simultaneously.
 - **Prefer immutable rows.** Insert once, avoid updates where practical. When updates are necessary (e.g. status transitions), that's fine — just design tables so most rows are append-only.

@@ -87,8 +87,11 @@ export interface AgentStore {
     messageId: string,
   ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | null>;
 
-  /** Load active steering rules for a profile (global + profile-specific, ordered by priority). */
-  getActiveRules(profileId: string): Promise<ReadonlyArray<{ rule: string }>>;
+  /** Load active steering rules for a profile + active channels (ordered by priority). */
+  getActiveRules(
+    profileId: string,
+    channelTypes: string[],
+  ): Promise<ReadonlyArray<{ rule: string }>>;
 
   /** Get all core memory blocks for a user, ordered by key. */
   getCoreMemoryBlocks(userId: string): Promise<ReadonlyArray<{ key: string; content: string }>>;
@@ -162,6 +165,15 @@ export interface AgentStore {
 
   // --- Evolution: correction extraction ---
 
+  /** Insert a manual steering rule (already active). Used by seed/setup. */
+  insertManualRule(params: {
+    rule: string;
+    category: string;
+    profileId?: string | null;
+    channelType?: string | null;
+    priority?: number;
+  }): Promise<{ id: string }>;
+
   /** Get all correction-sourced rules (active + inactive) for dedup during extraction. */
   getCorrections(profileId: string): Promise<
     ReadonlyArray<{
@@ -178,6 +190,7 @@ export interface AgentStore {
     rule: string;
     category: string;
     profileId: string | null;
+    channelType?: string | null;
     existingRuleId?: string;
   }): Promise<{ id: string; promoted: boolean }>;
 
@@ -394,7 +407,10 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getActiveRules(profileId: string): Promise<ReadonlyArray<{ rule: string }>> {
+  async getActiveRules(
+    profileId: string,
+    channelTypes: string[],
+  ): Promise<ReadonlyArray<{ rule: string }>> {
     return this.#db.transaction(async (tx) => {
       return tx
         .select({ rule: steeringRules.rule })
@@ -403,6 +419,12 @@ export class DrizzleAgentStore implements AgentStore {
           and(
             eq(steeringRules.active, true),
             or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
+            or(
+              isNull(steeringRules.channelType),
+              ...(channelTypes.length > 0
+                ? [inArray(steeringRules.channelType, channelTypes)]
+                : []),
+            ),
           ),
         )
         .orderBy(asc(steeringRules.priority));
@@ -595,6 +617,32 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
+  async insertManualRule(params: {
+    rule: string;
+    category: string;
+    profileId?: string | null;
+    channelType?: string | null;
+    priority?: number;
+  }): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      return single(
+        await tx
+          .insert(steeringRules)
+          .values({
+            rule: params.rule,
+            category: params.category,
+            source: "manual",
+            active: true,
+            priority: params.priority ?? 50,
+            observationCount: 0,
+            profileId: params.profileId ?? null,
+            channelType: params.channelType ?? null,
+          })
+          .returning({ id: steeringRules.id }),
+      );
+    });
+  }
+
   // --- Evolution: correction extraction ---
 
   async getCorrections(profileId: string): Promise<
@@ -630,6 +678,7 @@ export class DrizzleAgentStore implements AgentStore {
     rule: string;
     category: string;
     profileId: string | null;
+    channelType?: string | null;
     existingRuleId?: string;
   }): Promise<{ id: string; promoted: boolean }> {
     return this.#db.transaction(async (tx) => {
@@ -662,6 +711,7 @@ export class DrizzleAgentStore implements AgentStore {
             priority: 100,
             observationCount: 1,
             profileId: params.profileId,
+            channelType: params.channelType ?? null,
           })
           .returning({ id: steeringRules.id }),
       );

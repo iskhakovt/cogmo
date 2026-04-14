@@ -36,7 +36,7 @@ describe("createDeliveryRouter", () => {
   it("fans out push/finish to streaming adapters", async () => {
     const handle = mockStreamHandle();
     const streaming = mockStreamingAdapter({ openStream: vi.fn().mockResolvedValue(handle) });
-    const adapters = new Map([["ch-1", streaming]]);
+    const adapters = new Map([["ch-1", { adapter: streaming }]]);
     const transportStore = mockTransportStore({
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
@@ -53,7 +53,7 @@ describe("createDeliveryRouter", () => {
 
   it("delivers batch to non-streaming adapters", async () => {
     const batch = mockAdapter();
-    const adapters = new Map([["ch-1", batch]]);
+    const adapters = new Map([["ch-1", { adapter: batch }]]);
     const transportStore = mockTransportStore({
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
@@ -71,8 +71,8 @@ describe("createDeliveryRouter", () => {
     const streaming = mockStreamingAdapter({ openStream: vi.fn().mockResolvedValue(handle) });
     const batch = mockAdapter();
     const adapters = new Map<string, any>([
-      ["ch-stream", streaming],
-      ["ch-batch", batch],
+      ["ch-stream", { adapter: streaming }],
+      ["ch-batch", { adapter: batch }],
     ]);
     const transportStore = mockTransportStore({
       getSourceSessions: vi
@@ -114,8 +114,8 @@ describe("createDeliveryRouter", () => {
     const s1 = mockStreamingAdapter({ openStream: vi.fn().mockResolvedValue(handle1) });
     const s2 = mockStreamingAdapter({ openStream: vi.fn().mockResolvedValue(handle2) });
     const adapters = new Map<string, any>([
-      ["ch-1", s1],
-      ["ch-2", s2],
+      ["ch-1", { adapter: s1 }],
+      ["ch-2", { adapter: s2 }],
     ]);
     const transportStore = mockTransportStore({
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1"), session("s2", "ch-2")]),
@@ -132,7 +132,7 @@ describe("createDeliveryRouter", () => {
 
   it("passes runId to openStream for retry dedup", async () => {
     const streaming = mockStreamingAdapter();
-    const adapters = new Map([["ch-1", streaming]]);
+    const adapters = new Map([["ch-1", { adapter: streaming }]]);
     const transportStore = mockTransportStore({
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
@@ -176,8 +176,8 @@ describe("createDeliveryRouter", () => {
     const streaming = mockStreamingAdapter({ openStream: vi.fn().mockResolvedValue(handle) });
     const batch = mockAdapter();
     const adapters = new Map<string, any>([
-      ["ch-stream", streaming],
-      ["ch-batch", batch],
+      ["ch-stream", { adapter: streaming }],
+      ["ch-batch", { adapter: batch }],
     ]);
     const transportStore = mockTransportStore({
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-stream")]),
@@ -197,8 +197,8 @@ describe("createDeliveryRouter", () => {
   it("skips receive-all for non-private conversations", async () => {
     const batch = mockAdapter();
     const adapters = new Map<string, any>([
-      ["ch-source", batch],
-      ["ch-webui", mockAdapter()],
+      ["ch-source", { adapter: batch }],
+      ["ch-webui", { adapter: mockAdapter() }],
     ]);
     const transportStore = mockTransportStore({
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-source")]),
@@ -217,7 +217,7 @@ describe("createDeliveryRouter", () => {
 
   it("deduplicates when a session appears in both source and receive-all", async () => {
     const batch = mockAdapter();
-    const adapters = new Map<string, any>([["ch-1", batch]]);
+    const adapters = new Map<string, any>([["ch-1", { adapter: batch }]]);
     // Same session ID in both lists
     const shared = session("s1", "ch-1", "all");
     const transportStore = mockTransportStore({

@@ -1,0 +1,1 @@
+ALTER TABLE "steering_rules" ADD COLUMN "channel_type" text;

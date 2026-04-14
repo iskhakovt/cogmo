@@ -66,6 +66,9 @@ export interface TransportStore {
   /** Find all active sessions for a conversation (for lifecycle management). */
   getActiveSessionsForConversation(conversationId: string): Promise<ReadonlyArray<Session>>;
 
+  /** Get distinct channel types for a conversation's active sessions. */
+  getActiveChannelTypes(conversationId: string): Promise<string[]>;
+
   /** Find sessions that contributed inbound messages in the given range (source routing). */
   getSourceSessions(params: {
     conversationId: string;
@@ -262,6 +265,23 @@ export class DrizzleTransportStore implements TransportStore {
             or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
           ),
         );
+    });
+  }
+
+  async getActiveChannelTypes(conversationId: string): Promise<string[]> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .selectDistinct({ type: channels.type })
+        .from(channelSessions)
+        .innerJoin(channels, eq(channelSessions.channelId, channels.id))
+        .where(
+          and(
+            eq(channelSessions.conversationId, conversationId),
+            eq(channelSessions.status, "active"),
+            or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
+          ),
+        );
+      return rows.map((r) => r.type);
     });
   }
 

@@ -56,9 +56,11 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   return {
     adapter: {
       deliver: async (platformAddress, content) => {
-        await inngest.send(
-          directOutbound.create({ platformAddress, content: contentToText(content) }),
-        );
+        const text =
+          typeof content === "object" && content !== null && "parseMode" in content
+            ? (content as { text: string }).text
+            : contentToText(content as import("type-fest").JsonValue);
+        await inngest.send(directOutbound.create({ platformAddress, content: text }));
       },
       stop: async () => {},
     },

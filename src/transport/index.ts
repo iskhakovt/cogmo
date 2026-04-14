@@ -1,4 +1,9 @@
-export type { AdapterDeps, AdapterModule, AdapterSetupResult } from "./adapter-module.js";
+export type {
+  AdapterDeps,
+  AdapterModule,
+  AdapterSetupResult,
+  RenderedMessage,
+} from "./adapter-module.js";
 export { adapterModules, adaptersByType } from "./adapters/index.js";
 export { startChannels } from "./registry.js";
 export type { Transport } from "./transport.js";

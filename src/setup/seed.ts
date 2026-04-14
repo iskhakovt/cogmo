@@ -48,6 +48,32 @@ export async function ensureDirectChannel(
   logger.info({ channelId }, "created direct channel");
 }
 
+const TELEGRAM_DEFAULT_RULES = [
+  "Avoid tables — they don't render on this channel. Use bullet lists instead.",
+  "Prefer concise replies. For longer answers, use headings and short paragraphs.",
+  "Keep bullet lists to one level of nesting.",
+];
+
+/** Seed default channel-scoped steering rules. Idempotent — skips if rules for this channel type already exist. */
+export async function seedChannelRules(agentStore: AgentStore, channelType: string): Promise<void> {
+  const existing = await agentStore.getActiveRules("", [channelType]);
+  if (existing.length > 0) return;
+
+  const rules = channelType === "telegram" ? TELEGRAM_DEFAULT_RULES : [];
+
+  for (const rule of rules) {
+    await agentStore.insertManualRule({
+      rule,
+      category: "style",
+      channelType,
+    });
+  }
+
+  if (rules.length > 0) {
+    logger.info({ channelType, count: rules.length }, "seeded channel steering rules");
+  }
+}
+
 /** Run all seed steps. Idempotent. */
 export async function seedDefaults(
   agentStore: AgentStore,

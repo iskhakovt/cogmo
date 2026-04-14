@@ -23,6 +23,15 @@ export interface AdapterSetupResult {
 }
 
 /**
+ * Channel-rendered message — the result of converting canonical markdown
+ * to a channel-specific wire format.
+ */
+export interface RenderedMessage {
+  text: string;
+  parseMode?: "HTML" | "MarkdownV2";
+}
+
+/**
  * Contract every adapter module must satisfy.
  *
  * The barrel (adapters/index.ts) enforces this via `satisfies`.
@@ -31,4 +40,6 @@ export interface AdapterSetupResult {
 export interface AdapterModule {
   channelType: string;
   setup: (deps: AdapterDeps) => Promise<AdapterSetupResult>;
+  /** Convert canonical markdown to channel-specific format. Undefined = identity (raw markdown). */
+  renderOutput?: (markdown: string) => RenderedMessage;
 }

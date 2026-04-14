@@ -6,9 +6,10 @@ import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { adaptersByType } from "./adapters/index.js";
 import type { AttachmentStore } from "./attachment-store.js";
+import type { AdapterEntry } from "./delivery-router.js";
 import type { TransportStore } from "./store/index.js";
 import { createTransport } from "./transport.js";
-import type { Adapter, StreamingAdapter } from "./types.js";
+import type { Adapter } from "./types.js";
 
 export interface RegistryDeps {
   defaultUserId: string;
@@ -27,7 +28,7 @@ export interface RegistryResult {
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   functions: any[];
   adapters: Adapter[];
-  adapterMap: Map<string, Adapter | StreamingAdapter>;
+  adapterMap: Map<string, AdapterEntry>;
 }
 
 /**
@@ -42,7 +43,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [];
   const adapters: Adapter[] = [];
-  const adapterMap = new Map<string, Adapter | StreamingAdapter>();
+  const adapterMap = new Map<string, AdapterEntry>();
 
   const channels = await transportStore.getAllChannels();
 
@@ -79,7 +80,10 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
     });
 
     adapters.push(result.adapter);
-    adapterMap.set(channel.id, result.adapter);
+    adapterMap.set(channel.id, {
+      adapter: result.adapter,
+      renderOutput: mod.renderOutput,
+    });
     functions.push(...result.functions);
   }
 

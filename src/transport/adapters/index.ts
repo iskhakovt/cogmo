@@ -1,6 +1,6 @@
 import type { AdapterModule } from "../adapter-module.js";
 import direct from "./direct.js";
-import telegram from "./telegram.js";
+import telegram from "./telegram/index.js";
 
 /**
  * Adapter module registry — compile-time enforced via satisfies.

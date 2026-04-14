@@ -13,7 +13,7 @@ import type { AgentStore } from "../agent/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore, type SecretsStore } from "../secrets/store/index.js";
 import type { TransportStore } from "../transport/store/index.js";
-import { seedDefaults } from "./seed.js";
+import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
   validateAnthropicKey,
   validateHindsight,
@@ -278,6 +278,9 @@ async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<
     credentials: { tokenSecretName },
     identityMode: "mapped",
   });
+
+  // Seed default channel-scoped steering rules (idempotent)
+  await seedChannelRules(deps.agentStore, "telegram");
 
   // Allowlist
   p.note(

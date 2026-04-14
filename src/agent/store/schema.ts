@@ -122,5 +122,6 @@ export const steeringRules = pgTable("steering_rules", {
   priority: integer("priority").notNull(),
   observationCount: integer("observation_count").notNull(),
   profileId: uuid("profile_id").references(() => profiles.id), // NULL = applies to all profiles
+  channelType: text("channel_type"), // NULL = applies to all channels
   createdAt: ts(),
 });
