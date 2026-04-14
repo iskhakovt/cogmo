@@ -39,7 +39,7 @@
     "@noble/ciphers": "^2.2.0",
     "@noble/hashes": "^2.2.0",
     "@t3-oss/env-core": "^0.13.11",
-    "@vectorize-io/hindsight-client": "^0.5.0",
+    "@vectorize-io/hindsight-client": "^0.5.1",
     "date-fns": "^4.1.0",
     "drizzle-orm": "^0.45.2",
     "grammy": "^1.41.1",
