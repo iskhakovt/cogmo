@@ -24,6 +24,7 @@ export const env = createEnv({
     INNGEST_BASE_URL: z.string().default("http://localhost:8288"),
     TAVILY_API_KEY: z.string().optional(),
     OPENROUTER_API_KEY: z.string().optional(),
+    FAL_API_KEY: z.string().optional(),
     USER_TIMEZONE: z.string().default("UTC"),
     S3_ENDPOINT: z.string().optional(),
     S3_BUCKET: z.string().default("cogmo-files"),

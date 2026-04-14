@@ -1,6 +1,6 @@
 import { ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
-import { mockStep, mockTransport } from "../../test/factories.js";
+import { mockAttachmentStore, mockStep, mockTransport } from "../../test/factories.js";
 import { setup } from "./direct.js";
 
 const activeSession = {
@@ -32,6 +32,7 @@ async function setupAdapter(transportOverrides?: Partial<ReturnType<typeof mockT
     channelId: "direct-ch",
     credentials: {},
     transport,
+    attachments: mockAttachmentStore(),
   });
 
   // The inbound Inngest function

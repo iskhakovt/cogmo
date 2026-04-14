@@ -325,7 +325,7 @@ async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<
 
 async function stepConfigureOptionalTools(deps: WizardDeps): Promise<void> {
   const addTools = await p.confirm({
-    message: "Configure optional web tools? (Tavily search, etc.)",
+    message: "Configure optional tools? (Tavily search, fal.ai image generation, etc.)",
     initialValue: false,
   });
   if (!cancelGuard(addTools)) return;
@@ -347,6 +347,19 @@ async function stepConfigureOptionalTools(deps: WizardDeps): Promise<void> {
     } else {
       s.stop(`Tavily validation failed: ${result.error}`);
     }
+  }
+
+  // fal.ai — image generation. No live validation in v0 (no cheap ping endpoint);
+  // errors surface on first use.
+  p.note("Get a key at https://fal.ai/dashboard/keys", "fal.ai image generation");
+  const falKey = cancelGuard(await p.password({ message: "fal.ai API key (Enter to skip):" }));
+  if (falKey) {
+    await deps.secretsStore.putSecret({
+      name: "fal_api_key",
+      plaintext: falKey,
+      description: "fal.ai image generation",
+    });
+    p.log.success("fal.ai key saved.");
   }
 }
 

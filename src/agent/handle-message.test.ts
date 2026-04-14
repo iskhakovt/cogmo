@@ -228,8 +228,10 @@ describe("createHandleMessage", () => {
     expect(handle.finish).not.toHaveBeenCalled();
   });
 
-  it("calls delivery.deliverBatch after persist", async () => {
-    const handle = mockDeliveryHandle();
+  it("calls delivery.deliverBatch after persist when there are batch targets", async () => {
+    const handle = mockDeliveryHandle({
+      hasBatchTargets: vi.fn().mockReturnValue(true),
+    });
     const deps = mockDeps({
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
     });
@@ -240,7 +242,25 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    expect(handle.deliverBatch).toHaveBeenCalledWith("Hello from assistant");
+    expect(handle.deliverBatch).toHaveBeenCalledWith("Hello from assistant", undefined);
+  });
+
+  it("skips deliverBatch when there are no batch targets (streaming-only setup)", async () => {
+    const handle = mockDeliveryHandle({
+      hasBatchTargets: vi.fn().mockReturnValue(false),
+    });
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    // No batch targets → no S3 downloads, no deliverBatch call.
+    expect(handle.deliverBatch).not.toHaveBeenCalled();
   });
 
   it("skips processing when triggerInboundId is stale", async () => {

@@ -77,6 +77,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       channelId: channel.id,
       credentials,
       transport,
+      attachments: deps.attachments,
     });
 
     adapters.push(result.adapter);

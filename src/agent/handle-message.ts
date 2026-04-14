@@ -11,6 +11,7 @@ import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
 import type { DebounceConfig } from "./debounce.js";
+import { extractGeneratedImages } from "./extract-images.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
 import { shouldSkipRecall } from "./recall-gate.js";
@@ -289,9 +290,55 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         });
       });
 
-      // ──── NON-DURABLE: batch delivery ────
+      // ──── DURABLE: batch delivery ────
+      //
+      // Wrapped in step.run so it's exactly-once on Inngest retry — without
+      // this, a post-delivery step failure would re-fire sendMessage /
+      // sendPhoto to batch adapters. Return value is the delivery summary
+      // (small counts), so state stays lean — image bytes flow through the
+      // step body in memory but never into Inngest state.
+      //
+      // Skipped entirely when there are no batch targets (pure-streaming
+      // setups like Telegram-only): the stream handle already handled
+      // delivery mid-loop, and no S3 downloads are needed.
+      if (delivery.hasBatchTargets()) {
+        await step.run("batch-delivery", async () => {
+          const imageRefs = extractGeneratedImages(result.newMessages);
 
-      await delivery.deliverBatch(result.text);
+          // Per-image resilience via allSettled — one S3 miss or
+          // corrupted attachment shouldn't block delivery of the others
+          // (matches the stream handle's swallow-and-log pattern).
+          const settled = await Promise.allSettled(
+            imageRefs.map(async (ref) => ({
+              data: await attachments.download(ref.path),
+              mediaType: ref.mediaType,
+            })),
+          );
+
+          const fulfilled = settled
+            .filter(
+              (r): r is PromiseFulfilledResult<{ data: Buffer; mediaType: string }> =>
+                r.status === "fulfilled",
+            )
+            .map((r) => r.value);
+
+          for (const [i, r] of settled.entries()) {
+            if (r.status === "rejected") {
+              logger.error(
+                { err: r.reason, path: imageRefs[i]?.path },
+                "outbound image download failed, skipping",
+              );
+            }
+          }
+
+          await delivery.deliverBatch(result.text, fulfilled.length > 0 ? fulfilled : undefined);
+
+          return {
+            delivered: fulfilled.length,
+            failed: settled.length - fulfilled.length,
+          };
+        });
+      }
 
       // ──── DURABLE: notify (Observer, metrics — not delivery) ────
 
