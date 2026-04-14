@@ -439,6 +439,33 @@ describe("telegram adapter", () => {
       expect(mockBotApi.sendPhoto).not.toHaveBeenCalled();
     });
 
+    it("strips the tool_start placeholder from accumulated text after photo delivery", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+
+      // Emit the same sequence the agent loop produces: intro text,
+      // tool_start (adds placeholder), tool_result (sends photo),
+      // closing text, finish (final edit with HTML render).
+      await handle.push({ type: "text_delta", text: "Here's the image." });
+      await handle.push({ type: "tool_start", id: "t1", name: "generate_image", input: {} });
+      await handle.push({
+        type: "tool_result",
+        name: "generate_image",
+        output: JSON.stringify({ path: "generated/abc.jpg", mediaType: "image/jpeg" }),
+      });
+      await handle.push({ type: "text_delta", text: " Enjoy!" });
+      await handle.finish();
+
+      // The final edit must not contain the "🔍 generate_image..." placeholder.
+      // (renderTelegramHtml may escape some characters; we only assert the
+      // placeholder is gone and the surrounding text is preserved.)
+      const lastEdit = mockBotApi.editMessageText.mock.calls.at(-1);
+      const editedText = lastEdit?.[2] as string;
+      expect(editedText).not.toContain("🔍 generate_image");
+      expect(editedText).toContain("the image");
+      expect(editedText).toContain("Enjoy");
+    });
+
     it("deliver (batch path) sends images alongside text", async () => {
       const { adapter } = await createAdapter();
       await adapter.deliver("42", {

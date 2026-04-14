@@ -33,6 +33,14 @@ export interface DeliveryHandle {
   finish(): Promise<void>;
   abort(error: string): Promise<void>;
   /**
+   * Whether this delivery has any non-streaming targets.
+   *
+   * Lets callers skip expensive pre-delivery work (e.g., S3 downloads for
+   * outbound images) when all sessions use streaming adapters that already
+   * handled delivery mid-loop. Pure-Telegram setups return false.
+   */
+  hasBatchTargets(): boolean;
+  /**
    * Deliver final content to batch (non-streaming) adapters after persist.
    * No-op for sessions handled by streaming adapters — those receive content
    * via `push` events during the loop.
@@ -130,6 +138,9 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
           for (const handle of streamHandles) {
             await handle.abort(error);
           }
+        },
+        hasBatchTargets(): boolean {
+          return batchTargets.length > 0;
         },
         async deliverBatch(content, images): Promise<void> {
           for (const { platformAddress, adapter, renderOutput } of batchTargets) {

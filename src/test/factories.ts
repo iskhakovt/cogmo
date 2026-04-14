@@ -182,6 +182,7 @@ export function mockDeliveryHandle(overrides?: Partial<DeliveryHandle>): Deliver
     push: vi.fn().mockResolvedValue(undefined),
     finish: vi.fn().mockResolvedValue(undefined),
     abort: vi.fn().mockResolvedValue(undefined),
+    hasBatchTargets: vi.fn().mockReturnValue(true),
     deliverBatch: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };

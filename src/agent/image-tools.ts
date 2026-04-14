@@ -1,5 +1,5 @@
 import type { createFal } from "@ai-sdk/fal";
-import { generateImage } from "ai";
+import { APICallError, generateImage } from "ai";
 import { z } from "zod";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
@@ -115,24 +115,12 @@ export function createImageTools(
                 ...(input.seed !== undefined && { seed: input.seed }),
               });
             } catch (err) {
-              // fal returns 4xx for auth/validation/content-policy failures — don't retry.
-              // 400 (bad request), 401 (auth), 403 (forbidden), 422 (validation) are all
-              // futile to retry. 429 (rate limit) is intentionally NOT here — that's
-              // the canonical retry-with-backoff case. The SDK surfaces errors via its
-              // error types; conservatively classify by message.
-              if (err instanceof Error) {
-                const msg = err.message.toLowerCase();
-                if (
-                  msg.includes("400") ||
-                  msg.includes("401") ||
-                  msg.includes("403") ||
-                  msg.includes("422") ||
-                  msg.includes("invalid") ||
-                  msg.includes("unauthorized") ||
-                  msg.includes("forbidden")
-                ) {
-                  throw new AbortError(err.message);
-                }
+              // Use the AI SDK's structured APICallError rather than
+              // substring-matching the message — handles auth/validation/
+              // content-policy failures deterministically. The SDK sets
+              // `isRetryable: false` for 4xx except 429 (rate limit).
+              if (APICallError.isInstance(err) && err.isRetryable === false) {
+                throw new AbortError(err.message);
               }
               throw err;
             }

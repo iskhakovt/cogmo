@@ -152,6 +152,10 @@ class TelegramStreamHandle implements StreamHandle {
         new InputFile(bytes, `image.${mediaTypeToExt(mediaType)}`),
       );
       this.#sentImages.add(dedupKey);
+      // Strip the "🔍 generate_image..." placeholder from the accumulated
+      // text now that the photo has been delivered. Otherwise the placeholder
+      // lingers in the final edited message alongside the image.
+      this.#accumulated = this.#accumulated.replace(/\n?🔍 generate_image\.\.\.\n?/g, "");
     } catch (err) {
       // Don't crash the stream on a single image failure — user still gets the text.
       // dedupKey is intentionally NOT added so the next Inngest retry can try again.

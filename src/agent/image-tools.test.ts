@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AttachmentStore } from "../transport/attachment-store.js";
+import { AbortError } from "../util/with-retry.js";
 import { createImageTools, type FalProvider } from "./image-tools.js";
 
 // Passthrough withRetry — tests exercise the handler's error classification
@@ -15,8 +16,21 @@ vi.mock("../util/with-retry.js", async () => {
 });
 
 const mockGenerateImage = vi.fn();
+// Minimal APICallError shim — matches the SDK's structural contract for
+// the one property we classify on (`isRetryable`) plus `isInstance`.
+class FakeAPICallError extends Error {
+  readonly isRetryable: boolean;
+  constructor(message: string, isRetryable: boolean) {
+    super(message);
+    this.name = "AI_APICallError";
+    this.isRetryable = isRetryable;
+  }
+}
 vi.mock("ai", () => ({
   generateImage: (...args: unknown[]) => mockGenerateImage(...args),
+  APICallError: {
+    isInstance: (err: unknown): err is FakeAPICallError => err instanceof FakeAPICallError,
+  },
 }));
 
 afterEach(() => {
@@ -169,5 +183,51 @@ describe("createImageTools", () => {
     await tool.handler({ prompt: "x" }, stubService());
 
     expect(fal.image).toHaveBeenCalledWith("fal-ai/flux/dev");
+  });
+
+  it("classifies non-retryable APICallError as AbortError (no upload)", async () => {
+    const attachments = fakeAttachments();
+    const [tool] = createImageTools(fakeFalProvider(), attachments);
+    if (!tool) throw new Error("tool missing");
+
+    // SDK sets isRetryable=false for 4xx auth/validation failures.
+    mockGenerateImage.mockRejectedValueOnce(new FakeAPICallError("401 Unauthorized", false));
+
+    await expect(
+      tool.handler({ prompt: "x", model: "fal-ai/flux/dev" }, stubService()),
+    ).rejects.toBeInstanceOf(AbortError);
+
+    expect(attachments.upload).not.toHaveBeenCalled();
+  });
+
+  it("propagates retryable APICallError as-is (lets withRetry back off)", async () => {
+    const attachments = fakeAttachments();
+    const [tool] = createImageTools(fakeFalProvider(), attachments);
+    if (!tool) throw new Error("tool missing");
+
+    // 429 rate limit / 5xx → retryable.
+    const err = new FakeAPICallError("429 Rate limited", true);
+    mockGenerateImage.mockRejectedValueOnce(err);
+
+    await expect(
+      tool.handler({ prompt: "x", model: "fal-ai/flux/dev" }, stubService()),
+    ).rejects.toBe(err);
+
+    expect(attachments.upload).not.toHaveBeenCalled();
+  });
+
+  it("propagates generic errors (non-APICallError) to withRetry", async () => {
+    const attachments = fakeAttachments();
+    const [tool] = createImageTools(fakeFalProvider(), attachments);
+    if (!tool) throw new Error("tool missing");
+
+    const err = new Error("ECONNRESET");
+    mockGenerateImage.mockRejectedValueOnce(err);
+
+    await expect(
+      tool.handler({ prompt: "x", model: "fal-ai/flux/dev" }, stubService()),
+    ).rejects.toBe(err);
+
+    expect(attachments.upload).not.toHaveBeenCalled();
   });
 });

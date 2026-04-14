@@ -223,24 +223,37 @@ function extractGeneratedImages(messages: Message[]): OutboundImageRef[] {
 
 ### Streaming delivery (Telegram — primary path)
 
-The streaming adapter receives `tool_result` events during the loop. When the event is from `generate_image`, the stream handle parses the output JSON, downloads from AttachmentStore, and calls `sendPhoto` mid-stream — before the LLM's final text even arrives.
+The streaming adapter receives `tool_result` events during the loop. When the event is from `generate_image`, the stream handle uses the shared `parseGeneratedImagePayload` helper to parse the output JSON, downloads from AttachmentStore, and calls `sendPhoto` mid-stream — before the LLM's final text even arrives.
 
 ```typescript
 // TelegramStreamHandle — extended
 async push(event: StreamEvent): Promise<void> {
   if (event.type === "tool_result" && event.name === "generate_image" && !event.isError) {
-    const { path, mediaType } = JSON.parse(event.output);
+    const payload = parseGeneratedImagePayload(event.output);
+    if (!payload) return;
+    const { path, mediaType } = payload;
 
-    // Dedup on Inngest retry — same runId + path = already sent
+    // Dedup on Inngest retry — same runId + path = already sent.
+    // Only marked sent AFTER successful sendPhoto so a transient failure
+    // leaves the next retry free to deliver.
     const dedupKey = `${this.#runId}:${path}`;
     if (this.#sentImages.has(dedupKey)) return;
-    this.#sentImages.add(dedupKey);
 
-    const bytes = await this.#attachments.download(path);
-    await this.#bot.api.sendPhoto(
-      this.#chatId,
-      new InputFile(bytes, `image.${ext(mediaType)}`),
-    );
+    try {
+      const bytes = await this.#attachments.download(path);
+      await this.#bot.api.sendPhoto(
+        this.#chatId,
+        new InputFile(bytes, `image.${ext(mediaType)}`),
+      );
+      this.#sentImages.add(dedupKey);
+      // Strip the "🔍 generate_image..." placeholder the tool_start event
+      // added — otherwise it lingers in the final text edit alongside the
+      // delivered image.
+      this.#accumulated = this.#accumulated.replace(/\n?🔍 generate_image\.\.\.\n?/g, "");
+    } catch (err) {
+      // Per-image failure shouldn't crash the stream; next retry re-tries.
+      logger.error({ err, path, runId: this.#runId }, "failed to send generated image");
+    }
     return;
   }
   // ... existing text_delta / tool_start handling
@@ -273,20 +286,43 @@ interface RenderedMessage {
 }
 ```
 
-Orchestrator, after the agent loop:
+Orchestrator, after the agent loop — wrapped in a durable `step.run` so it's exactly-once on Inngest retry and observable in the Inngest UI. `DeliveryHandle.hasBatchTargets()` gates the whole block so streaming-only setups (e.g., Telegram-only) skip the S3 downloads entirely.
 
 ```typescript
-const generatedImageRefs = extractGeneratedImages(result.newMessages);
-const outboundImages = await Promise.all(
-  generatedImageRefs.map(async ({ path, mediaType }) => ({
-    data: await attachments.download(path),
-    mediaType,
-  })),
-);
-await delivery.deliverBatch(result.text, outboundImages.length > 0 ? outboundImages : undefined);
+if (delivery.hasBatchTargets()) {
+  await step.run("batch-delivery", async () => {
+    const imageRefs = extractGeneratedImages(result.newMessages);
+
+    // Per-image resilience: one S3 miss shouldn't block the rest. Matches
+    // the stream handle's swallow-and-log pattern.
+    const settled = await Promise.allSettled(
+      imageRefs.map(async (ref) => ({
+        data: await attachments.download(ref.path),
+        mediaType: ref.mediaType,
+      })),
+    );
+    const fulfilled = settled
+      .filter((r) => r.status === "fulfilled")
+      .map((r) => r.value);
+
+    await delivery.deliverBatch(
+      result.text,
+      fulfilled.length > 0 ? fulfilled : undefined,
+    );
+    // Return value is small — image bytes flow through the step body in
+    // memory but never into Inngest state.
+    return { delivered: fulfilled.length, failed: settled.length - fulfilled.length };
+  });
+}
 ```
 
-The `deliverBatch` path is a no-op for streaming-only sessions (empty `batchTargets`). Images only fire for non-streaming adapters.
+**Why step-wrap this one.** The streaming section of `handle-message` is explicitly non-durable (you can't stream out of `step.run`) — see [crash-recovery.md](crash-recovery.md). Batch delivery runs *after* the streaming section completes and *after* the assistant message is persisted, so it doesn't inherit the streaming constraint. Wrapping it in `step.run` gives us:
+
+- **Exactly-once semantics** on Inngest retry — no double `sendMessage` / `sendPhoto` to batch adapters
+- **Observability** per delivery (timing, success/fail counts surface in the Inngest UI)
+- **Small state payload** — the step returns `{ delivered, failed }`, image bytes flow through the body in memory only
+
+Combined with `Promise.allSettled`, one slow/failed S3 download doesn't block the rest of the batch.
 
 **Direct adapter** extends the `directOutbound` event payload with optional `images: Array<{ data: string /* base64 */; mediaType: string }>` — events must serialize, so bytes are base64-encoded. Console clients opt into rendering.
 
@@ -387,7 +423,7 @@ The `ai` package also exports `generateText`/`streamText` which we don't use for
 | Tool injection | Closure (`createImageTools(model, store)`) | Same as `createWebTools`. Not per-user scoped — no need for `Service` namespace. |
 | Image extraction | Convention-based (parse tool results) | Pure function, no interface changes. Replace when a second tool produces non-text output. |
 | Delivery — streaming channels | Mid-stream via `tool_result` event | Telegram is a streaming adapter — `DeliveryRouter` partitions its sessions into `streamHandles`, `deliverBatch` is never called. Mid-stream delivery via existing `tool_result` event (parsed by adapter) is the only path that reaches Telegram users. Dedup on `runId + path`. |
-| Delivery — batch channels | `deliverBatch(text, images)` | Non-streaming adapters (Direct, future) get images via extended `deliverBatch`. Shared `extractGeneratedImages` helper with streaming path. |
+| Delivery — batch channels | `deliverBatch(text, images)` wrapped in `step.run("batch-delivery")` | Non-streaming adapters (Direct, future) get images via extended `deliverBatch`. Step-wrap gives exactly-once semantics on Inngest retry + observability; small return value (`{ delivered, failed }`) keeps state lean. `hasBatchTargets()` gate skips S3 downloads entirely for streaming-only setups. `Promise.allSettled` for per-image resilience. |
 | No new `StreamEvent` type | Reuse existing `tool_result` event | Adapter recognizes `name === "generate_image"`, parses output JSON. Zero changes to agent loop or tool handler signatures. |
 | Config (v0) | Secret + hardcoded model catalog | No table until operators need to customize. YAGNI. |
 | Tool surface | prompt, model (enum), aspectRatio, seed | LLM picks model per-call from curated shortlist. Inference hyperparameters omitted — prompt is the lever. |
