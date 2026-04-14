@@ -1,11 +1,12 @@
+import type { JsonValue } from "type-fest";
 import { inngest } from "../../inngest/client.js";
 import { directInbound, directOutbound } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
-import type {
-  AdapterDeps,
-  AdapterModule,
-  AdapterSetupResult,
-  RenderedMessage,
+import {
+  type AdapterDeps,
+  type AdapterModule,
+  type AdapterSetupResult,
+  isRenderedMessage,
 } from "../adapter-module.js";
 import { contentToText } from "../content.js";
 
@@ -61,11 +62,26 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   return {
     adapter: {
       deliver: async (platformAddress, content) => {
-        const text =
-          typeof content === "object" && content !== null && "parseMode" in content
-            ? (content as RenderedMessage).text
-            : contentToText(content as import("type-fest").JsonValue);
-        await inngest.send(directOutbound.create({ platformAddress, content: text }));
+        if (isRenderedMessage(content)) {
+          const images = content.images?.map((img) => ({
+            data: img.data.toString("base64"),
+            mediaType: img.mediaType,
+          }));
+          await inngest.send(
+            directOutbound.create({
+              platformAddress,
+              content: content.text,
+              ...(images && images.length > 0 && { images }),
+            }),
+          );
+        } else {
+          await inngest.send(
+            directOutbound.create({
+              platformAddress,
+              content: contentToText(content as JsonValue),
+            }),
+          );
+        }
       },
       stop: async () => {},
     },

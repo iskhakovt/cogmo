@@ -269,6 +269,100 @@ describe("createDeliveryRouter", () => {
     expect(batch.deliver).toHaveBeenCalledWith("addr-s1", "plain markdown");
   });
 
+  it("hasBatchTargets() returns false when all sessions are streaming", async () => {
+    const streaming = mockStreamingAdapter();
+    const adapters = new Map([["ch-1", { adapter: streaming }]]);
+    const transportStore = mockTransportStore({
+      getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+    });
+
+    const router = createDeliveryRouter({ adapters, transportStore });
+    const delivery = await router.prepare(ctx());
+
+    expect(delivery.hasBatchTargets()).toBe(false);
+  });
+
+  it("hasBatchTargets() returns true when any session uses a batch adapter", async () => {
+    const batch = mockAdapter();
+    const streaming = mockStreamingAdapter();
+    const adapters = new Map<string, any>([
+      ["ch-1", { adapter: streaming }],
+      ["ch-2", { adapter: batch }],
+    ]);
+    const transportStore = mockTransportStore({
+      getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1"), session("s2", "ch-2")]),
+    });
+
+    const router = createDeliveryRouter({ adapters, transportStore });
+    const delivery = await router.prepare(ctx());
+
+    expect(delivery.hasBatchTargets()).toBe(true);
+  });
+
+  it("hasBatchTargets() returns false when there are no sessions at all", async () => {
+    const transportStore = mockTransportStore();
+    const router = createDeliveryRouter({ adapters: new Map(), transportStore });
+    const delivery = await router.prepare(ctx());
+
+    expect(delivery.hasBatchTargets()).toBe(false);
+  });
+
+  it("forwards images to adapter when renderOutput is present", async () => {
+    const batch = mockAdapter();
+    const renderOutput = vi.fn().mockReturnValue({ text: "<b>text</b>", parseMode: "HTML" });
+    const adapters = new Map([["ch-1", { adapter: batch, renderOutput }]]);
+    const transportStore = mockTransportStore({
+      getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+    });
+
+    const router = createDeliveryRouter({ adapters, transportStore });
+    const delivery = await router.prepare(ctx());
+
+    const images = [{ data: Buffer.from([1, 2]), mediaType: "image/png" }];
+    await delivery.deliverBatch("text", images);
+
+    expect(batch.deliver).toHaveBeenCalledWith("addr-s1", {
+      text: "<b>text</b>",
+      parseMode: "HTML",
+      images,
+    });
+  });
+
+  it("wraps content in RenderedMessage when images present but no renderOutput", async () => {
+    const batch = mockAdapter();
+    const adapters = new Map([["ch-1", { adapter: batch }]]);
+    const transportStore = mockTransportStore({
+      getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+    });
+
+    const router = createDeliveryRouter({ adapters, transportStore });
+    const delivery = await router.prepare(ctx());
+
+    const images = [{ data: Buffer.from([1, 2]), mediaType: "image/png" }];
+    await delivery.deliverBatch("plain text", images);
+
+    // No renderOutput → normally raw string, but images require a RenderedMessage wrapper
+    expect(batch.deliver).toHaveBeenCalledWith("addr-s1", {
+      text: "plain text",
+      images,
+    });
+  });
+
+  it("still passes raw string when no images and no renderOutput", async () => {
+    const batch = mockAdapter();
+    const adapters = new Map([["ch-1", { adapter: batch }]]);
+    const transportStore = mockTransportStore({
+      getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+    });
+
+    const router = createDeliveryRouter({ adapters, transportStore });
+    const delivery = await router.prepare(ctx());
+
+    await delivery.deliverBatch("plain text");
+
+    expect(batch.deliver).toHaveBeenCalledWith("addr-s1", "plain text");
+  });
+
   it("renders per-adapter independently in multi-channel delivery", async () => {
     const telegramAdapter = mockAdapter();
     const directAdapter = mockAdapter();

@@ -27,7 +27,7 @@ The bug class to catch is #2. The contract below makes #1 vs #2 explicit for `ha
 | Compact | `summarize-prefix` (conditional) | `provider.chat` for prefix summarization | **LLM call** | ✓ |
 | **Streaming** | *(none — not in a step)* | image resolution, `memory.recall`, `getProfile`, `deliveryRouter.prepare`, `runStreamingAgentLoop`, tool execution, `delivery.finish` | **LLM stream + tool side effects** | ✗ |
 | Persist | `persist-new-messages` | `agentStore.insertMessages` (batch INSERT: intermediate tool turns + final assistant, single transaction) | **DB write** | ✓ |
-| Deliver | *(none — not in a step)* | `delivery.deliverBatch` | **Network send to batch adapters** | ✗ |
+| Deliver | `batch-delivery` (conditional) | image resolution via `Promise.allSettled` + `delivery.deliverBatch` | **S3 GET + network send to batch adapters** | ✓ |
 | Notify | `send-response` | `step.sendEvent("response/ready")` | Inngest event | ✓ |
 | Resume | `flush` (conditional) | `step.sendEvent("inbound/ready")` | Inngest event | ✓ |
 
@@ -35,7 +35,8 @@ The non-durable regions are:
 
 - **`compactMessages` orchestration.** Token counting and the threshold decisions are cheap and depend on `fullPrompt` / `historyMessages`, which are partially built from non-durable reads (`memory.recall`, image resolution). Caching the orchestration would freeze the compaction decision against potentially stale inputs and force base64 image payloads into Inngest state. Only the expensive summarization LLM call is durable — see "Why only summarization is durable" below.
 - **Streaming.** You cannot stream events out of `step.run` — a step returns a single JSON-serializable value at the end. To deliver tokens to Telegram as they arrive, the LLM call has to happen in the bare function body. See [transport/streaming.md](transport/streaming.md) → "Orchestrator Changes".
-- **Batch delivery.** Lives outside the persist step so that adapters receive the *final* assistant text after it has been written to the DB. Idempotency is the adapter's responsibility (see "Streaming dedup" below).
+
+**Batch delivery is durable.** The `batch-delivery` step runs *after* the non-durable streaming section completes and the assistant message is persisted, so it doesn't inherit the streaming constraint. Wrapping it gives exactly-once `sendMessage` / `sendPhoto` to batch adapters on retry + observability in the Inngest UI. Generated-image bytes flow through the step body in memory; the return value is only a small `{ delivered, failed }` record, so state stays lean. The step is gated by `delivery.hasBatchTargets()` — for pure-streaming setups (Telegram-only), the block is skipped entirely and no S3 downloads happen.
 
 ## Why only summarization is durable `[confirmed]`
 

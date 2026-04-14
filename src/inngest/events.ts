@@ -81,10 +81,21 @@ export const directInbound = eventType("adapter/direct/inbound", {
 /**
  * Direct channel — emitted when a response is ready for a direct-channel session.
  * External clients can poll for this or use DB polling.
+ *
+ * `images` is included when the agent generated images (base64-encoded, since
+ * events must serialize). Console clients opt into rendering.
  */
 export const directOutbound = eventType("adapter/direct/outbound", {
   schema: z.object({
     platformAddress: z.string(),
     content: z.string(),
+    images: z
+      .array(
+        z.object({
+          data: z.string(), // base64
+          mediaType: z.string(),
+        }),
+      )
+      .optional(),
   }),
 });

@@ -1,6 +1,6 @@
 import { ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mockTransport } from "../../../test/factories.js";
+import { mockAttachmentStore, mockTransport } from "../../../test/factories.js";
 import type { StreamingAdapter } from "../../types.js";
 import { setup } from "./index.js";
 
@@ -10,10 +10,20 @@ const mockBotApi = {
   sendMessage: vi.fn().mockResolvedValue({ message_id: 100 }),
   sendChatAction: vi.fn().mockResolvedValue(true),
   editMessageText: vi.fn().mockResolvedValue({}),
+  sendPhoto: vi.fn().mockResolvedValue({ message_id: 101 }),
   getFile: vi.fn().mockResolvedValue({ file_path: "photos/file_1.jpg" }),
 };
 
 vi.mock("grammy", () => {
+  // Grammy's InputFile wraps a Buffer — the test captures it so assertions can
+  // inspect the payload without needing the real grammy implementation.
+  // Defined inside the factory to satisfy vi.mock's hoisting constraint.
+  class InputFile {
+    constructor(
+      public data: Buffer | Uint8Array,
+      public filename?: string,
+    ) {}
+  }
   class MockBot {
     api = mockBotApi;
     command = vi.fn((cmd: string, handler: any) => handlers.set(`command:${cmd}`, handler));
@@ -22,7 +32,7 @@ vi.mock("grammy", () => {
     start = vi.fn(({ onStart }: any = {}) => onStart?.());
     stop = vi.fn();
   }
-  return { Bot: MockBot };
+  return { Bot: MockBot, InputFile };
 });
 
 function makeCtx(fromId: number, text = "hello", chatId = 42) {
@@ -84,13 +94,16 @@ describe("telegram adapter", () => {
       ...transportOverrides,
     });
 
+    const attachments = mockAttachmentStore();
+
     const result = await setup({
       channelId: "tg-ch",
       credentials: { token: "fake" },
       transport,
+      attachments,
     });
 
-    return { adapter: result.adapter, transport };
+    return { adapter: result.adapter, transport, attachments };
   }
 
   it("emits via transport on text message", async () => {
@@ -287,6 +300,191 @@ describe("telegram adapter", () => {
         100,
         "Let me search.\n🔍 web_search...\n",
       );
+    });
+  });
+
+  describe("generated images (mid-stream)", () => {
+    async function createAdapterWithAttachments() {
+      const transport = mockTransport({
+        resolveSession: vi.fn().mockResolvedValue({
+          id: "session-1",
+          channelId: "tg-ch",
+          platformAddress: "42",
+          conversationId: "conv-1",
+          status: "active",
+          receive: "routed",
+        }),
+      });
+      const attachments = mockAttachmentStore({
+        download: vi.fn().mockResolvedValue(Buffer.from([7, 8, 9])),
+      });
+      const result = await setup({
+        channelId: "tg-ch",
+        credentials: { token: "fake" },
+        transport,
+        attachments,
+      });
+      return { adapter: result.adapter as unknown as StreamingAdapter, attachments };
+    }
+
+    it("sends generated image via sendPhoto on generate_image tool_result", async () => {
+      const { adapter, attachments } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({
+        type: "tool_result",
+        name: "generate_image",
+        output: JSON.stringify({
+          path: "generated/abc.jpg",
+          mediaType: "image/jpeg",
+        }),
+      });
+
+      expect(attachments.download).toHaveBeenCalledWith("generated/abc.jpg");
+      expect(mockBotApi.sendPhoto).toHaveBeenCalledTimes(1);
+      const [chatId, inputFile] = mockBotApi.sendPhoto.mock.calls[0] ?? [];
+      expect(chatId).toBe(42);
+      const file = inputFile as { data: Buffer; filename: string };
+      expect(file.data).toEqual(Buffer.from([7, 8, 9]));
+      expect(file.filename).toBe("image.jpg");
+    });
+
+    it("dedups generate_image tool_result within the same run", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+
+      const event = {
+        type: "tool_result" as const,
+        name: "generate_image",
+        output: JSON.stringify({ path: "generated/abc.jpg", mediaType: "image/jpeg" }),
+      };
+      await handle.push(event);
+      await handle.push(event);
+
+      expect(mockBotApi.sendPhoto).toHaveBeenCalledTimes(1);
+    });
+
+    it("retries the image after a failed sendPhoto (dedup only marks success)", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+
+      const event = {
+        type: "tool_result" as const,
+        name: "generate_image",
+        output: JSON.stringify({ path: "generated/abc.jpg", mediaType: "image/jpeg" }),
+      };
+
+      // First attempt: sendPhoto throws — dedup must not block the retry
+      mockBotApi.sendPhoto.mockRejectedValueOnce(new Error("network blip"));
+      await handle.push(event);
+      // Second attempt (e.g., Inngest retry): should succeed
+      await handle.push(event);
+
+      expect(mockBotApi.sendPhoto).toHaveBeenCalledTimes(2);
+    });
+
+    it("different runId delivers independently", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle1 = await adapter.openStream("42", "run-1");
+      const handle2 = await adapter.openStream("42", "run-2");
+
+      const event = {
+        type: "tool_result" as const,
+        name: "generate_image",
+        output: JSON.stringify({ path: "generated/abc.jpg", mediaType: "image/jpeg" }),
+      };
+      await handle1.push(event);
+      await handle2.push(event);
+
+      expect(mockBotApi.sendPhoto).toHaveBeenCalledTimes(2);
+    });
+
+    it("skips tool_result with isError=true", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({
+        type: "tool_result",
+        name: "generate_image",
+        output: JSON.stringify({ path: "generated/x.jpg", mediaType: "image/jpeg" }),
+        isError: true,
+      });
+
+      expect(mockBotApi.sendPhoto).not.toHaveBeenCalled();
+    });
+
+    it("ignores tool_result from other tools", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({
+        type: "tool_result",
+        name: "web_search",
+        output: JSON.stringify({ path: "something", mediaType: "image/jpeg" }),
+      });
+
+      expect(mockBotApi.sendPhoto).not.toHaveBeenCalled();
+    });
+
+    it("handles non-JSON output gracefully", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({
+        type: "tool_result",
+        name: "generate_image",
+        output: "not json",
+      });
+
+      expect(mockBotApi.sendPhoto).not.toHaveBeenCalled();
+    });
+
+    it("strips the tool_start placeholder from accumulated text after photo delivery", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+
+      // Emit the same sequence the agent loop produces: intro text,
+      // tool_start (adds placeholder), tool_result (sends photo),
+      // closing text, finish (final edit with HTML render).
+      await handle.push({ type: "text_delta", text: "Here's the image." });
+      await handle.push({ type: "tool_start", id: "t1", name: "generate_image", input: {} });
+      await handle.push({
+        type: "tool_result",
+        name: "generate_image",
+        output: JSON.stringify({ path: "generated/abc.jpg", mediaType: "image/jpeg" }),
+      });
+      await handle.push({ type: "text_delta", text: " Enjoy!" });
+      await handle.finish();
+
+      // The final edit must not contain the "🔍 generate_image..." placeholder.
+      // (renderTelegramHtml may escape some characters; we only assert the
+      // placeholder is gone and the surrounding text is preserved.)
+      const lastEdit = mockBotApi.editMessageText.mock.calls.at(-1);
+      const editedText = lastEdit?.[2] as string;
+      expect(editedText).not.toContain("🔍 generate_image");
+      expect(editedText).toContain("the image");
+      expect(editedText).toContain("Enjoy");
+    });
+
+    it("deliver (batch path) sends images alongside text", async () => {
+      const { adapter } = await createAdapter();
+      await adapter.deliver("42", {
+        text: "here it is",
+        parseMode: "HTML",
+        images: [
+          { data: Buffer.from([1, 2, 3]), mediaType: "image/png" },
+          { data: Buffer.from([4, 5, 6]), mediaType: "image/jpeg" },
+        ],
+      });
+
+      expect(mockBotApi.sendMessage).toHaveBeenCalledWith(42, "here it is", {
+        parse_mode: "HTML",
+      });
+      expect(mockBotApi.sendPhoto).toHaveBeenCalledTimes(2);
+      const call0 = mockBotApi.sendPhoto.mock.calls[0];
+      const call1 = mockBotApi.sendPhoto.mock.calls[1];
+      expect((call0?.[1] as { filename: string }).filename).toBe("image.png");
+      expect((call1?.[1] as { filename: string }).filename).toBe("image.jpg");
     });
   });
 });
