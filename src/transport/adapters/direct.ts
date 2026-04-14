@@ -1,7 +1,12 @@
 import { inngest } from "../../inngest/client.js";
 import { directInbound, directOutbound } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
-import type { AdapterDeps, AdapterModule, AdapterSetupResult } from "../adapter-module.js";
+import type {
+  AdapterDeps,
+  AdapterModule,
+  AdapterSetupResult,
+  RenderedMessage,
+} from "../adapter-module.js";
 import { contentToText } from "../content.js";
 
 export const channelType = "direct";
@@ -56,9 +61,11 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   return {
     adapter: {
       deliver: async (platformAddress, content) => {
-        await inngest.send(
-          directOutbound.create({ platformAddress, content: contentToText(content) }),
-        );
+        const text =
+          typeof content === "object" && content !== null && "parseMode" in content
+            ? (content as RenderedMessage).text
+            : contentToText(content as import("type-fest").JsonValue);
+        await inngest.send(directOutbound.create({ platformAddress, content: text }));
       },
       stop: async () => {},
     },

@@ -1,5 +1,6 @@
 import type { StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
+import type { RenderedMessage } from "./adapter-module.js";
 import type { TransportStore } from "./store/index.js";
 import {
   type Adapter,
@@ -44,8 +45,13 @@ export interface DeliveryRouter {
   prepare(ctx: RoutingContext): Promise<DeliveryHandle>;
 }
 
+export interface AdapterEntry {
+  adapter: Adapter | StreamingAdapter;
+  renderOutput?: ((markdown: string) => RenderedMessage) | undefined;
+}
+
 export interface DeliveryRouterDeps {
-  adapters: Map<string, Adapter | StreamingAdapter>;
+  adapters: Map<string, AdapterEntry>;
   transportStore: TransportStore;
 }
 
@@ -82,17 +88,25 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
       }
 
       const streamHandles: StreamHandle[] = [];
-      const batchTargets: Array<{ platformAddress: string; adapter: Adapter }> = [];
+      const batchTargets: Array<{
+        platformAddress: string;
+        adapter: Adapter;
+        renderOutput?: ((markdown: string) => RenderedMessage) | undefined;
+      }> = [];
 
       for (const session of sessions) {
-        const adapter = adapters.get(session.channelId);
-        if (!adapter) continue;
+        const entry = adapters.get(session.channelId);
+        if (!entry) continue;
 
-        if (isStreamingAdapter(adapter)) {
-          const handle = await adapter.openStream(session.platformAddress, ctx.runId);
+        if (isStreamingAdapter(entry.adapter)) {
+          const handle = await entry.adapter.openStream(session.platformAddress, ctx.runId);
           streamHandles.push(handle);
         } else {
-          batchTargets.push({ platformAddress: session.platformAddress, adapter });
+          batchTargets.push({
+            platformAddress: session.platformAddress,
+            adapter: entry.adapter,
+            renderOutput: entry.renderOutput,
+          });
         }
       }
 
@@ -113,8 +127,9 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
           }
         },
         async deliverBatch(content: string): Promise<void> {
-          for (const { platformAddress, adapter } of batchTargets) {
-            await adapter.deliver(platformAddress, content);
+          for (const { platformAddress, adapter, renderOutput } of batchTargets) {
+            const rendered = renderOutput ? renderOutput(content) : content;
+            await adapter.deliver(platformAddress, rendered);
           }
         },
       };

@@ -158,19 +158,72 @@ Adapters manage their own platform connection (polling, webhooks, WebSocket) —
 
 ## Response Rendering `[confirmed]`
 
-The agent returns **markdown text**. Adapters handle all platform-specific rendering. No rich intermediate representation.
+Two layers: the LLM writes **canonical markdown**; adapters transform its output for the wire. The model never learns platform-specific syntax — it stays in its strongest domain (standard markdown), and the adapter does the mechanical conversion.
 
-**Researched alternatives:**
-- MS Bot Framework `Activity` model with `attachments` + `channelData`
-- Adaptive Cards (semantic JSON UI)
-- Botpress content types (carousel, card, choice)
-- Custom `ResponseContent` with `actions[]`, `editMessageId`, etc.
+### Channel-specific instructions
 
-**Decision:** All major AI agent frameworks (Letta, OpenClaw, Dust, Vercel AI SDK, LangChain) follow the same pattern: agent outputs text/markdown, adapters handle the rest. Markdown is the universal intermediate format.
+All behavioral instructions — global, profile-scoped, and channel-scoped — live in the `steering_rules` table. This includes channel-specific guidance like "avoid tables on Telegram" and "prefer concise replies." No separate prompt field on the adapter; no code-level guidance strings.
 
-- Each adapter converts markdown to platform-native format (Telegram MarkdownV2, Slack Block Kit, Discord embeds, etc.)
-- Platform chrome (typing indicators, message splitting, formatting) is adapter-internal
-- If rich rendering is ever needed (charts, interactive views), a standalone artifact renderer returns a URL that works in any channel
+`steering_rules` gains a nullable `channel_type` column alongside the existing nullable `profile_id`:
+
+| `profile_id` | `channel_type` | Applies to |
+|---|---|---|
+| null | null | everywhere |
+| set | null | one profile, all channels |
+| null | set | all profiles, one channel |
+| set | set | one profile on one channel |
+
+Query at prompt assembly: `(profile_id = $p OR IS NULL) AND (channel_type IN $activeChannels OR IS NULL) AND active = true`. Cross-channel conversations union rules from all active channels.
+
+Default channel rules are seeded when a channel is configured (setup wizard, same pattern as profile seeding). Observer can later modify, graduate, and consolidate them like any other rule — single evolution surface for all behavioral instructions.
+
+### Output rendering (format-level)
+
+Each adapter implements `renderOutput(markdown) → RenderedMessage` — a pure function from canonical markdown to channel-ready content. The `DeliveryRouter` calls it immediately before sending. This is mechanical conversion, not behavioral — it lives on the adapter, not in steering rules.
+
+```typescript
+interface AdapterModule {
+  channelType: string;
+  setup: (deps: AdapterDeps) => Promise<AdapterSetupResult>;
+  renderOutput?: (markdown: string) => RenderedMessage;
+}
+
+interface RenderedMessage {
+  text: string;
+  parseMode?: "HTML" | "MarkdownV2" | undefined;
+  // Future: blocks (Slack), embeds (Discord), attachments
+}
+```
+
+Each adapter picks the rendering path that suits its platform:
+
+- **Telegram**: `marked` (GFM → HTML) + custom post-processor → Telegram HTML subset, `parseMode: "HTML"`. Post-processor handles: table → `<pre>` wrapping, emoji+bold adjacency fix, `<blockquote>` for `>` blocks, stripping unsupported tags. Streaming sends plain; final edit re-sends with formatting. On Telegram 400 *"can't parse entities"*, retry the same edit with plain text. Chunking (if needed for 4096 char limit) splits at the markdown level before rendering, not on rendered HTML. Informed by OpenClaw's production issues: server-side table conversion, emoji preprocessing, native blockquote tags.
+- **Direct** (console/tests): identity — `{ text: markdown }`.
+- **Slack** (future): `marked` HTML as starting point, different post-processor.
+- **Discord** (future): native markdown, split at 2000 chars.
+
+### Cross-channel conversations
+
+A conversation can have sessions on multiple channels simultaneously (e.g., Telegram DM + web UI). Two implications:
+
+1. **Output** — `DeliveryRouter` calls each adapter's `renderOutput` per session. Same canonical markdown, different renders per channel. No special logic needed in the orchestrator.
+2. **Prompt** — Steering rules for all active channel types are unioned via the query's `IN` clause. Rules are written to be additive and non-conflicting (channel-specific guidance scoped by `channel_type`, general guidance left null).
+
+### Why this design
+
+- **LLMs are fluent in standard markdown** — millions of training tokens. They drift off HTML or MarkdownV2 and emit unsupported constructs. Keep the model in its strongest domain.
+- **Conversion is deterministic** — parsers don't hallucinate; prompts do.
+- **Decoupling** — the model doesn't know which channel it's on. Fan-out to multiple channels requires zero change at the model layer.
+- **Single evolution surface** — all behavioral instructions (global, profile-scoped, channel-scoped) live in `steering_rules`. One table, one graduation/consolidation lifecycle. No parallel override machinery.
+
+**Researched alternatives considered and rejected:**
+- MS Bot Framework `Activity` model — too heavy for our needs
+- Adaptive Cards (semantic JSON UI), Botpress content types — overkill
+- Letting the LLM emit platform-specific formatting (HTML / MarkdownV2 / Block Kit directly) — model drifts to unsupported constructs, output tokens wasted, couples model layer to transport
+- `channels.prompt_guidance` DB column — requires inventing a merge rule (replace vs append vs template) and stores evolving and static guidance in parallel surfaces. Steering rules already do the evolving-preferences job.
+- `AdapterModule.promptGuidance` code string — static, can't evolve without code deploy, splits behavioral instructions across code and DB
+
+**Industry consensus:** Letta, OpenClaw, Dust, Vercel AI SDK, LangChain all follow the same pattern — agent outputs markdown, adapters render. If rich rendering is ever needed (charts, interactive views), a standalone artifact renderer returns a URL that works in any channel.
 
 ## Full Picture
 

@@ -7,8 +7,13 @@ import type { AgentStore } from "./store/index.js";
  * Implementations can load prompts from files, database, remote config, etc.
  * The orchestrator depends on this interface, never on a concrete source.
  */
+export interface AssembleContext {
+  profileId: string;
+  channelTypes: string[];
+}
+
 export interface PromptSource {
-  assemble(store: AgentStore, profileId: string): Promise<string>;
+  assemble(store: AgentStore, ctx: AssembleContext): Promise<string>;
 }
 
 // --- Prompt sections ---
@@ -50,9 +55,10 @@ export class DefaultPromptSource implements PromptSource {
     this.#serviceGuidance = config.serviceGuidance ?? [];
   }
 
-  async assemble(store: AgentStore, profileId: string): Promise<string> {
+  async assemble(store: AgentStore, ctx: AssembleContext): Promise<string> {
+    const { profileId, channelTypes } = ctx;
     const profile = await store.getProfile(profileId);
-    const rules = await store.getActiveRules(profileId);
+    const rules = await store.getActiveRules(profileId, channelTypes);
     const userContext = await this.#getUserContext();
 
     const parts: string[] = [];

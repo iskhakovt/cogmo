@@ -43,6 +43,13 @@
       "when": 1776081635812,
       "tag": "0005_salty_impossible_man",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1776160052347,
+      "tag": "0006_sloppy_pandemic",
+      "breakpoints": true
     }
   ]
 }
