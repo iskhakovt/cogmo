@@ -71,7 +71,10 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    expect(deps.promptSource.assemble).toHaveBeenCalledWith(deps.agentStore, "profile-1");
+    expect(deps.promptSource.assemble).toHaveBeenCalledWith(deps.agentStore, {
+      profileId: "profile-1",
+      channelTypes: [],
+    });
   });
 
   it("uses model from profile", async () => {

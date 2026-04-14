@@ -46,6 +46,7 @@
     "inngest": "^4.2.1",
     "js-tiktoken": "^1.0.21",
     "jsdom": "^29.0.2",
+    "marked": "^18.0.0",
     "neverthrow": "^8.2.0",
     "openai": "^6.34.0",
     "p-limit": "^7.3.0",

@@ -1,8 +1,8 @@
 import { ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mockTransport } from "../../test/factories.js";
-import type { StreamingAdapter } from "../types.js";
-import { setup } from "./telegram.js";
+import { mockTransport } from "../../../test/factories.js";
+import type { StreamingAdapter } from "../../types.js";
+import { setup } from "./index.js";
 
 // Mock grammy
 const handlers = new Map<string, any>();
@@ -221,7 +221,25 @@ describe("telegram adapter", () => {
       mockBotApi.editMessageText.mockClear();
       await handle.finish();
 
-      expect(mockBotApi.editMessageText).toHaveBeenCalledWith(42, 100, "done");
+      expect(mockBotApi.editMessageText).toHaveBeenCalledWith(42, 100, "done", {
+        parse_mode: "HTML",
+      });
+    });
+
+    it("finish falls back to plain text when HTML parse fails", async () => {
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "done" });
+      mockBotApi.editMessageText
+        .mockReset()
+        .mockRejectedValueOnce(new Error("can't parse entities"))
+        .mockResolvedValue(true);
+
+      await handle.finish();
+
+      // First call: HTML attempt, second call would be absent (keeps plain text from stream)
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(1);
     });
 
     it("abort appends error to message", async () => {

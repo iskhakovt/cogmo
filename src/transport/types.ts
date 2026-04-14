@@ -1,5 +1,6 @@
 import type { JsonValue } from "type-fest";
 import type { StreamEvent } from "../llm/types.js";
+import type { RenderedMessage } from "./adapter-module.js";
 import type { Transport } from "./transport.js";
 
 /**
@@ -8,7 +9,7 @@ import type { Transport } from "./transport.js";
  */
 export interface Adapter {
   stop(): Promise<void>;
-  deliver(platformAddress: string, content: JsonValue): Promise<void>;
+  deliver(platformAddress: string, content: RenderedMessage | JsonValue): Promise<void>;
 }
 
 /**

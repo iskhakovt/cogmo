@@ -63,6 +63,7 @@ The minimum useful system: talk to it, it remembers things.
 - [x] Channel management — `createIdentity`, `updateChannelCredentials`, `removeChannel` on transport store, identity resolution wired in `createConversation`
 - [x] Seed refactor — `src/setup/seed.ts` with named exports, reusable by wizard and CLI
 - [x] Guided setup wizard — `cogmo setup` via `@clack/prompts`, provider validation (`/v1/models`, `getMe`), Telegram channel + allowlist, re-runnable (Keep/Modify/Skip), `--reset` scopes, `--non-interactive` mode
+- [x] Telegram response formatting — `marked` + custom HTML post-processor, `renderOutput` on AdapterModule, `steering_rules.channel_type` scope, channel-scoped rules seeded at setup
 
 ## Phase 2: Scheduling + Ingestion
 

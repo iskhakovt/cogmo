@@ -123,7 +123,7 @@ See [`design/context-management.md`](context-management.md) — token counting, 
 
 ## AI Steering Rules `[confirmed]`
 
-Rules stored as PostgreSQL rows. Injected into system prompts at invocation time. Can be global or scoped to a profile. Managed by the `DefaultPromptSource` which loads the profile's base prompt and layers applicable rules on top.
+Rules stored as PostgreSQL rows. Injected into system prompts at invocation time. Scoped on two independent axes — profile and channel — so a rule can apply globally, per-profile, per-channel, or to a specific profile-on-channel combination. Managed by the `DefaultPromptSource` which loads the profile's base prompt and layers applicable rules on top.
 
 Stage 1 evolution edits these rows. Stage 5 signal pipeline auto-proposes new rules from conversation signals.
 
@@ -137,9 +137,22 @@ steering_rules (
   priority          INT NOT NULL,             -- ordering in system prompt
   observation_count INT NOT NULL,             -- rule graduation (2+ = promoted)
   profile_id        UUID FK → profiles,       -- nullable: null = applies to all profiles
+  channel_type      TEXT,                     -- nullable: null = applies to all channels
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
+
+Query at prompt assembly: `(profile_id = $p OR profile_id IS NULL) AND (channel_type IN $activeChannels OR channel_type IS NULL) AND active = true`. Cross-channel conversations union rules from all active channels.
+
+All behavioral instructions — global, profile-scoped, and channel-scoped — live in this one table. Default channel rules (e.g., "avoid tables on Telegram", "prefer concise replies") are seeded when a channel is configured, same pattern as profile seeding. Adapters own only mechanical output rendering (`renderOutput`), not behavioral guidance. See [transport/adapters.md](transport/adapters.md) → Response Rendering.
+
+### Observation lineage `[proposed]`
+
+Channel lineage is already derivable: `conversationId → channel_sessions → channels.type`. No denormalized column needed — the Observer can join to get the source channel at extraction time.
+
+When Observer channel scoping lands, the Observer queries the conversation's active channels, passes them to the extraction LLM, and the LLM decides per correction whether it's channel-specific ("don't use tables" → Telegram) or general ("be more concise" → everywhere). The extraction Zod schema gains an optional `channelType` field.
+
+Future: if per-observation precision matters (rule graduated from mixed channels), introduce a `steering_rule_observations` table (`rule_id`, `conversation_id`, `channel_type`, `created_at`). Earns its keep when the rule count exceeds what eyeballing can handle.
 
 ## Crash Recovery `[confirmed]`
 

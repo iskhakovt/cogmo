@@ -131,8 +131,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return agentStore.getHistory(conversationId);
       });
 
+      const channelTypes = await step.run("resolve-channel-types", async () => {
+        return transportStore.getActiveChannelTypes(conversationId);
+      });
+
       const systemPrompt = await step.run("assemble-prompt", async () => {
-        return promptSource.assemble(agentStore, profileId);
+        return promptSource.assemble(agentStore, { profileId, channelTypes });
       });
 
       // ──── NON-DURABLE: resolve images + auto-recall + stream ────

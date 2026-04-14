@@ -417,13 +417,66 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      const rules = await store.getActiveRules(profileId);
+      const rules = await store.getActiveRules(profileId, []);
       expect(rules).toEqual([{ rule: "Global safety rule" }, { rule: "Be concise" }]);
     });
 
     it("returns empty array when no active rules", async () => {
       const profileId = await seedProfile();
-      expect(await store.getActiveRules(profileId)).toEqual([]);
+      expect(await store.getActiveRules(profileId, [])).toEqual([]);
+    });
+
+    it("returns channel-scoped rules when channel is active", async () => {
+      const profileId = await seedProfile();
+      const { steeringRules: sr } = await import("./schema.js");
+      await db.insert(sr).values([
+        {
+          rule: "Global rule",
+          category: "style",
+          active: true,
+          source: "manual",
+          priority: 1,
+          observationCount: 0,
+          profileId: null,
+          channelType: null,
+        },
+        {
+          rule: "Telegram rule",
+          category: "style",
+          active: true,
+          source: "manual",
+          priority: 2,
+          observationCount: 0,
+          profileId: null,
+          channelType: "telegram",
+        },
+        {
+          rule: "Slack rule",
+          category: "style",
+          active: true,
+          source: "manual",
+          priority: 3,
+          observationCount: 0,
+          profileId: null,
+          channelType: "slack",
+        },
+      ]);
+
+      // No channels active — only null-scoped rules
+      expect(await store.getActiveRules(profileId, [])).toEqual([{ rule: "Global rule" }]);
+
+      // Telegram active — global + telegram
+      expect(await store.getActiveRules(profileId, ["telegram"])).toEqual([
+        { rule: "Global rule" },
+        { rule: "Telegram rule" },
+      ]);
+
+      // Both channels — union
+      expect(await store.getActiveRules(profileId, ["telegram", "slack"])).toEqual([
+        { rule: "Global rule" },
+        { rule: "Telegram rule" },
+        { rule: "Slack rule" },
+      ]);
     });
   });
 
@@ -884,7 +937,7 @@ describe("DrizzleAgentStore", () => {
         },
       });
 
-      const rules = await store.getActiveRules(profileId);
+      const rules = await store.getActiveRules(profileId, []);
       expect(rules).toEqual([{ rule: "New consolidated rule" }]);
     });
   });

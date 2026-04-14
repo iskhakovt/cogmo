@@ -13,7 +13,7 @@ import type { AgentStore } from "../agent/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore, type SecretsStore } from "../secrets/store/index.js";
 import type { TransportStore } from "../transport/store/index.js";
-import { seedDefaults } from "./seed.js";
+import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
   validateAnthropicKey,
   validateHindsight,
@@ -230,7 +230,10 @@ async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<
       ],
     });
     cancelGuard(action);
-    if (action === "keep") return;
+    if (action === "keep") {
+      await seedChannelRules(deps.agentStore, "telegram");
+      return;
+    }
     await deps.transportStore.removeChannel(existing.id);
   } else {
     const add = await p.confirm({ message: "Add a Telegram channel? (optional)" });
@@ -278,6 +281,9 @@ async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<
     credentials: { tokenSecretName },
     identityMode: "mapped",
   });
+
+  // Seed default channel-scoped steering rules (idempotent)
+  await seedChannelRules(deps.agentStore, "telegram");
 
   // Allowlist
   p.note(

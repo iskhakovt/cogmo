@@ -1,6 +1,6 @@
 import type { AdapterModule } from "../adapter-module.js";
 import direct from "./direct.js";
-import telegram from "./telegram.js";
+import { telegramModule } from "./telegram/index.js";
 
 /**
  * Adapter module registry — compile-time enforced via satisfies.
@@ -10,7 +10,7 @@ import telegram from "./telegram.js";
  */
 export const adapterModules: ReadonlyArray<AdapterModule> = [
   direct satisfies AdapterModule,
-  telegram satisfies AdapterModule,
+  telegramModule satisfies AdapterModule,
 ];
 
 /** Lookup by channel type. */
