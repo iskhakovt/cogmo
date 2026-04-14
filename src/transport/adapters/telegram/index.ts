@@ -1,12 +1,14 @@
 import { Bot, InputFile } from "grammy";
 import type { JsonValue } from "type-fest";
+import { parseGeneratedImagePayload } from "../../../agent/image-tools.js";
 import type { StreamEvent } from "../../../llm/types.js";
 import { logger } from "../../../logger.js";
-import type {
-  AdapterDeps,
-  AdapterModule,
-  AdapterSetupResult,
-  RenderedMessage,
+import {
+  type AdapterDeps,
+  type AdapterModule,
+  type AdapterSetupResult,
+  isRenderedMessage,
+  type RenderedMessage,
 } from "../../adapter-module.js";
 import { type AttachmentStore, mediaTypeToExt } from "../../attachment-store.js";
 import { contentToText } from "../../content.js";
@@ -27,23 +29,22 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
 
   async deliver(platformAddress: string, content: RenderedMessage | JsonValue): Promise<void> {
     const chatId = Number(platformAddress);
-    if (typeof content === "object" && content !== null && "parseMode" in content) {
-      const rendered = content as RenderedMessage;
+    if (isRenderedMessage(content)) {
       try {
-        await this.#bot.api.sendMessage(chatId, rendered.text, {
-          ...(rendered.parseMode && { parse_mode: rendered.parseMode }),
+        await this.#bot.api.sendMessage(chatId, content.text, {
+          ...(content.parseMode && { parse_mode: content.parseMode }),
         });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "";
         if (msg.includes("can't parse entities")) {
           logger.warn("telegram: HTML parse failed, falling back to plain text");
-          await this.#bot.api.sendMessage(chatId, stripHtmlTags(rendered.text));
+          await this.#bot.api.sendMessage(chatId, stripHtmlTags(content.text));
         } else {
           throw err;
         }
       }
       // Send any attached images as separate photo messages after the text.
-      for (const img of rendered.images ?? []) {
+      for (const img of content.images ?? []) {
         await this.#bot.api.sendPhoto(
           chatId,
           new InputFile(img.data, `image.${mediaTypeToExt(img.mediaType)}`),
@@ -128,29 +129,21 @@ class TelegramStreamHandle implements StreamHandle {
   }
 
   async #sendGeneratedImage(output: string): Promise<void> {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(output);
-    } catch {
-      logger.warn({ runId: this.#runId }, "telegram: generate_image tool_result wasn't JSON");
+    const payload = parseGeneratedImagePayload(output);
+    if (!payload) {
+      logger.warn(
+        { runId: this.#runId },
+        "telegram: generate_image tool_result didn't match expected payload shape",
+      );
       return;
     }
-    if (
-      parsed === null ||
-      typeof parsed !== "object" ||
-      !("path" in parsed) ||
-      !("mediaType" in parsed) ||
-      typeof (parsed as { path: unknown }).path !== "string" ||
-      typeof (parsed as { mediaType: unknown }).mediaType !== "string"
-    ) {
-      return;
-    }
-    const { path, mediaType } = parsed as { path: string; mediaType: string };
+    const { path, mediaType } = payload;
 
     // Dedup across Inngest retries — same run + path = already delivered.
+    // Only mark as sent AFTER successful delivery so a transient S3/Telegram
+    // failure leaves room for the next retry to succeed.
     const dedupKey = `${this.#runId}:${path}`;
     if (this.#sentImages.has(dedupKey)) return;
-    this.#sentImages.add(dedupKey);
 
     try {
       const bytes = await this.#attachments.download(path);
@@ -158,8 +151,10 @@ class TelegramStreamHandle implements StreamHandle {
         this.#chatId,
         new InputFile(bytes, `image.${mediaTypeToExt(mediaType)}`),
       );
+      this.#sentImages.add(dedupKey);
     } catch (err) {
       // Don't crash the stream on a single image failure — user still gets the text.
+      // dedupKey is intentionally NOT added so the next Inngest retry can try again.
       logger.error({ err, path, runId: this.#runId }, "telegram: failed to send generated image");
     }
   }

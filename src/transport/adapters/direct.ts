@@ -1,11 +1,12 @@
+import type { JsonValue } from "type-fest";
 import { inngest } from "../../inngest/client.js";
 import { directInbound, directOutbound } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
-import type {
-  AdapterDeps,
-  AdapterModule,
-  AdapterSetupResult,
-  RenderedMessage,
+import {
+  type AdapterDeps,
+  type AdapterModule,
+  type AdapterSetupResult,
+  isRenderedMessage,
 } from "../adapter-module.js";
 import { contentToText } from "../content.js";
 
@@ -61,23 +62,26 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   return {
     adapter: {
       deliver: async (platformAddress, content) => {
-        const isRendered = typeof content === "object" && content !== null && "text" in content;
-        const text = isRendered
-          ? (content as RenderedMessage).text
-          : contentToText(content as import("type-fest").JsonValue);
-        const images = isRendered
-          ? (content as RenderedMessage).images?.map((img) => ({
-              data: img.data.toString("base64"),
-              mediaType: img.mediaType,
-            }))
-          : undefined;
-        await inngest.send(
-          directOutbound.create({
-            platformAddress,
-            content: text,
-            ...(images && images.length > 0 && { images }),
-          }),
-        );
+        if (isRenderedMessage(content)) {
+          const images = content.images?.map((img) => ({
+            data: img.data.toString("base64"),
+            mediaType: img.mediaType,
+          }));
+          await inngest.send(
+            directOutbound.create({
+              platformAddress,
+              content: content.text,
+              ...(images && images.length > 0 && { images }),
+            }),
+          );
+        } else {
+          await inngest.send(
+            directOutbound.create({
+              platformAddress,
+              content: contentToText(content as JsonValue),
+            }),
+          );
+        }
       },
       stop: async () => {},
     },

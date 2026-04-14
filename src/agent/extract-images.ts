@@ -1,4 +1,5 @@
 import type { Message } from "../llm/types.js";
+import { parseGeneratedImagePayload } from "./image-tools.js";
 
 /**
  * Reference to a generated image stored in AttachmentStore.
@@ -20,6 +21,10 @@ export interface OutboundImageRef {
  *
  * Scoping by originating tool name prevents false positives from other
  * tools that happen to return `{path, mediaType}`-shaped JSON.
+ *
+ * Payload parsing goes through `parseGeneratedImagePayload` — the same
+ * helper the Telegram stream handle uses for mid-stream delivery, so the
+ * batch and streaming paths stay in sync.
  */
 export function extractGeneratedImages(messages: readonly Message[]): readonly OutboundImageRef[] {
   const toolNames = new Map<string, string>();
@@ -37,22 +42,8 @@ export function extractGeneratedImages(messages: readonly Message[]): readonly O
       if (block.type !== "tool_result") continue;
       if (toolNames.get(block.toolUseId) !== "generate_image") continue;
       if (block.isError) continue;
-      try {
-        const parsed = JSON.parse(block.content) as unknown;
-        if (
-          parsed !== null &&
-          typeof parsed === "object" &&
-          "path" in parsed &&
-          "mediaType" in parsed &&
-          typeof (parsed as { path: unknown }).path === "string" &&
-          typeof (parsed as { mediaType: unknown }).mediaType === "string"
-        ) {
-          const { path, mediaType } = parsed as { path: string; mediaType: string };
-          images.push({ path, mediaType });
-        }
-      } catch {
-        // tool_result content isn't JSON — silently skip
-      }
+      const payload = parseGeneratedImagePayload(block.content);
+      if (payload) images.push({ path: payload.path, mediaType: payload.mediaType });
     }
   }
   return images;

@@ -9,6 +9,46 @@ import { defineTool, type ToolSpec } from "./tools.js";
 export type FalProvider = ReturnType<typeof createFal>;
 
 /**
+ * The shape returned by the `generate_image` tool's text result (JSON-encoded).
+ *
+ * Two consumers parse this payload — the orchestrator's batch path
+ * (`extractGeneratedImages`) and the Telegram stream handle (mid-stream
+ * `sendPhoto`). Keep this contract in one place so any field change
+ * touches both consumers via the type system.
+ */
+export interface GeneratedImagePayload {
+  path: string;
+  mediaType: string;
+  /** Model the LLM picked. Informational — not used by delivery. */
+  model?: string;
+}
+
+/**
+ * Parse and validate a `generate_image` tool_result body.
+ *
+ * Returns `null` on any failure (non-JSON, missing/wrong-typed fields).
+ * Callers silently skip null results — the contract is convention-based,
+ * and a malformed payload from a future or failed tool call shouldn't
+ * crash delivery.
+ */
+export function parseGeneratedImagePayload(raw: string): GeneratedImagePayload | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object") return null;
+  const obj = parsed as Record<string, unknown>;
+  if (typeof obj.path !== "string" || typeof obj.mediaType !== "string") return null;
+  return {
+    path: obj.path,
+    mediaType: obj.mediaType,
+    ...(typeof obj.model === "string" && { model: obj.model }),
+  };
+}
+
+/**
  * Curated image-generation models.
  *
  * fal.ai hosts 1000+ models — exposing all of them would flood the LLM.
@@ -76,10 +116,14 @@ export function createImageTools(
               });
             } catch (err) {
               // fal returns 4xx for auth/validation/content-policy failures — don't retry.
-              // The SDK surfaces these via its error types; conservatively classify by message.
+              // 400 (bad request), 401 (auth), 403 (forbidden), 422 (validation) are all
+              // futile to retry. 429 (rate limit) is intentionally NOT here — that's
+              // the canonical retry-with-backoff case. The SDK surfaces errors via its
+              // error types; conservatively classify by message.
               if (err instanceof Error) {
                 const msg = err.message.toLowerCase();
                 if (
+                  msg.includes("400") ||
                   msg.includes("401") ||
                   msg.includes("403") ||
                   msg.includes("422") ||

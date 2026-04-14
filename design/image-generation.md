@@ -126,22 +126,28 @@ function createImageTools(
         "- `fal-ai/flux-pro/kontext` — image editing (requires reference image)\n\n" +
         "Be specific and detailed in the prompt — describe style, composition, colors, mood.",
       schema: z.object({
-        prompt: z.string().describe("Detailed image description"),
+        prompt: z.string().min(1).describe("Detailed image description"),
         model: z.enum(MODEL_CATALOG).default("fal-ai/flux/dev")
           .describe("Model — choose based on task (see tool description)"),
         aspectRatio: z.enum(["1:1", "16:9", "9:16", "4:3", "3:4"]).optional()
           .describe("Aspect ratio. Default 1:1."),
-        seed: z.number().optional().describe("Seed for reproducibility"),
+        seed: z.number().int().optional().describe("Seed for reproducibility"),
       }),
       handler: async (input) => {
         if (!fal) return "Error: generate_image is not configured (FAL_API_KEY missing).";
 
-        const { image } = await generateImage({
-          model: fal.image(input.model),
-          prompt: input.prompt,
-          ...(input.aspectRatio && { aspectRatio: input.aspectRatio }),
-          ...(input.seed !== undefined && { seed: input.seed }),
-        });
+        // Wrap in withRetry — fal returns transient 5xx and 429s. 4xx
+        // (400/401/403/422) are classified as AbortError so withRetry
+        // stops immediately rather than burning the retry budget.
+        const { image } = await withRetry(
+          () => generateImage({
+            model: fal.image(input.model),
+            prompt: input.prompt,
+            ...(input.aspectRatio && { aspectRatio: input.aspectRatio }),
+            ...(input.seed !== undefined && { seed: input.seed }),
+          }),
+          { retries: 2, context: "fal.generateImage" },
+        );
 
         const buffer = Buffer.from(image.uint8Array);
         const path = await attachments.upload(buffer, image.mediaType, "generated");
@@ -156,6 +162,8 @@ function createImageTools(
   ];
 }
 ```
+
+**Retry semantics:** `generateImage` is wrapped in `withRetry({ retries: 2 })`. The handler classifies fal's 4xx errors (400 bad request, 401 unauthorized, 403 forbidden, 422 validation) as `AbortError` — these are futile to retry. 429 (rate limit) and 5xx fall through to the default exponential-backoff retry. This mirrors `web-tools.ts` for transport-level external API calls.
 
 **Closure injection** (like `createWebTools`), not through `Service`. Image generation is a shared capability, not per-user scoped. The fal provider factory and attachment store are injected at bootstrap, reused across all turns.
 

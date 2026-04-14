@@ -49,6 +49,22 @@ export interface RenderedMessage {
 }
 
 /**
+ * Type guard distinguishing a `RenderedMessage` from raw `JsonValue` content.
+ *
+ * `parseMode` and `images` are both optional — checking for `text` is the
+ * only reliable structural discriminator. Adapters use this in `deliver()`
+ * to decide between rendering paths without unsafe `as` casts.
+ */
+export function isRenderedMessage(content: unknown): content is RenderedMessage {
+  return (
+    typeof content === "object" &&
+    content !== null &&
+    "text" in content &&
+    typeof (content as { text: unknown }).text === "string"
+  );
+}
+
+/**
  * Contract every adapter module must satisfy.
  *
  * The barrel (adapters/index.ts) enforces this via `satisfies`.

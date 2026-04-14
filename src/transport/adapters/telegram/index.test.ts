@@ -364,6 +364,25 @@ describe("telegram adapter", () => {
       expect(mockBotApi.sendPhoto).toHaveBeenCalledTimes(1);
     });
 
+    it("retries the image after a failed sendPhoto (dedup only marks success)", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+
+      const event = {
+        type: "tool_result" as const,
+        name: "generate_image",
+        output: JSON.stringify({ path: "generated/abc.jpg", mediaType: "image/jpeg" }),
+      };
+
+      // First attempt: sendPhoto throws — dedup must not block the retry
+      mockBotApi.sendPhoto.mockRejectedValueOnce(new Error("network blip"));
+      await handle.push(event);
+      // Second attempt (e.g., Inngest retry): should succeed
+      await handle.push(event);
+
+      expect(mockBotApi.sendPhoto).toHaveBeenCalledTimes(2);
+    });
+
     it("different runId delivers independently", async () => {
       const { adapter } = await createAdapterWithAttachments();
       const handle1 = await adapter.openStream("42", "run-1");
