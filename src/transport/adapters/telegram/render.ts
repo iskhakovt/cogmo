@@ -40,6 +40,16 @@ function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** Decode HTML entities back to raw characters. */
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
 /**
  * Convert standard HTML from marked into Telegram's HTML subset.
  *
@@ -61,7 +71,7 @@ function telegramize(html: string): string {
       .map((line) => line.trim())
       .filter(Boolean)
       .join("\n");
-    return `<pre>${escapeHtml(text)}</pre>`;
+    return `<pre>${escapeHtml(decodeHtmlEntities(text))}</pre>`;
   });
 
   // Headings → bold + newlines
@@ -123,11 +133,28 @@ function telegramize(html: string): string {
 
   // --- Cleanup: strip any remaining unsupported HTML tags ---
   // Keep: b, i, s, u, code, pre, a, blockquote, tg-spoiler, span
-  const ALLOWED_TAGS = /^\/?(b|i|s|u|code|pre|a|blockquote|tg-spoiler|span)([\s>]|$)/i;
-  result = result.replace(/<\/?([^>]+)>/g, (match, tagContent: string) => {
-    if (ALLOWED_TAGS.test(tagContent)) return match;
-    return "";
-  });
+  const ALLOWED_TAG_NAMES = new Set([
+    "b",
+    "i",
+    "s",
+    "u",
+    "code",
+    "pre",
+    "a",
+    "blockquote",
+    "tg-spoiler",
+    "span",
+  ]);
+  result = result.replace(
+    /<(\/?)([a-z][a-z0-9-]*)\b[^>]*>/gi,
+    (match, slash: string, tagName: string) => {
+      const name = tagName.toLowerCase();
+      if (!ALLOWED_TAG_NAMES.has(name)) return "";
+      // Keep attributes only for <a> (href) and <code> (class for language)
+      if (name === "a" || name === "code") return match;
+      return `<${slash}${name}>`;
+    },
+  );
 
   // Collapse excessive newlines (more than 2 → 2)
   result = result.replace(/\n{3,}/g, "\n\n");
@@ -156,4 +183,12 @@ export function renderTelegramHtml(markdown: string): RenderedMessage {
     text: telegramHtml,
     parseMode: "HTML",
   };
+}
+
+/**
+ * Strip all HTML tags from a string, keeping text content.
+ * Used as fallback when Telegram rejects HTML.
+ */
+export function stripHtmlTags(html: string): string {
+  return html.replace(/<[^>]*>/g, "").trim();
 }

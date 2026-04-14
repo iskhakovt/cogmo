@@ -67,7 +67,7 @@ export interface TransportStore {
   getActiveSessionsForConversation(conversationId: string): Promise<ReadonlyArray<Session>>;
 
   /** Get distinct channel types for a conversation's active sessions. */
-  getActiveChannelTypes(conversationId: string): Promise<string[]>;
+  getActiveChannelTypes(conversationId: string): Promise<ReadonlyArray<string>>;
 
   /** Find sessions that contributed inbound messages in the given range (source routing). */
   getSourceSessions(params: {
@@ -268,7 +268,7 @@ export class DrizzleTransportStore implements TransportStore {
     });
   }
 
-  async getActiveChannelTypes(conversationId: string): Promise<string[]> {
+  async getActiveChannelTypes(conversationId: string): Promise<ReadonlyArray<string>> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .selectDistinct({ type: channels.type })

@@ -10,7 +10,7 @@ import type {
 } from "../../adapter-module.js";
 import { contentToText } from "../../content.js";
 import type { Adapter, StreamHandle, StreamingAdapter } from "../../types.js";
-import { renderTelegramHtml } from "./render.js";
+import { renderTelegramHtml, stripHtmlTags } from "./render.js";
 
 export const channelType = "telegram";
 
@@ -34,7 +34,7 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
         const msg = err instanceof Error ? err.message : "";
         if (msg.includes("can't parse entities")) {
           logger.warn("telegram: HTML parse failed, falling back to plain text");
-          await this.#bot.api.sendMessage(chatId, rendered.text);
+          await this.#bot.api.sendMessage(chatId, stripHtmlTags(rendered.text));
         } else {
           throw err;
         }
@@ -256,4 +256,9 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
 }
 
 export { renderTelegramHtml } from "./render.js";
-export default { channelType, setup, renderOutput: renderTelegramHtml } satisfies AdapterModule;
+
+export const telegramModule = {
+  channelType,
+  setup,
+  renderOutput: renderTelegramHtml,
+} satisfies AdapterModule;

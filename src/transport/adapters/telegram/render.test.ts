@@ -108,10 +108,13 @@ describe("renderTelegramHtml", () => {
   });
 
   it("strips unsupported HTML tags but keeps content", () => {
-    const result = renderTelegramHtml("Normal text");
-    // No divs, spans with classes, etc should appear
+    // marked passes through raw HTML in markdown input
+    const result = renderTelegramHtml('before <div>inner</div> <span class="oops">x</span> after');
+    expect(result.text).toContain("before");
+    expect(result.text).toContain("inner");
+    expect(result.text).toContain("x");
     expect(result.text).not.toMatch(/<div/);
-    expect(result.text).not.toMatch(/<p>/);
+    expect(result.text).not.toMatch(/class="oops"/);
   });
 
   it("does not collapse more than 2 newlines", () => {

@@ -165,13 +165,16 @@ export interface AgentStore {
 
   // --- Evolution: correction extraction ---
 
+  /** Check if any channel-specific rules exist for a given channel type. */
+  hasChannelRules(channelType: string): Promise<boolean>;
+
   /** Insert a manual steering rule (already active). Used by seed/setup. */
   insertManualRule(params: {
     rule: string;
     category: string;
     profileId?: string | null;
     channelType?: string | null;
-    priority?: number;
+    priority: number;
   }): Promise<{ id: string }>;
 
   /** Get all correction-sourced rules (active + inactive) for dedup during extraction. */
@@ -617,12 +620,23 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
+  async hasChannelRules(channelType: string): Promise<boolean> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ id: steeringRules.id })
+        .from(steeringRules)
+        .where(eq(steeringRules.channelType, channelType))
+        .limit(1);
+      return rows.length > 0;
+    });
+  }
+
   async insertManualRule(params: {
     rule: string;
     category: string;
     profileId?: string | null;
     channelType?: string | null;
-    priority?: number;
+    priority: number;
   }): Promise<{ id: string }> {
     return this.#db.transaction(async (tx) => {
       return single(
@@ -633,7 +647,7 @@ export class DrizzleAgentStore implements AgentStore {
             category: params.category,
             source: "manual",
             active: true,
-            priority: params.priority ?? 50,
+            priority: params.priority,
             observationCount: 0,
             profileId: params.profileId ?? null,
             channelType: params.channelType ?? null,

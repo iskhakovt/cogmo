@@ -226,6 +226,22 @@ describe("telegram adapter", () => {
       });
     });
 
+    it("finish falls back to plain text when HTML parse fails", async () => {
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "done" });
+      mockBotApi.editMessageText
+        .mockReset()
+        .mockRejectedValueOnce(new Error("can't parse entities"))
+        .mockResolvedValue(true);
+
+      await handle.finish();
+
+      // First call: HTML attempt, second call would be absent (keeps plain text from stream)
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(1);
+    });
+
     it("abort appends error to message", async () => {
       const adapter = await createStreamingAdapter();
       const handle = await adapter.openStream("42", "run-1");
