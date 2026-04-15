@@ -92,7 +92,9 @@ export function hindsight(
     if (opts?.baseUrl) env.HINDSIGHT_API_LLM_BASE_URL = opts.baseUrl;
   }
 
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight:latest")
+  // API-only image — same runtime as the full `hindsight` image but without
+  // the Control Plane web UI (which Cogmo never talks to).
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:latest")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
@@ -103,8 +105,9 @@ export function hindsight(
 }
 
 /**
- * Slim Hindsight — no local ML models, external LLM + embeddings + reranker.
- * ~500MB image, ~5s startup. Patched config/cross_encoder for zerank base URL support.
+ * Slim Hindsight — API-only, no local ML models, external LLM + embeddings + reranker.
+ * ~400MB image, ~5s startup. No Control Plane UI (Cogmo doesn't use it).
+ * Patched config/cross_encoder for zerank base URL support.
  */
 export function hindsightSlim(
   network: StartedNetwork,
@@ -145,7 +148,7 @@ export function hindsightSlim(
 
   // Pin version — floating `latest-slim` breaks llmock fixtures when Hindsight
   // changes its LLM request format. Update version + re-record fixtures together.
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight:0.5.0-slim")
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:0.5.1-slim")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
