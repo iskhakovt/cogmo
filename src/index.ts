@@ -35,6 +35,13 @@ import { DrizzleTransportStore } from "./transport/store/index.js";
 export interface BootstrapOptions {
   /** Inject a provider directly — skips DB resolution. Used by tests. */
   providerOverride?: LlmProvider;
+  /**
+   * Custom `fetch` for the fal.ai provider — used by integration tests to
+   * intercept fal HTTP traffic via a scoped fetch wrapper (see
+   * `src/test/fal-mock.ts`). Production wiring leaves this undefined so the
+   * SDK uses `globalThis.fetch`.
+   */
+  falFetchOverride?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }
 
 /**
@@ -95,7 +102,9 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const falKey = (await secretsStore.getSecret("fal_api_key")) ?? env.FAL_API_KEY;
 
   const webTools = createWebTools(tavilyKey, openrouterKey);
-  const falProvider = falKey ? createFal({ apiKey: falKey }) : undefined;
+  const falProvider = falKey
+    ? createFal({ apiKey: falKey, ...(opts.falFetchOverride && { fetch: opts.falFetchOverride }) })
+    : undefined;
   const imageTools = createImageTools(falProvider, attachmentStore);
   const tools = createDefaultTools(
     [...memoryTools, ...webTools, ...fileTools, ...coreMemoryTools, ...imageTools],

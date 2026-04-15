@@ -1,1 +1,13 @@
 test/fixtures/recorded/* linguist-generated=true
+test/fixtures/fal/* linguist-generated=true
+
+# Binary test fixtures — skip line-ending normalization, suppress diffs,
+# force binary merges. `binary` is a macro for `-text -diff -merge`.
+# Staying off Git LFS: fixtures are <200 KB, low-churn (re-recorded only
+# when prompts change). Revisit if a single fixture exceeds 1 MB or
+# fixtures churn on most PRs. See design/image-generation.md → Testing.
+*.jpg  binary
+*.jpeg binary
+*.png  binary
+*.webp binary
+*.gif  binary
