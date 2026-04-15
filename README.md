@@ -26,7 +26,7 @@ MVP conversation + memory is shipping. Stage 1 self-evolution (post-conversation
 
 Cogmo runs as a single container that talks to your own infrastructure. You provide:
 
-- **PostgreSQL 18+ with pgvector** (one instance, used for both Cogmo's application state and Hindsight's vectors)
+- **PostgreSQL 18 with pgvector** (recommended; older versions supported with caveats — see [`DEPLOYMENT.md`](DEPLOYMENT.md))
 - **Redis 7+** (Inngest queue and state)
 - **[Inngest](https://www.inngest.com/)** (self-hosted dev server or production deployment)
 - **[Hindsight](https://github.com/vectorize-io/hindsight)** memory server
@@ -48,7 +48,7 @@ docker run --rm -it \
   -e DATABASE_URL=postgresql://... \
   -e COGMO_MASTER_KEY=... \
   -e HINDSIGHT_URL=http://hindsight:8888 \
-  ghcr.io/iskhakovt/cogmo setup
+  ghcr.io/iskhakovt/cogmo:<version> setup
 ```
 
 The wizard (`@clack/prompts` TUI) walks you through:
@@ -70,7 +70,7 @@ docker run -d \
   -e HINDSIGHT_URL=... \
   -e INNGEST_BASE_URL=... \
   -p 9090:9090 \
-  ghcr.io/iskhakovt/cogmo
+  ghcr.io/iskhakovt/cogmo:<version>
 ```
 
 Then message your bot on Telegram. Liveness is exposed at `GET /health` on port 9090.

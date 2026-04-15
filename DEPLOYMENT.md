@@ -29,7 +29,7 @@ Pick **full** only if you need fully offline operation (air-gapped deploy, no ex
 
 Each release publishes to GitHub Container Registry:
 
-```
+```text
 ghcr.io/iskhakovt/cogmo:<version>
 ```
 
