@@ -19,5 +19,7 @@ ENV VERSION=$VERSION
 WORKDIR /app
 USER nonroot
 COPY --from=build /deploy .
+# health endpoint
+EXPOSE 9090
 ENTRYPOINT ["/nodejs/bin/node", "dist/main.js"]
 CMD ["serve"]

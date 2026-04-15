@@ -1,4 +1,5 @@
 reviews:
   auto_review:
-    enabled: false
-    labels: ["review-ready"]
+    enabled: true
+    ignore_usernames:
+      - "dependabot[bot]"
