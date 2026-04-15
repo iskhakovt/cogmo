@@ -5,10 +5,7 @@
  * The caller starts them in the right order and manages lifecycle.
  */
 
-import { OllamaContainer } from "@testcontainers/ollama";
 import { GenericContainer, type StartedNetwork, Wait } from "testcontainers";
-
-export const OLLAMA_MODEL = "qwen2.5:3b";
 
 export function postgres(network: StartedNetwork) {
   return new GenericContainer("pgvector/pgvector:pg18")
@@ -65,32 +62,18 @@ export function minio(network: StartedNetwork) {
     .withStartupTimeout(30_000);
 }
 
-export function ollama(network: StartedNetwork) {
-  return new OllamaContainer("ollama/ollama:latest")
-    .withNetwork(network)
-    .withNetworkAliases("ollama");
-}
-
 export function hindsight(
   network: StartedNetwork,
-  llmProvider: "ollama" | "anthropic",
-  opts?: {
-    apiKey?: string;
+  opts: {
+    apiKey: string;
     baseUrl?: string;
   },
 ) {
-  const env: Record<string, string> = {};
-
-  if (llmProvider === "ollama") {
-    env.HINDSIGHT_API_LLM_PROVIDER = "ollama";
-    env.HINDSIGHT_API_LLM_MODEL = OLLAMA_MODEL;
-    env.HINDSIGHT_API_LLM_BASE_URL = opts?.baseUrl ?? "http://ollama:11434/v1";
-    env.HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS = "16000";
-  } else {
-    env.HINDSIGHT_API_LLM_PROVIDER = "anthropic";
-    if (opts?.apiKey) env.HINDSIGHT_API_LLM_API_KEY = opts.apiKey;
-    if (opts?.baseUrl) env.HINDSIGHT_API_LLM_BASE_URL = opts.baseUrl;
-  }
+  const env: Record<string, string> = {
+    HINDSIGHT_API_LLM_PROVIDER: "anthropic",
+    HINDSIGHT_API_LLM_API_KEY: opts.apiKey,
+  };
+  if (opts.baseUrl) env.HINDSIGHT_API_LLM_BASE_URL = opts.baseUrl;
 
   // API-only image — same runtime as the full `hindsight` image but without
   // the Control Plane web UI (which Cogmo never talks to).
@@ -158,19 +141,6 @@ export function hindsightSlim(
     .withStartupTimeout(300_000);
 }
 
-/** Pull a model in a started Ollama container. */
-export async function pullModel(
-  ollamaContainer: Awaited<ReturnType<typeof OllamaContainer.prototype.start>>,
-  model: string,
-): Promise<void> {
-  console.log(`Pulling ${model}...`);
-  const result = await ollamaContainer.exec(["ollama", "pull", model]);
-  if (result.exitCode !== 0) {
-    throw new Error(`Failed to pull model: ${result.output}`);
-  }
-  console.log(`Model ${model} ready.`);
-}
-
 interface ContainerEndpoint {
   getHost(): string;
   getMappedPort(p: number): number;
@@ -181,7 +151,6 @@ export function getUrls(containers: {
   postgres: ContainerEndpoint;
   inngest: ContainerEndpoint;
   hindsight?: ContainerEndpoint;
-  ollama?: ContainerEndpoint;
   minio?: ContainerEndpoint;
 }) {
   return {
@@ -189,9 +158,6 @@ export function getUrls(containers: {
     inngestBaseUrl: `http://${containers.inngest.getHost()}:${containers.inngest.getMappedPort(8288)}`,
     ...(containers.hindsight && {
       hindsightUrl: `http://${containers.hindsight.getHost()}:${containers.hindsight.getMappedPort(8888)}`,
-    }),
-    ...(containers.ollama && {
-      ollamaUrl: `http://${containers.ollama.getHost()}:${containers.ollama.getMappedPort(11434)}`,
     }),
     ...(containers.minio && {
       s3Endpoint: `http://${containers.minio.getHost()}:${containers.minio.getMappedPort(9000)}`,
