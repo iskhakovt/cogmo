@@ -95,8 +95,8 @@ importers:
         specifier: ^2.4.11
         version: 2.4.11
       '@copilotkit/aimock':
-        specifier: ^1.8.0
-        version: 1.8.0
+        specifier: ^1.13.0
+        version: 1.13.0
       '@electric-sql/pglite':
         specifier: ^0.4.4
         version: 0.4.4
@@ -452,8 +452,8 @@ packages:
   '@clack/prompts@1.2.0':
     resolution: {integrity: sha512-4jmztR9fMqPMjz6H/UZXj0zEmE43ha1euENwkckKKel4XpSfokExPo5AiVStdHSAlHekz4d0CA/r45Ok1E4D3w==}
 
-  '@copilotkit/aimock@1.8.0':
-    resolution: {integrity: sha512-zrkHAkDKARKgueb6rJffSVxpHC5wSwuBd5CVo43RV7UrOCNdNocppbL/ncahnJX0hJOjLxb3KknGaYwnB2t2fQ==}
+  '@copilotkit/aimock@1.13.0':
+    resolution: {integrity: sha512-wcNQdicxSuaHf4MLtoC9bouKeYGcV9aBoIVJbeLtrBUhqz5LUAmo/U/S1WT69kyAEuM0uO1XyD3Jz+V+H9jsUw==}
     engines: {node: '>=20.15.0'}
     hasBin: true
 
@@ -4778,7 +4778,7 @@ snapshots:
       fast-wrap-ansi: 0.1.6
       sisteransi: 1.0.5
 
-  '@copilotkit/aimock@1.8.0': {}
+  '@copilotkit/aimock@1.13.0': {}
 
   '@csstools/color-helpers@6.0.2': {}
 
