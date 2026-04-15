@@ -9,8 +9,9 @@ import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
 import {
   NonInteractiveValidationError,
-  runNonInteractive,
+  persistNonInteractive,
   SetupEnvError,
+  validateNonInteractive,
 } from "./non-interactive.js";
 import { applyReset, type ResetScope, VALID_RESETS } from "./reset.js";
 import { runWizard, WizardCancelled } from "./wizard.js";
@@ -48,6 +49,19 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
   const db = drizzle({ connection: databaseUrl, schema });
 
   try {
+    // For non-interactive: validate env + credentials before any DB mutation,
+    // so a bad config can't trigger migrations or wipe state via --reset.
+    let validatedNonInteractive = null;
+    if (opts.nonInteractive) {
+      const result = await validateNonInteractive(process.env);
+      if (result.isErr()) {
+        console.error(result.error.message);
+        process.exitCode = 1;
+        return;
+      }
+      validatedNonInteractive = result.value;
+    }
+
     await migrate(db, { migrationsFolder: "./migrations" });
     logger.info("migrations applied");
 
@@ -56,18 +70,15 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
     const secretsStore = new DrizzleSecretsStore(db, encryptionKey);
 
-    // Handle --reset before anything else (including non-interactive)
     if (opts.reset) {
       await applyReset(opts.reset, { db });
     }
 
-    if (opts.nonInteractive) {
-      await runNonInteractive({
-        agentStore,
-        transportStore,
-        secretsStore,
-        env: process.env,
-      });
+    if (validatedNonInteractive) {
+      await persistNonInteractive(
+        { agentStore, transportStore, secretsStore },
+        validatedNonInteractive,
+      );
       return;
     }
 

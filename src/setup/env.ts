@@ -10,18 +10,9 @@
 import { err, ok, type Result } from "neverthrow";
 import { z } from "zod";
 import { resolveEnvFile } from "../secrets/env-file.js";
+import { PROVIDER_TYPES } from "./providers.js";
 
-/** Provider types the wizard knows how to configure. */
-export const PROVIDER_TYPES = ["anthropic", "openrouter", "openai", "custom"] as const;
-export type ProviderType = (typeof PROVIDER_TYPES)[number];
-
-/** Default base URL per provider type (undefined = SDK default). */
-export const PROVIDER_BASE_URLS: Record<ProviderType, string | undefined> = {
-  anthropic: undefined,
-  openrouter: "https://openrouter.ai/api/v1",
-  openai: "https://api.openai.com/v1",
-  custom: undefined,
-};
+export { PROVIDER_BASE_URLS, PROVIDER_TYPES, type ProviderType } from "./providers.js";
 
 const commaSeparated = z
   .string()

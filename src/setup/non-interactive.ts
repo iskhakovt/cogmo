@@ -8,13 +8,15 @@
  * interactive wizard; writes happen only after every validation passes.
  */
 
+import { err, ok, type Result } from "neverthrow";
 import type { JsonValue } from "type-fest";
 import type { AgentStore } from "../agent/store/index.js";
 import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { TransportStore } from "../transport/store/index.js";
-import type { NonInteractiveAnswers, ProviderType } from "./env.js";
-import { PROVIDER_BASE_URLS, parseNonInteractiveEnv, SetupEnvError } from "./env.js";
+import type { NonInteractiveAnswers } from "./env.js";
+import { parseNonInteractiveEnv, SetupEnvError } from "./env.js";
+import { PROVIDER_BASE_URLS, type ProviderType } from "./providers.js";
 import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
   type ValidationResult,
@@ -39,12 +41,21 @@ export const defaultValidators: Validators = {
   tavily: validateTavilyKey,
 };
 
-export interface NonInteractiveDeps {
+export interface PersistDeps {
   agentStore: AgentStore;
   transportStore: TransportStore;
   secretsStore: SecretsStore;
+}
+
+export interface NonInteractiveDeps extends PersistDeps {
   env: Record<string, string | undefined>;
   validators?: Validators;
+}
+
+/** Output of `validateNonInteractive` — the answers and any meta from validators. */
+export interface ValidatedNonInteractive {
+  answers: NonInteractiveAnswers;
+  telegramBotUsername?: string;
 }
 
 /** Thrown when one or more provider/channel validations fail. */
@@ -58,36 +69,48 @@ export class NonInteractiveValidationError extends Error {
 }
 
 /**
- * Run non-interactive setup end-to-end.
+ * Validate non-interactive setup input without touching the database.
  *
- * Flow:
- *  1. Parse env (fail fast on missing/malformed).
- *  2. Validate every credential against live APIs (fail fast on invalid).
- *  3. Seed defaults (user + profile + direct channel).
- *  4. Persist provider, model_providers, channel, identities, secrets.
- *
- * Any failure in steps 1-2 aborts before any writes happen.
+ * Used by `runSetup` to fail fast before destructive actions like
+ * `applyReset`, and by `runNonInteractive` as the first phase of its
+ * end-to-end flow. Composing this separately means we never mutate
+ * persistent state on bad input.
  */
-export async function runNonInteractive(deps: NonInteractiveDeps): Promise<void> {
-  const parsed = parseNonInteractiveEnv(deps.env);
-  if (parsed.isErr()) throw parsed.error;
-  const answers = parsed.value;
+export async function validateNonInteractive(
+  env: Record<string, string | undefined>,
+  validators: Validators = defaultValidators,
+): Promise<Result<ValidatedNonInteractive, SetupEnvError | NonInteractiveValidationError>> {
+  const parsed = parseNonInteractiveEnv(env);
+  if (parsed.isErr()) return err(parsed.error);
 
-  const validators = deps.validators ?? defaultValidators;
-
-  // --- Validate everything up front; no writes yet ---
-  const validations = await validateAll(answers, validators);
-  if (validations.failures.length > 0) {
-    throw new NonInteractiveValidationError(validations.failures);
+  const summary = await validateAll(parsed.value, validators);
+  if (summary.failures.length > 0) {
+    return err(new NonInteractiveValidationError(summary.failures));
   }
 
-  // --- Persist (after all validation passes) ---
+  return ok({
+    answers: parsed.value,
+    ...(summary.telegramBotUsername && { telegramBotUsername: summary.telegramBotUsername }),
+  });
+}
+
+/**
+ * Persist a pre-validated non-interactive setup to the database.
+ *
+ * Caller must have validated via `validateNonInteractive` first.
+ */
+export async function persistNonInteractive(
+  deps: PersistDeps,
+  validated: ValidatedNonInteractive,
+): Promise<void> {
+  const { answers, telegramBotUsername } = validated;
+
   const { userId } = await seedDefaults(deps.agentStore, deps.transportStore);
 
   await persistProvider(deps, answers);
 
   if (answers.telegramBotToken && answers.telegramAllowedUsers) {
-    await persistTelegram(deps, userId, answers, validations.telegramBotUsername);
+    await persistTelegram(deps, userId, answers, telegramBotUsername);
   }
 
   if (answers.tavilyApiKey) {
@@ -116,6 +139,23 @@ export async function runNonInteractive(deps: NonInteractiveDeps): Promise<void>
     },
     "non-interactive setup complete",
   );
+}
+
+/**
+ * Run non-interactive setup end-to-end.
+ *
+ * Flow:
+ *  1. Parse env (fail fast on missing/malformed).
+ *  2. Validate every credential against live APIs (fail fast on invalid).
+ *  3. Seed defaults (user + profile + direct channel).
+ *  4. Persist provider, model_providers, channel, identities, secrets.
+ *
+ * Any failure in steps 1-2 aborts before any writes happen.
+ */
+export async function runNonInteractive(deps: NonInteractiveDeps): Promise<void> {
+  const validated = await validateNonInteractive(deps.env, deps.validators ?? defaultValidators);
+  if (validated.isErr()) throw validated.error;
+  await persistNonInteractive(deps, validated.value);
 }
 
 interface ValidationSummary {
@@ -173,7 +213,7 @@ function adapterTypeFor(providerType: ProviderType): "anthropic" | "openai_compa
 }
 
 async function persistProvider(
-  deps: NonInteractiveDeps,
+  deps: PersistDeps,
   answers: NonInteractiveAnswers,
 ): Promise<void> {
   const adapterType = adapterTypeFor(answers.llmProviderType);
@@ -221,7 +261,7 @@ async function persistProvider(
 }
 
 async function persistTelegram(
-  deps: NonInteractiveDeps,
+  deps: PersistDeps,
   userId: string,
   answers: NonInteractiveAnswers,
   botUsername: string | undefined,

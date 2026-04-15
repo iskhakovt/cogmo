@@ -43,9 +43,15 @@ interface WizardDeps {
   secretsStore: SecretsStore;
 }
 
-// --- Provider types for the wizard ---
+// --- Provider UI metadata (canonical types/URLs come from providers.ts) ---
 
-const PROVIDER_TYPES = [
+import { PROVIDER_BASE_URLS, type ProviderType } from "./providers.js";
+
+const PROVIDER_OPTIONS: ReadonlyArray<{
+  value: ProviderType;
+  label: string;
+  hint: string;
+}> = [
   { value: "anthropic", label: "Anthropic (Claude)", hint: "direct API access" },
   {
     value: "openrouter",
@@ -58,31 +64,26 @@ const PROVIDER_TYPES = [
     label: "Custom (OpenAI-compatible)",
     hint: "any endpoint with /v1/chat/completions",
   },
-] as const;
+];
 
-const PROVIDER_HELP: Record<string, { url: string; path: string; keyName: string }> = {
-  anthropic: {
-    url: "https://console.anthropic.com/",
-    path: "Settings → API Keys → Create Key",
-    keyName: "cogmo",
-  },
-  openrouter: {
-    url: "https://openrouter.ai/settings/keys",
-    path: "Create Key",
-    keyName: "cogmo",
-  },
-  openai: {
-    url: "https://platform.openai.com/api-keys",
-    path: "Create new secret key",
-    keyName: "cogmo",
-  },
-};
-
-const PROVIDER_BASE_URLS: Record<string, string | undefined> = {
-  anthropic: undefined, // SDK default
-  openrouter: "https://openrouter.ai/api/v1",
-  openai: "https://api.openai.com/v1",
-};
+const PROVIDER_HELP: Partial<Record<ProviderType, { url: string; path: string; keyName: string }>> =
+  {
+    anthropic: {
+      url: "https://console.anthropic.com/",
+      path: "Settings → API Keys → Create Key",
+      keyName: "cogmo",
+    },
+    openrouter: {
+      url: "https://openrouter.ai/settings/keys",
+      path: "Create Key",
+      keyName: "cogmo",
+    },
+    openai: {
+      url: "https://platform.openai.com/api-keys",
+      path: "Create new secret key",
+      keyName: "cogmo",
+    },
+  };
 
 // --- Wizard steps ---
 
@@ -116,13 +117,14 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     }
   }
 
-  const providerType = await p.select({
-    message: "Choose your LLM provider:",
-    options: [...PROVIDER_TYPES],
-  });
-  cancelGuard(providerType);
+  const providerType = cancelGuard(
+    await p.select({
+      message: "Choose your LLM provider:",
+      options: [...PROVIDER_OPTIONS],
+    }),
+  );
 
-  const help = PROVIDER_HELP[providerType as string];
+  const help = PROVIDER_HELP[providerType];
   if (help) {
     p.note(
       `Visit ${help.url}\n→ ${help.path}\nWe recommend naming it "${help.keyName}"`,
@@ -130,7 +132,7 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     );
   }
 
-  let baseUrl = PROVIDER_BASE_URLS[providerType as string];
+  let baseUrl = PROVIDER_BASE_URLS[providerType];
 
   if (providerType === "custom") {
     baseUrl = cancelGuard(
