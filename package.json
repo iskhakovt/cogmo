@@ -65,7 +65,7 @@
     "@copilotkit/aimock": "^1.13.0",
     "@electric-sql/pglite": "^0.4.4",
     "@inngest/test": "^1.0.0",
-    "@testcontainers/ollama": "^11.13.0",
+    "@testcontainers/ollama": "^11.14.0",
     "@total-typescript/ts-reset": "^0.6.1",
     "@types/jsdom": "^28.0.1",
     "@types/node": "^25.6.0",

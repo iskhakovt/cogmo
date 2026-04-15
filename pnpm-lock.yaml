@@ -104,8 +104,8 @@ importers:
         specifier: ^1.0.0
         version: 1.0.0(inngest@4.2.2(@opentelemetry/core@2.6.1(@opentelemetry/api@1.9.1))(typescript@6.0.2)(zod@4.3.6))
       '@testcontainers/ollama':
-        specifier: ^11.13.0
-        version: 11.13.0
+        specifier: ^11.14.0
+        version: 11.14.0
       '@total-typescript/ts-reset':
         specifier: ^0.6.1
         version: 0.6.1
@@ -2044,8 +2044,8 @@ packages:
       zod:
         optional: true
 
-  '@testcontainers/ollama@11.13.0':
-    resolution: {integrity: sha512-x/J7UFkellowfC4hqGxlsUM4t1u4XqYDIihtqruHdZivSBs2P7b3t+bIIgfE6TueF/W+gOd9MV01JsVBq9PAXQ==}
+  '@testcontainers/ollama@11.14.0':
+    resolution: {integrity: sha512-z9s8spLxKHKOB1XhApDtc3wQj8gnD7JtNSPbp9Nktxsfts4MATXrQ5XGb0jz6ba9UJsXDGadlgqHRfcH7zrnBw==}
 
   '@total-typescript/ts-reset@0.6.1':
     resolution: {integrity: sha512-cka47fVSo6lfQDIATYqb/vO1nvFfbPw7uWLayIXIhGETj0wcOOlrlkobOMDNQOFr9QOafegUPq13V2+6vtD7yg==}
@@ -6371,7 +6371,7 @@ snapshots:
       typescript: 6.0.2
       zod: 4.3.6
 
-  '@testcontainers/ollama@11.13.0':
+  '@testcontainers/ollama@11.14.0':
     dependencies:
       testcontainers: 11.14.0
     transitivePeerDependencies:
