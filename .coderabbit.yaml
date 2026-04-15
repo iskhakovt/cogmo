@@ -3,3 +3,8 @@ reviews:
     enabled: true
     ignore_usernames:
       - "dependabot[bot]"
+    # Review-on-demand mode: CodeRabbit reviews the initial PR, then stays
+    # quiet through fix-up rounds. Re-trigger with `@coderabbitai review`
+    # when iterations settle. Mirrors how human reviewers work — you ping
+    # them when ready, not on every commit.
+    auto_pause_after_reviewed_commits: 1
