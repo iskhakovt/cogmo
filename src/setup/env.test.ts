@@ -1,0 +1,105 @@
+/**
+ * Unit tests for the non-interactive setup env parser.
+ *
+ * Pure parser tests — no DB, no network. The persistence and validation
+ * concerns are tested in `non-interactive.test.ts`.
+ */
+
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { parseNonInteractiveEnv, SetupEnvError } from "./env.js";
+
+function tempFile(content: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "cogmo-env-test-"));
+  const path = join(dir, "secret.txt");
+  writeFileSync(path, content);
+  return path;
+}
+
+describe("parseNonInteractiveEnv", () => {
+  it("returns typed answers for a minimal valid env", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+    });
+    if (r.isErr()) throw r.error;
+    expect(r.value.llmProviderType).toBe("anthropic");
+    expect(r.value.llmApiKey).toBe("sk-ant-0123456789");
+    expect(r.value.telegramBotToken).toBeUndefined();
+  });
+
+  it("reads a secret from the _FILE variant", () => {
+    const path = tempFile("sk-ant-from-file-01234");
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY_FILE: path,
+    });
+    if (r.isErr()) throw r.error;
+    expect(r.value.llmApiKey).toBe("sk-ant-from-file-01234");
+  });
+
+  it("parses comma-separated Telegram user IDs", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+      COGMO_TELEGRAM_BOT_TOKEN: "123456:ABC-def",
+      COGMO_TELEGRAM_ALLOWED_USERS: "100, 200 ,300",
+    });
+    if (r.isErr()) throw r.error;
+    expect(r.value.telegramAllowedUsers).toEqual(["100", "200", "300"]);
+  });
+
+  it("fails when required vars are missing", () => {
+    const r = parseNonInteractiveEnv({});
+    expect(r.isErr()).toBe(true);
+    if (!r.isErr()) return;
+    expect(r.error).toBeInstanceOf(SetupEnvError);
+    expect(r.error.issues.join("\n")).toMatch(/COGMO_LLM_PROVIDER_TYPE/);
+    expect(r.error.issues.join("\n")).toMatch(/COGMO_LLM_API_KEY/);
+  });
+
+  it("rejects unknown provider types", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "bogus",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+    });
+    expect(r.isErr()).toBe(true);
+    if (!r.isErr()) return;
+    expect(r.error.issues.join("\n")).toMatch(/COGMO_LLM_PROVIDER_TYPE/);
+  });
+
+  it("requires COGMO_LLM_BASE_URL when provider type is custom", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "custom",
+      COGMO_LLM_API_KEY: "sk-custom-012345",
+    });
+    expect(r.isErr()).toBe(true);
+    if (!r.isErr()) return;
+    expect(r.error.issues.join("\n")).toMatch(/COGMO_LLM_BASE_URL/);
+  });
+
+  it("rejects non-numeric Telegram user IDs", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+      COGMO_TELEGRAM_BOT_TOKEN: "123:ABC",
+      COGMO_TELEGRAM_ALLOWED_USERS: "100,not-a-number",
+    });
+    expect(r.isErr()).toBe(true);
+    if (!r.isErr()) return;
+    expect(r.error.issues.join("\n")).toMatch(/not-a-number/);
+  });
+
+  it("requires allowed-users when a bot token is set", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+      COGMO_TELEGRAM_BOT_TOKEN: "123:ABC",
+    });
+    expect(r.isErr()).toBe(true);
+    if (!r.isErr()) return;
+    expect(r.error.issues.join("\n")).toMatch(/COGMO_TELEGRAM_ALLOWED_USERS/);
+  });
+});
