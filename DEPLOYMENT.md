@@ -10,10 +10,20 @@ This is the canonical install guide. Cogmo is a single Node.js process distribut
 | pgvector | latest | Postgres extension for vector storage. The `pgvector/pgvector:pg18` image bundles it. |
 | Redis | 7+ | Inngest queue and state store. |
 | Inngest | latest | Self-hosted dev server (`inngest dev`) or production deployment. |
-| [Hindsight](https://github.com/vectorize-io/hindsight) | latest | Memory server, HTTP API on port 8888. Cogmo pins `ghcr.io/vectorize-io/hindsight` in development. |
+| [Hindsight](https://github.com/vectorize-io/hindsight) | latest-slim recommended | Memory server, HTTP API on port 8888. See [Hindsight image variant](#hindsight-image-variant) for which tag to pick. |
 | Docker | latest | For pulling and running the image. |
 
 Cogmo stores its application state in your Postgres; Hindsight stores its vectors in the same Postgres (different schema). One database is enough for personal scale.
+
+### Hindsight image variant
+
+Hindsight publishes two image families: **slim** (`:latest-slim`, ~500 MB, no local ML) and **full** (`:latest`, ~9 GB, bundles PyTorch + embedding/reranker models). Cogmo recommends **slim** for most deployments:
+
+- You already configured an LLM provider for Cogmo's main loop. Reusing that same OpenAI-/OpenRouter-/Cohere-compatible key for Hindsight's embeddings and reranker costs a few cents per month at personal scale.
+- The image is ~18× smaller, cold-start is seconds instead of a minute, and idle RAM stays under 500 MB.
+- Configure embeddings + reranker provider URLs/keys via Hindsight's own env vars — see [Hindsight's installation docs](https://hindsight.vectorize.io/developer/installation).
+
+Pick **full** only if you need fully offline operation (air-gapped deploy, no external API calls for memory) and can spare ~4 GB of always-on RAM.
 
 ## The image
 
