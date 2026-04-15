@@ -82,6 +82,10 @@ export async function setup({ provide }: GlobalSetupContext) {
   process.env.S3_SECRET_KEY = "minioadmin";
   process.env.S3_BUCKET = "cogmo-files";
   process.env.LOG_LEVEL = "warn";
+  // fal-mock intercepts all real network traffic in tests, so the dummy key
+  // is never validated. Real key passes through in record mode when the
+  // operator sets it locally: RECORD=1 FAL_API_KEY=... pnpm test:integration.
+  process.env.FAL_API_KEY = process.env.FAL_API_KEY ?? "test-fal-key";
 
   const gatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;
   process.env.INNGEST_CONNECT_GATEWAY_URL = gatewayUrl;

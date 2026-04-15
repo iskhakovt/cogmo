@@ -1,0 +1,18 @@
+{
+  "images": [
+    {
+      "url": "https://fal.media-mock.test/fal-ai-flux-dev-14d20a0d0c41.jpg",
+      "width": 1024,
+      "height": 768,
+      "content_type": "image/jpeg"
+    }
+  ],
+  "timings": {
+    "inference": 1.1711693680263124
+  },
+  "seed": 923156435,
+  "has_nsfw_concepts": [
+    false
+  ],
+  "prompt": "A cute tabby cat wearing a colorful top hat, sitting upright with a friendly expression. The cat has bright green eyes and orange and black striped fur. The hat is a classic tall top hat in deep purple with a red band around it. The scene is set against a soft, warm background with gentle lighting. The style is whimsical and charming, with detailed fur texture and expressive eyes. The composition centers the cat prominently in the frame."
+}

@@ -24,7 +24,9 @@ export default defineConfig({
           environment: "node",
           include: ["src/**/*.integration.test.ts"],
           globalSetup: "./test/integration-setup.ts",
-          testTimeout: 60_000,
+          // 90s for the image-gen test in record mode (fal call + 2x LLM round trips).
+          // Replay is much faster but one bound covers both modes.
+          testTimeout: 90_000,
           hookTimeout: 600_000,
           env: {
             NODE_ENV: "test",

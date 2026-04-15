@@ -1,0 +1,28 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "draw me a cat in a hat",
+        "sequenceIndex": 0
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "generate_image",
+            "arguments": "{\"prompt\":\"A cute tabby cat wearing a colorful top hat, sitting upright with a friendly expression. The cat has bright green eyes and orange and black striped fur. The hat is a classic tall top hat in deep purple with a red band around it. The scene is set against a soft, warm background with gentle lighting. The style is whimsical and charming, with detailed fur texture and expressive eyes. The composition centers the cat prominently in the frame.\",\"model\":\"fal-ai/flux/dev\"}",
+            "id": "toolu_01XhHNjADQbfPRwgWys5weUz"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "draw me a cat in a hat",
+        "sequenceIndex": 1
+      },
+      "response": {
+        "content": "Here's your cat in a hat!"
+      }
+    }
+  ]
+}
