@@ -3,3 +3,7 @@ reviews:
     enabled: true
     ignore_usernames:
       - "dependabot[bot]"
+    # Stop auto-reviewing after this many commits per PR — keeps fix-up rounds
+    # from re-triggering CodeRabbit (which hits rate limits) and silencing
+    # newer PRs. Resume manually with `@coderabbitai resume`.
+    auto_pause_after_reviewed_commits: 3
