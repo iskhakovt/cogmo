@@ -21,8 +21,7 @@ export const env = createEnv({
     INNGEST_DEV: z.coerce.boolean().default(true),
     INNGEST_EVENT_KEY: z.string().optional(),
     INNGEST_SIGNING_KEY: z.string().optional(),
-    /** Read directly by the Inngest SDK at serve time, never by Cogmo code. Optional here. */
-    INNGEST_BASE_URL: z.string().url().optional(),
+    INNGEST_BASE_URL: z.string().url(),
     TAVILY_API_KEY: z.string().optional(),
     OPENROUTER_API_KEY: z.string().optional(),
     FAL_API_KEY: z.string().optional(),

@@ -48,6 +48,7 @@ docker run --rm -it \
   -e DATABASE_URL=postgresql://... \
   -e COGMO_MASTER_KEY=... \
   -e HINDSIGHT_URL=http://hindsight:8888 \
+  -e INNGEST_BASE_URL=http://inngest:8288 \
   ghcr.io/iskhakovt/cogmo:<version> setup
 ```
 
