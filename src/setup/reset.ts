@@ -11,8 +11,8 @@ import type { Database } from "../db/index.js";
 import { logger } from "../logger.js";
 import { secrets } from "../secrets/store/schema.js";
 import {
-  channels,
   channelSessions,
+  channels,
   inboundMessages,
   userIdentities,
 } from "../transport/store/schema.js";

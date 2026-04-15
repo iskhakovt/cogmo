@@ -254,7 +254,7 @@ async function stepConfigureTelegram(
     await p.password({
       message: "Paste your bot token:",
       validate: (v) => {
-        if (!v || !v.includes(":")) return "Token should contain a colon (e.g., 123:ABC)";
+        if (!v?.includes(":")) return "Token should contain a colon (e.g., 123:ABC)";
         return undefined;
       },
     }),

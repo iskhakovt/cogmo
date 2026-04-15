@@ -212,10 +212,7 @@ function adapterTypeFor(providerType: ProviderType): "anthropic" | "openai_compa
   return providerType === "anthropic" ? "anthropic" : "openai_compatible";
 }
 
-async function persistProvider(
-  deps: PersistDeps,
-  answers: NonInteractiveAnswers,
-): Promise<void> {
+async function persistProvider(deps: PersistDeps, answers: NonInteractiveAnswers): Promise<void> {
   const adapterType = adapterTypeFor(answers.llmProviderType);
   const baseUrl = answers.llmBaseUrl ?? PROVIDER_BASE_URLS[answers.llmProviderType];
   const providerName = answers.llmProviderType;
