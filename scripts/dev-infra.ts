@@ -47,17 +47,13 @@ async function main() {
       }),
   ]);
 
-  // Hindsight with Anthropic (dev uses real API, not Ollama)
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     console.error("Error: ANTHROPIC_API_KEY not set. Hindsight needs it for LLM extraction.");
     process.exit(1);
   }
 
-  const hindsightContainer = await c
-    .hindsight(network, "anthropic", { apiKey })
-    .withReuse()
-    .start();
+  const hindsightContainer = await c.hindsight(network, { apiKey }).withReuse().start();
   console.log("  Hindsight ready");
 
   // Build env vars
