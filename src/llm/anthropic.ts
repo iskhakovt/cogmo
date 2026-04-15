@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { logger } from "../logger.js";
+import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
 import type {
   ChatParams,
@@ -37,97 +38,121 @@ export class AnthropicProvider implements LlmProvider {
 
     const anthropicParams = buildCreateParams(params);
     let resolveResponse: (v: { stopReason: StopReason; model: string; usage: Usage }) => void;
+    let rejectResponse: (err: unknown) => void;
     const response = new Promise<{ stopReason: StopReason; model: string; usage: Usage }>(
-      (resolve) => {
+      (resolve, reject) => {
         resolveResponse = resolve;
+        rejectResponse = reject;
       },
     );
 
     const client = this.#client;
+    const providerName = this.name;
+    const span = startChatSpan(providerName, params.model);
 
     async function* generateEvents(): AsyncIterable<StreamEvent> {
-      const stream = await client.messages.create({ ...anthropicParams, stream: true });
+      let completed = false;
+      try {
+        const stream = await client.messages.create({ ...anthropicParams, stream: true });
 
-      // Track tool_use blocks by index for input accumulation
-      const toolBlocks = new Map<number, { id: string; name: string; jsonChunks: string[] }>();
-      // Track thinking blocks by index for content accumulation
-      const thinkingBlocks = new Map<number, { signature: string; chunks: string[] }>();
-      let model = "";
-      let stopReason: StopReason = "end_turn";
-      const usage: Usage = { inputTokens: 0, outputTokens: 0 };
+        // Track tool_use blocks by index for input accumulation
+        const toolBlocks = new Map<number, { id: string; name: string; jsonChunks: string[] }>();
+        // Track thinking blocks by index for content accumulation
+        const thinkingBlocks = new Map<number, { signature: string; chunks: string[] }>();
+        let model = "";
+        let stopReason: StopReason = "end_turn";
+        const usage: Usage = { inputTokens: 0, outputTokens: 0 };
 
-      for await (const event of stream) {
-        switch (event.type) {
-          case "message_start":
-            model = event.message.model;
-            usage.inputTokens = event.message.usage.input_tokens;
-            usage.outputTokens = event.message.usage.output_tokens;
-            if (event.message.usage.cache_read_input_tokens != null)
-              usage.cacheReadTokens = event.message.usage.cache_read_input_tokens;
-            if (event.message.usage.cache_creation_input_tokens != null)
-              usage.cacheCreationTokens = event.message.usage.cache_creation_input_tokens;
-            break;
+        for await (const event of stream) {
+          switch (event.type) {
+            case "message_start":
+              model = event.message.model;
+              usage.inputTokens = event.message.usage.input_tokens;
+              usage.outputTokens = event.message.usage.output_tokens;
+              if (event.message.usage.cache_read_input_tokens != null)
+                usage.cacheReadTokens = event.message.usage.cache_read_input_tokens;
+              if (event.message.usage.cache_creation_input_tokens != null)
+                usage.cacheCreationTokens = event.message.usage.cache_creation_input_tokens;
+              break;
 
-          case "content_block_start":
-            if (event.content_block.type === "tool_use") {
-              toolBlocks.set(event.index, {
-                id: event.content_block.id,
-                name: event.content_block.name,
-                jsonChunks: [],
-              });
-            } else if (event.content_block.type === "thinking") {
-              thinkingBlocks.set(event.index, {
-                signature: event.content_block.signature,
-                chunks: [],
-              });
-            }
-            break;
-
-          case "content_block_delta":
-            if (event.delta.type === "text_delta") {
-              yield { type: "text_delta", text: event.delta.text };
-            } else if (event.delta.type === "input_json_delta") {
-              const block = toolBlocks.get(event.index);
-              if (block) {
-                block.jsonChunks.push(event.delta.partial_json);
+            case "content_block_start":
+              if (event.content_block.type === "tool_use") {
+                toolBlocks.set(event.index, {
+                  id: event.content_block.id,
+                  name: event.content_block.name,
+                  jsonChunks: [],
+                });
+              } else if (event.content_block.type === "thinking") {
+                thinkingBlocks.set(event.index, {
+                  signature: event.content_block.signature,
+                  chunks: [],
+                });
               }
-            } else if (event.delta.type === "thinking_delta") {
-              const block = thinkingBlocks.get(event.index);
-              if (block) {
-                block.chunks.push(event.delta.thinking);
-              }
-            }
-            break;
+              break;
 
-          case "content_block_stop": {
-            const toolBlock = toolBlocks.get(event.index);
-            if (toolBlock) {
-              const input = JSON.parse(toolBlock.jsonChunks.join(""));
-              yield { type: "tool_start", id: toolBlock.id, name: toolBlock.name, input };
-              toolBlocks.delete(event.index);
+            case "content_block_delta":
+              if (event.delta.type === "text_delta") {
+                yield { type: "text_delta", text: event.delta.text };
+              } else if (event.delta.type === "input_json_delta") {
+                const block = toolBlocks.get(event.index);
+                if (block) {
+                  block.jsonChunks.push(event.delta.partial_json);
+                }
+              } else if (event.delta.type === "thinking_delta") {
+                const block = thinkingBlocks.get(event.index);
+                if (block) {
+                  block.chunks.push(event.delta.thinking);
+                }
+              }
+              break;
+
+            case "content_block_stop": {
+              const toolBlock = toolBlocks.get(event.index);
+              if (toolBlock) {
+                const input = JSON.parse(toolBlock.jsonChunks.join(""));
+                yield { type: "tool_start", id: toolBlock.id, name: toolBlock.name, input };
+                toolBlocks.delete(event.index);
+              }
+              const thinkingBlock = thinkingBlocks.get(event.index);
+              if (thinkingBlock) {
+                // Emit as a thinking_delta with the full accumulated text + signature.
+                // The agent loop captures this into a ThinkingBlock.
+                yield {
+                  type: "thinking_delta",
+                  thinking: thinkingBlock.chunks.join(""),
+                  signature: thinkingBlock.signature,
+                };
+                thinkingBlocks.delete(event.index);
+              }
+              break;
             }
-            const thinkingBlock = thinkingBlocks.get(event.index);
-            if (thinkingBlock) {
-              // Emit as a thinking_delta with the full accumulated text + signature.
-              // The agent loop captures this into a ThinkingBlock.
-              yield {
-                type: "thinking_delta",
-                thinking: thinkingBlock.chunks.join(""),
-                signature: thinkingBlock.signature,
-              };
-              thinkingBlocks.delete(event.index);
-            }
-            break;
+
+            case "message_delta":
+              stopReason = fromAnthropicStopReason(event.delta.stop_reason);
+              usage.outputTokens = event.usage.output_tokens;
+              break;
           }
-
-          case "message_delta":
-            stopReason = fromAnthropicStopReason(event.delta.stop_reason);
-            usage.outputTokens = event.usage.output_tokens;
-            break;
         }
-      }
 
-      resolveResponse({ stopReason, model, usage });
+        recordChatUsage(span, providerName, model, usage, stopReason);
+        completed = true;
+        resolveResponse({ stopReason, model, usage });
+      } catch (err) {
+        completed = true;
+        failChatSpan(span, err);
+        rejectResponse(err);
+        throw err;
+      } finally {
+        if (!completed) {
+          // Generator was returned early (consumer broke out of for-await
+          // without an exception). Reject the response promise so awaiters
+          // don't hang and mark the span as incomplete.
+          const abortErr = new Error("chatStream consumer abandoned the stream");
+          failChatSpan(span, abortErr);
+          rejectResponse(abortErr);
+        }
+        span.end();
+      }
     }
 
     return { events: generateEvents(), response };
@@ -150,40 +175,51 @@ export class AnthropicProvider implements LlmProvider {
       throw new Error("responseFormat and tools are mutually exclusive");
     }
 
-    const response = await this.#client.messages.create(buildCreateParams(params));
+    const span = startChatSpan(this.name, params.model);
+    try {
+      const response = await this.#client.messages.create(buildCreateParams(params));
 
-    const usage: Usage = {
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      ...(response.usage.cache_read_input_tokens != null && {
-        cacheReadTokens: response.usage.cache_read_input_tokens,
-      }),
-      ...(response.usage.cache_creation_input_tokens != null && {
-        cacheCreationTokens: response.usage.cache_creation_input_tokens,
-      }),
-    };
+      const usage: Usage = {
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+        ...(response.usage.cache_read_input_tokens != null && {
+          cacheReadTokens: response.usage.cache_read_input_tokens,
+        }),
+        ...(response.usage.cache_creation_input_tokens != null && {
+          cacheCreationTokens: response.usage.cache_creation_input_tokens,
+        }),
+      };
 
-    // When responseFormat is set, the model is forced to call a synthetic tool.
-    // Normalize: extract tool input as JSON text, set stopReason to end_turn.
-    if (params.responseFormat) {
-      const toolUse = response.content.find((b) => b.type === "tool_use");
-      if (toolUse && toolUse.type === "tool_use") {
-        return {
-          content: [{ type: "text", text: JSON.stringify(toolUse.input) }],
-          stopReason: "end_turn",
-          model: response.model,
-          usage,
-        };
+      const stopReason = fromAnthropicStopReason(response.stop_reason);
+      recordChatUsage(span, this.name, response.model, usage, stopReason);
+
+      // When responseFormat is set, the model is forced to call a synthetic tool.
+      // Normalize: extract tool input as JSON text, set stopReason to end_turn.
+      if (params.responseFormat) {
+        const toolUse = response.content.find((b) => b.type === "tool_use");
+        if (toolUse && toolUse.type === "tool_use") {
+          return {
+            content: [{ type: "text", text: JSON.stringify(toolUse.input) }],
+            stopReason: "end_turn",
+            model: response.model,
+            usage,
+          };
+        }
+        logger.warn("responseFormat set but no tool_use block in response");
       }
-      logger.warn("responseFormat set but no tool_use block in response");
-    }
 
-    return {
-      content: response.content.flatMap(fromAnthropicBlock),
-      stopReason: fromAnthropicStopReason(response.stop_reason),
-      model: response.model,
-      usage,
-    };
+      return {
+        content: response.content.flatMap(fromAnthropicBlock),
+        stopReason,
+        model: response.model,
+        usage,
+      };
+    } catch (err) {
+      failChatSpan(span, err);
+      throw err;
+    } finally {
+      span.end();
+    }
   }
 }
 
