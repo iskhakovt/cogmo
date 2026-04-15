@@ -95,6 +95,13 @@ async function waitForAssistantMessage(conversationId: string, timeoutMs = 30_00
   throw new Error("Timed out waiting for assistant message");
 }
 
+/**
+ * Poll the captured directOutbound buffer for an event matching `predicate`.
+ *
+ * `conversationId` is used only to label the timeout error message — correlation
+ * against the actual event is done by the caller via `predicate` (typically
+ * matching on the `platformAddress` we set per-test to disambiguate runs).
+ */
 async function waitForOutbound(
   conversationId: string,
   predicate: (e: CapturedOutbound) => boolean,
@@ -102,8 +109,6 @@ async function waitForOutbound(
 ): Promise<CapturedOutbound> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    // Correlation is per platformAddress (which we control via test-<ts>
-    // suffixes); scan the buffer each tick.
     const match = capturedOutbound.find(predicate);
     if (match) return match;
     await new Promise((r) => setTimeout(r, 500));

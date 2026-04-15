@@ -29,7 +29,7 @@
  *   fal.ai, captures response + image bytes, writes both fixtures, returns
  *   the rewritten response to the SDK so it then hits our mock CDN for bytes.
  *
- * Fixture key: `{model-slug}-{sha256(model:prompt:aspectRatio:seed):12}`.
+ * Fixture key: `{model-slug}-{sha256(model:prompt:image_size:seed):12}`.
  * Stable across runs for the same input, collision-safe across different inputs.
  */
 

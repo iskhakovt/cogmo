@@ -404,7 +404,7 @@ test/fixtures/recorded/
   anthropic-image-gen.json               # hand-written llmock fixture (multi-turn)
 ```
 
-**Fixture key:** `{model-slug}-{sha256(model:prompt:imageSize:seed):12}`. Stable across runs for same input, collision-safe across different inputs.
+**Fixture key:** `{model-slug}-{sha256(model:prompt:image_size:seed):12}`. Stable across runs for same input, collision-safe across different inputs. `image_size` is fal's native request field (string preset like `"landscape_16_9"` or `{width, height}` object); we normalize to a stable string before hashing.
 
 **Modes:**
 - **Replay (default, CI):** handler loads `{key}.json` from disk, returns it (with pre-rewritten mock CDN URL `https://fal.media-mock.test/{key}.{ext}`). The SDK then fetches that URL, which routes back to the same handler and returns `{key}.{ext}` bytes. Unmatched fal URLs return 503 (strict).
@@ -466,4 +466,4 @@ The `ai` package also exports `generateText`/`streamText` which we don't use for
 | Tool surface | prompt, model (enum), aspectRatio, seed | LLM picks model per-call from curated shortlist. Inference hyperparameters omitted — prompt is the lever. |
 | Model selection | Per-call, curated enum in tool schema | fal.ai has 1000+ models — Flux Pro for portraits, Ideogram for text, etc. The LLM must choose per task. Hardcoded `MODEL_CATALOG` constant for v0; DB-backed when operator customization matters. |
 | Storage prefix | `generated/` for tool output | AttachmentStore `upload()` gains optional `prefix` param (default `"inbound"`). Backward compatible. |
-| Test mock | Separate MSW-based fal-mock | llmock is LLM-API-specific; extending it for fal's queue/CDN pattern is a larger project. Record/replay fixtures follow the same spirit. |
+| Test mock | Scoped `fetch` interceptor (`createFalFetch`) passed via `createFal({ fetch })` | llmock is LLM-API-specific and can't cover fal. MSW was tried first but `onUnhandledRequest: "bypass"` mangled Anthropic streaming auth headers through llmock. Per-library fetch injection via the SDK's own `fetch` option avoids that class of interaction and touches nothing outside fal. Record/replay fixtures follow llmock's spirit. |
