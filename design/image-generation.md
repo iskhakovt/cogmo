@@ -376,33 +376,70 @@ Adding a provider = `pnpm add @ai-sdk/<provider>`, construct the model, pass to 
 | Replicate | `@ai-sdk/replicate` | flux-schnell, recraft-v3. |
 | xAI | `@ai-sdk/xai` | Grok Imagine. |
 
-## Testing `[proposed]`
+## Testing `[confirmed]`
 
 Three tiers, same pattern as the rest of the codebase.
 
 | Tier | What | Mock strategy |
 |-|-|-|
 | **Unit** | `image-tools.ts`, `extract-images.ts`, Telegram stream handle image path | `vi.mock('ai')` returning a fixed fake `{ image: { uint8Array, mediaType } }`. Mock `AttachmentStore`. |
-| **Integration** | `handle-message` with a `generate_image` tool_use fixture — orchestrator extracts, downloads, delivers | llmock fixture triggers the tool call; fal HTTP calls mocked via **fal-mock** (see below) |
-| **E2E** | Real fal.ai call with recorded fixtures in CI, live key locally | fal-mock for CI, `FAL_API_KEY` for record mode |
+| **Integration** | `handle-message` with a `generate_image` tool_use fixture — orchestrator extracts, downloads, delivers | llmock fixture triggers the tool call; fal HTTP calls intercepted via **fal-mock** (see below) |
+| **E2E** | Deferred — integration covers the full pipeline; e2e would duplicate without adding signal | — |
 
-### fal-mock — MSW fixtures for fal.ai
+### fal-mock — scoped `fetch` interceptor for fal.ai
 
-llmock (`@copilotkit/aimock`) is LLM-API-specific (Anthropic Messages, OpenAI chat/embeddings) — it doesn't support fal.ai's queue/subscribe endpoints or CDN downloads. We add a separate MSW-based mock that follows the same record/replay pattern.
+llmock (`@copilotkit/aimock`) is LLM-API-specific (Anthropic Messages, OpenAI chat/embeddings) — it doesn't support fal.ai's endpoints or CDN downloads. We add a mock that intercepts fal HTTP traffic specifically, **without patching global `fetch`**.
+
+**Design:** `createFalFetch({ mode, fixturePath })` returns a function with fetch signature. Pass it to `createFal({ fetch })` via `BootstrapOptions.falFetchOverride` in tests. The wrapper handles fal endpoints; everything else delegates to `globalThis.fetch`, so the Anthropic SDK (through llmock), Hindsight, MinIO, Inngest — all untouched.
+
+**Why not MSW:** MSW patches `globalThis.fetch` process-wide. When we tried it, `onUnhandledRequest: "bypass"` was not transparent for the Anthropic SDK's streaming requests going through llmock — auth headers came back mangled even with a valid key. A library-scoped `fetch` option eliminates this class of interaction. Prefer per-library fetch injection over global patching when the library supports it; MSW is the fallback when it doesn't.
 
 **Layout:**
 ```
-src/test/fal-mock.ts              # MSW handlers + record/replay logic
+src/test/fal-mock.ts                     # createFalFetch() — record/replay
 test/fixtures/fal/
-  flux-dev-simple.json            # captured fal.run response (sans image)
-  flux-dev-simple.png             # small reference image (~1-5 KB)
+  fal-ai-flux-dev-{hash}.json            # captured fal response (URL rewritten to mock CDN)
+  fal-ai-flux-dev-{hash}.jpg             # captured image bytes
+test/fixtures/recorded/
+  anthropic-image-gen.json               # hand-written llmock fixture (multi-turn)
 ```
 
-**Modes:**
-- **Replay (default, CI):** MSW intercepts fal.ai + CDN URLs, serves from fixtures. Unmatched requests return 503 (strict mode — same guarantee as llmock).
-- **Record (local):** `RECORD=1 FAL_API_KEY=... pnpm test:e2e` — real HTTP, captures response JSON + saves reference image, writes fixture.
+**Fixture key:** `{model-slug}-{sha256(model:prompt:imageSize:seed):12}`. Stable across runs for same input, collision-safe across different inputs.
 
-**Why not extend aimock upstream:** fal.ai's async queue pattern + CDN-hosted image URLs don't map to aimock's LLM-specific abstractions. Contributing would be a real project (image/audio providers are a broader roadmap concern). Separate mock is shippable today; consider upstream contribution when non-LLM provider coverage grows.
+**Modes:**
+- **Replay (default, CI):** handler loads `{key}.json` from disk, returns it (with pre-rewritten mock CDN URL `https://fal.media-mock.test/{key}.{ext}`). The SDK then fetches that URL, which routes back to the same handler and returns `{key}.{ext}` bytes. Unmatched fal URLs return 503 (strict).
+- **Record (local, `RECORD=1 FAL_API_KEY=...`):** handler passes through to real fal, captures response, downloads CDN image bytes, writes both fixtures with URL rewritten, returns rewritten response to the SDK. Replay-ready immediately.
+
+### Multi-turn tool flows via llmock's `sequenceIndex`
+
+llmock's Anthropic→ChatCompletion conversion turns tool_result user messages into role=`tool`, so the **original user question remains the "last user message"** on every iteration. Without intervention this causes the tool fixture to match forever until the 20-iteration cap — producing 20 generate_image calls, 20 S3 uploads, and a 3 MB `directOutbound` event that exceeds Inngest's size limit.
+
+**Fix:** hand-written fixture with `match.sequenceIndex` — fixtures with the same `userMessage` match in order of invocation:
+
+```json
+{
+  "fixtures": [
+    { "match": { "userMessage": "draw me a cat in a hat", "sequenceIndex": 0 },
+      "response": { "toolCalls": [{ "name": "generate_image", "arguments": "...", "id": "..." }] } },
+    { "match": { "userMessage": "draw me a cat in a hat", "sequenceIndex": 1 },
+      "response": { "content": "Here's your cat in a hat!" } }
+  ]
+}
+```
+
+First call → tool_use. Second call → final text. Loop ends cleanly.
+
+### Record workflow
+
+```
+# First time / after prompt changes:
+LLMOCK_RECORD=1 RECORD=1 FAL_API_KEY=<real> pnpm test:integration
+
+# Subsequent (CI, normal dev):
+pnpm test:integration
+```
+
+Commit `test/fixtures/fal/*` and `test/fixtures/recorded/*`. Embedding calls (Hindsight auto-recall) auto-record as OpenAI fixtures.
 
 ## Dependencies
 
