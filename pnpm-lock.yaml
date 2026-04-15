@@ -13,8 +13,8 @@ importers:
         specifier: ^2.0.30
         version: 2.0.30(zod@4.3.6)
       '@anthropic-ai/sdk':
-        specifier: ^0.80.0
-        version: 0.80.0(zod@4.3.6)
+        specifier: ^0.88.0
+        version: 0.88.0(zod@4.3.6)
       '@aws-sdk/client-s3':
         specifier: ^3.1029.0
         version: 3.1029.0
@@ -34,8 +34,8 @@ importers:
         specifier: ^0.13.11
         version: 0.13.11(typescript@6.0.2)(zod@4.3.6)
       '@vectorize-io/hindsight-client':
-        specifier: ^0.5.0
-        version: 0.5.0
+        specifier: ^0.5.1
+        version: 0.5.2
       ai:
         specifier: ^6.0.159
         version: 6.0.159(zod@4.3.6)
@@ -46,11 +46,11 @@ importers:
         specifier: ^0.45.2
         version: 0.45.2(@electric-sql/pglite@0.4.4)(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.20.0)(postgres@3.4.9)
       grammy:
-        specifier: ^1.41.1
-        version: 1.41.1
+        specifier: ^1.42.0
+        version: 1.42.0
       inngest:
-        specifier: ^4.2.1
-        version: 4.2.1(@opentelemetry/core@2.6.1(@opentelemetry/api@1.9.1))(typescript@6.0.2)(zod@4.3.6)
+        specifier: ^4.2.2
+        version: 4.2.4(@opentelemetry/core@2.6.1(@opentelemetry/api@1.9.1))(typescript@6.0.2)(zod@4.3.6)
       js-tiktoken:
         specifier: ^1.0.21
         version: 1.0.21
@@ -86,14 +86,14 @@ importers:
         specifier: ^2.4.11
         version: 2.4.11
       '@copilotkit/aimock':
-        specifier: ^1.8.0
-        version: 1.8.0
+        specifier: ^1.13.0
+        version: 1.13.0
       '@electric-sql/pglite':
         specifier: ^0.4.4
         version: 0.4.4
       '@inngest/test':
         specifier: ^1.0.0
-        version: 1.0.0(inngest@4.2.1(@opentelemetry/core@2.6.1(@opentelemetry/api@1.9.1))(typescript@6.0.2)(zod@4.3.6))
+        version: 1.0.0(inngest@4.2.4(@opentelemetry/core@2.6.1(@opentelemetry/api@1.9.1))(typescript@6.0.2)(zod@4.3.6))
       '@total-typescript/ts-reset':
         specifier: ^0.6.1
         version: 0.6.1
@@ -161,8 +161,8 @@ packages:
     resolution: {integrity: sha512-oGMAgGoQdBXbZqNG0Ze56CHjDZ1IDYOwGYxYjO5KLSlz5HiNQ9udIXsPZ61VWaHGZ5XW/jyjmr6t2xz2jGVwbQ==}
     engines: {node: '>=18'}
 
-  '@anthropic-ai/sdk@0.80.0':
-    resolution: {integrity: sha512-WeXLn7zNVk3yjeshn+xZHvld6AoFUOR3Sep6pSoHho5YbSi6HwcirqgPA5ccFuW8QTVJAAU7N8uQQC6Wa9TG+g==}
+  '@anthropic-ai/sdk@0.88.0':
+    resolution: {integrity: sha512-QQOtB5U9ZBJQj6y1ICmDZl14LWa4JCiJRoihI+0yuZ4OjbONrakP0yLwPv4DJFb3VYCtQM31bTOpCBMs2zghPw==}
     hasBin: true
     peerDependencies:
       zod: ^3.25.0 || ^4.0.0
@@ -434,8 +434,8 @@ packages:
   '@clack/prompts@1.2.0':
     resolution: {integrity: sha512-4jmztR9fMqPMjz6H/UZXj0zEmE43ha1euENwkckKKel4XpSfokExPo5AiVStdHSAlHekz4d0CA/r45Ok1E4D3w==}
 
-  '@copilotkit/aimock@1.8.0':
-    resolution: {integrity: sha512-zrkHAkDKARKgueb6rJffSVxpHC5wSwuBd5CVo43RV7UrOCNdNocppbL/ncahnJX0hJOjLxb3KknGaYwnB2t2fQ==}
+  '@copilotkit/aimock@1.13.0':
+    resolution: {integrity: sha512-wcNQdicxSuaHf4MLtoC9bouKeYGcV9aBoIVJbeLtrBUhqz5LUAmo/U/S1WT69kyAEuM0uO1XyD3Jz+V+H9jsUw==}
     engines: {node: '>=20.15.0'}
     hasBin: true
 
@@ -951,8 +951,8 @@ packages:
       '@noble/hashes':
         optional: true
 
-  '@grammyjs/types@3.25.0':
-    resolution: {integrity: sha512-iN9i5p+8ZOu9OMxWNcguojQfz4K/PDyMPOnL7PPCON+SoA/F8OKMH3uR7CVUkYfdNe0GCz8QOzAWrnqusQYFOg==}
+  '@grammyjs/types@3.26.0':
+    resolution: {integrity: sha512-jlnyfxfev/2o68HlvAGRocAXgdPPX5QabG7jZlbqC2r9DZyWBfzTlg+nu3O3Fy4EhgLWu28hZ/8wr7DsNamP9A==}
 
   '@grpc/grpc-js@1.14.3':
     resolution: {integrity: sha512-Iq8QQQ/7X3Sac15oB6p0FmUg/klxQvXLeileoqrTRGJYLV+/9tubbr9ipz0GKHjmXVsgFPo/+W+2cA8eNcR+XA==}
@@ -2118,8 +2118,8 @@ packages:
   '@types/tough-cookie@4.0.5':
     resolution: {integrity: sha512-/Ad8+nIOV7Rl++6f1BdKxFSMgmoqEoYbHRpPcx3JEfv8VRsQe9Z4mCXeJBzxs7mbHY/XOZZuXlRNfhpVPbs6ZA==}
 
-  '@vectorize-io/hindsight-client@0.5.0':
-    resolution: {integrity: sha512-Ob4hSIpx1bb1BU0A7SDPQdFkDhJPi+haA1HoaQFrE2qz2VanSeoKulGEmnbH5RgVJuKRTjqQPAYrgiBN5r3Xlg==}
+  '@vectorize-io/hindsight-client@0.5.2':
+    resolution: {integrity: sha512-BUN658MR2XE96COM66dED9KeGGFgThQ6DNiEy+EH7T//Lnqn7MjtoA91jVsEilPa7Tpqazh8aK/qajyoSIjg/g==}
 
   '@vercel/oidc@3.1.0':
     resolution: {integrity: sha512-Fw28YZpRnA3cAHHDlkt7xQHiJ0fcL+NRcIqsocZQUSmbzeIKRpwttJjik5ZGanXP+vlA4SbTg+AbA3bP363l+w==}
@@ -2728,8 +2728,8 @@ packages:
   graceful-fs@4.2.11:
     resolution: {integrity: sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==}
 
-  grammy@1.41.1:
-    resolution: {integrity: sha512-wcHAQ1e7svL3fJMpDchcQVcWUmywhuepOOjHUHmMmWAwUJEIyK5ea5sbSjZd+Gy1aMpZeP8VYJa+4tP+j1YptQ==}
+  grammy@1.42.0:
+    resolution: {integrity: sha512-1AdCge+AkjSdp2FwfICSFnVbl8Mq3KVHJDy+DgTI9+D6keJ0zWALPRKas5jv/8psiCzL4N2cEOcGW7O45Kn39g==}
     engines: {node: ^12.20.0 || >=14.13.1}
 
   graphql@16.13.2:
@@ -2782,8 +2782,8 @@ packages:
   inherits@2.0.4:
     resolution: {integrity: sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==}
 
-  inngest@4.2.1:
-    resolution: {integrity: sha512-j7wCZ/BbSo1CEooks6eDtWm8vjfZKiFMt/cXBZhE2h/4ZNWojBUHpPPNcOqF/i/IKBdOhD13nX96J0kdNH02Rg==}
+  inngest@4.2.4:
+    resolution: {integrity: sha512-MBFcRhhQ+dcGHLYCbIcMYxiAZCxzfAx0+3b/euYQKc7MK3rOnNHaNHuF2e0WsT13oWJiGzjuC3T4Nocggmh5WQ==}
     engines: {node: '>=20'}
     peerDependencies:
       '@sveltejs/kit': '>=1.27.3'
@@ -3895,7 +3895,7 @@ snapshots:
     dependencies:
       json-schema: 0.4.0
 
-  '@anthropic-ai/sdk@0.80.0(zod@4.3.6)':
+  '@anthropic-ai/sdk@0.88.0(zod@4.3.6)':
     dependencies:
       json-schema-to-ts: 3.1.1
     optionalDependencies:
@@ -4433,7 +4433,7 @@ snapshots:
       fast-wrap-ansi: 0.1.6
       sisteransi: 1.0.5
 
-  '@copilotkit/aimock@1.8.0': {}
+  '@copilotkit/aimock@1.13.0': {}
 
   '@csstools/color-helpers@6.0.2': {}
 
@@ -4715,7 +4715,7 @@ snapshots:
     optionalDependencies:
       '@noble/hashes': 2.2.0
 
-  '@grammyjs/types@3.25.0': {}
+  '@grammyjs/types@3.26.0': {}
 
   '@grpc/grpc-js@1.14.3':
     dependencies:
@@ -4741,9 +4741,9 @@ snapshots:
       '@types/node': 22.19.17
       typescript: 5.9.3
 
-  '@inngest/test@1.0.0(inngest@4.2.1(@opentelemetry/core@2.6.1(@opentelemetry/api@1.9.1))(typescript@6.0.2)(zod@4.3.6))':
+  '@inngest/test@1.0.0(inngest@4.2.4(@opentelemetry/core@2.6.1(@opentelemetry/api@1.9.1))(typescript@6.0.2)(zod@4.3.6))':
     dependencies:
-      inngest: 4.2.1(@opentelemetry/core@2.6.1(@opentelemetry/api@1.9.1))(typescript@6.0.2)(zod@4.3.6)
+      inngest: 4.2.4(@opentelemetry/core@2.6.1(@opentelemetry/api@1.9.1))(typescript@6.0.2)(zod@4.3.6)
       tinyspy: 3.0.2
       ulid: 2.4.0
 
@@ -6126,7 +6126,7 @@ snapshots:
 
   '@types/pg-pool@2.0.7':
     dependencies:
-      '@types/pg': 8.15.6
+      '@types/pg': 8.20.0
 
   '@types/pg@8.15.6':
     dependencies:
@@ -6139,7 +6139,6 @@ snapshots:
       '@types/node': 25.6.0
       pg-protocol: 1.13.0
       pg-types: 2.2.0
-    optional: true
 
   '@types/ssh2-streams@0.1.13':
     dependencies:
@@ -6163,7 +6162,7 @@ snapshots:
 
   '@types/tough-cookie@4.0.5': {}
 
-  '@vectorize-io/hindsight-client@0.5.0': {}
+  '@vectorize-io/hindsight-client@0.5.2': {}
 
   '@vercel/oidc@3.1.0': {}
 
@@ -6745,9 +6744,9 @@ snapshots:
 
   graceful-fs@4.2.11: {}
 
-  grammy@1.41.1:
+  grammy@1.42.0:
     dependencies:
-      '@grammyjs/types': 3.25.0
+      '@grammyjs/types': 3.26.0
       abort-controller: 3.0.0
       debug: 4.4.3
       node-fetch: 2.7.0
@@ -6809,7 +6808,7 @@ snapshots:
 
   inherits@2.0.4: {}
 
-  inngest@4.2.1(@opentelemetry/core@2.6.1(@opentelemetry/api@1.9.1))(typescript@6.0.2)(zod@4.3.6):
+  inngest@4.2.4(@opentelemetry/core@2.6.1(@opentelemetry/api@1.9.1))(typescript@6.0.2)(zod@4.3.6):
     dependencies:
       '@bufbuild/protobuf': 2.11.0
       '@inngest/ai': 0.1.7
