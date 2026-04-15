@@ -3,17 +3,22 @@ import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import * as schema from "../db/schemas.js";
 import { logger } from "../logger.js";
+import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { resolveEnvFile } from "../secrets/env-file.js";
+import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
-import { seedDefaults } from "./seed.js";
+import {
+  NonInteractiveValidationError,
+  runNonInteractive,
+  SetupEnvError,
+} from "./non-interactive.js";
+import { applyReset, type ResetScope, VALID_RESETS } from "./reset.js";
 import { runWizard, WizardCancelled } from "./wizard.js";
 
 export interface SetupOptions {
-  reset?: "secrets" | "channels" | "all";
+  reset?: ResetScope;
   nonInteractive?: boolean;
 }
-
-const VALID_RESETS = new Set(["secrets", "channels", "all"]);
 
 /**
  * Run the setup wizard or non-interactive setup.
@@ -48,35 +53,21 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
 
     const agentStore = new DrizzleAgentStore(db);
     const transportStore = new DrizzleTransportStore(db);
+    const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
+    const secretsStore = new DrizzleSecretsStore(db, encryptionKey);
 
     // Handle --reset before anything else (including non-interactive)
-    if (opts.reset === "all" || opts.reset === "secrets") {
-      const { deriveMasterKey, parseMasterKey } = await import("../secrets/encryption.js");
-      const { DrizzleSecretsStore } = await import("../secrets/store/index.js");
-      const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
-      const secretsStore = new DrizzleSecretsStore(db, encryptionKey);
-      await secretsStore.deleteAllSecrets();
-      logger.info("all secrets deleted");
-    }
-    if (opts.reset === "all" || opts.reset === "channels") {
-      const allChannels = await transportStore.getAllChannels();
-      for (const ch of allChannels) {
-        if (ch.type !== "direct") {
-          await transportStore.removeChannel(ch.id);
-        }
-      }
-      logger.info("non-direct channels removed");
+    if (opts.reset) {
+      await applyReset(opts.reset, { secretsStore, transportStore });
     }
 
     if (opts.nonInteractive) {
-      // TODO: read COGMO_LLM_PROVIDER_TYPE, COGMO_LLM_API_KEY, COGMO_LLM_BASE_URL,
-      // COGMO_TELEGRAM_BOT_TOKEN, COGMO_TELEGRAM_ALLOWED_USERS from env. Validate
-      // each, write to secrets + llm_providers + model_providers + channels.
-      // Currently only seeds defaults — cogmo serve will fail without a provider.
-      await seedDefaults(agentStore, transportStore);
-      logger.warn(
-        "non-interactive mode only seeds defaults — provider configuration not yet implemented. Run interactive `cogmo setup` to configure a provider.",
-      );
+      await runNonInteractive({
+        agentStore,
+        transportStore,
+        secretsStore,
+        env: process.env,
+      });
       return;
     }
 
@@ -84,6 +75,11 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
   } catch (err) {
     if (err instanceof WizardCancelled) {
       logger.info("setup cancelled by user");
+      return;
+    }
+    if (err instanceof SetupEnvError || err instanceof NonInteractiveValidationError) {
+      console.error(err.message);
+      process.exitCode = 1;
       return;
     }
     throw err;

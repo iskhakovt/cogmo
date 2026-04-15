@@ -78,18 +78,25 @@ The wizard is **not a one-shot first-run gate**. It's a settings flow that happe
 
 For CI, IaC, or Docker entrypoint scripts. Reads from env vars with `COGMO_` prefix:
 
-| Env var | Maps to |
-|-|-|
-| `COGMO_LLM_PROVIDER_TYPE` | Provider type (anthropic, openai_compatible) |
-| `COGMO_LLM_API_KEY` | Provider API key |
-| `COGMO_LLM_BASE_URL` | Provider base URL (optional) |
-| `COGMO_TELEGRAM_BOT_TOKEN` | Telegram bot token (optional) |
-| `COGMO_TELEGRAM_ALLOWED_USERS` | Comma-separated Telegram user IDs (optional) |
-| `COGMO_TAVILY_API_KEY` | Tavily API key (optional) |
+| Env var | Maps to | Required |
+|-|-|-|
+| `COGMO_LLM_PROVIDER_TYPE` | Provider type (`anthropic` \| `openrouter` \| `openai` \| `custom`) | Yes |
+| `COGMO_LLM_API_KEY` (+ `_FILE`) | Provider API key | Yes |
+| `COGMO_LLM_BASE_URL` | Provider base URL (required when type is `custom`) | Optional |
+| `COGMO_TELEGRAM_BOT_TOKEN` (+ `_FILE`) | Telegram bot token | Optional |
+| `COGMO_TELEGRAM_ALLOWED_USERS` | Comma-separated Telegram user IDs | Required with token |
+| `COGMO_TAVILY_API_KEY` (+ `_FILE`) | Tavily API key | Optional |
+| `COGMO_FAL_API_KEY` (+ `_FILE`) | fal.ai image generation key | Optional |
 
-Validates each, writes to DB, exits 0 on success, non-zero on missing required values. No prompts.
+Every secret-bearing input supports the `_FILE` convention (Docker-style — point at a file, contents used as the value).
 
-**Status:** not yet implemented. Current `--non-interactive` only runs `seedDefaults` (user + profile + direct channel). Provider configuration requires the interactive wizard. Tracked as a future enhancement.
+Validation matches the interactive wizard: `/v1/models` for LLM keys, `getMe()` for Telegram, Tavily search ping. Every credential is validated *before* any DB write — a failure at any step aborts the run with a listing of failed inputs, leaving the DB untouched. fal.ai has no cheap ping endpoint; errors surface on first use.
+
+Re-running is idempotent: an existing provider row with the same name is replaced, an existing Telegram channel is replaced with the new credentials and allowlist. Use `--reset secrets` / `--reset channels` / `--reset all` for explicit wipes.
+
+Exits 0 on success, non-zero on missing required env vars or validation failures. No prompts.
+
+**Status:** `[confirmed]`. Implemented in `src/setup/non-interactive.ts`. See `src/setup/env.ts` for the Zod schema.
 
 ### Library
 
