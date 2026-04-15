@@ -24,7 +24,6 @@
 - [ ] `p3` Stale llmock fixture cleanup — detect unused fixtures after test run, auto-delete
 - [ ] `p2` Observer channel-scoped extraction — query conversation's active channels via `channel_sessions → channels`, pass to extraction prompt, extend Zod schema with optional `channelType`, let LLM decide if correction is channel-specific or general. Also: add `channelType` to `getCorrections()` return shape so dedup key distinguishes channel-scoped from global corrections.
 - [ ] `p3` Composite index on `steering_rules(profile_id, channel_type)` — premature at personal scale (~30 rules), add when rule count or query latency grows
-- [ ] `p3` Basic health check endpoint (HTTP)
 - [ ] `p3` grammY native test primitives — use `bot.handleUpdate()` + `bot.api.config.use(transformer)` instead of `vi.mock("grammy")`
 - [ ] `p3` Telegram e2e via Test DC + tgintegration — real user on Telegram test servers, TypeScript/mtcute client
 - [ ] `p3` Consider web interface adapter for e2e testing

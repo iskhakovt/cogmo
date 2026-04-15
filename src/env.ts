@@ -36,6 +36,10 @@ export const env = createEnv({
     DEBOUNCE_MAXWAIT_SECONDS: z.coerce.number().default(30),
     DEBOUNCE_RESUME_POLICY: z.enum(["debounce", "flush", "await_input"]).default("debounce"),
     COGMO_MASTER_KEY: z.string().optional(),
+    /** Semver set at build time (Dockerfile `ARG VERSION`). `dev` when unset. */
+    VERSION: z.string().default("dev"),
+    /** Short git SHA, set at build time via Dockerfile `ARG GIT_SHA`. Optional. */
+    GIT_SHA: z.string().optional(),
   },
   runtimeEnv: resolved,
   emptyStringAsUndefined: true,

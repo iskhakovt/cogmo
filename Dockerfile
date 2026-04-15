@@ -19,5 +19,9 @@ ENV VERSION=$VERSION
 WORKDIR /app
 USER nonroot
 COPY --from=build /deploy .
+# Health endpoint — documentation only. `docker run -p 9090:9090` to reach
+# from outside. Telegram adapter uses long polling (outbound-only), no
+# inbound port to expose.
+EXPOSE 9090
 ENTRYPOINT ["/nodejs/bin/node", "dist/main.js"]
 CMD ["serve"]

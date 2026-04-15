@@ -44,9 +44,11 @@ async function main() {
   const { createServer: createInngestServer } = await import("inngest/node");
   const { bootstrap } = await import("./index.js");
   const { env } = await import("./env.js");
+  const { startHealthServer } = await import("./health.js");
   const { logger } = await import("./logger.js");
 
   const { inngest, functions, adapters } = await bootstrap();
+  const healthServer = await startHealthServer();
 
   try {
     if (env.INNGEST_MODE === "serve") {
@@ -75,6 +77,7 @@ async function main() {
     for (const adapter of adapters) {
       await adapter.stop();
     }
+    await new Promise<void>((resolve) => healthServer.close(() => resolve()));
   }
 
   logger.info("cogmo stopped");
