@@ -47,7 +47,7 @@ describe("applyReset", () => {
       identityMode: "mapped",
     });
 
-    await applyReset("secrets", { secretsStore, transportStore });
+    await applyReset("secrets", { db });
 
     expect(await secretsStore.listSecrets()).toHaveLength(0);
     expect(await transportStore.getAllChannels()).toHaveLength(2); // direct + telegram
@@ -63,7 +63,7 @@ describe("applyReset", () => {
     });
     await secretsStore.putSecret({ name: "llm_key", plaintext: "abc" });
 
-    await applyReset("channels", { secretsStore, transportStore });
+    await applyReset("channels", { db });
 
     const channels = await transportStore.getAllChannels();
     expect(channels).toHaveLength(1);
@@ -82,7 +82,7 @@ describe("applyReset", () => {
     });
     await secretsStore.putSecret({ name: "k1", plaintext: "v1" });
 
-    await applyReset("all", { secretsStore, transportStore });
+    await applyReset("all", { db });
 
     expect(await secretsStore.listSecrets()).toHaveLength(0);
     const channels = await transportStore.getAllChannels();
@@ -91,7 +91,7 @@ describe("applyReset", () => {
   });
 
   it("no-ops cleanly when nothing has been seeded yet", async () => {
-    await expect(applyReset("all", { secretsStore, transportStore })).resolves.toBeUndefined();
+    await expect(applyReset("all", { db })).resolves.toBeUndefined();
     expect(await secretsStore.listSecrets()).toHaveLength(0);
     expect(await transportStore.getAllChannels()).toHaveLength(0);
   });

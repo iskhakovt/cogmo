@@ -58,7 +58,7 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
 
     // Handle --reset before anything else (including non-interactive)
     if (opts.reset) {
-      await applyReset(opts.reset, { secretsStore, transportStore });
+      await applyReset(opts.reset, { db });
     }
 
     if (opts.nonInteractive) {
