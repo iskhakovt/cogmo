@@ -94,7 +94,7 @@ function inputUrl(input: RequestInfo | URL): string {
 
 function inputMethod(input: RequestInfo | URL, init?: RequestInit): string {
   if (init?.method) return init.method.toUpperCase();
-  if (typeof input === "object" && "method" in input) return input.method.toUpperCase();
+  if (input instanceof Request) return input.method.toUpperCase();
   return "GET";
 }
 
@@ -106,9 +106,17 @@ async function handleFalPost(
   opts: FalMockOptions,
 ): Promise<Response> {
   const modelId = new URL(url).pathname.replace(/^\//, "");
-  const rawBody =
-    typeof init?.body === "string" ? init.body : new TextDecoder().decode(init?.body as Uint8Array);
-  const body = JSON.parse(rawBody) as FalRequestBody;
+
+  // The fal SDK always sends a JSON string body. Other BodyInit shapes
+  // (Blob, FormData, ReadableStream, Uint8Array) would require a different
+  // decode path — fail loudly rather than silently mis-parsing.
+  if (typeof init?.body !== "string") {
+    return new Response(
+      `fal-mock: expected string body, got ${typeof init?.body} (${init?.body?.constructor?.name ?? "none"})`,
+      { status: 500 },
+    );
+  }
+  const body = JSON.parse(init.body) as FalRequestBody;
   const key = fixtureKey(modelId, body);
 
   if (opts.mode === "replay") {
@@ -136,6 +144,15 @@ async function handleFalPost(
 
   await mkdir(opts.fixturePath, { recursive: true });
 
+  // fal sometimes returns 200 with an error object in the body (rate limits,
+  // content-policy rejections, etc.). Surface this as 502 rather than
+  // writing a malformed fixture.
+  if (!Array.isArray(falJson.images) || falJson.images.length === 0) {
+    return new Response(
+      `fal-mock: real fal response had no images: ${JSON.stringify(falJson).slice(0, 200)}`,
+      { status: 502 },
+    );
+  }
   const origImg = falJson.images[0];
   if (!origImg) {
     return new Response("fal-mock: real fal response had no images", { status: 502 });

@@ -2,7 +2,7 @@
 
 import { eq } from "drizzle-orm";
 import { connect } from "inngest/connect";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from "vitest";
 import { conversations, messages, profiles } from "../agent/store/schema.js";
 import { db } from "../db/index.js";
 import { bootstrap } from "../index.js";
@@ -66,6 +66,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (connection) await connection.close();
+});
+
+// Reset the outbound capture buffer between tests so events from a previous
+// test can't leak into a later test's `waitForOutbound` search.
+beforeEach(() => {
+  capturedOutbound.length = 0;
 });
 
 async function sendEvent(name: string, data: Record<string, unknown>) {
