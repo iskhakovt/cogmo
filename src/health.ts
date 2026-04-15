@@ -77,7 +77,9 @@ export function createHealthServer(): Server {
 export function startHealthServer(): Promise<Server> {
   const server = createHealthServer();
   return new Promise((resolve) => {
-    server.listen(HEALTH_PORT, () => {
+    // Explicit bind — don't rely on Node's default. The module doc is
+    // emphatic about 0.0.0.0 for deployment reasons; tie that to runtime.
+    server.listen(HEALTH_PORT, "0.0.0.0", () => {
       logger.info({ port: HEALTH_PORT, version: env.VERSION }, "health server listening");
       resolve(server);
     });

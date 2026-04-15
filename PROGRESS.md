@@ -18,7 +18,7 @@
 - [x] Three-tier test structure — unit (PGlite), integration (Docker + in-process), e2e (Docker container)
 - [x] CI pipeline — typecheck, lint, unit tests, integration tests, Docker-based e2e, Codecov coverage, JUnit test reports
 - [x] Slim Hindsight image for tests — llmock fixture replay, no Ollama dependency
-- [x] Basic health check endpoint (HTTP) — `GET /health` with IETF `application/health+json` body, bound to `127.0.0.1:9090`, liveness-only
+- [x] Basic health check endpoint (HTTP) — `GET /health` with IETF `application/health+json` body, bound to `0.0.0.0:9090`, liveness-only
 
 ## Phase 1: MVP — Conversation + Memory
 
