@@ -54,8 +54,8 @@ All configuration is via environment variables. The schema is in [`src/env.ts`](
 |-|-|
 | `DATABASE_URL` | Postgres connection string (e.g. `postgresql://cogmo:pw@host/cogmo`). Also accepts `DATABASE_URL_FILE` for Docker secrets. |
 | `COGMO_MASTER_KEY` | 32-byte base64 master key. Encrypts every credential at rest (AES-256-GCM, HKDF-derived per purpose). Generate with `cogmo gen-key`. Also accepts `COGMO_MASTER_KEY_FILE` for Docker secrets. **Losing it means re-entering every credential.** |
-| `HINDSIGHT_URL` | Hindsight server URL (e.g. `http://hindsight.internal:8888`). |
-| `INNGEST_BASE_URL` | Inngest server URL (e.g. `http://inngest.internal:8288`). |
+| `HINDSIGHT_URL` | Hindsight server URL (e.g. `http://hindsight.internal:8888`). Required for both `setup` (wizard validates reachability) and `serve` (memory provider). |
+| `INNGEST_BASE_URL` | Inngest server URL (e.g. `http://inngest.internal:8288`). Required for `serve` only — read by the Inngest SDK at runtime. `setup` does not connect to Inngest. |
 
 ### Optional
 
