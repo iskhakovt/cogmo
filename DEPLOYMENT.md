@@ -38,8 +38,8 @@ See [packages](https://github.com/iskhakovt/cogmo/pkgs/container/cogmo) for avai
 To build locally instead:
 
 ```bash
-docker build -t cogmo .
-docker build --build-arg VERSION=1.16.0 -t cogmo .
+docker build -t cogmo .                              # version = "dev" (Dockerfile default)
+docker build --build-arg VERSION=0.0.0-dev -t cogmo . # override the embedded version string
 ```
 
 The image is `gcr.io/distroless/nodejs24-debian13`, runs as `nonroot`, and exposes port 9090 (health). Default entrypoint: `node dist/main.js serve`.
