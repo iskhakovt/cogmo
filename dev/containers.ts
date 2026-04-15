@@ -93,8 +93,7 @@ export function hindsight(
   }
 
   // API-only image — same runtime as the full `hindsight` image but without
-  // the Control Plane web UI (which Cogmo never talks to). Migrations and
-  // schema setup run in the API process, so dropping CP is safe.
+  // the Control Plane web UI (which Cogmo never talks to).
   return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:latest")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
