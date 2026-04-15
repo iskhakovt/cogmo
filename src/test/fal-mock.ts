@@ -171,6 +171,11 @@ async function handleFalPost(
   await writeFile(join(opts.fixturePath, imgFileName), imgBytes);
 
   // Rewrite URL in response so the SDK's follow-up download hits our mock CDN.
+  // Only the first image is rewritten — the tool schema exposes no `n`
+  // parameter and fal/flux models return exactly one image per call today.
+  // If multi-image support is ever added, write a fixture per image and
+  // rewrite all URLs here; otherwise subsequent images would keep their
+  // expiring real-CDN URLs and fail on replay.
   const rewritten: FalResponse = {
     ...falJson,
     images: falJson.images.map((img, i) =>
