@@ -18,7 +18,7 @@
 - [x] Three-tier test structure — unit (PGlite), integration (Docker + in-process), e2e (Docker container)
 - [x] CI pipeline — typecheck, lint, unit tests, integration tests, Docker-based e2e, Codecov coverage, JUnit test reports
 - [x] Slim Hindsight image for tests — llmock fixture replay, no Ollama dependency
-- [ ] Basic health check endpoint (HTTP)
+- [x] Basic health check endpoint (HTTP) — `GET /health` with IETF `application/health+json` body, bound to `0.0.0.0:9090`, liveness-only
 
 ## Phase 1: MVP — Conversation + Memory
 
@@ -64,6 +64,7 @@ The minimum useful system: talk to it, it remembers things.
 - [x] Seed refactor — `src/setup/seed.ts` with named exports, reusable by wizard and CLI
 - [x] Guided setup wizard — `cogmo setup` via `@clack/prompts`, provider validation (`/v1/models`, `getMe`), Telegram channel + allowlist, re-runnable (Keep/Modify/Skip), `--reset` scopes, `--non-interactive` mode
 - [x] Telegram response formatting — `marked` + custom HTML post-processor, `renderOutput` on AdapterModule, `steering_rules.channel_type` scope, channel-scoped rules seeded at setup
+- [x] Image generation — `generate_image` tool via Vercel AI SDK + `@ai-sdk/fal`, curated model catalog, mid-stream delivery via `tool_result` events in Telegram stream handle, batch delivery step-wrapped, integration test via scoped `fetch` injection (fal-mock)
 
 ## Phase 2: Scheduling + Ingestion
 
