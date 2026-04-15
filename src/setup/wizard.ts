@@ -43,9 +43,15 @@ interface WizardDeps {
   secretsStore: SecretsStore;
 }
 
-// --- Provider types for the wizard ---
+// --- Provider UI metadata (canonical types/URLs come from providers.ts) ---
 
-const PROVIDER_TYPES = [
+import { PROVIDER_BASE_URLS, type ProviderType } from "./providers.js";
+
+const PROVIDER_OPTIONS: ReadonlyArray<{
+  value: ProviderType;
+  label: string;
+  hint: string;
+}> = [
   { value: "anthropic", label: "Anthropic (Claude)", hint: "direct API access" },
   {
     value: "openrouter",
@@ -58,31 +64,26 @@ const PROVIDER_TYPES = [
     label: "Custom (OpenAI-compatible)",
     hint: "any endpoint with /v1/chat/completions",
   },
-] as const;
+];
 
-const PROVIDER_HELP: Record<string, { url: string; path: string; keyName: string }> = {
-  anthropic: {
-    url: "https://console.anthropic.com/",
-    path: "Settings → API Keys → Create Key",
-    keyName: "cogmo",
-  },
-  openrouter: {
-    url: "https://openrouter.ai/settings/keys",
-    path: "Create Key",
-    keyName: "cogmo",
-  },
-  openai: {
-    url: "https://platform.openai.com/api-keys",
-    path: "Create new secret key",
-    keyName: "cogmo",
-  },
-};
-
-const PROVIDER_BASE_URLS: Record<string, string | undefined> = {
-  anthropic: undefined, // SDK default
-  openrouter: "https://openrouter.ai/api/v1",
-  openai: "https://api.openai.com/v1",
-};
+const PROVIDER_HELP: Partial<Record<ProviderType, { url: string; path: string; keyName: string }>> =
+  {
+    anthropic: {
+      url: "https://console.anthropic.com/",
+      path: "Settings → API Keys → Create Key",
+      keyName: "cogmo",
+    },
+    openrouter: {
+      url: "https://openrouter.ai/settings/keys",
+      path: "Create Key",
+      keyName: "cogmo",
+    },
+    openai: {
+      url: "https://platform.openai.com/api-keys",
+      path: "Create new secret key",
+      keyName: "cogmo",
+    },
+  };
 
 // --- Wizard steps ---
 
@@ -116,13 +117,14 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     }
   }
 
-  const providerType = await p.select({
-    message: "Choose your LLM provider:",
-    options: [...PROVIDER_TYPES],
-  });
-  cancelGuard(providerType);
+  const providerType = cancelGuard(
+    await p.select({
+      message: "Choose your LLM provider:",
+      options: [...PROVIDER_OPTIONS],
+    }),
+  );
 
-  const help = PROVIDER_HELP[providerType as string];
+  const help = PROVIDER_HELP[providerType];
   if (help) {
     p.note(
       `Visit ${help.url}\n→ ${help.path}\nWe recommend naming it "${help.keyName}"`,
@@ -130,7 +132,7 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     );
   }
 
-  let baseUrl = PROVIDER_BASE_URLS[providerType as string];
+  let baseUrl = PROVIDER_BASE_URLS[providerType];
 
   if (providerType === "custom") {
     baseUrl = cancelGuard(
@@ -218,7 +220,10 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
   p.log.success(`Provider "${providerName}" configured for model routing.`);
 }
 
-async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<void> {
+async function stepConfigureTelegram(
+  deps: WizardDeps,
+  userId: string,
+): Promise<{ botUsername?: string }> {
   const existing = await deps.transportStore.getChannelByType("telegram");
 
   if (existing) {
@@ -232,12 +237,12 @@ async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<
     cancelGuard(action);
     if (action === "keep") {
       await seedChannelRules(deps.agentStore, "telegram");
-      return;
+      return {};
     }
     await deps.transportStore.removeChannel(existing.id);
   } else {
     const add = await p.confirm({ message: "Add a Telegram channel? (optional)" });
-    if (!cancelGuard(add)) return;
+    if (!cancelGuard(add)) return {};
   }
 
   p.note(
@@ -249,7 +254,7 @@ async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<
     await p.password({
       message: "Paste your bot token:",
       validate: (v) => {
-        if (!v || !v.includes(":")) return "Token should contain a colon (e.g., 123:ABC)";
+        if (!v?.includes(":")) return "Token should contain a colon (e.g., 123:ABC)";
         return undefined;
       },
     }),
@@ -262,9 +267,10 @@ async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<
   if (!result.valid) {
     s.stop(`Validation failed: ${result.error}`);
     p.log.warn("Skipping Telegram channel. Re-run `cogmo setup` to try again.");
-    return;
+    return {};
   }
   s.stop(`Connected as @${result.meta?.botUsername}`);
+  const botUsername = result.meta?.botUsername;
 
   // Store bot token as an encrypted secret, reference by name in channel credentials.
   // The adapter resolves the secret at startup via the secrets store.
@@ -321,6 +327,7 @@ async function stepConfigureTelegram(deps: WizardDeps, userId: string): Promise<
   p.log.success(
     `Telegram channel created with ${userIds.length} allowed user${userIds.length === 1 ? "" : "s"}.`,
   );
+  return botUsername ? { botUsername } : {};
 }
 
 async function stepConfigureOptionalTools(deps: WizardDeps): Promise<void> {
@@ -377,7 +384,7 @@ async function stepValidateHindsight(): Promise<void> {
   }
 }
 
-async function stepSummary(deps: WizardDeps): Promise<void> {
+async function stepSummary(deps: WizardDeps, botUsername?: string): Promise<void> {
   const providers = await deps.agentStore.listProviders();
   const secrets = await deps.secretsStore.listSecrets();
   const telegramChannel = await deps.transportStore.getChannelByType("telegram");
@@ -388,7 +395,27 @@ async function stepSummary(deps: WizardDeps): Promise<void> {
   lines.push(`Telegram: ${telegramChannel ? "configured" : "not configured"}`);
 
   p.note(lines.join("\n"), "Setup complete");
-  p.outro("Cogmo is ready. Start with `cogmo serve` and send a message.");
+
+  // Concrete next-steps block — answers "how do I know it's working?".
+  // Only shown in interactive mode where a human is watching.
+  const nextSteps: string[] = [];
+  nextSteps.push("1. Start the server: cogmo serve");
+  if (botUsername) {
+    nextSteps.push(`2. Open Telegram and message @${botUsername}`);
+    nextSteps.push("3. You should get a reply within a few seconds.");
+  } else if (telegramChannel) {
+    // Telegram configured on a previous run — we don't have the username here.
+    nextSteps.push("2. Open Telegram and message your configured bot.");
+    nextSteps.push("3. You should get a reply within a few seconds.");
+  } else {
+    nextSteps.push("2. Use `pnpm console` to send a message to the direct channel.");
+    nextSteps.push("3. You should get a reply within a few seconds.");
+  }
+  nextSteps.push("");
+  nextSteps.push("If something doesn't work, see DEPLOYMENT.md.");
+
+  p.note(nextSteps.join("\n"), "Verify it's running");
+  p.outro("Cogmo is ready.");
 }
 
 // --- Main wizard ---
@@ -425,7 +452,7 @@ export async function runWizard(deps: {
   }
 
   // Step 3: Telegram (optional)
-  await stepConfigureTelegram(wizardDeps, userId);
+  const { botUsername } = await stepConfigureTelegram(wizardDeps, userId);
 
   // Step 4: Optional tools
   await stepConfigureOptionalTools(wizardDeps);
@@ -433,6 +460,6 @@ export async function runWizard(deps: {
   // Step 5: Hindsight check
   await stepValidateHindsight();
 
-  // Step 6: Summary
-  await stepSummary(wizardDeps);
+  // Step 6: Summary + next-steps
+  await stepSummary(wizardDeps, botUsername);
 }

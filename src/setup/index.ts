@@ -3,17 +3,23 @@ import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import * as schema from "../db/schemas.js";
 import { logger } from "../logger.js";
+import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { resolveEnvFile } from "../secrets/env-file.js";
+import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
-import { seedDefaults } from "./seed.js";
+import {
+  NonInteractiveValidationError,
+  persistNonInteractive,
+  SetupEnvError,
+  validateNonInteractive,
+} from "./non-interactive.js";
+import { applyReset, type ResetScope, VALID_RESETS } from "./reset.js";
 import { runWizard, WizardCancelled } from "./wizard.js";
 
 export interface SetupOptions {
-  reset?: "secrets" | "channels" | "all";
+  reset?: ResetScope;
   nonInteractive?: boolean;
 }
-
-const VALID_RESETS = new Set(["secrets", "channels", "all"]);
 
 /**
  * Run the setup wizard or non-interactive setup.
@@ -43,39 +49,35 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
   const db = drizzle({ connection: databaseUrl, schema });
 
   try {
+    // For non-interactive: validate env + credentials before any DB mutation,
+    // so a bad config can't trigger migrations or wipe state via --reset.
+    let validatedNonInteractive = null;
+    if (opts.nonInteractive) {
+      const result = await validateNonInteractive(process.env);
+      if (result.isErr()) {
+        console.error(result.error.message);
+        process.exitCode = 1;
+        return;
+      }
+      validatedNonInteractive = result.value;
+    }
+
     await migrate(db, { migrationsFolder: "./migrations" });
     logger.info("migrations applied");
 
     const agentStore = new DrizzleAgentStore(db);
     const transportStore = new DrizzleTransportStore(db);
+    const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
+    const secretsStore = new DrizzleSecretsStore(db, encryptionKey);
 
-    // Handle --reset before anything else (including non-interactive)
-    if (opts.reset === "all" || opts.reset === "secrets") {
-      const { deriveMasterKey, parseMasterKey } = await import("../secrets/encryption.js");
-      const { DrizzleSecretsStore } = await import("../secrets/store/index.js");
-      const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
-      const secretsStore = new DrizzleSecretsStore(db, encryptionKey);
-      await secretsStore.deleteAllSecrets();
-      logger.info("all secrets deleted");
-    }
-    if (opts.reset === "all" || opts.reset === "channels") {
-      const allChannels = await transportStore.getAllChannels();
-      for (const ch of allChannels) {
-        if (ch.type !== "direct") {
-          await transportStore.removeChannel(ch.id);
-        }
-      }
-      logger.info("non-direct channels removed");
+    if (opts.reset) {
+      await applyReset(opts.reset, { db });
     }
 
-    if (opts.nonInteractive) {
-      // TODO: read COGMO_LLM_PROVIDER_TYPE, COGMO_LLM_API_KEY, COGMO_LLM_BASE_URL,
-      // COGMO_TELEGRAM_BOT_TOKEN, COGMO_TELEGRAM_ALLOWED_USERS from env. Validate
-      // each, write to secrets + llm_providers + model_providers + channels.
-      // Currently only seeds defaults — cogmo serve will fail without a provider.
-      await seedDefaults(agentStore, transportStore);
-      logger.warn(
-        "non-interactive mode only seeds defaults — provider configuration not yet implemented. Run interactive `cogmo setup` to configure a provider.",
+    if (validatedNonInteractive) {
+      await persistNonInteractive(
+        { agentStore, transportStore, secretsStore },
+        validatedNonInteractive,
       );
       return;
     }
@@ -84,6 +86,11 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
   } catch (err) {
     if (err instanceof WizardCancelled) {
       logger.info("setup cancelled by user");
+      return;
+    }
+    if (err instanceof SetupEnvError || err instanceof NonInteractiveValidationError) {
+      console.error(err.message);
+      process.exitCode = 1;
       return;
     }
     throw err;
