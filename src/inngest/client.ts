@@ -1,24 +1,22 @@
-import { Inngest, type Middleware } from "inngest";
-import { extendedTracesMiddleware } from "inngest/experimental";
+import { Inngest } from "inngest";
 
-// extendedTracesMiddleware bridges Inngest run/step spans into the active
-// OTel provider when telemetry is configured. We gate on the same env flags
-// as `src/otel.ts`: when OTel isn't initialized, set `"off"` so the middleware
-// doesn't try to extend a provider that doesn't exist (which would emit
-// noisy warnings on every test run).
+// Note on Inngest + OTel:
 //
-// Cast: `extendedTracesMiddleware`'s factory return widens `maxAttempts` to
-// `number | undefined`, which is incompatible with Inngest's own
-// `BaseContext` under our `exactOptionalPropertyTypes: true`. Upstream type
-// bug; runtime behaviour is correct.
-const otelEnabled =
-  !!process.env.OTEL_EXPORTER_OTLP_ENDPOINT && process.env.OTEL_SDK_DISABLED !== "true";
-const otelMiddleware = extendedTracesMiddleware({
-  behaviour: otelEnabled ? "extendProvider" : "off",
-}) as unknown as Middleware.Class;
-
+// The Inngest engine unconditionally opens an `inngest.execution` root span
+// per function run via `trace.getTracer("inngest").startActiveSpan(...)` (see
+// `inngest/components/execution/engine.js`). That span becomes the active
+// context, and our domain spans (`chat`, `tool.execute`, `memory.recall`)
+// parent under it via standard OTel propagation. We don't need any middleware
+// for that.
+//
+// `extendedTracesMiddleware` from `inngest/experimental` adds a separate
+// `InngestSpanProcessor` that sets `inngest.runId`/`traceref`/`step.*`
+// attributes and exports to Inngest's own trace endpoint — but only when the
+// function run is started with a `traceparent` on the request headers. We
+// don't propagate `traceparent` through event payloads (see DEPLOYMENT.md →
+// Observability for rationale), so the processor would be dormant. Skipping
+// it keeps setup minimal; re-add if we adopt traceparent propagation.
 export const inngest = new Inngest({
   id: "cogmo",
   isDev: process.env.INNGEST_DEV === "true" || process.env.INNGEST_DEV === "1",
-  middleware: [otelMiddleware],
 });

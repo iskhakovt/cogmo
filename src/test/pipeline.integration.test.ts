@@ -293,6 +293,10 @@ describe("message pipeline", () => {
     await new Promise((r) => setTimeout(r, 200));
 
     const spans = otel.getSpans();
+    // `inngest.execution` is opened by Inngest's engine unconditionally via
+    // the global tracer; it's the per-function-run span our domain spans
+    // parent under. Verifying it appears confirms the engine integration.
+    expect(spans.some((s) => s.name === "inngest.execution")).toBe(true);
     const chatSpans = spans.filter((s) => s.name === "chat");
     expect(chatSpans.length).toBeGreaterThanOrEqual(1);
     const first = chatSpans[0]!;

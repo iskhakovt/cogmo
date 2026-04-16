@@ -136,9 +136,15 @@ The image entrypoint always launches with `node --import ./dist/otel.js`, which 
 
 | Signal | Where |
 |-|-|
-| Traces | One trace per Inngest function run (via `extendedTracesMiddleware`). Children: `chat` spans tagged with `gen_ai.*` semantic conventions (`provider.name`, `request.model`, `usage.input_tokens`/`output_tokens`/`cache_*`, `response.finish_reasons`); `tool.execute` spans (`cogmo.tool.name`); `memory.recall`/`memory.retain` spans (`memory.hit`, `memory.count`). Auto-instrumented HTTP and undici give you outbound calls (Anthropic, OpenAI, Hindsight, fal.ai, Tavily, Telegram). |
+| Traces | One trace per Inngest function run. Inngest's engine unconditionally opens an `inngest.execution` root span via the active tracer provider (no middleware required), and our domain spans parent under it via standard OTel context propagation. Children: `chat` spans tagged with `gen_ai.*` semantic conventions (`provider.name`, `request.model`, `usage.input_tokens`/`output_tokens`/`cache_*`, `response.finish_reasons`); `tool.execute` spans (`cogmo.tool.name`); `memory.recall`/`memory.retain` spans (`memory.hit`, `memory.count`). Auto-instrumented HTTP and undici give you outbound calls (Anthropic, OpenAI, Hindsight, fal.ai, Tavily, Telegram). |
 | Metrics | `cogmo.llm.tokens` counter (labels `type`/`model`/`provider`, where `type` ∈ `input`/`output`/`cache_read`/`cache_create`); `cogmo.agent.iterations` histogram (per turn, labeled by model); `cogmo.debounce.wait_ms` histogram. |
 | Logs | Pino lines automatically gain `trace_id` / `span_id` / `trace_flags` via `instrumentation-pino`, so journald correlation works without code changes. |
+
+### Cross-function-run correlation
+
+Each Inngest function run (`handle-message`, `debounce-idle`, future `observer`, etc.) is its own trace in your backend. Function runs that flow from one to another (orchestrator → debounce → handler) show up as separate traces with their own `trace_id`. If you need to correlate a chain of runs — for one user turn or one debugging session — filter by an attribute you put on your own spans (e.g. `cogmo.conversation_id` if added, or `inngest.runId` from the engine). Inngest's own dashboard does visual auto-stitching via their internal run graph; Tempo / SigNoz / Grafana Cloud give you the filterable data and let you query.
+
+Retries of a single function run currently create a fresh trace per attempt. Inngest's `extendedTracesMiddleware` (from `inngest/experimental`) would enable retries-as-sibling-spans plus deterministic step-ID parenting across HTTP checkpoints, but only activates when the function is started with a W3C `traceparent` on the request. That requires propagating `traceparent` through event payloads — schema churn on every event type, and Inngest issue #1436 (third-party context drops at `step.run()` boundaries) has to be worked around. Deferred; revisit if retry analysis becomes a recurring pain point.
 
 ### Configuration
 
