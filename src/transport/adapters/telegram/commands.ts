@@ -75,15 +75,28 @@ export async function handleResume(
   const addr = String(ctx.chat.id);
   // Accept both alias and UUID forms so `/sessions` numbered output (which emits `/resume <uuid>`
   // for unaliased entries) stays actionable. The callback-query path already does this.
-  const key = looksLikeUuid(target)
-    ? ({ conversationId: target } as const)
-    : ({ alias: target } as const);
+  const isUuid = looksLikeUuid(target);
+  const key = isUuid ? ({ conversationId: target } as const) : ({ alias: target } as const);
   const res = await transport.resumeConversation(addr, handle, key);
   if (res.isErr()) {
     await ctx.reply(errorMessage(res.error));
     return;
   }
-  await ctx.reply(`Resumed conversation "${target}".`);
+  // For UUID form, look up a friendlier label (alias or preview) so the user doesn't see a
+  // 36-char hex blob echoed back. For alias form, the alias itself is the label.
+  const label = isUuid ? await resumeLabelFor(transport, handle, res.value.conversationId) : target;
+  await ctx.reply(`Resumed conversation "${label}".`);
+}
+
+async function resumeLabelFor(
+  transport: Transport,
+  handle: string,
+  conversationId: string,
+): Promise<string> {
+  const list = await transport.conversations.list(handle);
+  if (list.isErr()) return conversationId;
+  const conv = list.value.find((c) => c.id === conversationId);
+  return conv?.alias ?? conv?.lastMessagePreview ?? conversationId;
 }
 
 export async function handleName(transport: Transport, ctx: TelegramCommandContext): Promise<void> {
@@ -94,22 +107,16 @@ export async function handleName(transport: Transport, ctx: TelegramCommandConte
   }
   const handle = String(ctx.from.id);
   const addr = String(ctx.chat.id);
-  const current = await transport.conversations.getCurrent(handle, addr);
-  if (current.isErr()) {
-    await ctx.reply(errorMessage(current.error));
-    return;
-  }
-  if (!current.value) {
+  // resolveSession is enough here — setAlias on Transport enforces ownership internally.
+  // Avoids the extra profile join that getCurrent would do.
+  const session = await transport.resolveSession(addr);
+  if (!session) {
     await ctx.reply("No active conversation yet — send a message first.");
     return;
   }
 
   const newAlias = arg === "-" ? null : arg;
-  const res = await transport.conversations.setAlias(
-    handle,
-    current.value.conversationId,
-    newAlias,
-  );
+  const res = await transport.conversations.setAlias(handle, session.conversationId, newAlias);
   if (res.isErr()) {
     await ctx.reply(errorMessage(res.error));
     return;

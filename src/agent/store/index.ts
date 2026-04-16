@@ -50,23 +50,23 @@ export interface ConversationSummary {
 
 const PREVIEW_MAX_CHARS = 120;
 
+function isTextBlock(b: unknown): b is { type: "text"; text: string } {
+  return (
+    typeof b === "object" &&
+    b !== null &&
+    "type" in b &&
+    (b as { type: unknown }).type === "text" &&
+    "text" in b &&
+    typeof (b as { text: unknown }).text === "string"
+  );
+}
+
 /** Extract a short preview string from a `messages.content` jsonb value. */
 function previewFromContent(content: unknown): string {
   if (typeof content === "string") return truncate(content, PREVIEW_MAX_CHARS);
-  if (Array.isArray(content)) {
-    const text = content
-      .map((b) =>
-        typeof b === "object" &&
-        b !== null &&
-        "type" in b &&
-        (b as { type: unknown }).type === "text"
-          ? (b as { text?: unknown }).text
-          : undefined,
-      )
-      .find((t): t is string => typeof t === "string");
-    if (text) return truncate(text, PREVIEW_MAX_CHARS);
-  }
-  return "";
+  if (!Array.isArray(content)) return "";
+  const block = R.find(content, isTextBlock);
+  return block ? truncate(block.text, PREVIEW_MAX_CHARS) : "";
 }
 
 function truncate(s: string, max: number): string {
@@ -127,14 +127,14 @@ export interface AgentStore {
   /** Get the first profile (for bootstrapping). */
   getDefaultProfile(): Promise<{ id: string } | null>;
 
-  /** Create a profile. `userId: null` = org profile (read-only via Transport); `userId: <id>` = user profile (owned by that user). Throws `UniqueViolationError` on (user_id, name) collision. */
+  /** Create a profile and return the full row. `userId: null` = org profile (read-only via Transport); `userId: <id>` = user profile (owned by that user). Throws `UniqueViolationError` on (user_id, name) collision. */
   createProfile(params: {
     userId: string | null;
     name: string;
     basePrompt: string;
     model: string;
     toolSet: JsonValue;
-  }): Promise<{ id: string }>;
+  }): Promise<Profile>;
 
   /** List profiles visible to `userId`: org profiles (user_id IS NULL) + the user's own profiles. */
   listProfiles(userId: string): Promise<ReadonlyArray<Profile>>;
@@ -486,10 +486,23 @@ export class DrizzleAgentStore implements AgentStore {
     basePrompt: string;
     model: string;
     toolSet: JsonValue;
-  }): Promise<{ id: string }> {
+  }): Promise<Profile> {
     return translateUniqueViolation(() =>
       this.#db.transaction(async (tx) => {
-        return single(await tx.insert(profiles).values(params).returning({ id: profiles.id }));
+        const row = single(
+          await tx.insert(profiles).values(params).returning({
+            id: profiles.id,
+            userId: profiles.userId,
+            name: profiles.name,
+            basePrompt: profiles.basePrompt,
+            model: profiles.model,
+            summarizationModel: profiles.summarizationModel,
+            extractionModel: profiles.extractionModel,
+            autoRecall: profiles.autoRecall,
+            toolSet: profiles.toolSet,
+          }),
+        );
+        return row as Profile;
       }),
     );
   }

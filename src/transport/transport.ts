@@ -343,15 +343,13 @@ export function createTransport(deps: {
           return err({ code: "model_unavailable" as const, model: input.model });
         }
         try {
-          const { id } = await agentStore.createProfile({
+          const created = await agentStore.createProfile({
             userId: identity.userId,
             name: input.name,
             basePrompt: input.basePrompt,
             model: input.model,
             toolSet: input.toolSet,
           });
-          const created = await agentStore.getProfile(id);
-          if (!created) throw new Error(`createProfile: new profile ${id} missing after insert`);
           return ok(created);
         } catch (e) {
           if (e instanceof UniqueViolationError)

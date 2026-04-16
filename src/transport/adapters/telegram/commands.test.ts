@@ -105,16 +105,22 @@ describe("handleResume", () => {
 });
 
 describe("handleName", () => {
+  const activeSession = {
+    id: "s1",
+    channelId: "ch",
+    platformAddress: "42",
+    conversationId: "c1",
+    status: "active" as const,
+    receive: "routed" as const,
+  };
+
   it("sets alias on current conversation", async () => {
     const setAlias = vi.fn().mockResolvedValue(ok(undefined));
     const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue(activeSession),
       conversations: {
         list: vi.fn().mockResolvedValue(ok([])),
-        getCurrent: vi
-          .fn()
-          .mockResolvedValue(
-            ok({ conversationId: "c1", profileId: "p1", profileName: "a", model: "m" }),
-          ),
+        getCurrent: vi.fn().mockResolvedValue(ok(null)),
         setAlias,
         setProfile: vi.fn().mockResolvedValue(ok(undefined)),
       },
@@ -128,13 +134,10 @@ describe("handleName", () => {
   it("treats '-' as null (clear alias)", async () => {
     const setAlias = vi.fn().mockResolvedValue(ok(undefined));
     const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue(activeSession),
       conversations: {
         list: vi.fn().mockResolvedValue(ok([])),
-        getCurrent: vi
-          .fn()
-          .mockResolvedValue(
-            ok({ conversationId: "c1", profileId: "p1", profileName: "a", model: "m" }),
-          ),
+        getCurrent: vi.fn().mockResolvedValue(ok(null)),
         setAlias,
         setProfile: vi.fn().mockResolvedValue(ok(undefined)),
       },
@@ -147,12 +150,7 @@ describe("handleName", () => {
 
   it("rejects when no active conversation", async () => {
     const transport = transportWith({
-      conversations: {
-        list: vi.fn().mockResolvedValue(ok([])),
-        getCurrent: vi.fn().mockResolvedValue(ok(null)),
-        setAlias: vi.fn().mockResolvedValue(ok(undefined)),
-        setProfile: vi.fn().mockResolvedValue(ok(undefined)),
-      },
+      resolveSession: vi.fn().mockResolvedValue(null),
     });
     const ctx = mkCtx("work");
     await handleName(transport, ctx);
@@ -161,13 +159,10 @@ describe("handleName", () => {
 
   it("maps alias_taken to friendly error", async () => {
     const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue(activeSession),
       conversations: {
         list: vi.fn().mockResolvedValue(ok([])),
-        getCurrent: vi
-          .fn()
-          .mockResolvedValue(
-            ok({ conversationId: "c1", profileId: "p1", profileName: "a", model: "m" }),
-          ),
+        getCurrent: vi.fn().mockResolvedValue(ok(null)),
         setAlias: vi.fn().mockResolvedValue(err({ code: "alias_taken" })),
         setProfile: vi.fn().mockResolvedValue(ok(undefined)),
       },

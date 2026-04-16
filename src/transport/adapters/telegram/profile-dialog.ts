@@ -106,9 +106,12 @@ export class ProfileDialogs {
       await ctx.reply(`"${name}" is an org profile and can't be edited here.`);
       return;
     } else {
+      // Defensive branch: UNIQUE(user_id, name) NULLS NOT DISTINCT means we should see at most
+      // one org + one user row per name, and the owned==1 case above always wins that. If this
+      // fires, something odd is going on schema-wise — point the user at /profile list.
       const scopes = matches.map((p) => (p.userId === null ? "org" : "user")).join(", ");
       await ctx.reply(
-        `Profile name "${name}" is ambiguous (${matches.length} matches: ${scopes}). Rename one of them first.`,
+        `Multiple profiles named "${name}" (${matches.length}: ${scopes}) — can't determine which one to edit. Use /profile list to inspect.`,
       );
       return;
     }
@@ -268,6 +271,13 @@ export class ProfileDialogs {
     }
     if (state.draft.model !== undefined && state.draft.model !== state.current?.model) {
       changes.model = state.draft.model;
+    }
+    // All-skipped edit path — nothing to update. Avoid calling profiles.update with {},
+    // which would throw "No values to set" from Drizzle.
+    if (Object.keys(changes).length === 0) {
+      this.#state.delete(ctx.chat.id);
+      await ctx.reply(`No changes to apply to "${state.name}".`);
+      return;
     }
     const res = await transport.profiles.update(handle, state.profileId, changes);
     if (res.isErr()) {

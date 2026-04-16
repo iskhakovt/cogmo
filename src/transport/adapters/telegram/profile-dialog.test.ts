@@ -211,6 +211,29 @@ describe("ProfileDialogs - /profile edit", () => {
     expect(update).toHaveBeenCalledWith("1", "p-existing", { model: "new-model" });
   });
 
+  it("edit-with-both-skips replies 'no changes' and does NOT call profiles.update", async () => {
+    // Regression guard: without the empty-changes early return, Drizzle would throw
+    // "No values to set" when handed {} and the user would see "something went wrong".
+    const update = vi.fn();
+    const transport = editTransport({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([existing])),
+        create: vi.fn().mockResolvedValue(ok({} as never)),
+        update,
+        delete: vi.fn().mockResolvedValue(ok(undefined)),
+      },
+    });
+    const dialogs = new ProfileDialogs();
+    await dialogs.startEdit(transport, mkCtx(), "coder");
+    await dialogs.handleMessage(transport, mkCtx("skip")); // prompt step
+    await dialogs.handleMessage(transport, mkCtx("skip")); // model step
+    const saveCtx = mkCtx("save");
+    await dialogs.handleMessage(transport, saveCtx);
+
+    expect(update).not.toHaveBeenCalled();
+    expect(saveCtx.reply).toHaveBeenLastCalledWith('No changes to apply to "coder".');
+  });
+
   it("rejects editing an org profile (user_id=null)", async () => {
     const orgProfile = mkProfile({ id: "p-org", name: "assistant", userId: null });
     const transport = transportWith({
