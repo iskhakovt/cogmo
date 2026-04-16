@@ -42,7 +42,7 @@ docker build -t cogmo .                              # version = "dev" (Dockerfi
 docker build --build-arg VERSION=0.0.0-dev -t cogmo . # override the embedded version string
 ```
 
-The image is `gcr.io/distroless/nodejs24-debian13`, runs as `nonroot`, and exposes port 9090 (health). Default entrypoint: `node dist/main.js serve`.
+The image is `gcr.io/distroless/nodejs24-debian13`, runs as `nonroot`, and exposes port 9090 (health). Default entrypoint: `node --import ./dist/otel.js dist/main.js serve`. The `--import` hook initializes OpenTelemetry if configured (see [Observability](#observability)) and is a no-op otherwise.
 
 ## Configuration
 
@@ -125,6 +125,97 @@ The image entrypoint dispatches based on the first arg:
 ## Health check
 
 `GET /health` on port 9090 returns 200 with an `application/health+json` body (IETF draft schema: `status`, `version`, `releaseId`, `description`, `notes`). Liveness only — a Postgres blip will not flap the container. Wire it to your supervisor (Docker `HEALTHCHECK`, k8s `livenessProbe`, systemd, etc.).
+
+## Observability
+
+Cogmo emits OpenTelemetry traces, metrics, and trace-correlated logs when an OTLP endpoint is configured. Telemetry is opt-in: with `OTEL_EXPORTER_OTLP_ENDPOINT` unset the SDK isn't loaded at all, so the default process stays lean.
+
+The image entrypoint always launches with `node --import ./dist/otel.js`, which is a no-op until the env var is set. Once set, the SDK exports OTLP over HTTP/protobuf — supported by every common backend without a separate Collector.
+
+### What you get
+
+| Signal | Where |
+|-|-|
+| Traces | One trace per Inngest function run. Inngest's engine unconditionally opens an `inngest.execution` root span via the active tracer provider (no middleware required), and our domain spans parent under it via standard OTel context propagation. Children: `chat` spans tagged with `gen_ai.*` semantic conventions (`provider.name`, `request.model`, `usage.input_tokens`/`output_tokens`/`cache_*`, `response.finish_reasons`); `tool.execute` spans (`cogmo.tool.name`); `memory.recall`/`memory.retain` spans (`memory.hit`, `memory.count`). Auto-instrumented HTTP and undici give you outbound calls (Anthropic, OpenAI, Hindsight, fal.ai, Tavily, Telegram). |
+| Metrics | `cogmo.llm.tokens` counter (labels `type`/`model`/`provider`, where `type` ∈ `input`/`output`/`cache_read`/`cache_create`); `cogmo.agent.iterations` histogram (per turn, labeled by model); `cogmo.debounce.wait_ms` histogram. |
+| Logs | Pino lines automatically gain `trace_id` / `span_id` / `trace_flags` via `instrumentation-pino`, so journald correlation works without code changes. |
+
+### Cross-function-run correlation
+
+Each Inngest function run (`handle-message`, `debounce-idle`, future `observer`, etc.) is its own trace in your backend. Function runs that flow from one to another (orchestrator → debounce → handler) show up as separate traces with their own `trace_id`. If you need to correlate a chain of runs — for one user turn or one debugging session — filter by an attribute you put on your own spans (e.g. `cogmo.conversation_id` if added, or `inngest.runId` from the engine). Inngest's own dashboard does visual auto-stitching via their internal run graph; Tempo / SigNoz / Grafana Cloud give you the filterable data and let you query.
+
+Retries of a single function run currently create a fresh trace per attempt. Inngest's `extendedTracesMiddleware` (from `inngest/experimental`) would enable retries-as-sibling-spans plus deterministic step-ID parenting across HTTP checkpoints, but only activates when the function is started with a W3C `traceparent` on the request. That requires propagating `traceparent` through event payloads — schema churn on every event type, and Inngest issue #1436 (third-party context drops at `step.run()` boundaries) has to be worked around. Deferred; revisit if retry analysis becomes a recurring pain point.
+
+### Configuration
+
+Standard OTel env vars apply — Cogmo doesn't wrap them.
+
+| Variable | Required | Notes |
+|-|-|-|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | yes (to enable) | Base URL of the OTLP/HTTP receiver, e.g. `http://lgtm:4318` or `https://otlp-gateway-prod-eu-west-2.grafana.net/otlp`. |
+| `OTEL_SERVICE_NAME` | recommended | Defaults to `cogmo`. Set to disambiguate multiple instances. |
+| `OTEL_RESOURCE_ATTRIBUTES` | optional | Comma-separated `key=value` pairs, e.g. `deployment.environment=prod,host.name=cogmo-1`. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | as needed | For backends that require auth (Grafana Cloud, etc.). |
+| `OTEL_SDK_DISABLED` | optional | Set to `true` to force-off even when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Useful for one-off debugging. |
+
+### Local: Grafana LGTM all-in-one
+
+The simplest self-hosted setup. One container exposes Tempo (traces), Mimir/Prometheus (metrics), Loki (logs), and Grafana UI on port 3000. No Collector required.
+
+```bash
+docker run -d --name lgtm \
+  -p 3000:3000 -p 4318:4318 \
+  grafana/otel-lgtm
+
+docker run -d --name cogmo \
+  --restart=unless-stopped \
+  -e DATABASE_URL=postgresql://... \
+  -e COGMO_MASTER_KEY=... \
+  -e HINDSIGHT_URL=http://hindsight:8888 \
+  -e INNGEST_BASE_URL=http://inngest:8288 \
+  -e OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318 \
+  -e OTEL_SERVICE_NAME=cogmo \
+  -p 9090:9090 \
+  ghcr.io/iskhakovt/cogmo:<version>
+```
+
+Open `http://localhost:3000` and add Tempo / Prometheus / Loki as data sources (preconfigured in `grafana/otel-lgtm`).
+
+### Local: SigNoz
+
+[SigNoz](https://signoz.io/docs/install/docker/) accepts OTLP directly on 4318. Same `OTEL_EXPORTER_OTLP_ENDPOINT=http://<signoz-host>:4318` pattern.
+
+### Managed: Grafana Cloud
+
+Grafana Cloud's OTLP gateway accepts HTTP/protobuf only. Get the endpoint, instance ID, and token from the console (Connections → Add new connection → OpenTelemetry).
+
+```bash
+docker run -d --name cogmo \
+  --restart=unless-stopped \
+  -e DATABASE_URL=postgresql://... \
+  -e COGMO_MASTER_KEY=... \
+  -e HINDSIGHT_URL=http://hindsight:8888 \
+  -e INNGEST_BASE_URL=http://inngest:8288 \
+  -e OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-prod-eu-west-2.grafana.net/otlp \
+  -e OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(printf '%s' '<instance-id>:<token>' | base64)" \
+  -e OTEL_SERVICE_NAME=cogmo \
+  -e OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod \
+  -p 9090:9090 \
+  ghcr.io/iskhakovt/cogmo:<version>
+```
+
+The credentials live in env vars here for brevity — in production put them in your secret manager and inject via `--env-file` or systemd `LoadCredential`, the same as `COGMO_MASTER_KEY`.
+
+### Sampling
+
+The default sampler is `parentbased_always_on` — every trace is exported. Fine at personal scale. If costs grow:
+
+```
+OTEL_TRACES_SAMPLER=parentbased_traceidratio
+OTEL_TRACES_SAMPLER_ARG=0.1
+```
+
+samples 10% of root traces while keeping child spans consistent.
 
 ## Updating
 

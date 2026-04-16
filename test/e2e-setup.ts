@@ -74,7 +74,9 @@ export async function setup({ provide }: GlobalSetupContext) {
     appImage = new GenericContainer(imageName);
   } else {
     console.log("Building app Docker image...");
-    appImage = await GenericContainer.fromDockerfile(".", "Dockerfile").build(imageName);
+    appImage = await GenericContainer.fromDockerfile(".", "Dockerfile")
+      .withBuildkit()
+      .build(imageName);
   }
 
   // Same DB URL is used by both the seed container and the long-running app container,

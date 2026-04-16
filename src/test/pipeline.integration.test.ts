@@ -9,9 +9,11 @@ import { bootstrap } from "../index.js";
 import { directOutbound } from "../inngest/events.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 import { createFalFetch } from "./fal-mock.js";
+import { type OtelHarness, setupOtelHarness } from "./otel-harness.js";
 
 let inngestBaseUrl: string;
 let connection: Awaited<ReturnType<typeof connect>>;
+let otel: OtelHarness;
 
 interface CapturedOutbound {
   platformAddress: string;
@@ -25,6 +27,11 @@ const capturedOutbound: CapturedOutbound[] = [];
 
 beforeAll(async () => {
   inngestBaseUrl = inject("inngestBaseUrl");
+
+  // Set up the OTel harness BEFORE bootstrap so the global tracer/meter
+  // providers exist by the time domain modules first call startSpan/record.
+  // ProxyTracer caches its delegate on first use, so this ordering matters.
+  otel = setupOtelHarness();
 
   // Wire app in-process and register Inngest functions via connect mode (WebSocket).
   // Connect mode self-registers with the Inngest dev server — no discovery needed.
@@ -66,12 +73,14 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (connection) await connection.close();
+  if (otel) await otel.shutdown();
 });
 
 // Reset the outbound capture buffer between tests so events from a previous
 // test can't leak into a later test's `waitForOutbound` search.
-beforeEach(() => {
+beforeEach(async () => {
   capturedOutbound.length = 0;
+  await otel.reset();
 });
 
 async function sendEvent(name: string, data: Record<string, unknown>) {
@@ -238,5 +247,82 @@ describe("message pipeline", () => {
     expect(img.mediaType).toMatch(/^image\//);
     const bytes = Buffer.from(img.data, "base64");
     expect(bytes.length).toBeGreaterThan(0);
+  });
+
+  it("emits gen_ai chat spans + token metrics through the live pipeline", async () => {
+    const defaultUserId = inject("defaultUserId");
+
+    const [profile] = await db.select({ id: profiles.id }).from(profiles).limit(1);
+    const [channel] = await db.select({ id: channels.id }).from(channels).limit(1);
+    if (!profile || !channel) throw new Error("seed incomplete");
+
+    const [conv] = await db
+      .insert(conversations)
+      .values({ userId: defaultUserId, profileId: profile.id, isPrivate: true })
+      .returning({ id: conversations.id });
+
+    const [session] = await db
+      .insert(channelSessions)
+      .values({
+        channelId: channel.id,
+        platformAddress: `otel-test-${Date.now()}`,
+        conversationId: conv!.id,
+        status: "active",
+        receive: "routed",
+      })
+      .returning({ id: channelSessions.id });
+
+    const [inbound] = await db
+      .insert(inboundMessages)
+      .values({
+        channelSessionId: session!.id,
+        conversationId: conv!.id,
+        content: "Hello integration test",
+        platformTs: new Date(),
+      })
+      .returning({ id: inboundMessages.id });
+
+    await sendEvent("inbound/arrived", {
+      conversationId: conv!.id,
+      inboundMessageId: inbound!.id,
+    });
+
+    await waitForAssistantMessage(conv!.id);
+
+    // Spans land via SimpleSpanProcessor; small grace for any in-flight ends.
+    await new Promise((r) => setTimeout(r, 200));
+
+    const spans = otel.getSpans();
+    // `inngest.execution` is opened by Inngest's engine unconditionally via
+    // the global tracer; it's the per-function-run span our domain spans
+    // parent under. Verifying it appears confirms the engine integration.
+    expect(spans.some((s) => s.name === "inngest.execution")).toBe(true);
+    const chatSpans = spans.filter((s) => s.name === "chat");
+    expect(chatSpans.length).toBeGreaterThanOrEqual(1);
+    const first = chatSpans[0]!;
+    expect(first.attributes["gen_ai.operation.name"]).toBe("chat");
+    expect(first.attributes["gen_ai.provider.name"]).toBe("anthropic");
+    expect(typeof first.attributes["gen_ai.request.model"]).toBe("string");
+    expect(typeof first.attributes["gen_ai.usage.input_tokens"]).toBe("number");
+    expect(typeof first.attributes["gen_ai.usage.output_tokens"]).toBe("number");
+
+    // Token counter receives input/output data points labeled by model+provider.
+    // We assert on shape rather than magnitude — llmock fixture replay returns
+    // usage `{0, 0}`, so values land at zero. The contract we care about is
+    // "tokens are being recorded with proper labels"; re-record fixtures to
+    // verify magnitudes.
+    const result = await otel.collectMetrics();
+    const allMetrics = result.scopeMetrics.flatMap((s) => s.metrics);
+    const tokenMetric = allMetrics.find((m) => m.descriptor.name === "cogmo.llm.tokens");
+    expect(tokenMetric).toBeDefined();
+    const types = new Set((tokenMetric?.dataPoints ?? []).map((p) => p.attributes["type"]));
+    expect(types).toContain("input");
+    expect(types).toContain("output");
+    const inputPoint = tokenMetric?.dataPoints.find((p) => p.attributes["type"] === "input");
+    expect(inputPoint?.attributes["provider"]).toBe("anthropic");
+
+    const iterationsMetric = allMetrics.find((m) => m.descriptor.name === "cogmo.agent.iterations");
+    expect(iterationsMetric).toBeDefined();
+    expect(iterationsMetric?.dataPoints.length).toBeGreaterThanOrEqual(1);
   });
 });

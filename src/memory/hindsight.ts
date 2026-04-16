@@ -1,3 +1,4 @@
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { MemoryItemInput } from "@vectorize-io/hindsight-client";
 import { HindsightClient } from "@vectorize-io/hindsight-client";
 import { withRetry } from "../util/with-retry.js";
@@ -11,6 +12,8 @@ import type {
   RetainBatchItem,
   RetainOptions,
 } from "./provider.js";
+
+const tracer = trace.getTracer("cogmo.memory");
 
 /**
  * Hindsight memory provider — talks to a self-hosted Hindsight server via HTTP.
@@ -40,9 +43,23 @@ export class HindsightMemoryProvider implements MemoryProvider {
     if (options?.context !== undefined) opts.context = options.context;
     if (options?.metadata !== undefined) opts.metadata = options.metadata;
     if (options?.tags !== undefined) opts.tags = options.tags;
-    await withRetry(() => this.#client.retain(bankId, content, opts), {
-      context: `hindsight.retain[${bankId}]`,
-    });
+    await tracer.startActiveSpan(
+      "memory.retain",
+      { attributes: { "memory.provider": this.name } },
+      async (span) => {
+        try {
+          await withRetry(() => this.#client.retain(bankId, content, opts), {
+            context: `hindsight.retain[${bankId}]`,
+          });
+        } catch (err) {
+          span.recordException(err instanceof Error ? err : new Error(String(err)));
+          span.setStatus({ code: SpanStatusCode.ERROR });
+          throw err;
+        } finally {
+          span.end();
+        }
+      },
+    );
   }
 
   async retainBatch(bankId: string, items: RetainBatchItem[]): Promise<void> {
@@ -66,19 +83,38 @@ export class HindsightMemoryProvider implements MemoryProvider {
     if (options?.tags !== undefined) opts.tags = options.tags;
     if (options?.tagsMatch !== undefined) opts.tagsMatch = options.tagsMatch;
 
-    const response = await withRetry(() => this.#client.recall(bankId, query, opts), {
-      retries: 2,
-      maxRetryTimeMs: 5000,
-      context: `hindsight.recall[${bankId}]`,
-    });
+    return tracer.startActiveSpan(
+      "memory.recall",
+      { attributes: { "memory.provider": this.name } },
+      async (span) => {
+        try {
+          const response = await withRetry(() => this.#client.recall(bankId, query, opts), {
+            retries: 2,
+            maxRetryTimeMs: 5000,
+            context: `hindsight.recall[${bankId}]`,
+          });
 
-    const memories: Memory[] = (response.results ?? []).map((r) => {
-      const memory: Memory = { content: r.text, type: r.type ?? "unknown" };
-      if (r.metadata) memory.metadata = r.metadata;
-      return memory;
-    });
+          const memories: Memory[] = (response.results ?? []).map((r) => {
+            const memory: Memory = { content: r.text, type: r.type ?? "unknown" };
+            if (r.metadata) memory.metadata = r.metadata;
+            return memory;
+          });
 
-    return { memories };
+          span.setAttributes({
+            "memory.hit": memories.length > 0,
+            "memory.count": memories.length,
+          });
+
+          return { memories };
+        } catch (err) {
+          span.recordException(err instanceof Error ? err : new Error(String(err)));
+          span.setStatus({ code: SpanStatusCode.ERROR });
+          throw err;
+        } finally {
+          span.end();
+        }
+      },
+    );
   }
 
   async reflect(bankId: string, query: string, options?: ReflectOptions): Promise<ReflectResult> {

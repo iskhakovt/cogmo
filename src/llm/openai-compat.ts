@@ -1,5 +1,6 @@
 import { getEncoding, type Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
+import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
 import type {
   ChatParams,
@@ -111,41 +112,53 @@ export class OpenAICompatibleProvider implements LlmProvider {
       throw new Error("responseFormat and tools are mutually exclusive");
     }
 
-    const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming = {
-      model: params.model,
-      max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
-      messages: buildMessages(params.system, params.messages, this.#promptCaching),
-    };
-
-    if (params.tools?.length) {
-      createParams.tools = params.tools.map(toOpenAITool);
-    }
-
-    if (params.responseFormat) {
-      createParams.response_format = {
-        type: "json_schema",
-        json_schema: {
-          name: params.responseFormat.name,
-          schema: params.responseFormat.schema,
-          strict: true,
-        },
+    const span = startChatSpan(this.name, params.model);
+    try {
+      const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming = {
+        model: params.model,
+        max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
+        messages: buildMessages(params.system, params.messages, this.#promptCaching),
       };
-    }
 
-    const response = await this.#client.chat.completions.create(createParams);
+      if (params.tools?.length) {
+        createParams.tools = params.tools.map(toOpenAITool);
+      }
 
-    const choice = response.choices[0];
-    if (!choice) throw new Error("No choices in response");
+      if (params.responseFormat) {
+        createParams.response_format = {
+          type: "json_schema",
+          json_schema: {
+            name: params.responseFormat.name,
+            schema: params.responseFormat.schema,
+            strict: true,
+          },
+        };
+      }
 
-    return {
-      content: fromOpenAIMessage(choice.message),
-      stopReason: fromOpenAIFinishReason(choice.finish_reason),
-      model: response.model,
-      usage: {
+      const response = await this.#client.chat.completions.create(createParams);
+
+      const choice = response.choices[0];
+      if (!choice) throw new Error("No choices in response");
+
+      const usage: Usage = {
         inputTokens: response.usage?.prompt_tokens ?? 0,
         outputTokens: response.usage?.completion_tokens ?? 0,
-      },
-    };
+      };
+      const stopReason = fromOpenAIFinishReason(choice.finish_reason);
+      recordChatUsage(span, this.name, response.model, usage, stopReason);
+
+      return {
+        content: fromOpenAIMessage(choice.message),
+        stopReason,
+        model: response.model,
+        usage,
+      };
+    } catch (err) {
+      failChatSpan(span, err);
+      throw err;
+    } finally {
+      span.end();
+    }
   }
 
   chatStream(params: ChatParams): ChatStreamResult {
@@ -154,83 +167,114 @@ export class OpenAICompatibleProvider implements LlmProvider {
     }
 
     let resolveResponse: (v: { stopReason: StopReason; model: string; usage: Usage }) => void;
+    let rejectResponse: (err: unknown) => void;
     const response = new Promise<{ stopReason: StopReason; model: string; usage: Usage }>(
-      (resolve) => {
+      (resolve, reject) => {
         resolveResponse = resolve;
+        rejectResponse = reject;
       },
     );
 
     const client = this.#client;
     const caching = this.#promptCaching;
+    const providerName = this.name;
+    const span = startChatSpan(providerName, params.model);
 
     async function* generateEvents(): AsyncIterable<StreamEvent> {
-      const stream = await client.chat.completions.create({
-        model: params.model,
-        max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
-        messages: buildMessages(params.system, params.messages, caching),
-        ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
-        stream: true,
-        stream_options: { include_usage: true },
-      });
+      let completed = false;
+      try {
+        const stream = await client.chat.completions.create({
+          model: params.model,
+          max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
+          messages: buildMessages(params.system, params.messages, caching),
+          ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
+          stream: true,
+          stream_options: { include_usage: true },
+        });
 
-      let model = params.model;
-      const usage: Usage = { inputTokens: 0, outputTokens: 0 };
-      let finishReason: StopReason = "end_turn";
+        let model = params.model;
+        const usage: Usage = { inputTokens: 0, outputTokens: 0 };
+        let finishReason: StopReason = "end_turn";
 
-      // Accumulate tool call arguments per index (streamed as deltas)
-      const toolCalls = new Map<number, { id: string; name: string; argumentChunks: string[] }>();
+        // Accumulate tool call arguments per index (streamed as deltas)
+        const toolCalls = new Map<number, { id: string; name: string; argumentChunks: string[] }>();
 
-      for await (const chunk of stream) {
-        if (chunk.model) model = chunk.model;
+        for await (const chunk of stream) {
+          if (chunk.model) model = chunk.model;
 
-        // Usage comes in the final chunk (stream_options: include_usage)
-        if (chunk.usage) {
-          usage.inputTokens = chunk.usage.prompt_tokens;
-          usage.outputTokens = chunk.usage.completion_tokens;
-        }
+          // Usage comes in the final chunk (stream_options: include_usage)
+          if (chunk.usage) {
+            usage.inputTokens = chunk.usage.prompt_tokens;
+            usage.outputTokens = chunk.usage.completion_tokens;
+          }
 
-        const delta = chunk.choices[0]?.delta;
-        const reason = chunk.choices[0]?.finish_reason;
+          const delta = chunk.choices[0]?.delta;
+          const reason = chunk.choices[0]?.finish_reason;
 
-        if (reason) {
-          finishReason = fromOpenAIFinishReason(reason);
-        }
+          if (reason) {
+            finishReason = fromOpenAIFinishReason(reason);
+          }
 
-        if (!delta) continue;
+          if (!delta) continue;
 
-        // Text content
-        if (delta.content) {
-          yield { type: "text_delta", text: delta.content };
-        }
+          // Text content
+          if (delta.content) {
+            yield { type: "text_delta", text: delta.content };
+          }
 
-        // Tool calls — streamed as deltas with index
-        if (delta.tool_calls) {
-          for (const tc of delta.tool_calls) {
-            let call = toolCalls.get(tc.index);
-            if (!call) {
-              call = {
-                id: tc.id ?? "",
-                name: tc.function?.name ?? "",
-                argumentChunks: [],
-              };
-              toolCalls.set(tc.index, call);
-            }
-            if (tc.id) call.id = tc.id;
-            if (tc.function?.name) call.name = tc.function.name;
-            if (tc.function?.arguments) {
-              call.argumentChunks.push(tc.function.arguments);
+          // Tool calls — streamed as deltas with index
+          if (delta.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              let call = toolCalls.get(tc.index);
+              if (!call) {
+                call = {
+                  id: tc.id ?? "",
+                  name: tc.function?.name ?? "",
+                  argumentChunks: [],
+                };
+                toolCalls.set(tc.index, call);
+              }
+              if (tc.id) call.id = tc.id;
+              if (tc.function?.name) call.name = tc.function.name;
+              if (tc.function?.arguments) {
+                call.argumentChunks.push(tc.function.arguments);
+              }
             }
           }
         }
-      }
 
-      // Yield accumulated tool calls as complete tool_start events
-      for (const [, call] of [...toolCalls.entries()].sort(([a], [b]) => a - b)) {
-        const input = JSON.parse(call.argumentChunks.join(""));
-        yield { type: "tool_start", id: call.id, name: call.name, input };
-      }
+        // Yield accumulated tool calls as complete tool_start events.
+        // Malformed argument JSON is attributed to the span before unwinding,
+        // matching the catch branch below.
+        for (const [, call] of [...toolCalls.entries()].sort(([a], [b]) => a - b)) {
+          let input: unknown;
+          try {
+            input = JSON.parse(call.argumentChunks.join(""));
+          } catch (parseErr) {
+            completed = true;
+            failChatSpan(span, parseErr);
+            rejectResponse(parseErr);
+            throw parseErr;
+          }
+          yield { type: "tool_start", id: call.id, name: call.name, input };
+        }
 
-      resolveResponse({ stopReason: finishReason, model, usage });
+        recordChatUsage(span, providerName, model, usage, finishReason);
+        completed = true;
+        resolveResponse({ stopReason: finishReason, model, usage });
+      } catch (err) {
+        completed = true;
+        failChatSpan(span, err);
+        rejectResponse(err);
+        throw err;
+      } finally {
+        if (!completed) {
+          const abortErr = new Error("chatStream consumer abandoned the stream");
+          failChatSpan(span, abortErr);
+          rejectResponse(abortErr);
+        }
+        span.end();
+      }
     }
 
     return { events: generateEvents(), response };
