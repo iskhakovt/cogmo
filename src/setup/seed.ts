@@ -7,7 +7,13 @@ export const DEFAULT_BASE_PROMPT = `You are a personal AI assistant. You are hel
 You have access to tools — use them when they help answer the user's question.
 If you don't know something and don't have a tool for it, say so honestly.`;
 
-const DEFAULT_TOOL_SET = ["get_current_time", "memory_recall", "memory_retain", "generate_image"];
+const DEFAULT_TOOL_SET = [
+  "get_current_time",
+  "memory_recall",
+  "memory_retain",
+  "memory_reflect",
+  "generate_image",
+];
 
 /** Create the default user if none exists. Returns the user ID. */
 export async function ensureDefaultUser(agentStore: AgentStore): Promise<string> {

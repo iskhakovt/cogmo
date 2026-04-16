@@ -104,8 +104,46 @@ describe("createService", () => {
 
     await svc.memory.recall("q");
     await svc.memory.retain("f");
+    await svc.memory.reflect("q");
 
     expect(memory.recall).toHaveBeenCalledWith("bank-1", "q", { tags: ["tag-a"] });
     expect(memory.retain).toHaveBeenCalledWith("bank-1", "f", { tags: ["tag-a"] });
+    expect(memory.reflect).toHaveBeenCalledWith("bank-1", "q", { tags: ["tag-a"] });
+  });
+
+  it("delegates reflect to MemoryProvider with correct bankId", async () => {
+    const memory = mockMemory();
+    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory);
+
+    await svc.memory.reflect("who is Alice?");
+
+    expect(memory.reflect).toHaveBeenCalledWith("user-123", "who is Alice?", { tags: [] });
+  });
+
+  it("merges profileTags with caller-provided tags on reflect", async () => {
+    const memory = mockMemory();
+    const svc = createService(memory, "user-123", ["network:world"], stubFiles, stubCoreMemory);
+
+    await svc.memory.reflect("query", { tags: ["extra"], budget: "mid" });
+
+    expect(memory.reflect).toHaveBeenCalledWith("user-123", "query", {
+      tags: ["network:world", "extra"],
+      budget: "mid",
+    });
+  });
+
+  it("forwards reflect budget and returns provider answer", async () => {
+    const memory = mockMemory();
+    const reflectMock = vi.fn().mockResolvedValue({ answer: "synthesized" });
+    memory.reflect = reflectMock;
+    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory);
+
+    const result = await svc.memory.reflect("query", { budget: "high" });
+
+    expect(reflectMock).toHaveBeenCalledWith("user-123", "query", {
+      tags: [],
+      budget: "high",
+    });
+    expect(result).toEqual({ answer: "synthesized" });
   });
 });

@@ -8,6 +8,7 @@ const stubService: Service = {
   memory: {
     recall: async () => ({ memories: [] }),
     retain: async () => {},
+    reflect: async () => ({ answer: "" }),
   },
   files: {
     read: async () => "",
@@ -157,6 +158,7 @@ describe("createDefaultTools", () => {
     const registry = createDefaultTools(memoryTools);
     expect(registry.get("memory_recall")).toBeDefined();
     expect(registry.get("memory_retain")).toBeDefined();
-    expect(registry.definitions()).toHaveLength(3);
+    expect(registry.get("memory_reflect")).toBeDefined();
+    expect(registry.definitions()).toHaveLength(4);
   });
 });
