@@ -47,15 +47,15 @@ export interface TransportStore {
   closeSession(sessionId: string): Promise<void>;
 
   /**
-   * Atomically close an existing session (if any) and open a new one, in a single transaction.
-   * Used by `resumeConversation` so the user can't be left session-less if the create half fails.
-   * `oldSessionId: null` means "no existing session to close" — still transactional for consistency.
+   * Atomically close any active session on `(channelId, platformAddress)` and open a new one,
+   * in a single transaction. Used by `resumeConversation` — both the close and the insert (and
+   * the lookup that decides what to close) happen under the same snapshot, so no concurrent
+   * `createSession`/`swapSession` on the same address can slip between resolve and swap.
    */
   swapSession(
-    oldSessionId: string | null,
+    channelId: string,
+    platformAddress: string,
     newParams: {
-      channelId: string;
-      platformAddress: string;
       conversationId: string;
       status: string;
       receive: string;
@@ -215,24 +215,34 @@ export class DrizzleTransportStore implements TransportStore {
   }
 
   async swapSession(
-    oldSessionId: string | null,
+    channelId: string,
+    platformAddress: string,
     newParams: {
-      channelId: string;
-      platformAddress: string;
       conversationId: string;
       status: string;
       receive: string;
     },
   ): Promise<{ id: string }> {
     return this.#db.transaction(async (tx) => {
-      if (oldSessionId) {
-        await tx
-          .update(channelSessions)
-          .set({ status: "closed" })
-          .where(eq(channelSessions.id, oldSessionId));
-      }
+      // Close ALL active sessions on this (channelId, platformAddress) inside the tx.
+      // There should be at most one under normal usage, but closing set-wise is race-safe:
+      // a concurrent createSession landing between our close and insert would be impossible
+      // because both statements share the same transactional snapshot.
+      await tx
+        .update(channelSessions)
+        .set({ status: "closed" })
+        .where(
+          and(
+            eq(channelSessions.channelId, channelId),
+            eq(channelSessions.platformAddress, platformAddress),
+            eq(channelSessions.status, "active"),
+          ),
+        );
       return single(
-        await tx.insert(channelSessions).values(newParams).returning({ id: channelSessions.id }),
+        await tx
+          .insert(channelSessions)
+          .values({ channelId, platformAddress, ...newParams })
+          .returning({ id: channelSessions.id }),
       );
     });
   }

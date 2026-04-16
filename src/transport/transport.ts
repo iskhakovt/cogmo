@@ -215,18 +215,16 @@ export function createTransport(deps: {
         });
       }
 
-      // Atomic close-old + open-new in one transaction. Without this, a create failure after
-      // close would leave the user session-less with no recovery path.
-      const existing = await transportStore.resolveSession(channelId, platformAddress);
-      const params = {
-        channelId,
-        platformAddress,
+      // Atomic close-old + open-new in one transaction, with the "what's active" lookup
+      // happening INSIDE the tx so no concurrent createSession / swapSession on this address
+      // can slip between resolve and swap. Failure of the insert rolls back the close.
+      const newParams = {
         conversationId,
         status: "active" as const,
         receive: "routed" as const,
       };
-      const { id } = await transportStore.swapSession(existing?.id ?? null, params);
-      return ok({ id, ...params });
+      const { id } = await transportStore.swapSession(channelId, platformAddress, newParams);
+      return ok({ id, channelId, platformAddress, ...newParams });
     },
 
     async emit(sessionId, content, platformTs) {

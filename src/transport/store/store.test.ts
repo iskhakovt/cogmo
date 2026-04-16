@@ -29,16 +29,18 @@ async function seedChannel(type = "direct"): Promise<string> {
   return (await store.createChannel({ type, credentials: {}, identityMode: "fixed" })).id;
 }
 
+let profileNameCounter = 0;
 async function seedConversation(): Promise<{
   userId: string;
   profileId: string;
   conversationId: string;
 }> {
   const userId = (await agentStore.createUser()).id;
+  profileNameCounter += 1;
   const profileId = (
     await agentStore.createProfile({
       userId: null,
-      name: "test",
+      name: `test-${profileNameCounter}`,
       basePrompt: "prompt",
       model: "model",
       toolSet: [],
@@ -171,6 +173,53 @@ describe("DrizzleTransportStore", () => {
       const active = await store.getActiveSessionsForConversation(conversationId);
       expect(active).toHaveLength(1);
       expect(active[0]?.platformAddress).toBe("addr-2");
+    });
+
+    it("swapSession closes all prior active sessions on (channelId, platformAddress) and opens a new one", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const { conversationId: conv2 } = await seedConversation();
+      const oldId = await seedSession(channelId, conversationId, "addr-swap");
+
+      const { id: newId } = await store.swapSession(channelId, "addr-swap", {
+        conversationId: conv2,
+        status: "active",
+        receive: "routed",
+      });
+
+      expect(newId).not.toBe(oldId);
+      expect((await store.getSession(oldId))?.status).toBe("closed");
+      expect((await store.getSession(newId))?.status).toBe("active");
+      // resolveSession returns the new one (most recent)
+      expect((await store.resolveSession(channelId, "addr-swap"))?.id).toBe(newId);
+    });
+
+    it("swapSession works when no prior session exists on the address", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+
+      const { id } = await store.swapSession(channelId, "fresh-addr", {
+        conversationId,
+        status: "active",
+        receive: "routed",
+      });
+
+      expect((await store.getSession(id))?.status).toBe("active");
+      expect((await store.resolveSession(channelId, "fresh-addr"))?.id).toBe(id);
+    });
+
+    it("swapSession does not touch sessions on other addresses", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const otherId = await seedSession(channelId, conversationId, "other-addr");
+
+      await store.swapSession(channelId, "addr-a", {
+        conversationId,
+        status: "active",
+        receive: "routed",
+      });
+
+      expect((await store.getSession(otherId))?.status).toBe("active");
     });
   });
 
