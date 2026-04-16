@@ -682,16 +682,19 @@ export class DrizzleAgentStore implements AgentStore {
 
       return rows
         .filter((r) => r.lastMessageAt != null) // skip conversations with no messages yet
-        .map((r) => ({
-          id: r.id,
-          profileName: r.profileName,
-          alias: r.alias,
-          lastMessagePreview: previewFromContent(r.content),
-          // Correlated subquery loses the Drizzle column type mapper; normalize to Date here.
-          // biome-ignore lint/style/noNonNullAssertion: filtered above
-          lastMessageAt:
-            r.lastMessageAt instanceof Date ? r.lastMessageAt : new Date(r.lastMessageAt!),
-        }));
+        .map((r) => {
+          // Correlated subquery loses the Drizzle column type mapper — driver returns either
+          // a Date (postgres-js) or an ISO string (PGlite); normalize.
+          const raw = r.lastMessageAt as Date | string;
+          const lastMessageAt = raw instanceof Date ? raw : new Date(raw);
+          return {
+            id: r.id,
+            profileName: r.profileName,
+            alias: r.alias,
+            lastMessagePreview: previewFromContent(r.content),
+            lastMessageAt,
+          };
+        });
     });
   }
 

@@ -266,9 +266,12 @@ export class ProfileDialogs {
   }
 }
 
-/** For `new` profiles, inherit the current org default toolSet so the user isn't stuck picking. */
-function defaultToolSetFor(state: DialogState): string[] {
-  // v0: use a minimal safe default. User can edit via future /profile edit <tools> sub-flow.
+/**
+ * Default toolSet for new user profiles — v0 uses a minimal safe set. A future `/profile edit
+ * <tools>` sub-flow can expose tool selection. Takes `state` so we can extend later
+ * (e.g. inherit from a current profile in edit mode) without changing the call site.
+ */
+function defaultToolSetFor(_state: DialogState): string[] {
   return ["get_current_time", "memory_recall", "memory_retain"];
 }
 
