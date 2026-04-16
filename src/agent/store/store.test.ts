@@ -219,6 +219,7 @@ describe("DrizzleAgentStore", () => {
         ],
         lastInboundMessageId: inboundId,
         lastMessageInputTokens: 500,
+        lastMessageOutputTokens: 120,
       });
 
       expect(result.id).toBeDefined();
@@ -245,11 +246,12 @@ describe("DrizzleAgentStore", () => {
           conversationId,
           messages: [],
           lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+          lastMessageOutputTokens: 0,
         }),
       ).rejects.toThrow("insertMessages requires at least one message");
     });
 
-    it("insertMessages sets inputTokens only on the last message", async () => {
+    it("insertMessages writes token counts onto the last message only", async () => {
       const { conversationId } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
@@ -262,21 +264,32 @@ describe("DrizzleAgentStore", () => {
         ],
         lastInboundMessageId: inboundId,
         lastMessageInputTokens: 42,
+        lastMessageOutputTokens: 7,
       });
 
       // Query raw table — don't rely on UUID ordering (PGlite's pg_uuidv7
       // uses random bits, so ORDER BY id is non-deterministic within a batch)
       const rows = await db
-        .select({ role: messages.role, inputTokens: messages.inputTokens })
+        .select({
+          role: messages.role,
+          inputTokens: messages.inputTokens,
+          outputTokens: messages.outputTokens,
+        })
         .from(messages)
         .where(eq(messages.conversationId, conversationId));
 
-      const withTokens = rows.filter((r) => r.inputTokens != null);
-      expect(withTokens).toHaveLength(1);
-      expect(withTokens[0]!.inputTokens).toBe(42);
+      // Only one row carries real token counts — the final assistant reply.
+      const finalRow = rows.find((r) => r.inputTokens != null);
+      expect(finalRow).toBeDefined();
+      expect(finalRow!.inputTokens).toBe(42);
+      expect(finalRow!.outputTokens).toBe(7);
 
-      const withoutTokens = rows.filter((r) => r.inputTokens == null);
-      expect(withoutTokens).toHaveLength(2);
+      // Non-final rows: inputTokens null, outputTokens is the -1 sentinel.
+      const otherRows = rows.filter((r) => r.inputTokens == null);
+      expect(otherRows).toHaveLength(2);
+      for (const r of otherRows) {
+        expect(r.outputTokens).toBe(-1);
+      }
     });
 
     it("getLastAssistantMessage returns most recent", async () => {
@@ -310,62 +323,81 @@ describe("DrizzleAgentStore", () => {
       expect(await store.getHistory(conversationId)).toEqual([]);
     });
 
-    it("persists and retrieves inputTokens on assistant messages", async () => {
+    it("insertMessages persists both token counts and getLastTokens returns them", async () => {
+      // After a turn with input=N, output=M, getLastTokens should report
+      // both — the fast path needs both terms to estimate next-turn input.
       const { conversationId } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
-      await store.insertMessage({
+      await store.insertMessages({
         conversationId,
-        role: "assistant",
-        content: "response",
+        messages: [{ role: "assistant", content: [{ type: "text", text: "response" }] }],
         lastInboundMessageId: inboundId,
-        inputTokens: 5432,
+        lastMessageInputTokens: 5432,
+        lastMessageOutputTokens: 321,
       });
 
-      const tokens = await store.getLastInputTokens(conversationId);
-      expect(tokens).toBe(5432);
+      expect(await store.getLastTokens(conversationId)).toEqual({
+        inputTokens: 5432,
+        outputTokens: 321,
+      });
     });
 
-    it("getLastInputTokens returns null when no assistant messages", async () => {
+    it("getLastTokens returns null when no assistant messages", async () => {
       const { conversationId } = await seedConversation();
-      expect(await store.getLastInputTokens(conversationId)).toBeNull();
+      expect(await store.getLastTokens(conversationId)).toBeNull();
     });
 
-    it("getLastInputTokens returns most recent assistant's tokens", async () => {
+    it("getLastTokens returns the most recent assistant row's tokens", async () => {
       const { conversationId } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
-      await store.insertMessage({
+      await store.insertMessages({
         conversationId,
-        role: "assistant",
-        content: "first",
+        messages: [{ role: "assistant", content: [{ type: "text", text: "first" }] }],
         lastInboundMessageId: inboundId,
-        inputTokens: 1000,
+        lastMessageInputTokens: 1000,
+        lastMessageOutputTokens: 100,
       });
       await new Promise((r) => setTimeout(r, 2));
-      await store.insertMessage({
+      await store.insertMessages({
         conversationId,
-        role: "assistant",
-        content: "second",
+        messages: [{ role: "assistant", content: [{ type: "text", text: "second" }] }],
         lastInboundMessageId: inboundId,
-        inputTokens: 2000,
+        lastMessageInputTokens: 2000,
+        lastMessageOutputTokens: 200,
       });
 
-      expect(await store.getLastInputTokens(conversationId)).toBe(2000);
+      expect(await store.getLastTokens(conversationId)).toEqual({
+        inputTokens: 2000,
+        outputTokens: 200,
+      });
     });
 
-    it("insertMessage without inputTokens leaves it null", async () => {
+    it("insertMessage (singular) stores the -1 sentinel for outputTokens", async () => {
+      // Singular insertMessage is used for the user row the orchestrator
+      // writes up front — it has no output count, so the sentinel -1 is
+      // stored. (The fast path only reads the last *assistant* row, so this
+      // is never returned by getLastTokens — but we still prove it on disk.)
       const { conversationId } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
       await store.insertMessage({
         conversationId,
-        role: "assistant",
+        role: "user",
         content: "no tokens",
         lastInboundMessageId: inboundId,
       });
 
-      expect(await store.getLastInputTokens(conversationId)).toBeNull();
+      const rows = await db
+        .select({ outputTokens: messages.outputTokens })
+        .from(messages)
+        .where(eq(messages.conversationId, conversationId));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.outputTokens).toBe(-1);
+
+      // And getLastTokens still returns null — no assistant row exists.
+      expect(await store.getLastTokens(conversationId)).toBeNull();
     });
   });
 

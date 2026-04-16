@@ -218,8 +218,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const budget = computeBudget(model);
       const toolDefs = tools.definitions();
 
-      const lastInputTokens = await agentStore.getLastInputTokens(conversationId);
-      const skip = shouldSkipCounting(lastInputTokens, userContentText.length, budget);
+      const lastTokens = await agentStore.getLastTokens(conversationId);
+      const skip = shouldSkipCounting(
+        lastTokens?.inputTokens ?? null,
+        lastTokens?.outputTokens ?? null,
+        userContentText.length,
+        budget,
+      );
 
       if (!skip) {
         const compactResult = await compactMessages(fullPrompt, historyMessages, toolDefs, {
@@ -287,6 +292,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           messages: result.newMessages,
           lastInboundMessageId: maxInboundId,
           lastMessageInputTokens: result.usage.inputTokens,
+          lastMessageOutputTokens: result.usage.outputTokens,
         });
       });
 

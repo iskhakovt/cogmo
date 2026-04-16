@@ -16,6 +16,16 @@ import {
   users,
 } from "./schema.js";
 
+/**
+ * Sentinel for `messages.output_tokens` meaning "unknown — force a full token
+ * count on next turn." Used on:
+ *   1. Rows migrated from before the column existed (backfill in 0007).
+ *   2. Rows that never had a meaningful output count (user rows, intermediate
+ *      tool turns) — harmless because the fast path only reads the most
+ *      recent **assistant** row, which always carries the real count.
+ */
+export const UNKNOWN_OUTPUT_TOKENS = -1;
+
 export interface AgentStore {
   /** Create a new user. */
   createUser(): Promise<{ id: string }>;
@@ -41,12 +51,22 @@ export interface AgentStore {
     inputTokens?: number;
   }): Promise<{ id: string }>;
 
-  /** Insert multiple messages atomically in a single transaction. Returns the last inserted ID. */
+  /**
+   * Insert multiple messages atomically in a single transaction. Returns the
+   * last inserted ID.
+   *
+   * `lastMessageInputTokens` / `lastMessageOutputTokens` land on the **final**
+   * row (the assistant's visible reply). Output is required — the fast-path
+   * budget estimator (`shouldSkipCounting`) needs both, because the
+   * assistant's reply is part of next turn's input. Non-final rows (tool
+   * turns) get `output_tokens = -1` (sentinel: "unknown, force count").
+   */
   insertMessages(params: {
     conversationId: string;
     messages: ReadonlyArray<Message>;
     lastInboundMessageId: string;
     lastMessageInputTokens?: number;
+    lastMessageOutputTokens: number;
   }): Promise<{ id: string }>;
 
   /** Get the most recent assistant message for a conversation (for cursor chain). */
@@ -102,8 +122,17 @@ export interface AgentStore {
   /** Get the timestamp of the most recent message in a conversation (any role). */
   getLastMessageTime(conversationId: string): Promise<Date | null>;
 
-  /** Get inputTokens from the most recent assistant message (for fast-path budget estimation). */
-  getLastInputTokens(conversationId: string): Promise<number | null>;
+  /**
+   * Get `{ inputTokens, outputTokens }` from the most recent assistant
+   * message, for the fast-path budget estimator. Returns `null` if no
+   * assistant row exists. Either field may be `null` (never written, e.g.
+   * legacy inputTokens column) or `-1` (pre-migration sentinel for
+   * outputTokens). The fast path treats both as "unknown → force count".
+   */
+  getLastTokens(conversationId: string): Promise<{
+    inputTokens: number | null;
+    outputTokens: number;
+  } | null>;
 
   // --- LLM Providers ---
 
@@ -273,6 +302,11 @@ export class DrizzleAgentStore implements AgentStore {
             content,
             lastInboundMessageId: params.lastInboundMessageId,
             ...(params.inputTokens != null && { inputTokens: params.inputTokens }),
+            // Singular insert is only used for user rows (and the orchestrator's
+            // initial synthesized user message) — they never have an output
+            // count. Sentinel -1 tells the fast path "unknown, force count" if
+            // this row were ever the most-recent assistant (it isn't).
+            outputTokens: UNKNOWN_OUTPUT_TOKENS,
           })
           .returning({ id: messages.id }),
       );
@@ -284,6 +318,7 @@ export class DrizzleAgentStore implements AgentStore {
     messages: ReadonlyArray<Message>; // must be non-empty
     lastInboundMessageId: string;
     lastMessageInputTokens?: number;
+    lastMessageOutputTokens: number;
   }): Promise<{ id: string }> {
     if (params.messages.length === 0) {
       throw new Error("insertMessages requires at least one message");
@@ -299,6 +334,9 @@ export class DrizzleAgentStore implements AgentStore {
           params.lastMessageInputTokens != null && {
             inputTokens: params.lastMessageInputTokens,
           }),
+        // Intermediate tool turns get the sentinel — only the final assistant
+        // row carries the real aggregated outputTokens for the fast path.
+        outputTokens: i === lastIdx ? params.lastMessageOutputTokens : UNKNOWN_OUTPUT_TOKENS,
       }));
       const rows = await tx.insert(messages).values(values).returning({ id: messages.id });
       const last = R.last(rows);
@@ -462,15 +500,21 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getLastInputTokens(conversationId: string): Promise<number | null> {
+  async getLastTokens(conversationId: string): Promise<{
+    inputTokens: number | null;
+    outputTokens: number;
+  } | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
-        .select({ inputTokens: messages.inputTokens })
+        .select({
+          inputTokens: messages.inputTokens,
+          outputTokens: messages.outputTokens,
+        })
         .from(messages)
         .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
         .orderBy(desc(messages.id))
         .limit(1);
-      return rows[0]?.inputTokens ?? null;
+      return rows[0] ?? null;
     });
   }
 

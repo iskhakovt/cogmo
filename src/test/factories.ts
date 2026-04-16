@@ -46,7 +46,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     getCoreMemoryBlocks: vi.fn().mockResolvedValue([]),
     upsertCoreMemoryBlock: vi.fn().mockResolvedValue(undefined),
     getLastMessageTime: vi.fn().mockResolvedValue(null),
-    getLastInputTokens: vi.fn().mockResolvedValue(null),
+    getLastTokens: vi.fn().mockResolvedValue(null),
     createProvider: vi.fn().mockResolvedValue({ id: "provider-1" }),
     getProvider: vi.fn().mockResolvedValue(null),
     listProviders: vi.fn().mockResolvedValue([]),
