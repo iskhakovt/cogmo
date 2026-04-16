@@ -76,16 +76,26 @@ The user observes a message that took longer than usual (one extra round of tool
 
 ### Tool side effects that re-execute
 
-The streaming section is where tools run, so tool side effects are at-least-once on retry. By tool:
+The streaming section is where tools run, so tool side effects are at-least-once on retry **unless the tool opts into per-handler durability** (see "Per-tool durability" below). By tool:
 
 | Tool | Re-execution behavior |
 |-|-|
 | `memory_recall`, `read_file`, `list_files`, `current_time` | Pure reads — free to repeat. |
-| `web_search`, `web_answer`, `fetch_url` | Wastes external API quota. Otherwise benign — results inform the next LLM call only. |
+| `web_search`, `fetch_url` | Wastes external API quota. Otherwise benign — results inform the next LLM call only. |
+| `web_answer` | **Durable** — wrapped in `step.run` because Perplexity Sonar via OpenRouter is a billable LLM round-trip. Cached tool output replays on retry. |
 | `memory_retain` | Writes the same fact twice. Hindsight's `reflect()` job dedupes downstream. |
 | `core_memory_update`, `write_file` | Idempotent overwrites with the same content. No corruption. |
+| `generate_image` | **Durable** — wrapped in `step.run` because fal.ai charges $0.02–$0.04/call and uploads to AttachmentStore. Cached JSON result (path + mediaType) replays on retry — no re-billing, no duplicate uploaded blobs. |
 
-Net cost of a single retry: one extra LLM round-trip plus, in the worst case, a few duplicated external API calls. Acceptable for v0.
+Net cost of a single retry: one extra LLM round-trip plus, in the worst case, a few duplicated external API calls on non-durable tools. Acceptable for v0.
+
+### Per-tool durability
+
+Individual tool handlers may opt into durability via `ToolSpec.durable = true`. When set, the agent loop wraps that specific handler invocation in `step.run("tool-<name>-<toolUseId>", fn)` — the tool_use `id` (e.g. `toolu_01ABC`) is unique per LLM-issued call and stable across retries, so the step id is both unique within a turn and deterministic across attempts.
+
+Handlers execute **between** stream events (after the stream iteration finishes for a turn, before the next `onEvent("tool_result")` emission). Wrapping a single handler in `step.run` therefore doesn't reorder `onEvent` emissions — it just turns a direct `await handler(...)` into an `await step.run(id, () => handler(...))`, awaited in exactly the same place in the loop. Stream-handle side effects still see events in the same order as without durability.
+
+Use sparingly. Wrap only when the handler is expensive or billable (image generation, paid LLM round trips) — cheap/idempotent tools should stay non-durable so their results don't take up Inngest state. Current durable tools: `generate_image`, `web_answer`.
 
 ### Streaming dedup across the same process
 
@@ -155,7 +165,7 @@ Do **not** wrap:
 
 - Pure reads from injected dependencies (cheap, idempotent).
 - Code that captures references to the streaming `delivery` handle and expects to push events on every invocation.
-- Anything inside the agent loop body — the loop and its tools must stay in the non-durable section so streaming works.
+- The agent loop itself (`runStreamingAgentLoop`) — the loop body must stay in the non-durable section so tokens can stream out. Individual tool handlers *inside* the loop are the exception: they run between stream events and can be wrapped via `ToolSpec.durable = true` (see "Per-tool durability" above).
 - Pipelines that build large intermediate values (image base64, full message histories) just to return a small final result. Wrap only the expensive sub-step.
 
 When adding a new step, add a corresponding case to `handle-message.replay.test.ts` proving the body does not re-execute on cached replay.

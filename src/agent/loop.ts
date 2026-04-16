@@ -8,6 +8,19 @@ import type { ToolRegistry } from "./tools.js";
 
 const tracer = trace.getTracer("cogmo.agent");
 
+/**
+ * Wraps a single tool-handler execution in a durable boundary (Inngest
+ * `step.run`). When provided to the agent loop, tools with `spec.durable ===
+ * true` run inside this wrapper, so their result is cached exactly-once across
+ * retries. Handler errors propagate (Inngest per-step retries fire first,
+ * then the error bubbles up).
+ *
+ * Injected rather than depending on Inngest's `step` directly — keeps the
+ * loop testable without an Inngest context. When undefined, all tools run
+ * directly regardless of their `durable` flag.
+ */
+export type StepRunner = <T>(id: string, fn: () => Promise<T>) => Promise<T>;
+
 export interface AgentLoopParams {
   provider: LlmProvider;
   model: string;
@@ -16,6 +29,12 @@ export interface AgentLoopParams {
   tools: ToolRegistry;
   service: Service;
   maxIterations?: number;
+  /**
+   * Optional durability wrapper for tool handlers. See `StepRunner`.
+   * When provided, tools with `spec.durable === true` run inside the wrapper
+   * with step id `tool-<name>-<toolUseId>` (unique per LLM-issued tool call).
+   */
+  stepRun?: StepRunner;
 }
 
 export interface AgentLoopResult {
@@ -79,6 +98,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     systemPrompt,
     tools,
     service,
+    stepRun,
     maxIterations = DEFAULT_MAX_ITERATIONS,
   } = params;
   const messages = clearOldThinking(params.messages);
@@ -114,7 +134,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     }
 
     // Execute tool calls and append results
-    const toolResults = await executeToolCalls(response.content, tools, service);
+    const toolResults = await executeToolCalls(response.content, tools, service, stepRun);
     messages.push({ role: "user", content: toolResults });
 
     logger.debug({ iteration: iterations, toolCalls: toolResults.length }, "tool round complete");
@@ -128,6 +148,7 @@ async function executeToolCalls(
   content: ContentBlock[],
   tools: ToolRegistry,
   service: Service,
+  stepRun: StepRunner | undefined,
 ): Promise<ContentBlock[]> {
   const toolUseBlocks = content.filter((b) => b.type === "tool_use");
   const results: ContentBlock[] = [];
@@ -151,7 +172,16 @@ async function executeToolCalls(
       { attributes: { "cogmo.tool.name": block.name } },
       async (span) => {
         try {
-          const out = await spec.handler(block.input as Record<string, unknown>, service);
+          // Opt-in durability: wrap only when the tool is flagged AND a
+          // runner is provided. The handler body itself runs between stream
+          // events (never during), so wrapping in `step.run` doesn't
+          // reorder `onEvent` emissions. See design/crash-recovery.md.
+          const runHandler = (): Promise<string> =>
+            spec.handler(block.input as Record<string, unknown>, service);
+          const out =
+            spec.durable === true && stepRun
+              ? await stepRun(`tool-${block.name}-${block.id}`, runHandler)
+              : await runHandler();
           return { type: "tool_result" as const, toolUseId: block.id, content: out };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -234,6 +264,7 @@ export async function runStreamingAgentLoop(
     tools,
     service,
     onEvent,
+    stepRun,
     maxIterations = DEFAULT_MAX_ITERATIONS,
   } = params;
   const messages = clearOldThinking(params.messages);
@@ -315,7 +346,7 @@ export async function runStreamingAgentLoop(
     }
 
     // Execute tool calls, emit results, append to messages
-    const toolResults = await executeToolCalls(contentBlocks, tools, service);
+    const toolResults = await executeToolCalls(contentBlocks, tools, service, stepRun);
 
     for (const block of toolResults) {
       if (block.type === "tool_result") {
