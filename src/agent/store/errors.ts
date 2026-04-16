@@ -1,5 +1,7 @@
 /** Typed store errors. Thrown from DrizzleAgentStore; caught + mapped by Transport. */
 
+import { logger } from "../../logger.js";
+
 /**
  * Postgres unique constraint violation (SQLSTATE 23505).
  * The constraint name lets callers distinguish between e.g. `uq_profiles_user_name` vs `uq_aliases_user_alias`.
@@ -10,6 +12,24 @@ export class UniqueViolationError extends Error {
     super(`unique violation on constraint "${constraint}"`);
     this.name = "UniqueViolationError";
     this.constraint = constraint;
+  }
+}
+
+/**
+ * Thrown by `deleteProfile` when the profile is still referenced by at least one conversation
+ * or message. Messages reference profiles via `messages.profile_id` for audit stamping —
+ * once a profile has ever been used in a turn, it stays pinned until that history is deleted.
+ * Transport catches this and surfaces `profile_in_use`.
+ */
+export class ProfileInUseError extends Error {
+  constructor(
+    public readonly conversationRefs: number,
+    public readonly messageRefs: number,
+  ) {
+    super(
+      `profile in use: ${conversationRefs} conversation(s), ${messageRefs} message(s) reference it`,
+    );
+    this.name = "ProfileInUseError";
   }
 }
 
@@ -45,7 +65,17 @@ export async function translateUniqueViolation<T>(fn: () => Promise<T>): Promise
   } catch (e) {
     const pg = findPostgresUniqueViolation(e);
     if (pg) {
-      throw new UniqueViolationError(pg.constraint_name ?? pg.constraint ?? "unknown");
+      const constraint = pg.constraint_name ?? pg.constraint;
+      if (!constraint) {
+        // Shouldn't normally fire — postgres-js + PGlite both populate `constraint` on 23505.
+        // If this warns in prod, our driver-error walker is missing a new wrapper shape and
+        // downstream Transport mapping silently degrades to generic errors. Investigate.
+        logger.warn(
+          { err: e },
+          "translateUniqueViolation: 23505 without constraint name — update findPostgresUniqueViolation",
+        );
+      }
+      throw new UniqueViolationError(constraint ?? "unknown");
     }
     throw e;
   }

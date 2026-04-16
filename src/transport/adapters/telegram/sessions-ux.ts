@@ -39,10 +39,11 @@ export function renderSessionsList(
     return { text: "Select a conversation:", buttons };
   }
 
-  // Too many — numbered text list with /resume <alias> as the action.
+  // Too many — numbered text list with `/resume <alias|uuid>` as the action. Unaliased rows
+  // still get an actionable command; `handleResume` accepts both alias and UUID forms.
   const lines = summaries.map((s, i) => {
     const marker = s.id === opts.currentConversationId ? " (current)" : "";
-    const target = s.alias ? `/resume ${s.alias}` : s.id;
+    const target = `/resume ${s.alias ?? s.id}`;
     return `${i + 1}. ${labelFor(s, false)} — ${target}${marker}`;
   });
   return { text: lines.join("\n") };

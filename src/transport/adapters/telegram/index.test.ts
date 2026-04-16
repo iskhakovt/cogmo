@@ -147,7 +147,7 @@ describe("telegram adapter", () => {
     await handlers.get("command:new")!(ctx);
 
     expect(transport.closeSession).toHaveBeenCalledWith("session-1");
-    expect(ctx.reply).toHaveBeenCalledWith("New conversation started.");
+    expect(ctx.reply.mock.calls[0]?.[0]).toBe("New conversation started.");
   });
 
   it("mid-dialog text (/profile new flow) does NOT emit to agent", async () => {

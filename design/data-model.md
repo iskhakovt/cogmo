@@ -20,6 +20,7 @@ Tables are documented in the design doc that owns their domain:
 | `inbound_messages` | [transport/debounce.md](transport/debounce.md) | Raw input staging buffer for debounce batching |
 | `steering_rules` | [agents.md](agents.md) | Dynamic behavioral rules injected into system prompts. Written by manual insertion and automated correction extraction (Stage 1 evolution). |
 | `core_memory_blocks` | [agents.md](agents.md) | Structured persistent notes (user profile, projects). Upsert by (user_id, key). Always in system prompt. |
+| `aliases` | [transport/sessions.md](transport/sessions.md) | Human-friendly conversation names ('work', 'shopping'). Scoped per user (`UNIQUE(user_id, alias)`). Set via `transport.conversations.setAlias` (`/name <alias>` in Telegram). |
 
 ## New Tables (Setup Infrastructure) `[confirmed]`
 
@@ -41,7 +42,6 @@ Design sketches — added via Drizzle migrations when their phase begins.
 |-|-|-|
 | `agent_traces` | 2 | LLM execution log (tool calls, reasoning). FK → messages. |
 | `reflections` | 2 | Tracks Observer runs (conversation_id, covered_up_to message). |
-| `aliases` | 2 | Human-friendly conversation names ('work', 'shopping'). Scoped per user. Set via `transport.conversations.setAlias` (`/name <alias>` in Telegram). See [transport/sessions.md](transport/sessions.md) → Aliases. |
 | `signals` | 2 | Conversation signals for evolution pipeline (re-ask, correction, etc.). |
 | `skills` | 3 | Skill library metadata. Code on filesystem, descriptions for retrieval. |
 

@@ -34,11 +34,12 @@ interface Transport {
   // Inbound (hot path — top-level)
   emit(sessionId: string, content: InboundContent, platformTs: Date): Promise<void>;
 
-  // Conversations (admin)
+  // Conversations (admin) — every mutator takes platformUserHandle for ACL
   conversations: {
     list(platformUserHandle: string): Promise<ConversationSummary[]>;
-    setAlias(conversationId: string, alias: string | null): Promise<void>;  // null = unset
-    setProfile(conversationId: string, profileId: string): Promise<void>;   // takes effect next turn
+    getCurrent(platformUserHandle: string, platformAddress: string): Promise<CurrentConversation | null>;  // session + profile snapshot
+    setAlias(platformUserHandle: string, conversationId: string, alias: string | null): Promise<void>;
+    setProfile(platformUserHandle: string, conversationId: string, profileId: string): Promise<void>;     // takes effect next turn
   };
 
   // Profiles (admin)
@@ -46,11 +47,11 @@ interface Transport {
     list(platformUserHandle: string): Promise<Profile[]>;          // returns org profiles + caller's user profiles
     create(platformUserHandle: string, input: ProfileInput): Promise<Profile>;  // user_id = caller
     update(platformUserHandle: string, profileId: string, changes: Partial<ProfileInput>): Promise<Profile>;  // rejects if profile.user_id !== caller (incl. org profiles)
-    delete(platformUserHandle: string, profileId: string): Promise<void>;  // rejects if profile.user_id !== caller, or if conversations reference it
+    delete(platformUserHandle: string, profileId: string): Promise<void>;  // rejects if profile.user_id !== caller, or if conversations/messages reference it
   };
 
   // Models (read-only — discovery for /model command)
-  models: { list(): Promise<string[]> };  // SELECT DISTINCT model FROM model_providers
+  models: { list(): Promise<string[]> };  // SELECT DISTINCT model FROM model_providers WHERE user_selectable = true
 }
 
 interface ConversationSummary {
@@ -61,13 +62,18 @@ interface ConversationSummary {
   lastMessageAt: Date;
 }
 
+interface CurrentConversation {
+  conversationId: string;
+  profileId: string;
+  profileName: string;
+  model: string;
+}
+
 interface ProfileInput {
   name: string;
   basePrompt: string;
-  model: string;             // must exist in model_providers (else model_unavailable)
+  model: string;             // must exist in model_providers with user_selectable = true (else model_unavailable)
   toolSet: string[];
-  summarizationModel?: string;
-  autoRecall?: "off" | "always" | "heuristic" | "llm";
 }
 ```
 
@@ -155,48 +161,48 @@ session = transport.createConversation(address, userHandle, { isPrivate: true })
 ```
 
 **`/new coder` (with profile):**
-```
+```typescript
 transport.closeSession(currentSession.id)
 session = transport.createConversation(address, userHandle, { isPrivate: true, profileId })
 ```
 
 **`/profile list`:**
-```
+```typescript
 profiles = transport.profiles.list(userHandle)
 // render profile list in platform-native UI
 ```
 
 **`/profile switch coder` (mid-conversation):**
-```
-transport.conversations.setProfile(currentSession.conversationId, coderProfileId)
+```typescript
+transport.conversations.setProfile(userHandle, currentSession.conversationId, coderProfileId)
 // confirmation — next turn uses the new profile
 ```
 
 **`/profile new <name>` (create — always user-owned):**
-```
+```typescript
 profile = transport.profiles.create(userHandle, { name, basePrompt, model, toolSet: [...] })
 // adapter-specific flow collects basePrompt/model interactively
 ```
 
 **`/model <model>` (change active profile's model):**
-```
+```typescript
 models = transport.models.list()                                                  // user-selectable only
 transport.profiles.update(userHandle, currentProfile.id, { model: chosen })       // rejects access_denied if currentProfile is org-owned
 ```
 
 **`/name <alias>`:**
-```
-transport.conversations.setAlias(currentSession.conversationId, alias)
+```typescript
+transport.conversations.setAlias(userHandle, currentSession.conversationId, alias)
 ```
 
 **`/resume work` (alias):**
-```
-transport.closeSession(currentSession.id)
+```typescript
+// resumeConversation closes any existing session on the address and opens a new one atomically
 session = transport.resumeConversation(address, userHandle, { alias: "work" })
 ```
 
 **Web UI — view conversation:**
-```
+```typescript
 session = transport.resumeConversation(tabId, userHandle, { conversationId }, { receive: "all", expiresAt: now + TTL })
 // heartbeat loop:
 transport.extendSession(session.id, now + TTL)

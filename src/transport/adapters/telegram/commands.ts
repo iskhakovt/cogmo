@@ -6,6 +6,7 @@
  * `index.ts` so the dispatcher logic is covered by unit tests.
  */
 
+import type { Profile } from "../../../agent/store/index.js";
 import type { Transport, TransportError } from "../../transport.js";
 import type { ProfileDialogs } from "./profile-dialog.js";
 import {
@@ -65,19 +66,24 @@ export async function handleResume(
   transport: Transport,
   ctx: TelegramCommandContext,
 ): Promise<void> {
-  const alias = ctx.match?.trim();
-  if (!alias) {
+  const target = ctx.match?.trim();
+  if (!target) {
     await ctx.reply(USAGE.resume);
     return;
   }
   const handle = String(ctx.from.id);
   const addr = String(ctx.chat.id);
-  const res = await transport.resumeConversation(addr, handle, { alias });
+  // Accept both alias and UUID forms so `/sessions` numbered output (which emits `/resume <uuid>`
+  // for unaliased entries) stays actionable. The callback-query path already does this.
+  const key = looksLikeUuid(target)
+    ? ({ conversationId: target } as const)
+    : ({ alias: target } as const);
+  const res = await transport.resumeConversation(addr, handle, key);
   if (res.isErr()) {
     await ctx.reply(errorMessage(res.error));
     return;
   }
-  await ctx.reply(`Resumed conversation "${alias}".`);
+  await ctx.reply(`Resumed conversation "${target}".`);
 }
 
 export async function handleName(transport: Transport, ctx: TelegramCommandContext): Promise<void> {
@@ -208,6 +214,80 @@ export async function handleResumeCallback(
 
 // ---- Internal helpers ----
 
+type ProfileResolution =
+  | { kind: "ok"; profile: Profile }
+  | { kind: "none" }
+  | { kind: "ambiguous"; matches: ReadonlyArray<Profile> }
+  | { kind: "error"; error: TransportError };
+
+/**
+ * Resolve a user-typed profile name. Org and user profiles can share a name (uniqueness is per
+ * user_id), so when both exist we prefer the caller-owned one. Transport doesn't expose the
+ * caller's userId directly, but `profiles.list` only returns org profiles + caller's own —
+ * so any non-null userId in the result IS the caller's.
+ */
+async function resolveProfileByName(
+  transport: Transport,
+  handle: string,
+  name: string,
+): Promise<ProfileResolution> {
+  const list = await transport.profiles.list(handle);
+  if (list.isErr()) return { kind: "error", error: list.error };
+  const matches = list.value.filter((p) => p.name === name);
+  if (matches.length === 0) return { kind: "none" };
+  if (matches.length === 1) return { kind: "ok", profile: matches[0]! };
+  // Exactly one user-owned match among several (org + user with same name) → pick the user one.
+  const owned = matches.filter((p) => p.userId !== null);
+  if (owned.length === 1) return { kind: "ok", profile: owned[0]! };
+  return { kind: "ambiguous", matches };
+}
+
+export async function handleNew(transport: Transport, ctx: TelegramCommandContext): Promise<void> {
+  const addr = String(ctx.chat.id);
+  const handle = String(ctx.from.id);
+  const profileName = ctx.match?.trim();
+
+  let profileId: string | undefined;
+  if (profileName) {
+    const res = await resolveProfileByName(transport, handle, profileName);
+    if (res.kind === "error") {
+      await ctx.reply(errorMessage(res.error));
+      return;
+    }
+    if (res.kind === "none") {
+      await ctx.reply(`No profile named "${profileName}". Use /profile list.`);
+      return;
+    }
+    if (res.kind === "ambiguous") {
+      await ctx.reply(ambiguityMessage(profileName, res.matches));
+      return;
+    }
+    profileId = res.profile.id;
+  }
+
+  const existing = await transport.resolveSession(addr);
+  if (existing) await transport.closeSession(existing.id);
+  const result = await transport.createConversation(
+    addr,
+    handle,
+    profileId ? { isPrivate: true, profileId } : { isPrivate: true },
+  );
+  if (result.isErr()) {
+    await ctx.reply(errorMessage(result.error));
+    return;
+  }
+  await ctx.reply(
+    profileName
+      ? `New conversation started with profile "${profileName}".`
+      : "New conversation started.",
+  );
+}
+
+function ambiguityMessage(name: string, matches: ReadonlyArray<Profile>): string {
+  const scopes = matches.map((p) => (p.userId === null ? "org" : "user")).join(", ");
+  return `Profile name "${name}" is ambiguous (${matches.length} matches: ${scopes}). Use /profile list to see all and pick a unique one.`;
+}
+
 async function replyProfileList(
   transport: Transport,
   ctx: TelegramCommandContext,
@@ -236,14 +316,17 @@ async function replyProfileSwitch(
     await ctx.reply(USAGE.profile);
     return;
   }
-  const list = await transport.profiles.list(handle);
-  if (list.isErr()) {
-    await ctx.reply(errorMessage(list.error));
+  const res = await resolveProfileByName(transport, handle, name);
+  if (res.kind === "error") {
+    await ctx.reply(errorMessage(res.error));
     return;
   }
-  const match = list.value.find((p) => p.name === name);
-  if (!match) {
+  if (res.kind === "none") {
     await ctx.reply(`No profile named "${name}". Use /profile list to see available profiles.`);
+    return;
+  }
+  if (res.kind === "ambiguous") {
+    await ctx.reply(ambiguityMessage(name, res.matches));
     return;
   }
   const current = await transport.conversations.getCurrent(handle, addr);
@@ -255,13 +338,13 @@ async function replyProfileSwitch(
     await ctx.reply("No active conversation yet — send a message first.");
     return;
   }
-  const res = await transport.conversations.setProfile(
+  const set = await transport.conversations.setProfile(
     handle,
     current.value.conversationId,
-    match.id,
+    res.profile.id,
   );
-  if (res.isErr()) {
-    await ctx.reply(errorMessage(res.error));
+  if (set.isErr()) {
+    await ctx.reply(errorMessage(set.error));
     return;
   }
   await ctx.reply(`Profile switched to "${name}". Takes effect next turn.`);
@@ -277,19 +360,22 @@ async function replyProfileDelete(
     await ctx.reply(USAGE.profile);
     return;
   }
-  const list = await transport.profiles.list(handle);
-  if (list.isErr()) {
-    await ctx.reply(errorMessage(list.error));
+  const res = await resolveProfileByName(transport, handle, name);
+  if (res.kind === "error") {
+    await ctx.reply(errorMessage(res.error));
     return;
   }
-  const match = list.value.find((p) => p.name === name);
-  if (!match) {
+  if (res.kind === "none") {
     await ctx.reply(`No profile named "${name}".`);
     return;
   }
-  const res = await transport.profiles.delete(handle, match.id);
-  if (res.isErr()) {
-    await ctx.reply(errorMessage(res.error));
+  if (res.kind === "ambiguous") {
+    await ctx.reply(ambiguityMessage(name, res.matches));
+    return;
+  }
+  const del = await transport.profiles.delete(handle, res.profile.id);
+  if (del.isErr()) {
+    await ctx.reply(errorMessage(del.error));
     return;
   }
   await ctx.reply(`Profile "${name}" deleted.`);

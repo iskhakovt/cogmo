@@ -46,6 +46,22 @@ export interface TransportStore {
   /** Close a session (status = 'closed'). */
   closeSession(sessionId: string): Promise<void>;
 
+  /**
+   * Atomically close an existing session (if any) and open a new one, in a single transaction.
+   * Used by `resumeConversation` so the user can't be left session-less if the create half fails.
+   * `oldSessionId: null` means "no existing session to close" — still transactional for consistency.
+   */
+  swapSession(
+    oldSessionId: string | null,
+    newParams: {
+      channelId: string;
+      platformAddress: string;
+      conversationId: string;
+      status: string;
+      receive: string;
+    },
+  ): Promise<{ id: string }>;
+
   /** Persist a raw inbound message. */
   persistInbound(params: {
     channelSessionId: string;
@@ -195,6 +211,29 @@ export class DrizzleTransportStore implements TransportStore {
         .update(channelSessions)
         .set({ status: "closed" })
         .where(eq(channelSessions.id, sessionId));
+    });
+  }
+
+  async swapSession(
+    oldSessionId: string | null,
+    newParams: {
+      channelId: string;
+      platformAddress: string;
+      conversationId: string;
+      status: string;
+      receive: string;
+    },
+  ): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      if (oldSessionId) {
+        await tx
+          .update(channelSessions)
+          .set({ status: "closed" })
+          .where(eq(channelSessions.id, oldSessionId));
+      }
+      return single(
+        await tx.insert(channelSessions).values(newParams).returning({ id: channelSessions.id }),
+      );
     });
   }
 

@@ -5,7 +5,7 @@ import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
 import { type ContentBlock, type Message, MessageContentSchema } from "../../llm/types.js";
 import type { AutoRecallMode } from "../recall-gate.js";
-import { translateUniqueViolation } from "./errors.js";
+import { ProfileInUseError, translateUniqueViolation } from "./errors.js";
 import {
   aliases,
   conversations,
@@ -145,10 +145,17 @@ export interface AgentStore {
   /** Update a profile in place. Caller must verify ownership. Throws `UniqueViolationError` on name collision. */
   updateProfile(profileId: string, changes: ProfileUpdates): Promise<Profile>;
 
-  /** Count conversations currently pointing at a profile. Used before delete to surface `profile_in_use`. */
-  countConversationsForProfile(profileId: string): Promise<number>;
+  /**
+   * Count live references to a profile — active conversations + stamped message history.
+   * Useful for UX (warn before delete). `deleteProfile` performs the authoritative check-in-tx.
+   */
+  countProfileReferences(profileId: string): Promise<{ conversations: number; messages: number }>;
 
-  /** Delete a profile. Caller must ensure `countConversationsForProfile` is 0 first. */
+  /**
+   * Delete a profile atomically: checks `conversations` and `messages` references inside the
+   * same transaction and throws `ProfileInUseError` if any exist. Historical messages pin the
+   * profile as audit data — a profile that has ever been used in a turn stays undeletable.
+   */
   deleteProfile(profileId: string): Promise<void>;
 
   /** Load a single message by ID. */
@@ -542,18 +549,41 @@ export class DrizzleAgentStore implements AgentStore {
     );
   }
 
-  async countConversationsForProfile(profileId: string): Promise<number> {
+  async countProfileReferences(
+    profileId: string,
+  ): Promise<{ conversations: number; messages: number }> {
     return this.#db.transaction(async (tx) => {
-      const rows = await tx
-        .select({ value: count() })
-        .from(conversations)
-        .where(eq(conversations.profileId, profileId));
-      return rows[0]?.value ?? 0;
+      const [convRows, msgRows] = await Promise.all([
+        tx
+          .select({ value: count() })
+          .from(conversations)
+          .where(eq(conversations.profileId, profileId)),
+        tx.select({ value: count() }).from(messages).where(eq(messages.profileId, profileId)),
+      ]);
+      return {
+        conversations: convRows[0]?.value ?? 0,
+        messages: msgRows[0]?.value ?? 0,
+      };
     });
   }
 
   async deleteProfile(profileId: string): Promise<void> {
+    // Check refs + delete in one transaction so a concurrent conversation create / message insert
+    // can't sneak in between count and delete. Without this, callers would see a raw FK error
+    // instead of the typed ProfileInUseError.
     await this.#db.transaction(async (tx) => {
+      const [convRows, msgRows] = await Promise.all([
+        tx
+          .select({ value: count() })
+          .from(conversations)
+          .where(eq(conversations.profileId, profileId)),
+        tx.select({ value: count() }).from(messages).where(eq(messages.profileId, profileId)),
+      ]);
+      const convCount = convRows[0]?.value ?? 0;
+      const msgCount = msgRows[0]?.value ?? 0;
+      if (convCount > 0 || msgCount > 0) {
+        throw new ProfileInUseError(convCount, msgCount);
+      }
       await tx.delete(profiles).where(eq(profiles.id, profileId));
     });
   }

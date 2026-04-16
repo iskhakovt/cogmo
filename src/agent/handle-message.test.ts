@@ -147,6 +147,10 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
+    // Pin that the mid-turn reload actually happened — the test would false-pass if
+    // the second getProfile call were removed (e.g., someone caches the snapshot globally).
+    expect(getProfile.mock.calls.length).toBeGreaterThanOrEqual(2);
+
     // Both inserts stamped with the first (snapshot) profile+model, not the later change
     expect(deps.agentStore.insertMessage).toHaveBeenCalledWith(
       expect.objectContaining({ profileId: "profile-1", model: "claude-sonnet-4-20250514" }),

@@ -89,13 +89,26 @@ export class ProfileDialogs {
       await ctx.reply(friendlyError(list.error));
       return;
     }
-    const found = list.value.find((p) => p.name === name);
-    if (!found) {
+    // Name uniqueness is per user_id — a user profile can share a name with an org one.
+    // Prefer the user-owned match when both exist; surface ambiguity if we can't disambiguate.
+    const matches = list.value.filter((p) => p.name === name);
+    if (matches.length === 0) {
       await ctx.reply(`No profile named "${name}".`);
       return;
     }
-    if (found.userId === null) {
+    const owned = matches.filter((p) => p.userId !== null);
+    let found: Profile;
+    if (owned.length === 1) {
+      found = owned[0]!;
+    } else if (owned.length === 0 && matches.length === 1) {
+      // Only an org match — can't edit org profiles via Transport.
       await ctx.reply(`"${name}" is an org profile and can't be edited here.`);
+      return;
+    } else {
+      const scopes = matches.map((p) => (p.userId === null ? "org" : "user")).join(", ");
+      await ctx.reply(
+        `Profile name "${name}" is ambiguous (${matches.length} matches: ${scopes}). Rename one of them first.`,
+      );
       return;
     }
     this.#state.set(ctx.chat.id, {

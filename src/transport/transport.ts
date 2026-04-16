@@ -1,7 +1,7 @@
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { JsonValue } from "type-fest";
-import { UniqueViolationError } from "../agent/store/errors.js";
+import { ProfileInUseError, UniqueViolationError } from "../agent/store/errors.js";
 import type { AgentStore, ConversationSummary, Profile } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
@@ -13,8 +13,8 @@ export interface ProfileInput {
   basePrompt: string;
   model: string;
   toolSet: JsonValue;
-  summarizationModel?: string | null;
-  extractionModel?: string | null;
+  // summarizationModel / extractionModel are profile-level fields in the DB but not yet exposed
+  // via Transport — /profile edit doesn't cover them. Add back here when the dialog does.
 }
 
 export interface CurrentConversation {
@@ -215,10 +215,9 @@ export function createTransport(deps: {
         });
       }
 
-      // Close any existing active session on this address, then open a fresh one
+      // Atomic close-old + open-new in one transaction. Without this, a create failure after
+      // close would leave the user session-less with no recovery path.
       const existing = await transportStore.resolveSession(channelId, platformAddress);
-      if (existing) await transportStore.closeSession(existing.id);
-
       const params = {
         channelId,
         platformAddress,
@@ -226,7 +225,7 @@ export function createTransport(deps: {
         status: "active" as const,
         receive: "routed" as const,
       };
-      const { id } = await transportStore.createSession(params);
+      const { id } = await transportStore.swapSession(existing?.id ?? null, params);
       return ok({ id, ...params });
     },
 
@@ -353,10 +352,8 @@ export function createTransport(deps: {
             model: input.model,
             toolSet: input.toolSet,
           });
-          // Pick up the full row (Drizzle returning() only pulled id above to match the legacy signature).
-          const rows = await agentStore.listProfiles(identity.userId);
-          const created = rows.find((p) => p.id === id);
-          if (!created) throw new Error(`createProfile: new profile ${id} not found in list`);
+          const created = await agentStore.getProfile(id);
+          if (!created) throw new Error(`createProfile: new profile ${id} missing after insert`);
           return ok(created);
         } catch (e) {
           if (e instanceof UniqueViolationError)
@@ -409,10 +406,13 @@ export function createTransport(deps: {
         if (owner.userId !== identity.userId) {
           return err({ code: "access_denied" as const, reason: "profile not owned by caller" });
         }
-        const inUse = await agentStore.countConversationsForProfile(profileId);
-        if (inUse > 0) return err({ code: "profile_in_use" as const });
-        await agentStore.deleteProfile(profileId);
-        return ok(undefined);
+        try {
+          await agentStore.deleteProfile(profileId);
+          return ok(undefined);
+        } catch (e) {
+          if (e instanceof ProfileInUseError) return err({ code: "profile_in_use" as const });
+          throw e;
+        }
       },
     },
 

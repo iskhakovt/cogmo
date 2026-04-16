@@ -873,7 +873,7 @@ describe("DrizzleAgentStore", () => {
       );
     });
 
-    it("countConversationsForProfile counts conversations referencing the profile", async () => {
+    it("countProfileReferences counts both conversations and messages", async () => {
       const u = await seedUser();
       const { id: profileId } = await store.createProfile({
         userId: u,
@@ -882,13 +882,28 @@ describe("DrizzleAgentStore", () => {
         model: "m",
         toolSet: [],
       });
-      expect(await store.countConversationsForProfile(profileId)).toBe(0);
+      expect(await store.countProfileReferences(profileId)).toEqual({
+        conversations: 0,
+        messages: 0,
+      });
+
+      const { id: c1 } = await store.createConversation({ userId: u, profileId, isPrivate: true });
       await store.createConversation({ userId: u, profileId, isPrivate: true });
-      await store.createConversation({ userId: u, profileId, isPrivate: true });
-      expect(await store.countConversationsForProfile(profileId)).toBe(2);
+      await store.insertMessage({
+        conversationId: c1,
+        role: "user",
+        content: "hi",
+        profileId,
+        model: "m",
+        lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+      });
+      expect(await store.countProfileReferences(profileId)).toEqual({
+        conversations: 2,
+        messages: 1,
+      });
     });
 
-    it("deleteProfile removes the row (caller must pre-check count)", async () => {
+    it("deleteProfile removes the row when no references exist", async () => {
       const u = await seedUser();
       const { id } = await store.createProfile({
         userId: u,
@@ -899,6 +914,59 @@ describe("DrizzleAgentStore", () => {
       });
       await store.deleteProfile(id);
       expect(await store.getProfile(id)).toBeNull();
+    });
+
+    it("deleteProfile throws ProfileInUseError when conversations reference it", async () => {
+      const u = await seedUser();
+      const { id: profileId } = await store.createProfile({
+        userId: u,
+        name: "busy",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      await store.createConversation({ userId: u, profileId, isPrivate: true });
+      const { ProfileInUseError } = await import("./errors.js");
+      await expect(store.deleteProfile(profileId)).rejects.toThrow(ProfileInUseError);
+      // Profile still exists — delete rolled back.
+      expect(await store.getProfile(profileId)).not.toBeNull();
+    });
+
+    it("deleteProfile throws ProfileInUseError when only message history references it", async () => {
+      // The conversation has been switched away (profileId pointer gone) but stamped messages remain.
+      const u = await seedUser();
+      const { id: oldProfileId } = await store.createProfile({
+        userId: u,
+        name: "old",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      const { id: newProfileId } = await store.createProfile({
+        userId: u,
+        name: "new",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      const { id: convId } = await store.createConversation({
+        userId: u,
+        profileId: oldProfileId,
+        isPrivate: true,
+      });
+      await store.insertMessage({
+        conversationId: convId,
+        role: "user",
+        content: "hi",
+        profileId: oldProfileId,
+        model: "m",
+        lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+      });
+      // Switch the conversation to new profile — old profile now only referenced by stamped msg
+      await store.setConversationProfile(convId, newProfileId);
+
+      const { ProfileInUseError } = await import("./errors.js");
+      await expect(store.deleteProfile(oldProfileId)).rejects.toThrow(ProfileInUseError);
     });
   });
 

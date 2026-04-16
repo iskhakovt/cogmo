@@ -17,6 +17,7 @@ import {
   handleEnd,
   handleModel,
   handleName,
+  handleNew,
   handleProfile,
   handleResume,
   handleResumeCallback,
@@ -291,18 +292,10 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     );
   });
 
-  bot.command("new", async (ctx) => {
-    const addr = String(ctx.chat.id);
-    const session = await transport.resolveSession(addr);
-    if (session) {
-      await transport.closeSession(session.id);
-    }
-    await ctx.reply("New conversation started.");
-  });
-
   // Admin commands — each delegates to a pure handler in commands.ts.
   // grammY's ctx is ducktyped to `TelegramCommandContext` at call time; `ctx.match` holds
   // the trailing text after the command word (empty string for bare `/profile`).
+  bot.command("new", (ctx) => handleNew(transport, toCmdCtx(ctx)));
   bot.command("sessions", (ctx) => handleSessions(transport, toCmdCtx(ctx)));
   bot.command("resume", (ctx) => handleResume(transport, toCmdCtx(ctx)));
   bot.command("name", (ctx) => handleName(transport, toCmdCtx(ctx)));

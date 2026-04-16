@@ -49,7 +49,7 @@ profiles (
   model            TEXT NOT NULL,              -- LLM model identifier
   tool_set         JSONB NOT NULL,             -- enabled tool names
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (user_id, name)                       -- Postgres treats NULLs as distinct in UNIQUE; org profiles enforced unique by name via partial index `WHERE user_id IS NULL`
+  UNIQUE (user_id, name) NULLS NOT DISTINCT    -- org profiles (user_id = NULL) treated as equal by name, so "default" can only exist once across all org profiles; a user can still pick "default" for themselves
 );
 
 conversations (
@@ -106,7 +106,7 @@ Sequential handoff — channel side is done writing before orchestrator reads. T
 3. Resolve or create session via `transport.resolveSession()` / `transport.createConversation()` (identity resolved internally)
 4. Emit via `transport.emit(sessionId, content: InboundContent)` — persists inbound message + emits `inbound/arrived`
 
-**Control commands** (`/start`, `/new`, `/sessions`, `/resume`, `/name`, `/end`, `/profile`, `/model`) intercepted by adapter before step 2. No persist, no event, no LLM call — they call `Transport` admin methods directly. See [sessions.md](sessions.md), [adapters.md](adapters.md), and [telegram.md](telegram.md) for the canonical command table.
+**Control commands** (`/start`, `/new`, `/sessions`, `/resume`, `/name`, `/end`, `/profile`, `/model`, `/cancel`) intercepted by adapter before step 2. No persist, no event, no LLM call — they call `Transport` admin methods directly (or adapter-local state for interactive dialogs like `/profile new|edit` and its `/cancel`). See [sessions.md](sessions.md), [adapters.md](adapters.md), and [telegram.md](telegram.md) for the canonical command table.
 
 ## Agent Pipeline
 

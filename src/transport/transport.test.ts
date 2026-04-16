@@ -363,10 +363,11 @@ describe("createTransport", () => {
   });
 
   describe("profiles.delete", () => {
-    it("returns profile_in_use when conversations still reference the profile", async () => {
+    it("returns profile_in_use when deleteProfile throws ProfileInUseError (atomic check)", async () => {
+      const { ProfileInUseError } = await import("../agent/store/errors.js");
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
-        countConversationsForProfile: vi.fn().mockResolvedValue(3),
+        deleteProfile: vi.fn().mockRejectedValue(new ProfileInUseError(1, 4)),
       });
       const { transport } = setup({ agentStore });
       const res = await transport.profiles.delete("handle", "p-mine");
