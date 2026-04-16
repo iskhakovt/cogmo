@@ -109,7 +109,17 @@ export class AnthropicProvider implements LlmProvider {
             case "content_block_stop": {
               const toolBlock = toolBlocks.get(event.index);
               if (toolBlock) {
-                const input = JSON.parse(toolBlock.jsonChunks.join(""));
+                // Malformed tool-use JSON: attribute to the span before the
+                // generator unwinds, matching the catch branch below.
+                let input: unknown;
+                try {
+                  input = JSON.parse(toolBlock.jsonChunks.join(""));
+                } catch (parseErr) {
+                  completed = true;
+                  failChatSpan(span, parseErr);
+                  rejectResponse(parseErr);
+                  throw parseErr;
+                }
                 yield { type: "tool_start", id: toolBlock.id, name: toolBlock.name, input };
                 toolBlocks.delete(event.index);
               }

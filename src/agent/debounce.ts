@@ -72,7 +72,10 @@ export function createDebounceFunctions(config: DebounceConfig) {
     },
     async ({ event, step }) => {
       const ms = event.data.timeoutMs;
-      await step.sleep("wait", ms >= 1000 ? `${Math.round(ms / 1000)}s` : `${ms}ms`);
+      // Use `${ms}ms` unconditionally so the requested sleep and the recorded
+      // histogram value match. Rounding to whole seconds silently diverged
+      // the two by up to ~500ms on non-round timeouts.
+      await step.sleep("wait", `${ms}ms`);
       debounceWaitMs.record(ms, { kind: "idle" });
       await step.sendEvent(
         "fire",
@@ -94,7 +97,10 @@ export function createDebounceFunctions(config: DebounceConfig) {
     },
     async ({ event, step }) => {
       const ms = event.data.timeoutMs;
-      await step.sleep("wait", ms >= 1000 ? `${Math.round(ms / 1000)}s` : `${ms}ms`);
+      // Use `${ms}ms` unconditionally so the requested sleep and the recorded
+      // histogram value match. Rounding to whole seconds silently diverged
+      // the two by up to ~500ms on non-round timeouts.
+      await step.sleep("wait", `${ms}ms`);
       debounceWaitMs.record(ms, { kind: "maxwait" });
       await step.sendEvent(
         "fire",

@@ -243,9 +243,19 @@ export class OpenAICompatibleProvider implements LlmProvider {
           }
         }
 
-        // Yield accumulated tool calls as complete tool_start events
+        // Yield accumulated tool calls as complete tool_start events.
+        // Malformed argument JSON is attributed to the span before unwinding,
+        // matching the catch branch below.
         for (const [, call] of [...toolCalls.entries()].sort(([a], [b]) => a - b)) {
-          const input = JSON.parse(call.argumentChunks.join(""));
+          let input: unknown;
+          try {
+            input = JSON.parse(call.argumentChunks.join(""));
+          } catch (parseErr) {
+            completed = true;
+            failChatSpan(span, parseErr);
+            rejectResponse(parseErr);
+            throw parseErr;
+          }
           yield { type: "tool_start", id: call.id, name: call.name, input };
         }
 

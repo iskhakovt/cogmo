@@ -42,7 +42,7 @@ docker build -t cogmo .                              # version = "dev" (Dockerfi
 docker build --build-arg VERSION=0.0.0-dev -t cogmo . # override the embedded version string
 ```
 
-The image is `gcr.io/distroless/nodejs24-debian13`, runs as `nonroot`, and exposes port 9090 (health). Default entrypoint: `node dist/main.js serve`.
+The image is `gcr.io/distroless/nodejs24-debian13`, runs as `nonroot`, and exposes port 9090 (health). Default entrypoint: `node --import ./dist/otel.js dist/main.js serve`. The `--import` hook initializes OpenTelemetry if configured (see [Observability](#observability)) and is a no-op otherwise.
 
 ## Configuration
 

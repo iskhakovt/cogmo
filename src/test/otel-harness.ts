@@ -18,16 +18,21 @@ import { __resetMetricsForTests } from "../metrics.js";
  * In-memory OTel harness for unit and integration tests.
  *
  * Registers a BasicTracerProvider and MeterProvider as the global API
- * implementations. The OTel API uses lazy proxies, so any module that already
- * called `trace.getTracer()` / `metrics.getMeter()` at import time will see
- * the new provider on the next span/measurement.
+ * implementations.
  *
- * Call `setupOtelHarness()` in `beforeEach`, `harness.shutdown()` in
- * `afterEach`. Use `harness.getSpans()` and `harness.collectMetrics()` to
- * inspect emitted telemetry.
+ * ProxyTracer caches its delegate on first resolution, so the harness must be
+ * installed **before** any module under test creates its first span — call
+ * `setupOtelHarness()` in `beforeAll`, **before** `bootstrap()`, then drain
+ * between tests with `harness.reset()` in `beforeEach`. Shut down with
+ * `harness.shutdown()` in `afterAll`. Swapping providers per test doesn't
+ * work: the proxy's cached delegate keeps pointing at the first provider,
+ * and subsequent tests see stale spans/meters.
+ *
+ * Use `harness.getSpans()` and `harness.collectMetrics()` to inspect emitted
+ * telemetry.
  */
 export interface OtelHarness {
-  getSpans(): ReadableSpan[];
+  getSpans(): ReadonlyArray<ReadableSpan>;
   collectMetrics(): Promise<ResourceMetrics>;
   reset(): Promise<void>;
   shutdown(): Promise<void>;
@@ -54,7 +59,10 @@ export function setupOtelHarness(): OtelHarness {
 
   return {
     getSpans() {
-      return spanExporter.getFinishedSpans();
+      // Defensive copy — the exporter's internal array is mutated by
+      // reset(); callers inspecting a snapshot between tests shouldn't see
+      // their list cleared out from underneath them.
+      return [...spanExporter.getFinishedSpans()];
     },
     async collectMetrics() {
       const result = await metricReader.collect();
