@@ -224,4 +224,196 @@ describe("createTransport", () => {
       expect(result).toEqual(activeSession);
     });
   });
+
+  // --- Admin namespaces (Chunk 3) ---
+
+  describe("conversations.setAlias", () => {
+    it("returns access_denied when caller does not own the conversation", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi
+          .fn()
+          .mockResolvedValue({ id: "c1", userId: "someone-else", profileId: "p", isPrivate: true }),
+      });
+      const transportStore = mockTransportStore({
+        resolveUser: vi.fn().mockResolvedValue({ userId: "user-1" }),
+      });
+      const { transport } = setup({ transportStore, agentStore });
+
+      const res = await transport.conversations.setAlias("handle", "c1", "work");
+      expect(res.isErr()).toBe(true);
+      expect(res._unsafeUnwrapErr()).toMatchObject({ code: "access_denied" });
+    });
+
+    it("rejects non-private conversations with access_denied", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi
+          .fn()
+          .mockResolvedValue({ id: "c1", userId: "user-1", profileId: "p", isPrivate: false }),
+      });
+      const { transport } = setup({ agentStore });
+
+      const res = await transport.conversations.setAlias("handle", "c1", "work");
+      expect(res._unsafeUnwrapErr()).toMatchObject({
+        code: "access_denied",
+        reason: expect.stringContaining("non-private"),
+      });
+    });
+
+    it("maps UniqueViolationError to alias_taken", async () => {
+      const { UniqueViolationError } = await import("../agent/store/errors.js");
+      const agentStore = mockAgentStore({
+        getConversation: vi
+          .fn()
+          .mockResolvedValue({ id: "c1", userId: "user-1", profileId: "p", isPrivate: true }),
+        setAlias: vi.fn().mockRejectedValue(new UniqueViolationError("uq_aliases_user_alias")),
+      });
+      const { transport } = setup({ agentStore });
+
+      const res = await transport.conversations.setAlias("handle", "c1", "work");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "alias_taken" });
+    });
+  });
+
+  describe("conversations.setProfile", () => {
+    it("returns conversation_not_found when conversation missing", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.setProfile("handle", "c1", "p1");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "conversation_not_found" });
+    });
+
+    it("allows switching to an org profile (user_id = null)", async () => {
+      const setConversationProfile = vi.fn();
+      const agentStore = mockAgentStore({
+        getConversation: vi
+          .fn()
+          .mockResolvedValue({ id: "c1", userId: "user-1", profileId: "p-old", isPrivate: true }),
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: null }),
+        setConversationProfile,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.setProfile("handle", "c1", "p-org");
+      expect(res.isOk()).toBe(true);
+      expect(setConversationProfile).toHaveBeenCalledWith("c1", "p-org");
+    });
+
+    it("rejects switching to another user's profile", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi
+          .fn()
+          .mockResolvedValue({ id: "c1", userId: "user-1", profileId: "p-old", isPrivate: true }),
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-2" }),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.setProfile("handle", "c1", "p-their");
+      expect(res._unsafeUnwrapErr()).toMatchObject({
+        code: "access_denied",
+        reason: expect.stringContaining("not visible"),
+      });
+    });
+  });
+
+  describe("profiles.update", () => {
+    it("rejects org-profile mutation with access_denied", async () => {
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: null }),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update("handle", "p-org", { name: "mine" });
+      expect(res._unsafeUnwrapErr()).toMatchObject({
+        code: "access_denied",
+        reason: expect.stringContaining("org profiles"),
+      });
+    });
+
+    it("rejects another user's profile with access_denied", async () => {
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-2" }),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update("handle", "p-theirs", { name: "new" });
+      expect(res._unsafeUnwrapErr()).toMatchObject({ code: "access_denied" });
+    });
+
+    it("validates model against user_selectable and returns model_unavailable", async () => {
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        isModelUserSelectable: vi.fn().mockResolvedValue(false),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update("handle", "p-mine", { model: "experimental-1" });
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "model_unavailable",
+        model: "experimental-1",
+      });
+    });
+
+    it("maps UniqueViolationError to profile_name_taken", async () => {
+      const { UniqueViolationError } = await import("../agent/store/errors.js");
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        updateProfile: vi.fn().mockRejectedValue(new UniqueViolationError("uq_profiles_user_name")),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update("handle", "p-mine", { name: "taken" });
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_name_taken" });
+    });
+  });
+
+  describe("profiles.delete", () => {
+    it("returns profile_in_use when conversations still reference the profile", async () => {
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        countConversationsForProfile: vi.fn().mockResolvedValue(3),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.delete("handle", "p-mine");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_in_use" });
+    });
+
+    it("rejects deleting an org profile with access_denied", async () => {
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: null }),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.delete("handle", "p-org");
+      expect(res._unsafeUnwrapErr()).toMatchObject({
+        code: "access_denied",
+        reason: expect.stringContaining("org profiles"),
+      });
+    });
+  });
+
+  describe("profiles.create", () => {
+    it("validates model and returns model_unavailable", async () => {
+      const agentStore = mockAgentStore({
+        isModelUserSelectable: vi.fn().mockResolvedValue(false),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.create("handle", {
+        name: "new",
+        basePrompt: "p",
+        model: "experimental-1",
+        toolSet: [],
+      });
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "model_unavailable",
+        model: "experimental-1",
+      });
+    });
+  });
+
+  describe("models.list", () => {
+    it("delegates to agentStore.listDistinctUserSelectableModels", async () => {
+      const agentStore = mockAgentStore({
+        listDistinctUserSelectableModels: vi
+          .fn()
+          .mockResolvedValue(["claude-sonnet-4-20250514", "gpt-4o"]),
+      });
+      const { transport } = setup({ agentStore });
+      expect(await transport.models.list()).toEqual(["claude-sonnet-4-20250514", "gpt-4o"]);
+    });
+  });
 });

@@ -1,16 +1,40 @@
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { JsonValue } from "type-fest";
-import type { AgentStore } from "../agent/store/index.js";
+import { UniqueViolationError } from "../agent/store/errors.js";
+import type { AgentStore, ConversationSummary, Profile } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { Session, TransportStore } from "./store/index.js";
 
+export interface ProfileInput {
+  name: string;
+  basePrompt: string;
+  model: string;
+  toolSet: JsonValue;
+  summarizationModel?: string | null;
+  extractionModel?: string | null;
+}
+
+export interface CurrentConversation {
+  conversationId: string;
+  profileId: string;
+  profileName: string;
+  model: string;
+}
+
 export type TransportError =
   | { code: "session_not_found"; sessionId: string }
   | { code: "identity_rejected" }
-  | { code: "conversation_not_found" };
+  | { code: "conversation_not_found" }
+  | { code: "profile_not_found" }
+  | { code: "profile_in_use" }
+  | { code: "profile_name_taken" }
+  | { code: "model_unavailable"; model: string }
+  | { code: "alias_taken" }
+  | { code: "operation_not_permitted" }
+  | { code: "access_denied"; reason: string };
 
 /**
  * Transport — the adapter-facing contract for session management and inbound emission.
@@ -25,7 +49,7 @@ export interface Transport {
   createConversation(
     platformAddress: string,
     platformUserHandle: string,
-    opts: { isPrivate: boolean },
+    opts: { isPrivate: boolean; profileId?: string },
   ): Promise<Result<Session, TransportError>>;
   closeSession(sessionId: string): Promise<void>;
   emit(
@@ -35,6 +59,55 @@ export interface Transport {
   ): Promise<Result<void, TransportError>>;
   /** Upload an attachment (image, file) as raw bytes to storage. Returns the storage path. */
   uploadAttachment(data: Buffer, mediaType: string): Promise<string>;
+
+  /** Resume an existing conversation by alias or id. Closes any active session on this address, then opens a new one pointing at the resolved conversation. Rejects non-private conversations and conversations not owned by the caller. */
+  resumeConversation(
+    platformAddress: string,
+    platformUserHandle: string,
+    target: { alias: string } | { conversationId: string },
+  ): Promise<Result<Session, TransportError>>;
+
+  /** Conversation admin. `platformUserHandle` is resolved to a userId for ACL. */
+  conversations: {
+    list(
+      platformUserHandle: string,
+    ): Promise<Result<ReadonlyArray<ConversationSummary>, TransportError>>;
+    /** Current session's conversation + profile, or null if no active session exists for the address. */
+    getCurrent(
+      platformUserHandle: string,
+      platformAddress: string,
+    ): Promise<Result<CurrentConversation | null, TransportError>>;
+    setAlias(
+      platformUserHandle: string,
+      conversationId: string,
+      alias: string | null,
+    ): Promise<Result<void, TransportError>>;
+    setProfile(
+      platformUserHandle: string,
+      conversationId: string,
+      profileId: string,
+    ): Promise<Result<void, TransportError>>;
+  };
+
+  /** Profile admin. Org profiles (user_id IS NULL) always reject mutations with `access_denied`. */
+  profiles: {
+    list(platformUserHandle: string): Promise<Result<ReadonlyArray<Profile>, TransportError>>;
+    create(
+      platformUserHandle: string,
+      input: ProfileInput,
+    ): Promise<Result<Profile, TransportError>>;
+    update(
+      platformUserHandle: string,
+      profileId: string,
+      changes: Partial<ProfileInput>,
+    ): Promise<Result<Profile, TransportError>>;
+    delete(platformUserHandle: string, profileId: string): Promise<Result<void, TransportError>>;
+  };
+
+  /** Model discovery — filtered to `user_selectable = true`. */
+  models: {
+    list(): Promise<ReadonlyArray<string>>;
+  };
 }
 
 /**
@@ -94,7 +167,7 @@ export function createTransport(deps: {
       }
       const conv = await agentStore.createConversation({
         userId: identity.userId,
-        profileId: defaultProfileId,
+        profileId: opts.profileId ?? defaultProfileId,
         isPrivate: opts.isPrivate,
       });
       const params = {
@@ -110,6 +183,51 @@ export function createTransport(deps: {
 
     async closeSession(sessionId) {
       await transportStore.closeSession(sessionId);
+    },
+
+    async resumeConversation(platformAddress, platformUserHandle, target) {
+      const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+      if (!identity) return err({ code: "identity_rejected" as const });
+
+      // Resolve target to a conversationId
+      let conversationId: string;
+      if ("conversationId" in target) {
+        conversationId = target.conversationId;
+      } else {
+        const row = await agentStore.findConversationByAlias(identity.userId, target.alias);
+        if (!row) return err({ code: "conversation_not_found" as const });
+        conversationId = row.conversationId;
+      }
+
+      // Verify ownership + privacy
+      const conv = await agentStore.getConversation(conversationId);
+      if (!conv) return err({ code: "conversation_not_found" as const });
+      if (conv.userId !== identity.userId) {
+        return err({
+          code: "access_denied" as const,
+          reason: "conversation not owned by caller",
+        });
+      }
+      if (!conv.isPrivate) {
+        return err({
+          code: "access_denied" as const,
+          reason: "cannot resume non-private conversation",
+        });
+      }
+
+      // Close any existing active session on this address, then open a fresh one
+      const existing = await transportStore.resolveSession(channelId, platformAddress);
+      if (existing) await transportStore.closeSession(existing.id);
+
+      const params = {
+        channelId,
+        platformAddress,
+        conversationId,
+        status: "active" as const,
+        receive: "routed" as const,
+      };
+      const { id } = await transportStore.createSession(params);
+      return ok({ id, ...params });
     },
 
     async emit(sessionId, content, platformTs) {
@@ -137,6 +255,171 @@ export function createTransport(deps: {
 
     async uploadAttachment(data: Buffer, mediaType: string): Promise<string> {
       return attachments.upload(data, mediaType);
+    },
+
+    conversations: {
+      async list(platformUserHandle) {
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        return ok(await agentStore.listConversationsForUser(identity.userId));
+      },
+
+      async getCurrent(platformUserHandle, platformAddress) {
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        const session = await transportStore.resolveSession(channelId, platformAddress);
+        if (!session) return ok(null);
+        const conv = await agentStore.getConversation(session.conversationId);
+        if (!conv || conv.userId !== identity.userId) return ok(null);
+        const profile = await agentStore.getProfile(conv.profileId);
+        if (!profile) return err({ code: "profile_not_found" as const });
+        return ok({
+          conversationId: conv.id,
+          profileId: conv.profileId,
+          profileName: profile.name,
+          model: profile.model,
+        });
+      },
+
+      async setAlias(platformUserHandle, conversationId, alias) {
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        const conv = await agentStore.getConversation(conversationId);
+        if (!conv) return err({ code: "conversation_not_found" as const });
+        if (conv.userId !== identity.userId) {
+          return err({
+            code: "access_denied" as const,
+            reason: "conversation not owned by caller",
+          });
+        }
+        if (!conv.isPrivate) {
+          return err({
+            code: "access_denied" as const,
+            reason: "aliases are not allowed on non-private conversations",
+          });
+        }
+        try {
+          await agentStore.setAlias(identity.userId, conversationId, alias);
+          return ok(undefined);
+        } catch (e) {
+          if (e instanceof UniqueViolationError) return err({ code: "alias_taken" as const });
+          throw e;
+        }
+      },
+
+      async setProfile(platformUserHandle, conversationId, profileId) {
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        const conv = await agentStore.getConversation(conversationId);
+        if (!conv) return err({ code: "conversation_not_found" as const });
+        if (conv.userId !== identity.userId) {
+          return err({
+            code: "access_denied" as const,
+            reason: "conversation not owned by caller",
+          });
+        }
+        // Profile must be visible to the caller (org OR their own).
+        const owner = await agentStore.getProfileOwner(profileId);
+        if (!owner) return err({ code: "profile_not_found" as const });
+        if (owner.userId !== null && owner.userId !== identity.userId) {
+          return err({
+            code: "access_denied" as const,
+            reason: "profile not visible to caller",
+          });
+        }
+        await agentStore.setConversationProfile(conversationId, profileId);
+        return ok(undefined);
+      },
+    },
+
+    profiles: {
+      async list(platformUserHandle) {
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        return ok(await agentStore.listProfiles(identity.userId));
+      },
+
+      async create(platformUserHandle, input) {
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        if (!(await agentStore.isModelUserSelectable(input.model))) {
+          return err({ code: "model_unavailable" as const, model: input.model });
+        }
+        try {
+          const { id } = await agentStore.createProfile({
+            userId: identity.userId,
+            name: input.name,
+            basePrompt: input.basePrompt,
+            model: input.model,
+            toolSet: input.toolSet,
+          });
+          // Pick up the full row (Drizzle returning() only pulled id above to match the legacy signature).
+          const rows = await agentStore.listProfiles(identity.userId);
+          const created = rows.find((p) => p.id === id);
+          if (!created) throw new Error(`createProfile: new profile ${id} not found in list`);
+          return ok(created);
+        } catch (e) {
+          if (e instanceof UniqueViolationError)
+            return err({ code: "profile_name_taken" as const });
+          throw e;
+        }
+      },
+
+      async update(platformUserHandle, profileId, changes) {
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        const owner = await agentStore.getProfileOwner(profileId);
+        if (!owner) return err({ code: "profile_not_found" as const });
+        if (owner.userId === null) {
+          return err({
+            code: "access_denied" as const,
+            reason: "org profiles are read-only via Transport",
+          });
+        }
+        if (owner.userId !== identity.userId) {
+          return err({ code: "access_denied" as const, reason: "profile not owned by caller" });
+        }
+        if (
+          changes.model !== undefined &&
+          !(await agentStore.isModelUserSelectable(changes.model))
+        ) {
+          return err({ code: "model_unavailable" as const, model: changes.model });
+        }
+        try {
+          const updated = await agentStore.updateProfile(profileId, changes);
+          return ok(updated);
+        } catch (e) {
+          if (e instanceof UniqueViolationError)
+            return err({ code: "profile_name_taken" as const });
+          throw e;
+        }
+      },
+
+      async delete(platformUserHandle, profileId) {
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        const owner = await agentStore.getProfileOwner(profileId);
+        if (!owner) return err({ code: "profile_not_found" as const });
+        if (owner.userId === null) {
+          return err({
+            code: "access_denied" as const,
+            reason: "org profiles cannot be deleted via Transport",
+          });
+        }
+        if (owner.userId !== identity.userId) {
+          return err({ code: "access_denied" as const, reason: "profile not owned by caller" });
+        }
+        const inUse = await agentStore.countConversationsForProfile(profileId);
+        if (inUse > 0) return err({ code: "profile_in_use" as const });
+        await agentStore.deleteProfile(profileId);
+        return ok(undefined);
+      },
+    },
+
+    models: {
+      async list() {
+        return agentStore.listDistinctUserSelectableModels();
+      },
     },
   };
 }

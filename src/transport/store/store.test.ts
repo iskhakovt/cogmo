@@ -37,6 +37,7 @@ async function seedConversation(): Promise<{
   const userId = (await agentStore.createUser()).id;
   const profileId = (
     await agentStore.createProfile({
+      userId: null,
       name: "test",
       basePrompt: "prompt",
       model: "model",

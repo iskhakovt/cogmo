@@ -110,6 +110,52 @@ describe("createHandleMessage", () => {
     );
   });
 
+  it("freezes profile+model snapshot at turn start — survives mid-turn profile switch", async () => {
+    // Simulate getProfile being called once at snapshot time (returning snapshot model),
+    // then a second getProfile call later (e.g. for auto-recall) returning a different model
+    // — the stamps on messages must still reflect the snapshot, not the later value.
+    const getProfile = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "profile-1",
+        userId: null,
+        name: "assistant",
+        basePrompt: "a",
+        model: "claude-sonnet-4-20250514",
+        summarizationModel: null,
+        extractionModel: null,
+        autoRecall: "heuristic" as const,
+        toolSet: [],
+      })
+      .mockResolvedValue({
+        id: "profile-1",
+        userId: null,
+        name: "assistant",
+        basePrompt: "b",
+        model: "claude-opus-4-6",
+        summarizationModel: null,
+        extractionModel: null,
+        autoRecall: "heuristic" as const,
+        toolSet: [],
+      });
+    const deps = mockDeps({
+      agentStore: mockAgentStore({ getProfile }),
+    });
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    // Both inserts stamped with the first (snapshot) profile+model, not the later change
+    expect(deps.agentStore.insertMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ profileId: "profile-1", model: "claude-sonnet-4-20250514" }),
+    );
+    expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
+      expect.objectContaining({ profileId: "profile-1", model: "claude-sonnet-4-20250514" }),
+    );
+  });
+
   it("inserts user and assistant messages via agentStore", async () => {
     const deps = mockDeps();
     await (createHandleMessage(deps) as any).fn({
@@ -118,17 +164,24 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    // User message via insertMessage
+    // User message via insertMessage — stamped with the turn snapshot
     expect(deps.agentStore.insertMessage).toHaveBeenCalledTimes(1);
     expect(deps.agentStore.insertMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ role: "user", lastInboundMessageId: "inbound-1" }),
+      expect.objectContaining({
+        role: "user",
+        lastInboundMessageId: "inbound-1",
+        profileId: "profile-1",
+        model: "claude-sonnet-4-20250514",
+      }),
     );
-    // Assistant + tool turns via insertMessages (atomic batch)
+    // Assistant + tool turns via insertMessages (atomic batch) — same snapshot
     expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
     expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
       expect.objectContaining({
         conversationId: "conv-1",
         lastInboundMessageId: "inbound-1",
+        profileId: "profile-1",
+        model: "claude-sonnet-4-20250514",
       }),
     );
   });

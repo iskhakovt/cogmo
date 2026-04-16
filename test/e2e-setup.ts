@@ -124,8 +124,8 @@ export async function setup({ provide }: GlobalSetupContext) {
   // Route the default profile's model to this provider
   const [profileRow] = await sql<{ model: string }[]>`SELECT model FROM profiles LIMIT 1`;
   await sql`
-    INSERT INTO model_providers (id, model, provider_id, position)
-    VALUES (uuidv7(), ${profileRow!.model}, ${provider!.id}, 0)
+    INSERT INTO model_providers (id, model, provider_id, position, user_selectable)
+    VALUES (uuidv7(), ${profileRow!.model}, ${provider!.id}, 0, true)
   `;
   await sql.end();
 

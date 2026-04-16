@@ -14,7 +14,7 @@ Contract pseudocode — return types shown as `Promise<T>` for readability. Actu
 
 ```typescript
 interface Transport {
-  // Sessions
+  // Sessions (hot path — top-level)
   resolveSession(platformAddress: string): Promise<Session | null>;
   createConversation(platformAddress: string, platformUserHandle: string, opts: {
     isPrivate: boolean;
@@ -31,14 +31,26 @@ interface Transport {
   closeSession(sessionId: string): Promise<void>;
   extendSession(sessionId: string, expiresAt: Date): Promise<void>;
 
-  // Profiles
-  profiles: { list(platformUserHandle: string): Promise<Profile[]> };
-
-  // Conversations (what's returned may be scoped by adapter permissions)
-  conversations: { list(platformUserHandle: string): Promise<ConversationSummary[]> };
-
-  // Inbound
+  // Inbound (hot path — top-level)
   emit(sessionId: string, content: InboundContent, platformTs: Date): Promise<void>;
+
+  // Conversations (admin)
+  conversations: {
+    list(platformUserHandle: string): Promise<ConversationSummary[]>;
+    setAlias(conversationId: string, alias: string | null): Promise<void>;  // null = unset
+    setProfile(conversationId: string, profileId: string): Promise<void>;   // takes effect next turn
+  };
+
+  // Profiles (admin)
+  profiles: {
+    list(platformUserHandle: string): Promise<Profile[]>;          // returns org profiles + caller's user profiles
+    create(platformUserHandle: string, input: ProfileInput): Promise<Profile>;  // user_id = caller
+    update(platformUserHandle: string, profileId: string, changes: Partial<ProfileInput>): Promise<Profile>;  // rejects if profile.user_id !== caller (incl. org profiles)
+    delete(platformUserHandle: string, profileId: string): Promise<void>;  // rejects if profile.user_id !== caller, or if conversations reference it
+  };
+
+  // Models (read-only — discovery for /model command)
+  models: { list(): Promise<string[]> };  // SELECT DISTINCT model FROM model_providers
 }
 
 interface ConversationSummary {
@@ -48,6 +60,15 @@ interface ConversationSummary {
   lastMessagePreview: string;
   lastMessageAt: Date;
 }
+
+interface ProfileInput {
+  name: string;
+  basePrompt: string;
+  model: string;             // must exist in model_providers (else model_unavailable)
+  toolSet: string[];
+  summarizationModel?: string;
+  autoRecall?: "off" | "always" | "heuristic" | "llm";
+}
 ```
 
 ```typescript
@@ -55,6 +76,11 @@ type TransportError =
   | { code: "identity_rejected" }
   | { code: "conversation_not_found" }
   | { code: "profile_not_found" }
+  | { code: "profile_in_use" }            // delete blocked: conversations still reference it
+  | { code: "profile_name_taken" }
+  | { code: "model_unavailable"; model: string }  // no model_providers row for this model
+  | { code: "alias_taken" }
+  | { code: "operation_not_permitted" }   // ACL — see Trust Boundary
   | { code: "access_denied"; reason: string };
 ```
 
@@ -74,11 +100,37 @@ Identity resolution is internal — the adapter passes `platformUserHandle`, the
 - `closeSession` — set `status = 'closed'`, stops delivery. Used by `/new`.
 - `extendSession` — bump `expiresAt` for TTL-managed sessions (heartbeat).
 
+### Conversation admin
+
+- `conversations.list` — list user's conversations (scoped by adapter permissions). Returns alias, profile name, last-message preview.
+- `conversations.setAlias` — set or clear a human-readable alias (unique per user). Aliases are user-supplied; auto-naming is a future enhancement (see todo).
+- `conversations.setProfile` — switch the active profile. Takes effect on the *next* turn; in-flight turns finish on the old profile. See [overview.md](overview.md) → Profile and Model Stamping.
+
+### Profile admin
+
+Profiles have two scopes:
+
+- **Org profiles** (`profiles.user_id IS NULL`) — managed out-of-band (psql, wizard, future admin UI). Visible to all users via `list`/`switch`, but `update`/`delete` always reject with `access_denied` from Transport. Use case: shared "default", "compliance-bot", anything an admin wants centrally curated and centrally evolved.
+- **User profiles** (`profiles.user_id = <userId>`) — owned by one user. That user can update/delete; other users cannot see or touch them.
+
+Methods:
+
+- `profiles.list` — returns the union of (a) all org profiles and (b) caller's user profiles. Other users' profiles are never visible.
+- `profiles.create` — always sets `user_id = caller`. Org profiles cannot be created via Transport.
+- `profiles.update` — caller must own the profile (`profile.user_id = caller.userId`). Org profiles always reject with `access_denied`. Validates `model` against `model_providers` (`user_selectable = true` only — see [providers.md](../providers.md)) and unique `(user_id, name)`.
+- `profiles.delete` — caller must own the profile. Rejects with `profile_in_use` if any conversation still references it; callers must migrate conversations (via `conversations.setProfile`) first.
+
+Adapters never touch store rows directly. All profile mutations go through Transport so the ownership check and validation live in one place. There is no admin bypass in Transport — admin ops happen out-of-band.
+
+### Model discovery
+
+`models.list` returns user-selectable models only (`SELECT DISTINCT model FROM model_providers WHERE user_selectable = true`). Used by the `/model` command in interactive adapters. Models not returned by `list()` will fail `profiles.update({ model })` with `model_unavailable`. The `user_selectable` flag (see [providers.md](../providers.md) → Model policy) lets admins keep internal-only models (cheap summarization, experimental) out of the user-facing picker.
+
 ### Inbound
 
 `emit` persists an `inbound_messages` row and emits `inbound/arrived`. The adapter normalizes platform input (strip @mentions, resolve refs, convert entities) before calling emit.
 
-Control commands (`/new`, `/profile`, `/start`) are handled by the adapter using the session/profile methods directly — they never call `emit`.
+Control commands (`/new`, `/resume`, `/sessions`, `/name`, `/profile`, `/model`, `/start`) are handled by the adapter using the session/conversation/profile methods directly — they never call `emit`. See [telegram.md](telegram.md) for the canonical command table.
 
 ### Outbound
 
@@ -112,6 +164,29 @@ session = transport.createConversation(address, userHandle, { isPrivate: true, p
 ```
 profiles = transport.profiles.list(userHandle)
 // render profile list in platform-native UI
+```
+
+**`/profile switch coder` (mid-conversation):**
+```
+transport.conversations.setProfile(currentSession.conversationId, coderProfileId)
+// confirmation — next turn uses the new profile
+```
+
+**`/profile new <name>` (create — always user-owned):**
+```
+profile = transport.profiles.create(userHandle, { name, basePrompt, model, toolSet: [...] })
+// adapter-specific flow collects basePrompt/model interactively
+```
+
+**`/model <model>` (change active profile's model):**
+```
+models = transport.models.list()                                                  // user-selectable only
+transport.profiles.update(userHandle, currentProfile.id, { model: chosen })       // rejects access_denied if currentProfile is org-owned
+```
+
+**`/name <alias>`:**
+```
+transport.conversations.setAlias(currentSession.conversationId, alias)
 ```
 
 **`/resume work` (alias):**
@@ -241,5 +316,8 @@ The adapter is a trust boundary. An untrusted or compromised adapter could:
 - Fabricate content via `emit()` on any session it has access to
 - Discover active sessions via `resolveSession()`
 - Read response content from delivery events
+- Mutate profiles via `profiles.{create, update, delete}` — including changing the active model
 
-For first-party adapters this is fine — they run in-process. For future third-party plugins, consider E2E encryption between the user's device and the agent, making the adapter a blind pipe that routes encrypted content without being able to read or forge it.
+**v0 policy:** all first-party adapters (Telegram, Direct, Web UI) are trusted and may call any Transport method. There is no per-adapter ACL today. `operation_not_permitted` is reserved in the error union for the future.
+
+**Future:** for third-party plugins, the Transport will be wrapped per-adapter with a permission policy (e.g., "this adapter cannot create profiles" or "this adapter cannot create `receive: all` sessions"). Also consider E2E encryption between the user's device and the agent, making the adapter a blind pipe that routes encrypted content without being able to read or forge it. Tracked in todo.

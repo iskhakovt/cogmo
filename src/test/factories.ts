@@ -32,6 +32,8 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     getHistory: vi.fn().mockResolvedValue([]),
     getProfile: vi.fn().mockResolvedValue({
       id: "profile-1",
+      userId: null,
+      name: "assistant",
       basePrompt: "test",
       model: "claude-sonnet-4-20250514",
       summarizationModel: null,
@@ -61,6 +63,28 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
     countActiveRules: vi.fn().mockResolvedValue(0),
     replaceRules: vi.fn().mockResolvedValue({ id: "rule-1" }),
+    // --- Admin (Chunk 3) ---
+    listProfiles: vi.fn().mockResolvedValue([]),
+    getProfileOwner: vi.fn().mockResolvedValue(null),
+    updateProfile: vi.fn().mockResolvedValue({
+      id: "profile-1",
+      userId: null,
+      name: "test",
+      basePrompt: "",
+      model: "claude-sonnet-4-20250514",
+      summarizationModel: null,
+      extractionModel: null,
+      autoRecall: "heuristic",
+      toolSet: [],
+    }),
+    countConversationsForProfile: vi.fn().mockResolvedValue(0),
+    deleteProfile: vi.fn().mockResolvedValue(undefined),
+    listConversationsForUser: vi.fn().mockResolvedValue([]),
+    setConversationProfile: vi.fn().mockResolvedValue(undefined),
+    setAlias: vi.fn().mockResolvedValue(undefined),
+    findConversationByAlias: vi.fn().mockResolvedValue(null),
+    listDistinctUserSelectableModels: vi.fn().mockResolvedValue([]),
+    isModelUserSelectable: vi.fn().mockResolvedValue(true),
     ...overrides,
   };
 }
@@ -103,8 +127,57 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       }),
     ),
     closeSession: vi.fn().mockResolvedValue(undefined),
+    resumeConversation: vi.fn().mockResolvedValue(
+      ok({
+        id: "session-resumed",
+        channelId: "ch-1",
+        platformAddress: "addr",
+        conversationId: "conv-1",
+        status: "active",
+        receive: "routed",
+      }),
+    ),
     emit: vi.fn().mockResolvedValue(ok(undefined)),
     uploadAttachment: vi.fn().mockResolvedValue("inbound/test.jpg"),
+    conversations: {
+      list: vi.fn().mockResolvedValue(ok([])),
+      getCurrent: vi.fn().mockResolvedValue(ok(null)),
+      setAlias: vi.fn().mockResolvedValue(ok(undefined)),
+      setProfile: vi.fn().mockResolvedValue(ok(undefined)),
+    },
+    profiles: {
+      list: vi.fn().mockResolvedValue(ok([])),
+      create: vi.fn().mockResolvedValue(
+        ok({
+          id: "profile-new",
+          userId: "user-1",
+          name: "test",
+          basePrompt: "",
+          model: "claude-sonnet-4-20250514",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "heuristic",
+          toolSet: [],
+        }),
+      ),
+      update: vi.fn().mockResolvedValue(
+        ok({
+          id: "profile-1",
+          userId: "user-1",
+          name: "test",
+          basePrompt: "",
+          model: "claude-sonnet-4-20250514",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "heuristic",
+          toolSet: [],
+        }),
+      ),
+      delete: vi.fn().mockResolvedValue(ok(undefined)),
+    },
+    models: {
+      list: vi.fn().mockResolvedValue([]),
+    },
     ...overrides,
   };
 }

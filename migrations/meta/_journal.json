@@ -50,6 +50,13 @@
       "when": 1776160052347,
       "tag": "0006_sloppy_pandemic",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1776344598820,
+      "tag": "0007_odd_true_believers",
+      "breakpoints": true
     }
   ]
 }

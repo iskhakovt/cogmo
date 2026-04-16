@@ -13,6 +13,17 @@ import {
 import { type AttachmentStore, mediaTypeToExt } from "../../attachment-store.js";
 import { contentToText } from "../../content.js";
 import type { Adapter, StreamHandle, StreamingAdapter } from "../../types.js";
+import {
+  handleEnd,
+  handleModel,
+  handleName,
+  handleProfile,
+  handleResume,
+  handleResumeCallback,
+  handleSessions,
+  type TelegramCommandContext,
+} from "./commands.js";
+import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml, stripHtmlTags } from "./render.js";
 
 export const channelType = "telegram";
@@ -224,15 +235,59 @@ class TelegramStreamHandle implements StreamHandle {
 /**
  * Telegram adapter — long-polling bot, delivers via Bot API.
  */
+/**
+ * Narrow a grammY CommandContext/CallbackQueryContext to the minimal shape used by pure
+ * command handlers. Pure `TelegramCommandContext.reply` declares a narrower options type than
+ * grammY's; the wrapper casts at the boundary — runtime-safe because `reply_markup` is a
+ * valid field on grammY's `Other`.
+ */
+interface GrammyCtxLite {
+  chat: { id: number } | undefined;
+  from: { id: number | string } | undefined;
+  match?: unknown;
+  reply: (text: string, other?: Record<string, unknown>) => Promise<unknown>;
+}
+
+function toCmdCtx(ctx: GrammyCtxLite, overrideMatch?: string): TelegramCommandContext {
+  if (!ctx.chat || !ctx.from) throw new Error("telegram: ctx missing chat/from");
+  const match =
+    overrideMatch !== undefined
+      ? overrideMatch
+      : typeof ctx.match === "string"
+        ? ctx.match
+        : undefined;
+  return {
+    chat: { id: ctx.chat.id },
+    from: { id: ctx.from.id },
+    match,
+    reply: (text, options) => ctx.reply(text, options as Record<string, unknown> | undefined),
+  };
+}
+
 export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   const { credentials, transport, attachments } = deps;
   const creds = credentials as { token: string; apiRoot?: string };
   const bot = new Bot(creds.token, creds.apiRoot ? { client: { apiRoot: creds.apiRoot } } : {});
   const adapter = new TelegramAdapter(bot, attachments);
+  const profileDialogs = new ProfileDialogs();
 
   bot.command("start", async (ctx) => {
     await ctx.reply(
-      "Cogmo ready. Send a message to start chatting.\n\n/new — start a new conversation",
+      [
+        "Cogmo ready. Send a message to start chatting.",
+        "",
+        "Conversation:",
+        "  /new — start a new conversation",
+        "  /sessions — list conversations",
+        "  /resume <alias> — switch to a named conversation",
+        "  /name <alias> — name the current conversation",
+        "  /end — close the current conversation",
+        "",
+        "Profile & model:",
+        "  /profile [list|switch <name>|new <name>|edit <name>|delete <name>]",
+        "  /model [<model>]",
+        "  /cancel — abort interactive /profile new|edit flow",
+      ].join("\n"),
     );
   });
 
@@ -243,6 +298,33 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       await transport.closeSession(session.id);
     }
     await ctx.reply("New conversation started.");
+  });
+
+  // Admin commands — each delegates to a pure handler in commands.ts.
+  // grammY's ctx is ducktyped to `TelegramCommandContext` at call time; `ctx.match` holds
+  // the trailing text after the command word (empty string for bare `/profile`).
+  bot.command("sessions", (ctx) => handleSessions(transport, toCmdCtx(ctx)));
+  bot.command("resume", (ctx) => handleResume(transport, toCmdCtx(ctx)));
+  bot.command("name", (ctx) => handleName(transport, toCmdCtx(ctx)));
+  bot.command("end", (ctx) => handleEnd(transport, toCmdCtx(ctx)));
+  bot.command("profile", (ctx) => handleProfile(transport, toCmdCtx(ctx), profileDialogs));
+  bot.command("model", (ctx) => handleModel(transport, toCmdCtx(ctx)));
+
+  // Mid-dialog abort for /profile new|edit flows.
+  bot.command("cancel", async (ctx) => {
+    if (profileDialogs.cancel(ctx.chat.id)) {
+      await ctx.reply("Cancelled.");
+    } else {
+      await ctx.reply("Nothing to cancel.");
+    }
+  });
+
+  // Inline keyboard taps from /sessions list — callback_data = "resume:<alias|conversationId>"
+  bot.callbackQuery(/^resume:(.+)$/, async (ctx) => {
+    const target = ctx.match?.[1];
+    if (!target) return;
+    await handleResumeCallback(transport, toCmdCtx(ctx, ""), target);
+    await ctx.answerCallbackQuery();
   });
 
   async function resolveOrCreateSession(addr: string, handle: string) {
@@ -263,6 +345,14 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   }
 
   bot.on("message:text", async (ctx) => {
+    // Mid-dialog input (e.g. /profile new flow) goes to the FSM, not the agent.
+    // This check MUST run before typing indicator / session resolve / emit —
+    // otherwise the draft text leaks into conversation history.
+    if (profileDialogs.has(ctx.chat.id)) {
+      await profileDialogs.handleMessage(transport, toCmdCtx(ctx, ctx.message.text));
+      return;
+    }
+
     await ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => {});
 
     const addr = String(ctx.chat.id);

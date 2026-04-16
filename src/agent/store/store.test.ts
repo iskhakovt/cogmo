@@ -33,12 +33,15 @@ async function seedUser(): Promise<string> {
   return (await store.createUser()).id;
 }
 
+const TEST_MODEL = "claude-sonnet-4-20250514";
+
 async function seedProfile(): Promise<string> {
   return (
     await store.createProfile({
+      userId: null,
       name: "test",
       basePrompt: "You are a test assistant.",
-      model: "claude-sonnet-4-20250514",
+      model: TEST_MODEL,
       toolSet: ["tool_a"],
     })
   ).id;
@@ -48,12 +51,14 @@ async function seedConversation(): Promise<{
   userId: string;
   profileId: string;
   conversationId: string;
+  /** Convenience — spread into insertMessage/insertMessages to stamp the turn. */
+  stamp: { profileId: string; model: string };
 }> {
   const userId = await seedUser();
   const profileId = await seedProfile();
   const conversationId = (await store.createConversation({ userId, profileId, isPrivate: true }))
     .id;
-  return { userId, profileId, conversationId };
+  return { userId, profileId, conversationId, stamp: { profileId, model: TEST_MODEL } };
 }
 
 // --- Tests ---
@@ -76,6 +81,7 @@ describe("DrizzleAgentStore", () => {
   describe("profiles", () => {
     it("creates and retrieves a profile", async () => {
       const { id } = await store.createProfile({
+        userId: null,
         name: "main",
         basePrompt: "Be helpful.",
         model: "claude-test",
@@ -85,6 +91,8 @@ describe("DrizzleAgentStore", () => {
       const profile = await store.getProfile(id);
       expect(profile).toEqual({
         id,
+        userId: null,
+        name: "main",
         basePrompt: "Be helpful.",
         model: "claude-test",
         summarizationModel: null,
@@ -101,6 +109,7 @@ describe("DrizzleAgentStore", () => {
     it("getDefaultProfile returns first profile", async () => {
       expect(await store.getDefaultProfile()).toBeNull();
       const { id } = await store.createProfile({
+        userId: null,
         name: "default",
         basePrompt: "prompt",
         model: "m",
@@ -109,10 +118,69 @@ describe("DrizzleAgentStore", () => {
       expect((await store.getDefaultProfile())?.id).toBe(id);
     });
 
-    it("enforces unique profile name", async () => {
-      await store.createProfile({ name: "dup", basePrompt: "p", model: "m", toolSet: [] });
+    it("enforces unique org profile name (user_id null)", async () => {
+      await store.createProfile({
+        userId: null,
+        name: "dup",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
       await expect(
-        store.createProfile({ name: "dup", basePrompt: "p2", model: "m2", toolSet: [] }),
+        store.createProfile({
+          userId: null,
+          name: "dup",
+          basePrompt: "p2",
+          model: "m2",
+          toolSet: [],
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("allows same name across different users (and between org and user)", async () => {
+      const u1 = await seedUser();
+      const u2 = await seedUser();
+      await store.createProfile({
+        userId: null,
+        name: "coder",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      await store.createProfile({
+        userId: u1,
+        name: "coder",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      await store.createProfile({
+        userId: u2,
+        name: "coder",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      // No throw — same name is allowed when (user_id, name) differs.
+    });
+
+    it("rejects duplicate name within the same user", async () => {
+      const u = await seedUser();
+      await store.createProfile({
+        userId: u,
+        name: "mine",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      await expect(
+        store.createProfile({
+          userId: u,
+          name: "mine",
+          basePrompt: "p2",
+          model: "m2",
+          toolSet: [],
+        }),
       ).rejects.toThrow();
     });
   });
@@ -154,7 +222,7 @@ describe("DrizzleAgentStore", () => {
 
   describe("messages", () => {
     it("inserts and retrieves messages in order", async () => {
-      const { conversationId } = await seedConversation();
+      const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
       await store.insertMessage({
@@ -162,6 +230,7 @@ describe("DrizzleAgentStore", () => {
         role: "user",
         content: "Hello",
         lastInboundMessageId: inboundId,
+        ...stamp,
       });
       // 2ms sleep — PGlite's pg_uuidv7 uses random bits, not monotonic counter
       await new Promise((r) => setTimeout(r, 2));
@@ -170,6 +239,7 @@ describe("DrizzleAgentStore", () => {
         role: "assistant",
         content: "Hi there",
         lastInboundMessageId: inboundId,
+        ...stamp,
       });
 
       const history = await store.getHistory(conversationId);
@@ -179,7 +249,7 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("getMessage returns a single message", async () => {
-      const { conversationId } = await seedConversation();
+      const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
       const { id } = await store.insertMessage({
@@ -187,6 +257,7 @@ describe("DrizzleAgentStore", () => {
         role: "user",
         content: [{ type: "text", text: "structured" }],
         lastInboundMessageId: inboundId,
+        ...stamp,
       });
 
       const msg = await store.getMessage(id);
@@ -198,7 +269,7 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("insertMessages batch inserts with tool_use/tool_result pairing", async () => {
-      const { conversationId } = await seedConversation();
+      const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
       const result = await store.insertMessages({
@@ -219,6 +290,7 @@ describe("DrizzleAgentStore", () => {
         ],
         lastInboundMessageId: inboundId,
         lastMessageInputTokens: 500,
+        ...stamp,
       });
 
       expect(result.id).toBeDefined();
@@ -239,18 +311,19 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("insertMessages throws on empty array", async () => {
-      const { conversationId } = await seedConversation();
+      const { conversationId, stamp } = await seedConversation();
       await expect(
         store.insertMessages({
           conversationId,
           messages: [],
           lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+          ...stamp,
         }),
       ).rejects.toThrow("insertMessages requires at least one message");
     });
 
     it("insertMessages sets inputTokens only on the last message", async () => {
-      const { conversationId } = await seedConversation();
+      const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
       await store.insertMessages({
@@ -262,6 +335,7 @@ describe("DrizzleAgentStore", () => {
         ],
         lastInboundMessageId: inboundId,
         lastMessageInputTokens: 42,
+        ...stamp,
       });
 
       // Query raw table — don't rely on UUID ordering (PGlite's pg_uuidv7
@@ -280,7 +354,7 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("getLastAssistantMessage returns most recent", async () => {
-      const { conversationId } = await seedConversation();
+      const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
       expect(await store.getLastAssistantMessage(conversationId)).toBeNull();
@@ -290,6 +364,7 @@ describe("DrizzleAgentStore", () => {
         role: "assistant",
         content: "first",
         lastInboundMessageId: inboundId,
+        ...stamp,
       });
       // UUIDv7 is time-ordered per millisecond — ensure distinct timestamps
       await new Promise((r) => setTimeout(r, 2));
@@ -298,6 +373,7 @@ describe("DrizzleAgentStore", () => {
         role: "assistant",
         content: "second",
         lastInboundMessageId: inboundId,
+        ...stamp,
       });
 
       const last = await store.getLastAssistantMessage(conversationId);
@@ -311,7 +387,7 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("persists and retrieves inputTokens on assistant messages", async () => {
-      const { conversationId } = await seedConversation();
+      const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
       await store.insertMessage({
@@ -320,6 +396,7 @@ describe("DrizzleAgentStore", () => {
         content: "response",
         lastInboundMessageId: inboundId,
         inputTokens: 5432,
+        ...stamp,
       });
 
       const tokens = await store.getLastInputTokens(conversationId);
@@ -332,7 +409,7 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("getLastInputTokens returns most recent assistant's tokens", async () => {
-      const { conversationId } = await seedConversation();
+      const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
       await store.insertMessage({
@@ -341,6 +418,7 @@ describe("DrizzleAgentStore", () => {
         content: "first",
         lastInboundMessageId: inboundId,
         inputTokens: 1000,
+        ...stamp,
       });
       await new Promise((r) => setTimeout(r, 2));
       await store.insertMessage({
@@ -349,13 +427,14 @@ describe("DrizzleAgentStore", () => {
         content: "second",
         lastInboundMessageId: inboundId,
         inputTokens: 2000,
+        ...stamp,
       });
 
       expect(await store.getLastInputTokens(conversationId)).toBe(2000);
     });
 
     it("insertMessage without inputTokens leaves it null", async () => {
-      const { conversationId } = await seedConversation();
+      const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
       await store.insertMessage({
@@ -363,6 +442,7 @@ describe("DrizzleAgentStore", () => {
         role: "assistant",
         content: "no tokens",
         lastInboundMessageId: inboundId,
+        ...stamp,
       });
 
       expect(await store.getLastInputTokens(conversationId)).toBeNull();
@@ -373,7 +453,13 @@ describe("DrizzleAgentStore", () => {
     it("returns active rules for profile + global, ordered by priority", async () => {
       const profileId = await seedProfile();
       const otherProfileId = (
-        await store.createProfile({ name: "other", basePrompt: "p", model: "m", toolSet: [] })
+        await store.createProfile({
+          userId: null,
+          name: "other",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        })
       ).id;
 
       // Insert rules via raw db since store doesn't expose createRule
@@ -521,7 +607,7 @@ describe("DrizzleAgentStore", () => {
 
   describe("getLastMessageTime", () => {
     it("returns the most recent message timestamp", async () => {
-      const { conversationId } = await seedConversation();
+      const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
       await store.insertMessage({
@@ -529,6 +615,7 @@ describe("DrizzleAgentStore", () => {
         role: "user",
         content: "hello",
         lastInboundMessageId: inboundId,
+        ...stamp,
       });
 
       const time = await store.getLastMessageTime(conversationId);
@@ -571,7 +658,12 @@ describe("DrizzleAgentStore", () => {
 
     it("deleteProvider cascades to model_providers", async () => {
       const { id: providerId } = await seedProvider();
-      await store.addModelProvider({ model: "claude-test", providerId, position: 0 });
+      await store.addModelProvider({
+        model: "claude-test",
+        providerId,
+        position: 0,
+        userSelectable: true,
+      });
 
       await store.deleteProvider(providerId);
 
@@ -597,11 +689,13 @@ describe("DrizzleAgentStore", () => {
         model: "claude-sonnet-4",
         providerId: fallbackId,
         position: 1,
+        userSelectable: true,
       });
       await store.addModelProvider({
         model: "claude-sonnet-4",
         providerId: primaryId,
         position: 0,
+        userSelectable: true,
       });
 
       const resolved = await store.resolveProviderForModel("claude-sonnet-4");
@@ -615,8 +709,18 @@ describe("DrizzleAgentStore", () => {
 
     it("removes model_providers by provider", async () => {
       const { id: providerId } = await seedProviderWithSecret("removable");
-      await store.addModelProvider({ model: "model-a", providerId, position: 0 });
-      await store.addModelProvider({ model: "model-b", providerId, position: 0 });
+      await store.addModelProvider({
+        model: "model-a",
+        providerId,
+        position: 0,
+        userSelectable: true,
+      });
+      await store.addModelProvider({
+        model: "model-b",
+        providerId,
+        position: 0,
+        userSelectable: true,
+      });
 
       await store.removeModelProvidersByProvider(providerId);
 
@@ -628,11 +732,313 @@ describe("DrizzleAgentStore", () => {
       const { id: p1 } = await seedProviderWithSecret("p1");
       const { id: p2 } = await seedProviderWithSecret("p2");
 
-      await store.addModelProvider({ model: "claude-test", providerId: p1, position: 0 });
+      await store.addModelProvider({
+        model: "claude-test",
+        providerId: p1,
+        position: 0,
+        userSelectable: true,
+      });
 
       await expect(
-        store.addModelProvider({ model: "claude-test", providerId: p2, position: 0 }),
+        store.addModelProvider({
+          model: "claude-test",
+          providerId: p2,
+          position: 0,
+          userSelectable: true,
+        }),
       ).rejects.toThrow();
+    });
+
+    it("listDistinctUserSelectableModels excludes internal-only models", async () => {
+      const { id: p } = await seedProviderWithSecret("p");
+      await store.addModelProvider({
+        model: "model-public",
+        providerId: p,
+        position: 0,
+        userSelectable: true,
+      });
+      await store.addModelProvider({
+        model: "model-internal",
+        providerId: p,
+        position: 1,
+        userSelectable: false,
+      });
+
+      expect(await store.listDistinctUserSelectableModels()).toEqual(["model-public"]);
+      expect(await store.isModelUserSelectable("model-public")).toBe(true);
+      expect(await store.isModelUserSelectable("model-internal")).toBe(false);
+      expect(await store.isModelUserSelectable("model-missing")).toBe(false);
+    });
+  });
+
+  // --- Admin methods: profile CRUD, conversation listing, aliases ---
+
+  describe("profile admin", () => {
+    it("listProfiles returns org profiles + caller's own, not other users'", async () => {
+      const u1 = await seedUser();
+      const u2 = await seedUser();
+      const org = (
+        await store.createProfile({
+          userId: null,
+          name: "default",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        })
+      ).id;
+      const mine = (
+        await store.createProfile({
+          userId: u1,
+          name: "mine",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        })
+      ).id;
+      await store.createProfile({
+        userId: u2,
+        name: "theirs",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+
+      const visible = await store.listProfiles(u1);
+      expect(visible.map((p) => p.id).sort()).toEqual([org, mine].sort());
+    });
+
+    it("getProfileOwner returns userId (or null for org)", async () => {
+      const u = await seedUser();
+      const orgId = (
+        await store.createProfile({
+          userId: null,
+          name: "org",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        })
+      ).id;
+      const mineId = (
+        await store.createProfile({
+          userId: u,
+          name: "mine",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        })
+      ).id;
+      expect(await store.getProfileOwner(orgId)).toEqual({ userId: null });
+      expect(await store.getProfileOwner(mineId)).toEqual({ userId: u });
+      expect(await store.getProfileOwner("019d0000-0000-7000-8000-000000000000")).toBeNull();
+    });
+
+    it("updateProfile applies partial changes and preserves unlisted fields", async () => {
+      const u = await seedUser();
+      const { id } = await store.createProfile({
+        userId: u,
+        name: "before",
+        basePrompt: "before-prompt",
+        model: "m",
+        toolSet: ["a"],
+      });
+      const updated = await store.updateProfile(id, { name: "after", model: "m2" });
+      expect(updated).toMatchObject({
+        id,
+        userId: u,
+        name: "after",
+        model: "m2",
+        basePrompt: "before-prompt",
+      });
+    });
+
+    it("updateProfile translates unique-name collision to UniqueViolationError", async () => {
+      const u = await seedUser();
+      await store.createProfile({
+        userId: u,
+        name: "taken",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      const { id: other } = await store.createProfile({
+        userId: u,
+        name: "free",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      const { UniqueViolationError } = await import("./errors.js");
+      await expect(store.updateProfile(other, { name: "taken" })).rejects.toThrow(
+        UniqueViolationError,
+      );
+    });
+
+    it("countConversationsForProfile counts conversations referencing the profile", async () => {
+      const u = await seedUser();
+      const { id: profileId } = await store.createProfile({
+        userId: u,
+        name: "p",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      expect(await store.countConversationsForProfile(profileId)).toBe(0);
+      await store.createConversation({ userId: u, profileId, isPrivate: true });
+      await store.createConversation({ userId: u, profileId, isPrivate: true });
+      expect(await store.countConversationsForProfile(profileId)).toBe(2);
+    });
+
+    it("deleteProfile removes the row (caller must pre-check count)", async () => {
+      const u = await seedUser();
+      const { id } = await store.createProfile({
+        userId: u,
+        name: "temp",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      await store.deleteProfile(id);
+      expect(await store.getProfile(id)).toBeNull();
+    });
+  });
+
+  describe("conversation admin", () => {
+    it("listConversationsForUser returns user's private conversations with alias + last message preview", async () => {
+      const { userId, profileId, conversationId, stamp } = await seedConversation();
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+      await store.insertMessage({
+        conversationId,
+        role: "user",
+        content: "hello there this is the last message",
+        lastInboundMessageId: inboundId,
+        ...stamp,
+      });
+      await store.setAlias(userId, conversationId, "work");
+
+      const list = await store.listConversationsForUser(userId);
+      expect(list).toHaveLength(1);
+      expect(list[0]).toMatchObject({
+        id: conversationId,
+        profileName: "test",
+        alias: "work",
+      });
+      expect(list[0]!.lastMessagePreview).toContain("hello");
+      expect(list[0]!.lastMessageAt).toBeInstanceOf(Date);
+      // Also verify profileId from seedConversation was the one linked
+      expect(profileId).toBeDefined();
+    });
+
+    it("listConversationsForUser excludes conversations from other users", async () => {
+      const u1 = await seedUser();
+      const u2 = await seedUser();
+      const profileId = await seedProfile();
+      const c1 = (await store.createConversation({ userId: u1, profileId, isPrivate: true })).id;
+      const c2 = (await store.createConversation({ userId: u2, profileId, isPrivate: true })).id;
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+      await store.insertMessage({
+        conversationId: c1,
+        role: "user",
+        content: "u1",
+        lastInboundMessageId: inboundId,
+        profileId,
+        model: TEST_MODEL,
+      });
+      await store.insertMessage({
+        conversationId: c2,
+        role: "user",
+        content: "u2",
+        lastInboundMessageId: inboundId,
+        profileId,
+        model: TEST_MODEL,
+      });
+
+      const list = await store.listConversationsForUser(u1);
+      expect(list.map((c) => c.id)).toEqual([c1]);
+    });
+
+    it("listConversationsForUser excludes non-private conversations and empty conversations", async () => {
+      const userId = await seedUser();
+      const profileId = await seedProfile();
+      const empty = (await store.createConversation({ userId, profileId, isPrivate: true })).id;
+      const nonPrivate = (await store.createConversation({ userId, profileId, isPrivate: false }))
+        .id;
+      const withMsg = (await store.createConversation({ userId, profileId, isPrivate: true })).id;
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+      await store.insertMessage({
+        conversationId: nonPrivate,
+        role: "user",
+        content: "noisy",
+        lastInboundMessageId: inboundId,
+        profileId,
+        model: TEST_MODEL,
+      });
+      await store.insertMessage({
+        conversationId: withMsg,
+        role: "user",
+        content: "real",
+        lastInboundMessageId: inboundId,
+        profileId,
+        model: TEST_MODEL,
+      });
+
+      const list = await store.listConversationsForUser(userId);
+      expect(list.map((c) => c.id)).toEqual([withMsg]);
+      expect(empty).toBeDefined(); // empty conv excluded
+    });
+
+    it("setConversationProfile updates conversations.profile_id", async () => {
+      const { userId, conversationId } = await seedConversation();
+      const { id: newProfileId } = await store.createProfile({
+        userId,
+        name: "other",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      await store.setConversationProfile(conversationId, newProfileId);
+      const conv = await store.getConversation(conversationId);
+      expect(conv?.profileId).toBe(newProfileId);
+    });
+  });
+
+  describe("aliases", () => {
+    it("setAlias inserts, then updates on same conversationId", async () => {
+      const { userId, conversationId } = await seedConversation();
+      await store.setAlias(userId, conversationId, "work");
+      expect(await store.findConversationByAlias(userId, "work")).toEqual({ conversationId });
+
+      await store.setAlias(userId, conversationId, "personal");
+      expect(await store.findConversationByAlias(userId, "work")).toBeNull();
+      expect(await store.findConversationByAlias(userId, "personal")).toEqual({
+        conversationId,
+      });
+    });
+
+    it("setAlias with null clears the alias", async () => {
+      const { userId, conversationId } = await seedConversation();
+      await store.setAlias(userId, conversationId, "work");
+      await store.setAlias(userId, conversationId, null);
+      expect(await store.findConversationByAlias(userId, "work")).toBeNull();
+    });
+
+    it("setAlias collision across conversations throws UniqueViolationError", async () => {
+      const userId = await seedUser();
+      const profileId = await seedProfile();
+      const c1 = (await store.createConversation({ userId, profileId, isPrivate: true })).id;
+      const c2 = (await store.createConversation({ userId, profileId, isPrivate: true })).id;
+      await store.setAlias(userId, c1, "work");
+      const { UniqueViolationError } = await import("./errors.js");
+      await expect(store.setAlias(userId, c2, "work")).rejects.toThrow(UniqueViolationError);
+    });
+
+    it("findConversationByAlias scopes to user", async () => {
+      const u1 = await seedUser();
+      const u2 = await seedUser();
+      const profileId = await seedProfile();
+      const conv = (await store.createConversation({ userId: u1, profileId, isPrivate: true })).id;
+      await store.setAlias(u1, conv, "shared");
+      // u2 searching for same alias should see nothing
+      expect(await store.findConversationByAlias(u2, "shared")).toBeNull();
     });
   });
 
