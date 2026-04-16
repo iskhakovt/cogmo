@@ -234,11 +234,13 @@ async function resolveProfileByName(
   const list = await transport.profiles.list(handle);
   if (list.isErr()) return { kind: "error", error: list.error };
   const matches = list.value.filter((p) => p.name === name);
-  if (matches.length === 0) return { kind: "none" };
-  if (matches.length === 1) return { kind: "ok", profile: matches[0]! };
+  const [firstMatch] = matches;
+  if (!firstMatch) return { kind: "none" };
+  if (matches.length === 1) return { kind: "ok", profile: firstMatch };
   // Exactly one user-owned match among several (org + user with same name) → pick the user one.
   const owned = matches.filter((p) => p.userId !== null);
-  if (owned.length === 1) return { kind: "ok", profile: owned[0]! };
+  const [firstOwned] = owned;
+  if (owned.length === 1 && firstOwned) return { kind: "ok", profile: firstOwned };
   return { kind: "ambiguous", matches };
 }
 

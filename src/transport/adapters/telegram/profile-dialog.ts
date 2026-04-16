@@ -97,9 +97,10 @@ export class ProfileDialogs {
       return;
     }
     const owned = matches.filter((p) => p.userId !== null);
+    const [firstOwned] = owned;
     let found: Profile;
-    if (owned.length === 1) {
-      found = owned[0]!;
+    if (owned.length === 1 && firstOwned) {
+      found = firstOwned;
     } else if (owned.length === 0 && matches.length === 1) {
       // Only an org match — can't edit org profiles via Transport.
       await ctx.reply(`"${name}" is an org profile and can't be edited here.`);
