@@ -21,5 +21,5 @@ USER nonroot
 COPY --from=build /deploy .
 # health endpoint
 EXPOSE 9090
-ENTRYPOINT ["/nodejs/bin/node", "dist/main.js"]
+ENTRYPOINT ["/nodejs/bin/node", "--import", "./dist/otel.js", "dist/main.js"]
 CMD ["serve"]

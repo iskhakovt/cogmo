@@ -1,8 +1,12 @@
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, Message, StreamEvent, TextBlock, ToolUseBlock } from "../llm/types.js";
 import { logger } from "../logger.js";
+import { agentIterations } from "../metrics.js";
 import type { Service } from "./service.js";
 import type { ToolRegistry } from "./tools.js";
+
+const tracer = trace.getTracer("cogmo.agent");
 
 export interface AgentLoopParams {
   provider: LlmProvider;
@@ -142,18 +146,30 @@ async function executeToolCalls(
       continue;
     }
 
-    try {
-      const result = await spec.handler(block.input as Record<string, unknown>, service);
-      results.push({ type: "tool_result", toolUseId: block.id, content: result });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      results.push({
-        type: "tool_result",
-        toolUseId: block.id,
-        content: `Error: ${message}`,
-        isError: true,
-      });
-    }
+    const result = await tracer.startActiveSpan(
+      "tool.execute",
+      { attributes: { "cogmo.tool.name": block.name } },
+      async (span) => {
+        try {
+          const out = await spec.handler(block.input as Record<string, unknown>, service);
+          return { type: "tool_result" as const, toolUseId: block.id, content: out };
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          span.recordException(err instanceof Error ? err : new Error(message));
+          span.setStatus({ code: SpanStatusCode.ERROR, message });
+          span.setAttribute("cogmo.tool.error", true);
+          return {
+            type: "tool_result" as const,
+            toolUseId: block.id,
+            content: `Error: ${message}`,
+            isError: true,
+          };
+        } finally {
+          span.end();
+        }
+      },
+    );
+    results.push(result);
   }
 
   return results;
@@ -177,6 +193,8 @@ function buildResult(
   } else if (lastAssistant && typeof lastAssistant.content === "string") {
     text = lastAssistant.content;
   }
+
+  agentIterations.record(iterations, { model });
 
   // Defensive copy — don't leak the mutable internal array through the interface.
   // newMessages is guaranteed non-empty: the loop always pushes at least one
