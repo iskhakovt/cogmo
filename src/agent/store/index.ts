@@ -157,6 +157,22 @@ export interface AgentStore {
     attrs: JsonValue;
   } | null>;
 
+  /**
+   * List every provider registered for a model, ordered by position ASC
+   * (primary first, then fallbacks). Empty array when no provider is
+   * registered for the model.
+   */
+  listProvidersForModel(model: string): Promise<
+    ReadonlyArray<{
+      id: string;
+      name: string;
+      type: string;
+      baseUrl: string | null;
+      secretId: string;
+      attrs: JsonValue;
+    }>
+  >;
+
   /** Get the next available position for a model (MAX(position) + 1, or 0 if none). */
   getNextModelProviderPosition(model: string): Promise<number>;
 
@@ -599,6 +615,34 @@ export class DrizzleAgentStore implements AgentStore {
         .orderBy(asc(modelProviders.position))
         .limit(1);
       return (rows[0] as (typeof rows)[0] & { attrs: JsonValue }) ?? null;
+    });
+  }
+
+  async listProvidersForModel(model: string): Promise<
+    ReadonlyArray<{
+      id: string;
+      name: string;
+      type: string;
+      baseUrl: string | null;
+      secretId: string;
+      attrs: JsonValue;
+    }>
+  > {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: llmProviders.id,
+          name: llmProviders.name,
+          type: llmProviders.type,
+          baseUrl: llmProviders.baseUrl,
+          secretId: llmProviders.secretId,
+          attrs: llmProviders.attrs,
+        })
+        .from(modelProviders)
+        .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
+        .where(eq(modelProviders.model, model))
+        .orderBy(asc(modelProviders.position));
+      return rows as ReadonlyArray<(typeof rows)[number] & { attrs: JsonValue }>;
     });
   }
 
