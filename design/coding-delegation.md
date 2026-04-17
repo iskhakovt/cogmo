@@ -1,0 +1,567 @@
+# Coding Delegation
+
+Cogmo delegates heavy coding tasks to Claude Code and Codex CLI, leveraging the user's existing Max/Pro/Plus subscriptions as the execution backend. Telegram is the control plane. Cogmo handles planning, gating, progress reporting, and review; the CLIs do the actual work.
+
+## Purpose `[proposed]`
+
+Enable flows like:
+
+> *[Telegram]* "Please refactor the steering rules module to support per-channel scoping; run the integration tests; open a draft PR."
+
+Cogmo:
+
+1. Creates a sandboxed task container (worktree, git identity, tools).
+2. Runs `claude -p` in plan mode first; posts the plan to Telegram with Approve / Revise / Cancel buttons (user-initiated tasks; automated triggers skip this gate).
+3. On approval, executes the plan. Dangerous tool calls route to Telegram as approve/deny prompts via the stream-json permission channel (see *Autonomy Gates → Tool gate*).
+4. Verifies (typecheck, lint, tests), commits, pushes, opens a draft PR.
+5. Sends the PR URL to Telegram for final review.
+
+Scope explicitly *not* in this doc: writing code inline in the agent's own responses. That's what the existing `files` capability in `Service` covers. This doc is about **delegating multi-step coding work to a specialized subprocess** that can run commands, install deps, execute tests.
+
+## Execution Model `[confirmed]`
+
+**Subprocess-wrap the user's logged-in CLIs.** No API keys, no Agent SDK. This is the sanctioned personal-use path.
+
+| Backend | Invocation (shape) | Auth |
+|-|-|-|
+| Claude Code | `claude -p --output-format stream-json --include-partial-messages --input-format stream-json --permission-mode {plan,acceptEdits} [--resume <sid>] [--session-id <uuid>]` | User's Max/Pro subscription via existing login |
+| Codex CLI | `codex exec --json [resume <sid> \| --last]` | User's ChatGPT Plus/Pro login |
+
+Flag set is illustrative — pin and verify against the exact `claude` / `codex` versions baked into `cogmo/devbase`. Both CLIs evolve their flags quickly; the `CodingBackend` impl treats the argv vector as a versioned contract keyed on the image tag.
+
+The Agent SDK explicitly requires API keys and **cannot use subscription auth** — confirmed behaviour, intentional boundary from Anthropic. Subprocess-of-the-CLI is the only path that honours the subscription. Personal single-user is the sanctioned use; Cogmo runs on the user's own host.
+
+Output is parsed as JSONL. Both CLIs emit structured events (`system/init`, `stream_event` with `text_delta`, tool-use, `turn.completed` with tokens). Cogmo streams these as progress updates to Telegram.
+
+`session_id` is captured on the first event and persisted in `coding_tasks.session_id`. Resume uses `--resume` (Claude) or `resume <sid>` (Codex) — carries full conversation state across Cogmo restarts or multi-turn task flows.
+
+## Backend Interface `[proposed]`
+
+Shared abstraction over both CLIs, lives in `src/agent/coding/`:
+
+```typescript
+interface CodingBackend {
+  plan(task: CodingTask, container: TaskContainerHandle): AsyncIterable<CodingEvent>;
+  execute(task: CodingTask, container: TaskContainerHandle): AsyncIterable<CodingEvent>;
+  resume(task: CodingTask, container: TaskContainerHandle): AsyncIterable<CodingEvent>;
+}
+
+type CodingEvent =
+  | { kind: "status"; phase: "thinking" | "tool_use"; detail: string }
+  | { kind: "text_delta"; text: string }
+  | { kind: "tool_call"; tool: string; input: unknown; needsApproval: boolean }
+  | { kind: "tool_result"; tool: string; ok: boolean }
+  | { kind: "plan_ready"; plan: string }
+  | { kind: "complete"; exitCode: number; usage: Usage };
+```
+
+Two concrete impls: `ClaudeCodeBackend`, `CodexBackend`. Selection per-task via `coding_tasks.backend`.
+
+## Prompt Construction `[proposed]`
+
+What Cogmo actually *tells* the CLI. The prompt is first-class — it governs how the CLI behaves on its own initiative (verifying, fixing, summarizing), how it interacts with the target repo's conventions, and what stays out of its hands (credentials, PR opening, tool policy).
+
+### Skeleton
+
+One template per phase (`plan`, `execute`, `resume`). Concrete for `execute`:
+
+```
+# Task
+<goal from coding_tasks.goal>
+
+# Environment
+- Repo root is /workspace. Stay inside it.
+- Current branch: <branch>. Already created and checked out.
+- Git credentials are available via credential helper; pushing requires your action.
+- Do NOT open a PR. Cogmo opens the PR after verifying your work.
+
+# Repo conventions
+<contents of /workspace/CLAUDE.md, if present, verbatim>
+<injected repo-knowledge from Hindsight, tagged repo:<name> — P3+>
+
+# Verify before declaring done
+Run: <coding_repos.verify_command>
+If it fails, fix what broke and rerun. Iterate until it passes or you conclude you're stuck.
+If stuck, stop and explain what you tried, what's failing, and why — do NOT mark the task complete.
+
+# Budget
+Aim to finish within ~<task_token_budget> tokens. If you're running long, narrow scope rather than abandon verification.
+
+# When finished
+Produce a short summary under the heading "## Summary" describing what changed and why — Cogmo uses this verbatim in the PR body.
+You may commit incrementally as you work. Do NOT push.
+```
+
+`plan` differs only in the final block: emit a `## Plan` section, no edits, await approval. `resume` injects the approved plan text and drops the `# Task` / `# Repo conventions` blocks (session already has them from the earlier turn).
+
+### Self-verify clause
+
+This is the retry policy — resolved, was previously an open question.
+
+**Cogmo does not operate a retry loop around the CLI.** The CLI's own agent loop already handles edit → test → fix iteration; that's what it's good at. Re-invoking it externally to "retry" is just the same loop at a more expensive layer.
+
+Instead, three things replace the retry loop:
+
+1. **The self-verify clause above** — tells the CLI to run the verify command itself and iterate until passing or stuck.
+2. **Budget caps on `coding_repos`** (see schema update) — `task_token_budget` and `task_wall_time_seconds`. Cogmo kills the task subprocess if either is exceeded. Backstop against infinite loops.
+3. **Post-hoc verify** — after the CLI declares done, Cogmo runs the verify command *once more* from outside the session. Trust but verify. If it passes, push and open the draft PR. If it fails, mark task failed and notify the user — no feedback-loop retry. The CLI had its chance during its own loop; a post-hoc miss is a "stuck" signal worth a human eye, not more tokens.
+
+Flakiness is not handled specially. A flaky test that fails only on the post-hoc run surfaces to the user as a failed task with a link to the worktree — they rerun and merge if it's spurious.
+
+### Injected context
+
+Three sources, merged at prompt-build time:
+
+| Source | Location | Phase |
+|-|-|-|
+| Target repo's `CLAUDE.md` | `/workspace/CLAUDE.md` inside the container (read by Cogmo before CLI spawn) | P1 |
+| Hindsight repo-knowledge | Query `tags:['repo:<name>']`, top-K recent | P3 (Observer loop) |
+| Cogmo steering rules scoped to coding profile | `steering_rules WHERE profile_id IN (<coding-profile-id>)` | P2 |
+
+### Per-backend shaping
+
+Each `CodingBackend` impl owns the final serialization. Claude Code prefers structured markdown headers (shown above). Codex prefers terse bullet-style instruction. The skeleton's *content* is identical; only the formatting differs. Handled inside `ClaudeCodeBackend.buildPrompt()` / `CodexBackend.buildPrompt()`.
+
+### What stays out of the prompt
+
+- **Credentials.** Never in prompt text. Git sees them via `GIT_ASKPASS` only.
+- **Tool-policy details.** The stream-json gate enforces; the prompt doesn't need to re-describe what's blocked.
+- **Absolute host paths.** The container always sees `/workspace`; host paths leak implementation detail.
+- **Session id / task id.** CLI manages its own session identity. Cogmo's DB id is not the CLI's business.
+- **Cogmo architecture.** The CLI is editing a repo, not learning about its caller.
+
+### Interaction with steering rules
+
+Coding delegation introduces two new profiles in the existing `profiles` table: `coding-claude` and `coding-codex`. Each has the skeleton above as its base prompt. `steering_rules` rows scoped to these profiles layer on top via the existing `DefaultPromptSource` assembly pipeline.
+
+Concrete payoff: when Stage 1 evolution observes a correction during a coding task ("don't ever modify lockfiles without re-running install"), the correction graduates into a `steering_rules` row scoped to `coding-claude` (or global, if the extraction LLM judges it cross-profile). Next task picks it up automatically. Same mechanism as conversational steering, no new pipeline.
+
+Wiring this into `DefaultPromptSource` is P2 — P1 prompts are hardcoded templates with runtime slot fills.
+
+## Task Model `[proposed]`
+
+**One coding task = one git worktree + one branch + one CLI session + one draft PR.** The task container from [sandbox.md](sandbox.md) is the execution environment; the worktree lives inside it (mounted from the host's worktree path).
+
+```sql
+coding_tasks (
+  id                 UUID v7 PK,
+  repo_id            UUID NOT NULL REFERENCES coding_repos(id),
+  goal               TEXT NOT NULL,                        -- the task description (user-authored or machine-authored)
+  trigger_source     TEXT NOT NULL,                        -- 'user' | 'evolution' | 'signal_pipeline' — determines gating
+  trigger_ref        TEXT,                                 -- optional pointer into the originating subsystem (evolution proposal id, signal batch id)
+  backend            TEXT NOT NULL,                        -- 'claude' | 'codex'
+  branch             TEXT NOT NULL,                        -- 'cogmo/<task-id-short>' or derived from goal
+  worktree_path      TEXT NOT NULL,                        -- host path
+  session_id         TEXT,                                 -- CLI session for resume
+  container_id       UUID REFERENCES containers(id),       -- sandbox.md
+  allow_privileged_runc  BOOLEAN NOT NULL DEFAULT false,   -- compat escape hatch
+  plan               TEXT,                                 -- set after plan phase
+  plan_approved_at   TIMESTAMPTZ,                          -- null for automated triggers (plan gate skipped)
+  pr_url             TEXT,
+  status             TEXT NOT NULL,                        -- 'queued' | 'planning' | 'awaiting_approval' | 'executing' | 'verifying' | 'pushed' | 'pr_open' | 'failed' | 'cancelled'
+  failure_reason     TEXT,
+  resource_usage     JSONB NOT NULL,                       -- aggregated from sandbox
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+
+coding_repos (
+  id                      UUID v7 PK,
+  name                    TEXT NOT NULL UNIQUE,            -- 'cogmo', 'notes'
+  local_path              TEXT NOT NULL,                   -- host path to the git clone
+  default_branch          TEXT NOT NULL,                   -- usually 'main'
+  remote_url              TEXT NOT NULL,                   -- for push
+  devcontainer            JSONB,                           -- override — null = use cogmo/devbase
+  allowed_backends        TEXT[] NOT NULL,                 -- which CLIs can work on this repo
+  verify_command          TEXT NOT NULL,                   -- shell command run inside container to verify work — e.g. 'pnpm typecheck && pnpm lint && pnpm test'
+  task_token_budget       INT NOT NULL,                    -- per-task token ceiling — CLI subprocess killed on overrun
+  task_wall_time_seconds  INT NOT NULL,                    -- per-task wall-time ceiling
+  max_concurrent_tasks    INT NOT NULL,                    -- hard cap on active tasks per repo; default 1 (serial)
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+```
+
+Owned by `src/agent/store/` (fits the existing agent domain — tasks are agent work items). Consumer of `containers` from the sandbox store.
+
+## Container Lifecycle `[proposed]`
+
+**Invariant: one container per task.** Sharing a container across tasks causes state contamination — `pip install` in task A pollutes task B, long-running processes leak, failures cascade. Containers are cheap; clarity is worth the cold-start cost, which per-repo named cache volumes ([sandbox.md](sandbox.md) → Networks, Volumes, Images) flatten.
+
+### What persists vs what's ephemeral
+
+| Layer | Lifetime | Location |
+|-|-|-|
+| Worktree (files, git index, uncommitted edits) | Survives container death | Host filesystem, bind-mounted into container at a fixed path (`/workspace`) |
+| CLI conversation | Survives container death, dies with task | Per-task named volume `cogmo-task-home-<task-id>` mounted at `/home/cogmo`, holds `~/.claude/projects/<project-hash>/<session-id>.jsonl` and the Codex equivalent |
+| Git / registry credentials | Lifetime of the task | Same `cogmo-task-home-<task-id>` volume, wiped on terminal teardown |
+| Dependency + build caches | Scope depends on integrity story — see [sandbox.md → Cache volume scoping](sandbox.md#cache-volume-scoping) | Global for integrity-checked download caches (npm/cargo/go/apt); per-repo for pip and build caches |
+| In-container process state, `/tmp`, env vars | Dies with container | — |
+
+**Fixed container-side cwd matters for resume.** Claude Code (and Codex) derive their project-hash from cwd. If the mount path inside the container differs between the original and resume run, the CLI creates a fresh project directory and fails to find the prior session. Pin the container-side mount to `/workspace` and never let it vary.
+
+**Task-home volume is the simplest session store** — per-task scope, survives idle teardown, clean wipe on terminal state. Alternative (put session under the worktree at `.cogmo/.claude/`) works but pollutes the worktree with tool state; rejected.
+
+### Sunset triggers
+
+| Trigger | When | Teardown path |
+|-|-|-|
+| Terminal task status (`pr_open`, `failed`, `cancelled`) | Short grace period for log flush (default 120s, `CODING_TASK_GRACE_SECONDS`) | Orchestrator calls `sandbox.stopTask(id)` → root-task cascade |
+| Idle TTL | No CLI activity for `CODING_TASK_IDLE_TTL` (default 20 min) | Sandbox reaper TTL pass. `session_id` preserved in DB. |
+| Cogmo restart | Boot reconcile | Sandbox crash-recovery pass ([sandbox.md](sandbox.md) → Crash Recovery) |
+| LRU eviction under resource pressure | Disk / RAM threshold crossed | Oldest idle task containers first; active tasks protected |
+
+Grace period exists so a just-pushed PR's streaming logs and resource-usage poll can finish before the container disappears.
+
+### Worktree persistence
+
+No compression, no S3, no tar dumps by default. The git remote is the archive; the worktree is a disposable checkout. ~99% of a worktree is reproducible junk (`node_modules`, `.venv`, `target/`, build caches) that our per-repo named cache volumes ([sandbox.md](sandbox.md) → Networks, Volumes, Images) rehydrate in seconds. The ~1% that matters — commits and uncommitted edits — belongs in git refs.
+
+Teardown policy keyed on worktree state:
+
+| State at teardown | Action |
+|-|-|
+| Clean, branch pushed, draft PR open | `git worktree remove` — remote is authoritative |
+| Dirty (uncommitted edits or unpushed commits) | Stage all, commit as `wip: <task-id>` on the task branch, push as `refs/cogmo-wip/<task-id>`, then remove |
+| Failed before first commit with no remote yet (new repo bootstrap) | Fall back: tar under `~/.cogmo/archives/<task-id>.tar.zst` with 14-day TTL; only case that keeps a local dump |
+
+Resume after full teardown replays this in reverse: `git worktree add <path> <branch>` (or the `refs/cogmo-wip/<id>` ref), cache volumes rewarm automatically, `--resume <session_id>` rehydrates the CLI. Costs a few extra seconds vs resume-within-TTL, which keeps the worktree live.
+
+**`refs/cogmo-wip/<task-id>` retention.** These refs are append-only on the remote and accumulate if nothing prunes them. Two-pronged GC:
+
+- On PR merge/close, a GitHub webhook (or poll) deletes the corresponding `refs/cogmo-wip/<task-id>` ref via `git push origin :refs/cogmo-wip/<task-id>`.
+- Weekly cron prunes any WIP ref whose `coding_tasks` row is terminal and older than 30 days — belt-and-braces for cases where the webhook was missed.
+
+**S3 / remote object storage is opt-in, not default.** The motivating scenario — "my laptop died, I want the task back" — is already covered by remote refs for every case except the no-remote bootstrap. Deferred to a later remote-sandbox story.
+
+### Resume procedure
+
+"Resume" never means "same container" — it means *same state, fresh shell*:
+
+1. Look up `coding_tasks` row by id. If `status` is terminal and the user didn't explicitly ask to re-open, treat as a new task instead.
+2. `sandbox.createTaskContainer(spec)` with the same `worktree_path`, `repo_id`, and cache volumes. Fresh container, same mounts.
+3. Re-inject git credentials from the vault (short-lived, per-task).
+4. `backend.resume(task, container)` → `claude -p --resume <session_id>` (or Codex equivalent). CLI rehydrates its conversation from its session file.
+5. Insert a new `containers` row; update `coding_tasks.container_id`.
+
+Cost: ~1–3s container start under sysbox plus cache-volume mount. Acceptable because resume is the minority path vs first-time creation.
+
+### "Addition" disambiguation
+
+When the user sends a follow-up ("also add X", "now do Y"), Cogmo resolves to resume-vs-new using the last referenced task's state:
+
+| Prior task state | Default resolution |
+|-|-|
+| Non-terminal (`planning` / `executing` / `verifying`) | Resume — same task, same branch, same session |
+| `pr_open`, PR still draft | Ask — follow-up commit on the branch (resume) vs new task |
+| `pr_open`, PR merged | New task, new branch; repo-knowledge from Hindsight carries context |
+| `pr_open`, PR closed unmerged | Ask — retry on the same branch vs new task |
+| `failed` / `cancelled` | New task by default; resume is opt-in |
+| No prior task referenced | New task |
+
+Conversation context is the primary signal — a follow-up inside an active task thread defaults to resume; a fresh thread defaults to new task. Ambiguity triggers an explicit question, never a silent choice.
+
+## Concurrency `[proposed]`
+
+Per-repo concurrency is capped by `coding_repos.max_concurrent_tasks` (default 1). New tasks beyond the cap queue and the user is told on Telegram that they're queued behind an active task.
+
+**Branch and PR ownership is a non-issue.** Each task owns its own branch (`cogmo/<task-id-short>`) and its own draft PR. Two tasks editing the same files produce two PRs; the merge conflict surfaces at human review time, same as with any two humans on the same repo. No coordination required.
+
+**The real tension is cache contention.** Our cache volumes are shared across tasks (see [sandbox.md → Cache volume scoping](sandbox.md#cache-volume-scoping)) so concurrent `pnpm install`s on the same store can race. Three ships considered:
+
+| Option | Mechanism | Trade-off |
+|-|-|-|
+| **A. Serialize per repo** (P1 default) | `max_concurrent_tasks = 1` | Zero races, zero parallelism |
+| **B. Install-lock per repo** (P3, the relaxation path) | Parallel worktrees + containers. `<pkg-manager> install` acquires a flock on a lock file in the shared cache volume; compile, test, edit run unlocked | Install (10–30% of task time) serializes per repo; rest parallel. Cheap, targets the one real failure mode. |
+| **C. Narrow the lock to racers only** (refinement of B) | Only pip and apt hold the lock in practice — npm's cacache, cargo, and go modules handle concurrent reads + atomic writes cleanly | Measurement-driven follow-up once B ships. |
+
+Rejected:
+
+- **Per-task cache namespaces** — full isolation but loses the shared-cache disk win and forces cold installs per task. Only worth it if install-lock proves too painful.
+- **Overlayfs copy-on-write** — full parallelism with shared-cache benefit preserved, but real complexity (overlayfs inside sysbox, merge-back semantics). Over-engineered for personal scale.
+
+Industry analog: Devin, Copilot coding agent, Cursor background agents all give each parallel task a fully isolated environment (equivalent to per-task namespaces) and let git-level conflicts surface at review. They sidestep shared-cache contention by not sharing at all, at cloud-scale cost. Shared caches plus install-lock is the pragmatic single-host version of the same idea.
+
+## Admission & Rate Limiting `[proposed]`
+
+Automated trigger sources (`evolution`, `signal_pipeline`) can in principle queue tasks without human attention. Without guardrails, a misbehaving evolution loop can burn subscription tokens, eat host resources, and flood the PR list with noise. Every task passes admission control before it starts executing; `status = 'queued'` rows sit in the queue until they pass.
+
+### Admission checks
+
+Applied in order:
+
+1. **Per-repo cap** — `coding_repos.max_concurrent_tasks`. Covered in Concurrency.
+2. **Global cap** — `CODING_MAX_CONCURRENT_TASKS` (default 3). Host-level ceiling; protects CPU/RAM/disk regardless of per-repo math.
+3. **Per-source quota** — rolling 24-hour task count, per `trigger_source`:
+   - `user` — unlimited
+   - `evolution` — default 3/day, overridable via `CODING_EVOLUTION_DAILY_QUOTA`
+   - `signal_pipeline` — default 1/day, overridable via `CODING_SIGNAL_PIPELINE_DAILY_QUOTA`
+4. **Failure backoff** — if the last K tasks from a given source all failed (plan unparseable, verify fail, container crash), pause that source for T hours. Exponential on recurrence (1h → 4h → 24h), resets on a successful task. Defaults: K=3, T=1h. Applied per source, not per task type.
+5. **Priority** — when capacity frees up, queued `user` tasks always start before queued automated tasks. Inside a single priority tier, FIFO.
+
+### Scheduler
+
+Inngest cron ticking every ~30s (durable, retryable, fits the existing event-driven shape). Each tick:
+
+1. Query `coding_tasks WHERE status = 'queued' ORDER BY (trigger_source = 'user') DESC, created_at ASC`.
+2. Walk in order; for each, evaluate the admission checks against current state.
+3. Advance the first admissible task out of `queued` and hand off to the orchestrator, which runs worktree allocation, container creation, and plan generation as a single durable Inngest workflow.
+4. Stop when either the global cap is hit or no more admissible tasks remain.
+
+Derivation beats new tables — rolling quota counts come from `SELECT count(*) FROM coding_tasks WHERE trigger_source = $s AND created_at > now() - interval '24 hours'`. No `source_quota_state` row to keep in sync.
+
+### Scope — what this replaces
+
+- **Per-repo `max_concurrent_tasks`** from Concurrency stays as written — it's now one of the checks admission runs.
+- **`task_token_budget` / `task_wall_time_seconds`** from the Prompt Construction section stay as written — they're enforcement *during* a task, not admission before it.
+- **Subscription-side rate limits** (Claude Max 5-hour cap, Codex session limits) are external — we catch the error from the CLI, mark the task `failed` with an informative reason, and count it toward the backoff window above.
+
+Lands as part of P2 phase 12 (automated self-modification surface). Without it, `evolution` tasks ship disabled.
+
+## Flow `[proposed]`
+
+```
+[Telegram: "refactor steering rules to support per-channel scoping"]
+        │
+        ▼
+Cogmo orchestrator
+  1. Resolve repo (keyword match or ask)
+  2. Insert coding_tasks row, status='queued'
+  3. Allocate git worktree on host: git worktree add <path> -b cogmo/<id-short>
+  4. sandbox.createTaskContainer → task container up with worktree mounted, git creds injected
+        │
+        ▼
+ClaudeCodeBackend.plan()
+  claude -p --permission-mode plan "<goal>" ...
+  Stream events back as Telegram progress
+        │
+        ▼
+plan_ready event
+  · trigger_source=user        → Telegram inline keyboard [Approve] [Revise] [Cancel]
+  · trigger_source=evolution/
+    signal_pipeline            → auto-proceed (plan_approved_at stays null)
+        │
+        ▼ (on Approve or auto-proceed)
+ClaudeCodeBackend.execute()
+  claude -p --resume <sid> --permission-mode acceptEdits --input-format stream-json
+  Dangerous tool calls surface as stream-json permission requests → Telegram approve/deny
+  Text + tool-use events stream to Telegram progress message (edited in place)
+        │
+        ▼
+Verify step (inside container):
+  pnpm typecheck && pnpm lint && pnpm test
+        │
+        ▼
+Push + PR:
+  git push origin cogmo/<id-short>
+  gh pr create --draft --title "..." --body "<plan summary + test results>"
+        │
+        ▼
+Telegram: "Task done. Draft PR: <url>. Review from GitHub mobile when ready."
+```
+
+Failure at any stage: `status = 'failed'`, reason written, sandbox torn down, user notified with a link to the partial worktree for manual inspection.
+
+### Inngest step boundaries
+
+Same pattern as `handle-message` ([crash-recovery.md](crash-recovery.md)) — durable around the boundaries, non-durable through the streaming middle.
+
+| Step | Kind | Notes |
+|-|-|-|
+| `allocate-worktree` | `step.run` | `git worktree add -b cogmo/<id-short>`; idempotent — checks existence before creating |
+| `create-container` | `step.run` | `sandbox.createTaskContainer`; on retry, reuses existing container row if still healthy |
+| *plan streaming* | non-durable | Spawns `claude -p --permission-mode plan`, streams JSONL to Telegram. Not wrapped in `step.run` — can't replay a stream. On retry, re-invoked with `--resume <sid>` so it continues the same session instead of replanning from scratch |
+| `persist-plan` | `step.run` | Writes `coding_tasks.plan`, status `awaiting_approval` |
+| `wait-for-approval` | `step.waitForEvent` | Hours-to-days acceptable; Inngest durably parks the run |
+| *execute streaming* | non-durable | Same pattern as plan streaming — `--resume <sid>`, permission responses over stdin |
+| `verify` | `step.run` | `pnpm typecheck && pnpm lint && pnpm test` inside the container; timeout + test-fail retry loop is inside this step |
+| `push` | `step.run` | `git push origin cogmo/<id-short>`; non-fast-forward fails the task, no force |
+| `create-pr` | `step.run` | `gh pr create --draft`; idempotent — if a PR already exists for the branch, update body instead |
+| `teardown` | `step.run` | WIP-ref push if dirty, worktree remove, `sandbox.stopTask(id)` — always runs, even on failure, via `onFailure` hook |
+
+Streaming sections re-execute on retry. `--resume <sid>` plus idempotent durable steps around them keeps the task convergent — replays don't produce double commits, double pushes, or double PRs. Mirrors the tradeoff we already accepted for `handle-message` message streaming.
+
+## Autonomy Gates `[proposed]`
+
+Three gates, mapped onto Cogmo's existing `explicit_permission` rules.
+
+### Plan gate
+
+Before any writes. Invoke the backend in plan mode (`claude -p --permission-mode plan` or Codex equivalent). Plan text is captured in `coding_tasks.plan` regardless of trigger source.
+
+Gating depends on `trigger_source`:
+
+- **`user`** — Plan posted to Telegram with inline keyboard: **Approve**, **Revise** (sends a follow-up user message to refine), **Cancel**. No edits happen until approved. Approval writes `plan_approved_at` and triggers the execute phase.
+- **`evolution` / `signal_pipeline`** — Plan proceeds to execute automatically. `plan_approved_at` stays null. The PR merge gate remains the single human checkpoint; no interactive approval on Telegram.
+
+This keeps automated self-improvement flows non-blocking while preserving a human veto where it matters — at PR review. An automated task that produces a bad plan wastes its own tokens and parks a draft PR; it cannot modify the system without the human reviewer.
+
+**Approval does not expire.** Once a plan is approved (`plan_approved_at` set), that approval stands until the task reaches a terminal state. The plan text lives durably in `coding_tasks.plan`; the task's branch is isolated from base-branch drift until merge; container resources are freed by the idle-TTL path independently of approval freshness. If execution is resumed hours or days after approval, the preserved `session_id` rehydrates the same plan into a fresh container. State-based invalidation (code SHA drift) is the industry norm here, not time-based; our task-branch isolation makes even that a non-issue. P3 polish: post a "still want to proceed?" confirmation if execution would start >24h after approval — reminder, not expiry.
+
+### Tool gate
+
+During execute phase. Every tool call the CLI wants to run is gated against our policy before it executes.
+
+**Mechanism: `stream-json` bidirectional, not PreToolUse hooks.** Claude Code's `PreToolUse` hook runs as a synchronous subprocess with a default ~60s timeout — not workable when the user is asleep or away from Telegram for hours. Using `--input-format stream-json` we can respond to the CLI's permission requests over stdin, blocking for as long as the user needs. The same channel is how we inject follow-up messages during a multi-turn task. Hooks stay as a backup for pattern-match denies that we want to enforce in-band with no Cogmo round-trip (e.g., always block `rm -rf /*`), because hook timeouts don't matter when the decision is local and instantaneous.
+
+Policy (applied whether the signal comes from hook or stream-json):
+
+- **Always allow:** `Read`, `Grep`, `Glob`, `Edit`, `Write` to files under the worktree
+- **Always deny:** `Bash(rm -rf /*)`, `Bash(git push --force *)`, anything outside the worktree
+- **Prompt:** `Bash(git push*)`, `Bash(docker *)` (caught by sandbox policy anyway but also surfaced here), network writes (`curl -X POST`, npm publish, etc.)
+
+Prompts go to Telegram as inline-keyboard messages: **Allow once** / **Allow for this task** / **Deny**. Response writes to a decision log; matching decisions auto-apply for the rest of the task.
+
+### Merge gate
+
+The final artifact is a **draft PR**. Cogmo never pushes to `main`, never merges, never marks ready-for-review. The user reviews the diff in GitHub Mobile (or desktop) using their normal review flow — branch protection, required checks, and reviewers apply.
+
+## Git Identity `[proposed]`
+
+**P1:** Fine-grained PAT on a dedicated `cogmo-bot` GitHub account. Stored in Cogmo's `secrets` table. Per-repo scope, short expiry. Injected into the task container as a git credential helper at task start, wiped on teardown (never written to a file inside the container).
+
+**SSH commit signing:** `git config gpg.format ssh` + an SSH signing key owned by the bot account. Commits show "Verified" on GitHub. Uses OpenSSH, no GPG faff.
+
+**P2+:** Migrate to GitHub App with installation tokens. Short-lived tokens per task, cleaner audit trail, standard practice (Dependabot, Renovate, Copilot cloud agent all use this). Deferred because App setup is fiddly for a one-user tool and P1's PAT model is functionally equivalent for audit trail + signing.
+
+### Credential delivery: disk vs vault socket
+
+Two viable patterns, each with real costs:
+
+**A. Disk-based credential helper (P1 proposal)** — generate a per-task PAT-backed `~/.git-credentials` and `~/.netrc` inside the container at start, wipe at teardown. `GIT_ASKPASS=<script>` for the git path, same file covers `gh`, `npm`, `pip`, `curl`.
+
+- ✅ Zero custom code — every CLI already understands these files.
+- ✅ Easy to debug — `cat` reveals state.
+- ✅ Works uniformly across git, gh, npm, pip, curl, cargo.
+- ❌ Credentials sit on disk for the task's lifetime. If the container is breached or a backup captures the layer, they leak. Our no-dump worktree policy mitigates the backup path; layer snapshots remain a small residual risk.
+- ❌ A rogue subprocess can read the files and exfiltrate before teardown.
+
+**B. Vault socket (P2+ proposal)** — a helper binary inside (or adjacent to) the container exposes credentials on a Unix socket. `GIT_ASKPASS` becomes a tiny script that `curl`s the socket. Backed by Cogmo's encrypted secrets store.
+
+- ✅ Credentials never land on container disk. Revocable instantly by closing the socket.
+- ✅ Per-task scoping is natural — socket path identifies the task, same mechanism as the Docker proxy.
+- ✅ Matches Cogmo's capability-interface philosophy: tool asks for credential, vault decides.
+- ❌ ~200–300 lines of custom code (helper binary + client shim). Yet another moving piece.
+- ❌ Compat drift — every tool that needs auth must funnel through a helper Cogmo controls. Git via `GIT_ASKPASS` is easy; `npm` / `pip` / `cargo` may need per-tool helpers or environment shims.
+- ❌ Harder to debug — auth failures surface as opaque "permission denied" from the client.
+
+**P1 decision: ship pattern A.** Pair it with short-lived PATs (fine-grained, per-repo, quarterly rotation on the bot account) and aggressive teardown. Revisit vault socket in P2 alongside the GitHub App migration, when we'll have installation tokens that auto-expire in 1 hour and benefit most from no-disk storage.
+
+## Repo Registry `[proposed]`
+
+Repos are first-class. A repo must be registered (via CLI or control command) before Cogmo will work on it:
+
+```
+cogmo repo add <name> --path /path/to/clone --remote git@github.com:user/repo.git
+cogmo repo list
+cogmo repo remove <name>
+```
+
+Each repo can override:
+
+- **Devcontainer**: `.devcontainer/devcontainer.json` in the repo takes precedence; if absent, falls back to `cogmo/devbase` (opinionated image with node, python, common CLIs, claude, codex).
+- **Allowed backends**: some repos might restrict to Claude only, or opt out of Codex.
+- **Test command**: verify step needs to know how to run tests for this repo.
+
+## Memory Layers `[proposed]`
+
+Three layers, clean separation:
+
+| Layer | Scope | Storage |
+|-|-|-|
+| **In-session** | A single CLI invocation's rolling context | Claude/Codex's own session file, resumed via `session_id` |
+| **Task** | The lifetime of one `coding_tasks` row — plan, approvals, tool decisions, resource usage | Cogmo DB |
+| **Repo-knowledge** | Cross-task facts about a repo — "tests always require PG running", "this module is getting rewritten" | Hindsight, extracted by the Observer post-task |
+
+The Observer ([memory.md](memory.md)) runs after a task closes and extracts repo-scoped facts, tagged with `repo:<name>`. Future tasks on the same repo auto-recall these at plan time (inject into system prompt).
+
+Per-repo `CLAUDE.md` lives in the repo itself — that's the repo's own convention, not Cogmo state. Cogmo can propose edits to it as a normal code change.
+
+## Base Image `[proposed]`
+
+**`cogmo/devbase`** — the default task container image when a repo has no `.devcontainer/`. Contents:
+
+- Node 24 LTS + pnpm
+- Python 3.12 + uv
+- Go, Rust toolchains (via version managers, not pre-installed)
+- Common CLIs: git, gh, ripgrep, fd, jq, yq, curl, docker client
+- Claude Code CLI and Codex CLI preinstalled
+- Non-root user `cogmo` (UID mapping via sysbox handles the userns side)
+
+Images are pinned versions in Cogmo's deployment; updates happen via image rebuilds, not in-container installs.
+
+Cache volumes mounted into the container according to the scoping rules in [sandbox.md → Cache volume scoping](sandbox.md#cache-volume-scoping): global shared volumes for integrity-checked download caches (`~/.npm`, `~/.cargo/registry`, `~/go/pkg/mod`, apt); per-repo volumes for caches without ecosystem integrity (`~/.cache/pip`, `~/.cache/go-build`, Rust `target/`). Installed trees (`node_modules`, `.venv`) live in the worktree and are never cached cross-task.
+
+## Progress UX `[proposed]`
+
+One Telegram message per task, edited in place as the task progresses. Format:
+
+```
+🔧 refactor steering rules to support per-channel scoping
+   repo: cogmo · branch: cogmo/rvc1 · backend: claude
+   
+   ● plan approved · 4 files to edit · 2 new tests
+   ▶ executing: edit src/agent/steering-rules.ts (3/4)
+   
+   tokens: 12.4k in / 3.8k out · elapsed: 2m14s
+```
+
+Editing one message keeps the chat clean and matches established patterns ([RichardAtCT/claude-code-telegram](https://github.com/RichardAtCT/claude-code-telegram), [gergomiklos/heyagent](https://github.com/gergomiklos/heyagent)).
+
+Diffs are not rendered in Telegram. Link to GitHub for review. GitHub Mobile (since April 2026) natively supports reviewing Copilot cloud-agent diffs from a phone — Cogmo draft PRs use the same surface.
+
+## Failure Modes `[proposed]`
+
+| Failure | Handling |
+|-|-|
+| Plan LLM output unparseable | Retry once with clarification; if still failing, post raw output to Telegram and fail task |
+| Subscription rate-limited | Detect from CLI error; mark task `failed` with informative reason; the failure counts toward the source's backoff window (see *Admission & Rate Limiting → Failure backoff*). User can retry manually once the subscription window resets. |
+| Tool approval denied | Feed the denial back into the session so the CLI can try a different approach; if it keeps trying denied tools, fail task |
+| Tests fail in post-hoc verify | Mark task `failed` with the verify output. No Cogmo-side retry — the CLI's own agent loop had its iteration budget during execute (see *Prompt Construction → Self-verify clause*). User sees the failing output and decides whether to resume, file a fix as a new task, or merge as-is. |
+| Git push rejected (non-ff, protected) | Report error, do not force — user decides how to reconcile |
+| Task container crash | Mark task `failed`; sandbox reaper cleans up orphans; `session_id` preserved so the user can explicitly resume |
+| Cogmo restart mid-task | Sandbox crash recovery reconciles containers on boot. Non-terminal tasks are *not* auto-resumed — they stay in their last status with `session_id` intact, and the next user turn on that task triggers the resume path from [Container Lifecycle](#container-lifecycle-proposed). Avoids silent side-effects after a potentially long outage. |
+
+## Why this design `[confirmed]`
+
+Lines up with documented industry patterns (late 2025 / Q1 2026):
+
+- **Plan-first gating** is standard — Claude Code's plan mode, Cursor's plan mode, Cursor Auto's classifier-reviewed actions all converge here.
+- **Draft PR as merge gate** is universal — GitHub Copilot coding agent, Devin, Cursor background agents all end tasks with a draft PR rather than trying to render diffs in chat.
+- **Worktree-per-task** is Claude Code's own `-w` flag shape and Codex's experimental multi-agent pattern.
+- **Session resume** via `--resume` or `--continue` is both CLIs' native feature — use it, don't reinvent.
+- **Telegram UX** patterns (inline approvals, progress-in-one-message, ANSI stripping) are well-trodden in the reference bots.
+
+## Implementation Phases `[proposed]`
+
+Ship order. Each phase is independently useful — stop at any point and the prior phases still work.
+
+### P1 — core loop
+
+1. **Sandbox primitives.** `containers`, `cogmo_instances`, `networks`, `volumes` tables; sibling-container creation against host daemon with sysbox runtime; label injection; root-task cascade on teardown; reaper cron (TTL + orphan + stale-row passes). Proxy is pass-through only — no policy enforcement yet.
+2. **Claude backend, plan-only.** Subprocess wrap with `--permission-mode plan`, JSONL parsing, session capture. Stream plan text to Telegram. Emit `plan_ready` with inline keyboard. No execute path wired yet.
+3. **Plan approval + execute.** Approval writes `plan_approved_at`, orchestrator resumes session with `--permission-mode acceptEdits`. Text-delta streaming into a single edited Telegram message.
+4. **Tool gate.** Permission prompts over `stream-json` stdin → Telegram inline keyboards → decision back to stdin. Default policy table from Autonomy Gates applies.
+5. **Verify + push + draft PR.** In-container `pnpm typecheck && pnpm lint && pnpm test`, git commit + sign + push, `gh pr create --draft`. Teardown policy (worktree persistence table) executes. Resource usage written to `coding_tasks.resource_usage`.
+
+After (5): end-to-end working flow for the single-backend, trusted-repo case.
+
+### P2 — breadth + hardening
+
+6. **Codex backend.** Second `CodingBackend` impl, same interface. Selection per-task via `coding_tasks.backend`.
+7. **Proxy policy enforcement.** Deny `Privileged`, `NetworkMode=host`, out-of-scope host binds, dangerous caps. Runtime injection. Registry allowlist.
+8. **Devcontainer parsing.** Full `.devcontainer/devcontainer.json` support via the devcontainer CLI or equivalent — `image`, `features`, `postCreateCommand`, forwardPorts. Falls back to `cogmo/devbase` when absent.
+9. **Vault socket for credentials.** Replace disk-based `.git-credentials` with a per-task Unix socket helper. Enables short-lived GitHub App installation tokens without writing them to disk.
+10. **GitHub App migration.** Replace bot PAT with a Cogmo GitHub App and installation tokens. ~1-hour token expiry, per-task minted via the App's private key.
+11. **Extract sandbox proxy to sidecar.** Second subcommand on the same image (`cogmo sandbox-proxy`), communicating with `cogmo serve` over tRPC. See [sandbox.md → Deployment Topology](sandbox.md#deployment-topology). Triggered when an in-process crash first disrupts a live task.
+12. **Automated self-modification surface.** For `trigger_source IN ('evolution', 'signal_pipeline')`, expose read/write access to non-code configuration — `steering_rules`, `profiles.base_prompt`, and similar DB-backed assets — as direct domain operations, not through coding-delegation. Data changes don't need a diff, a PR, or a sandbox; they're atomic DB writes gated by which evolution stage holds the capability. Code/skill changes continue to flow through coding-delegation with its draft-PR gate. Specified properly in [evolution.md](evolution.md); this phase is the wiring from evolution stages into those capabilities.
+
+### P3 — polish
+
+13. **Parallel tasks on the same repo.** Raise `max_concurrent_tasks` past 1; add the install-lock (Concurrency option B) on shared cache volumes. Narrow the lock to known racers (pip, apt) after measurement (option C).
+14. **BuildKit policy enforcement.** Basic `buildx` works from P1 via transparent pipe on `/session`. This phase adds gRPC-level inspection via the BuildKit SDK for fine-grained policy — blocking `FROM` lines against unapproved registries, inspecting secret mounts, rejecting builds that would escape worktree scope.
+15. **Observer repo-knowledge loop.** Post-task extraction into Hindsight, tagged `repo:<name>`, auto-recall injected at plan time.
+
+Each phase has a clear "done" bar: the prior phase's feature works unchanged, and the new one is opt-in behind config (not a silent behavior change).
+
+## Open Questions
+
+- **Codex parity timeline.** Ship Claude backend in P1; Codex adapter in P3 behind the same interface. Revisit if Codex grows a feature (better model for a task class) that makes waiting painful.
