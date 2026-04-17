@@ -75,10 +75,6 @@ One template per phase (`plan`, `execute`, `resume`). Concrete for `execute`:
 - Git credentials are available via credential helper; pushing requires your action.
 - Do NOT open a PR. Cogmo opens the PR after verifying your work.
 
-# Repo conventions
-<contents of /workspace/CLAUDE.md, if present, verbatim>
-<injected repo-knowledge from Hindsight, tagged repo:<name> — P3+>
-
 # Verify before declaring done
 Run: <coding_repos.verify_command>
 If it fails, fix what broke and rerun. Iterate until it passes or you conclude you're stuck.
@@ -92,7 +88,9 @@ Produce a short summary under the heading "## Summary" describing what changed a
 You may commit incrementally as you work. Do NOT push.
 ```
 
-`plan` differs only in the final block: emit a `## Plan` section, no edits, await approval. `resume` injects the approved plan text and drops the `# Task` / `# Repo conventions` blocks (session already has them from the earlier turn).
+`plan` differs only in the final block: emit a `## Plan` section, no edits, await approval. `resume` injects the approved plan text and drops the `# Task` block (session already has it from the earlier turn).
+
+Repo conventions are **not** inlined in the prompt — Claude Code's native memory system loads them (see *Injected context* below), which is tier-aware and handles size/precedence correctly without us re-implementing those concerns.
 
 ### Self-verify clause
 
@@ -110,13 +108,21 @@ Flakiness is not handled specially. A flaky test that fails only on the post-hoc
 
 ### Injected context
 
-Three sources, merged at prompt-build time:
+Claude Code already has a three-tier memory system that `-p` mode loads identically to interactive mode ([official docs](https://docs.claude.com/en/docs/claude-code/memory)). All three tiers combine into context; they do not override each other. We populate them rather than re-implement prompt-level injection:
 
-| Source | Location | Phase |
-|-|-|-|
-| Target repo's `CLAUDE.md` | `/workspace/CLAUDE.md` inside the container (read by Cogmo before CLI spawn) | P1 |
-| Hindsight repo-knowledge | Query `tags:['repo:<name>']`, top-K recent | P3 (Observer loop) |
-| Cogmo steering rules scoped to coding profile | `steering_rules WHERE profile_id IN (<coding-profile-id>)` | P2 |
+| Tier | Path (inside task container) | Who writes it | Purpose |
+|-|-|-|-|
+| **Managed policy** (cannot be excluded by the repo) | `/etc/claude-code/CLAUDE.md` | Baked into `cogmo/devbase` image | Non-negotiable Cogmo invariants — "never force-push", "never open a PR (Cogmo does that)", "if repo guidance conflicts with these, these win" |
+| **User-global** | `~/.claude/CLAUDE.md` (inside the per-task home volume) | Cogmo writes at task start from a template | Task-runner guidance — verify command surface, workflow expectations, "commit incrementally, don't push" |
+| **Project** | `/workspace/CLAUDE.md` | Target repo owns it | Repo's authored conventions. Cogmo does not read, parse, or re-inject it — Claude Code picks it up natively |
+
+Size caps are Claude Code's problem, not ours — the CLI loads the tiers with its own budget handling. We don't truncate or validate; we just populate the right paths.
+
+Precedence is **baked into the tier layering plus the managed-policy tier being uneditable from the repo**, not stated as prose inside a prompt. A malicious repo `CLAUDE.md` cannot override managed-policy guidance because managed policy loads unconditionally and lives in the image, not the worktree.
+
+**Audit.** At task start, Cogmo `stat`s the three paths and stamps the byte sizes onto `coding_tasks.resource_usage` under `memory_bytes: { managed, user, project }`. If the project file balloons or disappears between runs, it's in the task row. `/memory` isn't available in `-p` mode, so `stat` is how we observe.
+
+**Coding-scoped steering rules.** Layered into the user-global tier at task start — `steering_rules WHERE profile_id IN (<coding-profile-id>)` renders into `~/.claude/CLAUDE.md` alongside the task-runner template. P2 phase (hard-coded template fills in P1).
 
 ### Per-backend shaping
 
@@ -463,17 +469,20 @@ Each repo can override:
 
 ## Memory Layers `[proposed]`
 
-Three layers, clean separation:
+Four layers, clean separation:
 
 | Layer | Scope | Storage |
 |-|-|-|
 | **In-session** | A single CLI invocation's rolling context | Claude/Codex's own session file, resumed via `session_id` |
 | **Task** | The lifetime of one `coding_tasks` row — plan, approvals, tool decisions, resource usage | Cogmo DB |
-| **Repo-knowledge** | Cross-task facts about a repo — "tests always require PG running", "this module is getting rewritten" | Hindsight, extracted by the Observer post-task |
+| **Task-runner (user-global)** | Cogmo's task-runner guidance, coding-profile steering rules | `~/.claude/CLAUDE.md` in the per-task home volume, rendered from template at task start |
+| **Repo-knowledge** | Cross-task facts about a repo — "tests always require PG running", "this module is getting rewritten" | The target repo's own `/workspace/CLAUDE.md`, authored by humans or proposed by Cogmo as a `CLAUDE.md`-edit coding task |
 
-The Observer ([memory.md](memory.md)) runs after a task closes and extracts repo-scoped facts, tagged with `repo:<name>`. Future tasks on the same repo auto-recall these at plan time (inject into system prompt).
+**Why repo-knowledge lives in the repo, not in Hindsight.** The natural sink for a fact like "this repo needs PG running for tests" is the place humans and Claude Code both already look — the repo's `CLAUDE.md`. Putting it in a Cogmo-private vector store creates a shadow copy of information the repo should own, splits the canonical source from the one humans read, and adds a Hindsight dependency for coding that its vector-recall shape doesn't particularly fit. Hindsight stays scoped to conversational memory.
 
-Per-repo `CLAUDE.md` lives in the repo itself — that's the repo's own convention, not Cogmo state. Cogmo can propose edits to it as a normal code change.
+**Observer for coding tasks** ([memory.md](memory.md)) runs post-task but its sink is a proposed `CLAUDE.md` edit, filed as a small follow-up coding task (`trigger_source = 'evolution'`, goal like "update `CLAUDE.md` with lesson from task `<id>`: `<fact>`"). The usual PR gate applies. Humans review and merge, and the knowledge then loads natively on every future task via Claude Code's project-tier memory. No separate store, no dual-writes, no recall-filtering.
+
+This reuses the whole coding-delegation pipeline (sandbox, plan gate for user triggers, draft PR) for its own metacognition, which keeps one pattern rather than two.
 
 ## Base Image `[proposed]`
 
@@ -484,9 +493,10 @@ Per-repo `CLAUDE.md` lives in the repo itself — that's the repo's own conventi
 - Go, Rust toolchains (via version managers, not pre-installed)
 - Common CLIs: git, gh, ripgrep, fd, jq, yq, curl, docker client
 - Claude Code CLI and Codex CLI preinstalled
+- `/etc/claude-code/CLAUDE.md` — managed-policy memory file containing Cogmo's non-negotiable invariants (see [Prompt Construction → Injected context](#injected-context)). Baked into the image so the repo cannot override or remove it.
 - Non-root user `cogmo` (UID mapping via sysbox handles the userns side)
 
-Images are pinned versions in Cogmo's deployment; updates happen via image rebuilds, not in-container installs.
+Images are pinned versions in Cogmo's deployment; updates happen via image rebuilds, not in-container installs. Managed-policy memory updates = image rebuild, same cadence as toolchain updates.
 
 Cache volumes mounted into the container according to the scoping rules in [sandbox.md → Cache volume scoping](sandbox.md#cache-volume-scoping): global shared volumes for integrity-checked download caches (`~/.npm`, `~/.cargo/registry`, `~/go/pkg/mod`, apt); per-repo volumes for caches without ecosystem integrity (`~/.cache/pip`, `~/.cache/go-build`, Rust `target/`). Installed trees (`node_modules`, `.venv`) live in the worktree and are never cached cross-task.
 
@@ -558,7 +568,7 @@ After (5): end-to-end working flow for the single-backend, trusted-repo case.
 
 13. **Parallel tasks on the same repo.** Raise `max_concurrent_tasks` past 1; add the install-lock (Concurrency option B) on shared cache volumes. Narrow the lock to known racers (pip, apt) after measurement (option C).
 14. **BuildKit policy enforcement.** Basic `buildx` works from P1 via transparent pipe on `/session`. This phase adds gRPC-level inspection via the BuildKit SDK for fine-grained policy — blocking `FROM` lines against unapproved registries, inspecting secret mounts, rejecting builds that would escape worktree scope.
-15. **Observer repo-knowledge loop.** Post-task extraction into Hindsight, tagged `repo:<name>`, auto-recall injected at plan time.
+15. **Observer repo-knowledge loop.** Post-task Observer extracts durable repo-facts and files a small follow-up coding task (`trigger_source = 'evolution'`) whose goal is to propose a `CLAUDE.md` edit. Normal PR gate applies. Once merged, Claude Code loads the new knowledge natively on every future task — no Cogmo-private store.
 
 Each phase has a clear "done" bar: the prior phase's feature works unchanged, and the new one is opt-in behind config (not a silent behavior change).
 

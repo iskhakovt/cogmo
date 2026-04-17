@@ -138,7 +138,7 @@ Cogmo delegates heavy coding tasks (and evolution-driven code changes) to `claud
 
 - [ ] Parallel tasks per repo — raise `max_concurrent_tasks`; install-lock on shared cache volumes (option B), narrow to pip/apt after measurement (option C)
 - [ ] BuildKit policy enforcement — gRPC inspection via moby/buildkit SDK; block unapproved `FROM` lines, inspect secret mounts
-- [ ] Observer repo-knowledge loop — post-task Hindsight extraction tagged `repo:<name>`; auto-recall at plan time
+- [ ] Observer repo-knowledge loop — post-task Observer files a `trigger_source='evolution'` coding task whose goal is a `CLAUDE.md` edit; native Claude Code memory loads it on future tasks (no Cogmo-private store)
 - [ ] Plan-age confirmation — "still want to proceed?" Telegram prompt when execution would start >24h after approval
 
 ## Monitoring Thresholds (Scaling Triggers)
