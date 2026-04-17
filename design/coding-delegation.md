@@ -25,7 +25,7 @@ Scope explicitly *not* in this doc: writing code inline in the agent's own respo
 | Backend | Invocation (shape) | Auth |
 |-|-|-|
 | Claude Code | `claude -p --output-format stream-json --include-partial-messages --input-format stream-json --permission-mode {plan,acceptEdits} [--resume <sid>] [--session-id <uuid>]` | User's Max/Pro subscription via existing login |
-| Codex CLI | `codex exec --json [resume <sid> \| --last]` | User's ChatGPT Plus/Pro login |
+| Codex CLI | `codex exec resume <sid> --json` (or `codex exec resume --last --json`) — `resume` is a subcommand and must precede `--json` | User's ChatGPT Plus/Pro login |
 
 Flag set is illustrative — pin and verify against the exact `claude` / `codex` versions baked into `cogmo/devbase`. Both CLIs evolve their flags quickly; the `CodingBackend` impl treats the argv vector as a versioned contract keyed on the image tag.
 
@@ -33,7 +33,7 @@ The Agent SDK explicitly requires API keys and **cannot use subscription auth** 
 
 Output is parsed as JSONL. Both CLIs emit structured events (`system/init`, `stream_event` with `text_delta`, tool-use, `turn.completed` with tokens). Cogmo streams these as progress updates to Telegram.
 
-`session_id` is captured on the first event and persisted in `coding_tasks.session_id`. Resume uses `--resume` (Claude) or `resume <sid>` (Codex) — carries full conversation state across Cogmo restarts or multi-turn task flows.
+`session_id` is captured on the first event and persisted in `coding_tasks.session_id`. Resume uses `--resume <sid>` (Claude) or the `resume` subcommand (Codex) — carries full conversation state across Cogmo restarts or multi-turn task flows.
 
 ## Backend Interface `[proposed]`
 
@@ -65,7 +65,7 @@ What Cogmo actually *tells* the CLI. The prompt is first-class — it governs ho
 
 One template per phase (`plan`, `execute`, `resume`). Concrete for `execute`:
 
-```
+```md
 # Task
 <goal from coding_tasks.goal>
 
@@ -318,7 +318,7 @@ Lands as part of P2 phase 12 (automated self-modification surface). Without it, 
 
 ## Flow `[proposed]`
 
-```
+```text
 [Telegram: "refactor steering rules to support per-channel scoping"]
         │
         ▼
@@ -416,7 +416,7 @@ The final artifact is a **draft PR**. Cogmo never pushes to `main`, never merges
 
 ## Git Identity `[proposed]`
 
-**P1:** Fine-grained PAT on a dedicated `cogmo-bot` GitHub account. Stored in Cogmo's `secrets` table. Per-repo scope, short expiry. Injected into the task container as a git credential helper at task start, wiped on teardown (never written to a file inside the container).
+**P1:** Fine-grained PAT on a dedicated `cogmo-bot` GitHub account. Stored in Cogmo's `secrets` table. Per-repo scope, short expiry. Delivered into the task container at task start via the mechanism chosen in *Credential delivery* below (P1 ships the disk-backed `~/.git-credentials` path with aggressive wipe on teardown; vault socket is the P2 hardening).
 
 **SSH commit signing:** `git config gpg.format ssh` + an SSH signing key owned by the bot account. Commits show "Verified" on GitHub. Uses OpenSSH, no GPG faff.
 
@@ -449,7 +449,7 @@ Two viable patterns, each with real costs:
 
 Repos are first-class. A repo must be registered (via CLI or control command) before Cogmo will work on it:
 
-```
+```bash
 cogmo repo add <name> --path /path/to/clone --remote git@github.com:user/repo.git
 cogmo repo list
 cogmo repo remove <name>
@@ -494,7 +494,7 @@ Cache volumes mounted into the container according to the scoping rules in [sand
 
 One Telegram message per task, edited in place as the task progresses. Format:
 
-```
+```text
 🔧 refactor steering rules to support per-channel scoping
    repo: cogmo · branch: cogmo/rvc1 · backend: claude
    

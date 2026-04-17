@@ -289,7 +289,7 @@ Swap at the `Sandbox` interface boundary. P1 `LocalInProcessSandbox` calls the s
 
 ## Module Structure `[proposed]`
 
-```
+```text
 src/sandbox/
   index.ts           — public API (Sandbox interface, factory)
   supervisor.ts      — container lifecycle, socket allocation
@@ -312,7 +312,7 @@ interface Sandbox {
 }
 ```
 
-`LocalDockerSandbox` is the P1 implementation. Future `RemoteSshSandbox` or `FlyMachineSandbox` slot behind the same interface.
+`LocalInProcessSandbox` is the P1 implementation (proxy as a module inside `cogmo serve`). `LocalSidecarSandbox` replaces it in P2 — same interface, calls the tRPC client from *Deployment Topology → Control plane* instead of the supervisor directly. Future `RemoteSshSandbox` or `FlyMachineSandbox` slot behind the same interface.
 
 ## Reference Implementations `[confirmed]`
 
