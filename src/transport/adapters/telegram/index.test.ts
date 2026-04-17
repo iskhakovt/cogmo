@@ -28,6 +28,9 @@ vi.mock("grammy", () => {
     api = mockBotApi;
     command = vi.fn((cmd: string, handler: any) => handlers.set(`command:${cmd}`, handler));
     on = vi.fn((filter: string, handler: any) => handlers.set(`on:${filter}`, handler));
+    callbackQuery = vi.fn((pattern: RegExp, handler: any) =>
+      handlers.set(`callbackQuery:${pattern.source}`, handler),
+    );
     catch = vi.fn();
     start = vi.fn(({ onStart }: any = {}) => onStart?.());
     stop = vi.fn();
@@ -144,7 +147,46 @@ describe("telegram adapter", () => {
     await handlers.get("command:new")!(ctx);
 
     expect(transport.closeSession).toHaveBeenCalledWith("session-1");
-    expect(ctx.reply).toHaveBeenCalledWith("New conversation started.");
+    expect(ctx.reply.mock.calls[0]?.[0]).toBe("New conversation started.");
+  });
+
+  it("mid-dialog text (/profile new flow) does NOT emit to agent", async () => {
+    // Start a /profile new dialog, then send a plain text message. The text should be
+    // consumed by the FSM and never reach transport.emit. Regression guard: placement of
+    // the dialog-intercept check at the top of bot.on("message:text") matters.
+    const transport = mockTransport({
+      resolveSession: vi.fn().mockResolvedValue({
+        id: "session-1",
+        channelId: "tg-ch",
+        platformAddress: "42",
+        conversationId: "conv-1",
+        status: "active",
+        receive: "routed",
+      }),
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        create: vi.fn().mockResolvedValue(ok({} as never)),
+        update: vi.fn().mockResolvedValue(ok({} as never)),
+        delete: vi.fn().mockResolvedValue(ok(undefined)),
+      },
+    });
+    await setup({
+      channelId: "tg-ch",
+      credentials: { token: "fake" },
+      transport,
+      attachments: mockAttachmentStore(),
+    });
+
+    // Enter /profile new flow
+    await handlers.get("command:profile")!({
+      ...makeCtx(111, "", 42),
+      match: "new coder",
+    });
+
+    // Now send plain text — FSM should eat it
+    await handlers.get("on:message:text")!(makeCtx(111, "You are a coder", 42));
+
+    expect(transport.emit).not.toHaveBeenCalled();
   });
 
   it("deliver sends via bot API", async () => {

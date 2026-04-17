@@ -213,6 +213,7 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
         model: profile.model,
         providerId,
         position: nextPosition,
+        userSelectable: true,
       });
     }
   }
