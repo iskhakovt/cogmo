@@ -114,18 +114,20 @@ Claude Code has a memory system that `-p` mode loads identically to interactive 
 
 | Tier | Path (inside task container) | Owner | Purpose in our design |
 |-|-|-|-|
-| **Managed policy** | `/etc/claude-code/CLAUDE.md` | Baked into `cogmo/devbase` image | Non-negotiable Cogmo invariants (e.g., "never force-push", "never open a PR — Cogmo does that", "if repo guidance conflicts with these, these win"). Loads unconditionally; the repo cannot exclude or override it because the file lives in the image, not the worktree. |
+| **Managed policy** | `/etc/claude-code/CLAUDE.md` | Baked into `cogmo/devbase` image — immutable from the worktree's perspective | Cogmo invariants (e.g., "never force-push", "never open a PR — Cogmo does that"), plus explicit text asking Claude to treat this file's guidance as authoritative when conflicts arise with `/workspace/CLAUDE.md`. |
 | **User-global** | `~/.claude/CLAUDE.md` | Cogmo writes at task start, inside the per-task home volume | Task-runner guidance — verify-command surface, workflow expectations, "commit incrementally, don't push" |
 | **Project** | `/workspace/CLAUDE.md` | Target repo owns it | Repo's authored conventions. Cogmo does not read, parse, or re-inject — Claude Code loads it natively |
 
 We do **not** populate `CLAUDE.local.md` variants; those are for personal, gitignored overrides and don't fit Cogmo's task-scoped delivery model.
 
-**What "precedence" means here.** Because all tiers concatenate, there is no file-level override. Authority when content conflicts comes from two mechanisms combined:
+**What "precedence" means here — being precise about the enforcement level.** All tiers concatenate into Claude Code's context; there is **no CLI-level or runtime mechanism that blocks, overrides, or silences `/workspace/CLAUDE.md`**. What we have are two distinct properties composing into an effective precedence:
 
-1. **The managed-policy file explicitly states that it overrides repo guidance on conflict.** Claude treats this like any other instruction — it's a content-level declaration, enforced by the LLM's instruction-following, not a CLI-level mechanism.
-2. **The repo cannot edit or remove the managed-policy file** (lives in the image). So the statement above cannot be neutralized by an adversarial repo.
+1. **Immutability at the image layer.** `/etc/claude-code/CLAUDE.md` is a file in the `cogmo/devbase` image. The repo's worktree is bind-mounted at `/workspace` and has no write path to `/etc/claude-code/`. An adversarial repo cannot delete or modify the managed-policy file; it can only attempt to contradict it via its own `/workspace/CLAUDE.md` content.
+2. **LLM-level authority resolution.** When the managed-policy content and the repo content conflict, the managed-policy file contains explicit text telling Claude to treat its guidance as authoritative. Claude follows that because it follows instructions, not because any runtime enforces it. If Claude were to be jailbroken or otherwise persuaded by the repo's content, the managed-policy text would lose.
 
-A prose "repo guidance is advisory" disclaimer in our prompt would add nothing on top of this — it would only repeat what the managed-policy tier already declares, and Claude already reads.
+So the practical guarantee is **"managed policy cannot be removed, and Claude is instructed to let it win on conflict"** — not "managed policy is hard-enforced." This is enough because (a) the repo owner is the person who registered the repo with Cogmo in the first place (trust boundary is human, not technical), and (b) the sandbox + draft-PR gate contain blast radius even if the instruction-following fails.
+
+A prose "repo guidance is advisory" disclaimer in our prompt would add nothing on top of this — it would only repeat what the managed-policy file already says, and Claude already reads.
 
 **Size limits.** Claude Code handles loading and budgeting; we do not truncate or validate tier contents. The `/memory` command (interactive only) is the human-facing inspection tool; `-p` mode does not expose it.
 
@@ -394,7 +396,7 @@ Same pattern as `handle-message` ([crash-recovery.md](crash-recovery.md)) — du
 | `persist-plan` | `step.run` | Writes `coding_tasks.plan`, status `awaiting_approval` |
 | `wait-for-approval` | `step.waitForEvent` | Hours-to-days acceptable; Inngest durably parks the run |
 | *execute streaming* | non-durable | Same pattern as plan streaming — `--resume <sid>`, permission responses over stdin |
-| `verify` | `step.run` | `pnpm typecheck && pnpm lint && pnpm test` inside the container; timeout + test-fail retry loop is inside this step |
+| `verify` | `step.run` | Single post-hoc execution of `<coding_repos.verify_command>` inside the container (via `bash -lc`). **No retry loop in this step.** Iterating on failure was the CLI's job during the execute phase per *Prompt Construction → Self-verify clause*; this step exists only to confirm the CLI's "done" claim. Pass → proceed to push + PR; fail → mark task failed with the verify output. Budget caps (`task_token_budget`, `task_wall_time_seconds`) enforce termination of the execute phase upstream; this step is bounded by a single command timeout, not by a retry count. |
 | `push` | `step.run` | `git push origin cogmo/<id-short>`; non-fast-forward fails the task, no force |
 | `create-pr` | `step.run` | `gh pr create --draft`; idempotent — if a PR already exists for the branch, update body instead |
 | `teardown` | `step.run` | WIP-ref push if dirty, worktree remove, `sandbox.stopTask(id)` — always runs, even on failure, via `onFailure` hook |
@@ -595,4 +597,4 @@ Each phase has a clear "done" bar: the prior phase's feature works unchanged, an
 
 ## Open Questions
 
-- **Codex parity timeline.** Ship Claude backend in P1; Codex adapter in P3 behind the same interface. Revisit if Codex grows a feature (better model for a task class) that makes waiting painful.
+_All resolved; placement of follow-on questions will be added here as they arise._
