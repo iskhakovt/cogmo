@@ -225,6 +225,79 @@ describe("createTransport", () => {
     });
   });
 
+  describe("resumeConversation", () => {
+    it("resolves alias, verifies ownership, and swaps session atomically", async () => {
+      const agentStore = mockAgentStore({
+        findConversationByAlias: vi.fn().mockResolvedValue({ conversationId: "conv-1" }),
+        getConversation: vi
+          .fn()
+          .mockResolvedValue({ id: "conv-1", userId: "user-1", profileId: "p1", isPrivate: true }),
+      });
+      const { transport, transportStore } = setup({ agentStore });
+
+      const res = await transport.resumeConversation("addr-1", "handle-1", { alias: "work" });
+      expect(res.isOk()).toBe(true);
+      expect(agentStore.findConversationByAlias).toHaveBeenCalledWith("user-1", "work");
+      expect(transportStore.swapSession).toHaveBeenCalledWith("ch-1", "addr-1", {
+        conversationId: "conv-1",
+        status: "active",
+        receive: "routed",
+      });
+    });
+
+    it("accepts conversationId target directly (skips alias lookup)", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi
+          .fn()
+          .mockResolvedValue({ id: "conv-1", userId: "user-1", profileId: "p1", isPrivate: true }),
+      });
+      const { transport } = setup({ agentStore });
+
+      const res = await transport.resumeConversation("addr-1", "handle-1", {
+        conversationId: "conv-1",
+      });
+      expect(res.isOk()).toBe(true);
+      expect(agentStore.findConversationByAlias).not.toHaveBeenCalled();
+    });
+
+    it("returns conversation_not_found when alias lookup fails", async () => {
+      const { transport } = setup();
+      const res = await transport.resumeConversation("addr-1", "handle-1", { alias: "ghost" });
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "conversation_not_found" });
+    });
+
+    it("returns access_denied when caller does not own the conversation", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi
+          .fn()
+          .mockResolvedValue({ id: "c1", userId: "someone-else", profileId: "p", isPrivate: true }),
+      });
+      const { transport } = setup({ agentStore });
+
+      const res = await transport.resumeConversation("addr-1", "handle-1", {
+        conversationId: "c1",
+      });
+      expect(res._unsafeUnwrapErr()).toMatchObject({ code: "access_denied" });
+    });
+
+    it("rejects non-private conversation with access_denied", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi
+          .fn()
+          .mockResolvedValue({ id: "c1", userId: "user-1", profileId: "p", isPrivate: false }),
+      });
+      const { transport } = setup({ agentStore });
+
+      const res = await transport.resumeConversation("addr-1", "handle-1", {
+        conversationId: "c1",
+      });
+      expect(res._unsafeUnwrapErr()).toMatchObject({
+        code: "access_denied",
+        reason: expect.stringContaining("non-private"),
+      });
+    });
+  });
+
   // --- Admin namespaces (Chunk 3) ---
 
   describe("conversations.setAlias", () => {

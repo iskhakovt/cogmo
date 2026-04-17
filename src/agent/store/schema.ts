@@ -72,17 +72,21 @@ export const profiles = pgTable(
   (t) => [unique("uq_profiles_user_name").on(t.userId, t.name).nullsNotDistinct()],
 );
 
-export const conversations = pgTable("conversations", {
-  id: pk(),
-  userId: uuid("user_id")
-    .notNull()
-    .references(() => users.id),
-  profileId: uuid("profile_id")
-    .notNull()
-    .references(() => profiles.id),
-  isPrivate: boolean("is_private").notNull(),
-  createdAt: ts(),
-});
+export const conversations = pgTable(
+  "conversations",
+  {
+    id: pk(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    profileId: uuid("profile_id")
+      .notNull()
+      .references(() => profiles.id),
+    isPrivate: boolean("is_private").notNull(),
+    createdAt: ts(),
+  },
+  (t) => [index("idx_conversations_profile_id").on(t.profileId)],
+);
 
 export const messages = pgTable(
   "messages",
@@ -101,7 +105,10 @@ export const messages = pgTable(
     inputTokens: integer("input_tokens"), // nullable — only set on assistant messages
     createdAt: ts(),
   },
-  (t) => [index("idx_messages_conv_id").on(t.conversationId, t.id)],
+  (t) => [
+    index("idx_messages_conv_id").on(t.conversationId, t.id),
+    index("idx_messages_profile_id").on(t.profileId),
+  ],
 );
 
 export const aliases = pgTable(

@@ -116,7 +116,23 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "idx_conversations_profile_id": {
+          "name": "idx_conversations_profile_id",
+          "columns": [
+            {
+              "expression": "profile_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "conversations_user_id_users_id_fk": {
           "name": "conversations_user_id_users_id_fk",
@@ -357,6 +373,21 @@
             },
             {
               "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_messages_profile_id": {
+          "name": "idx_messages_profile_id",
+          "columns": [
+            {
+              "expression": "profile_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

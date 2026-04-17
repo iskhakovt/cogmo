@@ -149,16 +149,21 @@ export class ProfileDialogs {
     if (!state) return false;
 
     const text = ctx.match ?? "";
-    switch (state.step) {
-      case "prompt":
-        await this.#handlePromptStep(ctx, state, text);
-        return true;
-      case "model":
-        await this.#handleModelStep(transport, ctx, state, text);
-        return true;
-      case "confirm":
-        await this.#handleConfirmStep(transport, ctx, state, text);
-        return true;
+    try {
+      switch (state.step) {
+        case "prompt":
+          await this.#handlePromptStep(ctx, state, text);
+          return true;
+        case "model":
+          await this.#handleModelStep(transport, ctx, state, text);
+          return true;
+        case "confirm":
+          await this.#handleConfirmStep(transport, ctx, state, text);
+          return true;
+      }
+    } catch (e) {
+      this.#state.delete(ctx.chat.id);
+      throw e;
     }
   }
 

@@ -413,6 +413,10 @@ function errorMessage(err: TransportError): string {
     case "session_not_found":
       return "Session not found.";
   }
+  // Exhaustive — if a new TransportError code is added, TypeScript will warn
+  // at call sites that return `string` (the inferred return becomes `string | undefined`).
+  // Belt-and-suspenders: surface a generic message rather than passing undefined to ctx.reply.
+  return "Something went wrong.";
 }
 
 function toReplyOptions(

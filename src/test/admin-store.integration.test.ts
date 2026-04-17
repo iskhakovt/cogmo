@@ -86,7 +86,6 @@ describe("AgentStore admin (real Postgres)", () => {
       model: TEST_MODEL,
       lastInboundMessageId: inboundId,
     });
-    await new Promise((r) => setTimeout(r, 5));
     await store.insertMessage({
       conversationId: c2,
       role: "user",

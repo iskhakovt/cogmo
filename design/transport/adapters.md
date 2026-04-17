@@ -10,7 +10,12 @@ This boundary also enables future permission tuning — e.g. restricting a third
 
 ## Transport
 
-Contract pseudocode — return types shown as `Promise<T>` for readability. Actual implementations return `Result<T, TransportError>` (exceptions don't cross process boundaries for future plugin transport).
+Contract pseudocode — return types shown as `Promise<T>` for readability. Actual return semantics vary by method:
+
+- **Result-based** (`Promise<Result<T, TransportError>>`): `createConversation`, `resumeConversation`, `emit`, and all admin mutators (`conversations.{list, getCurrent, setAlias, setProfile}`, `profiles.{list, create, update, delete}`).
+- **Raw values** (no Result wrapper): `resolveSession` (`Session | null`), `closeSession` (`void`), `extendSession` (`void`), `uploadAttachment` (`string`), `models.list` (`string[]`).
+
+Adapter authors should not assume uniform Result behavior — check the interface for each method.
 
 ```typescript
 interface Transport {

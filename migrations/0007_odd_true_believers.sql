@@ -45,4 +45,8 @@ UPDATE "messages" SET "profile_id" = (SELECT "profile_id" FROM "conversations" W
 UPDATE "messages" SET "model" = '<legacy>' WHERE "model" IS NULL;--> statement-breakpoint
 ALTER TABLE "messages" ALTER COLUMN "profile_id" SET NOT NULL;--> statement-breakpoint
 ALTER TABLE "messages" ALTER COLUMN "model" SET NOT NULL;--> statement-breakpoint
-ALTER TABLE "messages" ADD CONSTRAINT "messages_profile_id_profiles_id_fk" FOREIGN KEY ("profile_id") REFERENCES "public"."profiles"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "messages" ADD CONSTRAINT "messages_profile_id_profiles_id_fk" FOREIGN KEY ("profile_id") REFERENCES "public"."profiles"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+
+-- Indexes on profile_id for deleteProfile's count-before-delete check.
+CREATE INDEX "idx_conversations_profile_id" ON "conversations" USING btree ("profile_id");--> statement-breakpoint
+CREATE INDEX "idx_messages_profile_id" ON "messages" USING btree ("profile_id");
