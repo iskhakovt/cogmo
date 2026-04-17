@@ -108,19 +108,28 @@ Flakiness is not handled specially. A flaky test that fails only on the post-hoc
 
 ### Injected context
 
-Claude Code already has a three-tier memory system that `-p` mode loads identically to interactive mode ([official docs](https://docs.claude.com/en/docs/claude-code/memory)). All three tiers combine into context; they do not override each other. We populate them rather than re-implement prompt-level injection:
+Claude Code has a memory system that `-p` mode loads identically to interactive mode ([official docs: Memory](https://docs.claude.com/en/docs/claude-code/memory)). We populate it rather than re-implement prompt-level injection.
 
-| Tier | Path (inside task container) | Who writes it | Purpose |
+**Loading behaviour, per the official docs.** Claude Code discovers memory files across several tiers and **concatenates all of them into the system context** — none of the tiers overrides or replaces another at the file-loading level. The tiers we care about, with exact paths on Linux (our deployment target):
+
+| Tier | Path (inside task container) | Owner | Purpose in our design |
 |-|-|-|-|
-| **Managed policy** (cannot be excluded by the repo) | `/etc/claude-code/CLAUDE.md` | Baked into `cogmo/devbase` image | Non-negotiable Cogmo invariants — "never force-push", "never open a PR (Cogmo does that)", "if repo guidance conflicts with these, these win" |
-| **User-global** | `~/.claude/CLAUDE.md` (inside the per-task home volume) | Cogmo writes at task start from a template | Task-runner guidance — verify command surface, workflow expectations, "commit incrementally, don't push" |
-| **Project** | `/workspace/CLAUDE.md` | Target repo owns it | Repo's authored conventions. Cogmo does not read, parse, or re-inject it — Claude Code picks it up natively |
+| **Managed policy** | `/etc/claude-code/CLAUDE.md` | Baked into `cogmo/devbase` image | Non-negotiable Cogmo invariants (e.g., "never force-push", "never open a PR — Cogmo does that", "if repo guidance conflicts with these, these win"). Loads unconditionally; the repo cannot exclude or override it because the file lives in the image, not the worktree. |
+| **User-global** | `~/.claude/CLAUDE.md` | Cogmo writes at task start, inside the per-task home volume | Task-runner guidance — verify-command surface, workflow expectations, "commit incrementally, don't push" |
+| **Project** | `/workspace/CLAUDE.md` | Target repo owns it | Repo's authored conventions. Cogmo does not read, parse, or re-inject — Claude Code loads it natively |
 
-Size caps are Claude Code's problem, not ours — the CLI loads the tiers with its own budget handling. We don't truncate or validate; we just populate the right paths.
+We do **not** populate `CLAUDE.local.md` variants; those are for personal, gitignored overrides and don't fit Cogmo's task-scoped delivery model.
 
-Precedence is **baked into the tier layering plus the managed-policy tier being uneditable from the repo**, not stated as prose inside a prompt. A malicious repo `CLAUDE.md` cannot override managed-policy guidance because managed policy loads unconditionally and lives in the image, not the worktree.
+**What "precedence" means here.** Because all tiers concatenate, there is no file-level override. Authority when content conflicts comes from two mechanisms combined:
 
-**Audit.** At task start, Cogmo `stat`s the three paths and stamps the byte sizes onto `coding_tasks.resource_usage` under `memory_bytes: { managed, user, project }`. If the project file balloons or disappears between runs, it's in the task row. `/memory` isn't available in `-p` mode, so `stat` is how we observe.
+1. **The managed-policy file explicitly states that it overrides repo guidance on conflict.** Claude treats this like any other instruction — it's a content-level declaration, enforced by the LLM's instruction-following, not a CLI-level mechanism.
+2. **The repo cannot edit or remove the managed-policy file** (lives in the image). So the statement above cannot be neutralized by an adversarial repo.
+
+A prose "repo guidance is advisory" disclaimer in our prompt would add nothing on top of this — it would only repeat what the managed-policy tier already declares, and Claude already reads.
+
+**Size limits.** Claude Code handles loading and budgeting; we do not truncate or validate tier contents. The `/memory` command (interactive only) is the human-facing inspection tool; `-p` mode does not expose it.
+
+**Audit.** At task start, Cogmo `stat`s the three paths and stamps the byte sizes onto `coding_tasks.resource_usage` under `memory_bytes: { managed, user, project }`. Post-hoc diagnosis if a task misbehaves can cross-reference the recorded sizes with the task's session transcript.
 
 **Coding-scoped steering rules.** Layered into the user-global tier at task start — `steering_rules WHERE profile_id IN (<coding-profile-id>)` renders into `~/.claude/CLAUDE.md` alongside the task-runner template. P2 phase (hard-coded template fills in P1).
 

@@ -118,7 +118,7 @@ Cogmo delegates heavy coding tasks (and evolution-driven code changes) to `claud
 ### P1 — core loop
 
 - [ ] Sandbox primitives — `containers` / `cogmo_instances` / `networks` / `volumes` tables; sibling-container creation against host daemon with `sysbox-runc` runtime; Docker-label lineage; per-task socket proxy in pass-through mode; reaper cron (TTL + orphan + stale-row); per-task cgroup parent for kernel-enforced resource ceiling
-- [ ] Claude backend (plan-only) — subprocess wrap of `claude -p`, JSONL stream parsing, session-id capture, `plan_ready` event; prompt skeleton with injected `CLAUDE.md` context; `coding_tasks` / `coding_repos` tables
+- [ ] Claude backend (plan-only) — subprocess wrap of `claude -p`, JSONL stream parsing, session-id capture, `plan_ready` event; prompt skeleton with task-specific slots only (repo conventions come from Claude Code's native memory tiers — managed policy + user-global + project — not prompt injection); `coding_tasks` / `coding_repos` tables
 - [ ] Plan approval + execute — Telegram inline-keyboard gate (user-triggered), stream-json `acceptEdits` resume, text-delta streaming into single edited Telegram message
 - [ ] Tool gate — `stream-json` stdin permission channel; Telegram prompts with Allow-once / Allow-task / Deny; decision log
 - [ ] Verify + push + draft PR — in-container `<verify_command>`; git commit + SSH commit signing; `git push`; `gh pr create --draft`; teardown policy (worktree persistence table — clean remove vs `refs/cogmo-wip/` push)
