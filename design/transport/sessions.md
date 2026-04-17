@@ -39,6 +39,10 @@ Session lifecycle is adapter-specific: Telegram creates a long-lived session on 
 
 Closing the old session stops pending responses from the old conversation from being delivered. Any in-flight `outbound/deliver` events check session status before sending — closed = skip silently. This handles the "response arrives after `/new`" edge case without cancelling orchestrator runs.
 
+### `/end` Command
+
+Close current session (`status = 'closed'`) without creating a new one. The next inbound message will create a fresh conversation via the normal first-message flow (`resolveSession` returns null → `createConversation`). Same in-flight behavior as `/new`.
+
 **TODO:** Consider halting in-flight processing (orchestrator run) on session closure. Currently the orchestrator finishes and the response is silently dropped at delivery. Halting would save compute but adds complexity (cancellation signal from adapter to orchestrator).
 
 
@@ -64,12 +68,23 @@ Sessions are the delivery targets for response routing. See [response-routing.md
 - **`lastInbound` routing** finds the most recent inbound message's session
 - **`receive: "all"` sessions** receive all responses for the conversation regardless of routing config (private conversations only)
 
+## Aliases
+
+Conversations can carry a human-readable alias (`'work'`, `'shopping'`) to enable resume-by-name and friendly listings. Aliases are user-set, not auto-generated:
+
+- **Set/clear:** `transport.conversations.setAlias(conversationId, alias | null)`. Telegram surfaces this as `/name <alias>`. Web UI uses an inline rename.
+- **Uniqueness:** scoped per user. Conflicts return `alias_taken`.
+- **Storage:** the `aliases` table (see [data-model.md](../data-model.md), Phase 2). Separate table because aliases are sparse and users may want to rename without touching the conversation row.
+- **Privacy:** only `isPrivate: true` conversations can carry aliases. Group conversations are scoped to their platform thread.
+
+LLM-suggested auto-naming (e.g., generate an alias from the first turn) is a future enhancement — see todo. Until then, conversations without an alias appear in `/sessions` by their last-message preview.
+
 ## Non-Private Conversations
 
 Sessions on `isPrivate: false` conversations are constrained:
 
 - **Forced `source` routing** — responses stay in the originating thread
-- **No aliases or resume** — group conversations are scoped to their platform thread
+- **No aliases or resume** — group conversations are scoped to their platform thread (`setAlias` rejects with `access_denied`)
 - **Not visible in Web UI**
 
 ## Schema

@@ -52,13 +52,14 @@ llm_providers (
 
 ```sql
 model_providers (
-  id            UUID v7 PK,
-  model         TEXT NOT NULL,                          -- 'claude-sonnet-4-20250514'
-  provider_id   UUID NOT NULL FK → llm_providers CASCADE,
-  position      INT NOT NULL,                           -- 0 = primary, 1 = fallback
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (model, provider_id),                          -- one entry per pair
-  UNIQUE (model, position)                              -- ordered, no ties
+  id              UUID v7 PK,
+  model           TEXT NOT NULL,                          -- 'claude-sonnet-4-20250514'
+  provider_id     UUID NOT NULL FK → llm_providers CASCADE,
+  position        INT NOT NULL,                           -- 0 = primary, 1 = fallback
+  user_selectable BOOLEAN NOT NULL,                       -- true = appears in /model picker; false = internal-only (summarization, experimental)
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (model, provider_id),                            -- one entry per pair
+  UNIQUE (model, position)                                -- ordered, no ties
 )
 ```
 
@@ -88,6 +89,25 @@ profiles (
 Profiles declare **what model** they want, not **which provider** serves it. Named columns for well-known roles (default, summarization). Adding a role = adding a nullable column. If roles proliferate beyond 3-4, promote to a `profile_models` join table.
 
 `summarization_model` replaces the `SUMMARIZATION_MODEL` env var — it's a per-profile concern, not a system-wide one.
+
+**Editing `profiles.model`:** the wizard seeds initial values, but profiles are also editable at runtime via `Transport.profiles.update` (e.g., Telegram `/model <model>`). Updates validate that the chosen model exists in `model_providers` AND has `user_selectable = true` — anything else returns `model_unavailable`. Each `messages` row records the model that produced it (`messages.model`), so changing `profiles.model` doesn't lose history. See [transport/adapters.md](transport/adapters.md) → Profile admin and [transport/overview.md](transport/overview.md) → Profile and Model Stamping.
+
+## Model policy
+
+`model_providers.user_selectable` is the org-level policy gate. Two consumers care:
+
+- **`Transport.models.list()`** filters to `user_selectable = true` for the `/model` picker.
+- **`Transport.profiles.update({ model })`** validates the new model is `user_selectable`.
+
+Use cases for `user_selectable = false`:
+
+- **Internal models** — a cheap haiku used for summarization or extraction shouldn't appear as a user-pickable conversational model.
+- **Experimental/preview models** — admin wants to route them via `model_providers` without exposing them to users until validated.
+- **Deprecation** — flip the flag to retire a model from the picker without removing the routing entry; existing profiles keep working until the user picks a different one.
+
+Admin toggles via psql or the wizard. There is no Transport mutation for `user_selectable` in v0 — model policy is out-of-band.
+
+`profile.summarization_model` is not gated by `user_selectable` — it's an internal field set at profile creation/edit time, and admins control whether end users can edit profile fields beyond `model` via the broader profile ACL (see [transport/adapters.md](transport/adapters.md) → Profile admin).
 
 ## Provider dispatch
 

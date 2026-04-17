@@ -254,6 +254,7 @@ async function persistProvider(deps: PersistDeps, answers: NonInteractiveAnswers
     model: profile.model,
     providerId,
     position: nextPosition,
+    userSelectable: true,
   });
 }
 
