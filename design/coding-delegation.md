@@ -101,7 +101,7 @@ This is the retry policy — resolved, was previously an open question.
 Instead, three things replace the retry loop:
 
 1. **The self-verify clause above** — tells the CLI to run the verify command itself and iterate until passing or stuck.
-2. **Budget caps on `coding_repos`** (see schema update) — `task_token_budget` and `task_wall_time_seconds`. Cogmo kills the task subprocess if either is exceeded. Backstop against infinite loops.
+2. **Budget caps on `coding_repos`** (see schema update) — `task_token_budget` and `task_wall_time_seconds`. Cogmo kills the task subprocess if either is exceeded. Backstop against infinite loops. **Enforcement boundary:** Cogmo aggregates input+output tokens from each `turn.completed` event as the JSONL stream flows back; after each turn, if the running total is over budget, Cogmo sends `SIGTERM` between turns (never mid-turn — we never cut off a partial response that the CLI would retry in a loop). `task_wall_time_seconds` is enforced the same way by the streaming loop's wall-clock check on each event batch.
 3. **Post-hoc verify** — after the CLI declares done, Cogmo runs the verify command *once more* from outside the session. Trust but verify. If it passes, push and open the draft PR. If it fails, mark task failed and notify the user — no feedback-loop retry. The CLI had its chance during its own loop; a post-hoc miss is a "stuck" signal worth a human eye, not more tokens.
 
 Flakiness is not handled specially. A flaky test that fails only on the post-hoc run surfaces to the user as a failed task with a link to the worktree — they rerun and merge if it's spurious.
@@ -158,42 +158,52 @@ Wiring this into `DefaultPromptSource` is P2 — P1 prompts are hardcoded templa
 **One coding task = one git worktree + one branch + one CLI session + one draft PR.** The task container from [sandbox.md](sandbox.md) is the execution environment; the worktree lives inside it (mounted from the host's worktree path).
 
 ```sql
+-- Enumerated types (Drizzle pgEnum in the store schema)
+CREATE TYPE coding_backend AS ENUM ('claude', 'codex');
+CREATE TYPE coding_trigger_source AS ENUM ('user', 'evolution', 'signal_pipeline');
+CREATE TYPE coding_task_status AS ENUM (
+  'queued', 'planning', 'awaiting_approval', 'executing',
+  'verifying', 'pushed', 'pr_open', 'failed', 'cancelled'
+);
+
 coding_tasks (
-  id                 UUID v7 PK,
-  repo_id            UUID NOT NULL REFERENCES coding_repos(id),
-  goal               TEXT NOT NULL,                        -- the task description (user-authored or machine-authored)
-  trigger_source     TEXT NOT NULL,                        -- 'user' | 'evolution' | 'signal_pipeline' — determines gating
-  trigger_ref        TEXT,                                 -- optional pointer into the originating subsystem (evolution proposal id, signal batch id)
-  backend            TEXT NOT NULL,                        -- 'claude' | 'codex'
-  branch             TEXT NOT NULL,                        -- 'cogmo/<task-id-short>' or derived from goal
-  worktree_path      TEXT NOT NULL,                        -- host path
-  session_id         TEXT,                                 -- CLI session for resume
-  container_id       UUID REFERENCES containers(id),       -- sandbox.md
-  allow_privileged_runc  BOOLEAN NOT NULL DEFAULT false,   -- compat escape hatch
-  plan               TEXT,                                 -- set after plan phase
-  plan_approved_at   TIMESTAMPTZ,                          -- null for automated triggers (plan gate skipped)
-  pr_url             TEXT,
-  status             TEXT NOT NULL,                        -- 'queued' | 'planning' | 'awaiting_approval' | 'executing' | 'verifying' | 'pushed' | 'pr_open' | 'failed' | 'cancelled'
-  failure_reason     TEXT,
-  resource_usage     JSONB NOT NULL,                       -- aggregated from sandbox
-  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+  id                      UUID v7 PK,
+  repo_id                 UUID NOT NULL REFERENCES coding_repos(id),
+  goal                    TEXT NOT NULL,                          -- the task description (user-authored or machine-authored)
+  trigger_source          coding_trigger_source NOT NULL,         -- determines gating (plan approval path)
+  trigger_ref             TEXT,                                   -- optional pointer into the originating subsystem (evolution proposal id, signal batch id)
+  backend                 coding_backend NOT NULL,
+  branch                  TEXT NOT NULL,                          -- 'cogmo/<task-id-short>' or derived from goal
+  worktree_path           TEXT NOT NULL,                          -- host path
+  session_id              TEXT,                                   -- CLI session for resume
+  container_id            UUID REFERENCES containers(id),         -- sandbox.md
+  allow_privileged_runc   BOOLEAN NOT NULL,                       -- compat escape hatch; explicit at insert (no default)
+  plan                    TEXT,                                   -- set after plan phase
+  plan_approved_at        TIMESTAMPTZ,                            -- null for automated triggers (plan gate skipped)
+  pr_url                  TEXT,
+  status                  coding_task_status NOT NULL,
+  failure_reason          TEXT,
+  resource_usage          JSONB,                                  -- nullable: null = no stats poll yet; populated by sandbox aggregator from turn.completed events
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
 coding_repos (
   id                      UUID v7 PK,
-  name                    TEXT NOT NULL UNIQUE,            -- 'cogmo', 'notes'
-  local_path              TEXT NOT NULL,                   -- host path to the git clone
-  default_branch          TEXT NOT NULL,                   -- usually 'main'
-  remote_url              TEXT NOT NULL,                   -- for push
-  devcontainer            JSONB,                           -- override — null = use cogmo/devbase
-  allowed_backends        TEXT[] NOT NULL,                 -- which CLIs can work on this repo
-  verify_command          TEXT NOT NULL,                   -- shell command run inside container to verify work — e.g. 'pnpm typecheck && pnpm lint && pnpm test'
-  task_token_budget       INT NOT NULL,                    -- per-task token ceiling — CLI subprocess killed on overrun
-  task_wall_time_seconds  INT NOT NULL,                    -- per-task wall-time ceiling
-  max_concurrent_tasks    INT NOT NULL,                    -- hard cap on active tasks per repo; default 1 (serial)
+  name                    TEXT NOT NULL UNIQUE,                   -- 'cogmo', 'notes'
+  local_path              TEXT NOT NULL,                          -- host path to the git clone
+  default_branch          TEXT NOT NULL,                          -- usually 'main'
+  remote_url              TEXT NOT NULL,                          -- for push
+  devcontainer            JSONB,                                  -- override — null = use cogmo/devbase
+  allowed_backends        coding_backend[] NOT NULL,              -- which CLIs can work on this repo
+  verify_command          TEXT NOT NULL,                          -- shell command run via `bash -lc` inside the container — e.g. 'pnpm typecheck && pnpm lint && pnpm test'
+  task_token_budget       INT NOT NULL,                           -- per-task token ceiling; see Prompt Construction → Self-verify clause for enforcement boundary
+  task_wall_time_seconds  INT NOT NULL,                           -- per-task wall-time ceiling
+  max_concurrent_tasks    INT NOT NULL,                           -- hard cap on active tasks per repo; default 1 (serial)
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 ```
+
+`verify_command` is invoked as `bash -lc "<verify_command>"` so the login-shell PATH covers version-manager shims (nvm, pyenv, rbenv) and so pnpm/uv/cargo resolve correctly. Rows are admin-registered, so the shell-string trust model matches the rest of the repo registry.
 
 Owned by `src/agent/store/` (fits the existing agent domain — tasks are agent work items). Consumer of `containers` from the sandbox store.
 
@@ -240,10 +250,7 @@ Teardown policy keyed on worktree state:
 
 Resume after full teardown replays this in reverse: `git worktree add <path> <branch>` (or the `refs/cogmo-wip/<id>` ref), cache volumes rewarm automatically, `--resume <session_id>` rehydrates the CLI. Costs a few extra seconds vs resume-within-TTL, which keeps the worktree live.
 
-**`refs/cogmo-wip/<task-id>` retention.** These refs are append-only on the remote and accumulate if nothing prunes them. Two-pronged GC:
-
-- On PR merge/close, a GitHub webhook (or poll) deletes the corresponding `refs/cogmo-wip/<task-id>` ref via `git push origin :refs/cogmo-wip/<task-id>`.
-- Weekly cron prunes any WIP ref whose `coding_tasks` row is terminal and older than 30 days — belt-and-braces for cases where the webhook was missed.
+**`refs/cogmo-wip/<task-id>` retention.** These refs are append-only on the remote and accumulate if nothing prunes them. **P1: weekly cron** — prunes any WIP ref whose `coding_tasks` row is terminal and older than 30 days. Sufficient for personal scale; the refs live under `refs/cogmo-wip/` and don't clutter the branches list, so 30-day retention is low-pressure. Per-repo GitHub webhooks for minute-level cleanup on PR merge/close are a P3 optional — useful if hygiene becomes annoying, not worth the setup friction per registered repo at P1.
 
 **S3 / remote object storage is opt-in, not default.** The motivating scenario — "my laptop died, I want the task back" — is already covered by remote refs for every case except the no-remote bootstrap. Deferred to a later remote-sandbox story.
 
@@ -381,7 +388,7 @@ Same pattern as `handle-message` ([crash-recovery.md](crash-recovery.md)) — du
 
 | Step | Kind | Notes |
 |-|-|-|
-| `allocate-worktree` | `step.run` | `git worktree add -b cogmo/<id-short>`; idempotent — checks existence before creating |
+| `allocate-worktree` | `step.run` | Idempotent reconcile: (1) if the host path already exists and `git -C <path> rev-parse --is-inside-work-tree` succeeds and HEAD resolves to `cogmo/<id-short>`, adopt it and return. (2) If the branch `cogmo/<id-short>` already exists without a worktree, `git worktree add <path> cogmo/<id-short>`. (3) Otherwise, `git worktree add -b cogmo/<id-short> <path>`. Handles crashes between `worktree add` and the DB insert without the raw `add` failing on "path/branch already exists". |
 | `create-container` | `step.run` | `sandbox.createTaskContainer`; on retry, reuses existing container row if still healthy |
 | *plan streaming* | non-durable | Spawns `claude -p --permission-mode plan`, streams JSONL to Telegram. Not wrapped in `step.run` — can't replay a stream. On retry, re-invoked with `--resume <sid>` so it continues the same session instead of replanning from scratch |
 | `persist-plan` | `step.run` | Writes `coding_tasks.plan`, status `awaiting_approval` |
@@ -507,6 +514,11 @@ This reuses the whole coding-delegation pipeline (sandbox, plan gate for user tr
 
 Images are pinned versions in Cogmo's deployment; updates happen via image rebuilds, not in-container installs. Managed-policy memory updates = image rebuild, same cadence as toolchain updates.
 
+**Session-file layout is an upstream contract we depend on.** Claude Code writes sessions to `~/.claude/projects/<project-hash>/sessions/<session-id>.jsonl` (project-hash derived from the git repo root, not cwd). Resume correctness hinges on this layout. Mitigation:
+
+- `cogmo/devbase` pins both `claude` and `codex` to exact versions; upgrades are explicit image rebuilds, never floating `:latest`.
+- A smoke test in the integration tier runs a plan-only task and asserts that the expected session file exists at the expected path before declaring the image green. A silent upstream layout change fails the test rather than the first production resume.
+
 Cache volumes mounted into the container according to the scoping rules in [sandbox.md → Cache volume scoping](sandbox.md#cache-volume-scoping): global shared volumes for integrity-checked download caches (`~/.npm`, `~/.cargo/registry`, `~/go/pkg/mod`, apt); per-repo volumes for caches without ecosystem integrity (`~/.cache/pip`, `~/.cache/go-build`, Rust `target/`). Installed trees (`node_modules`, `.venv`) live in the worktree and are never cached cross-task.
 
 ## Progress UX `[proposed]`
@@ -555,7 +567,7 @@ Ship order. Each phase is independently useful — stop at any point and the pri
 
 ### P1 — core loop
 
-1. **Sandbox primitives.** `containers`, `cogmo_instances`, `networks`, `volumes` tables; sibling-container creation against host daemon with sysbox runtime; label injection; root-task cascade on teardown; reaper cron (TTL + orphan + stale-row passes). Proxy is pass-through only — no policy enforcement yet.
+1. **Sandbox primitives.** `containers`, `cogmo_instances`, `networks`, `volumes` tables; sibling-container creation against host daemon with sysbox runtime; label injection; root-task cascade on teardown; reaper cron (TTL + orphan + stale-row passes). Proxy is **body-level pass-through** on `POST /containers/create` (no `HostConfig` filtering yet — P2 adds the Privileged/NetworkMode/Binds/CapAdd denies). Endpoint-category blocks (`/swarm/*`, `/plugins/*`, `/nodes/*`) are *always on* regardless of phase — they're structural, not body policy.
 2. **Claude backend, plan-only.** Subprocess wrap with `--permission-mode plan`, JSONL parsing, session capture. Stream plan text to Telegram. Emit `plan_ready` with inline keyboard. No execute path wired yet.
 3. **Plan approval + execute.** Approval writes `plan_approved_at`, orchestrator resumes session with `--permission-mode acceptEdits`. Text-delta streaming into a single edited Telegram message.
 4. **Tool gate.** Permission prompts over `stream-json` stdin → Telegram inline keyboards → decision back to stdin. Default policy table from Autonomy Gates applies.

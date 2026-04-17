@@ -44,23 +44,27 @@ No parity. Coding delegation is a prod/staging feature — local `pnpm dev` does
 Owned by `src/sandbox/store/`.
 
 ```sql
+-- Enumerated types (Drizzle pgEnum in the store schema)
+CREATE TYPE container_runtime AS ENUM ('sysbox-runc', 'runc');
+CREATE TYPE container_status  AS ENUM ('starting', 'running', 'exited', 'reaped');
+
 containers (
   id               UUID v7 PK,
   docker_id        TEXT NOT NULL UNIQUE,            -- Docker's container ID
   parent_id        UUID REFERENCES containers(id),  -- null = created by Cogmo directly
-  root_task_id     UUID,                            -- denormalized, FK optional (not every container belongs to a coding task)
+  root_task_id     UUID,                            -- denormalized, NO FK — not every container belongs to a coding task (keep it that way; don't add a FK later)
   depth            INT NOT NULL,                    -- 0 = task container, 1+ = spawned by tooling
   image            TEXT NOT NULL,
-  runtime          TEXT NOT NULL,                   -- 'sysbox-runc' | 'runc'
+  runtime          container_runtime NOT NULL,
   labels           JSONB NOT NULL,
   resource_limits  JSONB NOT NULL,                  -- { cpus, memory_bytes, pids }
-  status           TEXT NOT NULL,                   -- 'starting' | 'running' | 'exited' | 'reaped'
+  status           container_status NOT NULL,
   exit_code        INT,
   ttl_expires_at   TIMESTAMPTZ NOT NULL,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   started_at       TIMESTAMPTZ,
   exited_at        TIMESTAMPTZ,
-  instance_id      UUID NOT NULL                    -- Cogmo process run id, for crash recovery
+  instance_id      UUID NOT NULL                    -- Cogmo process run id, for crash recovery (references cogmo_instances.id)
 )
 ```
 

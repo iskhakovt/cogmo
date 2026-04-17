@@ -79,7 +79,8 @@ The agent does things on its own, not just when you talk to it.
 - [ ] First ingestion agent: Gmail (MCP)
 - [ ] First ingestion agent: Google Calendar (MCP)
 - [ ] Concurrency control — per-conversation FIFO, global concurrency limit via Inngest
-- [ ] ~~Claude Agent SDK integration — background tasks via subscription ($0)~~ superseded by Phase 6 coding delegation (subscription auth goes via `claude -p` / `codex exec` subprocess, not Agent SDK — SDK requires API keys)
+
+(Subscription-backed background coding tasks live in Phase 6 via `claude -p` / `codex exec` subprocess — see [Phase 6: Autonomous Coding + Sandbox](#phase-6-autonomous-coding--sandbox). The Agent SDK path is not used here; it requires API keys, not subscriptions.)
 
 ## Phase 3: Skill Library + More Integrations
 
@@ -109,7 +110,8 @@ The agent improves its own prompts.
 - [ ] Anti-pattern enforcement — no instruction bloat, no contradictions
 - [ ] Bounded code mutation with tree-structured archive (Stage 6)
 - [ ] Lineage tracing for all evolution changes
-- [ ] ~~Sandbox execution for generated code~~ covered by Phase 6 — the sandbox module and coding delegation are how generated code runs
+
+(Sandbox execution for generated code is delivered by Phase 6 — see [Phase 6: Autonomous Coding + Sandbox](#phase-6-autonomous-coding--sandbox).)
 
 ## Phase 6: Autonomous Coding + Sandbox
 
