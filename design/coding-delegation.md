@@ -183,7 +183,7 @@ coding_tasks (
   pr_url                  TEXT,
   status                  coding_task_status NOT NULL,
   failure_reason          TEXT,
-  resource_usage          JSONB,                                  -- nullable: null = no stats poll yet; populated by sandbox aggregator from turn.completed events
+  resource_usage          JSONB,                                  -- ResourceUsageSchema; nullable = no stats poll yet; populated by sandbox aggregator from turn.completed events
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
@@ -193,7 +193,7 @@ coding_repos (
   local_path              TEXT NOT NULL,                          -- host path to the git clone
   default_branch          TEXT NOT NULL,                          -- usually 'main'
   remote_url              TEXT NOT NULL,                          -- for push
-  devcontainer            JSONB,                                  -- override — null = use cogmo/devbase
+  devcontainer            JSONB,                                  -- DevcontainerSpecSchema (subset of the upstream devcontainer.json schema we actually parse); null = use cogmo/devbase
   allowed_backends        coding_backend[] NOT NULL,              -- which CLIs can work on this repo
   verify_command          TEXT NOT NULL,                          -- shell command run via `bash -lc` inside the container — e.g. 'pnpm typecheck && pnpm lint && pnpm test'
   task_token_budget       INT NOT NULL,                           -- per-task token ceiling; see Prompt Construction → Self-verify clause for enforcement boundary

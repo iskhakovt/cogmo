@@ -56,8 +56,8 @@ containers (
   depth            INT NOT NULL,                    -- 0 = task container, 1+ = spawned by tooling
   image            TEXT NOT NULL,
   runtime          container_runtime NOT NULL,
-  labels           JSONB NOT NULL,
-  resource_limits  JSONB NOT NULL,                  -- { cpus, memory_bytes, pids }
+  labels           JSONB NOT NULL,                  -- ContainerLabelsSchema = z.record(z.string(), z.string())
+  resource_limits  JSONB NOT NULL,                  -- ResourceLimitsSchema = z.object({ cpus: z.number(), memory_bytes: z.number().int(), pids: z.number().int() })
   status           container_status NOT NULL,
   exit_code        INT,
   ttl_expires_at   TIMESTAMPTZ NOT NULL,
