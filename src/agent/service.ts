@@ -72,23 +72,18 @@ export function createService(
   files: Service["files"],
   coreMemory: Service["coreMemory"],
 ): Service {
+  function attachProfileTags(opts: { tags?: string[] } | undefined) {
+    return {
+      ...opts,
+      tags: [...profileTags, ...(opts?.tags ?? [])],
+    };
+  }
+
   return {
     memory: {
-      recall: (query, opts) =>
-        memory.recall(bankId, query, {
-          ...opts,
-          tags: [...profileTags, ...(opts?.tags ?? [])],
-        }),
-      retain: (content, opts) =>
-        memory.retain(bankId, content, {
-          ...opts,
-          tags: [...profileTags, ...(opts?.tags ?? [])],
-        }),
-      reflect: (query, opts) =>
-        memory.reflect(bankId, query, {
-          ...opts,
-          tags: [...profileTags, ...(opts?.tags ?? [])],
-        }),
+      recall: (query, opts) => memory.recall(bankId, query, attachProfileTags(opts)),
+      retain: (content, opts) => memory.retain(bankId, content, attachProfileTags(opts)),
+      reflect: (query, opts) => memory.reflect(bankId, query, attachProfileTags(opts)),
     },
     files,
     coreMemory,
