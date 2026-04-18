@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { memoryRecall, memoryRetain } from "./memory-tools.js";
+import { memoryRecall, memoryReflect, memoryRetain, memoryTools } from "./memory-tools.js";
 import type { Service } from "./service.js";
 
 function mockService(overrides?: Partial<Service["memory"]>): Service {
@@ -7,6 +7,7 @@ function mockService(overrides?: Partial<Service["memory"]>): Service {
     memory: {
       recall: vi.fn().mockResolvedValue({ memories: [] }),
       retain: vi.fn().mockResolvedValue(undefined),
+      reflect: vi.fn().mockResolvedValue({ answer: "" }),
       ...overrides,
     },
     files: {
@@ -102,5 +103,73 @@ describe("memory_retain", () => {
     expect(memoryRetain.name).toBe("memory_retain");
     expect(memoryRetain.description).toBeTruthy();
     expect(memoryRetain.inputSchema.type).toBe("object");
+  });
+});
+
+describe("memory_reflect", () => {
+  it("calls service.memory.reflect with query and default low budget", async () => {
+    const caps = mockService();
+    await memoryReflect.handler({ query: "what do I know about Alice?" }, caps);
+
+    expect(caps.memory.reflect).toHaveBeenCalledWith("what do I know about Alice?", {
+      budget: "low",
+    });
+  });
+
+  it("passes explicit budget through to the service", async () => {
+    const caps = mockService();
+    await memoryReflect.handler({ query: "project risks", budget: "high" }, caps);
+
+    expect(caps.memory.reflect).toHaveBeenCalledWith("project risks", { budget: "high" });
+  });
+
+  it("forwards tags and tagsMatch when provided", async () => {
+    const caps = mockService();
+    await memoryReflect.handler(
+      {
+        query: "summarise",
+        budget: "mid",
+        tags: ["network:opinion"],
+        tagsMatch: "any_strict",
+      },
+      caps,
+    );
+
+    expect(caps.memory.reflect).toHaveBeenCalledWith("summarise", {
+      budget: "mid",
+      tags: ["network:opinion"],
+      tagsMatch: "any_strict",
+    });
+  });
+
+  it("returns the synthesized answer from the provider", async () => {
+    const caps = mockService({
+      reflect: vi.fn().mockResolvedValue({ answer: "Alice prefers dark roast coffee." }),
+    });
+
+    const result = await memoryReflect.handler({ query: "Alice coffee" }, caps);
+
+    expect(result).toBe("Alice prefers dark roast coffee.");
+  });
+
+  it("rejects invalid input (missing query)", async () => {
+    const caps = mockService();
+    await expect(memoryReflect.handler({}, caps)).rejects.toThrow();
+  });
+
+  it("rejects invalid budget value", async () => {
+    const caps = mockService();
+    await expect(memoryReflect.handler({ query: "q", budget: "extreme" }, caps)).rejects.toThrow();
+  });
+
+  it("has valid tool definition", () => {
+    expect(memoryReflect.name).toBe("memory_reflect");
+    expect(memoryReflect.description).toBeTruthy();
+    expect(memoryReflect.description.toLowerCase()).toContain("synthes");
+    expect(memoryReflect.inputSchema.type).toBe("object");
+  });
+
+  it("is registered in memoryTools", () => {
+    expect(memoryTools.map((t) => t.name)).toContain("memory_reflect");
   });
 });

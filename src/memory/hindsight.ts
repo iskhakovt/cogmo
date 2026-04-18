@@ -122,6 +122,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
     if (options?.context !== undefined) opts.context = options.context;
     if (options?.tags !== undefined) opts.tags = options.tags;
     if (options?.tagsMatch !== undefined) opts.tagsMatch = options.tagsMatch;
+    if (options?.budget !== undefined) opts.budget = options.budget;
 
     const response = await withRetry(() => this.#client.reflect(bankId, query, opts), {
       retries: 2,

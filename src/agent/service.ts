@@ -2,6 +2,8 @@ import type {
   MemoryProvider,
   RecallOptions,
   RecallResult,
+  ReflectOptions,
+  ReflectResult,
   RetainOptions,
 } from "../memory/provider.js";
 
@@ -28,7 +30,8 @@ export const MEMORY_PROMPT_GUIDANCE = `You have persistent memory across convers
 - **Recall first**: At the start of a conversation or when a topic comes up, check if you already know relevant context.
 - **Retain important things**: Facts about the user, their preferences, decisions made, commitments, project context. Ask yourself: "would knowing this help me in a future conversation?"
 - **Don't over-retain**: Skip greetings, small talk, information already saved in files, and things the user said are temporary.
-- **Update, don't duplicate**: If you learn something that contradicts a previous memory, retain the new version with context about the change.`;
+- **Update, don't duplicate**: If you learn something that contradicts a previous memory, retain the new version with context about the change.
+- **Recall vs reflect**: \`memory_recall\` returns raw matching facts — fast, cheap, best for looking something up. \`memory_reflect\` runs an agentic synthesis loop across many memories — slower and more expensive, best for open-ended questions that need multi-hop reasoning (e.g. "summarise what I know about X", "what risks should I watch for on project Y?").`;
 
 /** Prompt guidance for the coreMemory Service namespace. */
 export const CORE_MEMORY_PROMPT_GUIDANCE = `You have core memory blocks — structured notes about your user and ongoing context that are always visible to you. Update them as you learn new things. Current blocks are shown in the User section of your instructions.`;
@@ -42,6 +45,7 @@ export interface Service {
   memory: {
     recall(query: string, opts?: RecallOptions): Promise<RecallResult>;
     retain(content: string, opts?: RetainOptions): Promise<void>;
+    reflect(query: string, opts?: ReflectOptions): Promise<ReflectResult>;
   };
   files: {
     read(path: string): Promise<string>;
@@ -77,6 +81,11 @@ export function createService(
         }),
       retain: (content, opts) =>
         memory.retain(bankId, content, {
+          ...opts,
+          tags: [...profileTags, ...(opts?.tags ?? [])],
+        }),
+      reflect: (query, opts) =>
+        memory.reflect(bankId, query, {
           ...opts,
           tags: [...profileTags, ...(opts?.tags ?? [])],
         }),

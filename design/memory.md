@@ -161,13 +161,13 @@ Three distinct operations — don't confuse them:
 
 `reflect()` is **not** consolidation. It reads from the consolidation layer but doesn't write to it. Consolidation is automatic inside `retain()`.
 
-### Should `reflect` be an LLM tool? `[proposed]`
+### Should `reflect` be an LLM tool? `[confirmed]`
 
 `reflect()` is a real-time operation suitable as an agent tool. Use case: questions that need multi-hop reasoning across memories ("What risks should I watch for on project X?", "Summarize everything I know about Alice's career"). `recall()` returns raw facts; `reflect()` synthesizes an answer.
 
 Cost: `reflect()` makes its own LLM calls inside Hindsight (configurable budget: low/mid/high). It's heavier than `recall()`.
 
-Decision: start with `memory_recall` and `memory_retain` tools. Add `memory_reflect` if `recall()` proves insufficient for synthesis-heavy queries.
+Decision: **implemented** as the `memory_reflect` tool alongside `memory_recall` and `memory_retain`. The tool exposes the Hindsight `budget` knob (default `low`) plus `tags` / `tagsMatch` for scoped synthesis. Prompt guidance in `MEMORY_PROMPT_GUIDANCE` steers the agent toward `memory_recall` for simple lookups and reserves `memory_reflect` for open-ended, synthesis-heavy questions.
 
 ## Hindsight Provider Configuration `[proposed]`
 

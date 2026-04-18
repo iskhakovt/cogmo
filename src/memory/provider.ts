@@ -16,8 +16,6 @@ export interface MemoryProvider {
   /** Semantic search for relevant memories. */
   recall(bankId: string, query: string, options?: RecallOptions): Promise<RecallResult>;
 
-  // TODO: not yet exposed as a Service method — start with recall+retain,
-  // add reflect when recall proves insufficient for synthesis-heavy queries.
   /** Agentic reasoning loop — synthesizes an answer from memories (not consolidation). */
   reflect(bankId: string, query: string, options?: ReflectOptions): Promise<ReflectResult>;
 }
@@ -39,6 +37,13 @@ export interface RetainBatchItem {
 /** How to match tags during recall/reflect: 'any' (OR, includes untagged), 'all' (AND, includes untagged), 'any_strict' (OR, excludes untagged), 'all_strict' (AND, excludes untagged). */
 export type TagsMatch = "any" | "all" | "any_strict" | "all_strict";
 
+/**
+ * Reasoning budget for reflect() — controls how many LLM calls Hindsight
+ * makes inside its agentic loop. Higher budgets allow deeper multi-hop
+ * reasoning at higher cost and latency.
+ */
+export type ReflectBudget = "low" | "mid" | "high";
+
 export interface RecallOptions {
   maxTokens?: number;
   tags?: string[];
@@ -59,6 +64,7 @@ export interface ReflectOptions {
   context?: string;
   tags?: string[];
   tagsMatch?: TagsMatch;
+  budget?: ReflectBudget;
 }
 
 export interface ReflectResult {
