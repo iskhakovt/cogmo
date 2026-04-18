@@ -161,7 +161,7 @@ describe("handle-message — crash recovery / step replay", () => {
   it("does not re-run the summarization LLM call when summarize-prefix is cached", async () => {
     // To exercise the summarize step, we need the compaction pipeline to
     // actually call its `summarize` callback. That requires:
-    //   - getLastInputTokens past the fast-path threshold so countTokens runs
+    //   - getLastTokens past the fast-path threshold so countTokens runs
     //   - countTokens reporting > 80% of budget so the SUMMARIZE strategy fires
     //   - history with more than DEFAULT_KEEP_TURNS messages (6) so there's
     //     a prefix to summarize
@@ -177,7 +177,7 @@ describe("handle-message — crash recovery / step replay", () => {
     const deps = mockDeps({
       provider: mockProvider({ countTokens, chat }),
       agentStore: mockAgentStore({
-        getLastInputTokens: vi.fn().mockResolvedValue(150_000),
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 150_000, outputTokens: 2_000 }),
         getHistory: vi.fn().mockResolvedValue([
           { role: "user", content: "m1" },
           { role: "assistant", content: "r1" },
