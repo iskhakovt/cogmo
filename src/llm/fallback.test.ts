@@ -44,11 +44,9 @@ function streamOf(events: StreamEvent[]): ChatStreamResult {
   };
 }
 
-/** Attach a no-op catch to a rejected promise so it is not flagged as unhandled. */
-function handled<T>(p: Promise<T>): Promise<T> {
-  p.catch(() => {});
-  return p;
-}
+// `response` is returned as a bare rejected promise (no pre-attached `.catch`).
+// FallbackLlmProvider is expected to detach any abandoned `response` promise
+// itself — if it doesn't, vitest flags the unhandled rejection and the test fails.
 
 /**
  * Build a ChatStreamResult that throws on first `events.next()` — simulates
@@ -62,7 +60,7 @@ function streamFailsBeforeFirstEvent(err: unknown): ChatStreamResult {
   }
   return {
     events: gen(),
-    response: handled(Promise.reject(err)),
+    response: Promise.reject(err),
   };
 }
 
@@ -77,7 +75,7 @@ function streamFailsMidStream(err: unknown): ChatStreamResult {
   }
   return {
     events: gen(),
-    response: handled(Promise.reject(err)),
+    response: Promise.reject(err),
   };
 }
 

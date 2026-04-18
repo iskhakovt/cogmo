@@ -93,6 +93,8 @@ function extractStatus(err: Error): number | undefined {
   return typeof status === "number" ? status : undefined;
 }
 
+function noop(): void {}
+
 function describeError(err: unknown): string {
   if (err instanceof Error) {
     const status = extractStatus(err);
@@ -152,9 +154,9 @@ export class FallbackLlmProvider implements LlmProvider {
         const provider = providers[i];
         if (!provider) continue;
 
-        let result: ChatStreamResult;
-        let iterator: AsyncIterator<StreamEvent>;
-        let firstEvent: IteratorResult<StreamEvent>;
+        let result: ChatStreamResult | undefined;
+        let iterator: AsyncIterator<StreamEvent> | undefined;
+        let firstEvent: IteratorResult<StreamEvent> | undefined;
 
         try {
           result = provider.chatStream(params);
@@ -165,6 +167,11 @@ export class FallbackLlmProvider implements LlmProvider {
           // to the consumer.
           firstEvent = await iterator.next();
         } catch (err) {
+          // If provider.chatStream() returned but iterator.next() rejected,
+          // the adapter's own `response` promise is still live and will
+          // typically settle with the same error. Detach a noop catcher so
+          // it doesn't surface as an unhandled rejection once we move on.
+          if (result) result.response.catch(noop);
           attempts.push({ provider: provider.name, error: err });
           if (isRetriableProviderError(err) && i < providers.length - 1) {
             const next = providers[i + 1];
@@ -198,22 +205,35 @@ export class FallbackLlmProvider implements LlmProvider {
           throw exhaustion;
         }
 
+        // Narrow locals — every catch path above exits the iteration, so
+        // reaching here guarantees all three were assigned.
+        if (!result || !iterator || !firstEvent) {
+          throw new Error("unreachable: stream setup succeeded without assigning locals");
+        }
+        const activeResult = result;
+        const activeIterator = iterator;
+        const activeFirstEvent = firstEvent;
+
         // Successfully established the stream. Forward the first event and
         // then drain the iterator. Any further errors propagate — fallback
         // is no longer an option.
         try {
-          if (!firstEvent.done) {
-            yield firstEvent.value;
+          if (!activeFirstEvent.done) {
+            yield activeFirstEvent.value;
             for (;;) {
-              const next = await iterator.next();
+              const next = await activeIterator.next();
               if (next.done) break;
               yield next.value;
             }
           }
-          const meta = await result.response;
+          const meta = await activeResult.response;
           resolveResponse(meta);
           return;
         } catch (err) {
+          // Mid-stream drain failed. `activeResult.response` is still
+          // dangling (we only await it on the success path above); detach
+          // so the adapter's independent rejection doesn't leak.
+          activeResult.response.catch(noop);
           rejectResponse(err);
           throw err;
         }

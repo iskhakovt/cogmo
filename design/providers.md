@@ -111,23 +111,26 @@ Admin toggles via psql or the wizard. There is no Transport mutation for `user_s
 
 ## Provider dispatch
 
-At bootstrap, resolve the model → provider → credentials chain:
+At bootstrap, resolve the model → ordered provider list → credentials chain. Every candidate in `listProvidersForModel(model)` is wrapped in a `FallbackLlmProvider` (see [Fallback](#fallback-confirmed)) — consumers receive a plain `LlmProvider` and never see the chain, even when there is only one row (in which case the wrapper is a no-op pass-through).
 
 ```typescript
 async function resolveProviderForModel(model: string, store: AgentStore): Promise<LlmProvider> {
-  // 1. Find the best provider for this model (lowest position)
-  const row = await store.resolveProviderForModel(model);
+  // 1. Find every provider for this model, ordered by position (primary first)
+  const rows = await store.listProvidersForModel(model);
   // → SELECT lp.* FROM model_providers mp
   //   JOIN llm_providers lp ON mp.provider_id = lp.id
-  //   WHERE mp.model = $model ORDER BY mp.position LIMIT 1
+  //   WHERE mp.model = $model ORDER BY mp.position ASC
 
-  // 2. Decrypt the API key
-  const apiKey = await secretsStore.getSecretById(row.secretId);
+  // 2. Construct an adapter per row (each has its own credential)
+  const providers = await Promise.all(rows.map(async (row) => {
+    const apiKey = await secretsStore.getSecretById(row.secretId);
+    return row.type === "anthropic"
+      ? new AnthropicProvider(apiKey, row.baseUrl)
+      : new OpenAICompatibleProvider(row.name, { apiKey, baseURL: row.baseUrl, ... });
+  }));
 
-  // 3. Construct the adapter
-  return row.type === "anthropic"
-    ? new AnthropicProvider(apiKey, row.baseUrl)
-    : new OpenAICompatibleProvider(row.name, { apiKey, baseURL: row.baseUrl, ... });
+  // 3. Wrap the ordered list in a fallback provider
+  return new FallbackLlmProvider(providers);
 }
 ```
 
