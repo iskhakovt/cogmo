@@ -21,6 +21,7 @@ import { db } from "./db/index.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
 import { AnthropicProvider } from "./llm/anthropic.js";
+import { FallbackLlmProvider } from "./llm/fallback.js";
 import { OpenAICompatibleProvider } from "./llm/openai-compat.js";
 import type { LlmProvider } from "./llm/provider.js";
 import { logger } from "./logger.js";
@@ -195,8 +196,11 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
 /**
  * Resolve the LLM provider for a model via the model_providers routing table.
  *
- * Looks up the best provider for the model (lowest position) → decrypts
- * API key from secrets store → constructs the correct adapter class.
+ * Loads every provider registered for the model (ordered by position ASC),
+ * decrypts each one's API key, constructs its adapter, and wraps the list
+ * in a {@link FallbackLlmProvider}. A single-row list still gets the
+ * wrapper — uniform wiring for the agent loop, zero fallback cost at
+ * runtime. See `design/providers.md` → Fallback for the semantics.
  *
  * Requires COGMO_MASTER_KEY to be set (for secrets decryption).
  */
@@ -205,39 +209,48 @@ async function resolveProviderForModel(
   agentStore: AgentStore,
   secretsStore: SecretsStore,
 ): Promise<LlmProvider> {
-  const row = await agentStore.resolveProviderForModel(model);
-  if (!row) {
+  const rows = await agentStore.listProvidersForModel(model);
+  if (rows.length === 0) {
     throw new Error(
       `No provider configured for model "${model}". Run \`cogmo setup\` to configure one.`,
     );
   }
 
-  const apiKey = await secretsStore.getSecretById(row.secretId);
-  if (!apiKey) {
-    throw new Error(
-      `Secret for provider "${row.name}" not found. Re-run \`cogmo setup\` to reconfigure.`,
-    );
-  }
-
-  const attrs = row.attrs as Record<string, unknown>;
-
-  switch (row.type) {
-    case "anthropic":
-      return new AnthropicProvider(apiKey, row.baseUrl ?? undefined);
-    case "openai_compatible": {
-      if (!row.baseUrl) {
-        throw new Error(
-          `Provider "${row.name}" (openai_compatible) requires a base URL. Re-run \`cogmo setup\` to reconfigure.`,
-        );
-      }
-      return new OpenAICompatibleProvider(row.name, {
-        apiKey,
-        baseURL: row.baseUrl,
-        headers: (attrs.headers as Record<string, string>) ?? undefined,
-        promptCaching: (attrs.promptCaching as boolean) ?? false,
-      });
+  const providers: LlmProvider[] = [];
+  for (const row of rows) {
+    const apiKey = await secretsStore.getSecretById(row.secretId);
+    if (!apiKey) {
+      throw new Error(
+        `Secret for provider "${row.name}" not found. Re-run \`cogmo setup\` to reconfigure.`,
+      );
     }
-    default:
-      throw new Error(`Unknown provider type: ${row.type}`);
+
+    const attrs = row.attrs as Record<string, unknown>;
+
+    switch (row.type) {
+      case "anthropic":
+        providers.push(new AnthropicProvider(apiKey, row.baseUrl ?? undefined));
+        break;
+      case "openai_compatible": {
+        if (!row.baseUrl) {
+          throw new Error(
+            `Provider "${row.name}" (openai_compatible) requires a base URL. Re-run \`cogmo setup\` to reconfigure.`,
+          );
+        }
+        providers.push(
+          new OpenAICompatibleProvider(row.name, {
+            apiKey,
+            baseURL: row.baseUrl,
+            headers: (attrs.headers as Record<string, string>) ?? undefined,
+            promptCaching: (attrs.promptCaching as boolean) ?? false,
+          }),
+        );
+        break;
+      }
+      default:
+        throw new Error(`Unknown provider type: ${row.type}`);
+    }
   }
+
+  return new FallbackLlmProvider(providers);
 }
