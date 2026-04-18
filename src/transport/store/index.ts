@@ -46,6 +46,22 @@ export interface TransportStore {
   /** Close a session (status = 'closed'). */
   closeSession(sessionId: string): Promise<void>;
 
+  /**
+   * Atomically close any active session on `(channelId, platformAddress)` and open a new one,
+   * in a single transaction. Used by `resumeConversation` — both the close and the insert (and
+   * the lookup that decides what to close) happen under the same snapshot, so no concurrent
+   * `createSession`/`swapSession` on the same address can slip between resolve and swap.
+   */
+  swapSession(
+    channelId: string,
+    platformAddress: string,
+    newParams: {
+      conversationId: string;
+      status: string;
+      receive: string;
+    },
+  ): Promise<{ id: string }>;
+
   /** Persist a raw inbound message. */
   persistInbound(params: {
     channelSessionId: string;
@@ -195,6 +211,39 @@ export class DrizzleTransportStore implements TransportStore {
         .update(channelSessions)
         .set({ status: "closed" })
         .where(eq(channelSessions.id, sessionId));
+    });
+  }
+
+  async swapSession(
+    channelId: string,
+    platformAddress: string,
+    newParams: {
+      conversationId: string;
+      status: string;
+      receive: string;
+    },
+  ): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      // Close ALL active sessions on this (channelId, platformAddress) inside the tx.
+      // There should be at most one under normal usage, but closing set-wise is race-safe:
+      // a concurrent createSession landing between our close and insert would be impossible
+      // because both statements share the same transactional snapshot.
+      await tx
+        .update(channelSessions)
+        .set({ status: "closed" })
+        .where(
+          and(
+            eq(channelSessions.channelId, channelId),
+            eq(channelSessions.platformAddress, platformAddress),
+            eq(channelSessions.status, "active"),
+          ),
+        );
+      return single(
+        await tx
+          .insert(channelSessions)
+          .values({ channelId, platformAddress, ...newParams })
+          .returning({ id: channelSessions.id }),
+      );
     });
   }
 
