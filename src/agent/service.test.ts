@@ -132,17 +132,18 @@ describe("createService", () => {
     });
   });
 
-  it("forwards reflect budget and returns provider answer", async () => {
+  it("forwards reflect budget and tagsMatch, returns provider answer", async () => {
     const memory = mockMemory();
     const reflectMock = vi.fn().mockResolvedValue({ answer: "synthesized" });
     memory.reflect = reflectMock;
     const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory);
 
-    const result = await svc.memory.reflect("query", { budget: "high" });
+    const result = await svc.memory.reflect("query", { budget: "high", tagsMatch: "any" });
 
     expect(reflectMock).toHaveBeenCalledWith("user-123", "query", {
       tags: [],
       budget: "high",
+      tagsMatch: "any",
     });
     expect(result).toEqual({ answer: "synthesized" });
   });
