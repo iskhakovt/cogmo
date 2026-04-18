@@ -5,7 +5,9 @@ import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
 import { type ContentBlock, type Message, MessageContentSchema } from "../../llm/types.js";
 import type { AutoRecallMode } from "../recall-gate.js";
+import { ProfileInUseError, translateUniqueViolation } from "./errors.js";
 import {
+  aliases,
   conversations,
   coreMemoryBlocks,
   llmProviders,
@@ -15,6 +17,71 @@ import {
   steeringRules,
   users,
 } from "./schema.js";
+
+/**
+ * Sentinel for `messages.output_tokens` meaning "unknown — force a full token
+ * count on next turn." Used on:
+ *   1. Rows migrated from before the column existed (backfill in 0008).
+ *   2. Rows that never had a meaningful output count (user rows, intermediate
+ *      tool turns) — harmless because the fast path only reads the most
+ *      recent **assistant** row, which always carries the real count.
+ */
+export const UNKNOWN_OUTPUT_TOKENS = -1;
+
+export interface Profile {
+  id: string;
+  userId: string | null; // null = org profile (read-only via Transport)
+  name: string;
+  basePrompt: string;
+  model: string;
+  summarizationModel: string | null;
+  extractionModel: string | null;
+  autoRecall: AutoRecallMode;
+  toolSet: JsonValue;
+}
+
+export interface ProfileUpdates {
+  name?: string;
+  basePrompt?: string;
+  model?: string;
+  summarizationModel?: string | null;
+  extractionModel?: string | null;
+  autoRecall?: AutoRecallMode;
+  toolSet?: JsonValue;
+}
+
+export interface ConversationSummary {
+  id: string;
+  profileName: string;
+  alias: string | null;
+  lastMessagePreview: string;
+  lastMessageAt: Date;
+}
+
+const PREVIEW_MAX_CHARS = 120;
+
+function isTextBlock(b: unknown): b is { type: "text"; text: string } {
+  return (
+    typeof b === "object" &&
+    b !== null &&
+    "type" in b &&
+    (b as { type: unknown }).type === "text" &&
+    "text" in b &&
+    typeof (b as { text: unknown }).text === "string"
+  );
+}
+
+/** Extract a short preview string from a `messages.content` jsonb value. */
+function previewFromContent(content: unknown): string {
+  if (typeof content === "string") return truncate(content, PREVIEW_MAX_CHARS);
+  if (!Array.isArray(content)) return "";
+  const block = R.find(content, isTextBlock);
+  return block ? truncate(block.text, PREVIEW_MAX_CHARS) : "";
+}
+
+function truncate(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
 
 export interface AgentStore {
   /** Create a new user. */
@@ -32,21 +99,35 @@ export interface AgentStore {
     conversationId: string,
   ): Promise<{ id: string; userId: string; profileId: string; isPrivate: boolean } | null>;
 
-  /** Insert a message (user or assistant). Returns the new message ID. */
+  /** Insert a message (user or assistant). Returns the new message ID. `profileId` + `model` stamp the turn snapshot (see design/transport/overview.md → Profile and Model Stamping). */
   insertMessage(params: {
     conversationId: string;
     role: "user" | "assistant";
     content: string | ContentBlock[];
+    profileId: string;
+    model: string;
     lastInboundMessageId: string;
     inputTokens?: number;
   }): Promise<{ id: string }>;
 
-  /** Insert multiple messages atomically in a single transaction. Returns the last inserted ID. */
+  /**
+   * Insert multiple messages atomically in a single transaction. Returns the
+   * last inserted ID. All rows share the same `profileId` + `model` snapshot.
+   *
+   * `lastMessageInputTokens` / `lastMessageOutputTokens` land on the **final**
+   * row (the assistant's visible reply). Output is required — the fast-path
+   * budget estimator (`shouldSkipCounting`) needs both, because the
+   * assistant's reply is part of next turn's input. Non-final rows (tool
+   * turns) get `output_tokens = -1` (sentinel: "unknown, force count").
+   */
   insertMessages(params: {
     conversationId: string;
     messages: ReadonlyArray<Message>;
+    profileId: string;
+    model: string;
     lastInboundMessageId: string;
     lastMessageInputTokens?: number;
+    lastMessageOutputTokens: number;
   }): Promise<{ id: string }>;
 
   /** Get the most recent assistant message for a conversation (for cursor chain). */
@@ -57,16 +138,8 @@ export interface AgentStore {
   /** Load full message history for a conversation, ordered by id. */
   getHistory(conversationId: string): Promise<ReadonlyArray<Message>>;
 
-  /** Load a profile by ID. */
-  getProfile(profileId: string): Promise<{
-    id: string;
-    basePrompt: string;
-    model: string;
-    summarizationModel: string | null;
-    extractionModel: string | null;
-    autoRecall: AutoRecallMode;
-    toolSet: JsonValue;
-  } | null>;
+  /** Load a profile by ID (returns the full `Profile` including `userId` and `name`). */
+  getProfile(profileId: string): Promise<Profile | null>;
 
   /** Get the first user (for bootstrapping). */
   getFirstUser(): Promise<{ id: string } | null>;
@@ -74,13 +147,36 @@ export interface AgentStore {
   /** Get the first profile (for bootstrapping). */
   getDefaultProfile(): Promise<{ id: string } | null>;
 
-  /** Create a profile. */
+  /** Create a profile and return the full row. `userId: null` = org profile (read-only via Transport); `userId: <id>` = user profile (owned by that user). Throws `UniqueViolationError` on (user_id, name) collision. */
   createProfile(params: {
+    userId: string | null;
     name: string;
     basePrompt: string;
     model: string;
     toolSet: JsonValue;
-  }): Promise<{ id: string }>;
+  }): Promise<Profile>;
+
+  /** List profiles visible to `userId`: org profiles (user_id IS NULL) + the user's own profiles. */
+  listProfiles(userId: string): Promise<ReadonlyArray<Profile>>;
+
+  /** Return ownership info for a profile, or null if it doesn't exist. `userId: null` = org profile. */
+  getProfileOwner(profileId: string): Promise<{ userId: string | null } | null>;
+
+  /** Update a profile in place. Caller must verify ownership. Throws `UniqueViolationError` on name collision. */
+  updateProfile(profileId: string, changes: ProfileUpdates): Promise<Profile>;
+
+  /**
+   * Count live references to a profile — active conversations + stamped message history.
+   * Useful for UX (warn before delete). `deleteProfile` performs the authoritative check-in-tx.
+   */
+  countProfileReferences(profileId: string): Promise<{ conversations: number; messages: number }>;
+
+  /**
+   * Delete a profile atomically: checks `conversations` and `messages` references inside the
+   * same transaction and throws `ProfileInUseError` if any exist. Historical messages pin the
+   * profile as audit data — a profile that has ever been used in a turn stays undeletable.
+   */
+  deleteProfile(profileId: string): Promise<void>;
 
   /** Load a single message by ID. */
   getMessage(
@@ -102,8 +198,42 @@ export interface AgentStore {
   /** Get the timestamp of the most recent message in a conversation (any role). */
   getLastMessageTime(conversationId: string): Promise<Date | null>;
 
-  /** Get inputTokens from the most recent assistant message (for fast-path budget estimation). */
-  getLastInputTokens(conversationId: string): Promise<number | null>;
+  /**
+   * Get `{ inputTokens, outputTokens }` from the most recent assistant
+   * message, for the fast-path budget estimator. Returns `null` if no
+   * assistant row exists. Either field may be `null` (never written, e.g.
+   * legacy inputTokens column) or `-1` (pre-migration sentinel for
+   * outputTokens). The fast path treats both as "unknown → force count".
+   */
+  getLastTokens(conversationId: string): Promise<{
+    inputTokens: number | null;
+    outputTokens: number;
+  } | null>;
+
+  // --- Conversation admin (Transport-facing) ---
+
+  /** List private conversations owned by a user with last-message preview + alias + profile name. */
+  listConversationsForUser(userId: string): Promise<ReadonlyArray<ConversationSummary>>;
+
+  /** Update a conversation's active profile. Takes effect on the next turn (current in-flight turn keeps its snapshot). */
+  setConversationProfile(conversationId: string, profileId: string): Promise<void>;
+
+  /** Upsert or clear a conversation's alias. `alias: null` removes the alias row. Throws `UniqueViolationError` if the alias is taken. */
+  setAlias(userId: string, conversationId: string, alias: string | null): Promise<void>;
+
+  /** Resolve an alias to a conversation ID for a user. Returns null if no match. */
+  findConversationByAlias(
+    userId: string,
+    alias: string,
+  ): Promise<{ conversationId: string } | null>;
+
+  // --- Model discovery (Transport-facing) ---
+
+  /** Distinct models that are user-selectable (user_selectable = true). Used by the `/model` picker. */
+  listDistinctUserSelectableModels(): Promise<ReadonlyArray<string>>;
+
+  /** True if at least one `model_providers` row has `user_selectable = true` for this model. Used to validate `profiles.update({ model })`. */
+  isModelUserSelectable(model: string): Promise<boolean>;
 
   // --- LLM Providers ---
 
@@ -140,11 +270,12 @@ export interface AgentStore {
 
   // --- Model → Provider routing ---
 
-  /** Register a provider for a model at a given position (lower = preferred). */
+  /** Register a provider for a model at a given position (lower = preferred). `userSelectable: false` hides the model from the user-facing `/model` picker — use for internal-only models (summarization, experimental). */
   addModelProvider(params: {
     model: string;
     providerId: string;
     position: number;
+    userSelectable: boolean;
   }): Promise<{ id: string }>;
 
   /** Resolve the best provider for a model (lowest position). */
@@ -259,6 +390,8 @@ export class DrizzleAgentStore implements AgentStore {
     conversationId: string;
     role: "user" | "assistant";
     content: string | ContentBlock[];
+    profileId: string;
+    model: string;
     lastInboundMessageId: string;
     inputTokens?: number;
   }): Promise<{ id: string }> {
@@ -271,8 +404,15 @@ export class DrizzleAgentStore implements AgentStore {
             conversationId: params.conversationId,
             role: params.role,
             content,
+            profileId: params.profileId,
+            model: params.model,
             lastInboundMessageId: params.lastInboundMessageId,
             ...(params.inputTokens != null && { inputTokens: params.inputTokens }),
+            // Singular insert is only used for user rows (and the orchestrator's
+            // initial synthesized user message) — they never have an output
+            // count. Sentinel -1 tells the fast path "unknown, force count" if
+            // this row were ever the most-recent assistant (it isn't).
+            outputTokens: UNKNOWN_OUTPUT_TOKENS,
           })
           .returning({ id: messages.id }),
       );
@@ -282,8 +422,11 @@ export class DrizzleAgentStore implements AgentStore {
   async insertMessages(params: {
     conversationId: string;
     messages: ReadonlyArray<Message>; // must be non-empty
+    profileId: string;
+    model: string;
     lastInboundMessageId: string;
     lastMessageInputTokens?: number;
+    lastMessageOutputTokens: number;
   }): Promise<{ id: string }> {
     if (params.messages.length === 0) {
       throw new Error("insertMessages requires at least one message");
@@ -294,11 +437,16 @@ export class DrizzleAgentStore implements AgentStore {
         conversationId: params.conversationId,
         role: msg.role,
         content: MessageContentSchema.parse(msg.content),
+        profileId: params.profileId,
+        model: params.model,
         lastInboundMessageId: params.lastInboundMessageId,
         ...(i === lastIdx &&
           params.lastMessageInputTokens != null && {
             inputTokens: params.lastMessageInputTokens,
           }),
+        // Intermediate tool turns get the sentinel — only the final assistant
+        // row carries the real aggregated outputTokens for the fast path.
+        outputTokens: i === lastIdx ? params.lastMessageOutputTokens : UNKNOWN_OUTPUT_TOKENS,
       }));
       const rows = await tx.insert(messages).values(values).returning({ id: messages.id });
       const last = R.last(rows);
@@ -335,19 +483,13 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getProfile(profileId: string): Promise<{
-    id: string;
-    basePrompt: string;
-    model: string;
-    summarizationModel: string | null;
-    extractionModel: string | null;
-    autoRecall: AutoRecallMode;
-    toolSet: JsonValue;
-  } | null> {
+  async getProfile(profileId: string): Promise<Profile | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
           id: profiles.id,
+          userId: profiles.userId,
+          name: profiles.name,
           basePrompt: profiles.basePrompt,
           model: profiles.model,
           summarizationModel: profiles.summarizationModel,
@@ -358,17 +500,7 @@ export class DrizzleAgentStore implements AgentStore {
         .from(profiles)
         .where(eq(profiles.id, profileId))
         .limit(1);
-      return (
-        (rows[0] as {
-          id: string;
-          basePrompt: string;
-          model: string;
-          summarizationModel: string | null;
-          extractionModel: string | null;
-          autoRecall: AutoRecallMode;
-          toolSet: JsonValue;
-        }) ?? null
-      );
+      return (rows[0] as Profile | undefined) ?? null;
     });
   }
 
@@ -387,13 +519,123 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async createProfile(params: {
+    userId: string | null;
     name: string;
     basePrompt: string;
     model: string;
     toolSet: JsonValue;
-  }): Promise<{ id: string }> {
+  }): Promise<Profile> {
+    return translateUniqueViolation(() =>
+      this.#db.transaction(async (tx) => {
+        const row = single(
+          await tx.insert(profiles).values(params).returning({
+            id: profiles.id,
+            userId: profiles.userId,
+            name: profiles.name,
+            basePrompt: profiles.basePrompt,
+            model: profiles.model,
+            summarizationModel: profiles.summarizationModel,
+            extractionModel: profiles.extractionModel,
+            autoRecall: profiles.autoRecall,
+            toolSet: profiles.toolSet,
+          }),
+        );
+        return row as Profile;
+      }),
+    );
+  }
+
+  async listProfiles(userId: string): Promise<ReadonlyArray<Profile>> {
     return this.#db.transaction(async (tx) => {
-      return single(await tx.insert(profiles).values(params).returning({ id: profiles.id }));
+      const rows = await tx
+        .select({
+          id: profiles.id,
+          userId: profiles.userId,
+          name: profiles.name,
+          basePrompt: profiles.basePrompt,
+          model: profiles.model,
+          summarizationModel: profiles.summarizationModel,
+          extractionModel: profiles.extractionModel,
+          autoRecall: profiles.autoRecall,
+          toolSet: profiles.toolSet,
+        })
+        .from(profiles)
+        .where(or(isNull(profiles.userId), eq(profiles.userId, userId)))
+        .orderBy(asc(profiles.name));
+      return rows as ReadonlyArray<Profile>;
+    });
+  }
+
+  async getProfileOwner(profileId: string): Promise<{ userId: string | null } | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ userId: profiles.userId })
+        .from(profiles)
+        .where(eq(profiles.id, profileId))
+        .limit(1);
+      return rows[0] ?? null;
+    });
+  }
+
+  async updateProfile(profileId: string, changes: ProfileUpdates): Promise<Profile> {
+    return translateUniqueViolation(() =>
+      this.#db.transaction(async (tx) => {
+        const rows = await tx
+          .update(profiles)
+          .set(changes)
+          .where(eq(profiles.id, profileId))
+          .returning({
+            id: profiles.id,
+            userId: profiles.userId,
+            name: profiles.name,
+            basePrompt: profiles.basePrompt,
+            model: profiles.model,
+            summarizationModel: profiles.summarizationModel,
+            extractionModel: profiles.extractionModel,
+            autoRecall: profiles.autoRecall,
+            toolSet: profiles.toolSet,
+          });
+        return single(rows) as Profile;
+      }),
+    );
+  }
+
+  async countProfileReferences(
+    profileId: string,
+  ): Promise<{ conversations: number; messages: number }> {
+    return this.#db.transaction(async (tx) => {
+      const [convRows, msgRows] = await Promise.all([
+        tx
+          .select({ value: count() })
+          .from(conversations)
+          .where(eq(conversations.profileId, profileId)),
+        tx.select({ value: count() }).from(messages).where(eq(messages.profileId, profileId)),
+      ]);
+      return {
+        conversations: convRows[0]?.value ?? 0,
+        messages: msgRows[0]?.value ?? 0,
+      };
+    });
+  }
+
+  async deleteProfile(profileId: string): Promise<void> {
+    // Check refs + delete in one transaction so a concurrent conversation create / message insert
+    // can't sneak in between count and delete. Without this, callers would see a raw FK error
+    // instead of the typed ProfileInUseError.
+    await this.#db.transaction(async (tx) => {
+      const [convRows, msgRows] = await Promise.all([
+        tx
+          .select({ value: count() })
+          .from(conversations)
+          .where(eq(conversations.profileId, profileId)),
+        tx.select({ value: count() }).from(messages).where(eq(messages.profileId, profileId)),
+      ]);
+      const convCount = convRows[0]?.value ?? 0;
+      const msgCount = msgRows[0]?.value ?? 0;
+      if (convCount > 0 || msgCount > 0) {
+        throw new ProfileInUseError(convCount, msgCount);
+      }
+      await tx.delete(profiles).where(eq(profiles.id, profileId));
     });
   }
 
@@ -462,15 +704,21 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getLastInputTokens(conversationId: string): Promise<number | null> {
+  async getLastTokens(conversationId: string): Promise<{
+    inputTokens: number | null;
+    outputTokens: number;
+  } | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
-        .select({ inputTokens: messages.inputTokens })
+        .select({
+          inputTokens: messages.inputTokens,
+          outputTokens: messages.outputTokens,
+        })
         .from(messages)
         .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
         .orderBy(desc(messages.id))
         .limit(1);
-      return rows[0]?.inputTokens ?? null;
+      return rows[0] ?? null;
     });
   }
 
@@ -483,6 +731,116 @@ export class DrizzleAgentStore implements AgentStore {
         .orderBy(desc(messages.id))
         .limit(1);
       return rows[0]?.createdAt ?? null;
+    });
+  }
+
+  // --- Conversation admin ---
+
+  async listConversationsForUser(userId: string): Promise<ReadonlyArray<ConversationSummary>> {
+    // One round-trip: pull every private conversation for the user with its profile name and
+    // (optional) alias. Last-message preview is a correlated subquery — we want the latest row
+    // regardless of role so /sessions shows the most recent activity.
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: conversations.id,
+          profileName: profiles.name,
+          alias: aliases.alias,
+          content: sql<unknown>`(
+            SELECT ${messages.content}
+            FROM ${messages}
+            WHERE ${messages.conversationId} = ${conversations.id}
+            ORDER BY ${messages.id} DESC
+            LIMIT 1
+          )`,
+          lastMessageAt: sql<string | Date | null>`(
+            SELECT ${messages.createdAt}
+            FROM ${messages}
+            WHERE ${messages.conversationId} = ${conversations.id}
+            ORDER BY ${messages.id} DESC
+            LIMIT 1
+          )`,
+        })
+        .from(conversations)
+        .innerJoin(profiles, eq(profiles.id, conversations.profileId))
+        .leftJoin(aliases, eq(aliases.conversationId, conversations.id))
+        .where(and(eq(conversations.userId, userId), eq(conversations.isPrivate, true)))
+        .orderBy(desc(conversations.id));
+
+      return rows
+        .filter((r) => r.lastMessageAt != null) // skip conversations with no messages yet
+        .map((r) => {
+          // Correlated subquery loses the Drizzle column type mapper — driver returns either
+          // a Date (postgres-js) or an ISO string (PGlite); normalize.
+          const raw = r.lastMessageAt as Date | string;
+          const lastMessageAt = raw instanceof Date ? raw : new Date(raw);
+          return {
+            id: r.id,
+            profileName: r.profileName,
+            alias: r.alias,
+            lastMessagePreview: previewFromContent(r.content),
+            lastMessageAt,
+          };
+        });
+    });
+  }
+
+  async setConversationProfile(conversationId: string, profileId: string): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      await tx.update(conversations).set({ profileId }).where(eq(conversations.id, conversationId));
+    });
+  }
+
+  async setAlias(userId: string, conversationId: string, alias: string | null): Promise<void> {
+    await translateUniqueViolation(() =>
+      this.#db.transaction(async (tx) => {
+        if (alias === null) {
+          await tx.delete(aliases).where(eq(aliases.conversationId, conversationId));
+          return;
+        }
+        await tx.insert(aliases).values({ userId, conversationId, alias }).onConflictDoUpdate({
+          target: aliases.conversationId,
+          set: { alias },
+        });
+      }),
+    );
+  }
+
+  async findConversationByAlias(
+    userId: string,
+    alias: string,
+  ): Promise<{ conversationId: string } | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ conversationId: aliases.conversationId })
+        .from(aliases)
+        .where(and(eq(aliases.userId, userId), eq(aliases.alias, alias)))
+        .limit(1);
+      return rows[0] ?? null;
+    });
+  }
+
+  // --- Model discovery ---
+
+  async listDistinctUserSelectableModels(): Promise<ReadonlyArray<string>> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .selectDistinct({ model: modelProviders.model })
+        .from(modelProviders)
+        .where(eq(modelProviders.userSelectable, true))
+        .orderBy(asc(modelProviders.model));
+      return rows.map((r) => r.model);
+    });
+  }
+
+  async isModelUserSelectable(model: string): Promise<boolean> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ id: modelProviders.id })
+        .from(modelProviders)
+        .where(and(eq(modelProviders.model, model), eq(modelProviders.userSelectable, true)))
+        .limit(1);
+      return rows.length > 0;
     });
   }
 
@@ -567,6 +925,7 @@ export class DrizzleAgentStore implements AgentStore {
     model: string;
     providerId: string;
     position: number;
+    userSelectable: boolean;
   }): Promise<{ id: string }> {
     return this.#db.transaction(async (tx) => {
       return single(

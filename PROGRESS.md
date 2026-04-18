@@ -79,7 +79,8 @@ The agent does things on its own, not just when you talk to it.
 - [ ] First ingestion agent: Gmail (MCP)
 - [ ] First ingestion agent: Google Calendar (MCP)
 - [ ] Concurrency control — per-conversation FIFO, global concurrency limit via Inngest
-- [ ] Claude Agent SDK integration — background tasks via subscription ($0)
+
+(Subscription-backed background coding tasks live in Phase 6 via `claude -p` / `codex exec` subprocess — see [Phase 6: Autonomous Coding + Sandbox](#phase-6-autonomous-coding--sandbox). The Agent SDK path is not used here; it requires API keys, not subscriptions.)
 
 ## Phase 3: Skill Library + More Integrations
 
@@ -109,7 +110,38 @@ The agent improves its own prompts.
 - [ ] Anti-pattern enforcement — no instruction bloat, no contradictions
 - [ ] Bounded code mutation with tree-structured archive (Stage 6)
 - [ ] Lineage tracing for all evolution changes
-- [ ] Sandbox execution for generated code
+
+(Sandbox execution for generated code is delivered by Phase 6 — see [Phase 6: Autonomous Coding + Sandbox](#phase-6-autonomous-coding--sandbox).)
+
+## Phase 6: Autonomous Coding + Sandbox
+
+Cogmo delegates heavy coding tasks (and evolution-driven code changes) to `claude -p` / `codex exec` running in isolated containers. Design: [sandbox.md](design/sandbox.md), [coding-delegation.md](design/coding-delegation.md).
+
+### P1 — core loop
+
+- [ ] Sandbox primitives — `containers` / `cogmo_instances` / `networks` / `volumes` tables; sibling-container creation against host daemon with `sysbox-runc` runtime; Docker-label lineage; per-task socket proxy in pass-through mode; reaper cron (TTL + orphan + stale-row); per-task cgroup parent for kernel-enforced resource ceiling
+- [ ] Claude backend (plan-only) — subprocess wrap of `claude -p`, JSONL stream parsing, session-id capture, `plan_ready` event; prompt skeleton with task-specific slots only (repo conventions come from Claude Code's native memory tiers — managed policy + user-global + project — not prompt injection); `coding_tasks` / `coding_repos` tables
+- [ ] Plan approval + execute — Telegram inline-keyboard gate (user-triggered), stream-json `acceptEdits` resume, text-delta streaming into single edited Telegram message
+- [ ] Tool gate — `stream-json` stdin permission channel; Telegram prompts with Allow-once / Allow-task / Deny; decision log
+- [ ] Verify + push + draft PR — in-container `<verify_command>`; git commit + SSH commit signing; `git push`; `gh pr create --draft`; teardown policy (worktree persistence table — clean remove vs `refs/cogmo-wip/` push)
+
+### P2 — breadth + hardening
+
+- [ ] Codex backend — second `CodingBackend` impl behind same interface
+- [ ] Proxy policy enforcement — deny `Privileged`, `NetworkMode=host`, out-of-scope binds, dangerous caps; runtime injection; registry allowlist
+- [ ] Devcontainer parsing — honour `.devcontainer/devcontainer.json` via devcontainer CLI
+- [ ] Vault socket for credentials — disk-based `.git-credentials` replaced with per-task Unix socket helper
+- [ ] GitHub App migration — installation tokens with ~1h expiry
+- [ ] Extract sandbox proxy to sidecar — `cogmo sandbox-proxy` subcommand, tRPC control plane
+- [ ] Automated self-modification surface — admission & rate limiting (global cap, per-source quotas, failure backoff, user-priority scheduler); wire `trigger_source IN ('evolution','signal_pipeline')`; expose steering-rules / prompts direct read/write capabilities
+- [ ] Coding-scoped steering rules in `DefaultPromptSource` — layer `coding-claude` / `coding-codex` profile rules into the prompt skeleton
+
+### P3 — polish
+
+- [ ] Parallel tasks per repo — raise `max_concurrent_tasks`; install-lock on shared cache volumes (option B), narrow to pip/apt after measurement (option C)
+- [ ] BuildKit policy enforcement — gRPC inspection via moby/buildkit SDK; block unapproved `FROM` lines, inspect secret mounts
+- [ ] Observer repo-knowledge loop — post-task Observer files a `trigger_source='evolution'` coding task whose goal is a `CLAUDE.md` edit; native Claude Code memory loads it on future tasks (no Cogmo-private store)
+- [ ] Plan-age confirmation — "still want to proceed?" Telegram prompt when execution would start >24h after approval
 
 ## Monitoring Thresholds (Scaling Triggers)
 

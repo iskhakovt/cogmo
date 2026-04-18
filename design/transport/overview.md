@@ -25,7 +25,7 @@ How messages flow from platform to agent and back, across all channels.
 | `profiles` | name, model | Org-scoped — shared across users. |
 | `channel_sessions` | id, channelId, platformAddress, conversationId, status, receive, expiresAt | Maps platform address to conversation. `status`: `active` \| `closed`. `receive`: `none` \| `routed` \| `all`. See [sessions.md](sessions.md). |
 | `conversations` | id, userId, profileId, isPrivate | Agent-side. No reference to channels. `isPrivate` controls memory scope. |
-| `messages` | id, conversationId, role, content, lastInboundMessageId | Immutable. `lastInboundMessageId` on all messages for attribution. |
+| `messages` | id, conversationId, role, content, profileId, model, lastInboundMessageId | Immutable. `lastInboundMessageId` on all messages for attribution. `profileId` + `model` stamp which profile+model was active — required because a conversation's profile can change and a profile's model can change, so neither alone identifies what produced a given turn. |
 | `inbound_messages` | id, channelSessionId, conversationId, content, platformTs | Immutable. `platformTs` = when user sent it (from platform API). `conversationId` denormalized from channel_sessions for query performance. User derived from `conversation.userId`. |
 
 ### Core Table Schemas
@@ -43,12 +43,13 @@ channels (
 
 profiles (
   id               UUID v7 PK,
-  name             TEXT NOT NULL UNIQUE,       -- 'assistant', 'coder', 'buddy', etc.
+  user_id          UUID FK → users,            -- NULL = org profile (read-only via Transport, managed out-of-band via psql/wizard); set = user profile (owned by that user)
+  name             TEXT NOT NULL,
   base_prompt      TEXT NOT NULL,
   model            TEXT NOT NULL,              -- LLM model identifier
   tool_set         JSONB NOT NULL,             -- enabled tool names
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-  -- Org-scoped for now. May extend to per-user (add user_id FK, change UNIQUE to (user_id, name)) later.
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (user_id, name) NULLS NOT DISTINCT    -- org profiles (user_id = NULL) treated as equal by name, so "default" can only exist once across all org profiles; a user can still pick "default" for themselves
 );
 
 conversations (
@@ -62,8 +63,10 @@ conversations (
 messages (
   id                       UUID v7 PK,
   conversation_id          UUID FK → conversations NOT NULL,
-  role                     TEXT NOT NULL,       -- 'user' | 'assistant'
-  content                  JSONB NOT NULL,      -- ContentBlock[] (text, tool_use, tool_result, image, thinking)
+  role                     TEXT NOT NULL,        -- 'user' | 'assistant'
+  content                  JSONB NOT NULL,       -- ContentBlock[] (text, tool_use, tool_result, image, thinking)
+  profile_id               UUID FK → profiles NOT NULL,  -- active profile for the turn this row belongs to
+  model                    TEXT NOT NULL,        -- model active for the turn; legacy backfill = '<legacy>' sentinel
   last_inbound_message_id  UUID NOT NULL,        -- attribution cursor. See debounce.md.
   created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -103,7 +106,7 @@ Sequential handoff — channel side is done writing before orchestrator reads. T
 3. Resolve or create session via `transport.resolveSession()` / `transport.createConversation()` (identity resolved internally)
 4. Emit via `transport.emit(sessionId, content: InboundContent)` — persists inbound message + emits `inbound/arrived`
 
-**Control commands** (`/new`, `/start`, `/profile`) intercepted by adapter before step 2. No persist, no event, no LLM call. `/new` closes the current session and creates a new conversation + session. See [sessions.md](sessions.md).
+**Control commands** (`/start`, `/new`, `/sessions`, `/resume`, `/name`, `/end`, `/profile`, `/model`, `/cancel`) intercepted by adapter before step 2. No persist, no event, no LLM call — they call `Transport` admin methods directly (or adapter-local state for interactive dialogs like `/profile new|edit` and its `/cancel`). See [sessions.md](sessions.md), [adapters.md](adapters.md), and [telegram.md](telegram.md) for the canonical command table.
 
 ## Agent Pipeline
 
@@ -111,12 +114,13 @@ Shared core — same for all platforms. The agent never knows which platform the
 
 1. Receive `inbound/ready` event (from debounce layer)
 2. Load unbatched inbound messages (`WHERE conversationId = ? AND id > lastResponse.lastInboundMessageId`, where `lastResponse` is the previous assistant message — null = load all)
-3. Batch into one user `messages` row (set `lastInboundMessageId` = max inbound ID)
-4. Load conversation history
-5. Assemble system prompt (profile base prompt + steering rules + memories)
-6. Run agentic loop
-7. Persist all new messages produced by the loop (intermediate tool_use/tool_result turns + final assistant), each as a `messages` row with full `ContentBlock[]` content. All carry the same `lastInboundMessageId`.
-8. Emit `response/ready` event
+3. Read the conversation's current `profile_id`; resolve `profile.model`. This is the snapshot used for the entire turn.
+4. Batch into one user `messages` row (set `lastInboundMessageId` = max inbound ID; stamp `profile_id` + `model` from the turn snapshot)
+5. Load conversation history
+6. Assemble system prompt (profile base prompt + steering rules + memories)
+7. Run agentic loop using the snapshotted model
+8. Persist all new messages produced by the loop (intermediate tool_use/tool_result turns + final assistant), each as a `messages` row with full `ContentBlock[]` content. All carry the same `lastInboundMessageId`, `profile_id`, and `model`.
+9. Emit `response/ready` event
 
 Concurrency: `limit: 1, key: conversationId` — one batch at a time per conversation. Second batch queues in Inngest until the first completes.
 
@@ -134,6 +138,20 @@ Four boundary events connect adapters to the agent pipeline. Debounce-internal e
 Events carry minimal data — IDs and routing info. Consumers derive what they need from their own tables.
 
 `inbound_messages` exists because of debounce. Without debounce, every inbound message IS a conversation turn — one table suffices. With debounce, raw messages need a staging area before batching into turns. See [debounce.md](debounce.md) for the full design.
+
+## Profile and Model Stamping
+
+Every `messages` row carries `profile_id` and `model` — both NOT NULL, both stamped at insert time, never updated. The pair identifies the turn the row belongs to.
+
+**Why both:** profiles can be switched mid-conversation (`/profile switch coder` updates `conversations.profile_id` for future turns), and `profile.model` can be edited independently (`/model claude-opus-4-6`). Storing only `conversations.profile_id` would lose the historical profile; storing only the profile would lose the historical model. Both are needed to answer "what was active for this turn?".
+
+**Snapshot semantic:** at turn-start the orchestrator reads `conversations.profile_id` and resolves `profile.model`. That `(profile_id, model)` pair is the turn snapshot, stamped on every row produced by the turn — user batch, intermediate assistant, tool_result, final assistant. All share the same stamp. This makes the invariant trivially NOT NULL on every row regardless of role.
+
+**Switch effective time:** profile and model changes take effect on the *next* turn. In-flight turns and running compactions finish on their existing snapshot. A `/profile switch` issued mid-turn updates `conversations.profile_id` but the running turn keeps stamping its original snapshot; the next turn picks up the new value.
+
+**Legacy rows:** pre-stamping rows are backfilled with `model = '<legacy>'` (angle brackets disambiguate from real model IDs — no provider uses `<` in model strings). `profile_id` is backfilled from `conversations.profile_id`. Queries that audit usage should filter `WHERE model <> '<legacy>'`.
+
+**No DEFAULT on `model`:** every insert site must stamp explicitly. Forgetting to pass the snapshot is a compile-time error rather than a silent fallback to a wrong value.
 
 ## Inbound Message / Message Attribution
 
