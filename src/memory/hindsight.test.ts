@@ -166,4 +166,22 @@ describe("HindsightMemoryProvider", () => {
       tagsMatch: "all",
     });
   });
+
+  it("reflect passes budget to client", async () => {
+    const provider = createProvider();
+    mockReflect.mockResolvedValueOnce({ text: "answer" });
+
+    await provider.reflect("bank-1", "query", { budget: "high" });
+
+    expect(mockReflect).toHaveBeenCalledWith("bank-1", "query", { budget: "high" });
+  });
+
+  it("reflect omits budget when undefined", async () => {
+    const provider = createProvider();
+    mockReflect.mockResolvedValueOnce({ text: "answer" });
+
+    await provider.reflect("bank-1", "query");
+
+    expect(mockReflect).toHaveBeenCalledWith("bank-1", "query", {});
+  });
 });

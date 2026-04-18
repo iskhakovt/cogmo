@@ -34,6 +34,7 @@ function stubService() {
     memory: {
       recall: vi.fn().mockResolvedValue({ memories: [] }),
       retain: vi.fn().mockResolvedValue(undefined),
+      reflect: vi.fn().mockResolvedValue({ answer: "" }),
     },
     files: {
       read: vi.fn().mockResolvedValue(""),
