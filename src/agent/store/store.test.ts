@@ -781,6 +781,39 @@ describe("DrizzleAgentStore", () => {
       ).rejects.toThrow();
     });
 
+    it("listProvidersForModel returns all providers in position ASC order", async () => {
+      const { id: pZero } = await seedProviderWithSecret("pri");
+      const { id: pOne } = await seedProviderWithSecret("sec");
+      const { id: pTwo } = await seedProviderWithSecret("ter");
+
+      // Insert out-of-order to verify sort isn't insertion-order-dependent.
+      await store.addModelProvider({
+        model: "claude-x",
+        providerId: pZero,
+        position: 0,
+        userSelectable: true,
+      });
+      await store.addModelProvider({
+        model: "claude-x",
+        providerId: pTwo,
+        position: 2,
+        userSelectable: true,
+      });
+      await store.addModelProvider({
+        model: "claude-x",
+        providerId: pOne,
+        position: 1,
+        userSelectable: true,
+      });
+
+      const list = await store.listProvidersForModel("claude-x");
+      expect(list.map((p) => p.name)).toEqual(["pri", "sec", "ter"]);
+    });
+
+    it("listProvidersForModel returns empty array when model has no providers", async () => {
+      expect(await store.listProvidersForModel("unknown-model")).toEqual([]);
+    });
+
     it("listDistinctUserSelectableModels excludes internal-only models", async () => {
       const { id: p } = await seedProviderWithSecret("p");
       await store.addModelProvider({
