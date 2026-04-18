@@ -18,8 +18,12 @@ const tracer = trace.getTracer("cogmo.agent");
  * Injected rather than depending on Inngest's `step` directly — keeps the
  * loop testable without an Inngest context. When undefined, all tools run
  * directly regardless of their `durable` flag.
+ *
+ * Narrowed to `Promise<string>` to match `ToolHandler` (the only caller) — this
+ * also matches Inngest's `step.run<Promise<string>>` exactly, since
+ * `Jsonify<string> === string`.
  */
-export type StepRunner = <T>(id: string, fn: () => Promise<T>) => Promise<T>;
+export type StepRunner = (id: string, fn: () => Promise<string>) => Promise<string>;
 
 export interface AgentLoopParams {
   provider: LlmProvider;
