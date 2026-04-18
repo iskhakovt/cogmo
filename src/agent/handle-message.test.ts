@@ -400,7 +400,7 @@ describe("createHandleMessage", () => {
   it("skips countTokens when fast path detects under budget", async () => {
     const deps = mockDeps({
       agentStore: mockAgentStore({
-        getLastInputTokens: vi.fn().mockResolvedValue(1000),
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1000, outputTokens: 100 }),
       }),
     });
 
@@ -414,7 +414,26 @@ describe("createHandleMessage", () => {
     expect(deps.provider.countTokens).not.toHaveBeenCalled();
   });
 
-  it("persists inputTokens on assistant message", async () => {
+  it("forces counting when prior output is the -1 pre-migration sentinel", async () => {
+    // Pre-migration rows carry outputTokens = -1. The fast path must NOT skip.
+    const countTokens = vi.fn().mockResolvedValue(50_000);
+    const deps = mockDeps({
+      provider: mockProvider({ countTokens }),
+      agentStore: mockAgentStore({
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1000, outputTokens: -1 }),
+      }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(countTokens).toHaveBeenCalled();
+  });
+
+  it("persists inputTokens and outputTokens on assistant message", async () => {
     const deps = mockDeps();
     await (createHandleMessage(deps) as any).fn({
       event: testEvent,
@@ -422,9 +441,13 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    // The insertMessages call should include lastMessageInputTokens
+    // Both counts from the loop's usage must reach insertMessages so the
+    // next turn's fast path can include them in the starting-input estimate.
     expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
-      expect.objectContaining({ lastMessageInputTokens: 10 }),
+      expect.objectContaining({
+        lastMessageInputTokens: 10,
+        lastMessageOutputTokens: 5,
+      }),
     );
   });
 
@@ -435,8 +458,8 @@ describe("createHandleMessage", () => {
     const deps = mockDeps({
       provider: mockProvider({ countTokens }),
       agentStore: mockAgentStore({
-        // No prior input tokens → fast path won't skip
-        getLastInputTokens: vi.fn().mockResolvedValue(null),
+        // No prior tokens → fast path won't skip
+        getLastTokens: vi.fn().mockResolvedValue(null),
       }),
     });
 
@@ -473,7 +496,7 @@ describe("createHandleMessage", () => {
       }),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       agentStore: mockAgentStore({
-        getLastInputTokens: vi.fn().mockResolvedValue(null),
+        getLastTokens: vi.fn().mockResolvedValue(null),
         // Need history with enough messages to trigger summarization (> keepTurns=6)
         getHistory: vi.fn().mockResolvedValue([
           { role: "user", content: "m1" },

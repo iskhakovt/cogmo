@@ -139,14 +139,26 @@ export async function compactMessages(
 /**
  * Fast-path check: should we skip the expensive countTokens call?
  * Returns true if the conversation is clearly under budget.
+ *
+ * Starting input for the *next* turn is:
+ *   prev input + prev output + new user content
+ * because the assistant's reply is persisted into history. Leaving the output
+ * term out biases the estimate low by one response — enough to slip past the
+ * 50% threshold and skip counting when we shouldn't.
+ *
+ * `null` (no prior assistant row) or a negative sentinel (pre-migration /
+ * row not carrying a real count) on either field means "unknown" → force a
+ * real count.
  */
 export function shouldSkipCounting(
   lastInputTokens: number | null,
+  lastOutputTokens: number | null,
   newContentChars: number,
   budget: number,
 ): boolean {
-  if (lastInputTokens === null) return false;
-  const estimate = lastInputTokens + Math.ceil(newContentChars / 4);
+  if (lastInputTokens === null || lastInputTokens < 0) return false;
+  if (lastOutputTokens === null || lastOutputTokens < 0) return false;
+  const estimate = lastInputTokens + lastOutputTokens + Math.ceil(newContentChars / 4);
   return estimate < budget * 0.5;
 }
 

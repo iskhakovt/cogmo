@@ -103,6 +103,11 @@ export const messages = pgTable(
     model: text("model").notNull(), // model active for the turn; legacy backfill = '<legacy>' sentinel
     lastInboundMessageId: uuid("last_inbound_message_id").notNull(),
     inputTokens: integer("input_tokens"), // nullable — only set on assistant messages
+    // NOT NULL, no default — callers must pass explicitly for assistant rows
+    // (via `lastMessageOutputTokens`). Backfilled to -1 for pre-migration rows
+    // and used as a sentinel on non-assistant rows where output is N/A; the
+    // fast path (`shouldSkipCounting`) treats -1 as "unknown → force count".
+    outputTokens: integer("output_tokens").notNull(),
     createdAt: ts(),
   },
   (t) => [

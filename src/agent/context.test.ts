@@ -429,16 +429,50 @@ describe("compactMessages — pair-aware", () => {
 
 describe("shouldSkipCounting", () => {
   it("returns false when no prior usage data", () => {
-    expect(shouldSkipCounting(null, 100, 200_000)).toBe(false);
+    expect(shouldSkipCounting(null, null, 100, 200_000)).toBe(false);
+  });
+
+  it("returns false when only input is known", () => {
+    // Missing output = unknown — force count.
+    expect(shouldSkipCounting(10_000, null, 400, 200_000)).toBe(false);
+  });
+
+  it("returns false when only output is known", () => {
+    expect(shouldSkipCounting(null, 500, 400, 200_000)).toBe(false);
   });
 
   it("returns true when clearly under budget", () => {
-    // 10_000 + 400/4 = 10_100, budget * 0.5 = 100_000
-    expect(shouldSkipCounting(10_000, 400, 200_000)).toBe(true);
+    // 10_000 + 500 + 400/4 = 10_600, budget * 0.5 = 100_000
+    expect(shouldSkipCounting(10_000, 500, 400, 200_000)).toBe(true);
+  });
+
+  it("returns false when the output term alone pushes past the 50% threshold", () => {
+    // Without the output term, lastIn + newChars/4 = 90_000 + 100 = 90_100 < 100_000 → skip.
+    // With output:            90_000 + 20_000 + 100 = 110_100 ≥ 100_000 → do NOT skip.
+    // This is the regression the fix guards against — one response worth of
+    // tokens that the old estimator ignored.
+    expect(shouldSkipCounting(90_000, 20_000, 400, 200_000)).toBe(false);
   });
 
   it("returns false when estimate is near budget", () => {
-    // 90_000 + 40_000/4 = 100_000, budget * 0.5 = 100_000
-    expect(shouldSkipCounting(90_000, 40_000, 200_000)).toBe(false);
+    // 90_000 + 0 + 40_000/4 = 100_000, budget * 0.5 = 100_000 → strict < → not skipped
+    expect(shouldSkipCounting(90_000, 0, 40_000, 200_000)).toBe(false);
+  });
+
+  it("returns false at exactly the 50% boundary", () => {
+    // 40_000 + 10_000 + 200_000/4 = 100_000 = budget * 0.5 → strict < → not skipped
+    expect(shouldSkipCounting(40_000, 10_000, 200_000, 200_000)).toBe(false);
+  });
+
+  it("returns true just under the 50% boundary", () => {
+    // 40_000 + 10_000 + 199_996/4 = 99_999 < 100_000 → skip
+    expect(shouldSkipCounting(40_000, 10_000, 199_996, 200_000)).toBe(true);
+  });
+
+  it("returns false when either value is the pre-migration -1 sentinel", () => {
+    // -1 on either field means "unknown" — force a real count.
+    expect(shouldSkipCounting(-1, 500, 400, 200_000)).toBe(false);
+    expect(shouldSkipCounting(10_000, -1, 400, 200_000)).toBe(false);
+    expect(shouldSkipCounting(-1, -1, 400, 200_000)).toBe(false);
   });
 });
