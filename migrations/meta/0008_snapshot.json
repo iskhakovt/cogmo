@@ -1,6 +1,6 @@
 {
-  "id": "0ffd9a74-5bec-42ce-a95a-fd5cd4308860",
-  "prevId": "43eb0750-14e6-4755-9367-c7a4378edffc",
+  "id": "d6ed8933-ba10-4471-b236-398ca5337379",
+  "prevId": "0ffd9a74-5bec-42ce-a95a-fd5cd4308860",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -352,6 +352,12 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": false
+        },
+        "output_tokens": {
+          "name": "output_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
         },
         "created_at": {
           "name": "created_at",

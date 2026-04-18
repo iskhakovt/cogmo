@@ -46,6 +46,7 @@ export const modelProviders = pgTable(
       .notNull()
       .references(() => llmProviders.id, { onDelete: "cascade" }),
     position: integer("position").notNull(), // 0 = primary, 1 = first fallback, ...
+    userSelectable: boolean("user_selectable").notNull(), // false = internal-only (hidden from /model picker)
     createdAt: ts(),
   },
   (t) => [
@@ -58,6 +59,7 @@ export const profiles = pgTable(
   "profiles",
   {
     id: pk(),
+    userId: uuid("user_id").references(() => users.id), // NULL = org profile (read-only via Transport); set = user profile
     name: text("name").notNull(),
     basePrompt: text("base_prompt").notNull(),
     model: text("model").notNull(),
@@ -67,20 +69,24 @@ export const profiles = pgTable(
     toolSet: jsonb("tool_set").notNull(),
     createdAt: ts(),
   },
-  (t) => [unique("uq_profiles_name").on(t.name)],
+  (t) => [unique("uq_profiles_user_name").on(t.userId, t.name).nullsNotDistinct()],
 );
 
-export const conversations = pgTable("conversations", {
-  id: pk(),
-  userId: uuid("user_id")
-    .notNull()
-    .references(() => users.id),
-  profileId: uuid("profile_id")
-    .notNull()
-    .references(() => profiles.id),
-  isPrivate: boolean("is_private").notNull(),
-  createdAt: ts(),
-});
+export const conversations = pgTable(
+  "conversations",
+  {
+    id: pk(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    profileId: uuid("profile_id")
+      .notNull()
+      .references(() => profiles.id),
+    isPrivate: boolean("is_private").notNull(),
+    createdAt: ts(),
+  },
+  (t) => [index("idx_conversations_profile_id").on(t.profileId)],
+);
 
 export const messages = pgTable(
   "messages",
@@ -91,6 +97,10 @@ export const messages = pgTable(
       .references(() => conversations.id),
     role: text("role").notNull(), // 'user' | 'assistant'
     content: jsonb("content").notNull(),
+    profileId: uuid("profile_id")
+      .notNull()
+      .references(() => profiles.id), // profile active for the turn this row belongs to
+    model: text("model").notNull(), // model active for the turn; legacy backfill = '<legacy>' sentinel
     lastInboundMessageId: uuid("last_inbound_message_id").notNull(),
     inputTokens: integer("input_tokens"), // nullable — only set on assistant messages
     // NOT NULL, no default — callers must pass explicitly for assistant rows
@@ -100,7 +110,27 @@ export const messages = pgTable(
     outputTokens: integer("output_tokens").notNull(),
     createdAt: ts(),
   },
-  (t) => [index("idx_messages_conv_id").on(t.conversationId, t.id)],
+  (t) => [
+    index("idx_messages_conv_id").on(t.conversationId, t.id),
+    index("idx_messages_profile_id").on(t.profileId),
+  ],
+);
+
+export const aliases = pgTable(
+  "aliases",
+  {
+    id: pk(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id)
+      .unique(),
+    alias: text("alias").notNull(),
+    createdAt: ts(),
+  },
+  (t) => [unique("uq_aliases_user_alias").on(t.userId, t.alias)],
 );
 
 export const coreMemoryBlocks = pgTable(

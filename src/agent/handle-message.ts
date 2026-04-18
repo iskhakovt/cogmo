@@ -35,8 +35,6 @@ export interface HandleMessageDeps {
   summarizationModel?: string;
 }
 
-const DEFAULT_MODEL = "claude-sonnet-4-20250514";
-
 /**
  * Main message pipeline — thin orchestration only.
  *
@@ -82,6 +80,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return agentStore.getLastAssistantMessage(conversationId);
       });
 
+      // Turn snapshot — read profile + model once at turn-start and stamp them on
+      // every message row this turn produces (user batch + intermediate + final
+      // assistant). Mid-turn /profile switch updates conversations.profile_id but
+      // the running turn keeps its snapshot; next turn picks up the new value.
+      // See design/transport/overview.md → Profile and Model Stamping.
+      const snapshot = await step.run("load-turn-snapshot", async () => {
+        const p = await agentStore.getProfile(profileId);
+        if (!p) throw new Error(`Profile not found: ${profileId}`);
+        return { profileId, model: p.model };
+      });
+
       // Guard 1 — Staleness: trigger was already batched into a previous turn.
       // null trigger = flush, skip this check.
       if (
@@ -124,6 +133,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           conversationId,
           role: "user",
           content: userContentText,
+          profileId: snapshot.profileId,
+          model: snapshot.model,
           lastInboundMessageId: maxInboundId,
         });
       });
@@ -158,7 +169,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         }),
       );
 
-      // Load profile early — needed for auto-recall gating and model selection
+      // Profile reload — needed for auto-recall gating and other per-profile settings.
+      // `model` comes from the turn snapshot, not this read, to preserve the invariant
+      // that one turn = one (profileId, model) stamp even if profile.model changes mid-turn.
       const profile = await agentStore.getProfile(profileId);
 
       // Auto-recall: search memory for context relevant to this message
@@ -214,7 +227,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // cached value is just the summary string — no large image payloads
       // in step state. See design/crash-recovery.md.
 
-      const model = profile?.model ?? DEFAULT_MODEL;
+      const model = snapshot.model;
       const budget = computeBudget(model);
       const toolDefs = tools.definitions();
 
@@ -290,6 +303,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return agentStore.insertMessages({
           conversationId,
           messages: result.newMessages,
+          profileId: snapshot.profileId,
+          model: snapshot.model,
           lastInboundMessageId: maxInboundId,
           lastMessageInputTokens: result.usage.inputTokens,
           lastMessageOutputTokens: result.usage.outputTokens,
