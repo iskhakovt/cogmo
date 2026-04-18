@@ -18,6 +18,21 @@ export interface ToolSpec {
   description: string;
   inputSchema: JsonSchema;
   handler: ToolHandler;
+  /**
+   * Opt-in durability for this tool's handler execution.
+   *
+   * When `true` AND a `StepRunner` is provided to the agent loop, the handler
+   * runs inside `step.run()` so the result is cached exactly-once across
+   * Inngest retries. Intended for expensive or billable side effects
+   * (image generation, paid web search, etc.) where re-execution on retry
+   * would re-bill or re-upload. Cheap/idempotent tools (memory reads, time,
+   * file I/O) should leave this unset — retrying them is free and avoids
+   * the overhead of a step state entry.
+   *
+   * No effect when `StepRunner` is not provided (e.g. unit tests, agent loops
+   * running outside Inngest). See `design/crash-recovery.md`.
+   */
+  durable?: boolean;
 }
 
 /**
@@ -33,6 +48,8 @@ export function defineTool<T>(opts: {
   description: string;
   schema: ZodType<T>;
   handler: (input: T, service: Service) => Promise<string>;
+  /** See `ToolSpec.durable`. */
+  durable?: boolean;
 }): ToolSpec {
   const inputSchema = z.toJSONSchema(opts.schema) as unknown as JsonSchema;
   return {
@@ -43,6 +60,7 @@ export function defineTool<T>(opts: {
       const parsed = opts.schema.parse(raw);
       return opts.handler(parsed, service);
     },
+    ...(opts.durable !== undefined && { durable: opts.durable }),
   };
 }
 

@@ -280,6 +280,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           tools,
           service,
           onEvent: (event: StreamEvent) => delivery.push(event),
+          // Opt-in per-tool durability. The streaming section itself is
+          // non-durable (can't stream out of `step.run`), but tool handlers
+          // run *between* stream events — wrapping an individual handler in
+          // `step.run` preserves event ordering while giving exactly-once
+          // semantics for expensive/billable tools (generate_image,
+          // web_answer). Step id = `tool-<name>-<toolUseId>`, unique per
+          // LLM-issued tool call. See design/crash-recovery.md.
+          stepRun: (id, fn) => step.run(id, fn),
         });
         await delivery.finish();
       } catch (err) {

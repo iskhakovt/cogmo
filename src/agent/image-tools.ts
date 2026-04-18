@@ -90,6 +90,10 @@ export function createImageTools(
     defineTool({
       name: "generate_image",
       description: TOOL_DESCRIPTION,
+      // Durable: each call bills $0.02-$0.04 and uploads to AttachmentStore.
+      // On Inngest retry the cached JSON result (path + mediaType) replays,
+      // so we neither re-bill fal nor produce duplicate uploaded blobs.
+      durable: true,
       schema: z.object({
         prompt: z.string().min(1).describe("Detailed image description"),
         model: z
