@@ -52,13 +52,14 @@ llm_providers (
 
 ```sql
 model_providers (
-  id            UUID v7 PK,
-  model         TEXT NOT NULL,                          -- 'claude-sonnet-4-20250514'
-  provider_id   UUID NOT NULL FK → llm_providers CASCADE,
-  position      INT NOT NULL,                           -- 0 = primary, 1 = fallback
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (model, provider_id),                          -- one entry per pair
-  UNIQUE (model, position)                              -- ordered, no ties
+  id              UUID v7 PK,
+  model           TEXT NOT NULL,                          -- 'claude-sonnet-4-20250514'
+  provider_id     UUID NOT NULL FK → llm_providers CASCADE,
+  position        INT NOT NULL,                           -- 0 = primary, 1 = fallback
+  user_selectable BOOLEAN NOT NULL,                       -- true = appears in /model picker; false = internal-only (summarization, experimental)
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (model, provider_id),                            -- one entry per pair
+  UNIQUE (model, position)                                -- ordered, no ties
 )
 ```
 
@@ -89,29 +90,88 @@ Profiles declare **what model** they want, not **which provider** serves it. Nam
 
 `summarization_model` replaces the `SUMMARIZATION_MODEL` env var — it's a per-profile concern, not a system-wide one.
 
+**Editing `profiles.model`:** the wizard seeds initial values, but profiles are also editable at runtime via `Transport.profiles.update` (e.g., Telegram `/model <model>`). Updates validate that the chosen model exists in `model_providers` AND has `user_selectable = true` — anything else returns `model_unavailable`. Each `messages` row records the model that produced it (`messages.model`), so changing `profiles.model` doesn't lose history. See [transport/adapters.md](transport/adapters.md) → Profile admin and [transport/overview.md](transport/overview.md) → Profile and Model Stamping.
+
+## Model policy
+
+`model_providers.user_selectable` is the org-level policy gate. Two consumers care:
+
+- **`Transport.models.list()`** filters to `user_selectable = true` for the `/model` picker.
+- **`Transport.profiles.update({ model })`** validates the new model is `user_selectable`.
+
+Use cases for `user_selectable = false`:
+
+- **Internal models** — a cheap haiku used for summarization or extraction shouldn't appear as a user-pickable conversational model.
+- **Experimental/preview models** — admin wants to route them via `model_providers` without exposing them to users until validated.
+- **Deprecation** — flip the flag to retire a model from the picker without removing the routing entry; existing profiles keep working until the user picks a different one.
+
+Admin toggles via psql or the wizard. There is no Transport mutation for `user_selectable` in v0 — model policy is out-of-band.
+
+`profile.summarization_model` is not gated by `user_selectable` — it's an internal field set at profile creation/edit time, and admins control whether end users can edit profile fields beyond `model` via the broader profile ACL (see [transport/adapters.md](transport/adapters.md) → Profile admin).
+
 ## Provider dispatch
 
-At bootstrap, resolve the model → provider → credentials chain:
+At bootstrap, resolve the model → ordered provider list → credentials chain. Every candidate in `listProvidersForModel(model)` is wrapped in a `FallbackLlmProvider` (see [Fallback](#fallback-confirmed)) — consumers receive a plain `LlmProvider` and never see the chain, even when there is only one row (in which case the wrapper is a no-op pass-through).
 
 ```typescript
 async function resolveProviderForModel(model: string, store: AgentStore): Promise<LlmProvider> {
-  // 1. Find the best provider for this model (lowest position)
-  const row = await store.resolveProviderForModel(model);
+  // 1. Find every provider for this model, ordered by position (primary first)
+  const rows = await store.listProvidersForModel(model);
   // → SELECT lp.* FROM model_providers mp
   //   JOIN llm_providers lp ON mp.provider_id = lp.id
-  //   WHERE mp.model = $model ORDER BY mp.position LIMIT 1
+  //   WHERE mp.model = $model ORDER BY mp.position ASC
 
-  // 2. Decrypt the API key
-  const apiKey = await secretsStore.getSecretById(row.secretId);
+  // 2. Construct an adapter per row (each has its own credential)
+  const providers = await Promise.all(rows.map(async (row) => {
+    const apiKey = await secretsStore.getSecretById(row.secretId);
+    return row.type === "anthropic"
+      ? new AnthropicProvider(apiKey, row.baseUrl)
+      : new OpenAICompatibleProvider(row.name, { apiKey, baseURL: row.baseUrl, ... });
+  }));
 
-  // 3. Construct the adapter
-  return row.type === "anthropic"
-    ? new AnthropicProvider(apiKey, row.baseUrl)
-    : new OpenAICompatibleProvider(row.name, { apiKey, baseURL: row.baseUrl, ... });
+  // 3. Wrap the ordered list in a fallback provider
+  return new FallbackLlmProvider(providers);
 }
 ```
 
 Provider instances are constructed per bootstrap, not per turn. If hot-swap is needed later, a lazy-loading wrapper can reconstruct on DB change.
+
+## Fallback `[confirmed]`
+
+When a model has more than one row in `model_providers`, cogmo builds a `FallbackLlmProvider` that wraps every candidate in position-ASC order and transparently retries transient failures against the next one. The agent loop, typed calls, and observer all consume a plain `LlmProvider` — they never see the chain.
+
+**The SDK retries come first.** The Anthropic and OpenAI SDKs both retry HTTP errors internally (exponential backoff, a few attempts). The fallback wrapper is the OUTER layer — it only engages after those in-SDK retries have exhausted. This is deliberate: retrying against the same provider is almost always the right first move (same cache state, same routing, usually cheaper). Cross-provider fallback only helps when the current provider is genuinely unhealthy.
+
+### Classification
+
+Errors are classified by duck-typing a numeric `status` field on the thrown `Error` — both SDKs expose this on their `APIError` shape, so no SDK-specific imports are needed.
+
+| Class | Statuses | Behaviour |
+|-|-|-|
+| **transient** | no status (network/DNS/TLS/timeout), 408, 425, 429, all 5xx | try the next candidate |
+| **permanent** | 400, 401, 403, 404, 409, 422, any other 4xx | propagate (no fallback) |
+
+Non-Error throws (strings, objects) are treated as **permanent** — the caller is misusing the SDK. The classifier (`isRetriableProviderError`) is a pure function and is covered by a table-driven test.
+
+Permanent errors are propagated immediately because retrying a 401 against the next provider rarely helps and burns quota — each provider has its own credential. Authentication, validation, and invalid-request errors are bugs in configuration or code, not transient infrastructure problems.
+
+### Ordering
+
+Every candidate in `listProvidersForModel(model)` is tried in position-ASC order (primary first, then each fallback). There is no cap on chain length — if the user has configured 5 fallbacks, all 5 can be tried. When every candidate fails transiently, the wrapper raises `AllProvidersFailedError`, which carries the ordered list of `{ provider, error }` attempts so operators can see exactly what failed.
+
+### Streaming
+
+Streaming fallback applies **only to pre-stream failures**. The wrapper establishes the candidate's stream and pulls the first event inside a try/catch — if that fails with a transient error, we move to the next candidate. Once the first byte has been yielded to the consumer, we are committed: mid-stream errors propagate and the partial output stays in history.
+
+This rule avoids two failure modes: yielding duplicated content (the agent sees the primary's tokens then restarts on the fallback), and losing context mid-turn (a tool call emitted by the primary, then a different model continuing from where it didn't start). Pre-stream recovery is safe because nothing has been committed yet.
+
+### Observability
+
+- `logger.warn` per fallback transition — fields: `fromProvider`, `toProvider`, `errClass`, `errMessage`. One line per hop, easy to grep.
+- `logger.error` when the chain exhausts — fields: `op`, ordered `attempts` list with provider names and error descriptions.
+- `AllProvidersFailedError.attempts` carries the same list for programmatic inspection.
+
+The wrapper does not deduplicate requests, rate-limit transitions, or track health state — it is stateless. A provider that just returned 500 will be tried again on the next turn. This is intentional for the single-user deployment: complexity that pays off at scale (circuit breakers, health checks) is noise here.
 
 ## Validation
 

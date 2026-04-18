@@ -1,4 +1,10 @@
 export { AnthropicProvider } from "./anthropic.js";
+export type { FallbackAttempt } from "./fallback.js";
+export {
+  AllProvidersFailedError,
+  FallbackLlmProvider,
+  isRetriableProviderError,
+} from "./fallback.js";
 export type { LlmProvider } from "./provider.js";
 export type { TypedChatParams, TypedChatResult } from "./typed.js";
 export { chatTyped } from "./typed.js";

@@ -35,8 +35,6 @@ export interface HandleMessageDeps {
   summarizationModel?: string;
 }
 
-const DEFAULT_MODEL = "claude-sonnet-4-20250514";
-
 /**
  * Main message pipeline — thin orchestration only.
  *
@@ -82,6 +80,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return agentStore.getLastAssistantMessage(conversationId);
       });
 
+      // Turn snapshot — read profile + model once at turn-start and stamp them on
+      // every message row this turn produces (user batch + intermediate + final
+      // assistant). Mid-turn /profile switch updates conversations.profile_id but
+      // the running turn keeps its snapshot; next turn picks up the new value.
+      // See design/transport/overview.md → Profile and Model Stamping.
+      const snapshot = await step.run("load-turn-snapshot", async () => {
+        const p = await agentStore.getProfile(profileId);
+        if (!p) throw new Error(`Profile not found: ${profileId}`);
+        return { profileId, model: p.model };
+      });
+
       // Guard 1 — Staleness: trigger was already batched into a previous turn.
       // null trigger = flush, skip this check.
       if (
@@ -124,6 +133,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           conversationId,
           role: "user",
           content: userContentText,
+          profileId: snapshot.profileId,
+          model: snapshot.model,
           lastInboundMessageId: maxInboundId,
         });
       });
@@ -158,7 +169,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         }),
       );
 
-      // Load profile early — needed for auto-recall gating and model selection
+      // Profile reload — needed for auto-recall gating and other per-profile settings.
+      // `model` comes from the turn snapshot, not this read, to preserve the invariant
+      // that one turn = one (profileId, model) stamp even if profile.model changes mid-turn.
       const profile = await agentStore.getProfile(profileId);
 
       // Auto-recall: search memory for context relevant to this message
@@ -214,12 +227,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // cached value is just the summary string — no large image payloads
       // in step state. See design/crash-recovery.md.
 
-      const model = profile?.model ?? DEFAULT_MODEL;
+      const model = snapshot.model;
       const budget = computeBudget(model);
       const toolDefs = tools.definitions();
 
-      const lastInputTokens = await agentStore.getLastInputTokens(conversationId);
-      const skip = shouldSkipCounting(lastInputTokens, userContentText.length, budget);
+      const lastTokens = await agentStore.getLastTokens(conversationId);
+      const skip = shouldSkipCounting(
+        lastTokens?.inputTokens ?? null,
+        lastTokens?.outputTokens ?? null,
+        userContentText.length,
+        budget,
+      );
 
       if (!skip) {
         const compactResult = await compactMessages(fullPrompt, historyMessages, toolDefs, {
@@ -262,6 +280,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           tools,
           service,
           onEvent: (event: StreamEvent) => delivery.push(event),
+          // Opt-in per-tool durability. The streaming section itself is
+          // non-durable (can't stream out of `step.run`), but tool handlers
+          // run *between* stream events — wrapping an individual handler in
+          // `step.run` preserves event ordering while giving exactly-once
+          // semantics for expensive/billable tools (generate_image,
+          // web_answer). Step id = `tool-<name>-<toolUseId>`, unique per
+          // LLM-issued tool call. See design/crash-recovery.md.
+          stepRun: (id, fn) => step.run(id, fn),
         });
         await delivery.finish();
       } catch (err) {
@@ -285,8 +311,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return agentStore.insertMessages({
           conversationId,
           messages: result.newMessages,
+          profileId: snapshot.profileId,
+          model: snapshot.model,
           lastInboundMessageId: maxInboundId,
           lastMessageInputTokens: result.usage.inputTokens,
+          lastMessageOutputTokens: result.usage.outputTokens,
         });
       });
 

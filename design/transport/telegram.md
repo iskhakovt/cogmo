@@ -23,11 +23,35 @@ Implements `AdapterModule` contract (`channelType` + `setup()`). Token extracted
 
 **Platform user handle:** `String(ctx.from.id)` — the user's Telegram ID, passed to transport for identity resolution.
 
-**Session lifecycle:** One long-lived session per DM. Created on first message, never expires. `/new` closes and recreates.
+**Session lifecycle:** One long-lived session per DM. Created on first message, never expires. `/new` and `/resume` close and recreate.
 
-**Control commands:**
-- `/start` — welcome message (Telegram convention). Does not call `transport.emit()`.
-- `/new` — close current session, create new conversation. Optional profile arg: `/new coder`.
+**Control commands:** intercepted by the adapter, never reach the agent. Each maps to a `Transport` method (see [adapters.md](adapters.md)).
+
+| Command | Transport call | Purpose |
+|-|-|-|
+| `/start` | — | Welcome message (Telegram convention). |
+| `/new [profile]` | `closeSession` + `createConversation` | Close current, start fresh. Optional profile name. |
+| `/sessions` | `conversations.list` | Show user's conversations (see UX below). |
+| `/resume <alias>` | `closeSession` + `resumeConversation({ alias })` | Switch the DM to an existing conversation by alias. |
+| `/name <alias>` | `conversations.setAlias` | Set/clear an alias on the current conversation. |
+| `/end` | `closeSession` | Close current session without opening a new one. Next message creates a new conversation. |
+| `/profile` | `profiles.list` | Show current profile + list available. |
+| `/profile switch <name>` | `conversations.setProfile` | Change the active profile of the current conversation. Effective next turn. |
+| `/profile new <name>` | `profiles.create` | Interactive flow to collect prompt/model/tools, then create. |
+| `/profile edit <name>` | `profiles.update` | Interactive flow to change fields. |
+| `/profile delete <name>` | `profiles.delete` | Errors if conversations still reference it. |
+| `/model [<model>]` | `models.list`, `profiles.update({ model })` | Without arg: show current + list. With arg: change the active profile's model. |
+
+Errors from Transport (`profile_not_found`, `model_unavailable`, `alias_taken`, etc.) are mapped to user-friendly Telegram replies.
+
+### Session list UX
+
+`/sessions` adapts to size:
+
+- **≤10 conversations** — render an inline keyboard, one button per conversation labeled `<alias or preview>` (most-recent-first). Tap routes to `/resume <alias>` (or by ID if no alias).
+- **>10 conversations** — render a numbered text list with `/resume <alias>` shown as the action. Avoids Telegram's inline-keyboard density limits and keeps the surface text-only above the threshold.
+
+The threshold is a constant in the adapter (start with `10`, tune by feel).
 
 **Outbound:**
 - `deliver()` calls `bot.api.sendMessage(platformAddress, content)`

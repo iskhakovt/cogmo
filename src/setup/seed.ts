@@ -24,17 +24,18 @@ export async function ensureDefaultUser(agentStore: AgentStore): Promise<string>
   return id;
 }
 
-/** Create the default profile if none exists. Returns the profile ID. */
+/** Create the default org profile if none exists. Returns the profile ID. Org profiles have `userId: null` — visible to all users, read-only via Transport. */
 export async function ensureDefaultProfile(agentStore: AgentStore): Promise<string> {
   const existing = await agentStore.getDefaultProfile();
   if (existing) return existing.id;
   const { id } = await agentStore.createProfile({
+    userId: null,
     name: "assistant",
     basePrompt: DEFAULT_BASE_PROMPT,
     model: "claude-sonnet-4-20250514",
     toolSet: DEFAULT_TOOL_SET,
   });
-  logger.info({ profileId: id }, "created default profile");
+  logger.info({ profileId: id }, "created default org profile");
   return id;
 }
 

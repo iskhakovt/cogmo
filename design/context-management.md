@@ -138,11 +138,15 @@ Token counting calls are minimized: one initial count, then re-count only after 
 
 ## Fast Path: Usage Tracking
 
-Calling `countTokens` every turn adds latency. Optimization: persist `inputTokens` from each LLM response on the assistant message row.
+Calling `countTokens` every turn adds latency. Optimization: persist both `inputTokens` and `outputTokens` from each LLM response on the assistant message row.
 
-Before the next turn, estimate: `lastInputTokens + newContentEstimate`. If clearly under budget (< 50%), skip `countTokens` entirely. Only long conversations pay the counting cost.
+Before the next turn, estimate: `lastInputTokens + lastOutputTokens + newContentEstimate`. If clearly under budget (< 50%), skip `countTokens` entirely. Only long conversations pay the counting cost.
 
-The estimate for new content can use chars/4 — it only needs to be conservative enough to avoid skipping counting when the conversation is actually near the limit.
+Both terms matter. The starting input for turn `N+1` is turn `N`'s input **plus** turn `N`'s output — the assistant's reply is persisted into history and becomes part of next turn's context. Tracking input alone underestimates by one response worth of tokens, which is enough to slip past the 50% threshold and skip counting when the conversation is actually close to the limit.
+
+The estimate for new user content can use chars/4 — it only needs to be conservative enough to avoid skipping counting when the conversation is actually near the limit.
+
+`outputTokens` is stored `NOT NULL` with a sentinel `-1` meaning "unknown, force count" — used on the pre-migration backfill and on non-final rows in a batch insert (tool turns, user rows) that carry no meaningful output count. The fast path treats any non-negative integer as real data and any negative/null value as a force-count signal, so legacy data is always safe.
 
 ## Integration
 

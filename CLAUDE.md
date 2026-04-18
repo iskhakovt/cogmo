@@ -48,6 +48,8 @@ Read `design/` for the full picture. Key docs:
 | [integrations.md](design/integrations.md) | MCP, Telegram adapter, skill library |
 | [providers.md](design/providers.md) | Multi-provider LLM routing, `llm_providers` table, profile FK, provider dispatch |
 | [image-generation.md](design/image-generation.md) | Image gen via Vercel AI SDK, fal.ai provider, outbound delivery, why AI SDK for images but not text LLMs |
+| [sandbox.md](design/sandbox.md) | Container sandbox — sysbox-default runtime, Docker API proxy, lineage tracking, reaper |
+| [coding-delegation.md](design/coding-delegation.md) | Claude Code / Codex CLI subprocess delegation, worktree + draft-PR flow, autonomy gates |
 | [setup.md](design/setup.md) | Guided setup wizard UX contract — interactive flow, re-runnable behavior, non-interactive mode |
 | [infrastructure.md](design/infrastructure.md) | Runtime requirements, Docker Compose, secrets (encrypted DB, master key, HKDF, `_FILE` convention), deployment |
 | [data-model.md](design/data-model.md) | Table index — points to schemas in domain docs, deferred tables, design decisions |
@@ -230,6 +232,7 @@ After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 - **Avoid default values** in DB columns and function parameters unless strongly justified (`id`, `created_at` are justified). Explicit values at the call site prevent hidden assumptions.
 - **No table design is final.** Schemas in `design/` docs are design intent, not frozen specs — they evolve as real usage reveals issues. When changing a table, update both the Drizzle schema (`<module>/store/schema.ts`) and the design doc that owns it simultaneously.
 - **Prefer immutable rows.** Insert once, avoid updates where practical. When updates are necessary (e.g. status transitions), that's fine — just design tables so most rows are append-only.
+- **Every JSONB column has a Zod schema validated at the store boundary** (on both read and write). JSONB without a schema is rep exposure — any shape drift is caught where the bytes enter or leave the DB, not deep inside consumer code. Name the schema in the design doc next to the column (e.g. `resource_usage JSONB, -- ResourceUsageSchema`) and enforce with `.parse()` on read and write. Example in place: `messages.content` via `MessageContentSchema.parse()` in `src/agent/store/index.ts`. Exception: opaque payloads that Cogmo never inspects (e.g. `channels.credentials`, which is encrypted ciphertext the adapter hands back to the channel SDK). Mark those explicitly as opaque in the schema comment.
 - Memory writes are always additive. Dedup runs async via `reflect()`.
 - Sub-agents never see API keys. Orchestrator makes all external calls.
 - Every LLM call uses typed contracts (Zod schema in, Zod schema out) with retry + feedback injection.

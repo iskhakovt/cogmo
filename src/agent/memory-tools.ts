@@ -43,6 +43,10 @@ export const memoryRetain = defineTool({
 
 export const memoryReflect = defineTool({
   name: "memory_reflect",
+  // Durable: reflect drives Hindsight's own agentic reasoning loop — multiple
+  // billable LLM round-trips per call. On Inngest retry the cached synthesized
+  // answer replays, avoiding re-running the whole loop.
+  durable: true,
   description:
     "Synthesize an answer from long-term memory via an agentic reasoning loop — " +
     "searches memories, follows entity-graph links, and returns a synthesized answer " +

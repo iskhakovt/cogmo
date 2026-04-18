@@ -8,6 +8,7 @@ import type {
   StopReason,
   StreamEvent,
 } from "../llm/types.js";
+import type { StepRunner } from "./loop.js";
 import { clearOldThinking, runAgentLoop, runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
 import { defineTool, ToolRegistry } from "./tools.js";
@@ -571,6 +572,191 @@ describe("runStreamingAgentLoop", () => {
       { type: "thinking", thinking: "Let me think...", signature: "sig" },
       { type: "text", text: "Answer" },
     ]);
+  });
+});
+
+describe("tool durability (stepRun)", () => {
+  it("wraps a durable tool in stepRun with a deterministic step id", async () => {
+    const provider = mockProvider([
+      toolUseResponse("paid", "toolu_01ABC", { q: "hi" }),
+      textResponse("done"),
+    ]);
+
+    let handlerCalls = 0;
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      handler: async () => {
+        handlerCalls++;
+        return "paid-result";
+      },
+    });
+
+    const stepRunCalls: Array<{ id: string }> = [];
+    const stepRun: StepRunner = async (id, fn) => {
+      stepRunCalls.push({ id });
+      return fn();
+    };
+
+    const result = await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      stepRun,
+    });
+
+    expect(stepRunCalls).toEqual([{ id: "tool-paid-toolu_01ABC" }]);
+    expect(handlerCalls).toBe(1);
+    // Handler ran *inside* the wrapper — its output flows through as tool_result.
+    expect(result.messages[2]!.content).toEqual([
+      { type: "tool_result", toolUseId: "toolu_01ABC", content: "paid-result" },
+    ]);
+  });
+
+  it("runs a durable tool directly when no stepRun is provided", async () => {
+    const provider = mockProvider([toolUseResponse("paid", "toolu_02", {}), textResponse("done")]);
+
+    let handlerCalls = 0;
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      handler: async () => {
+        handlerCalls++;
+        return "paid-result";
+      },
+    });
+
+    const result = await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      // no stepRun
+    });
+
+    expect(handlerCalls).toBe(1);
+    expect(result.messages[2]!.content).toEqual([
+      { type: "tool_result", toolUseId: "toolu_02", content: "paid-result" },
+    ]);
+  });
+
+  it("does not invoke stepRun for non-durable tools", async () => {
+    const provider = mockProvider([toolUseResponse("cheap", "toolu_03", {}), textResponse("done")]);
+
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "cheap",
+      description: "free",
+      inputSchema: { type: "object" },
+      // durable omitted — defaults to not durable
+      handler: async () => "cheap-result",
+    });
+
+    const stepRun = vi.fn<StepRunner>(async (_id, fn) => fn());
+
+    await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      stepRun,
+    });
+
+    expect(stepRun).not.toHaveBeenCalled();
+  });
+
+  it("uses distinct step ids when the same durable tool is called twice", async () => {
+    const provider = mockProvider([
+      {
+        content: [
+          { type: "tool_use", id: "toolu_A", name: "paid", input: {} },
+          { type: "tool_use", id: "toolu_B", name: "paid", input: {} },
+        ],
+        stopReason: "tool_use",
+        model: "mock-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      textResponse("done"),
+    ]);
+
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      handler: async () => "ok",
+    });
+
+    const ids: string[] = [];
+    const stepRun: StepRunner = async (id, fn) => {
+      ids.push(id);
+      return fn();
+    };
+
+    await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      stepRun,
+    });
+
+    expect(ids).toEqual(["tool-paid-toolu_A", "tool-paid-toolu_B"]);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("applies durability in the streaming loop as well", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [{ type: "tool_start", id: "toolu_stream", name: "paid", input: {} }],
+        stopReason: "tool_use",
+      },
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      handler: async () => "stream-result",
+    });
+
+    const stepRunCalls: string[] = [];
+    const stepRun: StepRunner = async (id, fn) => {
+      stepRunCalls.push(id);
+      return fn();
+    };
+
+    await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+      stepRun,
+    });
+
+    expect(stepRunCalls).toEqual(["tool-paid-toolu_stream"]);
   });
 });
 
