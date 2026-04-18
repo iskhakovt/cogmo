@@ -96,6 +96,10 @@ function createWebAnswer(apiKey: string | undefined): ToolSpec {
       "Get a synthesized answer to a question using web search with AI reasoning. " +
       "Returns a direct answer with citations. Use this for factual questions, " +
       "current events, or when you need a concise researched answer rather than raw search results.",
+    // Durable: Perplexity Sonar via OpenRouter is a billable LLM round-trip.
+    // `web_search` (Tavily) and `fetch_url` are cheaper and stay non-durable —
+    // wasted retries there are acceptable.
+    durable: true,
     schema: z.object({
       question: z.string().describe("The question to answer"),
     }),
