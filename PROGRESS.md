@@ -84,14 +84,49 @@ The agent does things on its own, not just when you talk to it.
 
 ## Phase 3: Skill Library + More Integrations
 
-The agent extends its own capabilities.
+The agent extends its own capabilities — authors small Python programs ("skills") that run in sandboxed workers, invoked as LLM tools or on cron. Design: [skills.md](design/skills.md).
 
-- [ ] Skill library — `skills/code/` + `skills/description/`, Voyager pattern
-- [ ] MCP dynamic tool registration — agent writes skill, registers as tool
-- [ ] Human review gate for new skills — Inngest `step.waitForEvent()` + Telegram approval
-- [ ] SKILL.md standard — progressive disclosure (tier 1/2/3)
-- [ ] Permission tiers — read-only / read-write auto / read-write approval
-- [ ] Additional integrations (as needed): Strava, banking, GitHub
+### P3.1 — Foundation
+
+- [ ] Skills store — `skills`, `skill_deploys`, `skill_runs`, `skill_context_calls` tables; Drizzle schema; `SkillStore` interface + impl; PGlite unit tests
+- [ ] `SkillManifestSchema` — canonical Zod schema for `SKILL.md` frontmatter (name, description, tier, isolation, triggers, schedule, inputs/outputs, effects, secrets, resources, budget, cost_per_call_usd); `SKILL_EFFECTS` constant; manifest parser that strips frontmatter from markdown body
+- [ ] Local skills repo bootstrap — initialize bare git repo at `$COGMO_SKILLS_PATH` (default `/var/lib/cogmo/skills`) on first boot; install `pre-receive` hook enforcing "main only via Cogmo" + force-push ban; `settings.local.json` config key
+
+### P3.2 — Runtime
+
+- [ ] Worker JSON-RPC protocol — framing over stdin/stdout, request/response shape per [skills.md](design/skills.md) → Host context; typed Python exceptions → typed TS errors
+- [ ] Tier 1 worker (WASM/Pyodide) — Pyodide instance in a Node worker thread, fresh globals scope per task, V8 heap limit + host-side wall-clock timer; Pyodide-compatibility lint (no `subprocess`, no `os.fork`, only available wheels)
+- [ ] Tier 2 worker (sysbox container) — Python subprocess inside a sysbox container (reuses [sandbox.md](design/sandbox.md) `Sandbox` interface), subinterpreter per task (Python 3.13+, PEP 684), per-run cgroup slice via sandbox cgroup parent; `isolation: recycle` opt-out path
+- [ ] Pool + Dispatcher — min=1 / max=3 warm workers per tier, queue-with-spawn-on-threshold, worker replacement every 500 tasks or 30min idle, health checks
+- [ ] Python `ctx` SDK — shipped into every worker image; RPC-backed methods for `secrets.get`, `memory.recall`, `memory.remember`, `attachments.upload/download`, `llm.complete`, `now`, `user`, `notify`, `log.info`; manifest-gated at host side
+
+### P3.3 — Deployment pipeline
+
+- [ ] Risk classifier — deterministic, consumes `SkillManifestSchema` + static-analysis pass (AST lint for `subprocess`, `os.remove`, destructive SDK methods); assigns `auto` / `notify` / `approve`; forces declaration of any undeclared effect it detects
+- [ ] `register` RPC — branch + fast-forward check + advisory lock (`pg_advisory_xact_lock` per skill name) + pending-deploy check + classify + atomic merge-and-write; returns `RegisterResult` synchronously
+- [ ] `approveDeploy` / `denyDeploy` / `rollback` RPCs — Telegram approval flow for `approve` tier, `git update-ref` rollback to prior SHA with classifier re-run
+- [ ] `cogmo skills` CLI — `register --branch X`, `rollback X`, `deregister X`, `list`, `run X '{}'` wrappers over the RPCs
+- [ ] `/disable <skill>`, `/enable <skill>` channel commands — Telegram shortcuts for the same RPCs
+
+### P3.4 — Invocation
+
+- [ ] Dynamic tool registration — orchestrator rebuilds tool list each turn from `SkillRunner.list()`; one tool per skill (name + tier-1 description + compiled `inputs` schema); tier-2 SKILL.md body swapped into tool description on selection (progressive disclosure)
+- [ ] Cron scheduling — one Inngest cron per scheduled skill (from `SKILL.md.schedule`), dispatcher fire-and-forget
+- [ ] Failure handling — Inngest retries → Telegram notification on final failure → auto-disable after 3 consecutive failures → `/enable` / `/rollback` recovery
+- [ ] Skill discovery retrieval layer — `search_skills(query)` tool (semantic search over manifest descriptions). Added when tool-list tokens exceed ~5k or tool-selection accuracy drops on evals
+
+### P3.5 — Telemetry & cost
+
+- [ ] `skill_runs` tracking — wall_clock_ms, peak memory (cgroup/isolate stats), status, error; Inngest step-wrapped for exactly-once
+- [ ] `skill_context_calls` audit log — every `ctx.*` RPC with method + target (never value); retention policy
+- [ ] Cost accounting — LLM tokens via `ctx.llm.complete()` (pricing table per model), declared `cost_per_call_usd` summed per run, dispatcher enforces daily/monthly budgets from `SKILL.md.budget`
+
+### P3.6 — Deferred (future `[research]`)
+
+- [ ] Egress-proxy secret substitution — UUID placeholder + HTTP egress proxy that validates destination against secret binding and substitutes on the fly
+- [ ] Inter-skill composition — `ctx.skills.invoke(name, inputs)` orchestrator-mediated, recursion cap, permission intersection
+- [ ] Agent-led repair loop — on `skill/failed`, spawn an orchestrator run to diagnose + patch + re-register (aligns with evolution stage 3+)
+- [ ] Additional integrations (as needed): Strava, banking, GitHub — Phase 3 scope retained
 
 ## Phase 4: Prompt Optimization
 
@@ -150,4 +185,4 @@ Cogmo delegates heavy coding tasks (and evolution-driven code changes) to `claud
 | RAM pressure or swap | Move to larger host or optimise |
 | API costs unsustainable | Evaluate local inference for background tasks |
 | pgvector index > 1GB | Evaluate dedicated vector store |
-| >50 skills | Hierarchical skill organization |
+| >50 skills OR tool-list tokens > ~5k OR selection accuracy drop | Add `search_skills` retrieval layer (P3.4), hierarchical organization if still needed |
