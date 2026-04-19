@@ -94,7 +94,7 @@ Per-skill caps on memory, CPU, wall-clock. Enforced at runtime, declared in `SKI
 
 | Tier | Memory | Wall-clock | CPU | Mechanism |
 |-|-|-|-|-|
-| **WASM** | 128 MB | 30 s | n/a (single-threaded isolate) | V8 isolate heap limit at creation; host-side wall-clock timer terminates the isolate on timeout. |
+| **WASM** | 128 MB | 30 s | n/a (single-threaded isolate) | V8 isolate heap limit at creation; host-side wall-clock timer terminates the isolate on timeout. **Known limit:** a tight CPU loop inside the WASM Python runtime may not yield to the V8 interrupt mechanism cleanly — the host timer will fire, but termination depends on hitting a JS↔WASM boundary. Hard fallback: kill the Node worker thread hosting the isolate. |
 | **Container** | 512 MB | 60 s | 1 CPU share | Per-run cgroup slice under [sandbox.md](sandbox.md)'s cgroup parent pattern — same mechanism as coding delegation's per-task budgets. Dispatcher SIGKILL on wall-clock exceeded. |
 
 Override per skill:
@@ -126,18 +126,31 @@ The container tier is warmed from day 1. A 1–2s cold start on every interactiv
 
 ### Protocol
 
-Task dispatch: JSON-RPC over stdin/stdout. One task is one request/response pair:
+Bidirectional JSON-RPC over stdin/stdout. One pipe handles four message types, correlated by `id`:
+
+- `task_invoke` (host → worker) — starts a task.
+- `task_result` (worker → host) — terminal response for a task.
+- `ctx_call` (worker → host) — `ctx.*` RPCs issued mid-task (e.g. `ctx.secrets.get()`).
+- `ctx_result` (host → worker) — response to a `ctx_call`.
+
+Each message is one line of NDJSON. Every `*_result` carries the `id` of the request it answers — a single worker may have one `task_invoke` in flight and several `ctx_call`s nested inside it concurrently. The worker-side SDK blocks the skill's Python call on the matching `ctx_result`.
 
 ```json
 // host → worker
-{"id": "<run-id>", "skill": "summarize-email", "input": {...}}
+{"type": "task_invoke", "id": "run-7f3", "skill": "summarize-email", "input": {...}}
 
-// worker → host
-{"id": "<run-id>", "ok": true, "output": {...}}
-{"id": "<run-id>", "ok": false, "error": "..."}
+// worker → host (mid-task)
+{"type": "ctx_call", "id": "ctx-9a2", "method": "secrets.get", "args": {"name": "slack_webhook"}}
+
+// host → worker (answer to ctx-9a2)
+{"type": "ctx_result", "id": "ctx-9a2", "ok": true, "value": "..."}
+
+// worker → host (task terminal)
+{"type": "task_result", "id": "run-7f3", "ok": true, "output": {...}}
+{"type": "task_result", "id": "run-7f3", "ok": false, "error": "..."}
 ```
 
-stdin/stdout chosen over HTTP / Unix socket for simplicity — one process per worker, no port allocation, no service discovery.
+stdin/stdout chosen over HTTP / Unix socket for simplicity — one process per worker, no port allocation, no service discovery. Multiplexing on a single pipe is fine because it's plain NDJSON with correlation IDs.
 
 ### State reset between tasks
 
@@ -208,17 +221,18 @@ $COGMO_SKILLS_PATH/                # default /var/lib/cogmo/skills (configurable
 
 Hard rules enforced on the skills repo:
 
-- **`main` is advanced only by Cogmo's `register` RPC.** Direct pushes to `main` from any other source (agent, human, tool, CI) are rejected. Agents work on feature branches; the orchestrator is the sole merger. This makes "classified and live" atomic with "present on `main`" — no transient "committed but rejected" state can exist.
+- **`main` is advanced only by Cogmo's `register` RPC.** Direct pushes to `main` from any other source (agent, human, tool, CI) are rejected *unconditionally*. Agents work on feature branches; the orchestrator is the sole merger. This makes "classified and live" atomic with "present on `main`" — no transient "committed but rejected" state can exist.
 
   Enforced by a `pre-receive` hook on the bare repo:
 
   ```bash
   while read oldrev newrev refname; do
-    if [[ "$refname" == "refs/heads/main" && "$COGMO_MERGE" != "1" ]]; then
+    # No push may update main — ever. Cogmo advances main via filesystem update-ref, not push.
+    if [[ "$refname" == "refs/heads/main" ]]; then
       echo "Direct pushes to main are not allowed. Use 'cogmo skills register'."
       exit 1
     fi
-    # Force-push denied on any branch
+    # Force-push denied on any branch (feature branches included).
     if [[ "$oldrev" != "0"* && "$newrev" != "0"* ]]; then
       git merge-base --is-ancestor "$oldrev" "$newrev" || {
         echo "Force push not allowed on $refname"; exit 1;
@@ -227,7 +241,7 @@ Hard rules enforced on the skills repo:
   done
   ```
 
-  Cogmo advances `main` via `git update-ref refs/heads/main <sha>` directly on the bare repo's filesystem — no push, no hook interaction. Equivalently, if a push path is used, Cogmo sets `COGMO_MERGE=1` to pass the hook.
+  Cogmo advances `main` via `git update-ref refs/heads/main <sha>` directly on the bare repo's filesystem. This bypasses the hook by design — hooks only fire on `push`, not on `update-ref`. No env-var escape hatch for the hook; that would be a footgun (anything in Cogmo's env could bypass). The filesystem-write path is the sole merge mechanism, and it's available only to Cogmo (who owns the filesystem).
 
 - **No force push, no history rewrite on any branch.** `skills.git_sha` references point to specific commits — if history is rewritten, those SHAs dangle and the live skill becomes uninvocable. Enforced by:
   - The pre-receive hook above (non-fast-forward rejected on every branch).
@@ -349,6 +363,14 @@ are considered. Default: 24 hours ago.
 
 ```typescript
 // src/skills/manifest.ts
+export const SKILL_EFFECTS = [
+  "reads_memory", "writes_memory",
+  "reads_user_data", "writes_user_data",
+  "sends_email", "sends_message", "posts_public",
+  "deletes_external", "financial",
+  "writes_filesystem", "spawns_subprocess",
+] as const;
+
 export const SkillManifestSchema = z.object({
   // Identity
   name: z.string().regex(/^[a-z][a-z0-9_-]*$/).min(1).max(64),
@@ -362,8 +384,12 @@ export const SkillManifestSchema = z.object({
   triggers: z.array(z.enum(["manual", "cron", "event"])).default(["manual"]),
   schedule: z.string().optional(),   // cron expression; required if triggers.includes('cron')
 
-  // Contract
-  inputs: z.record(z.unknown()),       // JSON Schema object (Cogmo compiles to Zod at runtime)
+  // Contract. inputs / outputs are JSON Schema objects, opaque to Zod at the
+  // manifest layer — Zod only guarantees "it's a JSON object." Actual shape
+  // validation at invoke time runs the declared JSON Schema against the input
+  // via a real validator (ajv). outputs is optional because pure-side-effect
+  // skills (cron jobs that post to Slack) have no structured return.
+  inputs: z.record(z.unknown()),
   outputs: z.record(z.unknown()).optional(),
 
   // Permissions & effects
@@ -402,14 +428,6 @@ export const SkillManifestSchema = z.object({
     ctx.addIssue({ code: "custom", message: "isolation only applies to tier=container" });
   }
 });
-
-export const SKILL_EFFECTS = [
-  "reads_memory", "writes_memory",
-  "reads_user_data", "writes_user_data",
-  "sends_email", "sends_message", "posts_public",
-  "deletes_external", "financial",
-  "writes_filesystem", "spawns_subprocess",
-] as const;
 ```
 
 **Compatibility with Anthropic's SKILL.md:** a minimal Anthropic SKILL.md with just `name` + `description` parses as an invalid Cogmo manifest (missing `tier` and `inputs`), but the *fields present* are interpreted the same. When mirroring to Anthropic's ecosystem (e.g., loading a Cogmo skill into Claude), the superset fields are ignored.
@@ -467,8 +485,8 @@ The `register` RPC:
 4. **Pending-approval check.** If any `skill_deploys` row for this skill has `status = 'pending_approval'` → return `{ status: "rejected", errors: ["pending deploy exists; approve or deny first"] }`.
 5. **Read + classify.** `git show <branch-tip>:SKILL.md` / `:skill.py`. Run classifier + static analysis. Validate manifest against `SkillManifestSchema`.
 6. **Branch by tier:**
-   - `auto` / `notify` → `git update-ref refs/heads/main <branch-tip>` (advances main), optionally delete feature branch, `UPSERT skills`, insert `skill_deploys` with `status = 'live'`.
-   - `approve` → insert `skill_deploys` with `status = 'pending_approval'`. Branch stays. `main` does not move. Fire Telegram prompt.
+   - `auto` / `notify` → `git update-ref refs/heads/main <branch-tip>` (advances main), delete the feature branch, `UPSERT skills`, insert `skill_deploys` with `status = 'live'`. The audit trail lives in `skill_deploys.git_sha` — the branch pointer itself is not the record, so cleanup is unambiguous.
+   - `approve` → insert `skill_deploys` with `status = 'pending_approval'`. Branch **stays** until `approveDeploy` / `denyDeploy` resolves the deploy. `main` does not move. Fire Telegram prompt.
    - Validation errors → return `errors[]`, nothing persisted.
 7. **Commit** (releases lock). Return result synchronously.
 
@@ -744,6 +762,7 @@ Owned by `src/skills/store/`.
 CREATE TYPE skill_tier AS ENUM ('wasm', 'container');
 CREATE TYPE skill_risk_tier AS ENUM ('auto', 'notify', 'approve');
 CREATE TYPE skill_run_status AS ENUM ('running', 'success', 'error');
+CREATE TYPE skill_run_trigger AS ENUM ('manual', 'cron', 'event');
 CREATE TYPE skill_deploy_status AS ENUM ('pending_approval', 'approved', 'denied', 'live', 'rolled_back');
 
 skills (
@@ -751,11 +770,11 @@ skills (
   name        TEXT NOT NULL UNIQUE,        -- matches dir name
   tier        skill_tier NOT NULL,
   risk_tier   skill_risk_tier NOT NULL,    -- computed by classifier at deploy
-  effects     JSONB NOT NULL,              -- declared effects list, SkillEffectsSchema
-  schedule    TEXT,                        -- cron expression, null = not scheduled
+  effects     JSONB NOT NULL,              -- SkillEffectsSchema (declared effects list)
+  schedule    TEXT,                        -- nullable: cron expression; null = not scheduled
   git_sha     TEXT NOT NULL,               -- commit hash of current live version
-  inputs      JSONB NOT NULL,              -- JSON schema, SkillIoSchema
-  outputs    JSONB NOT NULL,              -- JSON schema, SkillIoSchema
+  inputs      JSONB NOT NULL,              -- SkillIoSchema (opaque JSON Schema — see Manifest)
+  outputs     JSONB,                       -- nullable: side-effect-only skills have no structured output. SkillIoSchema when present.
   disabled    BOOLEAN NOT NULL DEFAULT false,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 )
@@ -764,39 +783,46 @@ skill_deploys (
   id              UUID v7 PK,
   skill_id        UUID NOT NULL REFERENCES skills(id),
   git_sha         TEXT NOT NULL,           -- commit being deployed
-  prior_git_sha   TEXT,                    -- null for first deploy; used for rollback
+  prior_git_sha   TEXT,                    -- nullable: null for first deploy; used for rollback
   risk_tier       skill_risk_tier NOT NULL,
   status          skill_deploy_status NOT NULL,
-  approved_by     TEXT,                    -- user id or 'auto'
-  classifier_log  JSONB NOT NULL,          -- full classifier output for audit
+  approved_by     UUID REFERENCES user_identities(id),  -- nullable: null for auto/notify-tier (no human approval); set only when a human clicks Approve on approve-tier
+  classifier_log  JSONB NOT NULL,          -- ClassifierLogSchema (classifier output + static analysis findings)
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  resolved_at     TIMESTAMPTZ              -- set when status moves to live / denied / rolled_back
+  resolved_at     TIMESTAMPTZ              -- nullable: set when status transitions to live / denied / rolled_back
 )
 
 skill_runs (
   id          UUID v7 PK,
   skill_id    UUID NOT NULL REFERENCES skills(id),
-  trigger     TEXT NOT NULL,              -- 'manual' | 'cron' | 'event'
-  inputs      JSONB NOT NULL,
+  trigger     skill_run_trigger NOT NULL,
+  inputs      JSONB NOT NULL,              -- SkillInvocationInputsSchema (matches skill's declared input JSON Schema at invoke time; Zod layer is pass-through)
   status      skill_run_status NOT NULL,
-  output      JSONB,                      -- null on error
-  error       TEXT,                       -- null on success
+  output      JSONB,                       -- nullable: null on error. SkillInvocationOutputSchema when present (matches skill's declared output JSON Schema).
+  error       TEXT,                        -- nullable: null on success
   started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  finished_at TIMESTAMPTZ                 -- null while running
+  finished_at TIMESTAMPTZ                  -- nullable: null while running
 )
 
 skill_context_calls (
   id         UUID v7 PK,
   run_id     UUID NOT NULL REFERENCES skill_runs(id),
-  method     TEXT NOT NULL,               -- 'secrets.get' | 'memory.recall' | ...
-  target     TEXT,                        -- secret name, memory bank, etc. NEVER the value
+  method     TEXT NOT NULL,                -- 'secrets.get' | 'memory.recall' | ...
+  target     TEXT,                         -- nullable: the method's target (secret name, memory bank) — some ctx methods take no target (e.g. now()). NEVER the value.
   ok         BOOLEAN NOT NULL,
-  error      TEXT,
+  error      TEXT,                         -- nullable: null on success
   called_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 ```
 
 `skills` is derived state — authoritative source is the git repo. Row synced from `SKILL.md` on deploy. `skill_runs` is append-only audit trail. `skill_context_calls` records every `ctx.*` RPC from the worker, scoped to a run — secret names and memory-bank names only, never values.
+
+**JSONB schemas validated at the store boundary** (per CLAUDE.md — every JSONB column has a Zod schema parsed on read and write):
+
+- `skills.inputs` / `skills.outputs` — `SkillIoSchema = z.record(z.unknown())`. Opaque at the Zod layer; the actual JSON Schema is enforced against task inputs/outputs at invoke time via `ajv`, not at the store boundary.
+- `skills.effects` — `SkillEffectsSchema = z.array(z.enum(SKILL_EFFECTS))`.
+- `skill_deploys.classifier_log` — `ClassifierLogSchema = z.object({ risk_tier, declared_effects, detected_effects, declared_secrets, validation_errors, classifier_version })`. Fully Cogmo-controlled, fully schema'd.
+- `skill_runs.inputs` / `skill_runs.output` — `SkillInvocationInputsSchema` / `SkillInvocationOutputSchema`. Pass-through `z.unknown()` wrappers at the store layer; the per-skill schema is whatever the skill declared in its manifest and is validated at invoke (the store just needs "valid JSON").
 
 ## Module structure `[proposed]`
 
