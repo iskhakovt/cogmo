@@ -87,7 +87,3 @@ Then message your bot on Telegram. Liveness is exposed at `GET /health` on port 
 | Deploy to your own host | [`DEPLOYMENT.md`](DEPLOYMENT.md) |
 
 Local dev uses testcontainers — `pnpm dev` boots Postgres, Redis, Inngest, and Hindsight, applies migrations, and runs the app. No `docker-compose.yml` is shipped for end users.
-
-## License
-
-Private.
