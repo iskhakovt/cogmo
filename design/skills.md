@@ -180,7 +180,7 @@ Skills live in git. Versioned, diffable, auditable — necessary for self-evolut
 
 **Configurable local bare repo, user-owned.** Shape:
 
-```
+```text
 $COGMO_SKILLS_PATH/                # default /var/lib/cogmo/skills (configurable)
   .git/                            # initialized by Cogmo if missing
   summarize-morning-email/
@@ -242,7 +242,7 @@ Hard rules enforced on the skills repo:
 
 Follows the Anthropic SKILL.md standard for progressive disclosure (see [integrations.md](integrations.md)):
 
-```
+```text
 skills/
   summarize-email/
     SKILL.md           — name, description, when-to-use (retrieval key)
@@ -431,9 +431,9 @@ Not every skill creation or edit needs human approval. Review-everything is fric
 
 | Tier | Matches when | Action |
 |-|-|-|
-| **Auto** | WASM tier, no secrets (or only read-only public-API secrets), no `writes_*` / `sends_*` / `deletes_*` / `financial` effects, cost-capped | Agent commits straight to `main`. Skill is live. No notification. |
-| **Notify** | Container tier, OR reads user data, OR idempotent external writes (`writes_memory`, creating drafts, upserts), OR any secrets with scoped destinations | Agent commits straight to `main`. Cogmo sends a one-line notification: *"added skill `X` — [summary]. /disable X if wrong."* |
-| **Approve** | Any destructive effect (`deletes_external`, overwrite), external messaging (`sends_email`, `sends_message`, `posts_public`), `financial`, `spawns_subprocess`, broad permissions (3+ secrets, filesystem writes) | Agent pushes branch. Cogmo sends a Telegram approval prompt with diff + effect summary + approve/deny buttons. Merged to `main` only on approval. |
+| **Auto** | WASM tier, no secrets (or only read-only public-API secrets), no `writes_*` / `sends_*` / `deletes_*` / `financial` effects, cost-capped | `register` fast-forwards `main` to the branch tip immediately on classification. Skill is live. No notification. |
+| **Notify** | Container tier, OR reads user data, OR idempotent external writes (`writes_memory`, creating drafts, upserts), OR any secrets with scoped destinations | `register` fast-forwards `main` to the branch tip immediately on classification. Cogmo sends a one-line notification: *"added skill `X` — [summary]. /disable X if wrong."* |
+| **Approve** | Any destructive effect (`deletes_external`, overwrite), external messaging (`sends_email`, `sends_message`, `posts_public`), `financial`, `spawns_subprocess`, broad permissions (3+ secrets, filesystem writes) | `register` leaves `main` untouched; the branch stays as-is. Cogmo sends a Telegram approval prompt with diff + effect summary + approve/deny buttons. `main` is fast-forwarded only when `approveDeploy` fires. |
 
 ### Classifier
 
@@ -450,7 +450,7 @@ Output: one of `auto` / `notify` / `approve`. Recorded in the `skills.risk_tier`
 
 **Branch + register RPC.** Commits land on a feature branch; Cogmo's `register` RPC is the only path that advances `main`. Cogmo does not watch or poll the repo.
 
-```
+```bash
 # Agent / user workflow
 git checkout -b skill/summarize-email-<date>
 # ... edit skill ...
@@ -814,14 +814,17 @@ src/skills/
     index.ts          — SkillStore interface + Drizzle impl
 ```
 
-Public interface:
+Public interface (canonical — see [Where the classifier runs](#where-the-classifier-runs) for the full RPC contract):
 
 ```typescript
 interface SkillRunner {
-  register(opts: { skillPath: string; gitRef?: string }): Promise<RegisterResult>;
-  deregister(name: string): Promise<void>;
+  register(opts: { branch: string }): Promise<RegisterResult>;
+  approveDeploy(opts: { pendingId: string }): Promise<RegisterResult>;
+  denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
+  rollback(opts: { name: string; toGitSha?: string }): Promise<RegisterResult>;
+  deregister(opts: { name: string }): Promise<void>;
   list(): Promise<readonly SkillRow[]>;
-  invoke(name: string, inputs: unknown): Promise<SkillRunResult>;
+  invoke(opts: { name: string; inputs: unknown }): Promise<SkillRunResult>;
 }
 ```
 
@@ -830,7 +833,7 @@ interface SkillRunner {
 | Module | How it relates |
 |-|-|
 | [sandbox.md](sandbox.md) | Tier 2 workers are sysbox containers created via the `Sandbox` interface — same supervisor, proxy, reaper, cgroup parent. |
-| [coding-delegation.md](coding-delegation.md) | Skills are authored via the same worktree + draft-PR flow. The skill library lives inside the Cogmo repo (option B above). |
+| [coding-delegation.md](coding-delegation.md) | Skills are authored via the same worktree + branch flow. The skill library is a separate user-owned bare git repo at `$COGMO_SKILLS_PATH`, operated on by the existing `Sandbox` + coding-delegation machinery. |
 | [scheduling.md](scheduling.md) | Cron-triggered skills use Inngest cron. Manual/event skills use Inngest events. |
 | [evolution.md](evolution.md) | Skill creation is stage 2+ evolution. Approval gates apply to new skills before merge. |
 | [integrations.md](integrations.md) | Voyager skill-library concept, SKILL.md standard, description-embedding retrieval, MCP tool registration. |
@@ -845,7 +848,6 @@ interface SkillRunner {
 | Container runtime | Sysbox (not plain runc) | Daemons already running for coding delegation. Per-container overhead negligible. User namespaces are a free security win. |
 | microVM (Firecracker) | Deferred | Personal scale, trusted codegen. Overkill until trust boundary widens. |
 | Warm pool | Day 1, not optimization | 1–2s cold start on every invocation is user-visible. Dispatcher abstraction also removes the need for a sync/async tier split. |
-| State reset | Worker recycle after N tasks | Logical reset too leaky; subinterpreters too experimental. N-task recycle amortizes imports while bounding state drift. |
 | Storage | Git-backed skill library | Diffs, rollback, audit — what self-evolution needs. |
 | Storage layout | Configurable local bare repo, user-owned | Personal skills belong in a user-owned repo, not a Cogmo fork or shared public repo. Remote optional for multi-machine sync. |
 | Cogmo as git server | No | Most commits auto-apply; no PR UI needed. Multi-machine sync (if/when) uses the user's own remote. |
