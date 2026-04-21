@@ -52,15 +52,15 @@
     "@opentelemetry/sdk-trace-base": "^2.6.1",
     "@opentelemetry/semantic-conventions": "^1.40.0",
     "@t3-oss/env-core": "^0.13.11",
-    "@vectorize-io/hindsight-client": "^0.5.1",
-    "ai": "^6.0.159",
+    "@vectorize-io/hindsight-client": "^0.5.3",
+    "ai": "^6.0.168",
     "date-fns": "^4.1.0",
     "drizzle-orm": "^0.45.2",
     "grammy": "^1.42.0",
-    "inngest": "^4.2.2",
+    "inngest": "^4.2.4",
     "js-tiktoken": "^1.0.21",
     "jsdom": "^29.0.2",
-    "marked": "^18.0.0",
+    "marked": "^18.0.2",
     "neverthrow": "^8.2.0",
     "openai": "^6.34.0",
     "p-retry": "^8.0.0",
@@ -70,7 +70,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.11",
+    "@biomejs/biome": "^2.4.12",
     "@copilotkit/aimock": "^1.13.0",
     "@electric-sql/pglite": "^0.4.4",
     "@inngest/test": "^1.0.0",
@@ -86,7 +86,7 @@
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "type-fest": "^5.5.0",
-    "typescript": "^6.0.2",
+    "typescript": "^6.0.3",
     "vitest": "^4.1.4"
   }
 }
