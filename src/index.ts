@@ -1,5 +1,7 @@
+import { hostname } from "node:os";
 import { createFal } from "@ai-sdk/fal";
 import { S3Client } from "@aws-sdk/client-s3";
+import Docker from "dockerode";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { coreMemoryTools } from "./agent/core-memory-tools.js";
 import { createDebounceFunctions, type DebounceConfig } from "./agent/debounce.js";
@@ -26,6 +28,8 @@ import { OpenAICompatibleProvider } from "./llm/openai-compat.js";
 import type { LlmProvider } from "./llm/provider.js";
 import { logger } from "./logger.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
+import { LocalInProcessSandbox, type Sandbox } from "./sandbox/index.js";
+import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
 import { DrizzleSecretsStore, type SecretsStore } from "./secrets/store/index.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
@@ -57,6 +61,33 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
 
   const agentStore = new DrizzleAgentStore(db);
   const transportStore = new DrizzleTransportStore(db);
+  const sandboxStore = new DrizzleSandboxStore(db);
+
+  // Sandbox is opt-in via SANDBOX_RUNTIME — coding-delegation features fail
+  // with a clear error when the env var is unset. No silent fallback.
+  let sandbox: Sandbox | null = null;
+  let sandboxInstanceId: string | null = null;
+  if (env.SANDBOX_RUNTIME) {
+    const docker = new Docker();
+    const instance = await sandboxStore.insertInstance({
+      host: hostname(),
+      pid: process.pid,
+    });
+    sandboxInstanceId = instance.id;
+    sandbox = await LocalInProcessSandbox.create({
+      docker,
+      store: sandboxStore,
+      runtime: env.SANDBOX_RUNTIME,
+      instanceId: instance.id,
+    });
+    const { orphansReaped } = await sandbox.reconcileCrashedInstances(instance.id);
+    if (orphansReaped > 0) {
+      logger.warn({ orphansReaped }, "reaped orphan containers from prior instance(s)");
+    }
+    logger.info({ runtime: env.SANDBOX_RUNTIME, instanceId: instance.id }, "sandbox initialized");
+  } else {
+    logger.info("SANDBOX_RUNTIME unset — sandbox module disabled (coding-delegation unavailable)");
+  }
 
   // Secrets store — required for decrypting provider credentials and channel tokens.
   if (!env.COGMO_MASTER_KEY) {
@@ -188,6 +219,9 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     adapters,
     agentStore,
     transportStore,
+    sandboxStore,
+    sandbox,
+    sandboxInstanceId,
     provider,
     memory,
   };
