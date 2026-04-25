@@ -71,6 +71,13 @@
       "when": 1777157576782,
       "tag": "0009_shocking_spencer_smythe",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1777158193137,
+      "tag": "0010_dapper_drax",
+      "breakpoints": true
     }
   ]
 }
