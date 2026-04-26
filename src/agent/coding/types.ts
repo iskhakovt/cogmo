@@ -54,6 +54,8 @@ export const ResourceUsageSchema = z
     network_bytes: z.number().int().nonnegative().optional(),
     tokens_input: z.number().int().nonnegative().optional(),
     tokens_output: z.number().int().nonnegative().optional(),
+    /** USD spend reported by the CLI's `result` event, when available. */
+    cost_usd: z.number().nonnegative().optional(),
   })
   .strict();
 export type ResourceUsage = z.infer<typeof ResourceUsageSchema>;

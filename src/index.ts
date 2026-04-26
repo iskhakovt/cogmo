@@ -4,7 +4,12 @@ import { S3Client } from "@aws-sdk/client-s3";
 import Docker from "dockerode";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { ClaudeCodeBackend } from "./agent/coding/claude.js";
-import { createCodingOrchestrator, type PlanStreamHandle } from "./agent/coding/orchestrator.js";
+import {
+  createCodingExecuteOrchestrator,
+  createCodingOrchestrator,
+  type ExecuteStreamHandle,
+  type PlanStreamHandle,
+} from "./agent/coding/orchestrator.js";
 import { createCodingService } from "./agent/coding/service.js";
 import { DrizzleCodingStore } from "./agent/coding/store/index.js";
 import { CodingStreamingRegistry } from "./agent/coding/streaming-registry.js";
@@ -173,30 +178,50 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const codingFunctions: any[] = [];
   if (sandbox) {
-    const codingOrchestrator = createCodingOrchestrator(
-      {
-        store: codingStore,
-        sandbox,
-        backend: codingBackend,
-        devbaseImage: env.COGMO_DEVBASE_IMAGE,
-        defaultResourceLimits: { cpus: 2, memory_bytes: 2 * 1024 * 1024 * 1024, pids: 256 },
-        taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
-        worktreesDir: env.COGMO_WORKTREES_DIR,
-        openPlanStream: async (taskId): Promise<PlanStreamHandle> => ({
-          async appendText(delta) {
-            codingStreamingRegistry.publish(taskId, { kind: "text", delta });
-          },
-          async finalize(plan) {
-            codingStreamingRegistry.publish(taskId, { kind: "plan_finalized", plan });
-          },
-          async fail(reason) {
-            codingStreamingRegistry.publish(taskId, { kind: "failed", reason });
-          },
-        }),
-      },
-      inngest,
-    );
-    codingFunctions.push(codingOrchestrator);
+    const orchestratorDeps = {
+      store: codingStore,
+      sandbox,
+      backend: codingBackend,
+      devbaseImage: env.COGMO_DEVBASE_IMAGE,
+      defaultResourceLimits: { cpus: 2, memory_bytes: 2 * 1024 * 1024 * 1024, pids: 256 },
+      taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
+      worktreesDir: env.COGMO_WORKTREES_DIR,
+      openPlanStream: async (taskId: string): Promise<PlanStreamHandle> => ({
+        async appendText(delta) {
+          codingStreamingRegistry.publish(taskId, { kind: "text", delta });
+        },
+        async finalize(plan) {
+          codingStreamingRegistry.publish(taskId, { kind: "plan_finalized", plan });
+        },
+        async fail(reason) {
+          codingStreamingRegistry.publish(taskId, { kind: "failed", reason });
+        },
+      }),
+      openExecuteStream: async (taskId: string): Promise<ExecuteStreamHandle> => ({
+        async appendText(delta) {
+          codingStreamingRegistry.publish(taskId, { kind: "text", delta });
+        },
+        async toolCall(tool) {
+          codingStreamingRegistry.publish(taskId, { kind: "tool_call", tool });
+        },
+        async toolResult(tool, ok, summary) {
+          codingStreamingRegistry.publish(taskId, {
+            kind: "tool_result",
+            tool,
+            ok,
+            ...(summary !== undefined && { summary }),
+          });
+        },
+        async complete(ok) {
+          codingStreamingRegistry.publish(taskId, { kind: "execute_complete", ok });
+        },
+        async fail(reason) {
+          codingStreamingRegistry.publish(taskId, { kind: "failed", reason });
+        },
+      }),
+    };
+    codingFunctions.push(createCodingOrchestrator(orchestratorDeps, inngest));
+    codingFunctions.push(createCodingExecuteOrchestrator(orchestratorDeps, inngest));
   }
 
   const tools = createDefaultTools(

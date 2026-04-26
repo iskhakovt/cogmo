@@ -11,7 +11,10 @@ import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
   type CodingOrchestratorDeps,
+  type ExecuteStreamHandle,
+  NULL_EXECUTE_STREAM,
   NULL_PLAN_STREAM,
+  runCodingExecute,
   runCodingTask,
   type StepRun,
 } from "./orchestrator.js";
@@ -173,9 +176,21 @@ function backendYielding(events: CodingEvent[]): CodingBackend {
     plan: async function* () {
       for (const ev of events) yield ev;
     },
-    // biome-ignore lint/correctness/useYield: stub never reached in slice-1 orchestrator tests
+    // biome-ignore lint/correctness/useYield: stub never reached in plan-only tests
     execute: async function* (): AsyncGenerator<CodingEvent> {
-      throw new Error("execute not exercised by these orchestrator tests");
+      throw new Error("execute not exercised by this test — use executeBackendYielding");
+    },
+  };
+}
+
+function executeBackendYielding(events: CodingEvent[]): CodingBackend {
+  return {
+    // biome-ignore lint/correctness/useYield: stub never reached in execute-only tests
+    plan: async function* (): AsyncGenerator<CodingEvent> {
+      throw new Error("plan not exercised by this test — use backendYielding");
+    },
+    execute: async function* () {
+      for (const ev of events) yield ev;
     },
   };
 }
@@ -427,4 +442,315 @@ describe("runCodingTask", () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// runCodingExecute — slice 2.0f
+// ──────────────────────────────────────────────────────────────────────
+
+interface RecordingExecuteStream {
+  text: string[];
+  toolCalls: string[];
+  toolResults: { tool: string; ok: boolean; summary?: string }[];
+  completed: boolean[];
+  failed: string[];
+  handle: ExecuteStreamHandle;
+}
+
+function recordingExecuteStream(): RecordingExecuteStream {
+  const out: RecordingExecuteStream = {
+    text: [],
+    toolCalls: [],
+    toolResults: [],
+    completed: [],
+    failed: [],
+    // biome-ignore lint/style/noNonNullAssertion: assigned below
+    handle: undefined!,
+  };
+  out.handle = {
+    appendText: async (delta) => {
+      out.text.push(delta);
+    },
+    toolCall: async (tool) => {
+      out.toolCalls.push(tool);
+    },
+    toolResult: async (tool, ok, summary) => {
+      out.toolResults.push(summary === undefined ? { tool, ok } : { tool, ok, summary });
+    },
+    complete: async (ok) => {
+      out.completed.push(ok);
+    },
+    fail: async (reason) => {
+      out.failed.push(reason);
+    },
+  };
+  return out;
+}
+
+/**
+ * Bring a freshly inserted task to the post-plan-phase state so
+ * runCodingExecute's preconditions are satisfied: status =
+ * awaiting_approval, sessionId set, planApprovedAt set, worktreeAssignment
+ * set, containerId set (and a real containers row to satisfy the FK).
+ */
+async function seedExecutableTask(
+  repo: CodingRepoRow,
+): Promise<{ task: CodingTaskRow; dockerId: string }> {
+  const task = await store.insertTask({
+    repoId: repo.id,
+    goal: "execute me",
+    triggerSource: "user",
+    backend: "claude",
+    allowPrivilegedRunc: false,
+  });
+  await store.setTaskWorktreeAssignment(task.id, {
+    branch: "cogmo/abc",
+    worktreePath: join(baseDir, "worktrees", "cogmo", "abc"),
+  });
+  await store.setTaskSessionId(task.id, "sess-from-plan");
+  // Stamp plan_approved_at via the atomic helper so the test exercises
+  // the same path the callback handler uses in production.
+  await store.updateTaskStatus({ id: task.id, status: "awaiting_approval" });
+  const approval = await store.approvePlanIfPending(task.id, new Date());
+  expect(approval.kind).toBe("approved");
+
+  // Seed a real containers row + record its dockerId so findLiveContainer
+  // discovers something. Not required for the recreate path, but keeps
+  // the happy-path test honest about what production does.
+  const dockerId = `docker-${Math.random().toString(36).slice(2)}`;
+  const containerRow = await sandboxStore.insertContainer({
+    dockerId,
+    parentId: null,
+    rootTaskId: task.id,
+    depth: 0,
+    image: "cogmo/devbase:slice2-test",
+    runtime: "runc",
+    labels: {
+      "cogmo.managed": "true",
+      "cogmo.instance": instanceId,
+      "cogmo.root_task": task.id,
+      "cogmo.parent": "",
+      "cogmo.depth": "0",
+    },
+    resourceLimits: RESOURCE_LIMITS,
+    ttlExpiresAt: new Date(Date.now() + 60_000),
+    instanceId,
+  });
+  await sandboxStore.updateContainerStatus({ id: containerRow.id, status: "running" });
+  await store.setTaskContainerId(task.id, containerRow.id);
+
+  const reloaded = await store.getTask(task.id);
+  if (!reloaded) throw new Error("seedExecutableTask: reload failed");
+  return { task: reloaded, dockerId };
+}
+
+describe("runCodingExecute", () => {
+  it("happy path: container reused, deltas streamed, status → pending_verify, usage persisted", async () => {
+    const repo = await seedRepo();
+    const { task, dockerId } = await seedExecutableTask(repo);
+    const { sandbox, createCalls, stopCalls } = fakeSandbox();
+    // Override listContainersForTask + getTaskContainer so the function
+    // finds the seeded container and reuses it.
+    sandbox.listContainersForTask = async () => [
+      {
+        id: "row-x",
+        dockerId,
+        parentId: null,
+        rootTaskId: task.id,
+        depth: 0,
+        image: "cogmo/devbase:slice2-test",
+        runtime: "runc",
+        labels: {
+          "cogmo.managed": "true",
+          "cogmo.instance": instanceId,
+          "cogmo.root_task": task.id,
+          "cogmo.parent": "",
+          "cogmo.depth": "0",
+        },
+        resourceLimits: RESOURCE_LIMITS,
+        status: "running",
+        exitCode: null,
+        ttlExpiresAt: new Date(Date.now() + 60_000),
+        startedAt: new Date(),
+        exitedAt: null,
+        instanceId,
+        createdAt: new Date(),
+      },
+    ];
+    sandbox.inspectContainer = async () => ({ status: "running", runtime: "runc" });
+    sandbox.getTaskContainer = vi.fn(async (id) => ({
+      containerRowId: "row-x",
+      dockerId: id,
+      exec: vi.fn(async () => noopExec()),
+    }));
+
+    const stream = recordingExecuteStream();
+    const backend = executeBackendYielding([
+      { kind: "session_started", sessionId: "sess-from-plan" },
+      { kind: "text_delta", text: "Adding foo()...\n" },
+      { kind: "tool_call", tool: "Read", input: { file_path: "foo.ts" } },
+      { kind: "tool_result", tool: "Read", ok: true, summary: "export fn" },
+      { kind: "tool_call", tool: "Edit", input: {} },
+      { kind: "tool_result", tool: "Edit", ok: true },
+      {
+        kind: "complete",
+        exitCode: 0,
+        isError: false,
+        usage: { inputTokens: 100, outputTokens: 20, costUsd: 0.05 },
+      },
+    ]);
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
+      stepRun,
+    });
+
+    expect(result.status).toBe("pending_verify");
+    const reloaded = await store.getTask(task.id);
+    expect(reloaded?.status).toBe("pending_verify");
+    expect(reloaded?.resourceUsage).toEqual({
+      tokens_input: 100,
+      tokens_output: 20,
+      cost_usd: 0.05,
+    });
+
+    // Container reused — no new createTaskContainer call.
+    expect(createCalls).toHaveLength(0);
+    // Teardown still runs at the grace boundary.
+    expect(stopCalls).toEqual([task.id]);
+
+    expect(stream.text).toEqual(["Adding foo()...\n"]);
+    expect(stream.toolCalls).toEqual(["Read", "Edit"]);
+    expect(stream.toolResults).toEqual([
+      { tool: "Read", ok: true, summary: "export fn" },
+      { tool: "Edit", ok: true },
+    ]);
+    expect(stream.completed).toEqual([true]);
+    expect(stream.failed).toEqual([]);
+  });
+
+  it("recreates container when no live one exists (reaper got it during long approval)", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox, createCalls, stopCalls } = fakeSandbox();
+    // No containers in the listing → triggers the recreate branch.
+    sandbox.listContainersForTask = async () => [];
+
+    const stream = recordingExecuteStream();
+    const backend = executeBackendYielding([
+      { kind: "session_started", sessionId: "sess-from-plan" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
+      stepRun,
+    });
+
+    expect(result.status).toBe("pending_verify");
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0].rootTaskId).toBe(task.id);
+    expect(stopCalls).toEqual([task.id]);
+  });
+
+  it("backend reports error → status=failed, sandbox stopped, stream failed (not completed)", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox, stopCalls } = fakeSandbox();
+    sandbox.listContainersForTask = async () => [];
+    const stream = recordingExecuteStream();
+    const backend = executeBackendYielding([
+      { kind: "session_started", sessionId: "sess-from-plan" },
+      { kind: "text_delta", text: "trying...\n" },
+      { kind: "complete", exitCode: 2, isError: true },
+    ]);
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
+      stepRun,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.failureReason).toMatch(/exit code 2/);
+    expect((await store.getTask(task.id))?.status).toBe("failed");
+    expect(stopCalls).toEqual([task.id]);
+    expect(stream.completed).toEqual([false]);
+    expect(stream.failed).toHaveLength(1);
+  });
+
+  it("idempotent: second event for already-executing task returns skipped without re-running", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    // Simulate first event already advanced status to executing.
+    await store.updateTaskStatus({ id: task.id, status: "executing" });
+
+    const { sandbox } = fakeSandbox();
+    const backend = executeBackendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+    });
+
+    expect(result.status).toBe("skipped");
+    // Status unchanged — second run didn't touch the DB.
+    expect((await store.getTask(task.id))?.status).toBe("executing");
+  });
+
+  it("throws when plan_approved_at is missing (event fired before approve handler stamped it)", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    await store.setTaskSessionId(task.id, "sess-x");
+    await store.setTaskWorktreeAssignment(task.id, {
+      branch: "cogmo/x",
+      worktreePath: join(baseDir, "wt"),
+    });
+    await store.updateTaskStatus({ id: task.id, status: "awaiting_approval" });
+    const { sandbox } = fakeSandbox();
+    await expect(
+      runCodingExecute({
+        taskId: task.id,
+        deps: makeDeps({
+          sandbox,
+          backend: executeBackendYielding([]),
+          openExecuteStream: async () => NULL_EXECUTE_STREAM,
+        }),
+        stepRun,
+      }),
+    ).rejects.toThrow(/plan_approved_at/);
+  });
+
+  it("throws when session_id is missing (plan phase didn't capture it)", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    await store.setTaskWorktreeAssignment(task.id, {
+      branch: "cogmo/x",
+      worktreePath: join(baseDir, "wt"),
+    });
+    await store.updateTaskStatus({ id: task.id, status: "awaiting_approval" });
+    await store.approvePlanIfPending(task.id, new Date());
+    const { sandbox } = fakeSandbox();
+    await expect(
+      runCodingExecute({
+        taskId: task.id,
+        deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
+        stepRun,
+      }),
+    ).rejects.toThrow(/no session_id/);
+  });
+
+  it("throws when task not found", async () => {
+    const { sandbox } = fakeSandbox();
+    await expect(
+      runCodingExecute({
+        taskId: "019d0000-0000-7000-8000-000000000099",
+        deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
+        stepRun,
+      }),
+    ).rejects.toThrow(/coding task not found/);
+  });
 });

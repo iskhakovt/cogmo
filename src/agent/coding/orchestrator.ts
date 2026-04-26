@@ -1,6 +1,6 @@
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Inngest } from "inngest";
-import { codingTaskStart } from "../../inngest/events.js";
+import { codingTaskPlanApproved, codingTaskStart } from "../../inngest/events.js";
 import type { StepRun } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import type { Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
@@ -30,6 +30,29 @@ export const NULL_PLAN_STREAM: PlanStreamHandle = {
   async fail() {},
 };
 
+/**
+ * Streaming surface for the execute phase. Adds tool-call observability and
+ * a `complete` terminator so the consumer (Telegram delivery, slice 2.0g)
+ * can render Claude's progress in place: text deltas grow the message body,
+ * tool events update an "activity" line, and `complete` flips to a final
+ * status. Failures still flow through `fail`.
+ */
+export interface ExecuteStreamHandle {
+  appendText(delta: string): Promise<void>;
+  toolCall(tool: string): Promise<void>;
+  toolResult(tool: string, ok: boolean, summary?: string): Promise<void>;
+  complete(ok: boolean): Promise<void>;
+  fail(reason: string): Promise<void>;
+}
+
+export const NULL_EXECUTE_STREAM: ExecuteStreamHandle = {
+  async appendText() {},
+  async toolCall() {},
+  async toolResult() {},
+  async complete() {},
+  async fail() {},
+};
+
 export interface CodingOrchestratorDeps {
   store: CodingStore;
   sandbox: Sandbox;
@@ -44,6 +67,12 @@ export interface CodingOrchestratorDeps {
   worktreesDir: string;
   /** Open a delivery channel for streaming plan text. Slice 1 default = NULL_PLAN_STREAM. */
   openPlanStream?: (taskId: string) => Promise<PlanStreamHandle>;
+  /**
+   * Open a delivery channel for execute-phase progress. Default =
+   * NULL_EXECUTE_STREAM. Wired to the `CodingStreamingRegistry` in
+   * bootstrap (slice 2.0f), consumed by Telegram delivery in 2.0g.
+   */
+  openExecuteStream?: (taskId: string) => Promise<ExecuteStreamHandle>;
 }
 
 export interface CodingOrchestratorResult {
@@ -301,4 +330,269 @@ async function runPlanStreaming(params: PlanStreamingParams): Promise<PlanStream
     ...(plan && { plan }),
     ...(failureReason !== undefined && { failureReason }),
   };
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Execute phase — slice 2.0f
+// ──────────────────────────────────────────────────────────────────────
+
+export interface CodingExecuteResult {
+  status: "pending_verify" | "failed" | "skipped";
+  failureReason?: string;
+}
+
+/**
+ * Inngest function that consumes `coding/task/plan-approved` and runs
+ * `claude --resume <sid> --permission-mode acceptEdits` in the same
+ * task container (recreating it if the reaper got it first).
+ *
+ * Same retries=0 reasoning as the plan function: file edits inside the
+ * container are not idempotent under retry. A failed run leaves the
+ * task in `failed`; the user re-delegates if they want another attempt.
+ */
+export function createCodingExecuteOrchestrator(deps: CodingOrchestratorDeps, inngest: Inngest) {
+  return inngest.createFunction(
+    {
+      id: "coding-task-execute",
+      triggers: [codingTaskPlanApproved],
+      retries: 0,
+      concurrency: { limit: 1, key: "event.data.taskId" },
+    },
+    async ({ event, step }) => {
+      return runCodingExecute({ taskId: event.data.taskId, deps, stepRun: step.run });
+    },
+  );
+}
+
+interface ExecuteRunParams {
+  taskId: string;
+  deps: CodingOrchestratorDeps;
+  stepRun: StepRun;
+}
+
+/**
+ * Pure execute orchestration — same `stepRun` injection pattern as
+ * `runCodingTask`, so unit tests can drive it with an inline shim.
+ *
+ * Guards before doing real work:
+ * - `plan_approved_at` must be set (the approve callback stamped it).
+ * - status must be `awaiting_approval` (idempotency: a duplicate event
+ *   sees `executing` or terminal and returns `skipped` without
+ *   re-running claude).
+ * - `session_id` must be present (the plan phase captured it).
+ * - `worktree_assignment` must be present (the plan phase allocated it).
+ */
+export async function runCodingExecute(params: ExecuteRunParams): Promise<CodingExecuteResult> {
+  const { taskId, deps, stepRun } = params;
+  const { store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs } = deps;
+  const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
+
+  const task = await store.getTask(taskId);
+  if (!task) throw new Error(`coding task not found: ${taskId}`);
+  const repo = await store.getRepoById(task.repoId);
+  if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
+
+  if (!task.planApprovedAt) {
+    throw new Error(`coding task ${taskId} has no plan_approved_at — execute fired prematurely`);
+  }
+  if (task.status !== "awaiting_approval") {
+    log.info(
+      { taskId, status: task.status },
+      "execute: task not in awaiting_approval — already started or terminated, skipping",
+    );
+    return { status: "skipped" };
+  }
+  if (!task.sessionId) {
+    throw new Error(`coding task ${taskId} has no session_id — plan phase didn't capture it`);
+  }
+  if (!task.worktreeAssignment) {
+    throw new Error(`coding task ${taskId} has no worktree_assignment`);
+  }
+
+  const sessionId = task.sessionId;
+  const worktreeAssignment = task.worktreeAssignment;
+  let containerCreated = false;
+  let executeStream: ExecuteStreamHandle | null = null;
+
+  try {
+    await stepRun("set-status-executing", () =>
+      store.updateTaskStatus({ id: taskId, status: "executing" }),
+    );
+
+    // Get-or-create the task container. The plan-phase container has an
+    // idle TTL (CODING_TASK_IDLE_TTL_MINUTES); if approval took longer
+    // than that, the reaper stopped it and we recreate. `claude --resume
+    // <sid>` reloads the prior session from disk inside the container's
+    // persistent home volume, so the recreate is transparent to Claude.
+    const containerInfo = await stepRun("get-or-create-container", async () => {
+      const existing = await findLiveContainer(sandbox, taskId);
+      if (existing) return { dockerId: existing.dockerId, recreated: false };
+
+      const handle = await sandbox.createTaskContainer({
+        rootTaskId: taskId,
+        worktreePath: worktreeAssignment.worktreePath,
+        homeVolumeName: `${HOME_VOLUME_PREFIX}-${taskId}`,
+        image: repo.devcontainer?.image ?? devbaseImage,
+        resourceLimits: defaultResourceLimits,
+        ttl: { expiresAt: new Date(Date.now() + taskTtlMs) },
+        allowPrivilegedRunc: task.allowPrivilegedRunc,
+      });
+      containerCreated = true;
+      await store.setTaskContainerId(taskId, handle.containerRowId);
+      return { dockerId: handle.dockerId, recreated: true };
+    });
+
+    const container = await sandbox.getTaskContainer(containerInfo.dockerId);
+
+    executeStream = await openExecuteStream(taskId);
+    const result = await runExecuteStreaming({
+      task,
+      repo,
+      container,
+      backend,
+      executeStream,
+      sessionId,
+      store,
+    });
+
+    if (result.isError) {
+      const reason = result.failureReason ?? "execute phase failed";
+      await stepRun("set-status-failed", () =>
+        store.updateTaskStatus({ id: taskId, status: "failed", failureReason: reason }),
+      );
+      await stepRun("teardown", () => sandbox.stopTask(taskId).catch(() => {}));
+      await executeStream.complete(false);
+      await executeStream.fail(reason);
+      return { status: "failed", failureReason: reason };
+    }
+
+    if (result.usage) {
+      // Replace-not-merge semantics today (see CodingStore comment): plan
+      // phase doesn't write resource_usage in slice 2, so the execute
+      // write is the first one and replace is fine. When slice 3+ adds
+      // memory_bytes at task start, this needs to become load+merge+write
+      // here OR the store contract changes to merge. The translation
+      // below maps the backend's camelCase shape onto the snake_case
+      // resource_usage schema (which lives at the storage layer and uses
+      // SQL-friendly naming).
+      const usage: Record<string, number> = {};
+      if (result.usage.inputTokens != null) usage.tokens_input = result.usage.inputTokens;
+      if (result.usage.outputTokens != null) usage.tokens_output = result.usage.outputTokens;
+      if (result.usage.costUsd != null) usage.cost_usd = result.usage.costUsd;
+      if (Object.keys(usage).length > 0) {
+        await stepRun("persist-usage", () => store.setTaskResourceUsage(taskId, usage));
+      }
+    }
+
+    await stepRun("set-status-pending-verify", () =>
+      store.updateTaskStatus({ id: taskId, status: "pending_verify" }),
+    );
+    await stepRun("teardown", () => sandbox.stopTask(taskId).catch(() => {}));
+    await executeStream.complete(true);
+    return { status: "pending_verify" };
+  } catch (err) {
+    const reason = (err as Error).message;
+    log.error({ err, taskId }, "coding execute failed");
+    await store
+      .updateTaskStatus({ id: taskId, status: "failed", failureReason: reason })
+      .catch(() => {});
+    if (containerCreated) {
+      await sandbox.stopTask(taskId).catch(() => {});
+    }
+    await executeStream?.fail(reason).catch(() => {});
+    return { status: "failed", failureReason: reason };
+  }
+}
+
+interface ExecuteStreamingParams {
+  task: CodingTaskRow;
+  repo: CodingRepoRow;
+  container: TaskContainerHandle;
+  backend: CodingBackend;
+  executeStream: ExecuteStreamHandle;
+  sessionId: string;
+  store: CodingStore;
+}
+
+interface ExecuteStreamingResult {
+  isError: boolean;
+  failureReason?: string;
+  // biome-ignore lint/suspicious/noExplicitAny: BackendUsage shape is opaque to the orchestrator
+  usage?: any;
+}
+
+async function runExecuteStreaming(
+  params: ExecuteStreamingParams,
+): Promise<ExecuteStreamingResult> {
+  const { task, repo, container, backend, executeStream, sessionId } = params;
+  let isError = false;
+  let failureReason: string | undefined;
+  // biome-ignore lint/suspicious/noExplicitAny: BackendUsage shape is opaque to the orchestrator
+  let usage: any;
+
+  for await (const event of backend.execute({ task, repo, container }, sessionId)) {
+    switch (event.kind) {
+      case "session_started":
+        // Resumed session — usually equals task.sessionId, but we don't
+        // re-persist (the plan-phase value is authoritative for slice 2).
+        break;
+      case "text_delta":
+        await executeStream.appendText(event.text);
+        break;
+      case "tool_call":
+        await executeStream.toolCall(event.tool);
+        break;
+      case "tool_result":
+        await executeStream.toolResult(event.tool, event.ok, event.summary);
+        break;
+      case "complete":
+        if (event.usage) usage = event.usage;
+        if (event.isError) {
+          isError = true;
+          failureReason = `claude exit code ${event.exitCode}`;
+        }
+        break;
+    }
+  }
+
+  return {
+    isError,
+    ...(failureReason !== undefined && { failureReason }),
+    ...(usage && { usage }),
+  };
+}
+
+/**
+ * Find the most recently created live container for this task, or null if
+ * none exist (or all are stopped/failed). Returns the `dockerId` so
+ * `getTaskContainer` can re-derive a handle on the orchestrator side of a
+ * step boundary.
+ */
+async function findLiveContainer(
+  sandbox: Sandbox,
+  taskId: string,
+): Promise<{ dockerId: string } | null> {
+  const containers = await sandbox.listContainersForTask(taskId);
+  if (containers.length === 0) return null;
+  // Sorted DESC by depth (children first); for a single non-nested task
+  // this is just the depth-0 container. Pick the first that's still
+  // running according to Docker's view.
+  for (const row of containers) {
+    // Skip rows the supervisor already marked terminal — it's a hint that
+    // the container won't be coming back. `starting` is included because
+    // the row is inserted in that state before Docker reports running;
+    // a fast approve-tap could find it mid-bring-up.
+    if (row.status !== "running" && row.status !== "starting") continue;
+    try {
+      const inspected = await sandbox.inspectContainer(row.dockerId);
+      // Docker `State.Status` values: created, running, paused,
+      // restarting, removing, exited, dead. Anything not running means
+      // the reaper or daemon stopped it — recreate.
+      if (inspected.status === "running") return { dockerId: row.dockerId };
+    } catch {
+      // inspectContainer throws when the container is gone (404). Skip
+      // to the next candidate or fall through to "no live container".
+    }
+  }
+  return null;
 }
