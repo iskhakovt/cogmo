@@ -51,6 +51,8 @@ export function defineTool<T>(opts: {
   /** See `ToolSpec.durable`. */
   durable?: boolean;
 }): ToolSpec {
+  // z.toJSONSchema returns Zod's JSONSchema7-flavoured shape; our internal
+  // JsonSchema type is a narrower subset that the LLM providers accept.
   const inputSchema = z.toJSONSchema(opts.schema) as unknown as JsonSchema;
   return {
     name: opts.name,

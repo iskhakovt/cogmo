@@ -39,6 +39,8 @@ const DEFAULT_MAX_RETRIES = 2;
  */
 export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedChatResult<T>> {
   const { provider, model, system, schema, name, maxRetries = DEFAULT_MAX_RETRIES } = params;
+  // z.toJSONSchema returns Zod's JSONSchema7-flavoured shape; our internal
+  // JsonSchema type is a narrower subset that the LLM providers accept.
   const jsonSchema = z.toJSONSchema(schema) as unknown as JsonSchema;
   const messages: Message[] = [...params.messages];
   const totalUsage: Usage = { inputTokens: 0, outputTokens: 0 };
