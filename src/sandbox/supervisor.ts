@@ -266,6 +266,8 @@ export class LocalInProcessSandbox implements Sandbox {
       stderr: stderr as Readable,
       wait: () => exitPromise,
     };
+    // dockerode's hijacked exec stream is bidirectional and structurally a
+    // Writable, but @types/dockerode types it as a generic Duplex.
     if (opts.attachStdin === true) handle.stdin = stream as unknown as Writable;
     return handle;
   }
