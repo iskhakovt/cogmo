@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { Inngest } from "inngest";
 import { codingTaskStart } from "../../inngest/events.js";
 import type { StepRun } from "../../inngest/index.js";
@@ -39,6 +40,8 @@ export interface CodingOrchestratorDeps {
   defaultResourceLimits: ResourceLimits;
   /** Idle TTL for the task container — the reaper picks up after this expires. */
   taskTtlMs: number;
+  /** Host root for per-task git worktrees — `${worktreesDir}/<repo>/<id-short>`. */
+  worktreesDir: string;
   /** Open a delivery channel for streaming plan text. Slice 1 default = NULL_PLAN_STREAM. */
   openPlanStream?: (taskId: string) => Promise<PlanStreamHandle>;
 }
@@ -90,7 +93,8 @@ interface RunParams {
  */
 export async function runCodingTask(params: RunParams): Promise<CodingOrchestratorResult> {
   const { taskId, deps, stepRun } = params;
-  const { store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs } = deps;
+  const { store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs, worktreesDir } =
+    deps;
   const openPlanStream = deps.openPlanStream ?? (async () => NULL_PLAN_STREAM);
 
   const task = await store.getTask(taskId);
@@ -99,23 +103,45 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
   let containerCreated = false;
+  // Worktree assignment may be null on a fresh task — derived from the
+  // (DB-generated) task id by the allocate-worktree step below. Local
+  // mutable so the rest of the function reads it without re-loading the row.
+  // Single null check covers both fields (atomic by Zod schema).
+  let assignment = task.worktreeAssignment;
   try {
     await stepRun("set-status-planning", () =>
       store.updateTaskStatus({ id: taskId, status: "planning" }),
     );
 
-    await stepRun("allocate-worktree", () =>
-      allocateWorktree({
+    await stepRun("allocate-worktree", async () => {
+      // Idempotent reconcile: if the row already has an assignment (a
+      // previous attempt persisted it), re-use; otherwise derive from the
+      // task id and persist before the worktree itself is created.
+      if (!assignment) {
+        const idShort = taskId.slice(0, 8);
+        assignment = {
+          branch: `cogmo/${idShort}`,
+          worktreePath: join(worktreesDir, repo.name, idShort),
+        };
+        await store.setTaskWorktreeAssignment(taskId, assignment);
+      }
+      await allocateWorktree({
         repoPath: repo.localPath,
-        branch: task.branch,
-        worktreePath: task.worktreePath,
-      }),
-    );
+        branch: assignment.branch,
+        worktreePath: assignment.worktreePath,
+      });
+    });
+
+    if (!assignment) {
+      throw new Error("allocate-worktree completed without setting worktreeAssignment");
+    }
 
     const created = await stepRun("create-container", async () => {
+      // biome-ignore lint/style/noNonNullAssertion: guarded by the throw above
+      const wt = assignment!;
       const handle = await sandbox.createTaskContainer({
         rootTaskId: taskId,
-        worktreePath: task.worktreePath,
+        worktreePath: wt.worktreePath,
         homeVolumeName: `${HOME_VOLUME_PREFIX}-${taskId}`,
         image: repo.devcontainer?.image ?? devbaseImage,
         resourceLimits: defaultResourceLimits,
@@ -136,7 +162,18 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
 
     // ── Non-durable: stream the plan ──
     const planStream = await openPlanStream(taskId);
-    const result = await runPlanStreaming({ task, repo, container, backend, planStream, store });
+    // Refresh worktreeAssignment onto the task — the prompt template reads
+    // task.worktreeAssignment.branch, and the row we loaded before
+    // allocate-worktree had it as null.
+    const planTask: CodingTaskRow = { ...task, worktreeAssignment: assignment };
+    const result = await runPlanStreaming({
+      task: planTask,
+      repo,
+      container,
+      backend,
+      planStream,
+      store,
+    });
 
     if (result.isError || !result.plan) {
       const reason = result.failureReason ?? "plan phase produced no plan";

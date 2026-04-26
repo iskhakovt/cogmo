@@ -1,5 +1,3 @@
-import { join } from "node:path";
-import { uuidv7 } from "uuidv7";
 import { logger } from "../../logger.js";
 import type { Sandbox } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
@@ -71,22 +69,16 @@ export function createCodingService(
         );
       }
 
-      // Pre-generate the task id so we can derive `branch` and
-      // `worktreePath` before insert. Both columns are NOT NULL.
-      const taskId = uuidv7();
-      const idShort = taskId.slice(0, 8);
-      const branch = `cogmo/${idShort}`;
-      const worktreePath = join(deps.worktreesDir, repo.name, idShort);
-
-      await deps.codingStore.insertTask({
-        id: taskId,
+      // Insert a fresh task in `queued` status. Branch + worktree path
+      // (jointly: `worktreeAssignment`) are null on insert — derived and
+      // persisted by the orchestrator's `allocate-worktree` step. Keeps the
+      // codebase's "DB always generates ids" invariant intact.
+      const task = await deps.codingStore.insertTask({
         repoId: repo.id,
         conversationId,
         goal: input.goal,
         triggerSource: "user",
         backend: "claude",
-        branch,
-        worktreePath,
         allowPrivilegedRunc: false,
       });
 
@@ -96,10 +88,10 @@ export function createCodingService(
       const inlineStepRun: StepRun = ((_id: string, fn: () => Promise<unknown>) =>
         fn()) as unknown as StepRun;
 
-      log.info({ taskId, repo: repo.name, goal: input.goal }, "coding task delegated");
+      log.info({ taskId: task.id, repo: repo.name, goal: input.goal }, "coding task delegated");
 
       const result = await runCodingTask({
-        taskId,
+        taskId: task.id,
         deps: {
           store: deps.codingStore,
           sandbox: deps.sandbox,
@@ -107,11 +99,12 @@ export function createCodingService(
           devbaseImage: deps.devbaseImage,
           defaultResourceLimits: deps.defaultResourceLimits,
           taskTtlMs: deps.taskTtlMs,
+          worktreesDir: deps.worktreesDir,
         },
         stepRun: inlineStepRun,
       });
 
-      const out: DelegateResult = { taskId, status: result.status };
+      const out: DelegateResult = { taskId: task.id, status: result.status };
       if (result.plan !== undefined) out.plan = result.plan;
       if (result.failureReason !== undefined) out.failureReason = result.failureReason;
       return out;

@@ -156,8 +156,6 @@ describe("DrizzleCodingStore", () => {
         goal: "refactor steering rules",
         triggerSource: "user",
         backend: "claude",
-        branch: "cogmo/abc123de",
-        worktreePath: "/var/lib/cogmo/worktrees/cogmo/abc123de",
         allowPrivilegedRunc: false,
       });
       expect(row.status).toBe("queued");
@@ -166,12 +164,47 @@ describe("DrizzleCodingStore", () => {
       expect(row.triggerRef).toBeNull();
       expect(row.sessionId).toBeNull();
       expect(row.containerId).toBeNull();
+      expect(row.worktreeAssignment).toBeNull();
       expect(row.plan).toBeNull();
       expect(row.planApprovedAt).toBeNull();
       expect(row.prUrl).toBeNull();
       expect(row.failureReason).toBeNull();
       expect(row.resourceUsage).toBeNull();
       expect(row.allowPrivilegedRunc).toBe(false);
+    });
+
+    it("setTaskWorktreeAssignment persists branch + worktreePath atomically as JSONB", async () => {
+      const repoId = await seedRepo();
+      const t = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      await store.setTaskWorktreeAssignment(t.id, {
+        branch: "cogmo/abc12345",
+        worktreePath: "/var/lib/cogmo/worktrees/cogmo/abc12345",
+      });
+      const reloaded = await store.getTask(t.id);
+      expect(reloaded?.worktreeAssignment).toEqual({
+        branch: "cogmo/abc12345",
+        worktreePath: "/var/lib/cogmo/worktrees/cogmo/abc12345",
+      });
+    });
+
+    it("setTaskWorktreeAssignment rejects empty branch (Zod schema)", async () => {
+      const repoId = await seedRepo();
+      const t = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      await expect(
+        store.setTaskWorktreeAssignment(t.id, { branch: "", worktreePath: "/p" }),
+      ).rejects.toThrow();
     });
 
     it("rejects task with non-existent repo (FK)", async () => {
@@ -181,8 +214,6 @@ describe("DrizzleCodingStore", () => {
           goal: "x",
           triggerSource: "user",
           backend: "claude",
-          branch: "cogmo/x",
-          worktreePath: "/tmp/x",
           allowPrivilegedRunc: false,
         }),
       ).rejects.toThrow();
@@ -195,8 +226,6 @@ describe("DrizzleCodingStore", () => {
         goal: "g",
         triggerSource: "user",
         backend: "claude",
-        branch: "b",
-        worktreePath: "/p",
         allowPrivilegedRunc: false,
       });
 
@@ -230,8 +259,6 @@ describe("DrizzleCodingStore", () => {
         goal: "g",
         triggerSource: "user",
         backend: "claude",
-        branch: "b",
-        worktreePath: "/p",
         allowPrivilegedRunc: false,
       });
       const containerId = await seedContainer();
@@ -255,8 +282,6 @@ describe("DrizzleCodingStore", () => {
         goal: "g",
         triggerSource: "user",
         backend: "claude",
-        branch: "b",
-        worktreePath: "/p",
         allowPrivilegedRunc: false,
       });
       await store.setTaskResourceUsage(t.id, {
@@ -276,8 +301,6 @@ describe("DrizzleCodingStore", () => {
         goal: "g",
         triggerSource: "user",
         backend: "claude",
-        branch: "b",
-        worktreePath: "/p",
         allowPrivilegedRunc: false,
       });
       await expect(
@@ -294,8 +317,6 @@ describe("DrizzleCodingStore", () => {
           goal: "g",
           triggerSource: "user",
           backend: "claude",
-          branch: `b-${status}`,
-          worktreePath: `/p-${status}`,
           allowPrivilegedRunc: false,
         });
         if (status !== "queued") await store.updateTaskStatus({ id: t.id, status });
@@ -319,8 +340,6 @@ describe("DrizzleCodingStore", () => {
         goal: "g",
         triggerSource: "user",
         backend: "claude",
-        branch: "b1",
-        worktreePath: "/p1",
         allowPrivilegedRunc: false,
       });
       expect(await store.countActiveTasksForRepo(a)).toBe(1);
@@ -339,8 +358,6 @@ describe("DrizzleCodingStore", () => {
         triggerSource: "evolution",
         triggerRef: "evo-proposal-123",
         backend: "claude",
-        branch: "cogmo/auto",
-        worktreePath: "/p",
         allowPrivilegedRunc: false,
       });
       expect(t.triggerSource).toBe("evolution");
@@ -354,8 +371,6 @@ describe("DrizzleCodingStore", () => {
         goal: "g",
         triggerSource: "user",
         backend: "claude",
-        branch: "cogmo/no-conv",
-        worktreePath: "/p1",
         allowPrivilegedRunc: false,
       });
       expect(noConv.conversationId).toBeNull();
@@ -367,8 +382,6 @@ describe("DrizzleCodingStore", () => {
         goal: "g",
         triggerSource: "user",
         backend: "claude",
-        branch: "cogmo/with-conv",
-        worktreePath: "/p2",
         allowPrivilegedRunc: false,
       });
       expect(withConv.conversationId).toBe(convId);
@@ -384,8 +397,6 @@ describe("DrizzleCodingStore", () => {
         goal: "first",
         triggerSource: "user",
         backend: "claude",
-        branch: "b1",
-        worktreePath: "/p1",
         allowPrivilegedRunc: false,
       });
       // Tiny delay so UUIDv7 timestamps differ — PGlite's pg_uuidv7 uses
@@ -398,8 +409,6 @@ describe("DrizzleCodingStore", () => {
         goal: "second",
         triggerSource: "user",
         backend: "claude",
-        branch: "b2",
-        worktreePath: "/p2",
         allowPrivilegedRunc: false,
       });
       await store.insertTask({
@@ -408,8 +417,6 @@ describe("DrizzleCodingStore", () => {
         goal: "other",
         triggerSource: "user",
         backend: "claude",
-        branch: "b3",
-        worktreePath: "/p3",
         allowPrivilegedRunc: false,
       });
 

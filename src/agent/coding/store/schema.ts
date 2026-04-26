@@ -77,8 +77,13 @@ export const codingTasks = pgTable("coding_tasks", {
   triggerSource: codingTriggerSource("trigger_source").notNull(),
   triggerRef: text("trigger_ref"), // pointer into the originating subsystem (evolution proposal id, etc.)
   backend: codingBackend("backend").notNull(),
-  branch: text("branch").notNull(),
-  worktreePath: text("worktree_path").notNull(),
+  // Worktree assignment — branch + host path derived from the task id by the
+  // orchestrator's `allocate-worktree` step (per design/coding-delegation.md
+  // → Inngest step boundaries). Stored as one JSONB blob with a Zod-validated
+  // shape so the two fields are atomic by construction (no "half-allocated"
+  // state). Null until allocate-worktree runs — same lifecycle pattern as
+  // session_id, container_id, plan, etc. on this table.
+  worktreeAssignment: jsonb("worktree_assignment"), // WorktreeAssignmentSchema
   sessionId: text("session_id"), // CLI session id captured on first event
   containerId: uuid("container_id").references(() => containers.id), // set after sandbox.createTaskContainer
   allowPrivilegedRunc: boolean("allow_privileged_runc").notNull(), // explicit at insert (no default)

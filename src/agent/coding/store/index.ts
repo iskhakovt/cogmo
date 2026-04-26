@@ -6,6 +6,8 @@ import {
   DevcontainerSpecSchema,
   type ResourceUsage,
   ResourceUsageSchema,
+  type WorktreeAssignment,
+  WorktreeAssignmentSchema,
 } from "../types.js";
 import { codingRepos, codingTasks } from "./schema.js";
 
@@ -51,8 +53,13 @@ export interface CodingTaskRow {
   triggerSource: CodingTriggerSource;
   triggerRef: string | null;
   backend: CodingBackend;
-  branch: string;
-  worktreePath: string;
+  /**
+   * Branch + worktree path, atomically — null until the orchestrator's
+   * `allocate-worktree` step runs, both fields populated together once it
+   * does. JSONB-with-Zod under the hood; consumers do one null check and
+   * get both fields typed as string.
+   */
+  worktreeAssignment: WorktreeAssignment | null;
   sessionId: string | null;
   containerId: string | null;
   allowPrivilegedRunc: boolean;
@@ -97,21 +104,17 @@ export interface CodingStore {
   // --- Tasks ---
 
   /**
-   * Insert a new task in `queued` status. `id` may be supplied by the caller
-   * — the delegate-coding flow generates a UUIDv7 client-side so it can
-   * derive `branch` and `worktreePath` before the row exists. When omitted,
-   * the DB default (`uuidv7()`) applies.
+   * Insert a new task in `queued` status. Branch + worktreePath are NOT
+   * accepted here — the orchestrator's `allocate-worktree` step derives them
+   * from the (DB-generated) task id and persists via `setTaskWorktreeAssignment`.
    */
   insertTask(params: {
-    id?: string;
     repoId: string;
     conversationId?: string | null;
     goal: string;
     triggerSource: CodingTriggerSource;
     triggerRef?: string | null;
     backend: CodingBackend;
-    branch: string;
-    worktreePath: string;
     allowPrivilegedRunc: boolean;
   }): Promise<CodingTaskRow>;
 
@@ -119,6 +122,14 @@ export interface CodingStore {
   listTasksForConversation(conversationId: string): Promise<readonly CodingTaskRow[]>;
 
   getTask(id: string): Promise<CodingTaskRow | null>;
+
+  /**
+   * Persist the worktree assignment derived by the orchestrator's
+   * `allocate-worktree` step. JSONB-validated by `WorktreeAssignmentSchema`
+   * on the way in. Called once per task; idempotent (a retry sees the
+   * values already set and skips the recompute).
+   */
+  setTaskWorktreeAssignment(id: string, assignment: WorktreeAssignment): Promise<void>;
 
   /**
    * Update a task's status and optionally its `failure_reason` and
@@ -228,15 +239,12 @@ export class DrizzleCodingStore implements CodingStore {
   // --- Tasks ---
 
   async insertTask(params: {
-    id?: string;
     repoId: string;
     conversationId?: string | null;
     goal: string;
     triggerSource: CodingTriggerSource;
     triggerRef?: string | null;
     backend: CodingBackend;
-    branch: string;
-    worktreePath: string;
     allowPrivilegedRunc: boolean;
   }): Promise<CodingTaskRow> {
     return this.#db.transaction(async (tx) => {
@@ -244,21 +252,28 @@ export class DrizzleCodingStore implements CodingStore {
         await tx
           .insert(codingTasks)
           .values({
-            ...(params.id !== undefined && { id: params.id }),
             repoId: params.repoId,
             conversationId: params.conversationId ?? null,
             goal: params.goal,
             triggerSource: params.triggerSource,
             triggerRef: params.triggerRef ?? null,
             backend: params.backend,
-            branch: params.branch,
-            worktreePath: params.worktreePath,
             allowPrivilegedRunc: params.allowPrivilegedRunc,
             status: "queued",
           })
           .returning(),
       );
       return parseTaskRow(row);
+    });
+  }
+
+  async setTaskWorktreeAssignment(id: string, assignment: WorktreeAssignment): Promise<void> {
+    const parsed = WorktreeAssignmentSchema.parse(assignment);
+    await this.#db.transaction(async (tx) => {
+      await tx
+        .update(codingTasks)
+        .set({ worktreeAssignment: parsed })
+        .where(eq(codingTasks.id, id));
     });
   }
 
@@ -370,8 +385,9 @@ function parseTaskRow(row: typeof codingTasks.$inferSelect): CodingTaskRow {
     triggerSource: row.triggerSource,
     triggerRef: row.triggerRef,
     backend: row.backend,
-    branch: row.branch,
-    worktreePath: row.worktreePath,
+    worktreeAssignment: row.worktreeAssignment
+      ? WorktreeAssignmentSchema.parse(row.worktreeAssignment)
+      : null,
     sessionId: row.sessionId,
     containerId: row.containerId,
     allowPrivilegedRunc: row.allowPrivilegedRunc,

@@ -9,13 +9,16 @@ import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
  * memory tiers. See design/coding-delegation.md → "Injected context".
  */
 export function buildPlanPrompt(task: CodingTaskRow, repo: CodingRepoRow): string {
+  if (!task.worktreeAssignment) {
+    throw new Error(`buildPlanPrompt called for task ${task.id} before worktree was allocated`);
+  }
   return [
     "# Task",
     task.goal,
     "",
     "# Environment",
     "- Repo root is /workspace. Stay inside it.",
-    `- Current branch: ${task.branch}. Already created and checked out.`,
+    `- Current branch: ${task.worktreeAssignment.branch}. Already created and checked out.`,
     "- Git credentials are NOT available in plan mode — you cannot push or pull.",
     "- Do NOT make any edits. Plan only.",
     "",

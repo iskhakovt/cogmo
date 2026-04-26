@@ -18,6 +18,22 @@ export const DevcontainerSpecSchema = z
 export type DevcontainerSpec = z.infer<typeof DevcontainerSpecSchema>;
 
 /**
+ * Branch + worktree path derived from the task id by the orchestrator's
+ * `allocate-worktree` step. Stored as one JSONB blob (rather than two
+ * nullable text columns) so the two fields are atomic by construction:
+ * either the worktree is allocated (both present, validated by Zod on read
+ * and write) or it isn't (column is null). No "half-allocated" intermediate
+ * state is representable.
+ */
+export const WorktreeAssignmentSchema = z
+  .object({
+    branch: z.string().min(1),
+    worktreePath: z.string().min(1),
+  })
+  .strict();
+export type WorktreeAssignment = z.infer<typeof WorktreeAssignmentSchema>;
+
+/**
  * Aggregated stats per coding task. All fields optional — populated
  * incrementally as the task runs (memory_bytes at task start from CLAUDE.md
  * `stat`, token counts from `turn.completed` events, container stats from

@@ -82,14 +82,12 @@ async function seedRepo(name = "cogmo"): Promise<CodingRepoRow> {
   });
 }
 
-async function seedTask(repo: CodingRepoRow, suffix: string): Promise<CodingTaskRow> {
+async function seedTask(repo: CodingRepoRow): Promise<CodingTaskRow> {
   return store.insertTask({
     repoId: repo.id,
     goal: "do a thing",
     triggerSource: "user",
     backend: "claude",
-    branch: `cogmo/${suffix}`,
-    worktreePath: join(baseDir, "worktrees", suffix),
     allowPrivilegedRunc: false,
   });
 }
@@ -218,6 +216,7 @@ function makeDeps(
     devbaseImage: "cogmo/devbase:slice1-test",
     defaultResourceLimits: RESOURCE_LIMITS,
     taskTtlMs: 60_000,
+    worktreesDir: join(baseDir, "worktrees"),
     openPlanStream: async () => NULL_PLAN_STREAM,
     ...overrides,
   };
@@ -226,7 +225,7 @@ function makeDeps(
 describe("runCodingTask", () => {
   it("happy path: plan streamed, session_id persisted, status → awaiting_approval (user trigger)", async () => {
     const repo = await seedRepo();
-    const task = await seedTask(repo, "happy01");
+    const task = await seedTask(repo);
     const { sandbox, createCalls, stopCalls } = fakeSandbox();
     const planStream = recordingPlanStream();
     const backend = backendYielding([
@@ -255,7 +254,13 @@ describe("runCodingTask", () => {
     expect(createCalls).toHaveLength(1);
     expect(createCalls[0].rootTaskId).toBe(task.id);
     expect(createCalls[0].image).toBe("cogmo/devbase:slice1-test");
-    expect(createCalls[0].worktreePath).toContain("happy01");
+    // Worktree path is derived in the orchestrator's allocate-worktree step:
+    // ${worktreesDir}/<repo.name>/<id-short>. Assert the structural contract,
+    // not a literal path (the id-short is whatever UUIDv7 the DB generated).
+    expect(createCalls[0].worktreePath).toContain(`${baseDir}/worktrees/cogmo/`);
+    // Persisted worktreeAssignment carries both fields atomically.
+    expect(reloaded?.worktreeAssignment?.branch).toMatch(/^cogmo\/[a-f0-9-]{8}$/);
+    expect(reloaded?.worktreeAssignment?.worktreePath).toBe(createCalls[0].worktreePath);
 
     expect(planStream.text).toEqual(["## Plan\n", "1. Do X\n"]);
     expect(planStream.finalized).toEqual(["## Plan\n1. Do X\n"]);
@@ -271,8 +276,6 @@ describe("runCodingTask", () => {
       triggerSource: "evolution",
       triggerRef: "evo-1",
       backend: "claude",
-      branch: "cogmo/evo01",
-      worktreePath: join(baseDir, "worktrees", "evo01"),
       allowPrivilegedRunc: false,
     });
     const { sandbox } = fakeSandbox();
@@ -294,7 +297,7 @@ describe("runCodingTask", () => {
 
   it("backend reports error → status=failed, sandbox stopped, plan stream failed", async () => {
     const repo = await seedRepo();
-    const task = await seedTask(repo, "fail01");
+    const task = await seedTask(repo);
     const { sandbox, stopCalls } = fakeSandbox();
     const planStream = recordingPlanStream();
     const backend = backendYielding([
@@ -319,7 +322,7 @@ describe("runCodingTask", () => {
 
   it("empty plan with success exit → status=failed (treated as nothing-to-show)", async () => {
     const repo = await seedRepo();
-    const task = await seedTask(repo, "empty01");
+    const task = await seedTask(repo);
     const { sandbox, stopCalls } = fakeSandbox();
     const backend = backendYielding([
       { kind: "session_started", sessionId: "sess-E" },
@@ -337,7 +340,7 @@ describe("runCodingTask", () => {
 
   it("createTaskContainer throws → status=failed, no stopTask (nothing to stop)", async () => {
     const repo = await seedRepo();
-    const task = await seedTask(repo, "boom01");
+    const task = await seedTask(repo);
     const { sandbox, stopCalls } = fakeSandbox();
     (sandbox.createTaskContainer as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error("docker daemon down"),
@@ -372,8 +375,6 @@ describe("runCodingTask", () => {
       goal: "g",
       triggerSource: "user",
       backend: "claude",
-      branch: "cogmo/wt-fail",
-      worktreePath: join(baseDir, "worktrees", "wt-fail"),
       allowPrivilegedRunc: false,
     });
 
@@ -400,7 +401,7 @@ describe("runCodingTask", () => {
 
   it("missing repo throws", async () => {
     const repo = await seedRepo();
-    const task = await seedTask(repo, "missing-repo");
+    const task = await seedTask(repo);
     // Override the store to return null for getRepoById without violating FK.
     const ghostStore = {
       ...store,

@@ -1,1 +1,0 @@
-ALTER TABLE "coding_tasks" ADD COLUMN "conversation_id" uuid;

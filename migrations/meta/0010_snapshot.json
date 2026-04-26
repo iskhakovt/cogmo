@@ -1,5 +1,5 @@
 {
-  "id": "4fef7c53-13dd-47cb-ae60-76007543650b",
+  "id": "719ebc61-15de-496b-aa74-5ba26eb73b51",
   "prevId": "bd716b0d-5400-4248-9831-6af2639c9921",
   "version": "7",
   "dialect": "postgresql",
@@ -115,6 +115,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "conversation_id": {
+          "name": "conversation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "goal": {
           "name": "goal",
           "type": "text",
@@ -141,17 +147,11 @@
           "primaryKey": false,
           "notNull": true
         },
-        "branch": {
-          "name": "branch",
-          "type": "text",
+        "worktree_assignment": {
+          "name": "worktree_assignment",
+          "type": "jsonb",
           "primaryKey": false,
-          "notNull": true
-        },
-        "worktree_path": {
-          "name": "worktree_path",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "session_id": {
           "name": "session_id",
