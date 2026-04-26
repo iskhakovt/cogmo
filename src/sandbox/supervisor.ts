@@ -112,6 +112,11 @@ export class LocalInProcessSandbox implements Sandbox {
       HostConfig: {
         Runtime: runtime,
         Binds: [`${spec.worktreePath}:/workspace`],
+        // Home volume mounted at /home/vscode — slice 1 contract: task images
+        // MUST run as user `vscode` (devbase inherits this from the
+        // mcr.microsoft.com/devcontainers/base:ubuntu-24.04 base). When slice 4
+        // grows custom devcontainer support, this needs to become part of
+        // TaskContainerSpec (image-declared user → mount target lookup).
         Mounts: [
           {
             Type: "volume",

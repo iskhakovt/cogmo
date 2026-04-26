@@ -603,6 +603,94 @@ describe("createTransport", () => {
       expect(args.maxConcurrentTasks).toBe(1);
     });
 
+    describe("add input validation", () => {
+      function freshTransport() {
+        return setupWithCoding({
+          listRepos: vi.fn(),
+          insertRepo: vi.fn(),
+          getRepoByName: vi.fn(),
+          countActiveTasksForRepo: vi.fn(),
+          removeRepo: vi.fn(),
+        });
+      }
+
+      it("rejects names with path separators", async () => {
+        const t = freshTransport();
+        const res = await t.repos.add({
+          name: "evil/../escape",
+          localPath: "/p",
+          remoteUrl: "git@x:y.git",
+        });
+        const e = res._unsafeUnwrapErr();
+        expect(e.code).toBe("repo_invalid_input");
+        if (e.code === "repo_invalid_input") expect(e.field).toBe("name");
+      });
+
+      it("rejects names with spaces or shell metacharacters", async () => {
+        const t = freshTransport();
+        const res = await t.repos.add({
+          name: "my repo",
+          localPath: "/p",
+          remoteUrl: "git@x:y.git",
+        });
+        expect(res._unsafeUnwrapErr().code).toBe("repo_invalid_input");
+      });
+
+      it("accepts valid names with letters, digits, dot, dash, underscore", async () => {
+        const insertRepo = vi.fn().mockResolvedValue({
+          id: "r1",
+          name: "cogmo.notes_v2-rc1",
+          localPath: "/p",
+          defaultBranch: "main",
+          remoteUrl: "x",
+          devcontainer: null,
+          allowedBackends: ["claude"],
+          verifyCommand: "true",
+          taskTokenBudget: 1,
+          taskWallTimeSeconds: 1,
+          maxConcurrentTasks: 1,
+          createdAt: new Date(),
+        });
+        const t = setupWithCoding({
+          listRepos: vi.fn(),
+          insertRepo,
+          getRepoByName: vi.fn(),
+          countActiveTasksForRepo: vi.fn(),
+          removeRepo: vi.fn(),
+        });
+        const res = await t.repos.add({
+          name: "cogmo.notes_v2-rc1",
+          localPath: "/p",
+          remoteUrl: "git@x:y.git",
+        });
+        expect(res.isOk()).toBe(true);
+      });
+
+      it("rejects relative localPath", async () => {
+        const t = freshTransport();
+        const res = await t.repos.add({
+          name: "cogmo",
+          localPath: "relative/path",
+          remoteUrl: "git@x:y.git",
+        });
+        const e = res._unsafeUnwrapErr();
+        expect(e.code).toBe("repo_invalid_input");
+        if (e.code === "repo_invalid_input") expect(e.field).toBe("localPath");
+      });
+
+      it("rejects empty remoteUrl", async () => {
+        const t = freshTransport();
+        const res = await t.repos.add({
+          name: "cogmo",
+          localPath: "/p",
+          remoteUrl: "   ",
+        });
+        const e = res._unsafeUnwrapErr();
+        expect(e.code).toBe("repo_invalid_input");
+        if (e.code === "repo_invalid_input") expect(e.field).toBe("remoteUrl");
+      });
+    });
+
     it("add maps UniqueViolationError to repo_name_taken", async () => {
       const { UniqueViolationError } = await import("../agent/store/errors.js");
       const transport = setupWithCoding({
@@ -633,7 +721,7 @@ describe("createTransport", () => {
     });
 
     it("remove blocks when active tasks exist", async () => {
-      const removeRepoIfIdle = vi.fn().mockResolvedValue({ activeTasks: 2 });
+      const removeRepoIfIdle = vi.fn().mockResolvedValue({ kind: "in_use", activeTasks: 2 });
       const transport = setupWithCoding({
         listRepos: vi.fn(),
         insertRepo: vi.fn(),
@@ -652,7 +740,7 @@ describe("createTransport", () => {
     });
 
     it("remove deletes when no active tasks", async () => {
-      const removeRepoIfIdle = vi.fn().mockResolvedValue(null);
+      const removeRepoIfIdle = vi.fn().mockResolvedValue({ kind: "deleted" });
       const transport = setupWithCoding({
         listRepos: vi.fn(),
         insertRepo: vi.fn(),

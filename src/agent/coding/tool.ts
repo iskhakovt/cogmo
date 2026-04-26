@@ -44,17 +44,21 @@ export const delegateCodingTool: ToolSpec = defineTool({
         reason: result.failureReason ?? "plan phase failed",
       });
     }
+    // The "approval keyboard ships in slice 2" hint is only meaningful when
+    // the task parks at `awaiting_approval` — i.e. `trigger_source = user`.
+    // Automated triggers (evolution, signal_pipeline) auto-advance to
+    // `executing`, so the hint would be misleading there.
+    const nextStep =
+      result.status === "awaiting_approval"
+        ? "Plan posted. Approval keyboard ships in slice 2 — for now, this task stays in " +
+          "awaiting_approval status. Show the plan to the user verbatim."
+        : undefined;
     return JSON.stringify({
       ok: true,
       taskId: result.taskId,
       status: result.status,
       plan: result.plan ?? "",
-      // Slice 1: plan stays at awaiting_approval until slice 2 wires the
-      // Telegram inline keyboard for Approve / Revise / Cancel. Surface
-      // this to the user so they understand the next step.
-      nextStep:
-        "Plan posted. Approval keyboard ships in slice 2 — for now, this task stays in " +
-        "awaiting_approval status. Show the plan to the user verbatim.",
+      ...(nextStep !== undefined && { nextStep }),
     });
   },
 });

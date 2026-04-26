@@ -104,11 +104,13 @@ export interface CodingStore {
   /**
    * Atomic "delete if no active tasks" — counts active tasks and deletes the
    * repo in one transaction so a concurrent `insertTask` between the two
-   * checks can't slip past. Returns the active count if non-zero (caller
-   * surfaces to the user); returns null on successful delete; returns null
-   * when the repo doesn't exist (caller treats as not-found above this layer).
+   * checks can't slip past. Discriminated union so the caller can't confuse
+   * "didn't exist" with "deleted successfully" — both used to be `null`,
+   * which made a future caller refactor a real footgun.
    */
-  removeRepoIfIdle(id: string): Promise<{ activeTasks: number } | null>;
+  removeRepoIfIdle(
+    id: string,
+  ): Promise<{ kind: "deleted" } | { kind: "not_found" } | { kind: "in_use"; activeTasks: number }>;
 
   // --- Tasks ---
 
@@ -253,7 +255,11 @@ export class DrizzleCodingStore implements CodingStore {
     });
   }
 
-  async removeRepoIfIdle(id: string): Promise<{ activeTasks: number } | null> {
+  async removeRepoIfIdle(
+    id: string,
+  ): Promise<
+    { kind: "deleted" } | { kind: "not_found" } | { kind: "in_use"; activeTasks: number }
+  > {
     return this.#db.transaction(async (tx) => {
       // Verify the repo exists inside the transaction so a concurrent
       // `removeRepo` racing with us doesn't leave the caller misreporting.
@@ -262,16 +268,16 @@ export class DrizzleCodingStore implements CodingStore {
         .from(codingRepos)
         .where(eq(codingRepos.id, id))
         .limit(1);
-      if (existing.length === 0) return null;
+      if (existing.length === 0) return { kind: "not_found" as const };
       const conditions = TERMINAL_STATUSES.map((s) => ne(codingTasks.status, s));
       const countRows = await tx
         .select({ value: count() })
         .from(codingTasks)
         .where(and(eq(codingTasks.repoId, id), ...conditions));
       const activeTasks = countRows[0]?.value ?? 0;
-      if (activeTasks > 0) return { activeTasks };
+      if (activeTasks > 0) return { kind: "in_use" as const, activeTasks };
       await tx.delete(codingRepos).where(eq(codingRepos.id, id));
-      return null;
+      return { kind: "deleted" as const };
     });
   }
 

@@ -76,4 +76,33 @@ describe("delegate_coding tool", () => {
       delegateCodingTool.handler({ goal: "fix it", repo: "cogmo" }, service({ delegate: vi.fn() })),
     ).rejects.toThrow();
   });
+
+  it("never lets the LLM choose triggerSource — tool schema strips it", async () => {
+    // service.coding.delegate hardcodes triggerSource: "user". A future
+    // change opening that to LLM input would silently widen the autonomy
+    // boundary (an evolution / signal_pipeline trigger skips the human
+    // approval gate). Pin the contract: even if the LLM passes
+    // triggerSource in the input, the tool's Zod schema strips it before
+    // the handler sees it, and the handler never forwards extras to
+    // service.coding.delegate.
+    const delegate = vi.fn(async () => ({
+      taskId: "t-1",
+      status: "awaiting_approval" as const,
+      plan: "p",
+    }));
+    await delegateCodingTool.handler(
+      {
+        goal: "refactor steering rules to support per-channel scoping",
+        repo: "cogmo",
+        // biome-ignore lint/suspicious/noExplicitAny: intentionally invalid extra input
+        triggerSource: "evolution" as any,
+      },
+      service({ delegate }),
+    );
+    expect(delegate).toHaveBeenCalledWith({
+      goal: "refactor steering rules to support per-channel scoping",
+      repoName: "cogmo",
+    });
+    expect(delegate.mock.calls[0]?.[0]).not.toHaveProperty("triggerSource");
+  });
 });

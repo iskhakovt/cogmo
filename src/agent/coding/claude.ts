@@ -124,20 +124,26 @@ async function* runClaude(
   // an unconsumed PassThrough buffer would grow unbounded for the run
   // duration. Pipe each line to the logger at warn level (claude doesn't
   // distinguish severity on stderr; treating everything as warn surfaces
-  // it without being noisy in the success path).
+  // issues without being noisy in the success path). The try/catch
+  // catches stream-error rejections from `for await` (the demuxed
+  // PassThrough is destroyed when the underlying exec stream errors).
   void (async () => {
-    let buf = "";
-    for await (const chunk of exec.stderr) {
-      buf += chunk.toString();
-      let nl = buf.indexOf("\n");
-      while (nl !== -1) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
-        if (line.trim()) log.warn({ stderr: line.trim() }, "claude stderr");
-        nl = buf.indexOf("\n");
+    try {
+      let buf = "";
+      for await (const chunk of exec.stderr) {
+        buf += chunk.toString();
+        let nl = buf.indexOf("\n");
+        while (nl !== -1) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (line.trim()) log.warn({ stderr: line.trim() }, "claude stderr");
+          nl = buf.indexOf("\n");
+        }
       }
+      if (buf.trim()) log.warn({ stderr: buf.trim() }, "claude stderr");
+    } catch (err) {
+      log.warn({ err: (err as Error).message }, "claude stderr drain error");
     }
-    if (buf.trim()) log.warn({ stderr: buf.trim() }, "claude stderr");
   })();
 
   let plan = "";

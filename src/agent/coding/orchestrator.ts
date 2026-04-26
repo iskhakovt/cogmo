@@ -1,4 +1,4 @@
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Inngest } from "inngest";
 import { codingTaskStart } from "../../inngest/events.js";
 import type { StepRun } from "../../inngest/index.js";
@@ -131,11 +131,13 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         const candidatePath = join(worktreesDir, repo.name, idShort);
         // Defense in depth: refuse to create a worktree outside
         // worktreesDir even if `repo.name` somehow contains traversal
-        // sequences (`..`, leading `/`, etc.). Repository names should be
-        // validated at registration time too — this is the second line.
+        // sequences. Repo-name validation in `Transport.repos.add` is the
+        // first line; this is the second. Segment-aware to avoid rejecting
+        // valid relative paths that happen to start with `..` (e.g. `..foo`
+        // is a legal directory name, only `..` and `..<sep>` mean escape).
         const root = resolve(worktreesDir);
         const rel = relative(root, resolve(candidatePath));
-        if (rel.startsWith("..") || rel.startsWith("/") || rel === "") {
+        if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
           throw new Error(
             `worktree path escape: repo.name="${repo.name}" produced path outside worktreesDir`,
           );
@@ -183,10 +185,14 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
 
     // ── Non-durable: stream the plan ──
     planStream = await openPlanStream(taskId);
-    // Refresh worktreeAssignment onto the task — the prompt template reads
-    // task.worktreeAssignment.branch, and the row we loaded before
-    // allocate-worktree had it as null.
-    const planTask: CodingTaskRow = { ...task, worktreeAssignment: assignment };
+    // Re-load the task so the prompt template sees the row in its
+    // post-allocation state (worktreeAssignment populated, container_id
+    // stamped). buildPlanPrompt only reads goal + worktreeAssignment.branch
+    // today, so spreading `{...task, worktreeAssignment}` would be enough —
+    // but a future prompt change that reads any other lifecycle field
+    // (e.g. container metadata) would silently see stale nulls. The
+    // single point-read is cheap; the footgun isn't worth saving it.
+    const planTask = (await store.getTask(taskId)) ?? task;
     const result = await runPlanStreaming({
       task: planTask,
       repo,
@@ -221,6 +227,13 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   } catch (err) {
     const reason = (err as Error).message;
     log.error({ err, taskId }, "coding task failed");
+    // Catch-path writes deliberately bypass `stepRun`. Slice 1 uses
+    // retries=0 on the Inngest function (the inline orchestrator skips
+    // step boundaries entirely), so wrapping in `stepRun` here would just
+    // add observability noise. Slice 2 raises retries to enable plan
+    // approval via `step.waitForEvent`; at that point this catch needs
+    // to move inside `stepRun("set-status-failed-from-catch", ...)` so
+    // the failure write is exactly-once on retry.
     await store
       .updateTaskStatus({ id: taskId, status: "failed", failureReason: reason })
       .catch(() => {});

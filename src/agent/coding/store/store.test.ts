@@ -193,6 +193,35 @@ describe("DrizzleCodingStore", () => {
       });
     });
 
+    it("setTaskWorktreeAssignment is idempotent — second call replaces with the second value", async () => {
+      // Models the orchestrator-retry path: if `allocate-worktree` runs
+      // twice (first attempt persisted assignment then crashed before
+      // returning), the second run derives the same branch/path from the
+      // same task id and writes again. Last write wins; the task ends up
+      // in the right state either way.
+      const repoId = await seedRepo();
+      const t = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      await store.setTaskWorktreeAssignment(t.id, {
+        branch: "cogmo/aaaa",
+        worktreePath: "/p1",
+      });
+      await store.setTaskWorktreeAssignment(t.id, {
+        branch: "cogmo/aaaa",
+        worktreePath: "/p1",
+      });
+      const reloaded = await store.getTask(t.id);
+      expect(reloaded?.worktreeAssignment).toEqual({
+        branch: "cogmo/aaaa",
+        worktreePath: "/p1",
+      });
+    });
+
     it("setTaskWorktreeAssignment rejects empty branch (Zod schema)", async () => {
       const repoId = await seedRepo();
       const t = await store.insertTask({

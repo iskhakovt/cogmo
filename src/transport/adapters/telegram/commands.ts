@@ -482,6 +482,8 @@ function errorMessage(err: TransportError): string {
       return `A repo named "${err.name}" already exists.`;
     case "repo_in_use":
       return `Repo "${err.name}" has ${err.activeTasks} active task(s). Wait for them to finish first.`;
+    case "repo_invalid_input":
+      return `Invalid ${err.field}: ${err.reason}`;
     case "sandbox_disabled":
       return "Coding-delegation features are unavailable — set SANDBOX_RUNTIME and restart Cogmo.";
   }

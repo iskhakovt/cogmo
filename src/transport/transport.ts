@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { JsonValue } from "type-fest";
@@ -68,6 +69,7 @@ export type TransportError =
   | { code: "repo_not_found"; name: string }
   | { code: "repo_name_taken"; name: string }
   | { code: "repo_in_use"; name: string; activeTasks: number }
+  | { code: "repo_invalid_input"; field: string; reason: string }
   | { code: "sandbox_disabled" };
 
 /**
@@ -486,6 +488,14 @@ export function createTransport(deps: {
       },
       async add(input) {
         if (!codingStore) return err({ code: "sandbox_disabled" as const });
+        // Input validation — `name` becomes a path segment under
+        // worktreesDir, so it must be a safe identifier. `localPath` must
+        // be absolute (relative would resolve against Cogmo's CWD, which
+        // changes between dev and prod). `remoteUrl` is opaque to slice 1
+        // (we only `git -C localPath` operations), but slice 4 will pass
+        // it to `git push` — empty-string check is enough for now.
+        const validation = validateRepoInput(input);
+        if (validation) return err(validation);
         try {
           const row = await codingStore.insertRepo({
             name: input.name,
@@ -525,12 +535,54 @@ export function createTransport(deps: {
         // so a concurrent `insertTask` can't slip past the count.
         const repo = await codingStore.getRepoByName(name);
         if (!repo) return err({ code: "repo_not_found" as const, name });
-        const blocked = await codingStore.removeRepoIfIdle(repo.id);
-        if (blocked) {
-          return err({ code: "repo_in_use" as const, name, activeTasks: blocked.activeTasks });
+        const result = await codingStore.removeRepoIfIdle(repo.id);
+        switch (result.kind) {
+          case "deleted":
+            return ok(undefined);
+          case "in_use":
+            return err({ code: "repo_in_use" as const, name, activeTasks: result.activeTasks });
+          case "not_found":
+            // Race window: repo existed at getRepoByName but was deleted
+            // between the lookup and the atomic check. Surface as
+            // not_found rather than synthesizing a stale success.
+            return err({ code: "repo_not_found" as const, name });
         }
-        return ok(undefined);
       },
     },
   };
+}
+
+/**
+ * Validate `RepoInput` for shape constraints that the schema can't enforce
+ * (the DB is text, but we have semantic constraints for filesystem safety).
+ * Returns a `TransportError` to surface, or `null` if input is valid.
+ */
+const REPO_NAME_RE = /^[a-zA-Z0-9._-]+$/;
+function validateRepoInput(input: {
+  name: string;
+  localPath: string;
+  remoteUrl: string;
+}): { code: "repo_invalid_input"; field: string; reason: string } | null {
+  if (!REPO_NAME_RE.test(input.name)) {
+    return {
+      code: "repo_invalid_input",
+      field: "name",
+      reason: "must match [a-zA-Z0-9._-]+ (no path separators, spaces, or shell metacharacters)",
+    };
+  }
+  if (!isAbsolute(input.localPath)) {
+    return {
+      code: "repo_invalid_input",
+      field: "localPath",
+      reason: "must be an absolute path (resolved against Cogmo's CWD otherwise)",
+    };
+  }
+  if (input.remoteUrl.trim() === "") {
+    return {
+      code: "repo_invalid_input",
+      field: "remoteUrl",
+      reason: "must not be empty",
+    };
+  }
+  return null;
 }
