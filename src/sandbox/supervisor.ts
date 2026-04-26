@@ -169,6 +169,19 @@ export class LocalInProcessSandbox implements Sandbox {
     };
   }
 
+  async getTaskContainer(dockerId: string): Promise<TaskContainerHandle> {
+    // Verifies the container is still present on the daemon — bare construction
+    // would silently produce a handle whose exec calls would 404.
+    await this.#docker.getContainer(dockerId).inspect();
+    const row = await this.#store.getContainerByDockerId(dockerId);
+    if (!row) throw new Error(`getTaskContainer: no DB row for docker id ${dockerId}`);
+    return {
+      containerRowId: row.id,
+      dockerId,
+      exec: (cmd, opts) => this.#exec(dockerId, cmd, opts),
+    };
+  }
+
   async stopTask(rootTaskId: string): Promise<void> {
     const rows = await this.#store.listContainersForTask(rootTaskId);
     // Cascade order: deepest first, so a parent isn't reaped while a child still depends on it.

@@ -81,6 +81,14 @@ export interface Sandbox {
 
   createTaskContainer(spec: TaskContainerSpec): Promise<TaskContainerHandle>;
 
+  /**
+   * Re-derive a `TaskContainerHandle` for an existing container. Pure
+   * factory — no Docker call beyond an inspect to verify the container is
+   * still there. Used by orchestrators that crossed a `step.run` boundary
+   * (which can only return JSON-serializable values, not handles).
+   */
+  getTaskContainer(dockerId: string): Promise<TaskContainerHandle>;
+
   /** Tear down every container in a root-task scope (cascade). Idempotent. */
   stopTask(rootTaskId: string): Promise<void>;
 
