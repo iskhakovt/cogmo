@@ -12,7 +12,7 @@
 # are deferred to slices that need them (verify commands in slice 4, polyglot
 # repos later).
 
-FROM mcr.microsoft.com/devcontainers/base:dev-ubuntu24.04
+FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
 # devcontainers/base already ships git, gh, curl, jq, ripgrep — but `fd-find`
 # is missing on Ubuntu and the binary is named `fdfind` rather than `fd`.

@@ -47,8 +47,15 @@ jobs:
           set -euo pipefail
           uname -a
           # Sysbox needs cgroupv2; GHA's ubuntu-24.04 runners default to it.
+          # `cgroup.controllers` is a file (the list of available controllers),
+          # not a directory — `-f` is the right test.
           mount | grep -E "^cgroup" || true
-          [ -d /sys/fs/cgroup/cgroup.controllers ] && echo "cgroup v2: OK"
+          if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+            echo "cgroup v2: OK"
+          else
+            echo "cgroup v2 missing — sysbox install will likely fail" >&2
+            exit 1
+          fi
 
       - name: Install sysbox-ce 0.7.0
         run: |
