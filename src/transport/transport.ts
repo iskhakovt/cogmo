@@ -70,7 +70,11 @@ export type TransportError =
   | { code: "repo_name_taken"; name: string }
   | { code: "repo_in_use"; name: string; activeTasks: number }
   | { code: "repo_invalid_input"; field: string; reason: string }
-  | { code: "sandbox_disabled" };
+  | { code: "sandbox_disabled" }
+  | { code: "task_not_found"; taskId: string }
+  | { code: "task_already_approved"; taskId: string }
+  | { code: "task_not_pending_approval"; taskId: string; status: string }
+  | { code: "task_already_terminal"; taskId: string; status: string };
 
 /**
  * Transport — the adapter-facing contract for session management and inbound emission.
@@ -154,6 +158,32 @@ export interface Transport {
     list(): Promise<Result<ReadonlyArray<RepoSummary>, TransportError>>;
     add(input: RepoInput): Promise<Result<RepoSummary, TransportError>>;
     remove(name: string): Promise<Result<void, TransportError>>;
+  };
+
+  /**
+   * Plan-approval surface for the slice 2.0e Telegram inline keyboard.
+   * Each method takes the platform handle of the user who tapped — the
+   * implementation resolves it to a userId and rejects with
+   * `identity_rejected` if it doesn't match the conversation owner.
+   *
+   * Returns `sandbox_disabled` when the sandbox module isn't initialized
+   * (parallels `repos`).
+   */
+  coding: {
+    /**
+     * Stamp `plan_approved_at` and emit `coding/task/plan-approved`. Idempotent:
+     * a second tap returns `task_already_approved` instead of re-emitting.
+     */
+    approvePlan(
+      taskId: string,
+      tapperPlatformHandle: string,
+    ): Promise<Result<{ taskId: string }, TransportError>>;
+    /** Set status=`cancelled` with the supplied reason. Idempotent on terminal tasks. */
+    cancelTask(
+      taskId: string,
+      tapperPlatformHandle: string,
+      reason: string,
+    ): Promise<Result<{ taskId: string }, TransportError>>;
   };
 }
 
@@ -549,7 +579,91 @@ export function createTransport(deps: {
         }
       },
     },
+
+    coding: {
+      async approvePlan(taskId, tapperPlatformHandle) {
+        if (!codingStore) return err({ code: "sandbox_disabled" as const });
+        const identityCheck = await checkTaskOwnership(taskId, tapperPlatformHandle);
+        if (identityCheck.isErr()) return err(identityCheck.error);
+        const result = await codingStore.approvePlanIfPending(taskId, new Date());
+        switch (result.kind) {
+          case "approved":
+            // Fire-and-await: emit the event so the slice 2.0f execute
+            // function picks it up. The event carries `approvedAt` so
+            // the receiver can stamp the same timestamp downstream
+            // without a second clock read.
+            await inngest.send({
+              name: "coding/task/plan-approved",
+              data: { taskId, approvedAt: new Date().toISOString() },
+            });
+            return ok({ taskId });
+          case "already_approved":
+            return err({ code: "task_already_approved" as const, taskId });
+          case "not_pending":
+            return err({
+              code: "task_not_pending_approval" as const,
+              taskId,
+              status: result.status,
+            });
+          case "not_found":
+            return err({ code: "task_not_found" as const, taskId });
+        }
+      },
+      async cancelTask(taskId, tapperPlatformHandle, reason) {
+        if (!codingStore) return err({ code: "sandbox_disabled" as const });
+        const identityCheck = await checkTaskOwnership(taskId, tapperPlatformHandle);
+        if (identityCheck.isErr()) return err(identityCheck.error);
+        const result = await codingStore.cancelTaskIfActive(taskId, reason);
+        switch (result.kind) {
+          case "cancelled":
+            return ok({ taskId });
+          case "already_terminal":
+            return err({
+              code: "task_already_terminal" as const,
+              taskId,
+              status: result.status,
+            });
+          case "not_found":
+            return err({ code: "task_not_found" as const, taskId });
+        }
+      },
+    },
   };
+
+  /**
+   * Strict identity check for task callbacks: the user who tapped the
+   * keyboard must own the conversation that triggered the task. Resolves
+   * the platform handle to a Cogmo userId via `transportStore.resolveUser`
+   * and compares against `coding_tasks.conversation_id →
+   * conversations.user_id`.
+   *
+   * Caveat: in single-user wildcard mode, `resolveUser` returns the same
+   * userId for any platform handle — the check degenerates to "is this
+   * channel known to Cogmo?". That's fine for personal deployments.
+   * Multi-user channels with explicit identities (`auto_created=false`,
+   * non-null `platform_handle`) get the strict comparison.
+   */
+  async function checkTaskOwnership(
+    taskId: string,
+    tapperPlatformHandle: string,
+  ): Promise<Result<void, TransportError>> {
+    if (!codingStore) return err({ code: "sandbox_disabled" as const });
+    const task = await codingStore.getTask(taskId);
+    if (!task) return err({ code: "task_not_found" as const, taskId });
+    if (!task.conversationId) {
+      // Automated triggers (evolution, signal_pipeline) have no
+      // conversation owner — there's no Telegram callback path for them
+      // either, so this branch is defensive.
+      return err({ code: "operation_not_permitted" as const });
+    }
+    const conv = await agentStore.getConversation(task.conversationId);
+    if (!conv) return err({ code: "conversation_not_found" as const });
+    const tapper = await transportStore.resolveUser(channelId, tapperPlatformHandle);
+    if (!tapper || tapper.userId !== conv.userId) {
+      return err({ code: "identity_rejected" as const });
+    }
+    return ok(undefined);
+  }
 }
 
 /**

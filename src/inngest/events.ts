@@ -80,6 +80,19 @@ export const codingTaskStart = eventType("coding/task/start", {
 });
 
 /**
+ * Coding delegation — user approved the plan via the Telegram inline
+ * keyboard (slice 2.0e). The execute orchestrator (slice 2.0f) consumes
+ * this event and runs `claude --resume <sid> --permission-mode acceptEdits`
+ * against the same task container.
+ */
+export const codingTaskPlanApproved = eventType("coding/task/plan-approved", {
+  schema: z.object({
+    taskId: z.string(),
+    approvedAt: z.string(), // ISO timestamp
+  }),
+});
+
+/**
  * Direct channel — external clients emit this to send messages.
  * The direct-inbound Inngest function translates to inbound/arrived.
  */

@@ -201,6 +201,63 @@ export async function handleModel(
   );
 }
 
+/**
+ * Result the Telegram adapter renders for a plan-callback tap. Pure data —
+ * `editText` replaces the plan-message body (and clears the keyboard);
+ * `followUp`, when set, posts as a separate chat message (used by Revise);
+ * `toast` is the small popup Telegram shows on the tapping device only.
+ */
+export interface PlanCallbackOutcome {
+  editText: string;
+  followUp?: string;
+  toast: string;
+}
+
+/**
+ * Pure handler for Approve / Revise / Cancel taps on the plan keyboard.
+ * Resolves identity (only the conversation owner can act), dispatches the
+ * appropriate `transport.coding.*` call, and returns the rendering
+ * instructions for the Telegram side.
+ *
+ * Idempotent against double-taps via Transport's atomic store methods.
+ */
+export async function handlePlanCallback(
+  transport: Transport,
+  parsed: { taskId: string; action: "approve" | "revise" | "cancel" },
+  tapperPlatformHandle: string,
+): Promise<PlanCallbackOutcome> {
+  if (parsed.action === "approve") {
+    const res = await transport.coding.approvePlan(parsed.taskId, tapperPlatformHandle);
+    if (res.isErr()) return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+    return {
+      editText: "✅ Plan approved. Execution starting…",
+      toast: "Approved",
+    };
+  }
+
+  // Revise & Cancel both end the current task — Revise additionally tells
+  // the user how to continue. Slice 2's "revise" is conversational
+  // (matches Cursor / Devin / Claude Code's plan mode): the user describes
+  // what to change, and the agent issues a fresh delegate_coding next
+  // turn. In-place plan editing requires an editor surface Telegram
+  // doesn't have.
+  const reason =
+    parsed.action === "revise" ? "user requested revisions" : "user cancelled the plan";
+  const res = await transport.coding.cancelTask(parsed.taskId, tapperPlatformHandle, reason);
+  if (res.isErr()) return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+
+  if (parsed.action === "revise") {
+    return {
+      editText: "✏️ Plan revised — see follow-up.",
+      followUp:
+        "Tell me what you'd like changed about the plan, and I'll re-delegate with your " +
+        "feedback.",
+      toast: "Revising",
+    };
+  }
+  return { editText: "❌ Plan cancelled.", toast: "Cancelled" };
+}
+
 /** Callback-query handler for inline-keyboard taps from /sessions. */
 export async function handleResumeCallback(
   transport: Transport,
@@ -486,11 +543,23 @@ function errorMessage(err: TransportError): string {
       return `Invalid ${err.field}: ${err.reason}`;
     case "sandbox_disabled":
       return "Coding-delegation features are unavailable — set SANDBOX_RUNTIME and restart Cogmo.";
+    case "task_not_found":
+      return `Task ${shortenId(err.taskId)} not found.`;
+    case "task_already_approved":
+      return "This plan was already approved — execution is in progress.";
+    case "task_not_pending_approval":
+      return `This plan can't be approved (status: ${err.status}).`;
+    case "task_already_terminal":
+      return `Task already finished (status: ${err.status}).`;
   }
   // Exhaustive — if a new TransportError code is added, TypeScript will warn
   // at call sites that return `string` (the inferred return becomes `string | undefined`).
   // Belt-and-suspenders: surface a generic message rather than passing undefined to ctx.reply.
   return "Something went wrong.";
+}
+
+function shortenId(id: string): string {
+  return id.length > 8 ? `${id.slice(0, 8)}…` : id;
 }
 
 function toReplyOptions(

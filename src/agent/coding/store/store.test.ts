@@ -456,4 +456,120 @@ describe("DrizzleCodingStore", () => {
       expect(rowsB).toHaveLength(1);
     });
   });
+
+  describe("approvePlanIfPending / cancelTaskIfActive", () => {
+    it("approve happy path: status awaiting_approval, plan_approved_at null → stamps", async () => {
+      const repoId = await seedRepo();
+      const convId = "019d0000-0000-7000-8000-00000000aabb";
+      const task = await store.insertTask({
+        repoId,
+        conversationId: convId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      await store.updateTaskStatus({ id: task.id, status: "awaiting_approval" });
+
+      const result = await store.approvePlanIfPending(task.id, new Date("2026-04-26T12:00:00Z"));
+      expect(result.kind).toBe("approved");
+      if (result.kind !== "approved") return;
+      expect(result.conversationId).toBe(convId);
+
+      const reloaded = await store.getTask(task.id);
+      expect(reloaded?.planApprovedAt).toBeInstanceOf(Date);
+    });
+
+    it("approve double-tap returns already_approved without overwriting the timestamp", async () => {
+      const repoId = await seedRepo();
+      const task = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      await store.updateTaskStatus({ id: task.id, status: "awaiting_approval" });
+      const first = new Date("2026-04-26T12:00:00Z");
+      const second = new Date("2026-04-26T13:00:00Z");
+      await store.approvePlanIfPending(task.id, first);
+      const result = await store.approvePlanIfPending(task.id, second);
+
+      expect(result.kind).toBe("already_approved");
+      if (result.kind !== "already_approved") return;
+      expect(result.approvedAt.toISOString()).toBe(first.toISOString());
+
+      const reloaded = await store.getTask(task.id);
+      expect(reloaded?.planApprovedAt?.toISOString()).toBe(first.toISOString());
+    });
+
+    it("approve returns not_pending when status is past awaiting_approval", async () => {
+      const repoId = await seedRepo();
+      const task = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      await store.updateTaskStatus({ id: task.id, status: "executing" });
+      const result = await store.approvePlanIfPending(task.id, new Date());
+      expect(result.kind).toBe("not_pending");
+      if (result.kind !== "not_pending") return;
+      expect(result.status).toBe("executing");
+    });
+
+    it("approve returns not_found for unknown id", async () => {
+      const result = await store.approvePlanIfPending(
+        "019d0000-0000-7000-8000-000000000099",
+        new Date(),
+      );
+      expect(result.kind).toBe("not_found");
+    });
+
+    it("cancel happy path: non-terminal task → status=cancelled with reason", async () => {
+      const repoId = await seedRepo();
+      const task = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      await store.updateTaskStatus({ id: task.id, status: "awaiting_approval" });
+
+      const result = await store.cancelTaskIfActive(task.id, "user cancelled");
+      expect(result.kind).toBe("cancelled");
+
+      const reloaded = await store.getTask(task.id);
+      expect(reloaded?.status).toBe("cancelled");
+      expect(reloaded?.failureReason).toBe("user cancelled");
+    });
+
+    it("cancel on terminal task returns already_terminal without rewriting", async () => {
+      const repoId = await seedRepo();
+      const task = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      await store.updateTaskStatus({
+        id: task.id,
+        status: "failed",
+        failureReason: "claude exit code 2",
+      });
+
+      const result = await store.cancelTaskIfActive(task.id, "ignored");
+      expect(result.kind).toBe("already_terminal");
+      if (result.kind !== "already_terminal") return;
+      expect(result.status).toBe("failed");
+
+      const reloaded = await store.getTask(task.id);
+      // Original failure preserved — cancel didn't overwrite it.
+      expect(reloaded?.status).toBe("failed");
+      expect(reloaded?.failureReason).toBe("claude exit code 2");
+    });
+  });
 });

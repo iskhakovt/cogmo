@@ -754,4 +754,198 @@ describe("createTransport", () => {
       expect(removeRepoIfIdle).toHaveBeenCalledWith("r1");
     });
   });
+
+  describe("coding (plan-callback surface)", () => {
+    const taskId = "019d0000-0000-7000-8000-000000000001";
+    const conversationId = "019d0000-0000-7000-8000-000000000002";
+    const ownerUserId = "user-owner";
+
+    function buildTransport(args: {
+      task: { conversationId: string | null } | null;
+      conversation: { userId: string } | null;
+      tapperUserId: string | null;
+      approvePlanIfPending?: ReturnType<typeof vi.fn>;
+      cancelTaskIfActive?: ReturnType<typeof vi.fn>;
+      inngestSend?: ReturnType<typeof vi.fn>;
+    }) {
+      const inngestSend = args.inngestSend ?? vi.fn().mockResolvedValue(undefined);
+      // biome-ignore lint/suspicious/noExplicitAny: minimal Inngest stub
+      const inngest = { send: inngestSend } as any;
+      const transportStore = mockTransportStore({
+        resolveUser: vi
+          .fn()
+          .mockResolvedValue(args.tapperUserId ? { userId: args.tapperUserId } : null),
+      });
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue(
+          args.conversation
+            ? {
+                id: conversationId,
+                userId: args.conversation.userId,
+                profileId: "p",
+                isPrivate: true,
+              }
+            : null,
+        ),
+      });
+      const codingStore = {
+        getTask: vi.fn().mockResolvedValue(args.task ? { id: taskId, ...args.task } : null),
+        approvePlanIfPending:
+          args.approvePlanIfPending ??
+          vi.fn().mockResolvedValue({ kind: "approved", conversationId }),
+        cancelTaskIfActive:
+          args.cancelTaskIfActive ??
+          vi.fn().mockResolvedValue({ kind: "cancelled", conversationId }),
+      };
+      const mockEvent = {
+        // biome-ignore lint/suspicious/noExplicitAny: minimal event-creator stub
+        create: vi.fn((data: any) => ({ name: "inbound/arrived", data })),
+      } as unknown as typeof inboundArrived;
+      const transport = createTransport({
+        channelId: "ch-1",
+        defaultUserId: ownerUserId,
+        defaultProfileId: "profile-1",
+        transportStore,
+        agentStore,
+        // biome-ignore lint/suspicious/noExplicitAny: minimal CodingStore stub
+        codingStore: codingStore as any,
+        inngest,
+        inboundArrived: mockEvent,
+        // biome-ignore lint/suspicious/noExplicitAny: AttachmentStore not exercised here
+        attachments: { upload: vi.fn(), download: vi.fn() } as any,
+        idleTimeoutMs: 0,
+      });
+      return { transport, codingStore, inngestSend };
+    }
+
+    it("approvePlan: success path stamps approval, emits coding/task/plan-approved", async () => {
+      const { transport, codingStore, inngestSend } = buildTransport({
+        task: { conversationId },
+        conversation: { userId: ownerUserId },
+        tapperUserId: ownerUserId,
+      });
+
+      const res = await transport.coding.approvePlan(taskId, "owner-tg-id");
+
+      expect(res.isOk()).toBe(true);
+      expect(codingStore.approvePlanIfPending).toHaveBeenCalledWith(taskId, expect.any(Date));
+      expect(inngestSend).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "coding/task/plan-approved",
+          data: expect.objectContaining({ taskId, approvedAt: expect.any(String) }),
+        }),
+      );
+    });
+
+    it("approvePlan: identity_rejected when tapper isn't the conversation owner — no store write, no event", async () => {
+      const approve = vi.fn();
+      const { transport, inngestSend } = buildTransport({
+        task: { conversationId },
+        conversation: { userId: ownerUserId },
+        tapperUserId: "different-user",
+        approvePlanIfPending: approve,
+      });
+
+      const res = await transport.coding.approvePlan(taskId, "stranger-tg-id");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+      expect(approve).not.toHaveBeenCalled();
+      expect(inngestSend).not.toHaveBeenCalled();
+    });
+
+    it("approvePlan: identity_rejected when resolveUser returns null", async () => {
+      const { transport } = buildTransport({
+        task: { conversationId },
+        conversation: { userId: ownerUserId },
+        tapperUserId: null,
+      });
+      const res = await transport.coding.approvePlan(taskId, "ghost-tg-id");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    });
+
+    it("approvePlan: task_already_approved on double-tap", async () => {
+      const { transport, inngestSend } = buildTransport({
+        task: { conversationId },
+        conversation: { userId: ownerUserId },
+        tapperUserId: ownerUserId,
+        approvePlanIfPending: vi
+          .fn()
+          .mockResolvedValue({ kind: "already_approved", approvedAt: new Date() }),
+      });
+
+      const res = await transport.coding.approvePlan(taskId, "owner-tg-id");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "task_already_approved", taskId });
+      expect(inngestSend).not.toHaveBeenCalled();
+    });
+
+    it("approvePlan: task_not_found when codingStore.getTask returns null", async () => {
+      const { transport } = buildTransport({
+        task: null,
+        conversation: { userId: ownerUserId },
+        tapperUserId: ownerUserId,
+      });
+      const res = await transport.coding.approvePlan(taskId, "owner-tg-id");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "task_not_found", taskId });
+    });
+
+    it("approvePlan: operation_not_permitted when task has no conversationId (automated trigger)", async () => {
+      const { transport } = buildTransport({
+        task: { conversationId: null },
+        conversation: { userId: ownerUserId },
+        tapperUserId: ownerUserId,
+      });
+      const res = await transport.coding.approvePlan(taskId, "owner-tg-id");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "operation_not_permitted" });
+    });
+
+    it("cancelTask: success path passes the reason through to the store", async () => {
+      const cancel = vi.fn().mockResolvedValue({ kind: "cancelled", conversationId });
+      const { transport } = buildTransport({
+        task: { conversationId },
+        conversation: { userId: ownerUserId },
+        tapperUserId: ownerUserId,
+        cancelTaskIfActive: cancel,
+      });
+
+      const res = await transport.coding.cancelTask(taskId, "owner-tg-id", "user cancelled");
+      expect(res.isOk()).toBe(true);
+      expect(cancel).toHaveBeenCalledWith(taskId, "user cancelled");
+    });
+
+    it("cancelTask: identity_rejected blocks store call", async () => {
+      const cancel = vi.fn();
+      const { transport } = buildTransport({
+        task: { conversationId },
+        conversation: { userId: ownerUserId },
+        tapperUserId: "different-user",
+        cancelTaskIfActive: cancel,
+      });
+      const res = await transport.coding.cancelTask(taskId, "stranger-tg-id", "x");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+      expect(cancel).not.toHaveBeenCalled();
+    });
+
+    it("cancelTask: task_already_terminal when the store says so", async () => {
+      const cancel = vi.fn().mockResolvedValue({ kind: "already_terminal", status: "failed" });
+      const { transport } = buildTransport({
+        task: { conversationId },
+        conversation: { userId: ownerUserId },
+        tapperUserId: ownerUserId,
+        cancelTaskIfActive: cancel,
+      });
+      const res = await transport.coding.cancelTask(taskId, "owner-tg-id", "x");
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "task_already_terminal",
+        taskId,
+        status: "failed",
+      });
+    });
+
+    it("returns sandbox_disabled when no codingStore is supplied", async () => {
+      const { transport } = setup();
+      const a = await transport.coding.approvePlan(taskId, "x");
+      expect(a._unsafeUnwrapErr()).toEqual({ code: "sandbox_disabled" });
+      const c = await transport.coding.cancelTask(taskId, "x", "y");
+      expect(c._unsafeUnwrapErr()).toEqual({ code: "sandbox_disabled" });
+    });
+  });
 });

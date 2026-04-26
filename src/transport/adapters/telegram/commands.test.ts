@@ -6,6 +6,7 @@ import {
   handleEnd,
   handleModel,
   handleName,
+  handlePlanCallback,
   handleProfile,
   handleResume,
   handleResumeCallback,
@@ -437,5 +438,114 @@ describe("handleResumeCallback", () => {
     const ctx = mkCtx();
     await handleResumeCallback(transport, ctx, uuid);
     expect(transport.resumeConversation).toHaveBeenCalledWith("42", "1", { conversationId: uuid });
+  });
+});
+
+describe("handlePlanCallback", () => {
+  const taskId = "019d0000-0000-7000-8000-000000000001";
+
+  it("Approve dispatches to coding.approvePlan and returns approval text + toast", async () => {
+    const approve = vi.fn().mockResolvedValue(ok({ taskId }));
+    const transport = transportWith({
+      coding: {
+        approvePlan: approve,
+        cancelTask: vi.fn(),
+      },
+    });
+
+    const outcome = await handlePlanCallback(transport, { taskId, action: "approve" }, "user-tg-1");
+
+    expect(approve).toHaveBeenCalledWith(taskId, "user-tg-1");
+    expect(outcome.editText).toMatch(/Plan approved/);
+    expect(outcome.toast).toBe("Approved");
+    expect(outcome.followUp).toBeUndefined();
+  });
+
+  it("Cancel dispatches to coding.cancelTask with a reason and clears the keyboard", async () => {
+    const cancel = vi.fn().mockResolvedValue(ok({ taskId }));
+    const transport = transportWith({
+      coding: {
+        approvePlan: vi.fn(),
+        cancelTask: cancel,
+      },
+    });
+
+    const outcome = await handlePlanCallback(transport, { taskId, action: "cancel" }, "user-tg-1");
+
+    expect(cancel).toHaveBeenCalledWith(taskId, "user-tg-1", "user cancelled the plan");
+    expect(outcome.editText).toMatch(/Plan cancelled/);
+    expect(outcome.toast).toBe("Cancelled");
+  });
+
+  it("Revise cancels the task AND posts a follow-up prompt for the user's revisions", async () => {
+    const cancel = vi.fn().mockResolvedValue(ok({ taskId }));
+    const transport = transportWith({
+      coding: {
+        approvePlan: vi.fn(),
+        cancelTask: cancel,
+      },
+    });
+
+    const outcome = await handlePlanCallback(transport, { taskId, action: "revise" }, "user-tg-1");
+
+    expect(cancel).toHaveBeenCalledWith(taskId, "user-tg-1", "user requested revisions");
+    expect(outcome.editText).toMatch(/Plan revised/);
+    expect(outcome.followUp).toMatch(/what you'd like changed/);
+    expect(outcome.toast).toBe("Revising");
+  });
+
+  it("identity_rejected from Transport surfaces an unauthorized message — no state change attempted twice", async () => {
+    const approve = vi.fn().mockResolvedValue(err({ code: "identity_rejected" as const }));
+    const transport = transportWith({
+      coding: {
+        approvePlan: approve,
+        cancelTask: vi.fn(),
+      },
+    });
+
+    const outcome = await handlePlanCallback(
+      transport,
+      { taskId, action: "approve" },
+      "wrong-user",
+    );
+
+    expect(approve).toHaveBeenCalledTimes(1);
+    expect(outcome.editText).toMatch(/not authorized/);
+    expect(outcome.toast).toMatch(/not authorized/);
+  });
+
+  it("double-tap Approve gets task_already_approved (idempotent at the Transport boundary)", async () => {
+    const approve = vi
+      .fn()
+      .mockResolvedValue(err({ code: "task_already_approved" as const, taskId }));
+    const transport = transportWith({
+      coding: {
+        approvePlan: approve,
+        cancelTask: vi.fn(),
+      },
+    });
+
+    const outcome = await handlePlanCallback(transport, { taskId, action: "approve" }, "user-tg-1");
+
+    expect(outcome.editText).toMatch(/already approved/);
+    // Toast and editText match — both come from errorMessage(error.code).
+    expect(outcome.toast).toBe(outcome.editText);
+  });
+
+  it("Cancel after task is already terminal surfaces task_already_terminal", async () => {
+    const cancel = vi
+      .fn()
+      .mockResolvedValue(err({ code: "task_already_terminal" as const, taskId, status: "failed" }));
+    const transport = transportWith({
+      coding: {
+        approvePlan: vi.fn(),
+        cancelTask: cancel,
+      },
+    });
+
+    const outcome = await handlePlanCallback(transport, { taskId, action: "cancel" }, "user-tg-1");
+
+    expect(outcome.editText).toMatch(/already finished/);
+    expect(outcome.editText).toMatch(/failed/);
   });
 });
