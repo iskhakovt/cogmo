@@ -171,12 +171,12 @@ CREATE TYPE coding_task_status AS ENUM (
 coding_tasks (
   id                      UUID v7 PK,
   repo_id                 UUID NOT NULL REFERENCES coding_repos(id),
+  conversation_id         UUID,                                   -- triggering conversation; null for automated triggers (evolution, signal_pipeline). Not declared as an FK across module boundaries.
   goal                    TEXT NOT NULL,                          -- the task description (user-authored or machine-authored)
   trigger_source          coding_trigger_source NOT NULL,         -- determines gating (plan approval path)
   trigger_ref             TEXT,                                   -- optional pointer into the originating subsystem (evolution proposal id, signal batch id)
   backend                 coding_backend NOT NULL,
-  branch                  TEXT NOT NULL,                          -- 'cogmo/<task-id-short>' or derived from goal
-  worktree_path           TEXT NOT NULL,                          -- host path
+  worktree_assignment     JSONB,                                  -- WorktreeAssignmentSchema = { branch, worktreePath }; null until allocate-worktree step runs. Atomic by Zod-on-read-and-write — no half-allocated state.
   session_id              TEXT,                                   -- CLI session for resume
   container_id            UUID REFERENCES containers(id),         -- sandbox.md
   allow_privileged_runc   BOOLEAN NOT NULL,                       -- compat escape hatch; explicit at insert (no default)

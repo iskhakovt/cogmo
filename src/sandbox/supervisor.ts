@@ -260,6 +260,11 @@ export class LocalInProcessSandbox implements Sandbox {
         reject(err);
       });
     });
+    // Suppress Node's unhandled-rejection process crash if the caller never
+    // awaits wait() (e.g. exec started but caller bailed before processing
+    // events). The error stays observable through wait() and through the
+    // destroyed stdout/stderr streams.
+    exitPromise.catch(() => {});
 
     const handle: ExecHandle = {
       stdout: stdout as Readable,

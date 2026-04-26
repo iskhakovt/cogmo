@@ -259,7 +259,9 @@ describe("runCodingTask", () => {
     // not a literal path (the id-short is whatever UUIDv7 the DB generated).
     expect(createCalls[0].worktreePath).toContain(`${baseDir}/worktrees/cogmo/`);
     // Persisted worktreeAssignment carries both fields atomically.
-    expect(reloaded?.worktreeAssignment?.branch).toMatch(/^cogmo\/[a-f0-9-]{8}$/);
+    // 12 hex chars, dashes stripped — covers the full 48-bit UUIDv7 timestamp
+    // ms portion to avoid prefix collisions on rapid-fire task creation.
+    expect(reloaded?.worktreeAssignment?.branch).toMatch(/^cogmo\/[a-f0-9]{12}$/);
     expect(reloaded?.worktreeAssignment?.worktreePath).toBe(createCalls[0].worktreePath);
 
     expect(planStream.text).toEqual(["## Plan\n", "1. Do X\n"]);

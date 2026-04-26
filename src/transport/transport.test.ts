@@ -633,13 +633,14 @@ describe("createTransport", () => {
     });
 
     it("remove blocks when active tasks exist", async () => {
-      const removeRepo = vi.fn();
+      const removeRepoIfIdle = vi.fn().mockResolvedValue({ activeTasks: 2 });
       const transport = setupWithCoding({
         listRepos: vi.fn(),
         insertRepo: vi.fn(),
         getRepoByName: vi.fn().mockResolvedValue({ id: "r1", name: "cogmo" }),
-        countActiveTasksForRepo: vi.fn().mockResolvedValue(2),
-        removeRepo,
+        countActiveTasksForRepo: vi.fn(),
+        removeRepo: vi.fn(),
+        removeRepoIfIdle,
       });
       const res = await transport.repos.remove("cogmo");
       expect(res._unsafeUnwrapErr()).toEqual({
@@ -647,21 +648,22 @@ describe("createTransport", () => {
         name: "cogmo",
         activeTasks: 2,
       });
-      expect(removeRepo).not.toHaveBeenCalled();
+      expect(removeRepoIfIdle).toHaveBeenCalledWith("r1");
     });
 
     it("remove deletes when no active tasks", async () => {
-      const removeRepo = vi.fn().mockResolvedValue(undefined);
+      const removeRepoIfIdle = vi.fn().mockResolvedValue(null);
       const transport = setupWithCoding({
         listRepos: vi.fn(),
         insertRepo: vi.fn(),
         getRepoByName: vi.fn().mockResolvedValue({ id: "r1", name: "cogmo" }),
-        countActiveTasksForRepo: vi.fn().mockResolvedValue(0),
-        removeRepo,
+        countActiveTasksForRepo: vi.fn(),
+        removeRepo: vi.fn(),
+        removeRepoIfIdle,
       });
       const res = await transport.repos.remove("cogmo");
       expect(res.isOk()).toBe(true);
-      expect(removeRepo).toHaveBeenCalledWith("r1");
+      expect(removeRepoIfIdle).toHaveBeenCalledWith("r1");
     });
   });
 });

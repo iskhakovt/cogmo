@@ -32,6 +32,12 @@ let docker: Docker;
 let workspaceTmp: string;
 const homeVolumes: string[] = [];
 const sandboxes: LocalInProcessSandbox[] = [];
+/**
+ * Instance ids this test file created — used to scope `afterEach` cleanup
+ * so a failing test only deletes containers tagged with one of these
+ * instance ids, never containers from other test files running in parallel.
+ */
+const testFileInstanceIds: string[] = [];
 
 beforeAll(async () => {
   ({ db, close } = await createTestDatabase());
@@ -56,17 +62,21 @@ beforeAll(async () => {
 }, 120_000);
 
 afterEach(async () => {
-  // Belt-and-suspenders: remove anything labelled cogmo.managed=true to
-  // prevent a failing test from leaving state behind for the next one.
-  const leftover = await docker.listContainers({
-    all: true,
-    filters: { label: [`${LABEL_MANAGED}=true`] },
-  });
-  for (const c of leftover) {
-    await docker
-      .getContainer(c.Id)
-      .remove({ force: true })
-      .catch(() => {});
+  // Belt-and-suspenders: remove containers tagged with any instance id
+  // this test file created. Scoped (not cogmo.managed=true alone) so we
+  // never clobber containers created by other integration test files
+  // running in parallel.
+  for (const instanceId of testFileInstanceIds) {
+    const leftover = await docker.listContainers({
+      all: true,
+      filters: { label: [`${LABEL_MANAGED}=true`, `${LABEL_INSTANCE}=${instanceId}`] },
+    });
+    for (const c of leftover) {
+      await docker
+        .getContainer(c.Id)
+        .remove({ force: true })
+        .catch(() => {});
+    }
   }
 });
 
@@ -84,6 +94,7 @@ afterAll(async () => {
 
 async function bootSandbox(): Promise<{ sandbox: LocalInProcessSandbox; instanceId: string }> {
   const inst = await store.insertInstance({ host: "test-host", pid: process.pid });
+  testFileInstanceIds.push(inst.id);
   const sandbox = await LocalInProcessSandbox.create({
     docker,
     store,

@@ -101,6 +101,15 @@ export interface CodingStore {
   /** Delete a repo. Caller is responsible for cleaning up associated tasks first. */
   removeRepo(id: string): Promise<void>;
 
+  /**
+   * Atomic "delete if no active tasks" — counts active tasks and deletes the
+   * repo in one transaction so a concurrent `insertTask` between the two
+   * checks can't slip past. Returns the active count if non-zero (caller
+   * surfaces to the user); returns null on successful delete; returns null
+   * when the repo doesn't exist (caller treats as not-found above this layer).
+   */
+  removeRepoIfIdle(id: string): Promise<{ activeTasks: number } | null>;
+
   // --- Tasks ---
 
   /**
@@ -154,7 +163,15 @@ export interface CodingStore {
   /** Persist the PR URL once the PR is opened. */
   setTaskPrUrl(id: string, prUrl: string): Promise<void>;
 
-  /** Merge new resource-usage fields into the JSONB column. */
+  /**
+   * **Replace** (not merge) the resource_usage JSONB column with the
+   * supplied object. Slice 1 only writes once per task, so replace is
+   * fine; once slice 2+ stamps `memory_bytes` at task start AND
+   * `tokens_*` later from `result` events, this needs to become a
+   * SQL `||` JSONB merge OR the contract changes to require the caller
+   * to load+merge+write. Bug pre-empted; landing the merge for the
+   * single-write slice would be premature.
+   */
   setTaskResourceUsage(id: string, usage: ResourceUsage): Promise<void>;
 
   /**
@@ -233,6 +250,28 @@ export class DrizzleCodingStore implements CodingStore {
   async removeRepo(id: string): Promise<void> {
     await this.#db.transaction(async (tx) => {
       await tx.delete(codingRepos).where(eq(codingRepos.id, id));
+    });
+  }
+
+  async removeRepoIfIdle(id: string): Promise<{ activeTasks: number } | null> {
+    return this.#db.transaction(async (tx) => {
+      // Verify the repo exists inside the transaction so a concurrent
+      // `removeRepo` racing with us doesn't leave the caller misreporting.
+      const existing = await tx
+        .select({ id: codingRepos.id })
+        .from(codingRepos)
+        .where(eq(codingRepos.id, id))
+        .limit(1);
+      if (existing.length === 0) return null;
+      const conditions = TERMINAL_STATUSES.map((s) => ne(codingTasks.status, s));
+      const countRows = await tx
+        .select({ value: count() })
+        .from(codingTasks)
+        .where(and(eq(codingTasks.repoId, id), ...conditions));
+      const activeTasks = countRows[0]?.value ?? 0;
+      if (activeTasks > 0) return { activeTasks };
+      await tx.delete(codingRepos).where(eq(codingRepos.id, id));
+      return null;
     });
   }
 

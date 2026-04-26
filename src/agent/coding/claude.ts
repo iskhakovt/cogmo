@@ -1,8 +1,11 @@
 import { z } from "zod";
+import { logger } from "../../logger.js";
 import type { TaskContainerHandle } from "../../sandbox/index.js";
 import type { BackendCallContext, BackendUsage, CodingBackend, CodingEvent } from "./backend.js";
 import { readJsonl } from "./jsonl.js";
 import { buildPlanPrompt } from "./prompt.js";
+
+const log = logger.child({ component: "coding.claude" });
 
 /**
  * Subset of Claude Code's stream-json events we read. Schema is permissive
@@ -116,6 +119,26 @@ async function* runClaude(
   };
   exec.stdin.write(`${JSON.stringify(userMessage)}\n`);
   exec.stdin.end();
+
+  // Drain stderr in the background — the CLI emits diagnostics here, and
+  // an unconsumed PassThrough buffer would grow unbounded for the run
+  // duration. Pipe each line to the logger at warn level (claude doesn't
+  // distinguish severity on stderr; treating everything as warn surfaces
+  // it without being noisy in the success path).
+  void (async () => {
+    let buf = "";
+    for await (const chunk of exec.stderr) {
+      buf += chunk.toString();
+      let nl = buf.indexOf("\n");
+      while (nl !== -1) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line.trim()) log.warn({ stderr: line.trim() }, "claude stderr");
+        nl = buf.indexOf("\n");
+      }
+    }
+    if (buf.trim()) log.warn({ stderr: buf.trim() }, "claude stderr");
+  })();
 
   let plan = "";
   let usage: BackendUsage | undefined;

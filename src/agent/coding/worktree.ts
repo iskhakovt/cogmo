@@ -77,9 +77,21 @@ export async function allocateWorktree(
 /**
  * Remove a worktree (best effort — used in teardown). `--force` covers
  * dirty worktrees that the supervisor decided not to preserve.
+ *
+ * When the worktree directory is already gone but git still tracks it in
+ * `.git/worktrees/<name>` (typical after a container crash that wiped the
+ * mount), `worktree remove` fails with "worktree is locked" or "worktree
+ * is missing" — `worktree prune` cleans up the stale metadata instead.
+ * Without this, a later `allocateWorktree` at the same path would fail.
  */
 export async function removeWorktree(repoPath: string, worktreePath: string): Promise<void> {
-  if (!existsSync(worktreePath)) return;
+  if (!existsSync(worktreePath)) {
+    // Path is gone — fall back to prune to clear any stale metadata.
+    await git(repoPath, ["worktree", "prune"]).catch((err) => {
+      log.warn({ err: (err as Error).message, worktreePath }, "git worktree prune failed");
+    });
+    return;
+  }
   await git(repoPath, ["worktree", "remove", "--force", worktreePath]).catch((err) => {
     log.warn({ err: (err as Error).message, worktreePath }, "git worktree remove failed");
   });

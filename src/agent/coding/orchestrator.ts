@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import type { Inngest } from "inngest";
 import { codingTaskStart } from "../../inngest/events.js";
 import type { StepRun } from "../../inngest/index.js";
@@ -108,6 +108,9 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   // mutable so the rest of the function reads it without re-loading the row.
   // Single null check covers both fields (atomic by Zod schema).
   let assignment = task.worktreeAssignment;
+  // Hoisted out of the try block so the catch can call planStream.fail().
+  // Stays null until openPlanStream has actually returned a handle.
+  let planStream: PlanStreamHandle | null = null;
   try {
     await stepRun("set-status-planning", () =>
       store.updateTaskStatus({ id: taskId, status: "planning" }),
@@ -118,10 +121,28 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       // previous attempt persisted it), re-use; otherwise derive from the
       // task id and persist before the worktree itself is created.
       if (!assignment) {
-        const idShort = taskId.slice(0, 8);
+        // 12 hex chars = 48-bit prefix of the UUIDv7 = the full unix-ms
+        // timestamp portion. Two tasks created in the same millisecond
+        // would still collide (~1 in 16 chance from the next nibble), but
+        // single-user concurrency makes that effectively impossible.
+        // Original 8 chars was just the high-order timestamp bits — every
+        // task in the same ~4096-second window shared a prefix. Bad.
+        const idShort = taskId.replaceAll("-", "").slice(0, 12);
+        const candidatePath = join(worktreesDir, repo.name, idShort);
+        // Defense in depth: refuse to create a worktree outside
+        // worktreesDir even if `repo.name` somehow contains traversal
+        // sequences (`..`, leading `/`, etc.). Repository names should be
+        // validated at registration time too — this is the second line.
+        const root = resolve(worktreesDir);
+        const rel = relative(root, resolve(candidatePath));
+        if (rel.startsWith("..") || rel.startsWith("/") || rel === "") {
+          throw new Error(
+            `worktree path escape: repo.name="${repo.name}" produced path outside worktreesDir`,
+          );
+        }
         assignment = {
           branch: `cogmo/${idShort}`,
-          worktreePath: join(worktreesDir, repo.name, idShort),
+          worktreePath: candidatePath,
         };
         await store.setTaskWorktreeAssignment(taskId, assignment);
       }
@@ -161,7 +182,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     const container = await sandbox.getTaskContainer(created.dockerId);
 
     // ── Non-durable: stream the plan ──
-    const planStream = await openPlanStream(taskId);
+    planStream = await openPlanStream(taskId);
     // Refresh worktreeAssignment onto the task — the prompt template reads
     // task.worktreeAssignment.branch, and the row we loaded before
     // allocate-worktree had it as null.
@@ -206,6 +227,9 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     if (containerCreated) {
       await sandbox.stopTask(taskId).catch(() => {});
     }
+    // Notify the plan stream if it was opened. Best-effort — we're already
+    // in the catch path, don't let a delivery failure mask the original error.
+    await planStream?.fail(reason).catch(() => {});
     return { status: "failed", failureReason: reason };
   }
 }

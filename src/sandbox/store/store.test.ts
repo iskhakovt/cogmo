@@ -207,7 +207,7 @@ describe("DrizzleSandboxStore", () => {
       expect(rowsB.map((r) => r.dockerId)).toEqual(["b1"]);
     });
 
-    it("listContainersForTask returns rows in cascade order (depth ASC for now)", async () => {
+    it("listContainersForTask returns rows in cascade order (depth DESC: children first)", async () => {
       const instanceId = await seedInstance();
       const taskId = "019d0000-0000-7000-8000-000000000010";
       const taskContainer = await store.insertContainer({
@@ -236,8 +236,8 @@ describe("DrizzleSandboxStore", () => {
       });
 
       const rows = await store.listContainersForTask(taskId);
-      expect(rows.map((r) => r.dockerId)).toEqual(["task", "child"]);
-      expect(rows.map((r) => r.depth)).toEqual([0, 1]);
+      expect(rows.map((r) => r.dockerId)).toEqual(["child", "task"]);
+      expect(rows.map((r) => r.depth)).toEqual([1, 0]);
     });
 
     it("supports the parent_id self-reference", async () => {

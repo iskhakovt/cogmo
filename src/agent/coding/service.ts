@@ -69,6 +69,16 @@ export function createCodingService(
         );
       }
 
+      // Slice 1 deliberately skips the per-repo concurrency check
+      // (`repo.maxConcurrentTasks` + `store.countActiveTasksForRepo()`).
+      // Reason: the inline orchestrator runs synchronously inside this
+      // turn and `delegate_coding` is a single-call agent tool — the LLM
+      // can't fan out parallel calls within one turn. The hazard
+      // (unbounded parallel tasks) only becomes real in slice 2 when
+      // the orchestrator becomes a durable Inngest function and
+      // multiple conversations can each kick a task off concurrently.
+      // Admission check lands with that swap.
+
       // Insert a fresh task in `queued` status. Branch + worktree path
       // (jointly: `worktreeAssignment`) are null on insert — derived and
       // persisted by the orchestrator's `allocate-worktree` step. Keeps the

@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
 import {
@@ -96,7 +96,7 @@ export interface SandboxStore {
    */
   listContainersForInstance(instanceId: string): Promise<readonly ContainerRow[]>;
 
-  /** List containers in a root-task scope, ordered by depth DESC for cascade teardown. */
+  /** List containers in a root-task scope, ordered by depth DESC so cascade teardown reaps children before parents. */
   listContainersForTask(rootTaskId: string): Promise<readonly ContainerRow[]>;
 }
 
@@ -258,8 +258,11 @@ export class DrizzleSandboxStore implements SandboxStore {
       const rows = await tx
         .select()
         .from(containers)
+        // depth DESC: callers iterate to tear down children before parents
+        // (a parent reaped first leaves orphaned children that the daemon
+        // refuses to remove because they reference the parent's namespace).
         .where(and(eq(containers.rootTaskId, rootTaskId)))
-        .orderBy(asc(containers.depth));
+        .orderBy(desc(containers.depth));
       return rows.map(parseContainerRow);
     });
   }

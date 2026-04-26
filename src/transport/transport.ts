@@ -519,13 +519,16 @@ export function createTransport(deps: {
       },
       async remove(name) {
         if (!codingStore) return err({ code: "sandbox_disabled" as const });
+        // Resolve name → id outside the atomic check (the name lookup itself
+        // doesn't race meaningfully — names are unique). The active-task
+        // count + delete run inside one transaction in `removeRepoIfIdle`,
+        // so a concurrent `insertTask` can't slip past the count.
         const repo = await codingStore.getRepoByName(name);
         if (!repo) return err({ code: "repo_not_found" as const, name });
-        const activeTasks = await codingStore.countActiveTasksForRepo(repo.id);
-        if (activeTasks > 0) {
-          return err({ code: "repo_in_use" as const, name, activeTasks });
+        const blocked = await codingStore.removeRepoIfIdle(repo.id);
+        if (blocked) {
+          return err({ code: "repo_in_use" as const, name, activeTasks: blocked.activeTasks });
         }
-        await codingStore.removeRepo(repo.id);
         return ok(undefined);
       },
     },
