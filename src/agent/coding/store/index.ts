@@ -18,6 +18,7 @@ export type CodingTaskStatus =
   | "planning"
   | "awaiting_approval"
   | "executing"
+  | "pending_verify"
   | "verifying"
   | "pushed"
   | "pr_open"

@@ -163,9 +163,11 @@ Wiring this into `DefaultPromptSource` is P2 — P1 prompts are hardcoded templa
 -- Enumerated types (Drizzle pgEnum in the store schema)
 CREATE TYPE coding_backend AS ENUM ('claude', 'codex');
 CREATE TYPE coding_trigger_source AS ENUM ('user', 'evolution', 'signal_pipeline');
+-- Naming convention: `awaiting_X` = waiting on a human gate;
+-- `pending_X` = automatic transient (queued for the orchestrator, no human in the loop).
 CREATE TYPE coding_task_status AS ENUM (
   'queued', 'planning', 'awaiting_approval', 'executing',
-  'verifying', 'pushed', 'pr_open', 'failed', 'cancelled'
+  'pending_verify', 'verifying', 'pushed', 'pr_open', 'failed', 'cancelled'
 );
 
 coding_tasks (
@@ -274,7 +276,7 @@ When the user sends a follow-up ("also add X", "now do Y"), Cogmo resolves to re
 
 | Prior task state | Default resolution |
 |-|-|
-| Non-terminal (`planning` / `executing` / `verifying`) | Resume — same task, same branch, same session |
+| Non-terminal (`planning` / `executing` / `pending_verify` / `verifying`) | Resume — same task, same branch, same session |
 | `pr_open`, PR still draft | Ask — follow-up commit on the branch (resume) vs new task |
 | `pr_open`, PR merged | New task, new branch; repo-knowledge from Hindsight carries context |
 | `pr_open`, PR closed unmerged | Ask — retry on the same branch vs new task |

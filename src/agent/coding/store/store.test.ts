@@ -354,11 +354,12 @@ describe("DrizzleCodingStore", () => {
       await mkTask("queued");
       await mkTask("planning");
       await mkTask("executing");
+      await mkTask("pending_verify");
       await mkTask("pr_open");
       await mkTask("failed");
       await mkTask("cancelled");
 
-      expect(await store.countActiveTasksForRepo(repoId)).toBe(3);
+      expect(await store.countActiveTasksForRepo(repoId)).toBe(4);
     });
 
     it("countActiveTasksForRepo scopes by repo", async () => {
