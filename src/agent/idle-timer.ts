@@ -30,20 +30,18 @@ export function createIdleTimer(deps: { idleTimeoutMs: number; transportStore: T
       await step.sleep("idle-wait", `${minutes}m`);
 
       // Timer fired — conversation is idle
-      await step.run("close-sessions", async () => {
+      const { sessionsClosed } = await step.run("close-sessions", async () => {
         const sessions = await transportStore.getActiveSessionsForConversation(conversationId);
         for (const session of sessions) {
           await transportStore.closeSession(session.id);
         }
-        logger.info(
-          { conversationId, sessionsClosed: sessions.length },
-          "conversation idle — sessions closed",
-        );
+        return { sessionsClosed: sessions.length };
       });
+      logger.info({ conversationId, sessionsClosed }, "conversation idle — sessions closed");
 
       await step.sendEvent("emit-idle", conversationIdle.create({ conversationId }));
 
-      return { status: "idle", conversationId };
+      return { status: "idle", conversationId, sessionsClosed };
     },
   );
 }
