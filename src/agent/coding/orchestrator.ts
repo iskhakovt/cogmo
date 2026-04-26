@@ -58,11 +58,15 @@ export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: 
   return inngest.createFunction(
     {
       id: "coding-task-start",
-      // Slice 1: retries=0. The plan-mode session is non-resumable from
-      // mid-stream by us — if Inngest replays mid-streaming, the session_id
-      // captured on the first attempt is stale and the retry would start a
-      // fresh CLI session anyway. Slice 2 introduces explicit resume on a
-      // separate trigger.
+      // Retries stay at 0 even now that the function is wired into Inngest
+      // (slice 2.0d). The plan-mode `claude` session is non-resumable
+      // from mid-stream — if Inngest replays after the session_id is
+      // captured, a retry would start a fresh CLI session that doesn't
+      // match what's persisted, and the user-visible streamed plan would
+      // be replayed too. Failures within this function are terminal for
+      // the task; the user re-delegates if they want another attempt.
+      // Same constraint applies to the slice 2.0f execute function (file
+      // edits inside the container aren't idempotent under retry).
       triggers: [codingTaskStart],
       retries: 0,
       // Sequentialize per task — guards against duplicate fires.
@@ -227,13 +231,11 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   } catch (err) {
     const reason = (err as Error).message;
     log.error({ err, taskId }, "coding task failed");
-    // Catch-path writes deliberately bypass `stepRun`. Slice 1 uses
-    // retries=0 on the Inngest function (the inline orchestrator skips
-    // step boundaries entirely), so wrapping in `stepRun` here would just
-    // add observability noise. Slice 2 raises retries to enable plan
-    // approval via `step.waitForEvent`; at that point this catch needs
-    // to move inside `stepRun("set-status-failed-from-catch", ...)` so
-    // the failure write is exactly-once on retry.
+    // Catch-path writes deliberately bypass `stepRun`. The function runs
+    // with retries=0 (the plan-mode `claude` session is non-resumable
+    // from mid-stream — see the createFunction comment), so wrapping in
+    // `stepRun` here would just add observability noise without any
+    // exactly-once benefit. Revisit if retries ever become non-zero.
     await store
       .updateTaskStatus({ id: taskId, status: "failed", failureReason: reason })
       .catch(() => {});

@@ -1,21 +1,26 @@
+import type { Inngest } from "inngest";
+import { codingTaskStart } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
-import type { Sandbox } from "../../sandbox/index.js";
-import type { ResourceLimits } from "../../sandbox/types.js";
-import type { CodingBackend } from "./backend.js";
-import { runCodingTask, type StepRun } from "./orchestrator.js";
 import type { CodingStore } from "./store/index.js";
 
 const log = logger.child({ component: "coding.service" });
 
 export interface CodingServiceDeps {
   codingStore: CodingStore;
-  /** Slice 1: nullable — when SANDBOX_RUNTIME is unset the sandbox module isn't initialized. */
-  sandbox: Sandbox | null;
-  backend: CodingBackend;
-  devbaseImage: string;
-  defaultResourceLimits: ResourceLimits;
-  taskTtlMs: number;
-  worktreesDir: string;
+  /**
+   * Inngest client used to emit `coding/task/start`. The orchestrator
+   * function ({@link createCodingOrchestrator}) consumes the event and
+   * runs the durable plan flow.
+   */
+  inngest: Inngest;
+  /**
+   * Whether the sandbox module is initialized. The service itself doesn't
+   * touch the sandbox — the orchestrator (running inside Inngest) does.
+   * The flag exists so we can fail fast at delegate time on a dev machine
+   * without `SANDBOX_RUNTIME` set, instead of inserting a task that the
+   * orchestrator immediately marks as failed.
+   */
+  sandboxAvailable: boolean;
 }
 
 export interface DelegateInput {
@@ -23,39 +28,38 @@ export interface DelegateInput {
   repoName: string;
 }
 
-export interface DelegateResult {
-  taskId: string;
-  status: "awaiting_approval" | "executing" | "failed";
-  plan?: string;
-  failureReason?: string;
-}
+export type DelegateResult =
+  | { taskId: string; status: "queued" }
+  | { taskId: null; status: "rejected"; reason: string };
 
 /**
- * Coding namespace on the per-turn `Service`. Slice 1 ships only `delegate`
- * — runs the full plan-only flow inline (no Inngest function) and returns
- * the result to the caller. The agent tool surfaces this to the LLM.
+ * Coding namespace on the per-turn `Service`. `delegate` is a **submit**
+ * call: it inserts a `coding_tasks` row in `queued` status, emits
+ * `coding/task/start`, and returns immediately. The durable orchestrator
+ * picks up the event and drives the task through plan → approval →
+ * execute. Plan and progress messages reach the user via the
+ * `CodingStreamingRegistry` + Telegram delivery (slice 2.0e+g), not via
+ * the tool result.
  *
- * Slice 2+ wires the same logic into a durable Inngest function so plan
- * approval can park the task across sessions; the inline path may stay as
- * a fallback or shrink to a thin "submit" call.
+ * This is a real LLM-facing API change vs slice 1: the tool result no
+ * longer carries the plan text. `DELEGATE_CODING_GUIDANCE` (in
+ * `tool.ts`) tells the model to acknowledge briefly and not speculate
+ * about plan content. Matches the industry pattern for long-running
+ * agent tools (Devin / Cursor background agents / LangGraph
+ * `interrupt`): fast tool return, out-of-band execution, results
+ * surface in subsequent LLM turns via new conversation messages.
  */
 export interface CodingService {
   delegate(input: DelegateInput): Promise<DelegateResult>;
 }
 
-/**
- * Build a `CodingService` scoped to a conversation. The orchestrator's
- * `stepRun` dependency is satisfied with an inline shim (slice 1 runs
- * synchronously inside the agent tool's invocation; durable steps land in
- * slice 2).
- */
 export function createCodingService(
   deps: CodingServiceDeps,
   conversationId: string,
 ): CodingService {
   return {
     async delegate(input: DelegateInput): Promise<DelegateResult> {
-      if (!deps.sandbox) {
+      if (!deps.sandboxAvailable) {
         throw new Error(
           "Coding delegation is unavailable — the sandbox module is not initialized. " +
             "Set SANDBOX_RUNTIME (sysbox in prod, runc for dev/CI) and restart Cogmo.",
@@ -69,20 +73,27 @@ export function createCodingService(
         );
       }
 
-      // Slice 1 deliberately skips the per-repo concurrency check
-      // (`repo.maxConcurrentTasks` + `store.countActiveTasksForRepo()`).
-      // Reason: the inline orchestrator runs synchronously inside this
-      // turn and `delegate_coding` is a single-call agent tool — the LLM
-      // can't fan out parallel calls within one turn. The hazard
-      // (unbounded parallel tasks) only becomes real in slice 2 when
-      // the orchestrator becomes a durable Inngest function and
-      // multiple conversations can each kick a task off concurrently.
-      // Admission check lands with that swap.
+      // Admission check: cap concurrent tasks per repo. Slice 1 skipped
+      // this because the inline orchestrator ran synchronously inside the
+      // turn, so the LLM couldn't fan out parallel calls within one turn.
+      // Slice 2's async submit + durable orchestrator means multiple
+      // conversations (or repeated taps from the same one) could each
+      // trigger a task concurrently — guard before INSERT to avoid
+      // contended worktrees on the same repo.
+      const active = await deps.codingStore.countActiveTasksForRepo(repo.id);
+      if (active >= repo.maxConcurrentTasks) {
+        return {
+          taskId: null,
+          status: "rejected",
+          reason:
+            `Repo "${repo.name}" already has ${active} active task(s) ` +
+            `(limit ${repo.maxConcurrentTasks}). Wait for one to finish or cancel it.`,
+        };
+      }
 
-      // Insert a fresh task in `queued` status. Branch + worktree path
-      // (jointly: `worktreeAssignment`) are null on insert — derived and
-      // persisted by the orchestrator's `allocate-worktree` step. Keeps the
-      // codebase's "DB always generates ids" invariant intact.
+      // Insert in `queued` status. Worktree assignment, container id,
+      // session id, etc. all stay null — the orchestrator's steps fill
+      // them in.
       const task = await deps.codingStore.insertTask({
         repoId: repo.id,
         conversationId,
@@ -92,32 +103,20 @@ export function createCodingService(
         allowPrivilegedRunc: false,
       });
 
-      // Slice 1: run the orchestrator inline. `stepRun` becomes a pass-through
-      // that just invokes the body. Slice 2 swaps this for the durable
-      // Inngest function so plan approval can park across sessions.
-      const inlineStepRun: StepRun = ((_id: string, fn: () => Promise<unknown>) =>
-        fn()) as unknown as StepRun;
-
-      log.info({ taskId: task.id, repo: repo.name, goal: input.goal }, "coding task delegated");
-
-      const result = await runCodingTask({
-        taskId: task.id,
-        deps: {
-          store: deps.codingStore,
-          sandbox: deps.sandbox,
-          backend: deps.backend,
-          devbaseImage: deps.devbaseImage,
-          defaultResourceLimits: deps.defaultResourceLimits,
-          taskTtlMs: deps.taskTtlMs,
-          worktreesDir: deps.worktreesDir,
-        },
-        stepRun: inlineStepRun,
+      // Hand off to the durable orchestrator. Once this event lands the
+      // service has no further role — plan rendering, approval, execute,
+      // and progress all happen out-of-band.
+      await deps.inngest.send({
+        name: codingTaskStart.name,
+        data: { taskId: task.id },
       });
 
-      const out: DelegateResult = { taskId: task.id, status: result.status };
-      if (result.plan !== undefined) out.plan = result.plan;
-      if (result.failureReason !== undefined) out.failureReason = result.failureReason;
-      return out;
+      log.info(
+        { taskId: task.id, repo: repo.name, conversationId, goal: input.goal },
+        "coding task submitted",
+      );
+
+      return { taskId: task.id, status: "queued" };
     },
   };
 }

@@ -24,12 +24,8 @@ function service(coding?: Service["coding"]): Service {
 }
 
 describe("delegate_coding tool", () => {
-  it("calls service.coding.delegate with parsed input", async () => {
-    const delegate = vi.fn(async () => ({
-      taskId: "t-1",
-      status: "awaiting_approval" as const,
-      plan: "## Plan\n1. Do X",
-    }));
+  it("calls service.coding.delegate with parsed input and returns the queued ack", async () => {
+    const delegate = vi.fn(async () => ({ taskId: "t-1", status: "queued" as const }));
     const result = await delegateCodingTool.handler(
       { goal: "refactor steering rules to support per-channel scoping", repo: "cogmo" },
       service({ delegate }),
@@ -41,9 +37,11 @@ describe("delegate_coding tool", () => {
     const parsed = JSON.parse(result);
     expect(parsed.ok).toBe(true);
     expect(parsed.taskId).toBe("t-1");
-    expect(parsed.plan).toBe("## Plan\n1. Do X");
-    expect(parsed.status).toBe("awaiting_approval");
-    expect(parsed.nextStep).toContain("slice 2");
+    expect(parsed.status).toBe("queued");
+    // The async-submit contract: tool result no longer carries a plan.
+    expect(parsed.plan).toBeUndefined();
+    expect(parsed.nextStep).toMatch(/separate message/);
+    expect(parsed.nextStep).toMatch(/don't speculate/);
   });
 
   it("throws a clear error when service.coding is unavailable", async () => {
@@ -55,11 +53,11 @@ describe("delegate_coding tool", () => {
     ).rejects.toThrow(/sandbox module is not initialized/);
   });
 
-  it("returns ok=false with reason on plan failure", async () => {
+  it("returns ok=false with reason on admission rejection", async () => {
     const delegate = vi.fn(async () => ({
-      taskId: "t-2",
-      status: "failed" as const,
-      failureReason: "claude exit code 2",
+      taskId: null,
+      status: "rejected" as const,
+      reason: 'Repo "cogmo" already has 1 active task(s) (limit 1).',
     }));
     const result = await delegateCodingTool.handler(
       { goal: "refactor steering rules to support per-channel scoping", repo: "cogmo" },
@@ -67,8 +65,7 @@ describe("delegate_coding tool", () => {
     );
     const parsed = JSON.parse(result);
     expect(parsed.ok).toBe(false);
-    expect(parsed.taskId).toBe("t-2");
-    expect(parsed.reason).toBe("claude exit code 2");
+    expect(parsed.reason).toMatch(/active task/);
   });
 
   it("rejects too-short goal at the schema layer", async () => {
@@ -85,11 +82,7 @@ describe("delegate_coding tool", () => {
     // triggerSource in the input, the tool's Zod schema strips it before
     // the handler sees it, and the handler never forwards extras to
     // service.coding.delegate.
-    const delegate = vi.fn(async () => ({
-      taskId: "t-1",
-      status: "awaiting_approval" as const,
-      plan: "p",
-    }));
+    const delegate = vi.fn(async () => ({ taskId: "t-1", status: "queued" as const }));
     await delegateCodingTool.handler(
       {
         goal: "refactor steering rules to support per-channel scoping",
