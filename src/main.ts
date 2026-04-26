@@ -47,7 +47,8 @@ async function main() {
   const { startHealthServer } = await import("./health.js");
   const { logger } = await import("./logger.js");
 
-  const { inngest, functions, adapters } = await bootstrap();
+  const { inngest, functions, adapters, sandbox, sandboxStore, sandboxInstanceId } =
+    await bootstrap();
   const healthServer = await startHealthServer();
 
   try {
@@ -77,6 +78,8 @@ async function main() {
     for (const adapter of adapters) {
       await adapter.stop();
     }
+    if (sandbox) await sandbox.shutdown();
+    if (sandboxInstanceId) await sandboxStore.closeInstance(sandboxInstanceId);
     await new Promise<void>((resolve) => healthServer.close(() => resolve()));
   }
 

@@ -1,6 +1,8 @@
+import { isAbsolute } from "node:path";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { JsonValue } from "type-fest";
+import type { CodingStore } from "../agent/coding/store/index.js";
 import { ProfileInUseError, UniqueViolationError } from "../agent/store/errors.js";
 import type { AgentStore, ConversationSummary, Profile } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
@@ -15,6 +17,35 @@ export interface ProfileInput {
   toolSet: JsonValue;
   // summarizationModel / extractionModel are profile-level fields in the DB but not yet exposed
   // via Transport — /profile edit doesn't cover them. Add back here when the dialog does.
+}
+
+/** Summary fields exposed to channel adapters for `/repo list`. */
+export interface RepoSummary {
+  id: string;
+  name: string;
+  localPath: string;
+  defaultBranch: string;
+  remoteUrl: string;
+  verifyCommand: string;
+}
+
+/**
+ * Input for `repos.add` (slice 1 — minimal positional form). FSM dialog with
+ * auto-clone + private-repo PAT injection lands in slice 4 alongside the
+ * push/PR flow that needs credentials.
+ */
+export interface RepoInput {
+  name: string;
+  localPath: string;
+  remoteUrl: string;
+  /** Optional override; defaults to "main" when omitted. */
+  defaultBranch?: string;
+  /**
+   * Optional override; defaults to `"true"` (no-op) so slice-1 plan-only
+   * tasks have something to record. Slice 4's verify+push step needs a real
+   * value and the user can update via `/repo edit` (later) or SQL meanwhile.
+   */
+  verifyCommand?: string;
 }
 
 export interface CurrentConversation {
@@ -34,7 +65,12 @@ export type TransportError =
   | { code: "model_unavailable"; model: string }
   | { code: "alias_taken" }
   | { code: "operation_not_permitted" }
-  | { code: "access_denied"; reason: string };
+  | { code: "access_denied"; reason: string }
+  | { code: "repo_not_found"; name: string }
+  | { code: "repo_name_taken"; name: string }
+  | { code: "repo_in_use"; name: string; activeTasks: number }
+  | { code: "repo_invalid_input"; field: string; reason: string }
+  | { code: "sandbox_disabled" };
 
 /**
  * Transport — the adapter-facing contract for session management and inbound emission.
@@ -108,6 +144,17 @@ export interface Transport {
   models: {
     list(): Promise<ReadonlyArray<string>>;
   };
+
+  /**
+   * Coding-repo registry. Returns `sandbox_disabled` when the sandbox module
+   * isn't initialized (no `SANDBOX_RUNTIME` env). Slice-1.0j ships the
+   * positional surface; FSM dialog with auto-clone is slice 4.
+   */
+  repos: {
+    list(): Promise<Result<ReadonlyArray<RepoSummary>, TransportError>>;
+    add(input: RepoInput): Promise<Result<RepoSummary, TransportError>>;
+    remove(name: string): Promise<Result<void, TransportError>>;
+  };
 }
 
 /**
@@ -119,6 +166,11 @@ export function createTransport(deps: {
   defaultProfileId: string;
   transportStore: TransportStore;
   agentStore: AgentStore;
+  /**
+   * Optional — when undefined, `repos.*` returns `sandbox_disabled`.
+   * Bootstrap supplies it whenever the sandbox module is initialized.
+   */
+  codingStore?: CodingStore;
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
@@ -130,6 +182,7 @@ export function createTransport(deps: {
     defaultProfileId,
     transportStore,
     agentStore,
+    codingStore,
     inngest,
     inboundArrived,
     attachments,
@@ -417,5 +470,119 @@ export function createTransport(deps: {
         return agentStore.listDistinctUserSelectableModels();
       },
     },
+
+    repos: {
+      async list() {
+        if (!codingStore) return err({ code: "sandbox_disabled" as const });
+        const rows = await codingStore.listRepos();
+        return ok(
+          rows.map((r) => ({
+            id: r.id,
+            name: r.name,
+            localPath: r.localPath,
+            defaultBranch: r.defaultBranch,
+            remoteUrl: r.remoteUrl,
+            verifyCommand: r.verifyCommand,
+          })),
+        );
+      },
+      async add(input) {
+        if (!codingStore) return err({ code: "sandbox_disabled" as const });
+        // Input validation — `name` becomes a path segment under
+        // worktreesDir, so it must be a safe identifier. `localPath` must
+        // be absolute (relative would resolve against Cogmo's CWD, which
+        // changes between dev and prod). `remoteUrl` is opaque to slice 1
+        // (we only `git -C localPath` operations), but slice 4 will pass
+        // it to `git push` — empty-string check is enough for now.
+        const validation = validateRepoInput(input);
+        if (validation) return err(validation);
+        try {
+          const row = await codingStore.insertRepo({
+            name: input.name,
+            localPath: input.localPath,
+            defaultBranch: input.defaultBranch ?? "main",
+            remoteUrl: input.remoteUrl,
+            devcontainer: null,
+            allowedBackends: ["claude"],
+            // Slice-1 default: a no-op so plan-only tasks have something to
+            // record. Slice 4's verify+push step needs a real value before
+            // it can use the repo. /repo edit (later) or SQL update for now.
+            verifyCommand: input.verifyCommand ?? "true",
+            taskTokenBudget: 200_000,
+            taskWallTimeSeconds: 1800,
+            maxConcurrentTasks: 1,
+          });
+          return ok({
+            id: row.id,
+            name: row.name,
+            localPath: row.localPath,
+            defaultBranch: row.defaultBranch,
+            remoteUrl: row.remoteUrl,
+            verifyCommand: row.verifyCommand,
+          });
+        } catch (e) {
+          if (e instanceof UniqueViolationError) {
+            return err({ code: "repo_name_taken" as const, name: input.name });
+          }
+          throw e;
+        }
+      },
+      async remove(name) {
+        if (!codingStore) return err({ code: "sandbox_disabled" as const });
+        // Resolve name → id outside the atomic check (the name lookup itself
+        // doesn't race meaningfully — names are unique). The active-task
+        // count + delete run inside one transaction in `removeRepoIfIdle`,
+        // so a concurrent `insertTask` can't slip past the count.
+        const repo = await codingStore.getRepoByName(name);
+        if (!repo) return err({ code: "repo_not_found" as const, name });
+        const result = await codingStore.removeRepoIfIdle(repo.id);
+        switch (result.kind) {
+          case "deleted":
+            return ok(undefined);
+          case "in_use":
+            return err({ code: "repo_in_use" as const, name, activeTasks: result.activeTasks });
+          case "not_found":
+            // Race window: repo existed at getRepoByName but was deleted
+            // between the lookup and the atomic check. Surface as
+            // not_found rather than synthesizing a stale success.
+            return err({ code: "repo_not_found" as const, name });
+        }
+      },
+    },
   };
+}
+
+/**
+ * Validate `RepoInput` for shape constraints that the schema can't enforce
+ * (the DB is text, but we have semantic constraints for filesystem safety).
+ * Returns a `TransportError` to surface, or `null` if input is valid.
+ */
+const REPO_NAME_RE = /^[a-zA-Z0-9._-]+$/;
+function validateRepoInput(input: {
+  name: string;
+  localPath: string;
+  remoteUrl: string;
+}): { code: "repo_invalid_input"; field: string; reason: string } | null {
+  if (!REPO_NAME_RE.test(input.name)) {
+    return {
+      code: "repo_invalid_input",
+      field: "name",
+      reason: "must match [a-zA-Z0-9._-]+ (no path separators, spaces, or shell metacharacters)",
+    };
+  }
+  if (!isAbsolute(input.localPath)) {
+    return {
+      code: "repo_invalid_input",
+      field: "localPath",
+      reason: "must be an absolute path (resolved against Cogmo's CWD otherwise)",
+    };
+  }
+  if (input.remoteUrl.trim() === "") {
+    return {
+      code: "repo_invalid_input",
+      field: "remoteUrl",
+      reason: "must not be empty",
+    };
+  }
+  return null;
 }
