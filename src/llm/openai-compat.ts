@@ -78,7 +78,8 @@ export class OpenAICompatibleProvider implements LlmProvider {
         }
       }
 
-      // Tool calls on assistant messages
+      // OpenAI SDK's ChatCompletionMessage union doesn't surface tool_calls
+      // on every variant we hit at runtime; narrow via runtime check below.
       const toolCalls = (msg as unknown as Record<string, unknown>).tool_calls as
         | Array<{ function: { name: string; arguments: string } }>
         | undefined;
