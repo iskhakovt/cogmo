@@ -74,15 +74,11 @@ export function createObserver(deps: ObserverDeps) {
         });
       });
 
-      if (result.consolidationNeeded) {
-        await step.run("consolidate-rules", async () => {
-          return consolidateRules(conv.profileId, {
-            provider,
-            model,
-            store: agentStore,
-          });
-        });
-      }
+      const consolidation = result.consolidationNeeded
+        ? await step.run("consolidate-rules", () =>
+            consolidateRules(conv.profileId, { provider, model, store: agentStore }),
+          )
+        : null;
 
       // Phase 2: extract facts into long-term memory
       const memoryResult = await step.run("extract-memories", async () => {
@@ -97,6 +93,7 @@ export function createObserver(deps: ObserverDeps) {
         status: "processed",
         conversationId,
         corrections: result,
+        consolidation,
         memories: memoryResult,
       };
     },
