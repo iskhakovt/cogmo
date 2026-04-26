@@ -3,7 +3,7 @@ import { logger } from "../../logger.js";
 import type { TaskContainerHandle } from "../../sandbox/index.js";
 import type { BackendCallContext, BackendUsage, CodingBackend, CodingEvent } from "./backend.js";
 import { readJsonl } from "./jsonl.js";
-import { buildPlanPrompt } from "./prompt.js";
+import { buildExecutePrompt, buildPlanPrompt } from "./prompt.js";
 
 const log = logger.child({ component: "coding.claude" });
 
@@ -12,6 +12,31 @@ const log = logger.child({ component: "coding.claude" });
  * (`passthrough`) — Anthropic adds new fields without bumping the contract,
  * and we only narrow what we depend on.
  */
+/**
+ * Block shapes inside `assistant.message.content` / `user.message.content`.
+ * Anthropic's stream-json reuses the same blocks as the Messages API; we only
+ * narrow the fields we surface as `tool_call` / `tool_result` events. Each
+ * schema is parsed per-block via `safeParse` — unknown block types (text,
+ * thinking, etc.) just fail to match and get skipped.
+ */
+const ToolUseBlockSchema = z
+  .object({
+    type: z.literal("tool_use"),
+    id: z.string(),
+    name: z.string(),
+    input: z.unknown(),
+  })
+  .passthrough();
+
+const ToolResultBlockSchema = z
+  .object({
+    type: z.literal("tool_result"),
+    tool_use_id: z.string(),
+    is_error: z.boolean().optional(),
+    content: z.unknown().optional(),
+  })
+  .passthrough();
+
 const ClaudeEventSchema = z.discriminatedUnion("type", [
   z
     .object({
@@ -34,7 +59,12 @@ const ClaudeEventSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("user"),
-      message: z.unknown().optional(),
+      message: z
+        .object({
+          content: z.array(z.unknown()).optional(),
+        })
+        .passthrough()
+        .optional(),
     })
     .passthrough(),
   z
@@ -72,22 +102,33 @@ const ClaudeEventSchema = z.discriminatedUnion("type", [
     .passthrough(),
 ]);
 
-const PLAN_FLAGS: readonly string[] = [
+/** Flags shared by every `claude -p` invocation regardless of mode. */
+const COMMON_FLAGS: readonly string[] = [
   "-p",
   "--output-format",
   "stream-json",
   "--include-partial-messages",
   "--input-format",
   "stream-json",
-  "--permission-mode",
-  "plan",
   "--verbose",
 ];
+
+const PLAN_FLAGS: readonly string[] = [...COMMON_FLAGS, "--permission-mode", "plan"];
+
+/**
+ * `acceptEdits` auto-allows file edits inside the container without a human
+ * prompt. The container itself is the security boundary — slice 3 layers a
+ * proxy/reaper/cgroup-parent on top; until then, execute mode operates within
+ * sysbox's userns and the per-task container TTL.
+ */
+const EXECUTE_PERMISSION_MODE = "acceptEdits";
 
 interface ClaudeCodeBackendOptions {
   /** Override the binary name. Defaults to `claude` (must be on PATH inside the container). */
   binary?: string;
 }
+
+type RunMode = "plan" | "execute";
 
 export class ClaudeCodeBackend implements CodingBackend {
   #binary: string;
@@ -98,7 +139,24 @@ export class ClaudeCodeBackend implements CodingBackend {
 
   plan(ctx: BackendCallContext): AsyncIterable<CodingEvent> {
     const prompt = buildPlanPrompt(ctx.task, ctx.repo);
-    return runClaude(this.#binary, ctx.container, PLAN_FLAGS, prompt);
+    return runClaude(this.#binary, ctx.container, PLAN_FLAGS, prompt, "plan");
+  }
+
+  execute(ctx: BackendCallContext, sessionId: string): AsyncIterable<CodingEvent> {
+    if (!sessionId) {
+      throw new Error(
+        `ClaudeCodeBackend.execute called for task ${ctx.task.id} without a session id`,
+      );
+    }
+    const prompt = buildExecutePrompt(ctx.repo);
+    const flags = [
+      ...COMMON_FLAGS,
+      "--permission-mode",
+      EXECUTE_PERMISSION_MODE,
+      "--resume",
+      sessionId,
+    ];
+    return runClaude(this.#binary, ctx.container, flags, prompt, "execute");
   }
 }
 
@@ -107,6 +165,7 @@ async function* runClaude(
   container: TaskContainerHandle,
   flags: readonly string[],
   prompt: string,
+  mode: RunMode,
 ): AsyncIterable<CodingEvent> {
   const exec = await container.exec([binary, ...flags], { attachStdin: true });
 
@@ -146,10 +205,19 @@ async function* runClaude(
     }
   })();
 
-  let plan = "";
+  let textBuf = "";
   let usage: BackendUsage | undefined;
   let resultIsError = false;
   let sessionEmitted = false;
+  // Tool-use blocks are surfaced from the consolidated `assistant` message
+  // (which arrives once Claude finishes that turn) rather than from
+  // stream_event content_block_start frames — by the time the consolidated
+  // message lands, `input` is fully assembled, whereas partial-message
+  // frames stream input_json_delta fragments we'd have to reassemble.
+  // `seenToolUseIds` dedupes against the same tool_use being echoed in a
+  // later `result.message` payload (Anthropic occasionally repeats blocks).
+  const seenToolUseIds = new Set<string>();
+  const seenToolResultIds = new Set<string>();
 
   for await (const raw of readJsonl(exec.stdout)) {
     const parsed = ClaudeEventSchema.safeParse(raw);
@@ -171,8 +239,35 @@ async function* runClaude(
         delta?.type === "text_delta" &&
         typeof delta.text === "string"
       ) {
-        plan += delta.text;
+        textBuf += delta.text;
         yield { kind: "text_delta", text: delta.text };
+      }
+      continue;
+    }
+
+    if (event.type === "assistant") {
+      for (const raw of event.message?.content ?? []) {
+        const block = ToolUseBlockSchema.safeParse(raw);
+        if (!block.success) continue;
+        if (seenToolUseIds.has(block.data.id)) continue;
+        seenToolUseIds.add(block.data.id);
+        yield { kind: "tool_call", tool: block.data.name, input: block.data.input };
+      }
+      continue;
+    }
+
+    if (event.type === "user") {
+      for (const raw of event.message?.content ?? []) {
+        const block = ToolResultBlockSchema.safeParse(raw);
+        if (!block.success) continue;
+        if (seenToolResultIds.has(block.data.tool_use_id)) continue;
+        seenToolResultIds.add(block.data.tool_use_id);
+        yield {
+          kind: "tool_result",
+          tool: block.data.tool_use_id,
+          ok: block.data.is_error !== true,
+          ...(typeof block.data.content === "string" && { summary: block.data.content }),
+        };
       }
       continue;
     }
@@ -184,16 +279,14 @@ async function* runClaude(
         ...(event.usage?.output_tokens != null && { outputTokens: event.usage.output_tokens }),
         ...(event.total_cost_usd != null && { costUsd: event.total_cost_usd }),
       };
-      // `--include-partial-messages` already streamed every text delta; the
-      // accumulated buffer IS the plan. No need to re-derive from any final
-      // assistant message.
-      if (!resultIsError && plan.length > 0) {
-        yield { kind: "plan_ready", plan };
+      // Plan mode: `--include-partial-messages` already streamed every text
+      // delta; the accumulated buffer IS the plan. Execute mode: text deltas
+      // are progress narration, not a structured artifact, so we don't emit
+      // plan_ready (the orchestrator persists the diff out-of-band).
+      if (mode === "plan" && !resultIsError && textBuf.length > 0) {
+        yield { kind: "plan_ready", plan: textBuf };
       }
     }
-
-    // assistant / user events carry no info we need beyond what stream_event
-    // already gave us in plan mode (no tool calls, no deltas worth duplicating).
   }
 
   const { exitCode } = await exec.wait();

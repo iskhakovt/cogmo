@@ -35,3 +35,26 @@ export function buildPlanPrompt(task: CodingTaskRow, repo: CodingRepoRow): strin
       "execution. No edits, no commits, no pushes.",
   ].join("\n");
 }
+
+/**
+ * Slice-2 execute-phase prompt. Sent on stdin after `claude --resume <sid>`
+ * loads the prior plan-mode session — Claude already has the goal, repo
+ * context, and its own plan in scrollback. This message just transitions it
+ * from plan mode to execution and reaffirms the boundaries it must respect.
+ */
+export function buildExecutePrompt(repo: CodingRepoRow): string {
+  return [
+    "# Approved",
+    "The plan you proposed has been approved. Proceed with the implementation.",
+    "",
+    "# Reminders",
+    "- Stay on the current branch and inside /workspace.",
+    "- Git credentials are NOT available — do not `git push` or `gh pr create`.",
+    "  Cogmo handles push and PR opening after verifying your work.",
+    "- When you believe the task is done, run the verify command and report",
+    "  the result. If it fails, iterate.",
+    "",
+    "# Verify command",
+    repo.verifyCommand,
+  ].join("\n");
+}

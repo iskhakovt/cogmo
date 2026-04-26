@@ -36,10 +36,18 @@ export interface BackendCallContext {
 }
 
 /**
- * Common surface for both Claude Code and Codex CLIs. Slice 1 ships only
- * `plan` — `execute` and `resume` follow in slices 2/3.
+ * Common surface for both Claude Code and Codex CLIs. Plan + execute land in
+ * slices 1/2; the stream-json permission gate (slice 3) layers on top of
+ * `execute` without changing this contract.
  */
 export interface CodingBackend {
   /** Plan-only run: `--permission-mode plan`, no edits, ends with `plan_ready`. */
   plan(ctx: BackendCallContext): AsyncIterable<CodingEvent>;
+  /**
+   * Execute run resuming a prior session: `--resume <sessionId>
+   * --permission-mode acceptEdits`. Yields text deltas + `tool_call` /
+   * `tool_result` events as the CLI works, ending with `complete`. The session
+   * id comes from `task.session_id`, captured during the plan phase.
+   */
+  execute(ctx: BackendCallContext, sessionId: string): AsyncIterable<CodingEvent>;
 }

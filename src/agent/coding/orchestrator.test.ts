@@ -173,6 +173,10 @@ function backendYielding(events: CodingEvent[]): CodingBackend {
     plan: async function* () {
       for (const ev of events) yield ev;
     },
+    // biome-ignore lint/correctness/useYield: stub never reached in slice-1 orchestrator tests
+    execute: async function* (): AsyncGenerator<CodingEvent> {
+      throw new Error("execute not exercised by these orchestrator tests");
+    },
   };
 }
 

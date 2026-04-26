@@ -210,3 +210,148 @@ describe("ClaudeCodeBackend.plan", () => {
     expect(text.text).toBe("hello");
   });
 });
+
+// Execute mode fixture: Claude resumes a session, narrates ("Adding foo()..."),
+// reads a file, edits it, runs the verify command, and reports success. Tool
+// blocks come from consolidated assistant/user messages; text comes from
+// partial-message deltas. Includes one repeated tool_use block in the result
+// payload to exercise dedup.
+const EXECUTE_FIXTURE = [
+  '{"type":"system","subtype":"init","session_id":"sess-exec-1","model":"claude-sonnet-4"}',
+  '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Adding foo()...\\n"}}}',
+  '{"type":"assistant","message":{"role":"assistant","content":[' +
+    '{"type":"text","text":"Adding foo()..."},' +
+    '{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"/workspace/src/foo.ts"}}' +
+    "]}}",
+  '{"type":"user","message":{"role":"user","content":[' +
+    '{"type":"tool_result","tool_use_id":"toolu_01","content":"export function foo() {}","is_error":false}' +
+    "]}}",
+  '{"type":"assistant","message":{"role":"assistant","content":[' +
+    '{"type":"tool_use","id":"toolu_02","name":"Edit","input":{"file_path":"/workspace/src/foo.ts","new":"return 42"}}' +
+    "]}}",
+  '{"type":"user","message":{"role":"user","content":[' +
+    '{"type":"tool_result","tool_use_id":"toolu_02","content":"edited","is_error":false}' +
+    "]}}",
+  '{"type":"assistant","message":{"role":"assistant","content":[' +
+    '{"type":"tool_use","id":"toolu_03","name":"Bash","input":{"command":"pnpm test"}}' +
+    "]}}",
+  '{"type":"user","message":{"role":"user","content":[' +
+    '{"type":"tool_result","tool_use_id":"toolu_03","content":"all tests passing","is_error":false}' +
+    "]}}",
+  '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Done.\\n"}}}',
+  // Repeat tool_use block in result payload — must be deduped, not re-emitted.
+  '{"type":"assistant","message":{"role":"assistant","content":[' +
+    '{"type":"tool_use","id":"toolu_03","name":"Bash","input":{"command":"pnpm test"}}' +
+    "]}}",
+  '{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.084,"usage":{"input_tokens":3120,"output_tokens":640}}',
+  "",
+].join("\n");
+
+describe("ClaudeCodeBackend.execute", () => {
+  const sessionId = "sess-plan-prior";
+  const taskWithSession = { ...task, sessionId };
+
+  it("emits session, text, tool_call, tool_result, complete — no plan_ready", async () => {
+    const { container } = fakeContainer(EXECUTE_FIXTURE);
+    const backend = new ClaudeCodeBackend();
+    const events = await collect(
+      backend.execute({ task: taskWithSession, repo, container }, sessionId),
+    );
+
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toEqual([
+      "session_started",
+      "text_delta",
+      "tool_call",
+      "tool_result",
+      "tool_call",
+      "tool_result",
+      "tool_call",
+      "tool_result",
+      "text_delta",
+      "complete",
+    ]);
+    expect(kinds).not.toContain("plan_ready");
+
+    const calls = events.filter((e) => e.kind === "tool_call") as Extract<
+      CodingEvent,
+      { kind: "tool_call" }
+    >[];
+    expect(calls.map((c) => c.tool)).toEqual(["Read", "Edit", "Bash"]);
+
+    const results = events.filter((e) => e.kind === "tool_result") as Extract<
+      CodingEvent,
+      { kind: "tool_result" }
+    >[];
+    expect(results.every((r) => r.ok)).toBe(true);
+    expect(results[0].summary).toBe("export function foo() {}");
+
+    const complete = events.at(-1) as Extract<CodingEvent, { kind: "complete" }>;
+    expect(complete.exitCode).toBe(0);
+    expect(complete.isError).toBe(false);
+    expect(complete.usage).toEqual({ inputTokens: 3120, outputTokens: 640, costUsd: 0.084 });
+  });
+
+  it("invokes claude with --resume <sid> and --permission-mode acceptEdits", async () => {
+    const { container } = fakeContainer(EXECUTE_FIXTURE);
+    const backend = new ClaudeCodeBackend();
+    await collect(backend.execute({ task: taskWithSession, repo, container }, sessionId));
+
+    const exec = container.exec as ReturnType<typeof vi.fn>;
+    expect(exec).toHaveBeenCalledTimes(1);
+    const [cmd] = exec.mock.calls[0];
+    expect(cmd[0]).toBe("claude");
+    expect(cmd).toContain("--resume");
+    expect(cmd[cmd.indexOf("--resume") + 1]).toBe(sessionId);
+    expect(cmd).toContain("--permission-mode");
+    expect(cmd[cmd.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
+    expect(cmd).not.toContain("plan");
+  });
+
+  it("sends the execute prompt (not the plan prompt) on stdin", async () => {
+    const { container, stdinChunks } = fakeContainer(EXECUTE_FIXTURE);
+    const backend = new ClaudeCodeBackend();
+    await collect(backend.execute({ task: taskWithSession, repo, container }, sessionId));
+
+    const written = stdinChunks.join("");
+    const parsed = JSON.parse(written.trim());
+    expect(parsed.type).toBe("user");
+    expect(parsed.message.content).toContain("# Approved");
+    expect(parsed.message.content).toContain("Proceed with the implementation");
+    expect(parsed.message.content).toContain(repo.verifyCommand);
+    expect(parsed.message.content).not.toContain("# Task");
+  });
+
+  it("surfaces tool_result with ok=false when is_error is true", async () => {
+    const fixture = [
+      '{"type":"system","subtype":"init","session_id":"sess-err","model":"m"}',
+      '{"type":"assistant","message":{"role":"assistant","content":[' +
+        '{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"false"}}' +
+        "]}}",
+      '{"type":"user","message":{"role":"user","content":[' +
+        '{"type":"tool_result","tool_use_id":"t1","content":"exit 1","is_error":true}' +
+        "]}}",
+      '{"type":"result","subtype":"success","is_error":false}',
+      "",
+    ].join("\n");
+    const { container } = fakeContainer(fixture);
+    const backend = new ClaudeCodeBackend();
+    const events = await collect(
+      backend.execute({ task: taskWithSession, repo, container }, sessionId),
+    );
+    const result = events.find((e) => e.kind === "tool_result") as Extract<
+      CodingEvent,
+      { kind: "tool_result" }
+    >;
+    expect(result.ok).toBe(false);
+    expect(result.summary).toBe("exit 1");
+  });
+
+  it("throws synchronously when sessionId is empty", () => {
+    const { container } = fakeContainer(EXECUTE_FIXTURE);
+    const backend = new ClaudeCodeBackend();
+    expect(() => backend.execute({ task: taskWithSession, repo, container }, "")).toThrow(
+      /without a session id/,
+    );
+  });
+});
