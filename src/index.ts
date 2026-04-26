@@ -209,6 +209,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     defaultProfileId: profile.id,
     transportStore,
     agentStore,
+    codingStore,
     inngest,
     inboundArrived,
     attachments: attachmentStore,

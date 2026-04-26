@@ -490,4 +490,178 @@ describe("createTransport", () => {
       expect(await transport.models.list()).toEqual(["claude-sonnet-4-20250514", "gpt-4o"]);
     });
   });
+
+  describe("repos", () => {
+    function setupWithCoding(codingStore: unknown) {
+      const transportStore = mockTransportStore();
+      const agentStore = mockAgentStore();
+      const inngestSend = vi.fn().mockResolvedValue(undefined);
+      // biome-ignore lint/suspicious/noExplicitAny: minimal Inngest stub for the test boundary
+      const inngest = { send: inngestSend } as any;
+      const mockEvent = {
+        // biome-ignore lint/suspicious/noExplicitAny: minimal event-creator stub for the test boundary
+        create: vi.fn((data: any) => ({ name: "inbound/arrived", data })),
+      } as unknown as typeof inboundArrived;
+      const transport = createTransport({
+        channelId: "ch-1",
+        defaultUserId: "user-1",
+        defaultProfileId: "profile-1",
+        transportStore,
+        agentStore,
+        // biome-ignore lint/suspicious/noExplicitAny: minimal CodingStore stub for the test boundary
+        codingStore: codingStore as any,
+        inngest,
+        inboundArrived: mockEvent,
+        // biome-ignore lint/suspicious/noExplicitAny: AttachmentStore not exercised here
+        attachments: { upload: vi.fn(), download: vi.fn() } as any,
+        idleTimeoutMs: 0,
+      });
+      return transport;
+    }
+
+    it("returns sandbox_disabled when no codingStore is supplied", async () => {
+      const { transport } = setup();
+      const list = await transport.repos.list();
+      expect(list._unsafeUnwrapErr()).toEqual({ code: "sandbox_disabled" });
+      const add = await transport.repos.add({
+        name: "x",
+        localPath: "/p",
+        remoteUrl: "git@x:y/z.git",
+      });
+      expect(add._unsafeUnwrapErr()).toEqual({ code: "sandbox_disabled" });
+      const remove = await transport.repos.remove("x");
+      expect(remove._unsafeUnwrapErr()).toEqual({ code: "sandbox_disabled" });
+    });
+
+    it("list maps store rows to RepoSummary shape", async () => {
+      const codingStore = {
+        listRepos: vi.fn().mockResolvedValue([
+          {
+            id: "r1",
+            name: "cogmo",
+            localPath: "/p",
+            defaultBranch: "main",
+            remoteUrl: "git@x:y/z.git",
+            verifyCommand: "true",
+            devcontainer: null,
+            allowedBackends: ["claude"],
+            taskTokenBudget: 1,
+            taskWallTimeSeconds: 1,
+            maxConcurrentTasks: 1,
+            createdAt: new Date(),
+          },
+        ]),
+        insertRepo: vi.fn(),
+        getRepoByName: vi.fn(),
+        countActiveTasksForRepo: vi.fn(),
+        removeRepo: vi.fn(),
+      };
+      const transport = setupWithCoding(codingStore);
+      const res = await transport.repos.list();
+      expect(res._unsafeUnwrap()[0]).toEqual({
+        id: "r1",
+        name: "cogmo",
+        localPath: "/p",
+        defaultBranch: "main",
+        remoteUrl: "git@x:y/z.git",
+        verifyCommand: "true",
+      });
+    });
+
+    it("add applies slice-1 defaults (verify=true, branch=main, single backend, single concurrent)", async () => {
+      const insertRepo = vi.fn().mockResolvedValue({
+        id: "r1",
+        name: "cogmo",
+        localPath: "/p",
+        defaultBranch: "main",
+        remoteUrl: "git@x:y/z.git",
+        verifyCommand: "true",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        taskTokenBudget: 200_000,
+        taskWallTimeSeconds: 1800,
+        maxConcurrentTasks: 1,
+        createdAt: new Date(),
+      });
+      const transport = setupWithCoding({
+        listRepos: vi.fn(),
+        insertRepo,
+        getRepoByName: vi.fn(),
+        countActiveTasksForRepo: vi.fn(),
+        removeRepo: vi.fn(),
+      });
+      await transport.repos.add({
+        name: "cogmo",
+        localPath: "/p",
+        remoteUrl: "git@x:y/z.git",
+      });
+      const args = insertRepo.mock.calls[0][0];
+      expect(args.defaultBranch).toBe("main");
+      expect(args.verifyCommand).toBe("true");
+      expect(args.allowedBackends).toEqual(["claude"]);
+      expect(args.taskTokenBudget).toBe(200_000);
+      expect(args.maxConcurrentTasks).toBe(1);
+    });
+
+    it("add maps UniqueViolationError to repo_name_taken", async () => {
+      const { UniqueViolationError } = await import("../agent/store/errors.js");
+      const transport = setupWithCoding({
+        listRepos: vi.fn(),
+        insertRepo: vi.fn().mockRejectedValue(new UniqueViolationError("cogmo")),
+        getRepoByName: vi.fn(),
+        countActiveTasksForRepo: vi.fn(),
+        removeRepo: vi.fn(),
+      });
+      const res = await transport.repos.add({
+        name: "cogmo",
+        localPath: "/p",
+        remoteUrl: "git@x:y/z.git",
+      });
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "repo_name_taken", name: "cogmo" });
+    });
+
+    it("remove returns repo_not_found for unknown name", async () => {
+      const transport = setupWithCoding({
+        listRepos: vi.fn(),
+        insertRepo: vi.fn(),
+        getRepoByName: vi.fn().mockResolvedValue(null),
+        countActiveTasksForRepo: vi.fn(),
+        removeRepo: vi.fn(),
+      });
+      const res = await transport.repos.remove("nope");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "repo_not_found", name: "nope" });
+    });
+
+    it("remove blocks when active tasks exist", async () => {
+      const removeRepo = vi.fn();
+      const transport = setupWithCoding({
+        listRepos: vi.fn(),
+        insertRepo: vi.fn(),
+        getRepoByName: vi.fn().mockResolvedValue({ id: "r1", name: "cogmo" }),
+        countActiveTasksForRepo: vi.fn().mockResolvedValue(2),
+        removeRepo,
+      });
+      const res = await transport.repos.remove("cogmo");
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "repo_in_use",
+        name: "cogmo",
+        activeTasks: 2,
+      });
+      expect(removeRepo).not.toHaveBeenCalled();
+    });
+
+    it("remove deletes when no active tasks", async () => {
+      const removeRepo = vi.fn().mockResolvedValue(undefined);
+      const transport = setupWithCoding({
+        listRepos: vi.fn(),
+        insertRepo: vi.fn(),
+        getRepoByName: vi.fn().mockResolvedValue({ id: "r1", name: "cogmo" }),
+        countActiveTasksForRepo: vi.fn().mockResolvedValue(0),
+        removeRepo,
+      });
+      const res = await transport.repos.remove("cogmo");
+      expect(res.isOk()).toBe(true);
+      expect(removeRepo).toHaveBeenCalledWith("r1");
+    });
+  });
 });

@@ -19,6 +19,7 @@ import {
   handleName,
   handleNew,
   handleProfile,
+  handleRepo,
   handleResume,
   handleResumeCallback,
   handleSessions,
@@ -288,6 +289,9 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         "  /profile [list|switch <name>|new <name>|edit <name>|delete <name>]",
         "  /model [<model>]",
         "  /cancel — abort interactive /profile new|edit flow",
+        "",
+        "Coding delegation:",
+        "  /repo [list|add <name> <local_path> <remote_url>|remove <name>]",
       ].join("\n"),
     );
   });
@@ -302,6 +306,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("end", (ctx) => handleEnd(transport, toCmdCtx(ctx)));
   bot.command("profile", (ctx) => handleProfile(transport, toCmdCtx(ctx), profileDialogs));
   bot.command("model", (ctx) => handleModel(transport, toCmdCtx(ctx)));
+  bot.command("repo", (ctx) => handleRepo(transport, toCmdCtx(ctx)));
 
   // Mid-dialog abort for /profile new|edit flows.
   bot.command("cancel", async (ctx) => {

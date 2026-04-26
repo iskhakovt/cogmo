@@ -1,6 +1,7 @@
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { JsonValue } from "type-fest";
+import type { CodingStore } from "../agent/coding/store/index.js";
 import { ProfileInUseError, UniqueViolationError } from "../agent/store/errors.js";
 import type { AgentStore, ConversationSummary, Profile } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
@@ -15,6 +16,35 @@ export interface ProfileInput {
   toolSet: JsonValue;
   // summarizationModel / extractionModel are profile-level fields in the DB but not yet exposed
   // via Transport — /profile edit doesn't cover them. Add back here when the dialog does.
+}
+
+/** Summary fields exposed to channel adapters for `/repo list`. */
+export interface RepoSummary {
+  id: string;
+  name: string;
+  localPath: string;
+  defaultBranch: string;
+  remoteUrl: string;
+  verifyCommand: string;
+}
+
+/**
+ * Input for `repos.add` (slice 1 — minimal positional form). FSM dialog with
+ * auto-clone + private-repo PAT injection lands in slice 4 alongside the
+ * push/PR flow that needs credentials.
+ */
+export interface RepoInput {
+  name: string;
+  localPath: string;
+  remoteUrl: string;
+  /** Optional override; defaults to "main" when omitted. */
+  defaultBranch?: string;
+  /**
+   * Optional override; defaults to `"true"` (no-op) so slice-1 plan-only
+   * tasks have something to record. Slice 4's verify+push step needs a real
+   * value and the user can update via `/repo edit` (later) or SQL meanwhile.
+   */
+  verifyCommand?: string;
 }
 
 export interface CurrentConversation {
@@ -34,7 +64,11 @@ export type TransportError =
   | { code: "model_unavailable"; model: string }
   | { code: "alias_taken" }
   | { code: "operation_not_permitted" }
-  | { code: "access_denied"; reason: string };
+  | { code: "access_denied"; reason: string }
+  | { code: "repo_not_found"; name: string }
+  | { code: "repo_name_taken"; name: string }
+  | { code: "repo_in_use"; name: string; activeTasks: number }
+  | { code: "sandbox_disabled" };
 
 /**
  * Transport — the adapter-facing contract for session management and inbound emission.
@@ -108,6 +142,17 @@ export interface Transport {
   models: {
     list(): Promise<ReadonlyArray<string>>;
   };
+
+  /**
+   * Coding-repo registry. Returns `sandbox_disabled` when the sandbox module
+   * isn't initialized (no `SANDBOX_RUNTIME` env). Slice-1.0j ships the
+   * positional surface; FSM dialog with auto-clone is slice 4.
+   */
+  repos: {
+    list(): Promise<Result<ReadonlyArray<RepoSummary>, TransportError>>;
+    add(input: RepoInput): Promise<Result<RepoSummary, TransportError>>;
+    remove(name: string): Promise<Result<void, TransportError>>;
+  };
 }
 
 /**
@@ -119,6 +164,11 @@ export function createTransport(deps: {
   defaultProfileId: string;
   transportStore: TransportStore;
   agentStore: AgentStore;
+  /**
+   * Optional — when undefined, `repos.*` returns `sandbox_disabled`.
+   * Bootstrap supplies it whenever the sandbox module is initialized.
+   */
+  codingStore?: CodingStore;
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
@@ -130,6 +180,7 @@ export function createTransport(deps: {
     defaultProfileId,
     transportStore,
     agentStore,
+    codingStore,
     inngest,
     inboundArrived,
     attachments,
@@ -415,6 +466,67 @@ export function createTransport(deps: {
     models: {
       async list() {
         return agentStore.listDistinctUserSelectableModels();
+      },
+    },
+
+    repos: {
+      async list() {
+        if (!codingStore) return err({ code: "sandbox_disabled" as const });
+        const rows = await codingStore.listRepos();
+        return ok(
+          rows.map((r) => ({
+            id: r.id,
+            name: r.name,
+            localPath: r.localPath,
+            defaultBranch: r.defaultBranch,
+            remoteUrl: r.remoteUrl,
+            verifyCommand: r.verifyCommand,
+          })),
+        );
+      },
+      async add(input) {
+        if (!codingStore) return err({ code: "sandbox_disabled" as const });
+        try {
+          const row = await codingStore.insertRepo({
+            name: input.name,
+            localPath: input.localPath,
+            defaultBranch: input.defaultBranch ?? "main",
+            remoteUrl: input.remoteUrl,
+            devcontainer: null,
+            allowedBackends: ["claude"],
+            // Slice-1 default: a no-op so plan-only tasks have something to
+            // record. Slice 4's verify+push step needs a real value before
+            // it can use the repo. /repo edit (later) or SQL update for now.
+            verifyCommand: input.verifyCommand ?? "true",
+            taskTokenBudget: 200_000,
+            taskWallTimeSeconds: 1800,
+            maxConcurrentTasks: 1,
+          });
+          return ok({
+            id: row.id,
+            name: row.name,
+            localPath: row.localPath,
+            defaultBranch: row.defaultBranch,
+            remoteUrl: row.remoteUrl,
+            verifyCommand: row.verifyCommand,
+          });
+        } catch (e) {
+          if (e instanceof UniqueViolationError) {
+            return err({ code: "repo_name_taken" as const, name: input.name });
+          }
+          throw e;
+        }
+      },
+      async remove(name) {
+        if (!codingStore) return err({ code: "sandbox_disabled" as const });
+        const repo = await codingStore.getRepoByName(name);
+        if (!repo) return err({ code: "repo_not_found" as const, name });
+        const activeTasks = await codingStore.countActiveTasksForRepo(repo.id);
+        if (activeTasks > 0) {
+          return err({ code: "repo_in_use" as const, name, activeTasks });
+        }
+        await codingStore.removeRepo(repo.id);
+        return ok(undefined);
       },
     },
   };

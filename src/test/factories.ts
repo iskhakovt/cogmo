@@ -190,6 +190,20 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
     models: {
       list: vi.fn().mockResolvedValue([]),
     },
+    repos: {
+      list: vi.fn().mockResolvedValue(ok([])),
+      add: vi.fn().mockResolvedValue(
+        ok({
+          id: "repo-1",
+          name: "cogmo",
+          localPath: "/repos/cogmo",
+          defaultBranch: "main",
+          remoteUrl: "git@github.com:user/cogmo.git",
+          verifyCommand: "true",
+        }),
+      ),
+      remove: vi.fn().mockResolvedValue(ok(undefined)),
+    },
     ...overrides,
   };
 }
