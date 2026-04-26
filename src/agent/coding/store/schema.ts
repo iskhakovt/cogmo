@@ -67,6 +67,12 @@ export const codingTasks = pgTable("coding_tasks", {
   repoId: uuid("repo_id")
     .notNull()
     .references(() => codingRepos.id),
+  // Conversation that triggered this task — null for non-conversation triggers
+  // (evolution, signal_pipeline). Drives `/repo list` scoping and slice-2
+  // Telegram delivery. Not declared as an FK to conversations because the
+  // FK would cross module boundaries (transport store) and the link is
+  // informational, not referential.
+  conversationId: uuid("conversation_id"),
   goal: text("goal").notNull(),
   triggerSource: codingTriggerSource("trigger_source").notNull(),
   triggerRef: text("trigger_ref"), // pointer into the originating subsystem (evolution proposal id, etc.)

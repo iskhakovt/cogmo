@@ -346,5 +346,77 @@ describe("DrizzleCodingStore", () => {
       expect(t.triggerSource).toBe("evolution");
       expect(t.triggerRef).toBe("evo-proposal-123");
     });
+
+    it("conversationId defaults to null when omitted, persists when set", async () => {
+      const repoId = await seedRepo();
+      const noConv = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        branch: "cogmo/no-conv",
+        worktreePath: "/p1",
+        allowPrivilegedRunc: false,
+      });
+      expect(noConv.conversationId).toBeNull();
+
+      const convId = "019d0000-0000-7000-8000-00000000aabb";
+      const withConv = await store.insertTask({
+        repoId,
+        conversationId: convId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        branch: "cogmo/with-conv",
+        worktreePath: "/p2",
+        allowPrivilegedRunc: false,
+      });
+      expect(withConv.conversationId).toBe(convId);
+    });
+
+    it("listTasksForConversation returns rows in createdAt DESC order, scoped to the conversation", async () => {
+      const repoId = await seedRepo();
+      const convA = "019d0000-0000-7000-8000-000000000a01";
+      const convB = "019d0000-0000-7000-8000-000000000b02";
+      const t1 = await store.insertTask({
+        repoId,
+        conversationId: convA,
+        goal: "first",
+        triggerSource: "user",
+        backend: "claude",
+        branch: "b1",
+        worktreePath: "/p1",
+        allowPrivilegedRunc: false,
+      });
+      // Tiny delay so UUIDv7 timestamps differ — PGlite's pg_uuidv7 uses
+      // random bits, not a monotonic counter, so we can't rely on insertion
+      // order to give a strict createdAt ordering inside one ms.
+      await new Promise((r) => setTimeout(r, 5));
+      const t2 = await store.insertTask({
+        repoId,
+        conversationId: convA,
+        goal: "second",
+        triggerSource: "user",
+        backend: "claude",
+        branch: "b2",
+        worktreePath: "/p2",
+        allowPrivilegedRunc: false,
+      });
+      await store.insertTask({
+        repoId,
+        conversationId: convB,
+        goal: "other",
+        triggerSource: "user",
+        backend: "claude",
+        branch: "b3",
+        worktreePath: "/p3",
+        allowPrivilegedRunc: false,
+      });
+
+      const rowsA = await store.listTasksForConversation(convA);
+      expect(rowsA.map((r) => r.id)).toEqual([t2.id, t1.id]);
+      const rowsB = await store.listTasksForConversation(convB);
+      expect(rowsB).toHaveLength(1);
+    });
   });
 });

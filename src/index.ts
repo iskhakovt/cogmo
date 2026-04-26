@@ -3,6 +3,10 @@ import { createFal } from "@ai-sdk/fal";
 import { S3Client } from "@aws-sdk/client-s3";
 import Docker from "dockerode";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
+import { ClaudeCodeBackend } from "./agent/coding/claude.js";
+import { createCodingService } from "./agent/coding/service.js";
+import { DrizzleCodingStore } from "./agent/coding/store/index.js";
+import { DELEGATE_CODING_GUIDANCE, delegateCodingTool } from "./agent/coding/tool.js";
 import { coreMemoryTools } from "./agent/core-memory-tools.js";
 import { createDebounceFunctions, type DebounceConfig } from "./agent/debounce.js";
 import { createObserver } from "./agent/evolution/index.js";
@@ -138,14 +142,49 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     ? createFal({ apiKey: falKey, ...(opts.falFetchOverride && { fetch: opts.falFetchOverride }) })
     : undefined;
   const imageTools = createImageTools(falProvider, attachmentStore);
+
+  // Coding store + service factory — only present when the sandbox module
+  // is initialized. delegate_coding tool is registered unconditionally so
+  // the LLM sees it; it throws a clear error at call time when the sandbox
+  // is unavailable (rather than disappearing from the prompt every other run).
+  const codingStore = new DrizzleCodingStore(db);
+  const codingBackend = new ClaudeCodeBackend();
+  const codingServiceFactory = sandbox
+    ? (conversationId: string) =>
+        createCodingService(
+          {
+            codingStore,
+            sandbox,
+            backend: codingBackend,
+            devbaseImage: env.COGMO_DEVBASE_IMAGE,
+            defaultResourceLimits: { cpus: 2, memory_bytes: 2 * 1024 * 1024 * 1024, pids: 256 },
+            taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
+            worktreesDir: env.COGMO_WORKTREES_DIR,
+          },
+          conversationId,
+        )
+    : undefined;
+
   const tools = createDefaultTools(
-    [...memoryTools, ...webTools, ...fileTools, ...coreMemoryTools, ...imageTools],
+    [
+      ...memoryTools,
+      ...webTools,
+      ...fileTools,
+      ...coreMemoryTools,
+      ...imageTools,
+      delegateCodingTool,
+    ],
     env.USER_TIMEZONE,
   );
   const promptSource = new DefaultPromptSource({
     timezone: env.USER_TIMEZONE,
     toolDefinitions: () => tools.definitions(),
-    serviceGuidance: [MEMORY_PROMPT_GUIDANCE, FILES_PROMPT_GUIDANCE, CORE_MEMORY_PROMPT_GUIDANCE],
+    serviceGuidance: [
+      MEMORY_PROMPT_GUIDANCE,
+      FILES_PROMPT_GUIDANCE,
+      CORE_MEMORY_PROMPT_GUIDANCE,
+      DELEGATE_CODING_GUIDANCE,
+    ],
     getUserContext: async () => {
       const blocks = await agentStore.getCoreMemoryBlocks(user.id);
       if (blocks.length === 0) return null;
@@ -193,6 +232,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     debounceConfig,
     deliveryRouter,
     runStreamingAgentLoop,
+    ...(codingServiceFactory && { codingServiceFactory }),
     ...(profile.summarizationModel && { summarizationModel: profile.summarizationModel }),
   });
 

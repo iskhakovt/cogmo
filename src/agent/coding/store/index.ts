@@ -1,4 +1,4 @@
-import { and, asc, count, eq, ne } from "drizzle-orm";
+import { and, asc, count, desc, eq, ne } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Database } from "../../../db/index.js";
 import {
@@ -46,6 +46,7 @@ export interface CodingRepoRow {
 export interface CodingTaskRow {
   id: string;
   repoId: string;
+  conversationId: string | null;
   goal: string;
   triggerSource: CodingTriggerSource;
   triggerRef: string | null;
@@ -95,9 +96,16 @@ export interface CodingStore {
 
   // --- Tasks ---
 
-  /** Insert a new task in `queued` status. */
+  /**
+   * Insert a new task in `queued` status. `id` may be supplied by the caller
+   * — the delegate-coding flow generates a UUIDv7 client-side so it can
+   * derive `branch` and `worktreePath` before the row exists. When omitted,
+   * the DB default (`uuidv7()`) applies.
+   */
   insertTask(params: {
+    id?: string;
     repoId: string;
+    conversationId?: string | null;
     goal: string;
     triggerSource: CodingTriggerSource;
     triggerRef?: string | null;
@@ -106,6 +114,9 @@ export interface CodingStore {
     worktreePath: string;
     allowPrivilegedRunc: boolean;
   }): Promise<CodingTaskRow>;
+
+  /** List tasks for a conversation, ordered by createdAt DESC (newest first). */
+  listTasksForConversation(conversationId: string): Promise<readonly CodingTaskRow[]>;
 
   getTask(id: string): Promise<CodingTaskRow | null>;
 
@@ -217,7 +228,9 @@ export class DrizzleCodingStore implements CodingStore {
   // --- Tasks ---
 
   async insertTask(params: {
+    id?: string;
     repoId: string;
+    conversationId?: string | null;
     goal: string;
     triggerSource: CodingTriggerSource;
     triggerRef?: string | null;
@@ -231,7 +244,9 @@ export class DrizzleCodingStore implements CodingStore {
         await tx
           .insert(codingTasks)
           .values({
+            ...(params.id !== undefined && { id: params.id }),
             repoId: params.repoId,
+            conversationId: params.conversationId ?? null,
             goal: params.goal,
             triggerSource: params.triggerSource,
             triggerRef: params.triggerRef ?? null,
@@ -244,6 +259,17 @@ export class DrizzleCodingStore implements CodingStore {
           .returning(),
       );
       return parseTaskRow(row);
+    });
+  }
+
+  async listTasksForConversation(conversationId: string): Promise<readonly CodingTaskRow[]> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(codingTasks)
+        .where(eq(codingTasks.conversationId, conversationId))
+        .orderBy(desc(codingTasks.createdAt));
+      return rows.map(parseTaskRow);
     });
   }
 
@@ -339,6 +365,7 @@ function parseTaskRow(row: typeof codingTasks.$inferSelect): CodingTaskRow {
   return {
     id: row.id,
     repoId: row.repoId,
+    conversationId: row.conversationId,
     goal: row.goal,
     triggerSource: row.triggerSource,
     triggerRef: row.triggerRef,

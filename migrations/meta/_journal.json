@@ -78,6 +78,13 @@
       "when": 1777158193137,
       "tag": "0010_dapper_drax",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1777198268626,
+      "tag": "0011_lively_boom_boom",
+      "breakpoints": true
     }
   ]
 }
