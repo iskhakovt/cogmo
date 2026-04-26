@@ -1,6 +1,12 @@
+import { hostname } from "node:os";
 import { createFal } from "@ai-sdk/fal";
 import { S3Client } from "@aws-sdk/client-s3";
+import Docker from "dockerode";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
+import { ClaudeCodeBackend } from "./agent/coding/claude.js";
+import { createCodingService } from "./agent/coding/service.js";
+import { DrizzleCodingStore } from "./agent/coding/store/index.js";
+import { DELEGATE_CODING_GUIDANCE, delegateCodingTool } from "./agent/coding/tool.js";
 import { coreMemoryTools } from "./agent/core-memory-tools.js";
 import { createDebounceFunctions, type DebounceConfig } from "./agent/debounce.js";
 import { createObserver } from "./agent/evolution/index.js";
@@ -26,6 +32,8 @@ import { OpenAICompatibleProvider } from "./llm/openai-compat.js";
 import type { LlmProvider } from "./llm/provider.js";
 import { logger } from "./logger.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
+import { LocalInProcessSandbox, type Sandbox } from "./sandbox/index.js";
+import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
 import { DrizzleSecretsStore, type SecretsStore } from "./secrets/store/index.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
@@ -57,6 +65,33 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
 
   const agentStore = new DrizzleAgentStore(db);
   const transportStore = new DrizzleTransportStore(db);
+  const sandboxStore = new DrizzleSandboxStore(db);
+
+  // Sandbox is opt-in via SANDBOX_RUNTIME — coding-delegation features fail
+  // with a clear error when the env var is unset. No silent fallback.
+  let sandbox: Sandbox | null = null;
+  let sandboxInstanceId: string | null = null;
+  if (env.SANDBOX_RUNTIME) {
+    const docker = new Docker();
+    const instance = await sandboxStore.insertInstance({
+      host: hostname(),
+      pid: process.pid,
+    });
+    sandboxInstanceId = instance.id;
+    sandbox = await LocalInProcessSandbox.create({
+      docker,
+      store: sandboxStore,
+      runtime: env.SANDBOX_RUNTIME,
+      instanceId: instance.id,
+    });
+    const { orphansReaped } = await sandbox.reconcileCrashedInstances(instance.id);
+    if (orphansReaped > 0) {
+      logger.warn({ orphansReaped }, "reaped orphan containers from prior instance(s)");
+    }
+    logger.info({ runtime: env.SANDBOX_RUNTIME, instanceId: instance.id }, "sandbox initialized");
+  } else {
+    logger.info("SANDBOX_RUNTIME unset — sandbox module disabled (coding-delegation unavailable)");
+  }
 
   // Secrets store — required for decrypting provider credentials and channel tokens.
   if (!env.COGMO_MASTER_KEY) {
@@ -107,14 +142,49 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     ? createFal({ apiKey: falKey, ...(opts.falFetchOverride && { fetch: opts.falFetchOverride }) })
     : undefined;
   const imageTools = createImageTools(falProvider, attachmentStore);
+
+  // Coding store + service factory — only present when the sandbox module
+  // is initialized. delegate_coding tool is registered unconditionally so
+  // the LLM sees it; it throws a clear error at call time when the sandbox
+  // is unavailable (rather than disappearing from the prompt every other run).
+  const codingStore = new DrizzleCodingStore(db);
+  const codingBackend = new ClaudeCodeBackend();
+  const codingServiceFactory = sandbox
+    ? (conversationId: string) =>
+        createCodingService(
+          {
+            codingStore,
+            sandbox,
+            backend: codingBackend,
+            devbaseImage: env.COGMO_DEVBASE_IMAGE,
+            defaultResourceLimits: { cpus: 2, memory_bytes: 2 * 1024 * 1024 * 1024, pids: 256 },
+            taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
+            worktreesDir: env.COGMO_WORKTREES_DIR,
+          },
+          conversationId,
+        )
+    : undefined;
+
   const tools = createDefaultTools(
-    [...memoryTools, ...webTools, ...fileTools, ...coreMemoryTools, ...imageTools],
+    [
+      ...memoryTools,
+      ...webTools,
+      ...fileTools,
+      ...coreMemoryTools,
+      ...imageTools,
+      delegateCodingTool,
+    ],
     env.USER_TIMEZONE,
   );
   const promptSource = new DefaultPromptSource({
     timezone: env.USER_TIMEZONE,
     toolDefinitions: () => tools.definitions(),
-    serviceGuidance: [MEMORY_PROMPT_GUIDANCE, FILES_PROMPT_GUIDANCE, CORE_MEMORY_PROMPT_GUIDANCE],
+    serviceGuidance: [
+      MEMORY_PROMPT_GUIDANCE,
+      FILES_PROMPT_GUIDANCE,
+      CORE_MEMORY_PROMPT_GUIDANCE,
+      DELEGATE_CODING_GUIDANCE,
+    ],
     getUserContext: async () => {
       const blocks = await agentStore.getCoreMemoryBlocks(user.id);
       if (blocks.length === 0) return null;
@@ -139,6 +209,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     defaultProfileId: profile.id,
     transportStore,
     agentStore,
+    codingStore,
     inngest,
     inboundArrived,
     attachments: attachmentStore,
@@ -162,6 +233,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     debounceConfig,
     deliveryRouter,
     runStreamingAgentLoop,
+    ...(codingServiceFactory && { codingServiceFactory }),
     ...(profile.summarizationModel && { summarizationModel: profile.summarizationModel }),
   });
 
@@ -188,6 +260,9 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     adapters,
     agentStore,
     transportStore,
+    sandboxStore,
+    sandbox,
+    sandboxInstanceId,
     provider,
     memory,
   };

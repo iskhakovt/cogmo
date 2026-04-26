@@ -23,7 +23,7 @@ Host daemon runs normally. Cogmo adds:
 
 Topology 2 — nested `dockerd` inside the task container — is deferred. Only add it if a specific use case requires a private daemon (rare for personal scale).
 
-## Runtime Selection `[proposed]`
+## Runtime Selection `[confirmed]`
 
 **Default:** `sysbox-runc`. Selected via `SANDBOX_RUNTIME` env var with values `sysbox` (default) or `runc`. No silent fallback — if `SANDBOX_RUNTIME=sysbox` and the runtime isn't registered on the host, Cogmo refuses to start a task. Explicit configuration over magic.
 
@@ -39,7 +39,7 @@ Topology 2 — nested `dockerd` inside the task container — is deferred. Only 
 
 No parity. Coding delegation is a prod/staging feature — local `pnpm dev` does not start the sandbox module and does not need sysbox installed. Developers working on sandbox code run it against a local VM or a dedicated Ubuntu host. Unit tests use plain Docker with no runtime injection.
 
-## Data Model `[proposed]`
+## Data Model `[confirmed]` (slice 1 — `containers` + `cogmo_instances`; `networks` + `volumes` deferred to slice 3)
 
 Owned by `src/sandbox/store/`.
 
@@ -84,7 +84,7 @@ cogmo_instances (
 
 Row inserted in bootstrap before any sandbox operations; `stopped_at` updated on graceful shutdown. Orphan detection joins `containers.instance_id → cogmo_instances.id` — any container tied to a row with non-null `stopped_at`, or a row that was never closed and whose pid no longer exists on the host, is an orphan. Gives an audit trail ("this run started at X, managed N tasks, stopped at Y") and a foundation for multi-host later.
 
-## Label Schema `[proposed]`
+## Label Schema `[confirmed]`
 
 Every container Cogmo creates or proxies gets these Docker labels:
 
@@ -181,7 +181,7 @@ Task teardown:
 2. Closes and removes the socket file.
 3. Removes socket entry from proxy's map.
 
-## Crash Recovery `[proposed]`
+## Crash Recovery `[confirmed]` (instance-label reconcile; in-process map for proxy lands in slice 3)
 
 At Cogmo boot:
 
@@ -291,7 +291,7 @@ tRPC's HTTP client accepts a custom `fetch`, so the Unix-socket case is wired vi
 
 Swap at the `Sandbox` interface boundary. P1 `LocalInProcessSandbox` calls the supervisor module directly; P2 `LocalSidecarSandbox` calls the tRPC client. Consumers (`src/agent/coding/` etc.) see the same `Sandbox` contract — no upstream changes. No data migration: all state lives in PostgreSQL already.
 
-## Module Structure `[proposed]`
+## Module Structure `[confirmed]`
 
 ```text
 src/sandbox/

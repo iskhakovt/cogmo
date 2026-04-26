@@ -9,6 +9,7 @@ import type { AttachmentStore } from "../transport/attachment-store.js";
 import { contentToBlocks, contentToText } from "../transport/content.js";
 import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
+import type { CodingService } from "./coding/service.js";
 import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedImages } from "./extract-images.js";
@@ -32,6 +33,13 @@ export interface HandleMessageDeps {
   debounceConfig: DebounceConfig;
   deliveryRouter: DeliveryRouter;
   runStreamingAgentLoop: (params: StreamingAgentLoopParams) => Promise<AgentLoopResult>;
+  /**
+   * Optional factory that constructs a coding service scoped to this turn's
+   * conversation. Bootstrap supplies it when the sandbox module is
+   * initialized; absent when SANDBOX_RUNTIME is unset (dev without
+   * coding-delegation).
+   */
+  codingServiceFactory?: (conversationId: string) => CodingService;
   summarizationModel?: string;
 }
 
@@ -190,7 +198,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         update: (key, content) => agentStore.upsertCoreMemoryBlock({ userId, key, content }),
       };
 
-      const service = createService(memory, userId, [], fileService, coreMemoryService);
+      const codingService = deps.codingServiceFactory?.(conversationId);
+      const service = createService(
+        memory,
+        userId,
+        [],
+        fileService,
+        coreMemoryService,
+        codingService,
+      );
       const delivery = await deliveryRouter.prepare({
         conversationId,
         runId,

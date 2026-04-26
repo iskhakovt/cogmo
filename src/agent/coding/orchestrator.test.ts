@@ -1,0 +1,426 @@
+import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Database } from "../../db/index.js";
+import type { ExecHandle, Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
+import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
+import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import type { CodingBackend, CodingEvent } from "./backend.js";
+import {
+  type CodingOrchestratorDeps,
+  NULL_PLAN_STREAM,
+  runCodingTask,
+  type StepRun,
+} from "./orchestrator.js";
+import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
+
+const execFileP = promisify(execFile);
+
+let db: Database;
+let close: () => Promise<void>;
+let store: DrizzleCodingStore;
+let sandboxStore: DrizzleSandboxStore;
+let instanceId: string;
+let baseDir: string;
+let repoPath: string;
+
+beforeAll(async () => {
+  ({ db, close } = await createTestDatabase());
+  store = new DrizzleCodingStore(db);
+  sandboxStore = new DrizzleSandboxStore(db);
+
+  baseDir = mkdtempSync(join(tmpdir(), "cogmo-orch-test-"));
+  repoPath = join(baseDir, "repo");
+  await execFileP("git", ["init", "--initial-branch=main", repoPath]);
+  await execFileP("git", ["-C", repoPath, "config", "user.email", "t@t"]);
+  await execFileP("git", ["-C", repoPath, "config", "user.name", "t"]);
+  await execFileP("git", ["-C", repoPath, "config", "commit.gpgsign", "false"]);
+  writeFileSync(join(repoPath, "README.md"), "x");
+  await execFileP("git", ["-C", repoPath, "add", "."]);
+  await execFileP("git", ["-C", repoPath, "commit", "-m", "init"]);
+});
+
+beforeEach(async () => {
+  // Fresh cogmo_instances row per test so the FK from containers.instance_id
+  // is satisfied when the fake sandbox inserts containers rows.
+  instanceId = (await sandboxStore.insertInstance({ host: "test", pid: 1 })).id;
+});
+
+afterEach(async () => {
+  await truncateAll(db);
+});
+
+afterAll(async () => {
+  rmSync(baseDir, { recursive: true, force: true });
+  await close();
+});
+
+// Shim mirroring `step.run`'s signature. Production has Inngest's real
+// step.run (return type Jsonify<T>); tests run the body inline. Cast at
+// the seam — explicitly justified per CLAUDE.md "intentionally invalid
+// input in tests".
+// biome-ignore lint/suspicious/noExplicitAny: test shim bypasses Jsonify wrapping
+const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
+
+const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
+
+async function seedRepo(name = "cogmo"): Promise<CodingRepoRow> {
+  return store.insertRepo({
+    name,
+    localPath: repoPath,
+    defaultBranch: "main",
+    remoteUrl: "git@github.com:user/cogmo.git",
+    devcontainer: null,
+    allowedBackends: ["claude"],
+    verifyCommand: "true",
+    taskTokenBudget: 100_000,
+    taskWallTimeSeconds: 600,
+    maxConcurrentTasks: 1,
+  });
+}
+
+async function seedTask(repo: CodingRepoRow): Promise<CodingTaskRow> {
+  return store.insertTask({
+    repoId: repo.id,
+    goal: "do a thing",
+    triggerSource: "user",
+    backend: "claude",
+    allowPrivilegedRunc: false,
+  });
+}
+
+interface FakeContainerOpts {
+  exec?: ExecHandle;
+}
+
+function fakeSandbox(opts: FakeContainerOpts = {}): {
+  sandbox: Sandbox;
+  createCalls: { rootTaskId: string; image: string; worktreePath: string }[];
+  stopCalls: string[];
+  inspectCalls: string[];
+} {
+  const createCalls: { rootTaskId: string; image: string; worktreePath: string }[] = [];
+  const stopCalls: string[] = [];
+  const inspectCalls: string[] = [];
+
+  let lastContainerHandle: TaskContainerHandle | null = null;
+
+  const sandbox: Sandbox = {
+    healthCheck: async () => ({ ok: true, runtime: "runc" }),
+    reconcileCrashedInstances: async () => ({ orphansReaped: 0 }),
+    createTaskContainer: vi.fn(async (spec) => {
+      createCalls.push({
+        rootTaskId: spec.rootTaskId,
+        image: spec.image,
+        worktreePath: spec.worktreePath,
+      });
+      // Insert a real `containers` row so coding_tasks.container_id FK is
+      // satisfied. Uses the per-test instanceId seeded in beforeEach.
+      const row = await sandboxStore.insertContainer({
+        dockerId: `docker-${Math.random().toString(36).slice(2)}`,
+        parentId: null,
+        rootTaskId: spec.rootTaskId,
+        depth: 0,
+        image: spec.image,
+        runtime: "runc",
+        labels: {
+          "cogmo.managed": "true",
+          "cogmo.instance": instanceId,
+          "cogmo.root_task": spec.rootTaskId,
+          "cogmo.parent": "",
+          "cogmo.depth": "0",
+        },
+        resourceLimits: spec.resourceLimits,
+        ttlExpiresAt: spec.ttl.expiresAt,
+        instanceId,
+      });
+      lastContainerHandle = {
+        containerRowId: row.id,
+        dockerId: row.dockerId,
+        exec: vi.fn(async () => opts.exec ?? noopExec()),
+      };
+      return lastContainerHandle;
+    }),
+    getTaskContainer: vi.fn(async (dockerId) => {
+      inspectCalls.push(dockerId);
+      if (!lastContainerHandle) throw new Error("getTaskContainer called before create");
+      return lastContainerHandle;
+    }),
+    stopTask: vi.fn(async (taskId) => {
+      stopCalls.push(taskId);
+    }),
+    listContainersForTask: async () => [],
+    inspectContainer: async () => ({ status: "running", runtime: "runc" }),
+    shutdown: async () => {},
+  };
+
+  return { sandbox, createCalls, stopCalls, inspectCalls };
+}
+
+function noopExec(): ExecHandle {
+  return {
+    stdout: process.stdin,
+    stderr: process.stdin,
+    wait: async () => ({ exitCode: 0 }),
+  };
+}
+
+function backendYielding(events: CodingEvent[]): CodingBackend {
+  return {
+    plan: async function* () {
+      for (const ev of events) yield ev;
+    },
+  };
+}
+
+interface RecordingPlanStream {
+  text: string[];
+  finalized: string[];
+  failed: string[];
+  handle: import("./orchestrator.js").PlanStreamHandle;
+}
+
+function recordingPlanStream(): RecordingPlanStream {
+  const out: RecordingPlanStream = {
+    text: [],
+    finalized: [],
+    failed: [],
+    // biome-ignore lint/style/noNonNullAssertion: assigned below
+    handle: undefined!,
+  };
+  out.handle = {
+    appendText: async (delta) => {
+      out.text.push(delta);
+    },
+    finalize: async (plan) => {
+      out.finalized.push(plan);
+    },
+    fail: async (reason) => {
+      out.failed.push(reason);
+    },
+  };
+  return out;
+}
+
+function makeDeps(
+  overrides: Partial<CodingOrchestratorDeps> & {
+    sandbox: Sandbox;
+    backend: CodingBackend;
+  },
+): CodingOrchestratorDeps {
+  return {
+    store,
+    devbaseImage: "cogmo/devbase:slice1-test",
+    defaultResourceLimits: RESOURCE_LIMITS,
+    taskTtlMs: 60_000,
+    worktreesDir: join(baseDir, "worktrees"),
+    openPlanStream: async () => NULL_PLAN_STREAM,
+    ...overrides,
+  };
+}
+
+describe("runCodingTask", () => {
+  it("happy path: plan streamed, session_id persisted, status → awaiting_approval (user trigger)", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, createCalls, stopCalls } = fakeSandbox();
+    const planStream = recordingPlanStream();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-AAA" },
+      { kind: "text_delta", text: "## Plan\n" },
+      { kind: "text_delta", text: "1. Do X\n" },
+      { kind: "plan_ready", plan: "## Plan\n1. Do X\n" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+    const deps = makeDeps({
+      sandbox,
+      backend,
+      openPlanStream: async () => planStream.handle,
+    });
+
+    const result = await runCodingTask({ taskId: task.id, deps, stepRun });
+    expect(result.status).toBe("awaiting_approval");
+    expect(result.plan).toBe("## Plan\n1. Do X\n");
+
+    const reloaded = await store.getTask(task.id);
+    expect(reloaded?.status).toBe("awaiting_approval");
+    expect(reloaded?.sessionId).toBe("sess-AAA");
+    expect(reloaded?.plan).toBe("## Plan\n1. Do X\n");
+    expect(reloaded?.containerId).toBeTruthy();
+
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0].rootTaskId).toBe(task.id);
+    expect(createCalls[0].image).toBe("cogmo/devbase:slice1-test");
+    // Worktree path is derived in the orchestrator's allocate-worktree step:
+    // ${worktreesDir}/<repo.name>/<id-short>. Assert the structural contract,
+    // not a literal path (the id-short is whatever UUIDv7 the DB generated).
+    expect(createCalls[0].worktreePath).toContain(`${baseDir}/worktrees/cogmo/`);
+    // Persisted worktreeAssignment carries both fields atomically.
+    // 12 hex chars, dashes stripped — covers the full 48-bit UUIDv7 timestamp
+    // ms portion to avoid prefix collisions on rapid-fire task creation.
+    expect(reloaded?.worktreeAssignment?.branch).toMatch(/^cogmo\/[a-f0-9]{12}$/);
+    expect(reloaded?.worktreeAssignment?.worktreePath).toBe(createCalls[0].worktreePath);
+
+    expect(planStream.text).toEqual(["## Plan\n", "1. Do X\n"]);
+    expect(planStream.finalized).toEqual(["## Plan\n1. Do X\n"]);
+    expect(planStream.failed).toEqual([]);
+    expect(stopCalls).toEqual([]);
+  });
+
+  it("automated trigger (evolution) auto-advances to executing", async () => {
+    const repo = await seedRepo();
+    const task = await store.insertTask({
+      repoId: repo.id,
+      goal: "g",
+      triggerSource: "evolution",
+      triggerRef: "evo-1",
+      backend: "claude",
+      allowPrivilegedRunc: false,
+    });
+    const { sandbox } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-EVO" },
+      { kind: "plan_ready", plan: "auto-plan" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+    // plan_ready needs a non-empty plan and the orchestrator only emits
+    // text_delta into the stream, so plan_ready's plan is what matters.
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+    });
+    expect(result.status).toBe("executing");
+    expect((await store.getTask(task.id))?.status).toBe("executing");
+  });
+
+  it("backend reports error → status=failed, sandbox stopped, plan stream failed", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, stopCalls } = fakeSandbox();
+    const planStream = recordingPlanStream();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-X" },
+      { kind: "text_delta", text: "partial" },
+      { kind: "complete", exitCode: 2, isError: true },
+    ]);
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend, openPlanStream: async () => planStream.handle }),
+      stepRun,
+    });
+    expect(result.status).toBe("failed");
+    expect(result.failureReason).toMatch(/exit code 2/);
+    expect((await store.getTask(task.id))?.status).toBe("failed");
+    expect((await store.getTask(task.id))?.failureReason).toMatch(/exit code 2/);
+    expect((await store.getTask(task.id))?.sessionId).toBe("sess-X");
+    expect(stopCalls).toEqual([task.id]);
+    expect(planStream.failed).toHaveLength(1);
+    expect(planStream.finalized).toEqual([]);
+  });
+
+  it("empty plan with success exit → status=failed (treated as nothing-to-show)", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, stopCalls } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-E" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+    });
+    expect(result.status).toBe("failed");
+    expect((await store.getTask(task.id))?.status).toBe("failed");
+    expect(stopCalls).toEqual([task.id]);
+  });
+
+  it("createTaskContainer throws → status=failed, no stopTask (nothing to stop)", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, stopCalls } = fakeSandbox();
+    (sandbox.createTaskContainer as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("docker daemon down"),
+    );
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend: backendYielding([]) }),
+      stepRun,
+    });
+    expect(result.status).toBe("failed");
+    expect(result.failureReason).toMatch(/docker daemon down/);
+    expect((await store.getTask(task.id))?.status).toBe("failed");
+    expect(stopCalls).toEqual([]);
+  });
+
+  it("worktree allocation failure → status=failed", async () => {
+    // Repo with a non-existent local path so `git worktree add` errors out.
+    const badRepo = await store.insertRepo({
+      name: "bad-path-repo",
+      localPath: "/no/such/repo/path",
+      defaultBranch: "main",
+      remoteUrl: "x",
+      devcontainer: null,
+      allowedBackends: ["claude"],
+      verifyCommand: "true",
+      taskTokenBudget: 1,
+      taskWallTimeSeconds: 1,
+      maxConcurrentTasks: 1,
+    });
+    const badTask = await store.insertTask({
+      repoId: badRepo.id,
+      goal: "g",
+      triggerSource: "user",
+      backend: "claude",
+      allowPrivilegedRunc: false,
+    });
+
+    const { sandbox } = fakeSandbox();
+    const result = await runCodingTask({
+      taskId: badTask.id,
+      deps: makeDeps({ sandbox, backend: backendYielding([]) }),
+      stepRun,
+    });
+    expect(result.status).toBe("failed");
+    expect((await store.getTask(badTask.id))?.status).toBe("failed");
+  });
+
+  it("missing task throws", async () => {
+    const { sandbox } = fakeSandbox();
+    await expect(
+      runCodingTask({
+        taskId: "019d0000-0000-7000-8000-0000000000ff",
+        deps: makeDeps({ sandbox, backend: backendYielding([]) }),
+        stepRun,
+      }),
+    ).rejects.toThrow(/task not found/);
+  });
+
+  it("missing repo throws", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    // Override the store to return null for getRepoById without violating FK.
+    const ghostStore = {
+      ...store,
+      getTask: store.getTask.bind(store),
+      getRepoById: async () => null,
+    } as unknown as typeof store;
+    const { sandbox } = fakeSandbox();
+    await expect(
+      runCodingTask({
+        taskId: task.id,
+        deps: makeDeps({ sandbox, backend: backendYielding([]), store: ghostStore }),
+        stepRun,
+      }),
+    ).rejects.toThrow(/repo not found/);
+  });
+});
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});

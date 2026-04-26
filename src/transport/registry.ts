@@ -1,5 +1,6 @@
 import type { Inngest } from "inngest";
 import type { JsonValue } from "type-fest";
+import type { CodingStore } from "../agent/coding/store/index.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
@@ -16,6 +17,8 @@ export interface RegistryDeps {
   defaultProfileId: string;
   transportStore: TransportStore;
   agentStore: AgentStore;
+  /** Optional — when omitted, `repos.*` returns `sandbox_disabled`. */
+  codingStore?: CodingStore;
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
@@ -62,6 +65,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       defaultProfileId: deps.defaultProfileId,
       transportStore,
       agentStore,
+      ...(deps.codingStore && { codingStore: deps.codingStore }),
       inngest: deps.inngest,
       inboundArrived: deps.inboundArrived,
       attachments: deps.attachments,

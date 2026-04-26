@@ -40,6 +40,23 @@ export const env = createEnv({
     VERSION: z.string().default("dev"),
     /** Short git SHA, set at build time via Dockerfile `ARG GIT_SHA`. Optional. */
     GIT_SHA: z.string().optional(),
+    /**
+     * OCI runtime for sandbox containers. Optional — when unset, the sandbox
+     * module does not initialize (coding-delegation features fail with a
+     * clear error on first use). No silent fallback to `runc` — explicit
+     * configuration only. Prod = `sysbox`; dev/CI integration = `runc`.
+     */
+    SANDBOX_RUNTIME: z.enum(["sysbox", "runc"]).optional(),
+    /** Default base image for task containers when a repo has no `.devcontainer/`. */
+    COGMO_DEVBASE_IMAGE: z.string().default("ghcr.io/iskhakovt/cogmo-devbase:slice1"),
+    /** Host root for git clones registered via `/repo add`. */
+    COGMO_REPOS_DIR: z.string().default("/var/lib/cogmo/repos"),
+    /** Host root for per-task git worktrees. */
+    COGMO_WORKTREES_DIR: z.string().default("/var/lib/cogmo/worktrees"),
+    /** Idle TTL after which a task container is reaped. */
+    CODING_TASK_IDLE_TTL_MINUTES: z.coerce.number().default(20),
+    /** Grace period after a task reaches a terminal status before container teardown. */
+    CODING_TASK_GRACE_SECONDS: z.coerce.number().default(120),
   },
   runtimeEnv: resolved,
   emptyStringAsUndefined: true,

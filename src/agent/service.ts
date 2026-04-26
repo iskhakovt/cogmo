@@ -6,6 +6,7 @@ import type {
   ReflectResult,
   RetainOptions,
 } from "../memory/provider.js";
+import type { CodingService } from "./coding/service.js";
 
 /**
  * Service interface — the ACL boundary between tools and external systems.
@@ -56,6 +57,12 @@ export interface Service {
     get(): Promise<ReadonlyArray<CoreMemoryBlock>>;
     update(key: string, content: string): Promise<void>;
   };
+  /**
+   * Coding-delegation surface. Optional — only present when the sandbox
+   * module is initialized (SANDBOX_RUNTIME set). Tools that depend on it
+   * fail with a clear error when absent.
+   */
+  coding?: CodingService;
 }
 
 /**
@@ -71,6 +78,7 @@ export function createService(
   profileTags: readonly string[],
   files: Service["files"],
   coreMemory: Service["coreMemory"],
+  coding?: CodingService,
 ): Service {
   function attachProfileTags(opts: { tags?: string[] } | undefined) {
     return {
@@ -87,5 +95,6 @@ export function createService(
     },
     files,
     coreMemory,
+    ...(coding !== undefined && { coding }),
   };
 }

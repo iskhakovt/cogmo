@@ -39,6 +39,9 @@ const USAGE = {
   name: "Usage: /name <alias>  (or /name -  to clear)",
   profile: "Usage: /profile [list|switch <name>|new <name>|edit <name>|delete <name>]",
   model: "Usage: /model [<model>]",
+  repo:
+    "Usage: /repo [list|add <name> <local_path> <remote_url>|remove <name>]\n" +
+    "Slice 1: positional add (FSM dialog + auto-clone ship in slice 4).",
 };
 
 // ---- Public handlers ----
@@ -390,6 +393,67 @@ async function replyProfileDelete(
   await ctx.reply(`Profile "${name}" deleted.`);
 }
 
+// ── /repo ─────────────────────────────────────────────────────────────
+
+export async function handleRepo(transport: Transport, ctx: TelegramCommandContext): Promise<void> {
+  const args = (ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
+  const subcommand = args[0]?.toLowerCase() ?? "list";
+
+  if (subcommand === "list") {
+    const res = await transport.repos.list();
+    if (res.isErr()) {
+      await ctx.reply(errorMessage(res.error));
+      return;
+    }
+    if (res.value.length === 0) {
+      await ctx.reply(
+        "No repos registered. Add one with:\n  /repo add <name> <local_path> <remote_url>",
+      );
+      return;
+    }
+    const lines = res.value.map((r) => `${r.name} — ${r.localPath} (branch: ${r.defaultBranch})`);
+    await ctx.reply(`Repos:\n${lines.join("\n")}`);
+    return;
+  }
+
+  if (subcommand === "add") {
+    const [, name, localPath, remoteUrl] = args;
+    if (!name || !localPath || !remoteUrl) {
+      await ctx.reply(USAGE.repo);
+      return;
+    }
+    const res = await transport.repos.add({ name, localPath, remoteUrl });
+    if (res.isErr()) {
+      await ctx.reply(errorMessage(res.error));
+      return;
+    }
+    await ctx.reply(
+      `Repo "${res.value.name}" added.\n` +
+        `Path: ${res.value.localPath}\n` +
+        `Remote: ${res.value.remoteUrl}\n` +
+        `Verify: ${res.value.verifyCommand} (slice-1 default — update via SQL until /repo edit ships in slice 4)`,
+    );
+    return;
+  }
+
+  if (subcommand === "remove" || subcommand === "rm") {
+    const name = args[1];
+    if (!name) {
+      await ctx.reply(USAGE.repo);
+      return;
+    }
+    const res = await transport.repos.remove(name);
+    if (res.isErr()) {
+      await ctx.reply(errorMessage(res.error));
+      return;
+    }
+    await ctx.reply(`Repo "${name}" removed.`);
+    return;
+  }
+
+  await ctx.reply(USAGE.repo);
+}
+
 function errorMessage(err: TransportError): string {
   switch (err.code) {
     case "identity_rejected":
@@ -412,6 +476,16 @@ function errorMessage(err: TransportError): string {
       return "Operation not permitted.";
     case "session_not_found":
       return "Session not found.";
+    case "repo_not_found":
+      return `No repo named "${err.name}". Use /repo list to see available repos.`;
+    case "repo_name_taken":
+      return `A repo named "${err.name}" already exists.`;
+    case "repo_in_use":
+      return `Repo "${err.name}" has ${err.activeTasks} active task(s). Wait for them to finish first.`;
+    case "repo_invalid_input":
+      return `Invalid ${err.field}: ${err.reason}`;
+    case "sandbox_disabled":
+      return "Coding-delegation features are unavailable — set SANDBOX_RUNTIME and restart Cogmo.";
   }
   // Exhaustive — if a new TransportError code is added, TypeScript will warn
   // at call sites that return `string` (the inferred return becomes `string | undefined`).

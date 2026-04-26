@@ -16,6 +16,10 @@ export default defineConfig({
           environment: "node",
           include: ["src/**/*.test.ts"],
           exclude: ["src/**/*.integration.test.ts", "src/**/*.e2e.test.ts"],
+          // PGlite `pushSchema` runs in `beforeAll` of every store test file
+          // and takes 2–7s each under parallel CPU contention. The default
+          // 10s hookTimeout flakes once enough store files exist.
+          hookTimeout: 30_000,
         },
       },
       {

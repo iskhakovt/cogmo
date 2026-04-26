@@ -3,12 +3,20 @@ import { pg_uuidv7 } from "@electric-sql/pglite/pg_uuidv7";
 import { pushSchema } from "drizzle-kit/api";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
+import * as codingSchema from "../agent/coding/store/schema.js";
 import * as agentSchema from "../agent/store/schema.js";
 import type { Database } from "../db/index.js";
+import * as sandboxSchema from "../sandbox/store/schema.js";
 import * as secretsSchema from "../secrets/store/schema.js";
 import * as transportSchema from "../transport/store/schema.js";
 
-const schema = { ...agentSchema, ...transportSchema, ...secretsSchema };
+const schema = {
+  ...agentSchema,
+  ...transportSchema,
+  ...secretsSchema,
+  ...sandboxSchema,
+  ...codingSchema,
+};
 
 /**
  * Boot an in-memory PGlite instance with the full schema applied.
