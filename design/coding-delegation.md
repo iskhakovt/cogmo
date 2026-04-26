@@ -35,7 +35,7 @@ Output is parsed as JSONL. Both CLIs emit structured events (`system/init`, `str
 
 `session_id` is captured on the first event and persisted in `coding_tasks.session_id`. Resume uses `--resume <sid>` (Claude) or the `resume` subcommand (Codex) — carries full conversation state across Cogmo restarts or multi-turn task flows.
 
-## Backend Interface `[proposed]`
+## Backend Interface `[confirmed]` (slice 1 — `plan()` only; `execute()` and `resume()` declared on the interface but ship in slices 2/3)
 
 Shared abstraction over both CLIs, lives in `src/agent/coding/`:
 
@@ -155,7 +155,7 @@ Concrete payoff: when Stage 1 evolution observes a correction during a coding ta
 
 Wiring this into `DefaultPromptSource` is P2 — P1 prompts are hardcoded templates with runtime slot fills.
 
-## Task Model `[proposed]`
+## Task Model `[confirmed]` (slice 1 — `coding_repos` + `coding_tasks` with the slice-1 column set; `conversation_id` added to track triggering conversation)
 
 **One coding task = one git worktree + one branch + one CLI session + one draft PR.** The task container from [sandbox.md](sandbox.md) is the execution environment; the worktree lives inside it (mounted from the host's worktree path).
 
