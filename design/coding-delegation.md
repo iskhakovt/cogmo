@@ -35,27 +35,27 @@ Output is parsed as JSONL. Both CLIs emit structured events (`system/init`, `str
 
 `session_id` is captured on the first event and persisted in `coding_tasks.session_id`. Resume uses `--resume <sid>` (Claude) or the `resume` subcommand (Codex) — carries full conversation state across Cogmo restarts or multi-turn task flows.
 
-## Backend Interface `[confirmed]` (slice 1 — `plan()` only; `execute()` and `resume()` declared on the interface but ship in slices 2/3)
+## Backend Interface `[confirmed]` (slice 2 — `plan()` + `execute()`; `resume()` is implicit via `execute(ctx, sessionId)`)
 
 Shared abstraction over both CLIs, lives in `src/agent/coding/`:
 
 ```typescript
 interface CodingBackend {
-  plan(task: CodingTask, container: TaskContainerHandle): AsyncIterable<CodingEvent>;
-  execute(task: CodingTask, container: TaskContainerHandle): AsyncIterable<CodingEvent>;
-  resume(task: CodingTask, container: TaskContainerHandle): AsyncIterable<CodingEvent>;
+  plan(ctx: BackendCallContext): AsyncIterable<CodingEvent>;
+  execute(ctx: BackendCallContext, sessionId: string): AsyncIterable<CodingEvent>;
 }
 
 type CodingEvent =
-  | { kind: "status"; phase: "thinking" | "tool_use"; detail: string }
+  | { kind: "session_started"; sessionId: string }
   | { kind: "text_delta"; text: string }
-  | { kind: "tool_call"; tool: string; input: unknown; needsApproval: boolean }
-  | { kind: "tool_result"; tool: string; ok: boolean }
+  | { kind: "tool_call"; tool: string; input: unknown }
+  | { kind: "tool_result"; tool: string; ok: boolean; summary?: string }
+  | { kind: "permission_request"; tool: string; input: unknown; requestId: string }
   | { kind: "plan_ready"; plan: string }
-  | { kind: "complete"; exitCode: number; usage: Usage };
+  | { kind: "complete"; exitCode: number; usage?: BackendUsage; isError: boolean };
 ```
 
-Two concrete impls: `ClaudeCodeBackend`, `CodexBackend`. Selection per-task via `coding_tasks.backend`.
+Two concrete impls: `ClaudeCodeBackend` (slices 1+2), `CodexBackend` (later). Selection per-task via `coding_tasks.backend`. `execute(ctx, sessionId)` resumes a prior session via `claude --resume <sid> --permission-mode acceptEdits` — there is no separate `resume()` method; both subcommands take the same flags. `permission_request` is reserved for slice 3 when the stream-json gate ships.
 
 ## Prompt Construction `[proposed]`
 
@@ -211,7 +211,7 @@ coding_repos (
 
 Owned by `src/agent/store/` (fits the existing agent domain — tasks are agent work items). Consumer of `containers` from the sandbox store.
 
-## Container Lifecycle `[proposed]`
+## Container Lifecycle `[confirmed]`
 
 **Invariant: one container per task.** Sharing a container across tasks causes state contamination — `pip install` in task A pollutes task B, long-running processes leak, failures cascade. Containers are cheap; clarity is worth the cold-start cost, which per-repo named cache volumes ([sandbox.md](sandbox.md) → Networks, Volumes, Images) flatten.
 
@@ -258,17 +258,17 @@ Resume after full teardown replays this in reverse: `git worktree add <path> <br
 
 **S3 / remote object storage is opt-in, not default.** The motivating scenario — "my laptop died, I want the task back" — is already covered by remote refs for every case except the no-remote bootstrap. Deferred to a later remote-sandbox story.
 
-### Resume procedure
+### Resume procedure `[confirmed]`
 
-"Resume" never means "same container" — it means *same state, fresh shell*:
+"Resume" never means "same container" — it means *same state, fresh shell*. Slice 2 ships the in-task variant (plan-phase container reaped before approval; execute recreates):
 
 1. Look up `coding_tasks` row by id. If `status` is terminal and the user didn't explicitly ask to re-open, treat as a new task instead.
-2. `sandbox.createTaskContainer(spec)` with the same `worktree_path`, `repo_id`, and cache volumes. Fresh container, same mounts.
-3. Re-inject git credentials from the vault (short-lived, per-task).
-4. `backend.resume(task, container)` → `claude -p --resume <session_id>` (or Codex equivalent). CLI rehydrates its conversation from its session file.
-5. Insert a new `containers` row; update `coding_tasks.container_id`.
+2. Reuse-or-create check: `sandbox.listContainersForTask(taskId)` finds any live container row; `sandbox.inspectContainer(dockerId)` verifies it's still `running` according to Docker. If yes, derive a fresh handle via `sandbox.getTaskContainer(dockerId)` and skip step 3.
+3. `sandbox.createTaskContainer(spec)` with the same `worktree_path`, `repo_id`, and cache volumes. Fresh container, same mounts. Insert a new `containers` row; update `coding_tasks.container_id`.
+4. (Slice 4+ for cross-task resume) Re-inject git credentials from the vault (short-lived, per-task).
+5. `backend.execute(ctx, sessionId)` → `claude -p --resume <session_id> --permission-mode acceptEdits` (or Codex equivalent). CLI rehydrates its conversation from its session file in the per-task home volume.
 
-Cost: ~1–3s container start under sysbox plus cache-volume mount. Acceptable because resume is the minority path vs first-time creation.
+Cost: ~1–3s container start under sysbox plus cache-volume mount when the recreate path is taken. Acceptable because reuse is the common case (default 20-minute idle TTL covers most approve-tap intervals).
 
 ### "Addition" disambiguation
 
@@ -407,20 +407,22 @@ Streaming sections re-execute on retry. `--resume <sid>` plus idempotent durable
 
 ## Autonomy Gates `[proposed]`
 
-Three gates, mapped onto Cogmo's existing `explicit_permission` rules.
+Three gates, mapped onto Cogmo's existing `explicit_permission` rules. Plan gate is `[confirmed]` (slice 2); tool gate and merge gate remain `[proposed]`.
 
-### Plan gate
+### Plan gate `[confirmed]`
 
 Before any writes. Invoke the backend in plan mode (`claude -p --permission-mode plan` or Codex equivalent). Plan text is captured in `coding_tasks.plan` regardless of trigger source.
 
 Gating depends on `trigger_source`:
 
-- **`user`** — Plan posted to Telegram with inline keyboard: **Approve**, **Revise** (sends a follow-up user message to refine), **Cancel**. No edits happen until approved. Approval writes `plan_approved_at` and triggers the execute phase.
+- **`user`** — Plan posted to Telegram with inline keyboard: **Approve**, **Revise** (cancels the task and asks the user to describe what should change; the agent's next turn issues a fresh `delegate_coding`), **Cancel**. No edits happen until approved. Approval writes `plan_approved_at` and emits `coding/task/plan-approved`, which triggers the execute orchestrator. Identity check: `callback.from.id` resolves via `transportStore.resolveUser` to a Cogmo `userId` and must match the conversation owner — strangers in the same chat get `identity_rejected`.
 - **`evolution` / `signal_pipeline`** — Plan proceeds to execute automatically. `plan_approved_at` stays null. The PR merge gate remains the single human checkpoint; no interactive approval on Telegram.
 
 This keeps automated self-improvement flows non-blocking while preserving a human veto where it matters — at PR review. An automated task that produces a bad plan wastes its own tokens and parks a draft PR; it cannot modify the system without the human reviewer.
 
 **Approval does not expire.** Once a plan is approved (`plan_approved_at` set), that approval stands until the task reaches a terminal state. The plan text lives durably in `coding_tasks.plan`; the task's branch is isolated from base-branch drift until merge; container resources are freed by the idle-TTL path independently of approval freshness. If execution is resumed hours or days after approval, the preserved `session_id` rehydrates the same plan into a fresh container. State-based invalidation (code SHA drift) is the industry norm here, not time-based; our task-branch isolation makes even that a non-issue. P3 polish: post a "still want to proceed?" confirmation if execution would start >24h after approval — reminder, not expiry.
+
+**Approval idempotency.** `approvePlanIfPending` is atomic: a second tap returns `task_already_approved` without re-emitting the event. Telegram surfaces the duplicate as "already approved" toast and no state change.
 
 ### Tool gate
 
