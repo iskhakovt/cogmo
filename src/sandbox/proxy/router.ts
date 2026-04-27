@@ -23,10 +23,6 @@ export type RouteOutcome =
   | { kind: "hijack" }
   | { kind: "forward" };
 
-/** Match `/containers/{id}/<action>` capturing the Docker container id. */
-const CONTAINER_ACTION_RE =
-  /^\/(?:v[\d.]+\/)?containers\/[^/]+\/(attach|start|stop|kill|restart|wait|logs|exec)(\?|$|\/)/;
-
 const EXEC_START_RE = /^\/(?:v[\d.]+\/)?exec\/[^/]+\/start(\?|$)/;
 
 /**
@@ -109,13 +105,12 @@ export function classify(method: string, rawPath: string): RouteOutcome {
   }
 
   // Pass-through everything else: `/_ping`, `/version`, `/info`,
-  // `/containers/json`, `/containers/{id}/json`, `/images/*`, `/networks/*`
-  // (with policy on `POST /networks/create` etc. layered in later sub-PRs),
-  // `/volumes/*`, `/auth`, `/system/df`, …
-  // The other /containers/{id}/<action> calls flow through too — slice 3
-  // doesn't authz them yet (the per-task socket itself is the boundary;
-  // 3.0f wires the docker-id ownership map).
-  void CONTAINER_ACTION_RE;
+  // `/containers/json`, `/containers/{id}/json`, `/images/*`,
+  // `/networks/*` (with policy on `POST /networks/create` etc.
+  // layered in later sub-PRs), `/volumes/*`, `/system/df`, …
+  // The other /containers/{id}/<action> calls flow through too — slice
+  // 3 doesn't authz them yet (the per-task socket itself is the
+  // boundary; the docker-id ownership map lands in a follow-up).
   return { kind: "forward" };
 }
 

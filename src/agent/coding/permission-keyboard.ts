@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { UUID_PATTERN } from "../../util/uuid.js";
 
 /**
  * Inline-keyboard helper for the tool-gate permission prompt. Pure: no
@@ -34,7 +35,6 @@ const SEP = ":";
  */
 const MAX_REQUEST_ID_LEN = 16;
 
-const UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const REQUEST_ID_PATTERN = "[A-Za-z0-9_-]{1,16}";
 /**
  * Single-char wire codes — Telegram's 64-byte `callback_data` limit

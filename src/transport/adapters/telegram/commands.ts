@@ -8,6 +8,7 @@
 
 import { actionToDecision } from "../../../agent/coding/permission-keyboard.js";
 import type { Profile } from "../../../agent/store/index.js";
+import { isUuid } from "../../../util/uuid.js";
 import type { Transport, TransportError } from "../../transport.js";
 import type { ProfileDialogs } from "./profile-dialog.js";
 import {
@@ -628,7 +629,14 @@ function toReplyOptions(
   };
 }
 
-const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * Treat a `/resume <target>` argument as a UUID iff it matches the
+ * standard 8-4-4-4-12 shape. Slice 2 enforced version-7 strictly; we
+ * relax to any-version because the Telegram surface only uses this
+ * to disambiguate UUID-looking strings from aliases — handing a
+ * structurally-valid-but-unknown UUID to \`resumeConversation\` falls
+ * through to an honest \"not found\" error.
+ */
 function looksLikeUuid(s: string): boolean {
-  return UUID_V7_PATTERN.test(s);
+  return isUuid(s.toLowerCase());
 }

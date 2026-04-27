@@ -22,8 +22,9 @@
  * out of scope; document linux-with-systemd as the supported config.
  */
 
+import { isUuid } from "../util/uuid.js";
+
 const SLICE_PREFIX = "cogmo-task-";
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * Build the systemd slice name for a task. UUIDv7 dashes are stripped so
@@ -37,7 +38,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * can't synthesise a weird unit name.
  */
 export function taskSliceName(taskId: string): string {
-  if (!UUID_RE.test(taskId)) {
+  if (!isUuid(taskId)) {
     throw new Error(`taskSliceName: expected a UUID, got ${JSON.stringify(taskId)}`);
   }
   return `${SLICE_PREFIX}${taskId.replaceAll("-", "")}.slice`;
