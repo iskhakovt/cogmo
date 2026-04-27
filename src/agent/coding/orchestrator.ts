@@ -1,12 +1,20 @@
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Inngest } from "inngest";
-import { codingTaskPlanApproved, codingTaskStart } from "../../inngest/events.js";
-import type { StepRun } from "../../inngest/index.js";
+import {
+  codingTaskPermissionDecision,
+  codingTaskPermissionRequested,
+  codingTaskPlanApproved,
+  codingTaskStart,
+} from "../../inngest/events.js";
+import type { StepRun, StepWaitForEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import type { Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
-import type { CodingBackend } from "./backend.js";
-import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
+import type { CodingBackend, PermissionResponse } from "./backend.js";
+import { shortenRequestId } from "./permission-keyboard.js";
+import * as policy from "./policy.js";
+import type { CodingRepoRow, CodingStore, CodingTaskRow, ToolDecision } from "./store/index.js";
+import { canonicalPattern, replayDecisionLog } from "./tool-gate.js";
 import { allocateWorktree } from "./worktree.js";
 
 const log = logger.child({ component: "coding.orchestrator" });
@@ -373,7 +381,13 @@ export function createCodingExecuteOrchestrator(deps: CodingOrchestratorDeps, in
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
     async ({ event, step }) => {
-      return runCodingExecute({ taskId: event.data.taskId, deps, stepRun: step.run });
+      return runCodingExecute({
+        taskId: event.data.taskId,
+        deps,
+        stepRun: step.run,
+        stepWaitForEvent: step.waitForEvent,
+        inngest,
+      });
     },
   );
 }
@@ -382,6 +396,18 @@ interface ExecuteRunParams {
   taskId: string;
   deps: CodingOrchestratorDeps;
   stepRun: StepRun;
+  /**
+   * Inngest's `step.waitForEvent` — blocks the durable function until a
+   * matching event arrives. Used by the tool gate to wait for the user's
+   * Telegram tap on a permission prompt.
+   */
+  stepWaitForEvent: StepWaitForEvent;
+  /**
+   * Inngest client — used to emit `coding/task/permission-requested` for
+   * observability + Telegram delivery, and any future events the gate
+   * fires.
+   */
+  inngest: Pick<Inngest, "send">;
 }
 
 /**
@@ -397,7 +423,7 @@ interface ExecuteRunParams {
  * - `worktree_assignment` must be present (the plan phase allocated it).
  */
 export async function runCodingExecute(params: ExecuteRunParams): Promise<CodingExecuteResult> {
-  const { taskId, deps, stepRun } = params;
+  const { taskId, deps, stepRun, stepWaitForEvent, inngest } = params;
   const { store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
 
@@ -481,6 +507,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       executeStream,
       sessionId,
       store,
+      stepWaitForEvent,
+      inngest,
     });
 
     if (result.isError) {
@@ -563,6 +591,8 @@ interface ExecuteStreamingParams {
   executeStream: ExecuteStreamHandle;
   sessionId: string;
   store: CodingStore;
+  stepWaitForEvent: StepWaitForEvent;
+  inngest: Pick<Inngest, "send">;
 }
 
 interface ExecuteStreamingResult {
@@ -575,7 +605,17 @@ interface ExecuteStreamingResult {
 async function runExecuteStreaming(
   params: ExecuteStreamingParams,
 ): Promise<ExecuteStreamingResult> {
-  const { task, repo, container, backend, executeStream, sessionId } = params;
+  const {
+    task,
+    repo,
+    container,
+    backend,
+    executeStream,
+    sessionId,
+    store,
+    stepWaitForEvent,
+    inngest,
+  } = params;
   let isError = false;
   let failureReason: string | undefined;
   // biome-ignore lint/suspicious/noExplicitAny: BackendUsage shape is opaque to the orchestrator
@@ -597,18 +637,19 @@ async function runExecuteStreaming(
       case "tool_result":
         await executeStream.toolResult(event.tool, event.ok, event.summary);
         break;
-      case "permission_request":
-        // Slice 3.0d wires the protocol but not the policy. Auto-allow
-        // every request so the existing flow keeps working — slice 3.0g
-        // layers policy.evaluate + decision log + Telegram prompt on top
-        // of this same hook. Logged so a stray request stands out if
-        // 3.0g hasn't landed yet.
-        log.info(
-          { taskId: task.id, requestId: event.requestId, tool: event.tool },
-          "permission_request — auto-allowing (slice 3.0d default)",
-        );
-        await handle.respondPermission(event.requestId, { behavior: "allow" });
+      case "permission_request": {
+        const response = await handlePermissionRequest({
+          taskId: task.id,
+          requestId: event.requestId,
+          tool: event.tool,
+          input: (event.input ?? {}) as Record<string, unknown>,
+          store,
+          stepWaitForEvent,
+          inngest,
+        });
+        await handle.respondPermission(event.requestId, response);
         break;
+      }
       case "complete":
         if (event.usage) usage = event.usage;
         if (event.isError) {
@@ -624,6 +665,122 @@ async function runExecuteStreaming(
     ...(failureReason !== undefined && { failureReason }),
     ...(usage && { usage }),
   };
+}
+
+interface HandlePermissionRequestParams {
+  taskId: string;
+  requestId: string;
+  tool: string;
+  input: Record<string, unknown>;
+  store: CodingStore;
+  stepWaitForEvent: StepWaitForEvent;
+  inngest: Pick<Inngest, "send">;
+}
+
+/**
+ * The tool gate's decision pipeline for a single `permission_request`:
+ *
+ *   1. Build the canonical pattern (`Bash(git push *)` etc.).
+ *   2. Replay the task's decision log — a prior task-scoped `allow` or
+ *      `deny` on the matching pattern wins immediately.
+ *   3. Run `policy.evaluate` — `allow` short-circuits and logs scope=once
+ *      for audit; `prompt` triggers the Telegram round trip.
+ *   4. On `prompt`: emit `coding/task/permission-requested` (the Telegram
+ *      adapter listens on this and posts the inline keyboard), then
+ *      block on `coding/task/permission-decision` until the user taps.
+ *      Apply the user's `(decision, scope)` to the log and return.
+ *
+ * Block-indefinitely on Telegram outage is the design choice (slice3-plan
+ * decision 4); the timeout below is a 7-day safety net for truly
+ * abandoned tasks, not a deny-on-timeout.
+ */
+async function handlePermissionRequest(
+  params: HandlePermissionRequestParams,
+): Promise<PermissionResponse> {
+  const { taskId, requestId, tool, input, store, stepWaitForEvent, inngest } = params;
+  const call = { tool, input };
+  const pattern = canonicalPattern(call);
+
+  // 1. Decision log replay — task-scoped patterns the user already approved.
+  const logRows = await store.listToolDecisionsForTask(taskId);
+  const replayed = replayDecisionLog(call, logRows);
+  if (replayed) {
+    log.info(
+      { taskId, requestId, tool, pattern, decision: replayed.decision },
+      "tool gate: decision-log match",
+    );
+    return replayed.decision === "allow" ? { behavior: "allow" } : { behavior: "deny" };
+  }
+
+  // 2. Static policy.
+  const result = policy.evaluate(call);
+  if (result.decision === "allow") {
+    log.info(
+      { taskId, requestId, tool, pattern, reason: result.reason },
+      "tool gate: policy allow",
+    );
+    await persistDecision(store, taskId, tool, pattern, "allow", "once");
+    return { behavior: "allow" };
+  }
+  if (result.decision === "deny") {
+    log.info({ taskId, requestId, tool, pattern, reason: result.reason }, "tool gate: policy deny");
+    await persistDecision(store, taskId, tool, pattern, "deny", "once");
+    return { behavior: "deny", message: result.reason };
+  }
+
+  // 3. Prompt path — emit the request event, wait for the user's tap.
+  const requestIdShort = shortenRequestId(requestId);
+  await inngest.send({
+    name: codingTaskPermissionRequested.name,
+    data: { taskId, requestId: requestIdShort, tool },
+  });
+  log.info(
+    { taskId, requestId, requestIdShort, tool, pattern },
+    "tool gate: prompting user via Telegram",
+  );
+
+  // step.waitForEvent is durable. The `if:` filter pins the wait to this
+  // task + this request id, so a concurrent prompt for a different
+  // request can't satisfy our wait. 7d timeout is the abandoned-task
+  // safety net — design intent is block-indefinitely (slice3-plan #4).
+  const decisionEvent = await stepWaitForEvent(`tool-gate-${requestIdShort}`, {
+    event: codingTaskPermissionDecision.name,
+    if: `async.data.taskId == "${taskId}" && async.data.requestId == "${requestIdShort}"`,
+    timeout: "7d",
+  });
+  if (!decisionEvent) {
+    log.warn({ taskId, requestId, tool }, "tool gate: prompt timed out (7d) — denying");
+    await persistDecision(store, taskId, tool, pattern, "deny", "once");
+    return { behavior: "deny", message: "permission prompt timed out" };
+  }
+
+  const data = decisionEvent.data as { decision: ToolDecision; scope: "once" | "task" };
+  // Persist what the user chose. `task` scope means future matching
+  // requests in this task auto-apply; `once` is audit-only.
+  await persistDecision(store, taskId, tool, pattern, data.decision, data.scope);
+
+  log.info(
+    { taskId, requestId, tool, pattern, decision: data.decision, scope: data.scope },
+    "tool gate: user decision applied",
+  );
+  return data.decision === "allow"
+    ? { behavior: "allow" }
+    : { behavior: "deny", message: "user denied" };
+}
+
+async function persistDecision(
+  store: CodingStore,
+  taskId: string,
+  tool: string,
+  pattern: string,
+  decision: ToolDecision,
+  scope: "once" | "task",
+): Promise<void> {
+  await store
+    .insertToolDecision({ taskId, tool, pattern, decision, scope })
+    .catch((err: unknown) => {
+      log.warn({ err, taskId, pattern, decision }, "tool gate: insertToolDecision failed");
+    });
 }
 
 /**

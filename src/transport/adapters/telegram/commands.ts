@@ -258,6 +258,63 @@ export async function handlePlanCallback(
   return { editText: "❌ Plan cancelled.", toast: "Cancelled" };
 }
 
+export interface PermissionCallbackOutcome {
+  /** Replacement text for the original prompt message (keyboard cleared too). */
+  editText: string;
+  /** Short toast popup confirming the tap on the user's device. */
+  toast: string;
+}
+
+/**
+ * Tool-gate callback handler — translates a parsed permission button tap
+ * into a Transport call + an outcome the adapter renders. Identity check
+ * happens inside `transport.coding.respondPermission`.
+ */
+export async function handlePermissionCallback(
+  transport: Transport,
+  parsed: {
+    taskId: string;
+    requestIdShort: string;
+    action: "allow_once" | "allow_task" | "deny";
+  },
+  tapperPlatformHandle: string,
+): Promise<PermissionCallbackOutcome> {
+  const decisionScope: Record<
+    typeof parsed.action,
+    { decision: "allow" | "deny"; scope: "once" | "task" }
+  > = {
+    allow_once: { decision: "allow", scope: "once" },
+    allow_task: { decision: "allow", scope: "task" },
+    deny: { decision: "deny", scope: "once" },
+  };
+  const { decision, scope } = decisionScope[parsed.action];
+
+  const res = await transport.coding.respondPermission(
+    {
+      taskId: parsed.taskId,
+      requestIdShort: parsed.requestIdShort,
+      decision,
+      scope,
+    },
+    tapperPlatformHandle,
+  );
+  if (res.isErr()) {
+    return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+  }
+
+  switch (parsed.action) {
+    case "allow_once":
+      return { editText: "✅ Allowed once.", toast: "Allowed" };
+    case "allow_task":
+      return {
+        editText: "✅ Allowed for this task — future matching requests auto-approve.",
+        toast: "Allowed for task",
+      };
+    case "deny":
+      return { editText: "❌ Denied.", toast: "Denied" };
+  }
+}
+
 /** Callback-query handler for inline-keyboard taps from /sessions. */
 export async function handleResumeCallback(
   transport: Transport,
