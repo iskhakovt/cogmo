@@ -198,6 +198,9 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
         },
       }),
       openExecuteStream: async (taskId: string): Promise<ExecuteStreamHandle> => ({
+        async started() {
+          codingStreamingRegistry.publish(taskId, { kind: "execute_started" });
+        },
         async appendText(delta) {
           codingStreamingRegistry.publish(taskId, { kind: "text", delta });
         },
@@ -212,8 +215,12 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
             ...(summary !== undefined && { summary }),
           });
         },
-        async complete(ok) {
-          codingStreamingRegistry.publish(taskId, { kind: "execute_complete", ok });
+        async complete(ok, tokens) {
+          codingStreamingRegistry.publish(taskId, {
+            kind: "execute_complete",
+            ok,
+            ...(tokens !== undefined && { tokens }),
+          });
         },
         async fail(reason) {
           codingStreamingRegistry.publish(taskId, { kind: "failed", reason });
@@ -269,6 +276,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     transportStore,
     agentStore,
     codingStore,
+    codingStreamingRegistry,
     inngest,
     inboundArrived,
     attachments: attachmentStore,

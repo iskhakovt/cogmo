@@ -22,7 +22,8 @@ export type CodingStreamEvent =
   | { kind: "tool_call"; tool: string }
   | { kind: "tool_result"; tool: string; ok: boolean; summary?: string }
   | { kind: "plan_finalized"; plan: string }
-  | { kind: "execute_complete"; ok: boolean }
+  | { kind: "execute_started" }
+  | { kind: "execute_complete"; ok: boolean; tokens?: { input: number; output: number } }
   | { kind: "failed"; reason: string };
 
 /**

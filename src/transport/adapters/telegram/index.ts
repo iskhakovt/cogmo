@@ -1,7 +1,9 @@
 import { Bot, InputFile } from "grammy";
 import type { JsonValue } from "type-fest";
 import { PLAN_CALLBACK_REGEX, parsePlanCallback } from "../../../agent/coding/plan-keyboard.js";
+import { CodingProgressSubscriber } from "../../../agent/coding/progress-subscriber.js";
 import { parseGeneratedImagePayload } from "../../../agent/image-tools.js";
+import { codingTaskStart } from "../../../inngest/events.js";
 import type { StreamEvent } from "../../../llm/types.js";
 import { logger } from "../../../logger.js";
 import {
@@ -447,7 +449,53 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     onStart: () => logger.info("telegram adapter started"),
   });
 
-  return { adapter, functions: [] };
+  // Coding-progress wiring — listen for coding/task/start, find the
+  // Telegram session attached to the task's conversation, and subscribe
+  // a per-task message renderer that edits in place as plan + execute
+  // events stream through the registry.
+  // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
+  const functions: any[] = [];
+  if (deps.codingProgress) {
+    const { inngest, codingStore, transportStore, streamingRegistry } = deps.codingProgress;
+    const channelId = deps.channelId;
+    functions.push(
+      inngest.createFunction(
+        {
+          id: `telegram-coding-progress-${channelId}`,
+          triggers: [codingTaskStart],
+          retries: 0,
+          concurrency: { limit: 1, key: "event.data.taskId" },
+        },
+        async ({ event }) => {
+          const taskId = event.data.taskId;
+          const task = await codingStore.getTask(taskId);
+          if (!task?.conversationId) return { skipped: "no conversation" };
+
+          const sessions = await transportStore.getActiveSessionsForConversation(
+            task.conversationId,
+          );
+          const tgSession = sessions.find((s) => s.channelId === channelId);
+          if (!tgSession) return { skipped: "no telegram session for this conversation" };
+
+          CodingProgressSubscriber.start({
+            taskId,
+            chatId: Number(tgSession.platformAddress),
+            goal: task.goal,
+            channelId,
+            bot: {
+              sendMessage: (chatId, text, opts) => bot.api.sendMessage(chatId, text, opts),
+              editMessageText: (chatId, messageId, text, opts) =>
+                bot.api.editMessageText(chatId, messageId, text, opts),
+            },
+            registry: streamingRegistry,
+          });
+          return { subscribed: true };
+        },
+      ),
+    );
+  }
+
+  return { adapter, functions };
 }
 
 export { renderTelegramHtml } from "./render.js";

@@ -1,7 +1,25 @@
+import type { Inngest } from "inngest";
 import type { JsonValue } from "type-fest";
+import type { CodingStore } from "../agent/coding/store/index.js";
+import type { CodingStreamingRegistry } from "../agent/coding/streaming-registry.js";
 import type { AttachmentStore } from "./attachment-store.js";
+import type { TransportStore } from "./store/index.js";
 import type { Transport } from "./transport.js";
 import type { Adapter } from "./types.js";
+
+/**
+ * Coding-progress wiring — optional adapter dependency. Adapters that
+ * surface coding tasks to the user (today: Telegram) use this to
+ * register an Inngest function that subscribes to the streaming
+ * registry and edits a per-task progress message in place. Adapters
+ * that don't show coding output (Direct CLI) ignore the field.
+ */
+export interface CodingProgressDeps {
+  inngest: Inngest;
+  codingStore: CodingStore;
+  transportStore: TransportStore;
+  streamingRegistry: CodingStreamingRegistry;
+}
 
 /**
  * Dependencies available to adapter setup.
@@ -12,6 +30,8 @@ export interface AdapterDeps {
   transport: Transport;
   /** Binary storage — adapters may download generated attachments for outbound delivery. */
   attachments: AttachmentStore;
+  /** Optional — present only when the sandbox module is initialized. */
+  codingProgress?: CodingProgressDeps;
 }
 
 /**

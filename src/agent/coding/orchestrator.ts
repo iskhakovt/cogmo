@@ -38,10 +38,12 @@ export const NULL_PLAN_STREAM: PlanStreamHandle = {
  * status. Failures still flow through `fail`.
  */
 export interface ExecuteStreamHandle {
+  /** Optional — bootstrap-side wiring may publish an `execute_started` event here. */
+  started?(): Promise<void>;
   appendText(delta: string): Promise<void>;
   toolCall(tool: string): Promise<void>;
   toolResult(tool: string, ok: boolean, summary?: string): Promise<void>;
-  complete(ok: boolean): Promise<void>;
+  complete(ok: boolean, tokens?: { input: number; output: number }): Promise<void>;
   fail(reason: string): Promise<void>;
 }
 
@@ -445,6 +447,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     const container = await sandbox.getTaskContainer(containerInfo.dockerId);
 
     executeStream = await openExecuteStream(taskId);
+    await executeStream.started?.();
     const result = await runExecuteStreaming({
       task,
       repo,
@@ -488,7 +491,11 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       store.updateTaskStatus({ id: taskId, status: "pending_verify" }),
     );
     await stepRun("teardown", () => sandbox.stopTask(taskId).catch(() => {}));
-    await executeStream.complete(true);
+    const completionTokens =
+      result.usage?.inputTokens != null && result.usage?.outputTokens != null
+        ? { input: result.usage.inputTokens, output: result.usage.outputTokens }
+        : undefined;
+    await executeStream.complete(true, completionTokens);
     return { status: "pending_verify" };
   } catch (err) {
     const reason = (err as Error).message;

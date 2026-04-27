@@ -15,9 +15,14 @@ const SEP = ":";
 /**
  * `approve` / `revise` / `cancel`. Stable codes (not button text) so future
  * label tweaks don't invalidate in-flight callback_data on user phones.
+ *
+ * Mutable arrays — grammY's Bot API types require `InlineKeyboardButton[][]`
+ * (not readonly) at the wire boundary. Keep this shape compatible so the
+ * Telegram adapter doesn't need a defensive clone or `as` cast on every
+ * send.
  */
 export interface PlanInlineKeyboardMarkup {
-  inline_keyboard: ReadonlyArray<ReadonlyArray<{ text: string; callback_data: string }>>;
+  inline_keyboard: { text: string; callback_data: string }[][];
 }
 
 export function buildPlanKeyboard(taskId: string): PlanInlineKeyboardMarkup {
