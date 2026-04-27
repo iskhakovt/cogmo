@@ -585,16 +585,16 @@ export function createTransport(deps: {
         if (!codingStore) return err({ code: "sandbox_disabled" as const });
         const identityCheck = await checkTaskOwnership(taskId, tapperPlatformHandle);
         if (identityCheck.isErr()) return err(identityCheck.error);
-        const result = await codingStore.approvePlanIfPending(taskId, new Date());
+        // Capture the timestamp once and reuse it for both the DB row
+        // and the Inngest event payload — the receiver downstream can
+        // trust them to match without a second clock read.
+        const approvedAt = new Date();
+        const result = await codingStore.approvePlanIfPending(taskId, approvedAt);
         switch (result.kind) {
           case "approved":
-            // Fire-and-await: emit the event so the slice 2.0f execute
-            // function picks it up. The event carries `approvedAt` so
-            // the receiver can stamp the same timestamp downstream
-            // without a second clock read.
             await inngest.send({
               name: "coding/task/plan-approved",
-              data: { taskId, approvedAt: new Date().toISOString() },
+              data: { taskId, approvedAt: approvedAt.toISOString() },
             });
             return ok({ taskId });
           case "already_approved":

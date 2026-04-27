@@ -837,6 +837,26 @@ describe("createTransport", () => {
       );
     });
 
+    it("approvePlan: DB row and event payload carry the same approvedAt timestamp", async () => {
+      // Regression for the duplicate `new Date()` calls — the event
+      // claims to carry "the same timestamp downstream without a second
+      // clock read", so prove the two are equal.
+      const { transport, codingStore, inngestSend } = buildTransport({
+        task: { conversationId },
+        conversation: { userId: ownerUserId },
+        tapperUserId: ownerUserId,
+      });
+
+      await transport.coding.approvePlan(taskId, "owner-tg-id");
+
+      const storeCallDate = (codingStore.approvePlanIfPending as ReturnType<typeof vi.fn>).mock
+        .calls[0]?.[1] as Date;
+      const eventArg = inngestSend.mock.calls[0]?.[0] as {
+        data: { approvedAt: string };
+      };
+      expect(storeCallDate.toISOString()).toBe(eventArg.data.approvedAt);
+    });
+
     it("approvePlan: identity_rejected when tapper isn't the conversation owner — no store write, no event", async () => {
       const approve = vi.fn();
       const { transport, inngestSend } = buildTransport({

@@ -106,10 +106,33 @@ export function createCodingService(
       // Hand off to the durable orchestrator. Once this event lands the
       // service has no further role — plan rendering, approval, execute,
       // and progress all happen out-of-band.
-      await deps.inngest.send({
-        name: codingTaskStart.name,
-        data: { taskId: task.id },
-      });
+      //
+      // If `inngest.send` fails after the row is in `queued`, the task
+      // would be orphaned: it permanently counts against
+      // `maxConcurrentTasks` (admission slot leak) and never progresses.
+      // Mark it failed before propagating so the row is in a terminal
+      // state and the slot frees up. The original send error is
+      // re-thrown so the caller knows the submission didn't take.
+      try {
+        await deps.inngest.send({
+          name: codingTaskStart.name,
+          data: { taskId: task.id },
+        });
+      } catch (sendErr) {
+        await deps.codingStore
+          .updateTaskStatus({
+            id: task.id,
+            status: "failed",
+            failureReason: `inngest.send failed: ${(sendErr as Error).message}`,
+          })
+          .catch((cleanupErr) => {
+            log.error(
+              { err: cleanupErr, taskId: task.id, sendErr },
+              "failed to mark task failed after inngest.send error — task is now orphaned",
+            );
+          });
+        throw sendErr;
+      }
 
       log.info(
         { taskId: task.id, repo: repo.name, conversationId, goal: input.goal },

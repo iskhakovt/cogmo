@@ -151,13 +151,38 @@ describe("CodingStreamingRegistry", () => {
     expect(reg.getSnapshot("t1")?.progressMessageRef?.messageId).toBe(REF.messageId);
   });
 
-  it("listener exception in one subscriber does not block others", () => {
-    // Node's EventEmitter throws synchronously on listener errors; assert the
-    // contract so we don't accidentally swallow them later.
+  it("isolates publisher from a throwing subscriber and still delivers to siblings", () => {
+    // Publisher (orchestrator) must not be killed by a subscriber failure
+    // — a throwing or rejecting listener (e.g. transient Telegram API
+    // error) is logged and dropped; later listeners on the same event
+    // still fire.
     const reg = new CodingStreamingRegistry();
+    const survivor: string[] = [];
     reg.subscribe("t1", () => {
       throw new Error("boom");
     });
-    expect(() => reg.publish("t1", { kind: "text", delta: "x" })).toThrow(/boom/);
+    reg.subscribe("t1", (e) => {
+      if (e.kind === "text") survivor.push(e.delta);
+    });
+    expect(() => reg.publish("t1", { kind: "text", delta: "x" })).not.toThrow();
+    expect(survivor).toEqual(["x"]);
+  });
+
+  it("isolates publisher from a rejecting async subscriber too", async () => {
+    // Subscribers are typically async; an unhandled promise rejection
+    // would crash the process under Node's --unhandled-rejections=strict.
+    // Registry catches the rejection at the boundary.
+    const reg = new CodingStreamingRegistry();
+    const survivor: string[] = [];
+    reg.subscribe("t1", async () => {
+      throw new Error("async boom");
+    });
+    reg.subscribe("t1", (e) => {
+      if (e.kind === "text") survivor.push(e.delta);
+    });
+    expect(() => reg.publish("t1", { kind: "text", delta: "y" })).not.toThrow();
+    // Wait a microtask so the async listener's rejection is observed.
+    await new Promise((r) => setImmediate(r));
+    expect(survivor).toEqual(["y"]);
   });
 });

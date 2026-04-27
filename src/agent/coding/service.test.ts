@@ -125,6 +125,28 @@ describe("createCodingService", () => {
     expect(inngest.send).not.toHaveBeenCalled();
   });
 
+  it("marks the task failed and rethrows when inngest.send throws — no orphan in queued", async () => {
+    await seedRepo("cogmo");
+    const sendErr = new Error("inngest gateway unreachable");
+    const inngest = { send: vi.fn().mockRejectedValue(sendErr) };
+    const service = createCodingService(
+      { codingStore: store, inngest: inngest as unknown as Inngest, sandboxAvailable: true },
+      conversationId,
+    );
+
+    await expect(service.delegate({ goal: "x".repeat(20), repoName: "cogmo" })).rejects.toThrow(
+      /inngest gateway unreachable/,
+    );
+
+    // Without the cleanup, the task would sit in `queued` forever and
+    // count against maxConcurrentTasks. Verify the row was marked failed
+    // so the admission slot frees up.
+    const tasks = await store.listTasksForConversation(conversationId);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.status).toBe("failed");
+    expect(tasks[0]?.failureReason).toMatch(/inngest gateway unreachable/);
+  });
+
   it("admits a second task when the cap allows it", async () => {
     const repoId = await seedRepo("cogmo", 2);
     await store.insertTask({

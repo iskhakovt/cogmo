@@ -243,7 +243,12 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         store.updateTaskStatus({ id: taskId, status: "failed", failureReason: reason }),
       );
       await stepRun("teardown", () => sandbox.stopTask(taskId).catch(() => {}));
-      await planStream.fail(reason);
+      // Stream notification post-commit — wrap so a subscriber error
+      // doesn't escape into the outer catch and write a second failed
+      // status that masks the original reason.
+      await planStream.fail(reason).catch((streamErr: unknown) => {
+        log.warn({ err: streamErr, taskId }, "plan stream fail notification failed");
+      });
       return { status: "failed", failureReason: reason };
     }
 
@@ -257,7 +262,14 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     await stepRun("set-status-awaiting", () =>
       store.updateTaskStatus({ id: taskId, status: nextStatus }),
     );
-    await planStream.finalize(result.plan ?? "");
+    // Same wrap as the failure-path notification above — once status is
+    // committed, a subscriber error must not regress the task to failed.
+    await planStream.finalize(result.plan ?? "").catch((streamErr: unknown) => {
+      log.warn(
+        { err: streamErr, taskId },
+        `plan stream finalize notification failed (task already ${nextStatus})`,
+      );
+    });
     return { status: nextStatus, plan: result.plan ?? "" };
   } catch (err) {
     const reason = (err as Error).message;
@@ -464,8 +476,15 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         store.updateTaskStatus({ id: taskId, status: "failed", failureReason: reason }),
       );
       await stepRun("teardown", () => sandbox.stopTask(taskId).catch(() => {}));
-      await executeStream.complete(false);
-      await executeStream.fail(reason);
+      // Stream notifications post-commit — wrap so a subscriber failure
+      // doesn't bubble into the outer catch, which would write a second
+      // (less informative) failed-status overwriting the original reason.
+      await executeStream.complete(false).catch((streamErr: unknown) => {
+        log.warn({ err: streamErr, taskId }, "execute stream complete(false) notification failed");
+      });
+      await executeStream.fail(reason).catch((streamErr: unknown) => {
+        log.warn({ err: streamErr, taskId }, "execute stream fail notification failed");
+      });
       return { status: "failed", failureReason: reason };
     }
 
@@ -495,7 +514,19 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       result.usage?.inputTokens != null && result.usage?.outputTokens != null
         ? { input: result.usage.inputTokens, output: result.usage.outputTokens }
         : undefined;
-    await executeStream.complete(true, completionTokens);
+    // Stream notification AFTER all the durable work has committed. Wrap
+    // in `.catch` so a subscriber failure (e.g. transient Telegram API
+    // error during the final edit) doesn't bubble into the outer catch
+    // and regress the already-committed `pending_verify` status to
+    // `failed`. The DB / sandbox state is correct; the user just won't
+    // see the final progress message edit, which is recoverable on next
+    // interaction.
+    await executeStream.complete(true, completionTokens).catch((streamErr: unknown) => {
+      log.warn(
+        { err: streamErr, taskId },
+        "execute stream complete notification failed (task already pending_verify)",
+      );
+    });
     return { status: "pending_verify" };
   } catch (err) {
     const reason = (err as Error).message;

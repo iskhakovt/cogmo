@@ -1,4 +1,7 @@
 import { EventEmitter } from "node:events";
+import { logger } from "../../logger.js";
+
+const log = logger.child({ component: "coding.streaming-registry" });
 
 /**
  * Generic reference to a chat message Cogmo has already posted and edits in
@@ -38,7 +41,7 @@ export interface CodingStreamSnapshot {
   progressMessageRef: ProgressMessageRef | null;
 }
 
-export type CodingStreamListener = (event: CodingStreamEvent) => void;
+export type CodingStreamListener = (event: CodingStreamEvent) => void | Promise<void>;
 export type CodingStreamUnsubscribe = () => void;
 
 interface TaskState {
@@ -88,7 +91,26 @@ export class CodingStreamingRegistry {
     const state = this.#getOrCreate(taskId);
     if (event.kind === "text") state.accumulatedText += event.delta;
     if (event.kind === "plan_finalized") state.accumulatedText = event.plan;
-    state.emitter.emit(STREAM_EVENT, event);
+    // Isolate publisher (orchestrator) from subscriber failures. Node's
+    // EventEmitter.emit is synchronous and propagates the FIRST listener
+    // error — without this guard a transient Telegram API error in the
+    // progress subscriber would bubble into the orchestrator's streaming
+    // loop and abort the task. We deliver each listener individually so a
+    // throwing one doesn't starve later listeners on the same event, and
+    // catch BOTH sync throws and async rejections (subscribers are
+    // typically async functions returning a promise).
+    for (const listener of state.emitter.listeners(STREAM_EVENT)) {
+      try {
+        const result = (listener as CodingStreamListener)(event);
+        if (result && typeof (result as Promise<void>).catch === "function") {
+          (result as Promise<void>).catch((err: unknown) => {
+            log.warn({ err, taskId, eventKind: event.kind }, "coding stream listener rejected");
+          });
+        }
+      } catch (err) {
+        log.warn({ err, taskId, eventKind: event.kind }, "coding stream listener threw");
+      }
+    }
   }
 
   /** Subscribe to live events for `taskId`. Returns an unsubscribe function. */

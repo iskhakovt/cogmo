@@ -444,6 +444,12 @@ export class DrizzleCodingStore implements CodingStore {
     | { kind: "not_found" }
   > {
     return this.#db.transaction(async (tx) => {
+      // `.for('update')` row-locks the matched row so a concurrent
+      // callback for the same task blocks here until our transaction
+      // commits — without it, two simultaneous Telegram callback
+      // deliveries can both observe `planApprovedAt = null` under
+      // READ COMMITTED and both return `kind: "approved"`, double-firing
+      // the plan-approved event.
       const rows = await tx
         .select({
           status: codingTasks.status,
@@ -452,7 +458,8 @@ export class DrizzleCodingStore implements CodingStore {
         })
         .from(codingTasks)
         .where(eq(codingTasks.id, id))
-        .limit(1);
+        .limit(1)
+        .for("update");
       const row = rows[0];
       if (!row) return { kind: "not_found" as const };
       if (row.planApprovedAt) {
@@ -478,6 +485,10 @@ export class DrizzleCodingStore implements CodingStore {
     | { kind: "not_found" }
   > {
     return this.#db.transaction(async (tx) => {
+      // Same `.for('update')` reasoning as approvePlanIfPending — a
+      // double-tap between approve and cancel (or two concurrent cancels)
+      // could otherwise both observe the row as non-terminal and both
+      // write status=cancelled with possibly different reasons.
       const rows = await tx
         .select({
           status: codingTasks.status,
@@ -485,7 +496,8 @@ export class DrizzleCodingStore implements CodingStore {
         })
         .from(codingTasks)
         .where(eq(codingTasks.id, id))
-        .limit(1);
+        .limit(1)
+        .for("update");
       const row = rows[0];
       if (!row) return { kind: "not_found" as const };
       if (TERMINAL_STATUSES.includes(row.status)) {
