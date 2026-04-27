@@ -493,5 +493,39 @@ describe("ClaudeCodeBackend.execute", () => {
       const events = await collect(handle.events);
       expect(events.find((e) => e.kind === "permission_request")).toBeUndefined();
     });
+
+    it("emits two interleaved permission_request events in stdin arrival order (FIFO)", async () => {
+      const fixture = [
+        '{"type":"system","subtype":"init","session_id":"sess-fifo","model":"m"}',
+        '{"type":"control_request","request_id":"req_first","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push"}}}',
+        '{"type":"control_request","request_id":"req_second","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"npm publish"}}}',
+        '{"type":"result","subtype":"success","is_error":false}',
+        "",
+      ].join("\n");
+      const { container, stdinChunks } = fakeContainer(fixture);
+      const backend = new ClaudeCodeBackend();
+      const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
+
+      const requestIds: string[] = [];
+      for await (const ev of handle.events) {
+        if (ev.kind === "permission_request") {
+          requestIds.push(ev.requestId);
+          await handle.respondPermission(ev.requestId, { behavior: "allow" });
+        }
+      }
+      // Events surface in stdout arrival order — the async generator
+      // doesn't reorder. Same order is preserved on the response stream.
+      expect(requestIds).toEqual(["req_first", "req_second"]);
+
+      const responseFrames = stdinChunks
+        .join("")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+        .map((l) => JSON.parse(l))
+        .filter((f) => f.type === "control_response")
+        .map((f) => f.response.request_id);
+      expect(responseFrames).toEqual(["req_first", "req_second"]);
+    });
   });
 });

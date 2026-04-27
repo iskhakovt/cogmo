@@ -391,11 +391,17 @@ export class DrizzleSandboxStore implements SandboxStore {
 
   async listNetworksForInstance(instanceId: string): Promise<readonly NetworkRow[]> {
     return this.#db.transaction(async (tx) => {
+      // depth DESC, then createdAt DESC: callers (the reaper) iterate
+      // the result and reap each row. If a daemon-side parent-child
+      // dependency ever shows up among networks (today none does, but
+      // `parent_id` + `depth` are in the schema for it), removing the
+      // parent first would orphan the children. Ordering matches
+      // listContainersForInstance / listNetworksForTask.
       const rows = await tx
         .select()
         .from(networks)
         .where(eq(networks.instanceId, instanceId))
-        .orderBy(asc(networks.createdAt));
+        .orderBy(desc(networks.depth), desc(networks.createdAt));
       return rows.map(parseNetworkRow);
     });
   }
@@ -457,11 +463,16 @@ export class DrizzleSandboxStore implements SandboxStore {
 
   async listVolumesForInstance(instanceId: string): Promise<readonly VolumeRow[]> {
     return this.#db.transaction(async (tx) => {
+      // depth DESC, then createdAt DESC — same reasoning as
+      // listNetworksForInstance: the reaper reaps the result in order,
+      // and a daemon-side parent-child dependency among volumes (none
+      // today, but the schema supports it) needs the leaf reaped
+      // before the root.
       const rows = await tx
         .select()
         .from(volumes)
         .where(eq(volumes.instanceId, instanceId))
-        .orderBy(asc(volumes.createdAt));
+        .orderBy(desc(volumes.depth), desc(volumes.createdAt));
       return rows.map(parseVolumeRow);
     });
   }

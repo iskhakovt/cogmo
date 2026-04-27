@@ -29,12 +29,40 @@ const CONTAINER_ACTION_RE =
 
 const EXEC_START_RE = /^\/(?:v[\d.]+\/)?exec\/[^/]+\/start(\?|$)/;
 
-/** Endpoints whose response is a stream that long-polls or upgrades. */
-const STREAMING_GET_RE =
-  /^\/(?:v[\d.]+\/)?(?:events|session|build|distribution\/[^/]+\/json)(\?|$)/;
+/**
+ * Endpoints whose response is a stream that long-polls or upgrades.
+ * `/events` is the live container event feed; `/distribution/.../json`
+ * is the registry-distribution metadata fetch. `/build` and `/session`
+ * are denied wholesale (see `DENY_PREFIXES`) so they don't appear here.
+ */
+const STREAMING_GET_RE = /^\/(?:v[\d.]+\/)?(?:events|distribution\/[^/]+\/json)(\?|$)/;
 
-/** Endpoint families denied wholesale — admin surfaces a non-orchestrator must never touch. */
-const DENY_PREFIXES: readonly string[] = ["/swarm", "/plugins", "/nodes"];
+/**
+ * Endpoint families denied wholesale.
+ *
+ * - `/swarm`, `/plugins`, `/nodes` — admin surfaces an unprivileged
+ *   container has no business touching.
+ * - `/build`, `/session` — image production. `/build` lets in-container
+ *   code build arbitrary images and push via `--push` / auth headers;
+ *   `/session` is BuildKit's gRPC channel which does the same. Until
+ *   we have a registry allowlist + BuildKit gRPC inspection (P3 in
+ *   `design/sandbox.md`), block both. Local in-container `docker
+ *   build` against testcontainers patterns still works because the
+ *   common case there is `/containers/create` against a pre-built
+ *   image, not `/build`.
+ * - `/auth` — populates the daemon's registry-credential cache; a
+ *   subsequent `/images/create` (pull) with private images, or any
+ *   future `/build --push` if the deny above were ever lifted, would
+ *   ride on those creds. Block at the source.
+ */
+const DENY_PREFIXES: readonly string[] = [
+  "/swarm",
+  "/plugins",
+  "/nodes",
+  "/build",
+  "/session",
+  "/auth",
+];
 
 /**
  * Classify a request. Strips the optional `/v1.NN/` API-version prefix before
@@ -77,17 +105,6 @@ export function classify(method: string, rawPath: string): RouteOutcome {
   }
 
   if (upper === "GET" && STREAMING_GET_RE.test(path)) {
-    return { kind: "hijack" };
-  }
-
-  // POST /build — long-running, NDJSON progress stream. Pipe both directions.
-  if (upper === "POST" && pathMatches(path, "/build")) {
-    return { kind: "hijack" };
-  }
-
-  // POST /session — BuildKit upgrades HTTP/1.1 → HTTP/2 (gRPC). Same raw-pipe
-  // treatment; we don't speak HTTP/2 inside the proxy.
-  if (upper === "POST" && pathMatches(path, "/session")) {
     return { kind: "hijack" };
   }
 

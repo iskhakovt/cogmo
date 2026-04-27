@@ -23,13 +23,22 @@
  */
 
 const SLICE_PREFIX = "cogmo-task-";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * Build the systemd slice name for a task. UUIDv7 dashes are stripped so
  * the slice unit-name is a single token (systemd is fine with dashes but
  * tooling output is cleaner without them, and we already use the dashless
  * form for branch names + worktree directories).
+ *
+ * Defence in depth: task ids are DB-issued UUIDv7s, but the slice name
+ * is forwarded into a Docker `HostConfig.CgroupParent` field that's
+ * exec'd as a systemd unit name. Validate the shape so a malformed id
+ * can't synthesise a weird unit name.
  */
 export function taskSliceName(taskId: string): string {
+  if (!UUID_RE.test(taskId)) {
+    throw new Error(`taskSliceName: expected a UUID, got ${JSON.stringify(taskId)}`);
+  }
   return `${SLICE_PREFIX}${taskId.replaceAll("-", "")}.slice`;
 }

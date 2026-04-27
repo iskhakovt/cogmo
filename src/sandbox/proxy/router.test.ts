@@ -78,12 +78,20 @@ describe("router.classify", () => {
       ["GET", "/v1.43/containers/abc/logs"],
       ["GET", "/events"],
       ["GET", "/v1.43/events?since=0"],
+    ])("hijacks %s %s", (method, path) => {
+      expect(classify(method, path).kind).toBe("hijack");
+    });
+
+    it.each([
       ["POST", "/build"],
       ["POST", "/v1.43/build"],
       ["POST", "/session"],
       ["POST", "/v1.43/session"],
-    ])("hijacks %s %s", (method, path) => {
-      expect(classify(method, path).kind).toBe("hijack");
+      ["POST", "/auth"],
+      ["POST", "/v1.43/auth"],
+    ])("denies %s %s (image production / registry auth — see DENY_PREFIXES)", (method, path) => {
+      const r = classify(method, path);
+      expect(r.kind).toBe("deny");
     });
   });
 
@@ -104,7 +112,6 @@ describe("router.classify", () => {
       ["GET", "/images/json"],
       ["POST", "/images/create"],
       ["GET", "/system/df"],
-      ["POST", "/auth"],
     ])("forwards %s %s", (method, path) => {
       expect(classify(method, path).kind).toBe("forward");
     });

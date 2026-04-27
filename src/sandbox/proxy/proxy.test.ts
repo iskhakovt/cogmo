@@ -288,6 +288,57 @@ describe("CogmoSocketProxy hijack/forward — fuzz the transcript", () => {
     expect(upstreamRequests[0].url).toBe("/foo?bar=baz");
   });
 
+  it("forwards POST /containers/create with chunked transfer encoding", async () => {
+    // grammY / docker compose can chunk-encode larger creates. Buffering
+    // through readBody works regardless of framing — assert that the
+    // mutated body still reaches the upstream.
+    upstreamResponder = (_req, res) => {
+      res.writeHead(201);
+      res.end('{"Id":"chunk-id"}');
+    };
+    const sock = await proxy.registerTask(SCOPE);
+    const body = JSON.stringify({ Image: "alpine" });
+
+    // Manually write a chunked HTTP/1.1 request: split the body into two
+    // chunks plus the terminating `0\r\n\r\n`. http.request with
+    // chunked encoding requires Content-Length undefined + Transfer-
+    // Encoding: chunked.
+    const split = Math.floor(body.length / 2);
+    const chunk1 = body.slice(0, split);
+    const chunk2 = body.slice(split);
+    const raw = [
+      "POST /containers/create HTTP/1.1",
+      `Host: docker`,
+      `Transfer-Encoding: chunked`,
+      `Content-Type: application/json`,
+      `Connection: close`,
+      "",
+      `${chunk1.length.toString(16)}\r\n${chunk1}`,
+      `${chunk2.length.toString(16)}\r\n${chunk2}`,
+      "0",
+      "",
+      "",
+    ].join("\r\n");
+
+    const client = net.createConnection({ path: sock });
+    await new Promise<void>((resolve) => client.once("connect", () => resolve()));
+    client.write(raw);
+    const response: Buffer[] = [];
+    await new Promise<void>((resolve) => {
+      client.on("data", (c: Buffer) => response.push(c));
+      client.on("close", () => resolve());
+    });
+    const reply = Buffer.concat(response).toString("utf8");
+    expect(reply).toContain("201");
+
+    expect(upstreamRequests).toHaveLength(1);
+    const seen = JSON.parse(upstreamRequests[0].body);
+    expect(seen.Image).toBe("alpine");
+    // Mutations applied through chunked-encoding the same as Content-Length.
+    expect(seen.HostConfig.CgroupParent).toBe("cogmo-task-abc.slice");
+    expect(seen.Labels["cogmo.managed"]).toBe("true");
+  });
+
   it("rejects POST /containers/create with body > 1 MiB cap", async () => {
     const sock = await proxy.registerTask(SCOPE);
     // 2 MiB body — well over the 1 MiB cap.

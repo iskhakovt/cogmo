@@ -306,7 +306,11 @@ export class CogmoSocketProxy {
       // socket lifecycle and won't expose the raw byte stream after upgrade
       // in a way that fits Docker's hijack protocol cleanly.
       upstream.write(buildHttpRequestPreamble(req));
-      // Pipe in both directions. Errors on either side close both.
+      // Pipe in both directions. Default `pipe()` propagates `end` (FIN)
+      // bidirectionally — if a client like `docker exec` half-closes its
+      // write side after sending stdin, the upstream sees the FIN and
+      // can flush. Errors on either side propagate via the `error`
+      // listeners and close both halves.
       clientSocket.pipe(upstream);
       upstream.pipe(clientSocket);
     });

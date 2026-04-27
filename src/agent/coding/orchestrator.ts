@@ -693,6 +693,14 @@ interface HandlePermissionRequestParams {
  * Block-indefinitely on Telegram outage is the design choice (slice3-plan
  * decision 4); the timeout below is a 7-day safety net for truly
  * abandoned tasks, not a deny-on-timeout.
+ *
+ * **Replay safety.** The decision-log lookup + policy evaluation +
+ * persistDecision sequence runs OUTSIDE `step.run`. That's only safe
+ * because `createCodingExecuteOrchestrator` pins `retries: 0` — if
+ * retries are ever turned on, the task-scoped `insertToolDecision` here
+ * would re-fire on replay and produce duplicate rows. Anyone enabling
+ * retries needs to wrap this block in `stepRun("evaluate-tool-gate", …)`
+ * first.
  */
 async function handlePermissionRequest(
   params: HandlePermissionRequestParams,
