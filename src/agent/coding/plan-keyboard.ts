@@ -43,10 +43,9 @@ export function encodePlanCallback(taskId: string, action: PlanCallbackAction): 
   return `${PREFIX}${SEP}${taskId}${SEP}${action}`;
 }
 
-// Standard UUID 8-4-4-4-12 shape (any version). Tighter than `[0-9a-f-]{36}`
-// which would accept e.g. 36 dashes or all-zeros; the DB lookup catches
-// pathological inputs anyway, but rejecting at the boundary keeps the
-// telegram callback layer honest and avoids one wasted round-trip.
+// Standard UUID 8-4-4-4-12 shape (any version). Rejecting malformed
+// callback_data here saves a DB round-trip and keeps the Telegram
+// callback layer honest about what it accepts.
 const UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const PARSE_REGEX = new RegExp(`^plan:(${UUID_PATTERN}):(approve|revise|cancel)$`);
 

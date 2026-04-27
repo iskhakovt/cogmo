@@ -130,6 +130,7 @@ Each domain module owns its DB access in a `store/` subdirectory:
 
 ## Code Style
 
+- **Comments describe the current state, not migration history.** Don't write "Tighter than the previous `[0-9a-f-]{36}` regex which would accept...", "Replaced the unconditional UPDATE here", "Don't say 'Done' because we used to...". Future readers don't have the prior code in front of them — they want to know what this code IS and why, not what it ISN'T or what it replaced. The diff and commit message own the migration story; the comment owns the present-tense rationale. If a comment only makes sense by contrast with a prior version, delete it.
 - **Idiomatic TypeScript** — use classes, interfaces, enums where they make the domain clear. Prefer `interface` over `type` for object shapes (extendable). Use generics for reusable components.
 - **`function` declarations for named exports** — use `function foo()` not `const foo = () => {}`. Better stack traces, hoisted, readable. Arrow functions for callbacks and inline lambdas only.
 - **Naming** — lowercase-hyphenated filenames (`steering-rules.ts`), `.test.ts` suffix for tests. PascalCase for classes/types/interfaces, camelCase for functions/variables.

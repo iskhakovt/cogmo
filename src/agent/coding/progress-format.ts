@@ -45,10 +45,10 @@ const PHASE_HEADER: Record<ProgressPhase, string> = {
   planning: "🧠 Planning",
   awaiting_approval: "📋 Plan ready — awaiting approval",
   executing: "⚙️ Executing",
-  // Don't say "Done": at this point Claude has finished but verify
-  // hasn't run (slice 4 ships verify+push+PR). The user shouldn't read
-  // a green check and assume the task succeeded — `pending_verify` is
-  // still a non-terminal state.
+  // Claude has finished but verify hasn't run (slice 4 ships
+  // verify+push+PR). Label avoids "done" / green-check imagery so the
+  // user doesn't mistake `pending_verify` for task success — it's a
+  // non-terminal state.
   pending_verify: "🛠 Execute done — awaiting verify",
   failed: "❌ Failed",
   cancelled: "🚫 Cancelled",

@@ -429,12 +429,12 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   let executeStream: ExecuteStreamHandle | null = null;
 
   try {
-    // Atomic transition: a concurrent cancel callback that wrote
-    // `cancelled` between our point-read and this step would otherwise
-    // be silently overwritten by an unconditional UPDATE. With
-    // retries=0 + per-task concurrency=1 the race is unlikely today,
-    // but the conditional UPDATE costs nothing and pre-empts the bug
-    // when slice 3+ adds a cancel-during-execute path.
+    // Conditional UPDATE: the transition only fires when the row is
+    // still `awaiting_approval`, so a concurrent cancel callback that
+    // already wrote `cancelled` is preserved. With retries=0 +
+    // per-task concurrency=1 the race window is narrow today; the
+    // conditional UPDATE pre-empts the bug for slice 3+'s
+    // cancel-during-execute path at zero cost.
     const transition = await stepRun("set-status-executing", () =>
       store.transitionTaskStatus(taskId, "awaiting_approval", "executing"),
     );
