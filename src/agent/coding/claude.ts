@@ -216,8 +216,13 @@ async function* runClaude(
   // frames stream input_json_delta fragments we'd have to reassemble.
   // `seenToolUseIds` dedupes against the same tool_use being echoed in a
   // later `result.message` payload (Anthropic occasionally repeats blocks).
+  // Plus a tool_use_id → name map: tool_result blocks only carry
+  // tool_use_id (Anthropic's stream-json schema doesn't repeat the name
+  // on the result), so we resolve the human-readable name from the prior
+  // tool_use block when emitting the `tool_result` event.
   const seenToolUseIds = new Set<string>();
   const seenToolResultIds = new Set<string>();
+  const toolUseNames = new Map<string, string>();
 
   for await (const raw of readJsonl(exec.stdout)) {
     const parsed = ClaudeEventSchema.safeParse(raw);
@@ -239,7 +244,12 @@ async function* runClaude(
         delta?.type === "text_delta" &&
         typeof delta.text === "string"
       ) {
-        textBuf += delta.text;
+        // Only accumulate in plan mode — the buffer is read by the
+        // result event to emit `plan_ready`. Execute-mode narration can
+        // run for tens of minutes and produce megabytes of text; keeping
+        // the whole buffer in memory until completion is wasteful when
+        // we never look at it.
+        if (mode === "plan") textBuf += delta.text;
         yield { kind: "text_delta", text: delta.text };
       }
       continue;
@@ -249,6 +259,11 @@ async function* runClaude(
       for (const raw of event.message?.content ?? []) {
         const block = ToolUseBlockSchema.safeParse(raw);
         if (!block.success) continue;
+        // Always record the id→name mapping so a delayed tool_use block
+        // can still resolve. seenToolUseIds gates the user-visible
+        // `tool_call` emit (no duplicate calls); the name map persists
+        // either way.
+        toolUseNames.set(block.data.id, block.data.name);
         if (seenToolUseIds.has(block.data.id)) continue;
         seenToolUseIds.add(block.data.id);
         yield { kind: "tool_call", tool: block.data.name, input: block.data.input };
@@ -262,9 +277,14 @@ async function* runClaude(
         if (!block.success) continue;
         if (seenToolResultIds.has(block.data.tool_use_id)) continue;
         seenToolResultIds.add(block.data.tool_use_id);
+        // Resolve the human-readable name from the prior tool_use block.
+        // Fall back to the opaque id if we somehow saw the result before
+        // its corresponding tool_use (shouldn't happen — Anthropic emits
+        // them in order — but cheap defensive fallback).
+        const toolName = toolUseNames.get(block.data.tool_use_id) ?? block.data.tool_use_id;
         yield {
           kind: "tool_result",
-          tool: block.data.tool_use_id,
+          tool: toolName,
           ok: block.data.is_error !== true,
           ...(typeof block.data.content === "string" && { summary: block.data.content }),
         };

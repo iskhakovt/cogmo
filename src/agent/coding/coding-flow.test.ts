@@ -499,7 +499,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
 
     expect(sent).toHaveLength(1); // single message, edited in place from then on
     const final = edits.at(-1);
-    expect(final?.text).toContain("Done");
+    expect(final?.text).toContain("Execute done");
     expect(final?.text).toContain("120 tokens");
     // The plan_finalized edit attached the keyboard.
     expect(edits.some((e) => Boolean(e.replyMarkup))).toBe(true);

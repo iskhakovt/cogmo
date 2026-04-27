@@ -45,6 +45,15 @@ describe("plan-keyboard parsing", () => {
     expect(parsePlanCallback(`plan:${TASK_ID}:approve:extra`)).toBeNull();
   });
 
+  it("rejects pathological 36-char strings the loose regex would accept", () => {
+    // Regression: previous regex was [0-9a-f-]{36}, which let through any
+    // mix of hex + dashes. Tightened to the real UUID 8-4-4-4-12 shape.
+    const allDashes = "------------------------------------"; // 36 chars
+    expect(parsePlanCallback(`plan:${allDashes}:approve`)).toBeNull();
+    const wrongLayout = "00000000-0000-0000-0000-000000000-00"; // 36 chars but wrong dashes
+    expect(parsePlanCallback(`plan:${wrongLayout}:approve`)).toBeNull();
+  });
+
   it("PLAN_CALLBACK_REGEX matches what parsePlanCallback accepts", () => {
     expect(PLAN_CALLBACK_REGEX.test(`plan:${TASK_ID}:approve`)).toBe(true);
     expect(PLAN_CALLBACK_REGEX.test(`plan:${TASK_ID}:revise`)).toBe(true);

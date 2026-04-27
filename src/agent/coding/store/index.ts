@@ -184,6 +184,22 @@ export interface CodingStore {
   countActiveTasksForRepo(repoId: string): Promise<number>;
 
   /**
+   * Atomic conditional status transition: `UPDATE ... SET status=$to
+   * WHERE id=$1 AND status=$from RETURNING ...`. Returns the prior
+   * status when the transition didn't fire (concurrent transition won
+   * the race). Used at the head of the execute orchestrator to flip
+   * `awaiting_approval` → `executing` without a TOCTOU gap that a
+   * concurrent cancel callback could squeeze through.
+   */
+  transitionTaskStatus(
+    id: string,
+    from: CodingTaskStatus,
+    to: CodingTaskStatus,
+  ): Promise<
+    { kind: "transitioned" } | { kind: "stale"; status: CodingTaskStatus } | { kind: "not_found" }
+  >;
+
+  /**
    * Atomic plan-approval: stamp `plan_approved_at` iff the task is still
    * `awaiting_approval` AND not already approved. Discriminated result so
    * callbacks can render the right Telegram message without a separate
@@ -431,6 +447,35 @@ export class DrizzleCodingStore implements CodingStore {
         .from(codingTasks)
         .where(and(eq(codingTasks.repoId, repoId), ...conditions));
       return rows[0]?.value ?? 0;
+    });
+  }
+
+  async transitionTaskStatus(
+    id: string,
+    from: CodingTaskStatus,
+    to: CodingTaskStatus,
+  ): Promise<
+    { kind: "transitioned" } | { kind: "stale"; status: CodingTaskStatus } | { kind: "not_found" }
+  > {
+    return this.#db.transaction(async (tx) => {
+      // Single conditional UPDATE — atomic at the SQL level. If RETURNING
+      // comes back empty, either the row doesn't exist or status didn't
+      // match `from`; do a follow-up SELECT to disambiguate.
+      const updated = await tx
+        .update(codingTasks)
+        .set({ status: to })
+        .where(and(eq(codingTasks.id, id), eq(codingTasks.status, from)))
+        .returning({ id: codingTasks.id });
+      if (updated.length > 0) return { kind: "transitioned" as const };
+
+      const rows = await tx
+        .select({ status: codingTasks.status })
+        .from(codingTasks)
+        .where(eq(codingTasks.id, id))
+        .limit(1);
+      const row = rows[0];
+      if (!row) return { kind: "not_found" as const };
+      return { kind: "stale" as const, status: row.status };
     });
   }
 

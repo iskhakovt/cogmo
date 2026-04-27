@@ -285,6 +285,11 @@ describe("ClaudeCodeBackend.execute", () => {
     >[];
     expect(results.every((r) => r.ok)).toBe(true);
     expect(results[0].summary).toBe("export function foo() {}");
+    // tool_result.tool must be the human-readable name (resolved from the
+    // tool_use block), NOT the opaque tool_use_id. Regression: previously
+    // `tool` was set to `block.tool_use_id` so the Telegram activity line
+    // rendered "toolu_01 ✓" instead of "Read ✓".
+    expect(results.map((r) => r.tool)).toEqual(["Read", "Edit", "Bash"]);
 
     const complete = events.at(-1) as Extract<CodingEvent, { kind: "complete" }>;
     expect(complete.exitCode).toBe(0);

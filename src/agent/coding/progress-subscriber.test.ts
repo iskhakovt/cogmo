@@ -124,7 +124,8 @@ describe("CodingProgressSubscriber", () => {
     await new Promise((r) => setImmediate(r));
 
     const completionEdit = bot.edits.at(-1);
-    expect(completionEdit?.text).toContain("✅ Done");
+    expect(completionEdit?.text).toContain("Execute done");
+    expect(completionEdit?.text).toContain("awaiting verify");
     expect(completionEdit?.text).toContain("120 tokens");
     expect(completionEdit?.text).toContain("in 100");
     expect(completionEdit?.text).toContain("out 20");

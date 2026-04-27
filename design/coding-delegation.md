@@ -211,7 +211,15 @@ coding_repos (
 
 Owned by `src/agent/store/` (fits the existing agent domain — tasks are agent work items). Consumer of `containers` from the sandbox store.
 
-## Container Lifecycle `[confirmed]`
+## Container Lifecycle `[confirmed: single-task plan→execute; reaper / sibling / proxy still proposed]`
+
+> Slice 2 confirms the in-task lifecycle: per-task container (depth 0),
+> bind-mounted worktree at `/workspace`, per-task home volume, idle TTL
+> reuse-or-recreate via `--resume <sid>`, and grace-period teardown on
+> terminal status. The reaper cron, sibling-container creation, the
+> Docker socket proxy, and `networks` / `volumes` tables are still
+> `[proposed]` — they earn their keep in slice 3 when execute-mode tool
+> calls can spawn child containers.
 
 **Invariant: one container per task.** Sharing a container across tasks causes state contamination — `pip install` in task A pollutes task B, long-running processes leak, failures cascade. Containers are cheap; clarity is worth the cold-start cost, which per-repo named cache volumes ([sandbox.md](sandbox.md) → Networks, Volumes, Images) flatten.
 

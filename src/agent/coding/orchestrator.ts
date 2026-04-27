@@ -429,9 +429,22 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   let executeStream: ExecuteStreamHandle | null = null;
 
   try {
-    await stepRun("set-status-executing", () =>
-      store.updateTaskStatus({ id: taskId, status: "executing" }),
+    // Atomic transition: a concurrent cancel callback that wrote
+    // `cancelled` between our point-read and this step would otherwise
+    // be silently overwritten by an unconditional UPDATE. With
+    // retries=0 + per-task concurrency=1 the race is unlikely today,
+    // but the conditional UPDATE costs nothing and pre-empts the bug
+    // when slice 3+ adds a cancel-during-execute path.
+    const transition = await stepRun("set-status-executing", () =>
+      store.transitionTaskStatus(taskId, "awaiting_approval", "executing"),
     );
+    if (transition.kind !== "transitioned") {
+      log.info(
+        { taskId, transition },
+        "execute: status transition lost the race (already cancelled or transitioned)",
+      );
+      return { status: "skipped" };
+    }
 
     // Get-or-create the task container. The plan-phase container has an
     // idle TTL (CODING_TASK_IDLE_TTL_MINUTES); if approval took longer

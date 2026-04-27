@@ -546,6 +546,49 @@ describe("DrizzleCodingStore", () => {
       expect(reloaded?.failureReason).toBe("user cancelled");
     });
 
+    it("transitionTaskStatus: success path swaps status atomically", async () => {
+      const repoId = await seedRepo();
+      const task = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      await store.updateTaskStatus({ id: task.id, status: "awaiting_approval" });
+
+      const result = await store.transitionTaskStatus(task.id, "awaiting_approval", "executing");
+      expect(result.kind).toBe("transitioned");
+      expect((await store.getTask(task.id))?.status).toBe("executing");
+    });
+
+    it("transitionTaskStatus: stale return when current status doesn't match `from`", async () => {
+      const repoId = await seedRepo();
+      const task = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      // Task is in `queued` — try to transition awaiting_approval → executing.
+      const result = await store.transitionTaskStatus(task.id, "awaiting_approval", "executing");
+      expect(result.kind).toBe("stale");
+      if (result.kind !== "stale") return;
+      expect(result.status).toBe("queued");
+      // Status unchanged — no write happened.
+      expect((await store.getTask(task.id))?.status).toBe("queued");
+    });
+
+    it("transitionTaskStatus: not_found for unknown id", async () => {
+      const result = await store.transitionTaskStatus(
+        "019d0000-0000-7000-8000-000000000099",
+        "awaiting_approval",
+        "executing",
+      );
+      expect(result.kind).toBe("not_found");
+    });
+
     it("cancel on terminal task returns already_terminal without rewriting", async () => {
       const repoId = await seedRepo();
       const task = await store.insertTask({

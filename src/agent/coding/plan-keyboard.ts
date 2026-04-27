@@ -43,7 +43,12 @@ export function encodePlanCallback(taskId: string, action: PlanCallbackAction): 
   return `${PREFIX}${SEP}${taskId}${SEP}${action}`;
 }
 
-const PARSE_REGEX = /^plan:([0-9a-f-]{36}):(approve|revise|cancel)$/;
+// Standard UUID 8-4-4-4-12 shape (any version). Tighter than `[0-9a-f-]{36}`
+// which would accept e.g. 36 dashes or all-zeros; the DB lookup catches
+// pathological inputs anyway, but rejecting at the boundary keeps the
+// telegram callback layer honest and avoids one wasted round-trip.
+const UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const PARSE_REGEX = new RegExp(`^plan:(${UUID_PATTERN}):(approve|revise|cancel)$`);
 
 export interface ParsedPlanCallback {
   taskId: string;
@@ -57,11 +62,11 @@ export function parsePlanCallback(data: string): ParsedPlanCallback | null {
   return { taskId: m[1] as string, action: m[2] as PlanCallbackAction };
 }
 
-/** Regex prefix for grammY's `bot.callbackQuery(REGEX, ...)` registration. */
-export const PLAN_CALLBACK_REGEX = /^plan:[0-9a-f-]{36}:(approve|revise|cancel)$/;
+/** Regex for grammY's `bot.callbackQuery(REGEX, ...)` registration. */
+export const PLAN_CALLBACK_REGEX = new RegExp(`^plan:${UUID_PATTERN}:(approve|revise|cancel)$`);
 
 /** Zod schema for the parsed shape — handy for tests + future runtime guards. */
 export const ParsedPlanCallbackSchema = z.object({
-  taskId: z.string().regex(/^[0-9a-f-]{36}$/),
+  taskId: z.string().regex(new RegExp(`^${UUID_PATTERN}$`)),
   action: z.enum(["approve", "revise", "cancel"]),
 });
