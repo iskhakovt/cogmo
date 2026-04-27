@@ -57,6 +57,18 @@ export const env = createEnv({
     CODING_TASK_IDLE_TTL_MINUTES: z.coerce.number().default(20),
     /** Grace period after a task reaches a terminal status before container teardown. */
     CODING_TASK_GRACE_SECONDS: z.coerce.number().default(120),
+    /**
+     * Directory holding per-task Docker proxy sockets. Created at boot if
+     * missing. Each task container gets `${SANDBOX_PROXY_SOCKET_DIR}/<taskId>.sock`
+     * bind-mounted at `/var/run/docker.sock` so child container creation
+     * flows through the proxy (label injection, runtime override, deny rules).
+     */
+    SANDBOX_PROXY_SOCKET_DIR: z.string().default("/run/cogmo/sockets"),
+    /**
+     * Host Docker socket the proxy forwards to. Override only for unusual
+     * deployments (rootless docker, snap, etc.).
+     */
+    SANDBOX_HOST_DOCKER_SOCKET: z.string().default("/var/run/docker.sock"),
   },
   runtimeEnv: resolved,
   emptyStringAsUndefined: true,

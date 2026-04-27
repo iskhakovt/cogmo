@@ -39,7 +39,7 @@ import { OpenAICompatibleProvider } from "./llm/openai-compat.js";
 import type { LlmProvider } from "./llm/provider.js";
 import { logger } from "./logger.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
-import { LocalInProcessSandbox, type Sandbox } from "./sandbox/index.js";
+import { CogmoSocketProxy, LocalInProcessSandbox, type Sandbox } from "./sandbox/index.js";
 import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
 import { DrizzleSecretsStore, type SecretsStore } from "./secrets/store/index.js";
@@ -85,17 +85,29 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       pid: process.pid,
     });
     sandboxInstanceId = instance.id;
+    const proxy = await CogmoSocketProxy.create({
+      socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
+      hostDockerSocket: env.SANDBOX_HOST_DOCKER_SOCKET,
+    });
     sandbox = await LocalInProcessSandbox.create({
       docker,
       store: sandboxStore,
       runtime: env.SANDBOX_RUNTIME,
       instanceId: instance.id,
+      proxy,
     });
     const { orphansReaped } = await sandbox.reconcileCrashedInstances(instance.id);
     if (orphansReaped > 0) {
       logger.warn({ orphansReaped }, "reaped orphan containers from prior instance(s)");
     }
-    logger.info({ runtime: env.SANDBOX_RUNTIME, instanceId: instance.id }, "sandbox initialized");
+    logger.info(
+      {
+        runtime: env.SANDBOX_RUNTIME,
+        instanceId: instance.id,
+        proxySocketDir: env.SANDBOX_PROXY_SOCKET_DIR,
+      },
+      "sandbox initialized",
+    );
   } else {
     logger.info("SANDBOX_RUNTIME unset — sandbox module disabled (coding-delegation unavailable)");
   }

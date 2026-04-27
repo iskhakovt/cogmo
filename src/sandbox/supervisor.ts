@@ -9,6 +9,7 @@ import type {
   TaskContainerHandle,
   TaskContainerSpec,
 } from "./index.js";
+import type { CogmoSocketProxy } from "./proxy/index.js";
 import { assertRuntimeAvailable, dockerRuntimeName, type SandboxRuntime } from "./runtime.js";
 import type { ContainerRow, SandboxStore } from "./store/index.js";
 import type { ContainerLabels } from "./types.js";
@@ -28,6 +29,16 @@ interface CreateOptions {
   runtime: SandboxRuntime;
   /** The current Cogmo instance id. Stamped into every container's `cogmo.instance` label. */
   instanceId: string;
+  /**
+   * Optional socket proxy. When provided, every task container gets its own
+   * per-task Unix socket bind-mounted at `/var/run/docker.sock`; child
+   * container creation from inside the task (testcontainers, `docker
+   * compose`, buildx) flows through the proxy so labels + runtime + cgroup
+   * parent are injected automatically. When omitted, no socket is mounted
+   * and child container creation from inside the task fails (intentional —
+   * slice 1's plan-only path doesn't spawn children).
+   */
+  proxy?: CogmoSocketProxy;
 }
 
 /**
@@ -42,12 +53,14 @@ export class LocalInProcessSandbox implements Sandbox {
   #store: SandboxStore;
   #runtime: SandboxRuntime;
   #instanceId: string;
+  #proxy?: CogmoSocketProxy;
 
   private constructor(opts: CreateOptions) {
     this.#docker = opts.docker;
     this.#store = opts.store;
     this.#runtime = opts.runtime;
     this.#instanceId = opts.instanceId;
+    if (opts.proxy) this.#proxy = opts.proxy;
   }
 
   static async create(opts: CreateOptions): Promise<LocalInProcessSandbox> {
@@ -90,7 +103,9 @@ export class LocalInProcessSandbox implements Sandbox {
   }
 
   async createTaskContainer(spec: TaskContainerSpec): Promise<TaskContainerHandle> {
-    const runtime = spec.allowPrivilegedRunc ? "runc" : dockerRuntimeName(this.#runtime);
+    const runtime: "sysbox-runc" | "runc" = spec.allowPrivilegedRunc
+      ? "runc"
+      : (dockerRuntimeName(this.#runtime) as "sysbox-runc" | "runc");
     const labels: ContainerLabels = {
       [LABEL_MANAGED]: "true",
       [LABEL_INSTANCE]: this.#instanceId,
@@ -99,38 +114,73 @@ export class LocalInProcessSandbox implements Sandbox {
       [LABEL_DEPTH]: "0",
     };
 
-    const container = await this.#docker.createContainer({
-      Image: spec.image,
-      // Hold the container open so we can `exec` claude/codex into it on demand.
-      // The CLI runs as a transient exec rather than as PID 1.
-      Entrypoint: ["/bin/sleep"],
-      Cmd: ["infinity"],
-      Tty: false,
-      OpenStdin: false,
-      WorkingDir: "/workspace",
-      Labels: labels,
-      HostConfig: {
-        Runtime: runtime,
-        Binds: [`${spec.worktreePath}:/workspace`],
-        // Home volume mounted at /home/vscode — slice 1 contract: task images
-        // MUST run as user `vscode` (devbase inherits this from the
-        // mcr.microsoft.com/devcontainers/base:ubuntu-24.04 base). When slice 4
-        // grows custom devcontainer support, this needs to become part of
-        // TaskContainerSpec (image-declared user → mount target lookup).
-        Mounts: [
-          {
-            Type: "volume",
-            Source: spec.homeVolumeName,
-            Target: "/home/vscode",
-          },
-        ],
-        // Resource caps. NanoCpus uses billionths of a CPU.
-        NanoCpus: Math.round(spec.resourceLimits.cpus * 1_000_000_000),
-        Memory: spec.resourceLimits.memory_bytes,
-        PidsLimit: spec.resourceLimits.pids,
-        AutoRemove: false,
-      },
-    });
+    // Pre-allocate the proxy socket so the task container can mount it at
+    // `/var/run/docker.sock` from the moment it starts. Parent docker id
+    // isn't known yet — register with a placeholder, then upsert below
+    // after `createContainer` returns. Bare scope is enough for any
+    // pre-start child create requests (there shouldn't be any, but the
+    // proxy is up regardless).
+    const proxySocketPath = this.#proxy
+      ? await this.#proxy.registerTask({
+          taskId: spec.rootTaskId,
+          parentContainerRowId: "",
+          parentDockerId: "",
+          parentDepth: 0,
+          runtime,
+          // Cgroup parent injection lands in slice 3.0h. For now use an
+          // empty string — Docker treats that as "use the daemon default".
+          cgroupParent: "",
+          instanceId: this.#instanceId,
+        })
+      : null;
+
+    const binds = [`${spec.worktreePath}:/workspace`];
+    if (proxySocketPath) {
+      binds.push(`${proxySocketPath}:/var/run/docker.sock`);
+    }
+
+    let container: Docker.Container;
+    try {
+      container = await this.#docker.createContainer({
+        Image: spec.image,
+        // Hold the container open so we can `exec` claude/codex into it on demand.
+        // The CLI runs as a transient exec rather than as PID 1.
+        Entrypoint: ["/bin/sleep"],
+        Cmd: ["infinity"],
+        Tty: false,
+        OpenStdin: false,
+        WorkingDir: "/workspace",
+        Labels: labels,
+        HostConfig: {
+          Runtime: runtime,
+          Binds: binds,
+          // Home volume mounted at /home/vscode — slice 1 contract: task images
+          // MUST run as user `vscode` (devbase inherits this from the
+          // mcr.microsoft.com/devcontainers/base:ubuntu-24.04 base). When slice 4
+          // grows custom devcontainer support, this needs to become part of
+          // TaskContainerSpec (image-declared user → mount target lookup).
+          Mounts: [
+            {
+              Type: "volume",
+              Source: spec.homeVolumeName,
+              Target: "/home/vscode",
+            },
+          ],
+          // Resource caps. NanoCpus uses billionths of a CPU.
+          NanoCpus: Math.round(spec.resourceLimits.cpus * 1_000_000_000),
+          Memory: spec.resourceLimits.memory_bytes,
+          PidsLimit: spec.resourceLimits.pids,
+          AutoRemove: false,
+        },
+      });
+    } catch (err) {
+      // Roll the proxy socket back so a failed retry doesn't see a dangling
+      // registration. unregisterTask is idempotent.
+      if (this.#proxy) {
+        await this.#proxy.unregisterTask(spec.rootTaskId).catch(() => {});
+      }
+      throw err;
+    }
 
     const containerRow = await this.#store.insertContainer({
       dockerId: container.id,
@@ -138,12 +188,27 @@ export class LocalInProcessSandbox implements Sandbox {
       rootTaskId: spec.rootTaskId,
       depth: 0,
       image: spec.image,
-      runtime: runtime as "sysbox-runc" | "runc",
+      runtime,
       labels,
       resourceLimits: spec.resourceLimits,
       ttlExpiresAt: spec.ttl.expiresAt,
       instanceId: this.#instanceId,
     });
+
+    // Now that the parent docker id is known, upsert the proxy scope so
+    // child container creates from inside the task get the right
+    // `cogmo.parent` label injected.
+    if (this.#proxy) {
+      await this.#proxy.registerTask({
+        taskId: spec.rootTaskId,
+        parentContainerRowId: containerRow.id,
+        parentDockerId: container.id,
+        parentDepth: 0,
+        runtime,
+        cgroupParent: "",
+        instanceId: this.#instanceId,
+      });
+    }
 
     try {
       await container.start();
@@ -164,6 +229,9 @@ export class LocalInProcessSandbox implements Sandbox {
       await container.remove({ force: true }).catch(() => {
         /* best effort */
       });
+      if (this.#proxy) {
+        await this.#proxy.unregisterTask(spec.rootTaskId).catch(() => {});
+      }
       throw err;
     }
 
@@ -200,6 +268,14 @@ export class LocalInProcessSandbox implements Sandbox {
         exitedAt: new Date(),
       });
     }
+    // Tear down the per-task proxy socket. Idempotent — safe to call when no
+    // proxy is configured or when the task was never registered (e.g. the
+    // container creation failed before registerTask).
+    if (this.#proxy) {
+      await this.#proxy.unregisterTask(rootTaskId).catch((err: unknown) => {
+        log.warn({ err, taskId: rootTaskId }, "proxy unregisterTask failed during stopTask");
+      });
+    }
   }
 
   async listContainersForTask(rootTaskId: string): Promise<readonly ContainerRow[]> {
@@ -215,8 +291,14 @@ export class LocalInProcessSandbox implements Sandbox {
   }
 
   async shutdown(): Promise<void> {
-    // dockerode holds no persistent connections — nothing to close. Method
-    // exists for symmetry with future remote impls that hold sockets.
+    // dockerode holds no persistent connections. The proxy holds Unix
+    // socket listeners — close so the socket files unlink and orphan
+    // sockets don't pile up across Cogmo restarts.
+    if (this.#proxy) {
+      await this.#proxy.close().catch((err: unknown) => {
+        log.warn({ err }, "proxy close failed during shutdown");
+      });
+    }
   }
 
   async #exec(

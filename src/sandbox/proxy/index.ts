@@ -13,8 +13,14 @@ const log = logger.child({ component: "sandbox.proxy" });
 
 const DEFAULT_HOST_DOCKER_SOCKET = "/var/run/docker.sock";
 
-/** Per-connection scope tag — set by the per-task net.Server's `connection` listener. */
-const SCOPE_BY_SOCKET = new WeakMap<net.Socket, TaskScope>();
+/**
+ * Per-connection task-id tag — set by the per-task net.Server's `connection`
+ * listener. Connection handlers look up the live scope via `#scopes.get(taskId)`
+ * each request, so a `registerTask` update mid-flight (e.g. once the
+ * supervisor learns the parent docker id) takes effect immediately without
+ * re-binding the socket.
+ */
+const TASK_ID_BY_SOCKET = new WeakMap<net.Socket, string>();
 
 /**
  * Unix-socket Docker daemon proxy. Listens on multiple per-task socket
@@ -41,6 +47,8 @@ export class CogmoSocketProxy {
   #taskServers = new Map<string, net.Server>();
   /** Tracks task socket paths so we can remove them on shutdown. */
   #socketPaths = new Map<string, string>();
+  /** Live task scopes — looked up per-request so `registerTask` updates take effect immediately. */
+  #scopes = new Map<string, TaskScope>();
   #closed = false;
 
   private constructor(opts: ProxyOptions) {
@@ -65,26 +73,30 @@ export class CogmoSocketProxy {
   }
 
   /**
-   * Allocate a task socket and register the scope. Returns the absolute
-   * socket path the supervisor should bind-mount into the container at
-   * `/var/run/docker.sock`. Idempotent on the same `taskId` — re-registering
-   * closes the prior server first.
+   * Upsert a task scope. On first call for a `taskId`: allocate the socket,
+   * bind a `net.Server` to it, and return the absolute socket path the
+   * supervisor mounts into the container at `/var/run/docker.sock`. On
+   * subsequent calls: replace the live scope (so a supervisor that registers
+   * with a placeholder parent docker id and updates after `createContainer`
+   * doesn't disrupt connections in flight). Returns the same path either
+   * way so callers can store it once at first register.
    */
   async registerTask(scope: TaskScope): Promise<string> {
     if (this.#closed) throw new Error("proxy is closed");
-    if (this.#taskServers.has(scope.taskId)) {
-      await this.unregisterTask(scope.taskId);
-    }
+    this.#scopes.set(scope.taskId, scope);
+
+    const existing = this.#socketPaths.get(scope.taskId);
+    if (existing) return existing;
+
     const socketPath = join(this.#socketDir, `${scope.taskId}.sock`);
     await rm(socketPath, { force: true });
+    const taskId = scope.taskId;
 
     const server = net.createServer((socket) => {
-      SCOPE_BY_SOCKET.set(socket, scope);
+      TASK_ID_BY_SOCKET.set(socket, taskId);
       this.#httpServer.emit("connection", socket);
     });
-    server.on("error", (err) =>
-      log.warn({ err: err.message, taskId: scope.taskId }, "task socket error"),
-    );
+    server.on("error", (err) => log.warn({ err: err.message, taskId }, "task socket error"));
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(socketPath, () => {
@@ -92,9 +104,9 @@ export class CogmoSocketProxy {
         resolve();
       });
     });
-    this.#taskServers.set(scope.taskId, server);
-    this.#socketPaths.set(scope.taskId, socketPath);
-    log.info({ taskId: scope.taskId, socketPath }, "registered task proxy socket");
+    this.#taskServers.set(taskId, server);
+    this.#socketPaths.set(taskId, socketPath);
+    log.info({ taskId, socketPath }, "registered task proxy socket");
     return socketPath;
   }
 
@@ -104,6 +116,7 @@ export class CogmoSocketProxy {
     const socketPath = this.#socketPaths.get(taskId);
     this.#taskServers.delete(taskId);
     this.#socketPaths.delete(taskId);
+    this.#scopes.delete(taskId);
     if (server) {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -125,10 +138,11 @@ export class CogmoSocketProxy {
   // ── HTTP request dispatch ────────────────────────────────────────────────
 
   #handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
-    const scope = SCOPE_BY_SOCKET.get(req.socket);
+    const taskId = TASK_ID_BY_SOCKET.get(req.socket);
+    const scope = taskId ? this.#scopes.get(taskId) : undefined;
     if (!scope) {
       // No scope tag — the connection didn't come through a registered task
-      // socket. Refuse rather than treat as an unscoped pass-through.
+      // socket, or the task was unregistered between connect and request.
       respondJson(res, 500, { message: "Cogmo proxy: connection has no task scope" });
       return;
     }
