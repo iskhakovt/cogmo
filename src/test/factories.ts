@@ -204,6 +204,10 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       ),
       remove: vi.fn().mockResolvedValue(ok(undefined)),
     },
+    coding: {
+      approvePlan: vi.fn().mockResolvedValue(ok({ taskId: "t-1" })),
+      cancelTask: vi.fn().mockResolvedValue(ok({ taskId: "t-1" })),
+    },
     ...overrides,
   };
 }

@@ -18,16 +18,19 @@ export const DELEGATE_CODING_GUIDANCE = `You can delegate multi-step coding work
 - The user asks for code changes that span more than a couple of files, require running tests, or would normally take you many tool calls.
 - The work targets a registered repo (see \`/repo list\`).
 
-Slice 1 supports plan-only — \`delegate_coding\` returns a plan for human approval. The plan is the CLI's own assessment of what it would do; surface it to the user verbatim. Do NOT pre-summarise. Approval flow ships in the next slice.
+**This tool is asynchronous.** It submits the task and returns immediately with a taskId. The plan, approval prompt, and execution updates appear in the chat as new messages from Cogmo — not in your tool result. So:
+- Do NOT wait for the plan in your reply. Acknowledge the submission briefly ("Submitted — I'll let you know when the plan's ready" or similar) and return.
+- Do NOT speculate about plan content, file lists, or expected outcomes. The CLI's own plan is authoritative; your guesses would conflict with it.
+- Do NOT call the tool a second time for the same goal — the first call is already running. Cancel via the message keyboard if needed.
 
-If the sandbox is not initialized (dev machine without SANDBOX_RUNTIME), the tool throws a clear error — relay the message to the user and suggest they configure it.`;
+If the sandbox is not initialized (dev machine without SANDBOX_RUNTIME), the tool throws a clear error — relay the message to the user and suggest they configure it. If the repo has reached its concurrent-task limit, the tool returns \`status: "rejected"\` with a reason — surface it.`;
 
 export const delegateCodingTool: ToolSpec = defineTool({
   name: "delegate_coding",
   description:
-    "Delegate a multi-step coding task to Claude Code in a sandboxed container. Returns a plan " +
-    "for the user to approve. Slice 1: plan only — no edits, no PR. Use when the task spans " +
-    "many files or needs running tests.",
+    "Submit a multi-step coding task to Claude Code in a sandboxed container. Returns immediately " +
+    "with a taskId — the plan, approval prompt, and execution updates arrive as separate chat " +
+    "messages. Use when the task spans many files or needs running tests.",
   schema: DelegateCodingInput,
   handler: async ({ goal, repo }, service) => {
     if (!service.coding) {
@@ -37,28 +40,17 @@ export const delegateCodingTool: ToolSpec = defineTool({
       );
     }
     const result = await service.coding.delegate({ goal, repoName: repo });
-    if (result.status === "failed") {
-      return JSON.stringify({
-        ok: false,
-        taskId: result.taskId,
-        reason: result.failureReason ?? "plan phase failed",
-      });
+    if (result.status === "rejected") {
+      return JSON.stringify({ ok: false, reason: result.reason });
     }
-    // The "approval keyboard ships in slice 2" hint is only meaningful when
-    // the task parks at `awaiting_approval` — i.e. `trigger_source = user`.
-    // Automated triggers (evolution, signal_pipeline) auto-advance to
-    // `executing`, so the hint would be misleading there.
-    const nextStep =
-      result.status === "awaiting_approval"
-        ? "Plan posted. Approval keyboard ships in slice 2 — for now, this task stays in " +
-          "awaiting_approval status. Show the plan to the user verbatim."
-        : undefined;
     return JSON.stringify({
       ok: true,
       taskId: result.taskId,
       status: result.status,
-      plan: result.plan ?? "",
-      ...(nextStep !== undefined && { nextStep }),
+      nextStep:
+        "Task submitted. The plan will post as a separate message with Approve / Revise / Cancel " +
+        "buttons. Acknowledge the submission to the user and stop — don't speculate about plan " +
+        "content.",
     });
   },
 });

@@ -26,6 +26,7 @@ export const codingTaskStatus = pgEnum("coding_task_status", [
   "planning",
   "awaiting_approval",
   "executing",
+  "pending_verify",
   "verifying",
   "pushed",
   "pr_open",
@@ -60,7 +61,8 @@ export const codingRepos = pgTable("coding_repos", {
 /**
  * One coding task = one git worktree + one branch + one CLI session +
  * (eventually) one draft PR. Slice 1 fields drive plan-only flows; later
- * slices fill in `pr_url`, `verifying`/`pushed`/`pr_open` statuses, etc.
+ * slices fill in `pr_url`, `pending_verify`/`verifying`/`pushed`/`pr_open`
+ * statuses, etc.
  */
 export const codingTasks = pgTable("coding_tasks", {
   id: pk(),
