@@ -415,7 +415,7 @@ Streaming sections re-execute on retry. `--resume <sid>` plus idempotent durable
 
 ## Autonomy Gates `[proposed]`
 
-Three gates, mapped onto Cogmo's existing `explicit_permission` rules. Plan gate is `[confirmed]` (slice 2); tool gate and merge gate remain `[proposed]`.
+Three gates, mapped onto Cogmo's existing `explicit_permission` rules. Plan gate is `[confirmed]` (slice 2); tool gate is `[confirmed]` (slice 3); merge gate remains `[proposed]`.
 
 ### Plan gate `[confirmed]`
 
@@ -432,19 +432,27 @@ This keeps automated self-improvement flows non-blocking while preserving a huma
 
 **Approval idempotency.** `approvePlanIfPending` is atomic: a second tap returns `task_already_approved` without re-emitting the event. Telegram surfaces the duplicate as "already approved" toast and no state change.
 
-### Tool gate
+### Tool gate `[confirmed]`
 
 During execute phase. Every tool call the CLI wants to run is gated against our policy before it executes.
 
-**Mechanism: `stream-json` bidirectional, not PreToolUse hooks.** Claude Code's `PreToolUse` hook runs as a synchronous subprocess with a default ~60s timeout — not workable when the user is asleep or away from Telegram for hours. Using `--input-format stream-json` we can respond to the CLI's permission requests over stdin, blocking for as long as the user needs. The same channel is how we inject follow-up messages during a multi-turn task. Hooks stay as a backup for pattern-match denies that we want to enforce in-band with no Cogmo round-trip (e.g., always block `rm -rf /*`), because hook timeouts don't matter when the decision is local and instantaneous.
+**Mechanism: stream-json `control_request` bidirectional.** Claude Code's `PreToolUse` hook runs as a synchronous subprocess with a default ~60s timeout — not workable when the user is asleep or away from Telegram for hours. Slice 3.0d drops `--permission-mode acceptEdits` so the CLI emits `control_request` frames with `subtype: can_use_tool` on stdout for every tool call; Cogmo writes a `control_response` back on stdin. The CLI blocks until each request is answered, so the orchestrator's policy + decision-log + Telegram round trip drives back-pressure naturally. Same channel is how we inject follow-up messages during a multi-turn task.
 
-Policy (applied whether the signal comes from hook or stream-json):
+**Defaults are loose. The container + Docker proxy + sysbox runtime are the security boundary; the gate is for visibility into externally-visible side effects, not in-container damage prevention** (the container's ephemerality is the recovery story; genuinely-dangerous things like `Privileged=true`, host-net, host-path binds, dangerous caps are blocked at the proxy layer where they belong).
 
-- **Always allow:** `Read`, `Grep`, `Glob`, `Edit`, `Write` to files under the worktree
-- **Always deny:** `Bash(rm -rf /*)`, `Bash(git push --force *)`, anything outside the worktree
-- **Prompt:** `Bash(git push*)`, `Bash(docker *)` (caught by sandbox policy anyway but also surfaced here), network writes (`curl -X POST`, npm publish, etc.)
+Policy:
 
-Prompts go to Telegram as inline-keyboard messages: **Allow once** / **Allow for this task** / **Deny**. Response writes to a decision log; matching decisions auto-apply for the rest of the task.
+- **Always allow:** all file ops anywhere in container (Read/Edit/Write/Glob/Grep/MultiEdit/NotebookEdit), all read-only Bash, test/build/lint/format/typecheck, package installs (`pnpm install`, `cargo build`, `pip install`, etc.), local docker actions (`docker ps`, `docker run`, `docker compose up`), in-container `rm`. Most calls hit always-allow and reply in microseconds with no Telegram round trip.
+- **Prompt:** narrow set of external state changes — `git push`, `gh pr create / merge / review / close / edit / comment / ready / reopen`, `gh issue` mutations, `gh release / repo create / delete / edit`, `npm/pnpm/yarn publish | unpublish`, `cargo publish | yank`, `uv publish`, `twine upload | publish`, HTTP writes via `curl -X POST/PUT/DELETE/PATCH` or `wget --post-data` to non-localhost URLs.
+- **Deny:** empty static set. The proxy + sysbox boundary handles the genuinely-dangerous side. The decision log can still record an explicit user-denied response (`scope=once`, `decision=deny`).
+
+Compound commands prompt if any sub-command is in the prompt set (worst-case wins): `pnpm test && git push` shows the push explicitly rather than letting it ride a blanket allow.
+
+**Telegram surface.** Prompts are inline-keyboard messages: **Once** / **Task** / **Deny**. callback_data uses single-char wire codes (`o`/`t`/`d`) to fit Telegram's 64-byte limit alongside a full UUID taskId + 16-char requestId prefix. Identity-checked: `callback.from.id` resolves via `transportStore.resolveUser` and must match the conversation owner.
+
+**Decision log replay.** Each user response writes a row to `coding_tool_decisions` (per-task). On every subsequent request, the orchestrator builds a canonical pattern (`Bash(git push *)`, `Bash(gh pr create *)`, etc.) and replays the log newest-first; the most recent task-scoped match wins immediately, no Telegram round trip. Audit-only `once`-scoped rows are ignored on replay. No "Allow forever" / cross-task scope — that's the static policy's territory, edited out-of-band by the user (avoids the "poisoned plan in task A normalises a dangerous pattern for task B" failure mode).
+
+**Block indefinitely on Telegram outage.** Slice 3 design: the CLI just waits. Implementation uses a 7-day `step.waitForEvent` timeout as an abandoned-task safety net, not a deny-on-timeout. If a prompt hits the safety-net deny, it's logged for surfacing to the operator.
 
 ### Merge gate
 

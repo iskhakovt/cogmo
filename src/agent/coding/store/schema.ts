@@ -1,5 +1,6 @@
 import {
   boolean,
+  index,
   integer,
   jsonb,
   pgEnum,
@@ -33,6 +34,10 @@ export const codingTaskStatus = pgEnum("coding_task_status", [
   "failed",
   "cancelled",
 ]);
+
+export const toolDecision = pgEnum("tool_decision", ["allow", "deny"]);
+
+export const decisionScope = pgEnum("decision_scope", ["once", "task"]);
 
 // --- Tables ---
 
@@ -97,3 +102,29 @@ export const codingTasks = pgTable("coding_tasks", {
   resourceUsage: jsonb("resource_usage"), // ResourceUsageSchema; null = no stats poll yet
   createdAt: ts(),
 });
+
+/**
+ * Per-task tool gate decision log. One row per user response to a permission
+ * prompt (or per implicit auto-allow that we want to remember). Future
+ * permission requests within the task replay against this log: the first
+ * matching pattern wins. `pattern` is the canonical matcher form (e.g.
+ * `Bash(git push origin *)`); `tool` is the request's top-level tool name
+ * for cheap pre-filtering. `scope` controls retention semantics — `once`
+ * records the resolved request id (in `pattern`) for audit only; `task`
+ * holds a glob-ish matcher consulted on every subsequent request.
+ */
+export const codingToolDecisions = pgTable(
+  "coding_tool_decisions",
+  {
+    id: pk(),
+    taskId: uuid("task_id")
+      .notNull()
+      .references(() => codingTasks.id),
+    tool: text("tool").notNull(),
+    pattern: text("pattern").notNull(),
+    decision: toolDecision("decision").notNull(),
+    scope: decisionScope("scope").notNull(),
+    createdAt: ts(),
+  },
+  (t) => [index("idx_coding_tool_decisions_task_id").on(t.taskId)],
+);

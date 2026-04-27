@@ -76,9 +76,12 @@ function flowBackend(args: {
     plan: async function* () {
       for (const ev of args.planEvents) yield ev;
     },
-    execute: async function* () {
-      for (const ev of args.executeEvents) yield ev;
-    },
+    execute: async () => ({
+      events: (async function* () {
+        for (const ev of args.executeEvents) yield ev;
+      })(),
+      respondPermission: async () => {},
+    }),
   };
 }
 

@@ -259,4 +259,254 @@ describe("DrizzleSandboxStore", () => {
       ).rejects.toThrow();
     });
   });
+
+  describe("networks", () => {
+    it("inserts a network with status='created' and parsed JSONB labels", async () => {
+      const instanceId = await seedInstance();
+      const row = await store.insertNetwork({
+        dockerId: "net-abc",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date("2026-04-26T00:00:00Z"),
+        instanceId,
+      });
+      expect(row.dockerId).toBe("net-abc");
+      expect(row.status).toBe("created");
+      expect(row.depth).toBe(0);
+      expect(row.labels["cogmo.managed"]).toBe("true");
+    });
+
+    it("rejects malformed labels at the store boundary", async () => {
+      const instanceId = await seedInstance();
+      await expect(
+        store.insertNetwork({
+          dockerId: "net-bad",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          // biome-ignore lint/suspicious/noExplicitAny: intentionally invalid input
+          labels: { "cogmo.depth": 0 } as any,
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("enforces unique docker_id", async () => {
+      const instanceId = await seedInstance();
+      await store.insertNetwork({
+        dockerId: "dup-net",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId,
+      });
+      await expect(
+        store.insertNetwork({
+          dockerId: "dup-net",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("updateNetworkStatus marks reaped", async () => {
+      const instanceId = await seedInstance();
+      const row = await store.insertNetwork({
+        dockerId: "net-1",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId,
+      });
+      await store.updateNetworkStatus({ id: row.id, status: "reaped" });
+      const reloaded = await store.getNetwork(row.id);
+      expect(reloaded?.status).toBe("reaped");
+    });
+
+    it("getNetworkByDockerId returns the row", async () => {
+      const instanceId = await seedInstance();
+      await store.insertNetwork({
+        dockerId: "lookup-net",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId,
+      });
+      const row = await store.getNetworkByDockerId("lookup-net");
+      expect(row?.dockerId).toBe("lookup-net");
+    });
+
+    it("listNetworksForTask returns rows depth DESC", async () => {
+      const instanceId = await seedInstance();
+      const taskId = "019d0000-0000-7000-8000-000000000020";
+      const parentId = await insertTaskContainer({ instanceId, rootTaskId: taskId });
+      await store.insertNetwork({
+        dockerId: "n-root",
+        parentId: null,
+        rootTaskId: taskId,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId,
+      });
+      await store.insertNetwork({
+        dockerId: "n-child",
+        parentId,
+        rootTaskId: taskId,
+        depth: 1,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId,
+      });
+      const rows = await store.listNetworksForTask(taskId);
+      expect(rows.map((r) => r.dockerId)).toEqual(["n-child", "n-root"]);
+    });
+
+    it("listNetworksForInstance scopes by instance", async () => {
+      const instA = await seedInstance();
+      const instB = (await store.insertInstance({ host: "b", pid: 2 })).id;
+      await store.insertNetwork({
+        dockerId: "n-a",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId: instA,
+      });
+      await store.insertNetwork({
+        dockerId: "n-b",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId: instB,
+      });
+      expect((await store.listNetworksForInstance(instA)).map((r) => r.dockerId)).toEqual(["n-a"]);
+      expect((await store.listNetworksForInstance(instB)).map((r) => r.dockerId)).toEqual(["n-b"]);
+    });
+  });
+
+  describe("volumes", () => {
+    it("inserts a volume with status='created' and parsed JSONB labels", async () => {
+      const instanceId = await seedInstance();
+      const row = await store.insertVolume({
+        dockerId: "vol-abc",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date("2026-04-26T00:00:00Z"),
+        instanceId,
+      });
+      expect(row.dockerId).toBe("vol-abc");
+      expect(row.status).toBe("created");
+      expect(row.labels["cogmo.managed"]).toBe("true");
+    });
+
+    it("enforces unique docker_id", async () => {
+      const instanceId = await seedInstance();
+      await store.insertVolume({
+        dockerId: "dup-vol",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId,
+      });
+      await expect(
+        store.insertVolume({
+          dockerId: "dup-vol",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("updateVolumeStatus + lookups round-trip", async () => {
+      const instanceId = await seedInstance();
+      const row = await store.insertVolume({
+        dockerId: "v-1",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId,
+      });
+      await store.updateVolumeStatus({ id: row.id, status: "reaped" });
+      expect((await store.getVolume(row.id))?.status).toBe("reaped");
+      expect((await store.getVolumeByDockerId("v-1"))?.id).toBe(row.id);
+    });
+
+    it("listVolumesForTask returns rows depth DESC", async () => {
+      const instanceId = await seedInstance();
+      const taskId = "019d0000-0000-7000-8000-000000000030";
+      const parentId = await insertTaskContainer({ instanceId, rootTaskId: taskId });
+      await store.insertVolume({
+        dockerId: "v-root",
+        parentId: null,
+        rootTaskId: taskId,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId,
+      });
+      await store.insertVolume({
+        dockerId: "v-child",
+        parentId,
+        rootTaskId: taskId,
+        depth: 1,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId,
+      });
+      const rows = await store.listVolumesForTask(taskId);
+      expect(rows.map((r) => r.dockerId)).toEqual(["v-child", "v-root"]);
+    });
+
+    it("listVolumesForInstance scopes by instance", async () => {
+      const instA = await seedInstance();
+      const instB = (await store.insertInstance({ host: "b", pid: 2 })).id;
+      await store.insertVolume({
+        dockerId: "v-a",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId: instA,
+      });
+      await store.insertVolume({
+        dockerId: "v-b",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId: instB,
+      });
+      expect((await store.listVolumesForInstance(instA)).map((r) => r.dockerId)).toEqual(["v-a"]);
+      expect((await store.listVolumesForInstance(instB)).map((r) => r.dockerId)).toEqual(["v-b"]);
+    });
+  });
 });

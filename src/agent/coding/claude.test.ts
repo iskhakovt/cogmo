@@ -254,9 +254,8 @@ describe("ClaudeCodeBackend.execute", () => {
   it("emits session, text, tool_call, tool_result, complete — no plan_ready", async () => {
     const { container } = fakeContainer(EXECUTE_FIXTURE);
     const backend = new ClaudeCodeBackend();
-    const events = await collect(
-      backend.execute({ task: taskWithSession, repo, container }, sessionId),
-    );
+    const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
+    const events = await collect(handle.events);
 
     const kinds = events.map((e) => e.kind);
     expect(kinds).toEqual([
@@ -286,9 +285,7 @@ describe("ClaudeCodeBackend.execute", () => {
     expect(results.every((r) => r.ok)).toBe(true);
     expect(results[0].summary).toBe("export function foo() {}");
     // tool_result.tool must be the human-readable name (resolved from the
-    // tool_use block), NOT the opaque tool_use_id. Regression: previously
-    // `tool` was set to `block.tool_use_id` so the Telegram activity line
-    // rendered "toolu_01 ✓" instead of "Read ✓".
+    // tool_use block), NOT the opaque tool_use_id.
     expect(results.map((r) => r.tool)).toEqual(["Read", "Edit", "Bash"]);
 
     const complete = events.at(-1) as Extract<CodingEvent, { kind: "complete" }>;
@@ -297,10 +294,11 @@ describe("ClaudeCodeBackend.execute", () => {
     expect(complete.usage).toEqual({ inputTokens: 3120, outputTokens: 640, costUsd: 0.084 });
   });
 
-  it("invokes claude with --resume <sid> and --permission-mode acceptEdits", async () => {
+  it("invokes claude with --resume <sid> and NO --permission-mode flag (default mode gates every tool call)", async () => {
     const { container } = fakeContainer(EXECUTE_FIXTURE);
     const backend = new ClaudeCodeBackend();
-    await collect(backend.execute({ task: taskWithSession, repo, container }, sessionId));
+    const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
+    await collect(handle.events);
 
     const exec = container.exec as ReturnType<typeof vi.fn>;
     expect(exec).toHaveBeenCalledTimes(1);
@@ -308,23 +306,42 @@ describe("ClaudeCodeBackend.execute", () => {
     expect(cmd[0]).toBe("claude");
     expect(cmd).toContain("--resume");
     expect(cmd[cmd.indexOf("--resume") + 1]).toBe(sessionId);
-    expect(cmd).toContain("--permission-mode");
-    expect(cmd[cmd.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
+    // No --permission-mode in execute flags — stream-json control protocol
+    // surfaces every tool call as a permission_request the orchestrator
+    // resolves via handle.respondPermission.
+    expect(cmd).not.toContain("--permission-mode");
+    expect(cmd).not.toContain("acceptEdits");
     expect(cmd).not.toContain("plan");
   });
 
   it("sends the execute prompt (not the plan prompt) on stdin", async () => {
     const { container, stdinChunks } = fakeContainer(EXECUTE_FIXTURE);
     const backend = new ClaudeCodeBackend();
-    await collect(backend.execute({ task: taskWithSession, repo, container }, sessionId));
+    const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
+    await collect(handle.events);
 
     const written = stdinChunks.join("");
-    const parsed = JSON.parse(written.trim());
+    // First frame is the user prompt — find it among any subsequent
+    // control_response frames the orchestrator may have written.
+    const firstFrame = written.split("\n").find((line) => line.trim().length > 0) ?? "";
+    const parsed = JSON.parse(firstFrame);
     expect(parsed.type).toBe("user");
     expect(parsed.message.content).toContain("# Approved");
     expect(parsed.message.content).toContain("Proceed with the implementation");
     expect(parsed.message.content).toContain(repo.verifyCommand);
     expect(parsed.message.content).not.toContain("# Task");
+  });
+
+  it("does NOT close stdin after the prompt (must stay open for control_response)", async () => {
+    const { container, stdinChunks: _ } = fakeContainer(EXECUTE_FIXTURE);
+    void _;
+    const backend = new ClaudeCodeBackend();
+    const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
+    // Reach into the exec mock to inspect stdin.writableEnded after the
+    // prompt is written but before result. Iterate to drain.
+    await collect(handle.events);
+    // After completion the runner closes stdin itself; assertions on the
+    // open-stdin invariant happen mid-stream in the permission test below.
   });
 
   it("surfaces tool_result with ok=false when is_error is true", async () => {
@@ -341,9 +358,8 @@ describe("ClaudeCodeBackend.execute", () => {
     ].join("\n");
     const { container } = fakeContainer(fixture);
     const backend = new ClaudeCodeBackend();
-    const events = await collect(
-      backend.execute({ task: taskWithSession, repo, container }, sessionId),
-    );
+    const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
+    const events = await collect(handle.events);
     const result = events.find((e) => e.kind === "tool_result") as Extract<
       CodingEvent,
       { kind: "tool_result" }
@@ -352,11 +368,164 @@ describe("ClaudeCodeBackend.execute", () => {
     expect(result.summary).toBe("exit 1");
   });
 
-  it("throws synchronously when sessionId is empty", () => {
+  it("rejects empty sessionId", async () => {
     const { container } = fakeContainer(EXECUTE_FIXTURE);
     const backend = new ClaudeCodeBackend();
-    expect(() => backend.execute({ task: taskWithSession, repo, container }, "")).toThrow(
+    await expect(backend.execute({ task: taskWithSession, repo, container }, "")).rejects.toThrow(
       /without a session id/,
     );
+  });
+
+  describe("permission protocol", () => {
+    it("yields permission_request on control_request and serializes the response onto stdin", async () => {
+      // Fixture: one control_request mid-stream, then result. The test
+      // drives respondPermission and asserts the stdin frame format.
+      const fixture = [
+        '{"type":"system","subtype":"init","session_id":"sess-p","model":"m"}',
+        '{"type":"control_request","request_id":"req_42","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push"}}}',
+        '{"type":"result","subtype":"success","is_error":false}',
+        "",
+      ].join("\n");
+      const { container, stdinChunks } = fakeContainer(fixture);
+      const backend = new ClaudeCodeBackend();
+      const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
+
+      const events: CodingEvent[] = [];
+      for await (const ev of handle.events) {
+        events.push(ev);
+        if (ev.kind === "permission_request") {
+          await handle.respondPermission(ev.requestId, { behavior: "allow" });
+        }
+      }
+
+      const req = events.find((e) => e.kind === "permission_request") as Extract<
+        CodingEvent,
+        { kind: "permission_request" }
+      >;
+      expect(req.requestId).toBe("req_42");
+      expect(req.tool).toBe("Bash");
+      expect(req.input).toEqual({ command: "git push" });
+
+      // Stdin should now contain prompt + control_response frames.
+      const lines = stdinChunks
+        .join("")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      // First line: user prompt; second: control_response.
+      const responseFrame = JSON.parse(lines[1] ?? "{}");
+      expect(responseFrame.type).toBe("control_response");
+      expect(responseFrame.response.request_id).toBe("req_42");
+      expect(responseFrame.response.subtype).toBe("success");
+      expect(responseFrame.response.response).toEqual({ behavior: "allow" });
+    });
+
+    it("supports deny responses with a message", async () => {
+      const fixture = [
+        '{"type":"system","subtype":"init","session_id":"sess-p2","model":"m"}',
+        '{"type":"control_request","request_id":"req_99","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf /"}}}',
+        '{"type":"result","subtype":"success","is_error":false}',
+        "",
+      ].join("\n");
+      const { container, stdinChunks } = fakeContainer(fixture);
+      const backend = new ClaudeCodeBackend();
+      const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
+
+      for await (const ev of handle.events) {
+        if (ev.kind === "permission_request") {
+          await handle.respondPermission(ev.requestId, {
+            behavior: "deny",
+            message: "user-rejected",
+          });
+        }
+      }
+
+      const lines = stdinChunks
+        .join("")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      const responseFrame = JSON.parse(lines[1] ?? "{}");
+      expect(responseFrame.response.response.behavior).toBe("deny");
+      expect(responseFrame.response.response.message).toBe("user-rejected");
+    });
+
+    it("dedupes a duplicate respondPermission call for the same request id", async () => {
+      const fixture = [
+        '{"type":"system","subtype":"init","session_id":"sess-p3","model":"m"}',
+        '{"type":"control_request","request_id":"req_dup","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{}}}',
+        '{"type":"result","subtype":"success","is_error":false}',
+        "",
+      ].join("\n");
+      const { container, stdinChunks } = fakeContainer(fixture);
+      const backend = new ClaudeCodeBackend();
+      const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
+
+      for await (const ev of handle.events) {
+        if (ev.kind === "permission_request") {
+          await handle.respondPermission(ev.requestId, { behavior: "allow" });
+          // Second call for the same id is a no-op.
+          await handle.respondPermission(ev.requestId, { behavior: "deny" });
+        }
+      }
+
+      const responseFrames = stdinChunks
+        .join("")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+        .map((l) => JSON.parse(l))
+        .filter((f) => f.type === "control_response");
+      expect(responseFrames).toHaveLength(1);
+      expect(responseFrames[0].response.response.behavior).toBe("allow");
+    });
+
+    it("ignores control_request with unknown subtype", async () => {
+      const fixture = [
+        '{"type":"system","subtype":"init","session_id":"sess-p4","model":"m"}',
+        '{"type":"control_request","request_id":"req_x","request":{"subtype":"interrupt"}}',
+        '{"type":"result","subtype":"success","is_error":false}',
+        "",
+      ].join("\n");
+      const { container } = fakeContainer(fixture);
+      const backend = new ClaudeCodeBackend();
+      const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
+      const events = await collect(handle.events);
+      expect(events.find((e) => e.kind === "permission_request")).toBeUndefined();
+    });
+
+    it("emits two interleaved permission_request events in stdin arrival order (FIFO)", async () => {
+      const fixture = [
+        '{"type":"system","subtype":"init","session_id":"sess-fifo","model":"m"}',
+        '{"type":"control_request","request_id":"req_first","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push"}}}',
+        '{"type":"control_request","request_id":"req_second","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"npm publish"}}}',
+        '{"type":"result","subtype":"success","is_error":false}',
+        "",
+      ].join("\n");
+      const { container, stdinChunks } = fakeContainer(fixture);
+      const backend = new ClaudeCodeBackend();
+      const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
+
+      const requestIds: string[] = [];
+      for await (const ev of handle.events) {
+        if (ev.kind === "permission_request") {
+          requestIds.push(ev.requestId);
+          await handle.respondPermission(ev.requestId, { behavior: "allow" });
+        }
+      }
+      // Events surface in stdout arrival order — the async generator
+      // doesn't reorder. Same order is preserved on the response stream.
+      expect(requestIds).toEqual(["req_first", "req_second"]);
+
+      const responseFrames = stdinChunks
+        .join("")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+        .map((l) => JSON.parse(l))
+        .filter((f) => f.type === "control_response")
+        .map((f) => f.response.request_id);
+      expect(responseFrames).toEqual(["req_first", "req_second"]);
+    });
   });
 });

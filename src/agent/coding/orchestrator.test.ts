@@ -176,22 +176,30 @@ function backendYielding(events: CodingEvent[]): CodingBackend {
     plan: async function* () {
       for (const ev of events) yield ev;
     },
-    // biome-ignore lint/correctness/useYield: stub never reached in plan-only tests
-    execute: async function* (): AsyncGenerator<CodingEvent> {
+    execute: async () => {
       throw new Error("execute not exercised by this test — use executeBackendYielding");
     },
   };
 }
 
-function executeBackendYielding(events: CodingEvent[]): CodingBackend {
+function executeBackendYielding(
+  events: CodingEvent[],
+  respondPermission: (
+    requestId: string,
+    response: { behavior: "allow" | "deny" },
+  ) => Promise<void> = async () => {},
+): CodingBackend {
   return {
     // biome-ignore lint/correctness/useYield: stub never reached in execute-only tests
     plan: async function* (): AsyncGenerator<CodingEvent> {
       throw new Error("plan not exercised by this test — use backendYielding");
     },
-    execute: async function* () {
-      for (const ev of events) yield ev;
-    },
+    execute: async () => ({
+      events: (async function* () {
+        for (const ev of events) yield ev;
+      })(),
+      respondPermission,
+    }),
   };
 }
 

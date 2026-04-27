@@ -93,6 +93,37 @@ export const codingTaskPlanApproved = eventType("coding/task/plan-approved", {
 });
 
 /**
+ * Coding tool gate — fired when Claude Code's stream-json control channel
+ * surfaces a `permission_request` and the orchestrator's policy decides
+ * to prompt the user (rather than auto-allowing or applying a logged
+ * decision). Observability + audit only; the orchestrator's blocking wait
+ * is on `coding/task/permission-decision`.
+ */
+export const codingTaskPermissionRequested = eventType("coding/task/permission-requested", {
+  schema: z.object({
+    taskId: z.string(),
+    requestId: z.string(),
+    tool: z.string(),
+  }),
+});
+
+/**
+ * Coding tool gate — user replied to the permission prompt via Telegram
+ * inline keyboard (or a future Direct channel callback). The execute
+ * orchestrator's `step.waitForEvent` resumes on this event. `requestId`
+ * is the truncated form encoded in `callback_data` (≤16 chars); the
+ * orchestrator's wait `if:` filter pins it to the in-flight request.
+ */
+export const codingTaskPermissionDecision = eventType("coding/task/permission-decision", {
+  schema: z.object({
+    taskId: z.string(),
+    requestId: z.string(),
+    decision: z.enum(["allow", "deny"]),
+    scope: z.enum(["once", "task"]),
+  }),
+});
+
+/**
  * Direct channel — external clients emit this to send messages.
  * The direct-inbound Inngest function translates to inbound/arrived.
  */

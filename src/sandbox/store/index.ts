@@ -7,10 +7,12 @@ import {
   type ResourceLimits,
   ResourceLimitsSchema,
 } from "../types.js";
-import { cogmoInstances, containers } from "./schema.js";
+import { cogmoInstances, containers, networks, volumes } from "./schema.js";
 
 export type ContainerRuntime = "sysbox-runc" | "runc";
 export type ContainerStatus = "starting" | "running" | "exited" | "reaped";
+export type NetworkStatus = "created" | "reaped";
+export type VolumeStatus = "created" | "reaped";
 
 export interface CogmoInstance {
   id: string;
@@ -37,6 +39,42 @@ export interface ContainerRow {
   exitedAt: Date | null;
   instanceId: string;
   createdAt: Date;
+}
+
+export interface NetworkRow {
+  id: string;
+  dockerId: string;
+  parentId: string | null;
+  rootTaskId: string;
+  depth: number;
+  labels: ContainerLabels;
+  status: NetworkStatus;
+  ttlExpiresAt: Date;
+  instanceId: string;
+  createdAt: Date;
+}
+
+export interface VolumeRow {
+  id: string;
+  dockerId: string;
+  parentId: string | null;
+  rootTaskId: string;
+  depth: number;
+  labels: ContainerLabels;
+  status: VolumeStatus;
+  ttlExpiresAt: Date;
+  instanceId: string;
+  createdAt: Date;
+}
+
+export interface SandboxObjectInsert {
+  dockerId: string;
+  parentId: string | null;
+  rootTaskId: string;
+  depth: number;
+  labels: ContainerLabels;
+  ttlExpiresAt: Date;
+  instanceId: string;
 }
 
 export interface SandboxStore {
@@ -98,6 +136,46 @@ export interface SandboxStore {
 
   /** List containers in a root-task scope, ordered by depth DESC so cascade teardown reaps children before parents. */
   listContainersForTask(rootTaskId: string): Promise<readonly ContainerRow[]>;
+
+  // --- Networks ---
+
+  /** Insert a network row, status starts at 'created'. Called by the proxy on `POST /networks/create`. */
+  insertNetwork(params: SandboxObjectInsert): Promise<NetworkRow>;
+
+  /** Update a network's status (mainly to mark it 'reaped'). */
+  updateNetworkStatus(params: { id: string; status: NetworkStatus }): Promise<void>;
+
+  /** Load a network by Cogmo id. */
+  getNetwork(id: string): Promise<NetworkRow | null>;
+
+  /** Load a network by Docker id (the daemon's network id). */
+  getNetworkByDockerId(dockerId: string): Promise<NetworkRow | null>;
+
+  /** List every network for an instance. Used by crash recovery. */
+  listNetworksForInstance(instanceId: string): Promise<readonly NetworkRow[]>;
+
+  /** List networks in a root-task scope, ordered by depth DESC for cascade teardown. */
+  listNetworksForTask(rootTaskId: string): Promise<readonly NetworkRow[]>;
+
+  // --- Volumes ---
+
+  /** Insert a volume row, status starts at 'created'. Called by the proxy on `POST /volumes/create`. */
+  insertVolume(params: SandboxObjectInsert): Promise<VolumeRow>;
+
+  /** Update a volume's status (mainly to mark it 'reaped'). */
+  updateVolumeStatus(params: { id: string; status: VolumeStatus }): Promise<void>;
+
+  /** Load a volume by Cogmo id. */
+  getVolume(id: string): Promise<VolumeRow | null>;
+
+  /** Load a volume by Docker id (the volume name). */
+  getVolumeByDockerId(dockerId: string): Promise<VolumeRow | null>;
+
+  /** List every volume for an instance. Used by crash recovery. */
+  listVolumesForInstance(instanceId: string): Promise<readonly VolumeRow[]>;
+
+  /** List volumes in a root-task scope, ordered by depth DESC for cascade teardown. */
+  listVolumesForTask(rootTaskId: string): Promise<readonly VolumeRow[]>;
 }
 
 export class DrizzleSandboxStore implements SandboxStore {
@@ -266,6 +344,149 @@ export class DrizzleSandboxStore implements SandboxStore {
       return rows.map(parseContainerRow);
     });
   }
+
+  // --- Networks ---
+
+  async insertNetwork(params: SandboxObjectInsert): Promise<NetworkRow> {
+    const labels = ContainerLabelsSchema.parse(params.labels);
+    return this.#db.transaction(async (tx) => {
+      const row = single(
+        await tx
+          .insert(networks)
+          .values({
+            dockerId: params.dockerId,
+            parentId: params.parentId,
+            rootTaskId: params.rootTaskId,
+            depth: params.depth,
+            labels,
+            status: "created",
+            ttlExpiresAt: params.ttlExpiresAt,
+            instanceId: params.instanceId,
+          })
+          .returning(),
+      );
+      return parseNetworkRow(row);
+    });
+  }
+
+  async updateNetworkStatus(params: { id: string; status: NetworkStatus }): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      await tx.update(networks).set({ status: params.status }).where(eq(networks.id, params.id));
+    });
+  }
+
+  async getNetwork(id: string): Promise<NetworkRow | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx.select().from(networks).where(eq(networks.id, id)).limit(1);
+      return rows[0] ? parseNetworkRow(rows[0]) : null;
+    });
+  }
+
+  async getNetworkByDockerId(dockerId: string): Promise<NetworkRow | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx.select().from(networks).where(eq(networks.dockerId, dockerId)).limit(1);
+      return rows[0] ? parseNetworkRow(rows[0]) : null;
+    });
+  }
+
+  async listNetworksForInstance(instanceId: string): Promise<readonly NetworkRow[]> {
+    return this.#db.transaction(async (tx) => {
+      // depth DESC, then createdAt DESC: callers (the reaper) iterate
+      // the result and reap each row. If a daemon-side parent-child
+      // dependency ever shows up among networks (today none does, but
+      // `parent_id` + `depth` are in the schema for it), removing the
+      // parent first would orphan the children. Ordering matches
+      // listContainersForInstance / listNetworksForTask.
+      const rows = await tx
+        .select()
+        .from(networks)
+        .where(eq(networks.instanceId, instanceId))
+        .orderBy(desc(networks.depth), desc(networks.createdAt));
+      return rows.map(parseNetworkRow);
+    });
+  }
+
+  async listNetworksForTask(rootTaskId: string): Promise<readonly NetworkRow[]> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(networks)
+        .where(eq(networks.rootTaskId, rootTaskId))
+        .orderBy(desc(networks.depth));
+      return rows.map(parseNetworkRow);
+    });
+  }
+
+  // --- Volumes ---
+
+  async insertVolume(params: SandboxObjectInsert): Promise<VolumeRow> {
+    const labels = ContainerLabelsSchema.parse(params.labels);
+    return this.#db.transaction(async (tx) => {
+      const row = single(
+        await tx
+          .insert(volumes)
+          .values({
+            dockerId: params.dockerId,
+            parentId: params.parentId,
+            rootTaskId: params.rootTaskId,
+            depth: params.depth,
+            labels,
+            status: "created",
+            ttlExpiresAt: params.ttlExpiresAt,
+            instanceId: params.instanceId,
+          })
+          .returning(),
+      );
+      return parseVolumeRow(row);
+    });
+  }
+
+  async updateVolumeStatus(params: { id: string; status: VolumeStatus }): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      await tx.update(volumes).set({ status: params.status }).where(eq(volumes.id, params.id));
+    });
+  }
+
+  async getVolume(id: string): Promise<VolumeRow | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx.select().from(volumes).where(eq(volumes.id, id)).limit(1);
+      return rows[0] ? parseVolumeRow(rows[0]) : null;
+    });
+  }
+
+  async getVolumeByDockerId(dockerId: string): Promise<VolumeRow | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx.select().from(volumes).where(eq(volumes.dockerId, dockerId)).limit(1);
+      return rows[0] ? parseVolumeRow(rows[0]) : null;
+    });
+  }
+
+  async listVolumesForInstance(instanceId: string): Promise<readonly VolumeRow[]> {
+    return this.#db.transaction(async (tx) => {
+      // depth DESC, then createdAt DESC — same reasoning as
+      // listNetworksForInstance: the reaper reaps the result in order,
+      // and a daemon-side parent-child dependency among volumes (none
+      // today, but the schema supports it) needs the leaf reaped
+      // before the root.
+      const rows = await tx
+        .select()
+        .from(volumes)
+        .where(eq(volumes.instanceId, instanceId))
+        .orderBy(desc(volumes.depth), desc(volumes.createdAt));
+      return rows.map(parseVolumeRow);
+    });
+  }
+
+  async listVolumesForTask(rootTaskId: string): Promise<readonly VolumeRow[]> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(volumes)
+        .where(eq(volumes.rootTaskId, rootTaskId))
+        .orderBy(desc(volumes.depth));
+      return rows.map(parseVolumeRow);
+    });
+  }
 }
 
 /**
@@ -289,6 +510,36 @@ function parseContainerRow(row: typeof containers.$inferSelect): ContainerRow {
     ttlExpiresAt: row.ttlExpiresAt,
     startedAt: row.startedAt,
     exitedAt: row.exitedAt,
+    instanceId: row.instanceId,
+    createdAt: row.createdAt,
+  };
+}
+
+function parseNetworkRow(row: typeof networks.$inferSelect): NetworkRow {
+  return {
+    id: row.id,
+    dockerId: row.dockerId,
+    parentId: row.parentId,
+    rootTaskId: row.rootTaskId,
+    depth: row.depth,
+    labels: ContainerLabelsSchema.parse(row.labels),
+    status: row.status,
+    ttlExpiresAt: row.ttlExpiresAt,
+    instanceId: row.instanceId,
+    createdAt: row.createdAt,
+  };
+}
+
+function parseVolumeRow(row: typeof volumes.$inferSelect): VolumeRow {
+  return {
+    id: row.id,
+    dockerId: row.dockerId,
+    parentId: row.parentId,
+    rootTaskId: row.rootTaskId,
+    depth: row.depth,
+    labels: ContainerLabelsSchema.parse(row.labels),
+    status: row.status,
+    ttlExpiresAt: row.ttlExpiresAt,
     instanceId: row.instanceId,
     createdAt: row.createdAt,
   };

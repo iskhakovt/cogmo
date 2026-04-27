@@ -39,7 +39,8 @@ import { OpenAICompatibleProvider } from "./llm/openai-compat.js";
 import type { LlmProvider } from "./llm/provider.js";
 import { logger } from "./logger.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
-import { LocalInProcessSandbox, type Sandbox } from "./sandbox/index.js";
+import { CogmoSocketProxy, LocalInProcessSandbox, type Sandbox } from "./sandbox/index.js";
+import { createSandboxReaper } from "./sandbox/reaper.js";
 import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
 import { DrizzleSecretsStore, type SecretsStore } from "./secrets/store/index.js";
@@ -78,24 +79,38 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // with a clear error when the env var is unset. No silent fallback.
   let sandbox: Sandbox | null = null;
   let sandboxInstanceId: string | null = null;
+  let sandboxDocker: Docker | null = null;
   if (env.SANDBOX_RUNTIME) {
     const docker = new Docker();
+    sandboxDocker = docker;
     const instance = await sandboxStore.insertInstance({
       host: hostname(),
       pid: process.pid,
     });
     sandboxInstanceId = instance.id;
+    const proxy = await CogmoSocketProxy.create({
+      socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
+      hostDockerSocket: env.SANDBOX_HOST_DOCKER_SOCKET,
+    });
     sandbox = await LocalInProcessSandbox.create({
       docker,
       store: sandboxStore,
       runtime: env.SANDBOX_RUNTIME,
       instanceId: instance.id,
+      proxy,
     });
     const { orphansReaped } = await sandbox.reconcileCrashedInstances(instance.id);
     if (orphansReaped > 0) {
       logger.warn({ orphansReaped }, "reaped orphan containers from prior instance(s)");
     }
-    logger.info({ runtime: env.SANDBOX_RUNTIME, instanceId: instance.id }, "sandbox initialized");
+    logger.info(
+      {
+        runtime: env.SANDBOX_RUNTIME,
+        instanceId: instance.id,
+        proxySocketDir: env.SANDBOX_PROXY_SOCKET_DIR,
+      },
+      "sandbox initialized",
+    );
   } else {
     logger.info("SANDBOX_RUNTIME unset — sandbox module disabled (coding-delegation unavailable)");
   }
@@ -229,6 +244,22 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     };
     codingFunctions.push(createCodingOrchestrator(orchestratorDeps, inngest));
     codingFunctions.push(createCodingExecuteOrchestrator(orchestratorDeps, inngest));
+
+    // Sandbox reaper — runs every minute, kills TTL-expired containers,
+    // discovers orphans tagged with dead instance ids, marks stale DB
+    // rows exited. See `src/sandbox/reaper.ts`.
+    if (sandboxDocker && sandboxInstanceId) {
+      codingFunctions.push(
+        createSandboxReaper(
+          {
+            docker: sandboxDocker,
+            store: sandboxStore,
+            instanceId: sandboxInstanceId,
+          },
+          inngest,
+        ),
+      );
+    }
   }
 
   const tools = createDefaultTools(

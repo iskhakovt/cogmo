@@ -207,6 +207,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
     coding: {
       approvePlan: vi.fn().mockResolvedValue(ok({ taskId: "t-1" })),
       cancelTask: vi.fn().mockResolvedValue(ok({ taskId: "t-1" })),
+      respondPermission: vi.fn().mockResolvedValue(ok({ taskId: "t-1" })),
     },
     ...overrides,
   };

@@ -9,7 +9,7 @@ import {
   type WorktreeAssignment,
   WorktreeAssignmentSchema,
 } from "../types.js";
-import { codingRepos, codingTasks } from "./schema.js";
+import { codingRepos, codingTasks, codingToolDecisions } from "./schema.js";
 
 export type CodingBackend = "claude" | "codex";
 export type CodingTriggerSource = "user" | "evolution" | "signal_pipeline";
@@ -24,6 +24,9 @@ export type CodingTaskStatus =
   | "pr_open"
   | "failed"
   | "cancelled";
+
+export type ToolDecision = "allow" | "deny";
+export type DecisionScope = "once" | "task";
 
 const TERMINAL_STATUSES: ReadonlyArray<CodingTaskStatus> = [
   "pr_open",
@@ -43,6 +46,16 @@ export interface CodingRepoRow {
   taskTokenBudget: number;
   taskWallTimeSeconds: number;
   maxConcurrentTasks: number;
+  createdAt: Date;
+}
+
+export interface CodingToolDecisionRow {
+  id: string;
+  taskId: string;
+  tool: string;
+  pattern: string;
+  decision: ToolDecision;
+  scope: DecisionScope;
   createdAt: Date;
 }
 
@@ -228,6 +241,28 @@ export interface CodingStore {
     | { kind: "already_terminal"; status: CodingTaskStatus }
     | { kind: "not_found" }
   >;
+
+  // --- Tool decisions ---
+
+  /**
+   * Record a permission decision for a task. `pattern` is the canonical
+   * matcher that future requests will be checked against (when scope=`task`)
+   * or the resolved request id (when scope=`once`, audit only).
+   */
+  insertToolDecision(params: {
+    taskId: string;
+    tool: string;
+    pattern: string;
+    decision: ToolDecision;
+    scope: DecisionScope;
+  }): Promise<CodingToolDecisionRow>;
+
+  /**
+   * List all decisions for a task, ordered oldest-first. The orchestrator's
+   * tool-gate replays this list against incoming permission_request events
+   * and applies the first matching `task`-scoped row.
+   */
+  listToolDecisionsForTask(taskId: string): Promise<readonly CodingToolDecisionRow[]>;
 }
 
 export class DrizzleCodingStore implements CodingStore {
@@ -521,6 +556,41 @@ export class DrizzleCodingStore implements CodingStore {
     });
   }
 
+  async insertToolDecision(params: {
+    taskId: string;
+    tool: string;
+    pattern: string;
+    decision: ToolDecision;
+    scope: DecisionScope;
+  }): Promise<CodingToolDecisionRow> {
+    return this.#db.transaction(async (tx) => {
+      const row = single(
+        await tx
+          .insert(codingToolDecisions)
+          .values({
+            taskId: params.taskId,
+            tool: params.tool,
+            pattern: params.pattern,
+            decision: params.decision,
+            scope: params.scope,
+          })
+          .returning(),
+      );
+      return parseToolDecisionRow(row);
+    });
+  }
+
+  async listToolDecisionsForTask(taskId: string): Promise<readonly CodingToolDecisionRow[]> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(codingToolDecisions)
+        .where(eq(codingToolDecisions.taskId, taskId))
+        .orderBy(asc(codingToolDecisions.createdAt));
+      return rows.map(parseToolDecisionRow);
+    });
+  }
+
   async cancelTaskIfActive(
     id: string,
     reason: string,
@@ -570,6 +640,18 @@ function parseRepoRow(row: typeof codingRepos.$inferSelect): CodingRepoRow {
     taskTokenBudget: row.taskTokenBudget,
     taskWallTimeSeconds: row.taskWallTimeSeconds,
     maxConcurrentTasks: row.maxConcurrentTasks,
+    createdAt: row.createdAt,
+  };
+}
+
+function parseToolDecisionRow(row: typeof codingToolDecisions.$inferSelect): CodingToolDecisionRow {
+  return {
+    id: row.id,
+    taskId: row.taskId,
+    tool: row.tool,
+    pattern: row.pattern,
+    decision: row.decision,
+    scope: row.scope,
     createdAt: row.createdAt,
   };
 }

@@ -106,5 +106,7 @@ export interface SandboxDeps {
   store: SandboxStore;
 }
 
+export type { ProxyOptions, TaskScope } from "./proxy/index.js";
+export { CogmoSocketProxy } from "./proxy/index.js";
 export { dockerRuntimeName } from "./runtime.js";
 export { createSandbox, LocalInProcessSandbox } from "./supervisor.js";
