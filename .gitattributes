@@ -2,6 +2,7 @@ test/fixtures/recorded/* linguist-generated=true
 test/fixtures/fal/* linguist-generated=true
 migrations/*.sql linguist-generated=true
 migrations/meta/*.json linguist-generated=true
+pnpm-lock.yaml linguist-generated=true
 
 # Binary test fixtures — skip line-ending normalization, suppress diffs,
 # force binary merges. `binary` is a macro for `-text -diff -merge`.
