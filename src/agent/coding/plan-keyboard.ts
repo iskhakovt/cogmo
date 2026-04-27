@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { UUID_PATTERN } from "../../util/uuid.js";
 
 /**
  * Inline-keyboard helper for the plan-approval message. Pure: no grammY
@@ -43,10 +44,9 @@ export function encodePlanCallback(taskId: string, action: PlanCallbackAction): 
   return `${PREFIX}${SEP}${taskId}${SEP}${action}`;
 }
 
-// Standard UUID 8-4-4-4-12 shape (any version). Rejecting malformed
-// callback_data here saves a DB round-trip and keeps the Telegram
-// callback layer honest about what it accepts.
-const UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+// Rejecting malformed callback_data via the shared UUID pattern saves a
+// DB round-trip and keeps the Telegram callback layer honest about what
+// it accepts.
 const PARSE_REGEX = new RegExp(`^plan:(${UUID_PATTERN}):(approve|revise|cancel)$`);
 
 export interface ParsedPlanCallback {

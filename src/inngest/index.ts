@@ -17,3 +17,9 @@ export {
  * deps that wrap `step.run` so unit tests can pass an inline shim.
  */
 export type StepRun = GetStepTools<typeof inngestClient>["run"];
+
+/**
+ * The exact shape of `step.waitForEvent` — same derivation pattern as
+ * `StepRun`. Used by orchestrators that block on Telegram callbacks.
+ */
+export type StepWaitForEvent = GetStepTools<typeof inngestClient>["waitForEvent"];

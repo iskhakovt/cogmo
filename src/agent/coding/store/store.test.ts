@@ -615,4 +615,101 @@ describe("DrizzleCodingStore", () => {
       expect(reloaded?.failureReason).toBe("claude exit code 2");
     });
   });
+
+  describe("tool decisions", () => {
+    let taskCounter = 0;
+    async function seedTask(): Promise<string> {
+      taskCounter += 1;
+      const repoId = await seedRepo(`tool-decisions-${taskCounter}`);
+      const task = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      return task.id;
+    }
+
+    it("inserts a decision and reads it back", async () => {
+      const taskId = await seedTask();
+      const row = await store.insertToolDecision({
+        taskId,
+        tool: "Bash",
+        pattern: "Bash(git push origin *)",
+        decision: "allow",
+        scope: "task",
+      });
+      expect(row.taskId).toBe(taskId);
+      expect(row.tool).toBe("Bash");
+      expect(row.pattern).toBe("Bash(git push origin *)");
+      expect(row.decision).toBe("allow");
+      expect(row.scope).toBe("task");
+      expect(row.createdAt).toBeInstanceOf(Date);
+    });
+
+    it("rejects an unknown task_id (FK constraint)", async () => {
+      await expect(
+        store.insertToolDecision({
+          taskId: "019d0000-0000-7000-8000-0000000000ff",
+          tool: "Bash",
+          pattern: "Bash(rm -rf *)",
+          decision: "deny",
+          scope: "task",
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("listToolDecisionsForTask returns rows oldest-first, scoped by task", async () => {
+      const taskA = await seedTask();
+      const taskB = await seedTask();
+      const first = await store.insertToolDecision({
+        taskId: taskA,
+        tool: "Bash",
+        pattern: "Bash(git push *)",
+        decision: "allow",
+        scope: "task",
+      });
+      const second = await store.insertToolDecision({
+        taskId: taskA,
+        tool: "Bash",
+        pattern: "Bash(curl -X POST *)",
+        decision: "deny",
+        scope: "task",
+      });
+      // Cross-task row to verify scoping.
+      await store.insertToolDecision({
+        taskId: taskB,
+        tool: "Bash",
+        pattern: "Bash(rm -rf *)",
+        decision: "deny",
+        scope: "once",
+      });
+
+      const rows = await store.listToolDecisionsForTask(taskA);
+      expect(rows.map((r) => r.id)).toEqual([first.id, second.id]);
+      expect(rows.map((r) => r.decision)).toEqual(["allow", "deny"]);
+    });
+
+    it("supports both scope and decision enums independently", async () => {
+      const taskId = await seedTask();
+      await store.insertToolDecision({
+        taskId,
+        tool: "Edit",
+        pattern: "request-id-abc",
+        decision: "allow",
+        scope: "once",
+      });
+      await store.insertToolDecision({
+        taskId,
+        tool: "Bash",
+        pattern: "Bash(npm publish)",
+        decision: "deny",
+        scope: "task",
+      });
+      const rows = await store.listToolDecisionsForTask(taskId);
+      expect(rows).toHaveLength(2);
+      expect(rows.map((r) => `${r.scope}/${r.decision}`)).toEqual(["once/allow", "task/deny"]);
+    });
+  });
 });

@@ -1,7 +1,15 @@
+import type { Writable } from "node:stream";
 import { z } from "zod";
 import { logger } from "../../logger.js";
-import type { TaskContainerHandle } from "../../sandbox/index.js";
-import type { BackendCallContext, BackendUsage, CodingBackend, CodingEvent } from "./backend.js";
+import type { ExecHandle, TaskContainerHandle } from "../../sandbox/index.js";
+import type {
+  BackendCallContext,
+  BackendUsage,
+  CodingBackend,
+  CodingEvent,
+  CodingExecuteHandle,
+  PermissionResponse,
+} from "./backend.js";
 import { readJsonl } from "./jsonl.js";
 import { buildExecutePrompt, buildPlanPrompt } from "./prompt.js";
 
@@ -11,13 +19,12 @@ const log = logger.child({ component: "coding.claude" });
  * Subset of Claude Code's stream-json events we read. Schema is permissive
  * (`passthrough`) — Anthropic adds new fields without bumping the contract,
  * and we only narrow what we depend on.
- */
-/**
- * Block shapes inside `assistant.message.content` / `user.message.content`.
- * Anthropic's stream-json reuses the same blocks as the Messages API; we only
- * narrow the fields we surface as `tool_call` / `tool_result` events. Each
- * schema is parsed per-block via `safeParse` — unknown block types (text,
- * thinking, etc.) just fail to match and get skipped.
+ *
+ * Block shapes inside `assistant.message.content` / `user.message.content`
+ * mirror the Messages API; we only narrow the fields we surface as
+ * `tool_call` / `tool_result` events. Each schema is parsed per-block via
+ * `safeParse` — unknown block types (text, thinking, etc.) just fail to
+ * match and get skipped.
  */
 const ToolUseBlockSchema = z
   .object({
@@ -34,6 +41,26 @@ const ToolResultBlockSchema = z
     tool_use_id: z.string(),
     is_error: z.boolean().optional(),
     content: z.unknown().optional(),
+  })
+  .passthrough();
+
+/**
+ * Permission request frame from Claude Code's stream-json control protocol.
+ * Shape: `{ type: "control_request", request_id, request: { subtype:
+ * "can_use_tool", tool_name, input } }`. Other control_request subtypes
+ * (interrupt, etc.) fall through and are ignored.
+ */
+const ControlRequestSchema = z
+  .object({
+    type: z.literal("control_request"),
+    request_id: z.string(),
+    request: z
+      .object({
+        subtype: z.string(),
+        tool_name: z.string().optional(),
+        input: z.unknown().optional(),
+      })
+      .passthrough(),
   })
   .passthrough();
 
@@ -100,6 +127,7 @@ const ClaudeEventSchema = z.discriminatedUnion("type", [
         .optional(),
     })
     .passthrough(),
+  ControlRequestSchema,
 ]);
 
 /** Flags shared by every `claude -p` invocation regardless of mode. */
@@ -115,20 +143,10 @@ const COMMON_FLAGS: readonly string[] = [
 
 const PLAN_FLAGS: readonly string[] = [...COMMON_FLAGS, "--permission-mode", "plan"];
 
-/**
- * `acceptEdits` auto-allows file edits inside the container without a human
- * prompt. The container itself is the security boundary — slice 3 layers a
- * proxy/reaper/cgroup-parent on top; until then, execute mode operates within
- * sysbox's userns and the per-task container TTL.
- */
-const EXECUTE_PERMISSION_MODE = "acceptEdits";
-
 interface ClaudeCodeBackendOptions {
   /** Override the binary name. Defaults to `claude` (must be on PATH inside the container). */
   binary?: string;
 }
-
-type RunMode = "plan" | "execute";
 
 export class ClaudeCodeBackend implements CodingBackend {
   #binary: string;
@@ -139,53 +157,128 @@ export class ClaudeCodeBackend implements CodingBackend {
 
   plan(ctx: BackendCallContext): AsyncIterable<CodingEvent> {
     const prompt = buildPlanPrompt(ctx.task, ctx.repo);
-    return runClaude(this.#binary, ctx.container, PLAN_FLAGS, prompt, "plan");
+    return runClaudePlan(this.#binary, ctx.container, PLAN_FLAGS, prompt);
   }
 
-  execute(ctx: BackendCallContext, sessionId: string): AsyncIterable<CodingEvent> {
+  async execute(ctx: BackendCallContext, sessionId: string): Promise<CodingExecuteHandle> {
     if (!sessionId) {
       throw new Error(
         `ClaudeCodeBackend.execute called for task ${ctx.task.id} without a session id`,
       );
     }
     const prompt = buildExecutePrompt(ctx.repo);
-    const flags = [
-      ...COMMON_FLAGS,
-      "--permission-mode",
-      EXECUTE_PERMISSION_MODE,
-      "--resume",
-      sessionId,
-    ];
-    return runClaude(this.#binary, ctx.container, flags, prompt, "execute");
+    // No `--permission-mode` flag — defaults to `default`, which routes
+    // every tool call through the stream-json control channel. The
+    // orchestrator drives allow/deny via `respondPermission` on the
+    // returned handle. acceptEdits is gone: the gate runs on every call,
+    // most just hit always-allow and reply in microseconds with no
+    // Telegram round trip.
+    const flags = [...COMMON_FLAGS, "--resume", sessionId];
+    return runClaudeExecute(this.#binary, ctx.container, flags, prompt);
   }
 }
 
-async function* runClaude(
+/**
+ * Plan-mode runner — same shape as before slice 3. `--permission-mode plan`
+ * blocks edits at the source, so no permission_request events arrive; the
+ * function closes stdin after writing the prompt and returns a single
+ * AsyncIterable. Execute mode uses a different runner because it needs
+ * stdin to stay open for control_response writes.
+ */
+async function* runClaudePlan(
   binary: string,
   container: TaskContainerHandle,
   flags: readonly string[],
   prompt: string,
-  mode: RunMode,
 ): AsyncIterable<CodingEvent> {
   const exec = await container.exec([binary, ...flags], { attachStdin: true });
-
-  // First and only stdin message: the user's prompt as a stream-json frame.
-  // The `claude` CLI closes the session on EOF.
   if (!exec.stdin) throw new Error("ClaudeCodeBackend: stdin not attached");
+  writeUserMessage(exec.stdin, prompt);
+  exec.stdin.end();
+
+  drainStderr(exec, "plan");
+
+  yield* parseClaudeStream(exec, "plan");
+}
+
+/**
+ * Execute-mode runner. Returns a handle so the orchestrator can drive
+ * permission decisions via `respondPermission`. Stdin stays open for
+ * control_response frames; the generator closes it on `result`.
+ */
+async function runClaudeExecute(
+  binary: string,
+  container: TaskContainerHandle,
+  flags: readonly string[],
+  prompt: string,
+): Promise<CodingExecuteHandle> {
+  const exec = await container.exec([binary, ...flags], { attachStdin: true });
+  if (!exec.stdin) throw new Error("ClaudeCodeBackend: stdin not attached");
+  writeUserMessage(exec.stdin, prompt);
+  // Don't end() — stdin must stay open for permission control_response
+  // frames. The generator closes it after the result event.
+
+  drainStderr(exec, "execute");
+
+  // Track answered request ids for idempotency. The CLI only emits each
+  // request_id once, but the orchestrator's retry / replay paths could
+  // call respondPermission twice; the second call is a no-op.
+  const answeredRequestIds = new Set<string>();
+  const stdin = exec.stdin;
+
+  const respondPermission = async (
+    requestId: string,
+    response: PermissionResponse,
+  ): Promise<void> => {
+    if (answeredRequestIds.has(requestId)) {
+      log.warn({ requestId }, "duplicate respondPermission call — dropping");
+      return;
+    }
+    answeredRequestIds.add(requestId);
+    if (stdin.writableEnded || stdin.destroyed) {
+      log.warn(
+        { requestId },
+        "respondPermission after stdin closed — CLI session has already ended",
+      );
+      return;
+    }
+    const frame = {
+      type: "control_response",
+      response: {
+        request_id: requestId,
+        subtype: "success",
+        response,
+      },
+    };
+    stdin.write(`${JSON.stringify(frame)}\n`);
+  };
+
+  const events = parseClaudeStream(exec, "execute");
+
+  return { events, respondPermission };
+}
+
+/**
+ * Frame the prompt as a stream-json user message and write it. The CLI
+ * reads stream-json frames from stdin until EOF (plan) or the result
+ * (execute, where stdin stays open for control_response replies).
+ */
+function writeUserMessage(stdin: Writable, prompt: string): void {
   const userMessage = {
     type: "user",
     message: { role: "user", content: prompt },
   };
-  exec.stdin.write(`${JSON.stringify(userMessage)}\n`);
-  exec.stdin.end();
+  stdin.write(`${JSON.stringify(userMessage)}\n`);
+}
 
-  // Drain stderr in the background — the CLI emits diagnostics here, and
-  // an unconsumed PassThrough buffer would grow unbounded for the run
-  // duration. Pipe each line to the logger at warn level (claude doesn't
-  // distinguish severity on stderr; treating everything as warn surfaces
-  // issues without being noisy in the success path). The try/catch
-  // catches stream-error rejections from `for await` (the demuxed
-  // PassThrough is destroyed when the underlying exec stream errors).
+/**
+ * Drain stderr in the background — the CLI emits diagnostics here, and an
+ * unconsumed PassThrough buffer would grow unbounded for the run duration.
+ * Pipe each line to the logger at warn level (claude doesn't distinguish
+ * severity on stderr; treating everything as warn surfaces issues without
+ * being noisy in the success path).
+ */
+function drainStderr(exec: ExecHandle, mode: "plan" | "execute"): void {
   void (async () => {
     try {
       let buf = "";
@@ -195,16 +288,26 @@ async function* runClaude(
         while (nl !== -1) {
           const line = buf.slice(0, nl);
           buf = buf.slice(nl + 1);
-          if (line.trim()) log.warn({ stderr: line.trim() }, "claude stderr");
+          if (line.trim()) log.warn({ stderr: line.trim(), mode }, "claude stderr");
           nl = buf.indexOf("\n");
         }
       }
-      if (buf.trim()) log.warn({ stderr: buf.trim() }, "claude stderr");
+      if (buf.trim()) log.warn({ stderr: buf.trim(), mode }, "claude stderr");
     } catch (err) {
-      log.warn({ err: (err as Error).message }, "claude stderr drain error");
+      log.warn({ err: (err as Error).message, mode }, "claude stderr drain error");
     }
   })();
+}
 
+/**
+ * Parse the CLI's stdout into `CodingEvent`s. Both plan and execute mode
+ * share this — the only mode-specific behavior is whether to accumulate
+ * text deltas for `plan_ready` (plan) vs let them stream by (execute).
+ */
+async function* parseClaudeStream(
+  exec: ExecHandle,
+  mode: "plan" | "execute",
+): AsyncIterable<CodingEvent> {
   let textBuf = "";
   let usage: BackendUsage | undefined;
   let resultIsError = false;
@@ -223,6 +326,7 @@ async function* runClaude(
   const seenToolUseIds = new Set<string>();
   const seenToolResultIds = new Set<string>();
   const toolUseNames = new Map<string, string>();
+  const seenPermissionRequestIds = new Set<string>();
 
   for await (const raw of readJsonl(exec.stdout)) {
     const parsed = ClaudeEventSchema.safeParse(raw);
@@ -251,6 +355,20 @@ async function* runClaude(
         // we never look at it.
         if (mode === "plan") textBuf += delta.text;
         yield { kind: "text_delta", text: delta.text };
+      }
+      continue;
+    }
+
+    if (event.type === "control_request") {
+      if (event.request.subtype === "can_use_tool" && event.request.tool_name) {
+        if (seenPermissionRequestIds.has(event.request_id)) continue;
+        seenPermissionRequestIds.add(event.request_id);
+        yield {
+          kind: "permission_request",
+          requestId: event.request_id,
+          tool: event.request.tool_name,
+          input: event.request.input ?? {},
+        };
       }
       continue;
     }
@@ -305,6 +423,12 @@ async function* runClaude(
       // plan_ready (the orchestrator persists the diff out-of-band).
       if (mode === "plan" && !resultIsError && textBuf.length > 0) {
         yield { kind: "plan_ready", plan: textBuf };
+      }
+      // The CLI is done; no further control_request frames will arrive.
+      // Close stdin so the subprocess exits cleanly. Plan mode already
+      // ended stdin after the prompt; this guard is harmless there.
+      if (mode === "execute" && exec.stdin && !exec.stdin.writableEnded) {
+        exec.stdin.end();
       }
     }
   }

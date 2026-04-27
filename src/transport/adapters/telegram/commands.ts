@@ -6,7 +6,9 @@
  * `index.ts` so the dispatcher logic is covered by unit tests.
  */
 
+import { actionToDecision } from "../../../agent/coding/permission-keyboard.js";
 import type { Profile } from "../../../agent/store/index.js";
+import { isUuid } from "../../../util/uuid.js";
 import type { Transport, TransportError } from "../../transport.js";
 import type { ProfileDialogs } from "./profile-dialog.js";
 import {
@@ -256,6 +258,59 @@ export async function handlePlanCallback(
     };
   }
   return { editText: "❌ Plan cancelled.", toast: "Cancelled" };
+}
+
+export interface PermissionCallbackOutcome {
+  /** Replacement text for the original prompt message (keyboard cleared too). */
+  editText: string;
+  /** Short toast popup confirming the tap on the user's device. */
+  toast: string;
+}
+
+/**
+ * Tool-gate callback handler — translates a parsed permission button tap
+ * into a Transport call + an outcome the adapter renders. Identity check
+ * happens inside `transport.coding.respondPermission`.
+ */
+export async function handlePermissionCallback(
+  transport: Transport,
+  parsed: {
+    taskId: string;
+    requestIdShort: string;
+    action: "allow_once" | "allow_task" | "deny";
+  },
+  tapperPlatformHandle: string,
+): Promise<PermissionCallbackOutcome> {
+  // Single source of truth for the action → (decision, scope) mapping.
+  // Lives in `permission-keyboard.ts` alongside `PermissionAction`; the
+  // mapping must agree with what's encoded into callback_data, so any
+  // future addition (e.g. `deny_task`) only needs editing in one place.
+  const { decision, scope } = actionToDecision(parsed.action);
+
+  const res = await transport.coding.respondPermission(
+    {
+      taskId: parsed.taskId,
+      requestIdShort: parsed.requestIdShort,
+      decision,
+      scope,
+    },
+    tapperPlatformHandle,
+  );
+  if (res.isErr()) {
+    return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+  }
+
+  switch (parsed.action) {
+    case "allow_once":
+      return { editText: "✅ Allowed once.", toast: "Allowed" };
+    case "allow_task":
+      return {
+        editText: "✅ Allowed for this task — future matching requests auto-approve.",
+        toast: "Allowed for task",
+      };
+    case "deny":
+      return { editText: "❌ Denied.", toast: "Denied" };
+  }
 }
 
 /** Callback-query handler for inline-keyboard taps from /sessions. */
@@ -574,7 +629,14 @@ function toReplyOptions(
   };
 }
 
-const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * Treat a `/resume <target>` argument as a UUID iff it matches the
+ * standard 8-4-4-4-12 shape. Slice 2 enforced version-7 strictly; we
+ * relax to any-version because the Telegram surface only uses this
+ * to disambiguate UUID-looking strings from aliases — handing a
+ * structurally-valid-but-unknown UUID to \`resumeConversation\` falls
+ * through to an honest \"not found\" error.
+ */
 function looksLikeUuid(s: string): boolean {
-  return UUID_V7_PATTERN.test(s);
+  return isUuid(s.toLowerCase());
 }
