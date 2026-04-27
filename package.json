@@ -25,6 +25,7 @@
     "test:watch": "vitest --project unit",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
+    "tokei": "tsx scripts/tokei.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "prepare": "husky"
