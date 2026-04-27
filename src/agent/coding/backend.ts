@@ -36,18 +36,46 @@ export interface BackendCallContext {
 }
 
 /**
+ * Reply payload for a `permission_request` event. Mirrors Claude Code's
+ * stream-json control protocol: `behavior: "allow"` lets the CLI continue
+ * (optionally with `updatedInput` to amend the call); `behavior: "deny"`
+ * rejects with an optional reason the CLI surfaces back to the model.
+ */
+export type PermissionResponse =
+  | { behavior: "allow"; updatedInput?: Record<string, unknown> }
+  | { behavior: "deny"; message?: string; interrupt?: boolean };
+
+/**
+ * Handle returned by `execute` — the orchestrator iterates `events` and
+ * calls `respondPermission` to reply to each `permission_request` event the
+ * CLI sends out via stream-json. The CLI blocks until each request is
+ * answered, so the orchestrator's policy + decision-log + Telegram-prompt
+ * flow drives back-pressure naturally.
+ */
+export interface CodingExecuteHandle {
+  events: AsyncIterable<CodingEvent>;
+  /**
+   * Reply to a permission_request by request id. Writes a `control_response`
+   * frame to the CLI's stdin. Idempotent — a duplicate reply for the same
+   * request id is logged and dropped (the underlying CLI already moved on).
+   */
+  respondPermission(requestId: string, response: PermissionResponse): Promise<void>;
+}
+
+/**
  * Common surface for both Claude Code and Codex CLIs. Plan + execute land in
- * slices 1/2; the stream-json permission gate (slice 3) layers on top of
- * `execute` without changing this contract.
+ * slices 1/2; the stream-json permission gate (slice 3) is wired into
+ * `execute` via the returned handle.
  */
 export interface CodingBackend {
   /** Plan-only run: `--permission-mode plan`, no edits, ends with `plan_ready`. */
   plan(ctx: BackendCallContext): AsyncIterable<CodingEvent>;
   /**
-   * Execute run resuming a prior session: `--resume <sessionId>
-   * --permission-mode acceptEdits`. Yields text deltas + `tool_call` /
-   * `tool_result` events as the CLI works, ending with `complete`. The session
-   * id comes from `task.session_id`, captured during the plan phase.
+   * Execute run resuming a prior session: `--resume <sessionId>` with default
+   * permission mode (NOT `acceptEdits`) so every tool call goes through the
+   * stream-json control channel. The orchestrator drives decisions via the
+   * returned handle. Session id comes from `task.session_id`, captured
+   * during the plan phase.
    */
-  execute(ctx: BackendCallContext, sessionId: string): AsyncIterable<CodingEvent>;
+  execute(ctx: BackendCallContext, sessionId: string): Promise<CodingExecuteHandle>;
 }

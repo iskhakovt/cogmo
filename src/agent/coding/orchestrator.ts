@@ -581,7 +581,8 @@ async function runExecuteStreaming(
   // biome-ignore lint/suspicious/noExplicitAny: BackendUsage shape is opaque to the orchestrator
   let usage: any;
 
-  for await (const event of backend.execute({ task, repo, container }, sessionId)) {
+  const handle = await backend.execute({ task, repo, container }, sessionId);
+  for await (const event of handle.events) {
     switch (event.kind) {
       case "session_started":
         // Resumed session — usually equals task.sessionId, but we don't
@@ -595,6 +596,18 @@ async function runExecuteStreaming(
         break;
       case "tool_result":
         await executeStream.toolResult(event.tool, event.ok, event.summary);
+        break;
+      case "permission_request":
+        // Slice 3.0d wires the protocol but not the policy. Auto-allow
+        // every request so the existing flow keeps working — slice 3.0g
+        // layers policy.evaluate + decision log + Telegram prompt on top
+        // of this same hook. Logged so a stray request stands out if
+        // 3.0g hasn't landed yet.
+        log.info(
+          { taskId: task.id, requestId: event.requestId, tool: event.tool },
+          "permission_request — auto-allowing (slice 3.0d default)",
+        );
+        await handle.respondPermission(event.requestId, { behavior: "allow" });
         break;
       case "complete":
         if (event.usage) usage = event.usage;
