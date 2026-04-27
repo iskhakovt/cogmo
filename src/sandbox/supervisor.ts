@@ -1,6 +1,7 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import type Docker from "dockerode";
 import { logger } from "../logger.js";
+import { taskSliceName } from "./cgroup-parent.js";
 import type {
   ExecHandle,
   ExecOptions,
@@ -114,6 +115,15 @@ export class LocalInProcessSandbox implements Sandbox {
       [LABEL_DEPTH]: "0",
     };
 
+    // Slice 3.0h: every container in the task tree gets pinned under a
+    // shared systemd slice. Docker creates the slice on demand when the
+    // first container references it; the proxy injects the same slice
+    // name on every child create so siblings land in the same subtree.
+    // Per-leaf limits (NanoCpus / Memory / PidsLimit) cap the task
+    // container directly; aggregate-budget enforcement at the slice
+    // level is deferred — see `cgroup-parent.ts` for rationale.
+    const cgroupParent = taskSliceName(spec.rootTaskId);
+
     // Pre-allocate the proxy socket so the task container can mount it at
     // `/var/run/docker.sock` from the moment it starts. Parent docker id
     // isn't known yet — register with a placeholder, then upsert below
@@ -127,9 +137,7 @@ export class LocalInProcessSandbox implements Sandbox {
           parentDockerId: "",
           parentDepth: 0,
           runtime,
-          // Cgroup parent injection lands in slice 3.0h. For now use an
-          // empty string — Docker treats that as "use the daemon default".
-          cgroupParent: "",
+          cgroupParent,
           instanceId: this.#instanceId,
         })
       : null;
@@ -153,6 +161,7 @@ export class LocalInProcessSandbox implements Sandbox {
         Labels: labels,
         HostConfig: {
           Runtime: runtime,
+          CgroupParent: cgroupParent,
           Binds: binds,
           // Home volume mounted at /home/vscode — slice 1 contract: task images
           // MUST run as user `vscode` (devbase inherits this from the
@@ -205,7 +214,7 @@ export class LocalInProcessSandbox implements Sandbox {
         parentDockerId: container.id,
         parentDepth: 0,
         runtime,
-        cgroupParent: "",
+        cgroupParent,
         instanceId: this.#instanceId,
       });
     }

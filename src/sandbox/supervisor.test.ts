@@ -42,6 +42,7 @@ interface DockerCreateCallArgs {
   HostConfig?: {
     Binds?: string[];
     Runtime?: string;
+    CgroupParent?: string;
   };
 }
 
@@ -103,10 +104,6 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     const inst = await store.insertInstance({ host: "h", pid: 1 });
     const { docker, calls } = fakeDocker({ dockerId: "docker-task-xyz" });
     const { proxy, registers } = fakeProxy();
-    // Skip assertRuntimeAvailable: the runtime probe lists runtimes via
-    // docker.info which our stub doesn't implement. Bypass by stubbing the
-    // sandbox factory's pre-check via a runc runtime + a dock that returns
-    // the runtime in `info`.
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const sandbox = await LocalInProcessSandbox.create({
       // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
@@ -117,8 +114,9 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
       proxy,
     });
 
+    const taskId = "019d0000-0000-7000-8000-000000000aaa";
     const handle = await sandbox.createTaskContainer({
-      rootTaskId: "019d0000-0000-7000-8000-000000000aaa",
+      rootTaskId: taskId,
       worktreePath: "/tmp/wt",
       homeVolumeName: "vol-1",
       image: "alpine",
@@ -136,6 +134,13 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     expect(registers[1].parentDockerId).toBe("docker-task-xyz");
     expect(registers[1].parentContainerRowId).toBeTruthy();
 
+    // Cgroup parent (slice 3.0h): both registers carry the same slice
+    // name; the proxy uses it to inject CgroupParent on every child
+    // create so siblings land in the same subtree.
+    const expectedSlice = "cogmo-task-019d0000000070008000000000000aaa.slice";
+    expect(registers[0].cgroupParent).toBe(expectedSlice);
+    expect(registers[1].cgroupParent).toBe(expectedSlice);
+
     // Container created with the proxy socket bind-mounted at /var/run/docker.sock.
     expect(calls.create).toHaveLength(1);
     const binds = calls.create[0].HostConfig?.Binds ?? [];
@@ -143,6 +148,10 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     expect(binds).toContain(
       "/run/cogmo/sockets/019d0000-0000-7000-8000-000000000aaa.sock:/var/run/docker.sock",
     );
+    // Task container itself pinned to the slice — Docker creates the
+    // slice on demand and aborts here if systemd refuses (e.g. on a
+    // non-systemd host).
+    expect(calls.create[0].HostConfig?.CgroupParent).toBe(expectedSlice);
   });
 
   it("unregisters the proxy on stopTask", async () => {
