@@ -77,6 +77,27 @@ describe("canonicalPattern", () => {
     );
   });
 
+  it("skips auto-allowed sub-commands when picking the canonical pattern", () => {
+    // `curl GET localhost` evaluates to allow, NOT prompt — so the
+    // canonical pattern for `curl GET localhost && git push` must be
+    // the push, not `Bash(curl *)`. Otherwise a user's "Allow for task"
+    // on a localhost curl would silently auto-approve a future
+    // unrelated `git push` via decision-log replay.
+    expect(
+      canonicalPattern({
+        tool: "Bash",
+        input: { command: "curl http://localhost:8080/x && git push" },
+      }),
+    ).toBe("Bash(git push *)");
+    // Read-only git ops auto-allow → don't anchor the canonical here.
+    expect(
+      canonicalPattern({
+        tool: "Bash",
+        input: { command: "git status && git push origin main" },
+      }),
+    ).toBe("Bash(git push *)");
+  });
+
   it("compound commands fall back to the first sub-head when no sub is prompt-worthy", () => {
     expect(canonicalPattern({ tool: "Bash", input: { command: "pnpm test && pnpm lint" } })).toBe(
       "Bash(pnpm *)",

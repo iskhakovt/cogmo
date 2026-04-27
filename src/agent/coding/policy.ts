@@ -242,60 +242,89 @@ function gitSubcommand(tokens: string[]): string | null {
 }
 
 /**
- * Pull the explicit verb out of `curl -X <verb>` / `curl --request <verb>` /
- * `curl --request=<verb>`. Returns the upper-cased verb if found.
+ * Pull the explicit verb out of `curl -X <verb>` / `curl -X<verb>` /
+ * `curl --request <verb>` / `curl --request=<verb>`. Returns the
+ * upper-cased verb if found.
  */
 function extractExplicitCurlVerb(tokens: string[]): string | null {
-  for (let i = 0; i < tokens.length - 1; i += 1) {
-    const t = tokens[i];
-    if (t === "-X" || t === "--request") {
+  for (let i = 0; i < tokens.length; i += 1) {
+    const t = tokens[i] ?? "";
+    if ((t === "-X" || t === "--request") && i + 1 < tokens.length) {
       const next = tokens[i + 1];
-      if (next) return next.replace(/^['"]|['"]$/g, "").toUpperCase();
+      if (next) return stripQuotes(next).toUpperCase();
     }
-    if (t?.startsWith("--request=")) {
-      return t
-        .slice("--request=".length)
-        .replace(/^['"]|['"]$/g, "")
-        .toUpperCase();
+    if (t.startsWith("--request=")) {
+      return stripQuotes(t.slice("--request=".length)).toUpperCase();
+    }
+    // -XPOST short-attached form.
+    if (t.startsWith("-X") && t.length > 2) {
+      return stripQuotes(t.slice(2)).toUpperCase();
     }
   }
   return null;
 }
 
-/** curl flags that imply a POST request when no explicit `-X` is set. */
-const CURL_IMPLIES_POST = new Set([
-  "-d",
+function stripQuotes(s: string): string {
+  return s.replace(/^['"]|['"]$/g, "");
+}
+
+/**
+ * Long-flag exact matches that imply POST when no explicit `-X` is set.
+ * Short flags are handled separately because curl accepts them with the
+ * value attached (`-dfoo`, `-F@file`, `-Tfile.tar.gz`).
+ */
+const CURL_LONG_IMPLIES_POST = new Set([
   "--data",
   "--data-raw",
   "--data-binary",
   "--data-urlencode",
   "--data-ascii",
-  "-F",
   "--form",
   "--form-string",
-  "-T",
   "--upload-file",
 ]);
+
+const CURL_SHORT_IMPLIES_POST = ["-d", "-F", "-T"] as const;
 
 /**
  * Effective verb a curl invocation will issue. Honours an explicit
  * `-X / --request <verb>` if present; otherwise falls back to curl's
  * default — POST when any of `-d`, `--data*`, `-F`, `--form*`, or upload
- * flags are set; HEAD on `-I / --head`; otherwise GET.
- *
- * Without this, `curl --data foo https://example.com/r` was missed
- * because the dispatcher only checked for `-X POST`.
+ * flags are set (in attached or separate form); HEAD on `-I / --head`;
+ * otherwise GET.
  */
 function effectiveCurlVerb(tokens: string[]): string | null {
   const explicit = extractExplicitCurlVerb(tokens);
   if (explicit) return explicit;
   for (const t of tokens) {
     if (!t) continue;
-    const flag = t.includes("=") ? t.slice(0, t.indexOf("=")) : t;
-    if (CURL_IMPLIES_POST.has(flag)) return "POST";
-    if (flag === "-I" || flag === "--head") return "HEAD";
+    if (curlTokenImpliesPost(t)) return "POST";
+    if (t === "-I" || t === "--head") return "HEAD";
   }
   return "GET";
+}
+
+/**
+ * Curl-flag-implies-POST matcher that handles all four invocation
+ * styles: bare flag (`-d`, `--data`), long with `=value`
+ * (`--data=foo`), short with attached value (`-dfoo`, `-Tfile`), and
+ * the equivalent for `-F`. Without short-attached handling, `curl
+ * -dfoo https://x.com/r` slips past as a GET because the dispatcher
+ * only sees a single token `-dfoo` that doesn't match `"-d"` exactly.
+ */
+function curlTokenImpliesPost(token: string): boolean {
+  // Long form: `--data` or `--data=value`.
+  if (CURL_LONG_IMPLIES_POST.has(token)) return true;
+  if (token.includes("=")) {
+    const flag = token.slice(0, token.indexOf("="));
+    if (CURL_LONG_IMPLIES_POST.has(flag)) return true;
+  }
+  // Short form: `-d`, `-F`, `-T` (bare or with value attached).
+  for (const short of CURL_SHORT_IMPLIES_POST) {
+    if (token === short) return true;
+    if (token.startsWith(short) && token.length > short.length) return true;
+  }
+  return false;
 }
 
 /** First token that looks like an http(s) URL. */

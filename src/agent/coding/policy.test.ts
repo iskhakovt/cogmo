@@ -182,6 +182,7 @@ describe("policy.evaluate", () => {
     it.each([
       "curl -d 'a=b' https://example.com/r",
       "curl --data 'a=b' https://example.com/r",
+      "curl --data=foo https://example.com/r",
       "curl --data-raw 'a=b' https://example.com/r",
       "curl --data-binary @file https://example.com/r",
       "curl --data-urlencode 'a=b' https://example.com/r",
@@ -191,6 +192,28 @@ describe("policy.evaluate", () => {
       "curl --upload-file file.tar.gz https://example.com/r",
     ])("prompts on implicit-POST flag: %s", (cmd) => {
       expect(bash(cmd).decision).toBe("prompt");
+    });
+
+    it.each([
+      "curl -dfoo https://example.com/r",
+      "curl -F@file https://example.com/r",
+      "curl -Tfile.tar.gz https://example.com/r",
+    ])("prompts on short-attached implicit-POST: %s", (cmd) => {
+      expect(bash(cmd).decision).toBe("prompt");
+    });
+
+    it.each([
+      "curl -XPOST https://example.com/r",
+      "curl -X POST https://example.com/r",
+      "curl --request=DELETE https://example.com/r",
+      "curl --request DELETE https://example.com/r",
+    ])("prompts on explicit verb form: %s", (cmd) => {
+      expect(bash(cmd).decision).toBe("prompt");
+    });
+
+    it("prompts when --request=<verb> is the trailing token", () => {
+      // Flag at end of tokens — the loop bound mustn't exclude it.
+      expect(bash("curl https://example.com/r --request=DELETE").decision).toBe("prompt");
     });
 
     it("treats curl -I / --head as HEAD (allow)", () => {

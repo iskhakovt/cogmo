@@ -11,6 +11,7 @@
  * read + Telegram round trip live in the orchestrator.
  */
 
+import * as policy from "./policy.js";
 import type { CodingToolDecisionRow } from "./store/index.js";
 
 export interface ToolCallInput {
@@ -49,30 +50,37 @@ export function canonicalPattern(call: ToolCallInput): string {
     .filter(Boolean);
   if (subs.length === 0) return "Bash()";
 
-  // First pass: pick the prompt-worthy sub if any. Worst-case wins, just
-  // like `policy.evaluate` does for compound commands. This keeps log
-  // replay aligned with what the user was actually answering for.
+  // Pick the canonical pattern for the first sub-command whose policy
+  // decision is `prompt`. Driving the choice through `policy.evaluate`
+  // (rather than a parallel match table) ensures we never canonicalise
+  // a sub that the policy would have auto-allowed — e.g. `curl GET
+  // localhost && git push` canonicalises to the push, not the curl,
+  // because `curl GET localhost` evaluates to `allow` and skips.
   for (const sub of subs) {
-    const matched = matchPromptPattern(sub);
+    const evald = policy.evaluate({ tool: "Bash", input: { command: sub } });
+    if (evald.decision !== "prompt") continue;
+    const matched = subPattern(sub);
     if (matched) return matched;
   }
 
-  // No sub matches the prompt set — fall back to the head of the first
-  // sub. Coarse but consistent with how unmatched commands canonicalise.
+  // No sub prompts — fall back to the head of the first sub. Coarse but
+  // consistent with how unmatched commands canonicalise.
   const tokens = (subs[0] ?? "").split(/\s+/).filter((t) => t.length > 0);
   const head = tokens[0] ?? "";
   return `Bash(${head} *)`;
 }
 
 /**
- * Return the canonical pattern for `sub` if it matches a prompt-worthy
- * shape, else null. Mirrors the verb set in `policy.ts`.
+ * Canonical glob form for a sub-command that the policy already
+ * confirmed is prompt-worthy. Mirrors the verb set in `policy.ts`; only
+ * called on subs that `policy.evaluate` returned `prompt` for, so the
+ * `curl`/`wget` arms are reached only for actual writes to non-localhost.
  */
-function matchPromptPattern(sub: string): string | null {
+function subPattern(sub: string): string | null {
   const tokens = sub.split(/\s+/).filter((t) => t.length > 0);
   const head = tokens[0] ?? "";
 
-  if (head === "git" && tokens[1] === "push") return "Bash(git push *)";
+  if (head === "git" && tokens.includes("push")) return "Bash(git push *)";
   if (head === "gh" && tokens[1] === "pr" && tokens[2]) return `Bash(gh pr ${tokens[2]} *)`;
   if (head === "gh" && tokens[1] === "issue" && tokens[2]) {
     return `Bash(gh issue ${tokens[2]} *)`;
@@ -93,12 +101,11 @@ function matchPromptPattern(sub: string): string | null {
     return `Bash(${head} ${tokens[1]} *)`;
   }
   if (head === "curl" || head === "wget") {
-    // Don't try to encode the URL — it's variable per request. The
-    // user's tap on `curl POST https://api.foo.com/x` allows future
-    // `curl` calls to non-localhost. Coarse, but matches the design.
+    // The URL is variable per request, so we don't encode it. Only
+    // reachable for subs the policy confirmed are external writes.
     return `Bash(${head} *)`;
   }
-  return null;
+  return `Bash(${head} *)`;
 }
 
 /**

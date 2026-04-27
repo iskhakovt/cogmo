@@ -68,6 +68,18 @@ describe("permission-keyboard", () => {
     expect(parsePermissionCallback(callback)?.requestIdShort).toBe(short);
   });
 
+  it("shortenRequestId fallback is collision-resistant across distinct malformed inputs", () => {
+    // Two distinct unrepresentable inputs MUST produce distinct shortened
+    // forms, otherwise a wait filtered on one's id could be unblocked by
+    // the other's keyboard tap (the Inngest filter compares the truncated
+    // string equality, not the original request_id).
+    const ids = ["🔥", "💥", "", ":::", "..", "@@@", "🔥🔥🔥"];
+    const shortened = ids.map(shortenRequestId);
+    expect(new Set(shortened).size).toBe(ids.length);
+    // Same input must still round-trip to the same shortened form.
+    expect(shortenRequestId("🔥")).toBe(shortenRequestId("🔥"));
+  });
+
   it("callback_data stays under Telegram's 64-byte limit for a full-UUID + 16-char id + worst-case action", () => {
     for (const action of ["allow_once", "allow_task", "deny"] as const) {
       const data = encodePermissionCallback(TASK_ID, "0123456789abcdef", action);

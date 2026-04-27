@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 
 /**
@@ -90,15 +91,20 @@ function encode(taskId: string, requestIdShort: string, action: PermissionAction
  * waitForEvent filter and the keyboard agree. Strips characters outside
  * `[A-Za-z0-9_-]` so the parse regex stays simple.
  *
- * If the input has no allowed characters at all (or is empty), fall back
- * to the literal placeholder `"unknown"` so the encoded `callback_data`
- * still parses through `PARSE_REGEX`. The placeholder never matches a
- * real Claude Code request id, so a wait filtered on it never resolves —
- * which is the right semantics: malformed input shouldn't auto-allow.
+ * For inputs that strip to empty (only emoji, only colons, etc.), derive
+ * a deterministic hash-based id so two distinct malformed request ids
+ * still produce distinct shortened forms. A constant placeholder would
+ * alias them — a wait filtered on one's id could be unblocked by the
+ * other's tap. Hash form starts with `un` (so it's visibly a fallback)
+ * + 14 hex chars of SHA-256(input), totalling 16 chars — fits the
+ * `[A-Za-z0-9_-]{1,16}` parse-regex bound.
  */
 export function shortenRequestId(requestId: string): string {
   const safe = requestId.replace(/[^A-Za-z0-9_-]/g, "");
-  if (safe.length === 0) return "unknown";
+  if (safe.length === 0) {
+    const h = createHash("sha256").update(requestId).digest("hex");
+    return `un${h.slice(0, 14)}`;
+  }
   return safe.slice(0, MAX_REQUEST_ID_LEN);
 }
 
