@@ -39,7 +39,7 @@ Topology 2 — nested `dockerd` inside the task container — is deferred. Only 
 
 No parity. Coding delegation is a prod/staging feature — local `pnpm dev` does not start the sandbox module and does not need sysbox installed. Developers working on sandbox code run it against a local VM or a dedicated Ubuntu host. Unit tests use plain Docker with no runtime injection.
 
-## Data Model `[confirmed]` (slice 1 — `containers` + `cogmo_instances`; `networks` + `volumes` deferred to slice 3)
+## Data Model `[confirmed]`
 
 Owned by `src/sandbox/store/`.
 
@@ -98,7 +98,7 @@ Every container Cogmo creates or proxies gets these Docker labels:
 
 Labels are the **mirror**; Cogmo DB is **authoritative**. Labels enable orphan detection via `docker ps --filter label=cogmo.managed=true` and survive Cogmo restarts for reconciliation.
 
-## Proxy Design `[proposed]`
+## Proxy Design `[confirmed]`
 
 Written in TS, lives in `src/sandbox/proxy.ts`. Single Node process. Listens on multiple Unix socket paths simultaneously — one per active task container. Socket path identifies the caller's parent.
 
@@ -152,7 +152,7 @@ Node's `http` module exposes upgrades via the `upgrade` event; forward the raw s
 
 References: [buildkite/sockguard](https://github.com/buildkite/sockguard) (label model + endpoint selection), [CpuID/dockerd-ci-proxy](https://github.com/CpuID/dockerd-ci-proxy) (label injection on create), [Tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) (endpoint categories to block).
 
-## Reaper `[proposed]`
+## Reaper `[confirmed]`
 
 Inngest cron, runs every 30s. Three passes:
 
@@ -164,7 +164,7 @@ Root-task cascade (not on cron — triggered by task completion/failure): `WHERE
 
 Networks and volumes reaped last, after all containers in the root task are gone.
 
-## Lifecycle `[proposed]`
+## Lifecycle `[confirmed]`
 
 Task startup:
 
@@ -181,7 +181,7 @@ Task teardown:
 2. Closes and removes the socket file.
 3. Removes socket entry from proxy's map.
 
-## Crash Recovery `[confirmed]` (instance-label reconcile; in-process map for proxy lands in slice 3)
+## Crash Recovery `[confirmed]`
 
 At Cogmo boot:
 
@@ -194,7 +194,7 @@ At Cogmo boot:
 
 Proxy crash mid-task: in-memory socket map is lost. Supervisor rebuilds it from the `containers` table (query `depth=0 AND status='running' AND instance_id=<current>`) and re-creates the socket files. Tasks briefly see "Docker daemon unavailable" errors; retry on their end, or Cogmo marks the task failed if the gap is long.
 
-## Networks, Volumes, Images `[proposed]`
+## Networks, Volumes, Images `[confirmed]`
 
 **Networks and volumes:** tracked identically to containers, with the same `root_task_id` cascade. Common case — docker compose brings up services + a network; all get reaped together when the task exits.
 
@@ -219,20 +219,19 @@ The attack surface this leaves is: a sandbox escape that reaches a shared cache 
 
 Per root task: cumulative CPU-seconds, memory-seconds, disk bytes written, network bytes. Polled from Docker stats API, aggregated across all containers sharing a `root_task_id`, written to `coding_tasks.resource_usage`. Accounting is observational — the numbers exist for budget reporting and post-hoc analysis, not for live enforcement (the cgroup parent below does the enforcement).
 
-### Hierarchical enforcement via cgroup parent
+### Hierarchical enforcement via cgroup parent `[confirmed]` (slice naming + assignment) / `[proposed]` (aggregate-budget enforcement)
 
 Siblings in our topology are separate cgroups under the host root by default, so "children sum ≤ parent" is not automatic the way it is in nested-dockerd setups. We fix this by attaching every container in a root task to a shared cgroup parent — the kernel then hierarchically enforces the task's total budget regardless of how many children spawn or what each one requests.
 
-Mechanism:
+**Slice 3.0h ships:** the slice naming + assignment infrastructure. Every container in a task tree (depth-0 task container + every proxy-created child) lands in the same systemd slice (`cogmo-task-<dashless-uuid>.slice`). Docker creates the slice on demand the first time a container references it; systemd auto-cleans the empty slice once all containers in it are removed. Per-leaf limits via Docker's `NanoCpus` / `Memory` / `PidsLimit` already cap the task container directly.
 
-1. On `sandbox.createTaskContainer`, supervisor creates a systemd slice (or direct cgroupfs node on hosts without systemd) at `cogmo-task-<task-id>.slice`. CPU, memory, and pid limits set to the task's total budget.
-2. Task container is created with `HostConfig.CgroupParent = "cogmo-task-<task-id>.slice"`.
-3. Proxy injects the same `CgroupParent` on every `POST /containers/create` from within the task's socket. Every sibling is now a child cgroup under the task's slice.
-4. On root-task teardown, after all containers are reaped, supervisor removes the slice.
+**Slice 3.0h does not ship:** aggregate-budget enforcement at the slice level. Setting CPU/memory/pids limits at the slice itself requires either Cogmo running as root (security regression) or systemd `Delegate=yes` on Cogmo's own unit + writing to `/sys/fs/cgroup/.../cpu.max` directly. The slice name is plumbed end-to-end so wiring delegated-slice limits later is a small follow-up. Trigger: when the spawn-many-children case becomes routine and a single child can steal the whole task budget.
 
-Outcome: the task's total budget is a hard ceiling enforced by the kernel. Individual child limits become advisory — a child asking for 4 CPU when the task has 4 still works, it just competes with siblings via normal fair-share scheduling. No policy code in the proxy, no sum-of-sibling bookkeeping, no admission race conditions.
+Outcome of the deferred enforcement: the task's total budget would be a hard ceiling enforced by the kernel. Individual child limits become advisory — a child asking for 4 CPU when the task has 4 still works, it just competes with siblings via normal fair-share scheduling. No policy code in the proxy, no sum-of-sibling bookkeeping, no admission race conditions.
 
 Matches how Kubernetes pod-level cgroups enforce pod resource limits under the hood. Requires cgroupv2 on the host — Ubuntu 22.04+ default, consistent with our deployment OS choice.
+
+**Deployment target:** Linux + systemd. Cgroupfs fallback for non-systemd hosts is out of scope; document linux-with-systemd as the supported config.
 
 ## Deployment Topology `[proposed]`
 
