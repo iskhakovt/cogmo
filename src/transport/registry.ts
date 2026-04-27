@@ -1,6 +1,7 @@
 import type { Inngest } from "inngest";
 import type { JsonValue } from "type-fest";
 import type { CodingStore } from "../agent/coding/store/index.js";
+import type { CodingStreamingRegistry } from "../agent/coding/streaming-registry.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
@@ -19,6 +20,8 @@ export interface RegistryDeps {
   agentStore: AgentStore;
   /** Optional — when omitted, `repos.*` returns `sandbox_disabled`. */
   codingStore?: CodingStore;
+  /** Optional — when omitted, adapters skip coding-progress wiring. */
+  codingStreamingRegistry?: CodingStreamingRegistry;
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
@@ -82,6 +85,15 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       credentials,
       transport,
       attachments: deps.attachments,
+      ...(deps.codingStore &&
+        deps.codingStreamingRegistry && {
+          codingProgress: {
+            inngest: deps.inngest,
+            codingStore: deps.codingStore,
+            transportStore: deps.transportStore,
+            streamingRegistry: deps.codingStreamingRegistry,
+          },
+        }),
     });
 
     adapters.push(result.adapter);

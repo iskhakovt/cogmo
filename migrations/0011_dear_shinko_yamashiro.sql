@@ -1,0 +1,1 @@
+ALTER TYPE "public"."coding_task_status" ADD VALUE 'pending_verify' BEFORE 'verifying';

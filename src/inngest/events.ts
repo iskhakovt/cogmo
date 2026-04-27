@@ -69,19 +69,26 @@ export const inboundReady = eventType("inbound/ready", {
 /**
  * Coding delegation — orchestrator entry point. The delegate_coding tool
  * (and any future automated trigger source) inserts a `coding_tasks` row
- * in `queued` status, then emits this event. The orchestrator function
- * advances the task through its lifecycle.
- *
- * **Slice 1: not wired.** `createCodingOrchestrator` is defined but the
- * Inngest function is not registered in bootstrap (the inline path in
- * `Service.coding.delegate` runs the same logic synchronously). Slice 2
- * registers the function so plan approval can park across sessions via
- * `step.waitForEvent`. Anything emitting `coding/task/start` today gets
- * silently dropped — don't.
+ * in `queued` status, then emits this event. The durable orchestrator
+ * function (`createCodingOrchestrator`, registered in bootstrap when the
+ * sandbox module is initialized) consumes it and runs the plan flow.
  */
 export const codingTaskStart = eventType("coding/task/start", {
   schema: z.object({
     taskId: z.string(),
+  }),
+});
+
+/**
+ * Coding delegation — user approved the plan via the Telegram inline
+ * keyboard (slice 2.0e). The execute orchestrator (slice 2.0f) consumes
+ * this event and runs `claude --resume <sid> --permission-mode acceptEdits`
+ * against the same task container.
+ */
+export const codingTaskPlanApproved = eventType("coding/task/plan-approved", {
+  schema: z.object({
+    taskId: z.string(),
+    approvedAt: z.string(), // ISO timestamp
   }),
 });
 

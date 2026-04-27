@@ -4,8 +4,15 @@ import { S3Client } from "@aws-sdk/client-s3";
 import Docker from "dockerode";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { ClaudeCodeBackend } from "./agent/coding/claude.js";
+import {
+  createCodingExecuteOrchestrator,
+  createCodingOrchestrator,
+  type ExecuteStreamHandle,
+  type PlanStreamHandle,
+} from "./agent/coding/orchestrator.js";
 import { createCodingService } from "./agent/coding/service.js";
 import { DrizzleCodingStore } from "./agent/coding/store/index.js";
+import { CodingStreamingRegistry } from "./agent/coding/streaming-registry.js";
 import { DELEGATE_CODING_GUIDANCE, delegateCodingTool } from "./agent/coding/tool.js";
 import { coreMemoryTools } from "./agent/core-memory-tools.js";
 import { createDebounceFunctions, type DebounceConfig } from "./agent/debounce.js";
@@ -143,27 +150,86 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     : undefined;
   const imageTools = createImageTools(falProvider, attachmentStore);
 
-  // Coding store + service factory — only present when the sandbox module
-  // is initialized. delegate_coding tool is registered unconditionally so
-  // the LLM sees it; it throws a clear error at call time when the sandbox
-  // is unavailable (rather than disappearing from the prompt every other run).
+  // Coding store + service factory + durable orchestrator. The
+  // `delegate_coding` tool is registered unconditionally so the LLM sees
+  // it; it throws a clear error at call time when the sandbox is
+  // unavailable (rather than disappearing from the prompt every other
+  // run).
+  //
+  // The streaming registry is the in-process pub/sub bridge between the
+  // orchestrator (publisher, runs inside Inngest) and the Telegram
+  // delivery adapter (subscriber, slice 2.0g). Single instance per
+  // process; both sides look up by taskId.
   const codingStore = new DrizzleCodingStore(db);
   const codingBackend = new ClaudeCodeBackend();
-  const codingServiceFactory = sandbox
-    ? (conversationId: string) =>
-        createCodingService(
-          {
-            codingStore,
-            sandbox,
-            backend: codingBackend,
-            devbaseImage: env.COGMO_DEVBASE_IMAGE,
-            defaultResourceLimits: { cpus: 2, memory_bytes: 2 * 1024 * 1024 * 1024, pids: 256 },
-            taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
-            worktreesDir: env.COGMO_WORKTREES_DIR,
-          },
-          conversationId,
-        )
-    : undefined;
+  const codingStreamingRegistry = new CodingStreamingRegistry();
+  const codingServiceFactory = (conversationId: string) =>
+    createCodingService(
+      {
+        codingStore,
+        inngest,
+        sandboxAvailable: sandbox !== null,
+      },
+      conversationId,
+    );
+
+  // Register the durable orchestrator only when the sandbox is available
+  // — without it the function would always fail at create-container.
+  // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
+  const codingFunctions: any[] = [];
+  if (sandbox) {
+    const orchestratorDeps = {
+      store: codingStore,
+      sandbox,
+      backend: codingBackend,
+      devbaseImage: env.COGMO_DEVBASE_IMAGE,
+      defaultResourceLimits: { cpus: 2, memory_bytes: 2 * 1024 * 1024 * 1024, pids: 256 },
+      taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
+      worktreesDir: env.COGMO_WORKTREES_DIR,
+      openPlanStream: async (taskId: string): Promise<PlanStreamHandle> => ({
+        async appendText(delta) {
+          codingStreamingRegistry.publish(taskId, { kind: "text", delta });
+        },
+        async finalize(plan) {
+          codingStreamingRegistry.publish(taskId, { kind: "plan_finalized", plan });
+        },
+        async fail(reason) {
+          codingStreamingRegistry.publish(taskId, { kind: "failed", reason });
+        },
+      }),
+      openExecuteStream: async (taskId: string): Promise<ExecuteStreamHandle> => ({
+        async started() {
+          codingStreamingRegistry.publish(taskId, { kind: "execute_started" });
+        },
+        async appendText(delta) {
+          codingStreamingRegistry.publish(taskId, { kind: "text", delta });
+        },
+        async toolCall(tool) {
+          codingStreamingRegistry.publish(taskId, { kind: "tool_call", tool });
+        },
+        async toolResult(tool, ok, summary) {
+          codingStreamingRegistry.publish(taskId, {
+            kind: "tool_result",
+            tool,
+            ok,
+            ...(summary !== undefined && { summary }),
+          });
+        },
+        async complete(ok, tokens) {
+          codingStreamingRegistry.publish(taskId, {
+            kind: "execute_complete",
+            ok,
+            ...(tokens !== undefined && { tokens }),
+          });
+        },
+        async fail(reason) {
+          codingStreamingRegistry.publish(taskId, { kind: "failed", reason });
+        },
+      }),
+    };
+    codingFunctions.push(createCodingOrchestrator(orchestratorDeps, inngest));
+    codingFunctions.push(createCodingExecuteOrchestrator(orchestratorDeps, inngest));
+  }
 
   const tools = createDefaultTools(
     [
@@ -210,6 +276,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     transportStore,
     agentStore,
     codingStore,
+    codingStreamingRegistry,
     inngest,
     inboundArrived,
     attachments: attachmentStore,
@@ -233,7 +300,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     debounceConfig,
     deliveryRouter,
     runStreamingAgentLoop,
-    ...(codingServiceFactory && { codingServiceFactory }),
+    codingServiceFactory,
     ...(profile.summarizationModel && { summarizationModel: profile.summarizationModel }),
   });
 
@@ -251,6 +318,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     observer,
     ...debounceFunctions,
     ...channelFunctions,
+    ...codingFunctions,
   ];
 
   return {

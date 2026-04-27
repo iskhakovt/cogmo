@@ -18,6 +18,7 @@ export type CodingTaskStatus =
   | "planning"
   | "awaiting_approval"
   | "executing"
+  | "pending_verify"
   | "verifying"
   | "pushed"
   | "pr_open"
@@ -181,6 +182,52 @@ export interface CodingStore {
    * `coding_repos.max_concurrent_tasks` at admission.
    */
   countActiveTasksForRepo(repoId: string): Promise<number>;
+
+  /**
+   * Atomic conditional status transition: `UPDATE ... SET status=$to
+   * WHERE id=$1 AND status=$from RETURNING ...`. Returns the prior
+   * status when the transition didn't fire (concurrent transition won
+   * the race). Used at the head of the execute orchestrator to flip
+   * `awaiting_approval` → `executing` without a TOCTOU gap that a
+   * concurrent cancel callback could squeeze through.
+   */
+  transitionTaskStatus(
+    id: string,
+    from: CodingTaskStatus,
+    to: CodingTaskStatus,
+  ): Promise<
+    { kind: "transitioned" } | { kind: "stale"; status: CodingTaskStatus } | { kind: "not_found" }
+  >;
+
+  /**
+   * Atomic plan-approval: stamp `plan_approved_at` iff the task is still
+   * `awaiting_approval` AND not already approved. Discriminated result so
+   * callbacks can render the right Telegram message without a separate
+   * read trip + race window. Used by the slice 2.0e callback handler.
+   */
+  approvePlanIfPending(
+    id: string,
+    approvedAt: Date,
+  ): Promise<
+    | { kind: "approved"; conversationId: string | null }
+    | { kind: "already_approved"; approvedAt: Date }
+    | { kind: "not_pending"; status: CodingTaskStatus }
+    | { kind: "not_found" }
+  >;
+
+  /**
+   * Atomic cancel: set status=`cancelled` iff the task is non-terminal.
+   * Mirrors `approvePlanIfPending` — read+write in one transaction so a
+   * concurrent state transition can't race.
+   */
+  cancelTaskIfActive(
+    id: string,
+    reason: string,
+  ): Promise<
+    | { kind: "cancelled"; conversationId: string | null }
+    | { kind: "already_terminal"; status: CodingTaskStatus }
+    | { kind: "not_found" }
+  >;
 }
 
 export class DrizzleCodingStore implements CodingStore {
@@ -400,6 +447,112 @@ export class DrizzleCodingStore implements CodingStore {
         .from(codingTasks)
         .where(and(eq(codingTasks.repoId, repoId), ...conditions));
       return rows[0]?.value ?? 0;
+    });
+  }
+
+  async transitionTaskStatus(
+    id: string,
+    from: CodingTaskStatus,
+    to: CodingTaskStatus,
+  ): Promise<
+    { kind: "transitioned" } | { kind: "stale"; status: CodingTaskStatus } | { kind: "not_found" }
+  > {
+    return this.#db.transaction(async (tx) => {
+      // Single conditional UPDATE — atomic at the SQL level. If RETURNING
+      // comes back empty, either the row doesn't exist or status didn't
+      // match `from`; do a follow-up SELECT to disambiguate.
+      const updated = await tx
+        .update(codingTasks)
+        .set({ status: to })
+        .where(and(eq(codingTasks.id, id), eq(codingTasks.status, from)))
+        .returning({ id: codingTasks.id });
+      if (updated.length > 0) return { kind: "transitioned" as const };
+
+      const rows = await tx
+        .select({ status: codingTasks.status })
+        .from(codingTasks)
+        .where(eq(codingTasks.id, id))
+        .limit(1);
+      const row = rows[0];
+      if (!row) return { kind: "not_found" as const };
+      return { kind: "stale" as const, status: row.status };
+    });
+  }
+
+  async approvePlanIfPending(
+    id: string,
+    approvedAt: Date,
+  ): Promise<
+    | { kind: "approved"; conversationId: string | null }
+    | { kind: "already_approved"; approvedAt: Date }
+    | { kind: "not_pending"; status: CodingTaskStatus }
+    | { kind: "not_found" }
+  > {
+    return this.#db.transaction(async (tx) => {
+      // `.for('update')` row-locks the matched row so a concurrent
+      // callback for the same task blocks here until our transaction
+      // commits — without it, two simultaneous Telegram callback
+      // deliveries can both observe `planApprovedAt = null` under
+      // READ COMMITTED and both return `kind: "approved"`, double-firing
+      // the plan-approved event.
+      const rows = await tx
+        .select({
+          status: codingTasks.status,
+          planApprovedAt: codingTasks.planApprovedAt,
+          conversationId: codingTasks.conversationId,
+        })
+        .from(codingTasks)
+        .where(eq(codingTasks.id, id))
+        .limit(1)
+        .for("update");
+      const row = rows[0];
+      if (!row) return { kind: "not_found" as const };
+      if (row.planApprovedAt) {
+        return { kind: "already_approved" as const, approvedAt: row.planApprovedAt };
+      }
+      if (row.status !== "awaiting_approval") {
+        return { kind: "not_pending" as const, status: row.status };
+      }
+      await tx
+        .update(codingTasks)
+        .set({ planApprovedAt: approvedAt })
+        .where(eq(codingTasks.id, id));
+      return { kind: "approved" as const, conversationId: row.conversationId };
+    });
+  }
+
+  async cancelTaskIfActive(
+    id: string,
+    reason: string,
+  ): Promise<
+    | { kind: "cancelled"; conversationId: string | null }
+    | { kind: "already_terminal"; status: CodingTaskStatus }
+    | { kind: "not_found" }
+  > {
+    return this.#db.transaction(async (tx) => {
+      // Same `.for('update')` reasoning as approvePlanIfPending — a
+      // double-tap between approve and cancel (or two concurrent cancels)
+      // could otherwise both observe the row as non-terminal and both
+      // write status=cancelled with possibly different reasons.
+      const rows = await tx
+        .select({
+          status: codingTasks.status,
+          conversationId: codingTasks.conversationId,
+        })
+        .from(codingTasks)
+        .where(eq(codingTasks.id, id))
+        .limit(1)
+        .for("update");
+      const row = rows[0];
+      if (!row) return { kind: "not_found" as const };
+      if (TERMINAL_STATUSES.includes(row.status)) {
+        return { kind: "already_terminal" as const, status: row.status };
+      }
+      await tx
+        .update(codingTasks)
+        .set({ status: "cancelled", failureReason: reason })
+        .where(eq(codingTasks.id, id));
+      return { kind: "cancelled" as const, conversationId: row.conversationId };
     });
   }
 }
