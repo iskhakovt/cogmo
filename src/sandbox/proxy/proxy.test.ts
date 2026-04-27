@@ -288,6 +288,42 @@ describe("CogmoSocketProxy hijack/forward — fuzz the transcript", () => {
     expect(upstreamRequests[0].url).toBe("/foo?bar=baz");
   });
 
+  it("rejects POST /containers/create with body > 1 MiB cap", async () => {
+    const sock = await proxy.registerTask(SCOPE);
+    // 2 MiB body — well over the 1 MiB cap.
+    const oversized = "x".repeat(2 * 1024 * 1024);
+    const huge = JSON.stringify({ Image: "alpine", Cmd: [oversized] });
+    const r = await unixRequest(sock, "POST", "/containers/create", huge);
+    expect(r.status).toBe(413);
+    expect(JSON.parse(r.body).message).toContain("body exceeds");
+    expect(upstreamRequests).toHaveLength(0);
+  });
+
+  it("rejects an Upgrade request to a denied path (/swarm) without forwarding", async () => {
+    const sock = await proxy.registerTask(SCOPE);
+    const client = net.createConnection({ path: sock });
+    await new Promise<void>((resolve) => client.once("connect", () => resolve()));
+    client.write(
+      [
+        "GET /swarm/inspect HTTP/1.1",
+        "Host: docker",
+        "Upgrade: tcp",
+        "Connection: Upgrade",
+        "",
+        "",
+      ].join("\r\n"),
+    );
+    const buf: Buffer[] = [];
+    await new Promise<void>((resolve) => {
+      client.on("data", (c: Buffer) => buf.push(c));
+      client.on("close", () => resolve());
+    });
+    const reply = Buffer.concat(buf).toString("utf8");
+    expect(reply).toContain("403");
+    expect(reply).toContain("swarm");
+    expect(upstreamRequests).toHaveLength(0);
+  });
+
   it("client error logs without crashing the server", async () => {
     const sock = await proxy.registerTask(SCOPE);
     // Send garbage HTTP — proxy should reset and stay alive.

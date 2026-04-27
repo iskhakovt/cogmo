@@ -105,7 +105,11 @@ describe("policy.evaluate", () => {
       "git push origin main",
       "git push origin cogmo/abc",
       "git push --force-with-lease origin main",
-    ])("prompts on %s", (cmd) => {
+      "git -C /repo push",
+      "git -C /repo -c user.email=x@y.com push origin main",
+      "git --git-dir=/path/.git push",
+      "git -c push.default=current push",
+    ])("prompts on %s (handles git global flags before subcommand)", (cmd) => {
       const r = bash(cmd);
       expect(r.decision).toBe("prompt");
       expect(r.reason).toContain("git push");
@@ -173,6 +177,25 @@ describe("policy.evaluate", () => {
     it("allows curl GET", () => {
       expect(bash("curl https://example.com/api").decision).toBe("allow");
       expect(bash("curl -X GET https://example.com/api").decision).toBe("allow");
+    });
+
+    it.each([
+      "curl -d 'a=b' https://example.com/r",
+      "curl --data 'a=b' https://example.com/r",
+      "curl --data-raw 'a=b' https://example.com/r",
+      "curl --data-binary @file https://example.com/r",
+      "curl --data-urlencode 'a=b' https://example.com/r",
+      "curl -F 'file=@x' https://example.com/r",
+      "curl --form 'file=@x' https://example.com/r",
+      "curl -T file.tar.gz https://example.com/r",
+      "curl --upload-file file.tar.gz https://example.com/r",
+    ])("prompts on implicit-POST flag: %s", (cmd) => {
+      expect(bash(cmd).decision).toBe("prompt");
+    });
+
+    it("treats curl -I / --head as HEAD (allow)", () => {
+      expect(bash("curl -I https://example.com").decision).toBe("allow");
+      expect(bash("curl --head https://example.com").decision).toBe("allow");
     });
 
     it("allows POST to localhost", () => {

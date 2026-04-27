@@ -548,9 +548,14 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
           if (!tgSession) return { skipped: "no telegram session for this conversation" };
 
           const keyboard = buildPermissionKeyboard(taskId, requestId);
-          const text = `🔐 Permission requested: \`${tool}\`\n\nAllow this tool call?`;
+          // Tool names may contain `[`, `*`, `_`, etc. (notably MCP tools
+          // like `mcp__github__create_pr`). Posting them under
+          // `parse_mode: "Markdown"` would 400-fail the request when the
+          // markup turns out to be malformed. Plain text avoids the
+          // escape-or-break tradeoff entirely; the prompt is short and
+          // doesn't need formatting.
+          const text = `🔐 Permission requested: ${tool}\n\nAllow this tool call?`;
           await bot.api.sendMessage(Number(tgSession.platformAddress), text, {
-            parse_mode: "Markdown",
             reply_markup: keyboard,
           });
           return { posted: true };

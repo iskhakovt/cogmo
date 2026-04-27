@@ -81,6 +81,52 @@ describe("applyContainerCreatePolicy", () => {
       expect(r.kind).toBe("allow");
     });
 
+    it("rejects HostConfig.Mounts type=bind with a host-path Source", () => {
+      const r = applyContainerCreatePolicy(
+        body({
+          HostConfig: {
+            Mounts: [{ Type: "bind", Source: "/etc", Target: "/host-etc" }],
+          },
+        }),
+        SCOPE,
+      );
+      expect(r.kind).toBe("deny");
+      if (r.kind !== "deny") return;
+      expect(r.message).toContain("/etc");
+    });
+
+    it("allows HostConfig.Mounts type=volume (named volume, no host path)", () => {
+      const r = applyContainerCreatePolicy(
+        body({
+          HostConfig: {
+            Mounts: [{ Type: "volume", Source: "myvol", Target: "/data" }],
+          },
+        }),
+        SCOPE,
+      );
+      expect(r.kind).toBe("allow");
+    });
+
+    it("allows HostConfig.Mounts type=tmpfs", () => {
+      const r = applyContainerCreatePolicy(
+        body({
+          HostConfig: { Mounts: [{ Type: "tmpfs", Target: "/scratch" }] },
+        }),
+        SCOPE,
+      );
+      expect(r.kind).toBe("allow");
+    });
+
+    it("rejects HostConfig.Mounts type=bind with empty Source", () => {
+      const r = applyContainerCreatePolicy(
+        body({
+          HostConfig: { Mounts: [{ Type: "bind", Source: "", Target: "/x" }] },
+        }),
+        SCOPE,
+      );
+      expect(r.kind).toBe("deny");
+    });
+
     it.each([
       "SYS_ADMIN",
       "CAP_SYS_ADMIN",

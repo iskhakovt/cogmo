@@ -87,11 +87,18 @@ function encode(taskId: string, requestIdShort: string, action: PermissionAction
 /**
  * Truncate the full Claude Code `request_id` to the form used in
  * `callback_data`. Stable: same input always produces same output, so the
- * waitForEvent filter and the keyboard agree. Also strips characters
- * outside `[A-Za-z0-9_-]` so the parse regex stays simple.
+ * waitForEvent filter and the keyboard agree. Strips characters outside
+ * `[A-Za-z0-9_-]` so the parse regex stays simple.
+ *
+ * If the input has no allowed characters at all (or is empty), fall back
+ * to the literal placeholder `"unknown"` so the encoded `callback_data`
+ * still parses through `PARSE_REGEX`. The placeholder never matches a
+ * real Claude Code request id, so a wait filtered on it never resolves —
+ * which is the right semantics: malformed input shouldn't auto-allow.
  */
 export function shortenRequestId(requestId: string): string {
   const safe = requestId.replace(/[^A-Za-z0-9_-]/g, "");
+  if (safe.length === 0) return "unknown";
   return safe.slice(0, MAX_REQUEST_ID_LEN);
 }
 

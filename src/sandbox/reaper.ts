@@ -92,13 +92,19 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
     }
   }
 
-  // 2. Orphan pass — discover from Docker side
+  // 2. Orphan pass — discover from Docker side. The dockerListOk flag
+  // gates the stale-DB pass below: if listContainers failed, an empty
+  // `dockerContainers` array is indistinguishable from "no containers",
+  // and the stale pass would mark every live row `exited`. Skip the
+  // stale pass when we don't have a trusted Docker view.
   let dockerContainers: Array<{ Id: string; Labels?: Record<string, string> }> = [];
+  let dockerListOk = false;
   try {
     dockerContainers = (await deps.docker.listContainers({
       all: true,
       filters: { label: [`${LABEL_MANAGED}=true`] },
     })) as Array<{ Id: string; Labels?: Record<string, string> }>;
+    dockerListOk = true;
   } catch (err) {
     log.warn({ err }, "reaper orphan pass: docker.listContainers failed");
   }
@@ -126,21 +132,25 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
     }
   }
 
-  // 3. Stale DB pass — rows we think are live but Docker doesn't know about
-  const dockerIdSet = new Set(dockerContainers.map((c) => c.Id));
-  for (const row of ourContainers) {
-    if (row.status !== "running" && row.status !== "starting") continue;
-    // Skip rows the TTL pass just marked reaped — re-reading is cheaper
-    // than threading the freshly-reaped set through, and the next tick
-    // sees the consistent state regardless.
-    if (expired.some((e) => e.id === row.id)) continue;
-    if (dockerIdSet.has(row.dockerId)) continue;
-    await deps.store.updateContainerStatus({
-      id: row.id,
-      status: "exited",
-      exitedAt: now,
-    });
-    result.staleMarked += 1;
+  // 3. Stale DB pass — rows we think are live but Docker doesn't know about.
+  // Only safe to run if we successfully read the Docker side; otherwise
+  // every live row would look "missing from Docker" and get marked exited.
+  if (dockerListOk) {
+    const dockerIdSet = new Set(dockerContainers.map((c) => c.Id));
+    for (const row of ourContainers) {
+      if (row.status !== "running" && row.status !== "starting") continue;
+      // Skip rows the TTL pass just marked reaped — re-reading is cheaper
+      // than threading the freshly-reaped set through, and the next tick
+      // sees the consistent state regardless.
+      if (expired.some((e) => e.id === row.id)) continue;
+      if (dockerIdSet.has(row.dockerId)) continue;
+      await deps.store.updateContainerStatus({
+        id: row.id,
+        status: "exited",
+        exitedAt: now,
+      });
+      result.staleMarked += 1;
+    }
   }
 
   // 4. Networks + volumes — TTL pass for the current instance

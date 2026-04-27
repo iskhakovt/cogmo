@@ -6,6 +6,7 @@
  * `index.ts` so the dispatcher logic is covered by unit tests.
  */
 
+import { actionToDecision } from "../../../agent/coding/permission-keyboard.js";
 import type { Profile } from "../../../agent/store/index.js";
 import type { Transport, TransportError } from "../../transport.js";
 import type { ProfileDialogs } from "./profile-dialog.js";
@@ -279,15 +280,11 @@ export async function handlePermissionCallback(
   },
   tapperPlatformHandle: string,
 ): Promise<PermissionCallbackOutcome> {
-  const decisionScope: Record<
-    typeof parsed.action,
-    { decision: "allow" | "deny"; scope: "once" | "task" }
-  > = {
-    allow_once: { decision: "allow", scope: "once" },
-    allow_task: { decision: "allow", scope: "task" },
-    deny: { decision: "deny", scope: "once" },
-  };
-  const { decision, scope } = decisionScope[parsed.action];
+  // Single source of truth for the action → (decision, scope) mapping.
+  // Lives in `permission-keyboard.ts` alongside `PermissionAction`; the
+  // mapping must agree with what's encoded into callback_data, so any
+  // future addition (e.g. `deny_task`) only needs editing in one place.
+  const { decision, scope } = actionToDecision(parsed.action);
 
   const res = await transport.coding.respondPermission(
     {

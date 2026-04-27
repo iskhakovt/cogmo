@@ -49,12 +49,21 @@ export type ContainerCreatePolicyResult =
   | { kind: "deny"; status: number; message: string }
   | { kind: "allow"; body: Buffer };
 
+interface ContainerCreateMount {
+  Type?: string;
+  Source?: string;
+  Target?: string;
+  ReadOnly?: boolean;
+  BindOptions?: Record<string, unknown>;
+}
+
 interface ContainerCreateBody {
   Labels?: Record<string, string> | null;
   HostConfig?: {
     Privileged?: boolean;
     NetworkMode?: string;
     Binds?: string[] | null;
+    Mounts?: ContainerCreateMount[] | null;
     CapAdd?: string[] | null;
     Runtime?: string;
     CgroupParent?: string;
@@ -110,6 +119,20 @@ export function applyContainerCreatePolicy(
       }
     }
   }
+  // Object-syntax mounts. Docker accepts both `Binds` (string) and `Mounts`
+  // (object) for bind mounts; we have to check both or the object-syntax
+  // form is a clean bypass. Type=`bind` with a host `Source` is the
+  // dangerous shape; Type=`volume` (named volume) and Type=`tmpfs` are
+  // fine — neither references a host path.
+  if (Array.isArray(host.Mounts)) {
+    for (const mount of host.Mounts) {
+      if (!mount || typeof mount !== "object") continue;
+      const violation = inspectMount(mount);
+      if (violation) {
+        return { kind: "deny", status: 403, message: violation };
+      }
+    }
+  }
   if (Array.isArray(host.CapAdd)) {
     for (const cap of host.CapAdd) {
       if (typeof cap !== "string") continue;
@@ -143,6 +166,28 @@ export function applyContainerCreatePolicy(
 
   const out = Buffer.from(JSON.stringify(mutated), "utf8");
   return { kind: "allow", body: out };
+}
+
+/**
+ * Inspect a `HostConfig.Mounts` entry. Mirrors `inspectBind` but for the
+ * object-syntax form. Bind type with a host-path source is denied; volume
+ * and tmpfs types pass through (the proxy already controls volume creation
+ * via `POST /volumes/create`).
+ */
+function inspectMount(mount: ContainerCreateMount): string | null {
+  const type = typeof mount.Type === "string" ? mount.Type.toLowerCase() : "";
+  if (type !== "bind") {
+    // `volume`, `tmpfs`, `npipe`, `cluster` — none mount a host path.
+    return null;
+  }
+  const source = typeof mount.Source === "string" ? mount.Source : "";
+  if (source.length === 0) {
+    return `HostConfig.Mounts entry of type "bind" has empty Source`;
+  }
+  if (source.startsWith("/")) {
+    return `HostConfig.Mounts host-path bind "${source}" is not allowed by the Cogmo proxy (use a named volume)`;
+  }
+  return null;
 }
 
 /**

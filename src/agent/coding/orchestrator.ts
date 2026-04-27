@@ -776,11 +776,22 @@ async function persistDecision(
   decision: ToolDecision,
   scope: "once" | "task",
 ): Promise<void> {
-  await store
-    .insertToolDecision({ taskId, tool, pattern, decision, scope })
-    .catch((err: unknown) => {
-      log.warn({ err, taskId, pattern, decision }, "tool gate: insertToolDecision failed");
-    });
+  try {
+    await store.insertToolDecision({ taskId, tool, pattern, decision, scope });
+  } catch (err) {
+    log.warn({ err, taskId, pattern, decision, scope }, "tool gate: insertToolDecision failed");
+    // `task` scope is behaviour-changing: future matching requests are
+    // supposed to auto-apply this decision via decision-log replay. A
+    // silently-lost `task`-scoped row would re-prompt every time, which
+    // is annoying but not unsafe — except the user already saw the
+    // outcome message ("Allowed for task"), so they expect it to stick.
+    // Re-throw so the orchestrator's outer catch marks the task failed
+    // and the user can re-delegate; loud beats quiet here. `once` is
+    // audit-only and safe to drop on the floor.
+    if (scope === "task") {
+      throw err;
+    }
+  }
 }
 
 /**

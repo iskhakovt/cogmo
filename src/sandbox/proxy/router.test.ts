@@ -26,6 +26,24 @@ describe("router.classify", () => {
       expect(classify("GET", "/containers/my-plugin/json").kind).toBe("forward");
       expect(classify("GET", "/networks/my-nodes/inspect").kind).toBe("forward");
     });
+
+    it("denies percent-encoded slash variants (%2F)", () => {
+      // Docker decodes these on its end, so the proxy has to canonicalise
+      // before the deny check or the encoded variant slips past.
+      expect(classify("GET", "/v1.43/swarm%2Finit").kind).toBe("deny");
+      expect(classify("GET", "%2Fswarm").kind).toBe("deny");
+      expect(classify("POST", "/v1.43/plugins%2Ffoo%2Fenable").kind).toBe("deny");
+    });
+
+    it("denies path-traversal variants", () => {
+      expect(classify("GET", "/swarm/./inspect").kind).toBe("deny");
+      expect(classify("GET", "/foo/../swarm/init").kind).toBe("deny");
+      expect(classify("GET", "//swarm/init").kind).toBe("deny");
+    });
+
+    it("denies backslash variants (windows-style separators)", () => {
+      expect(classify("GET", "\\swarm\\init").kind).toBe("deny");
+    });
   });
 
   describe("policy: container_create", () => {

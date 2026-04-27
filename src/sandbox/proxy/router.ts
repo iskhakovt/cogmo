@@ -39,10 +39,13 @@ const DENY_PREFIXES: readonly string[] = ["/swarm", "/plugins", "/nodes"];
 /**
  * Classify a request. Strips the optional `/v1.NN/` API-version prefix before
  * matching so callers can use either prefixed (`/v1.43/containers/create`) or
- * unprefixed (`/containers/create`) paths interchangeably.
+ * unprefixed (`/containers/create`) paths interchangeably. Canonicalises
+ * percent-encoded characters and collapses redundant slashes/dot-segments
+ * before any prefix match — otherwise `/v1.43/swarm%2Finit` or `/swarm/./x`
+ * would slip past the deny check on raw-string compares.
  */
 export function classify(method: string, rawPath: string): RouteOutcome {
-  const path = stripQuery(rawPath);
+  const path = canonicalisePath(stripQuery(rawPath));
   const upper = method.toUpperCase();
 
   for (const prefix of DENY_PREFIXES) {
@@ -57,23 +60,23 @@ export function classify(method: string, rawPath: string): RouteOutcome {
   }
 
   // Hijacked: `/exec/{id}/start` upgrades to raw bytes once Docker accepts.
-  if (upper === "POST" && EXEC_START_RE.test(rawPath)) {
+  if (upper === "POST" && EXEC_START_RE.test(path)) {
     return { kind: "hijack" };
   }
 
   // `/containers/{id}/attach` — same hijack mechanism as exec/start.
-  if (upper === "POST" && /\/(?:v[\d.]+\/)?containers\/[^/]+\/attach(\?|$)/.test(rawPath)) {
+  if (upper === "POST" && /\/(?:v[\d.]+\/)?containers\/[^/]+\/attach$/.test(path)) {
     return { kind: "hijack" };
   }
 
   // GET /containers/{id}/logs?follow=1 — long-polled stream. Without follow,
   // it's a normal short response; classify them both as hijack so the same
   // pipe handler covers both (it works equally well for short responses).
-  if (upper === "GET" && /\/(?:v[\d.]+\/)?containers\/[^/]+\/logs(\?|$)/.test(rawPath)) {
+  if (upper === "GET" && /\/(?:v[\d.]+\/)?containers\/[^/]+\/logs$/.test(path)) {
     return { kind: "hijack" };
   }
 
-  if (upper === "GET" && STREAMING_GET_RE.test(rawPath)) {
+  if (upper === "GET" && STREAMING_GET_RE.test(path)) {
     return { kind: "hijack" };
   }
 
@@ -102,6 +105,44 @@ export function classify(method: string, rawPath: string): RouteOutcome {
 function stripQuery(rawPath: string): string {
   const q = rawPath.indexOf("?");
   return q === -1 ? rawPath : rawPath.slice(0, q);
+}
+
+/**
+ * Canonicalise a path before classification:
+ *   1. percent-decode (handles `%2F`, `%5C`, `%2E` etc. — Docker decodes
+ *      these on its end, so encoded variants of `/swarm` or `/etc` would
+ *      otherwise route differently here than they execute on the daemon)
+ *   2. collapse `\` to `/` (Windows-style path separators)
+ *   3. collapse `//+` runs to `/`
+ *   4. resolve `.` / `..` segments against the path root, stopping at `/`
+ *
+ * Malformed encoding (`%XX` with non-hex) is treated as opaque — keep the
+ * raw bytes; the classifier still falls through to `forward` and the
+ * daemon will reject. We don't try to be lenient here.
+ */
+function canonicalisePath(p: string): string {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(p);
+  } catch {
+    decoded = p;
+  }
+  // Backslash → slash; multiple slashes → one.
+  let normalised = decoded.replace(/\\/g, "/").replace(/\/+/g, "/");
+  if (!normalised.startsWith("/")) normalised = `/${normalised}`;
+
+  // Resolve `.` / `..` segments. Bounded — segment count == slash count + 1.
+  const segments = normalised.split("/");
+  const out: string[] = [];
+  for (const seg of segments) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      out.pop();
+      continue;
+    }
+    out.push(seg);
+  }
+  return `/${out.join("/")}`;
 }
 
 /** True if `path` equals or starts with `prefix` (segment-aware). */

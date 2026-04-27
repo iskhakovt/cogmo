@@ -394,6 +394,98 @@ describe("tool gate wiring", () => {
     expect(log[0]?.decision).toBe("deny");
   });
 
+  it("re-throws when a task-scoped insertToolDecision fails (no silent loss)", async () => {
+    const { task } = await seedRepoAndTask();
+    const { sandbox } = fakeSandbox();
+    const { backend } = fakeBackend([
+      { kind: "session_started", sessionId: "sess-x" },
+      {
+        kind: "permission_request",
+        requestId: "req_loss",
+        tool: "Bash",
+        input: { command: "git push" },
+      },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const inngestSend = vi.fn().mockResolvedValue(undefined);
+    const stepWaitForEvent = vi.fn().mockResolvedValue({
+      data: { taskId: task.id, requestId: "req_loss", decision: "allow", scope: "task" },
+    });
+
+    // Wrap the store so insertToolDecision throws.
+    const wrappedStore = new Proxy(store, {
+      get(target, prop) {
+        if (prop === "insertToolDecision") {
+          return async () => {
+            throw new Error("synthetic DB failure");
+          };
+        }
+        // biome-ignore lint/suspicious/noExplicitAny: proxy passthrough
+        const value = (target as any)[prop];
+        // Bind methods to the underlying target so calls through the
+        // Proxy resolve `#db` etc. against the real store, not the Proxy.
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    const deps = makeDeps({ sandbox, backend });
+    const result = await runCodingExecute({
+      taskId: task.id,
+      deps: { ...deps, store: wrappedStore },
+      stepRun,
+      stepWaitForEvent,
+      inngest: { send: inngestSend } as unknown as Inngest,
+    });
+
+    // Task-scope DB failure surfaces as a failed task — better loud than
+    // silently re-prompting after the user already saw "Allowed for task".
+    expect(result.status).toBe("failed");
+    expect(result.failureReason).toContain("synthetic DB failure");
+  });
+
+  it("once-scope insertToolDecision failure is logged and the run continues", async () => {
+    const { task } = await seedRepoAndTask();
+    const { sandbox } = fakeSandbox();
+    const { backend, handle } = fakeBackend([
+      { kind: "session_started", sessionId: "sess-x" },
+      {
+        kind: "permission_request",
+        requestId: "req_audit",
+        tool: "Read",
+        input: { path: "/etc/foo" },
+      },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const wrappedStore = new Proxy(store, {
+      get(target, prop) {
+        if (prop === "insertToolDecision") {
+          return async () => {
+            throw new Error("synthetic audit-log failure");
+          };
+        }
+        // biome-ignore lint/suspicious/noExplicitAny: proxy passthrough
+        const value = (target as any)[prop];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    const deps = makeDeps({ sandbox, backend });
+    const result = await runCodingExecute({
+      taskId: task.id,
+      deps: { ...deps, store: wrappedStore },
+      stepRun,
+      stepWaitForEvent: vi.fn(),
+      inngest: { send: vi.fn().mockResolvedValue(undefined) } as unknown as Inngest,
+    });
+
+    // Auto-allow path: persistence is audit-only, drop on the floor and
+    // continue. The CLI got the allow.
+    expect(result.status).toBe("pending_verify");
+    expect(handle.responses[0]?.response).toEqual({ behavior: "allow" });
+  });
+
   it("two consecutive prompted requests get independent decisions", async () => {
     const { task } = await seedRepoAndTask();
     const { sandbox } = fakeSandbox();

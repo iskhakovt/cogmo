@@ -23,10 +23,13 @@ export interface ToolCallInput {
  * pattern stored against an `Allow for task` decision and as the lookup
  * key when replaying the log.
  *
- * - `Bash` calls: extract the first sub-command head (`git push`, `gh pr
- *   create`, `npm publish`, `curl`) and produce a glob form. Trailing
- *   arguments are wildcarded so a future `git push origin foo` matches
- *   the user's prior tap on `git push origin bar`.
+ * - `Bash` calls: extract the **prompt-worthy** sub-command (the one that
+ *   would have triggered the prompt under the static policy — `git push`,
+ *   `gh pr create`, `npm publish`, etc.). Compound commands like
+ *   `pnpm test && git push` get matched to `Bash(git push *)` so the
+ *   user's "Allow for task" tap applies to the dangerous part, not to
+ *   the test runner that happened to come first. If no sub-command is
+ *   prompt-worthy, fall back to the head of the first sub-command.
  * - Non-Bash tools: just the tool name. File ops are default-allowed at
  *   the policy layer so they rarely show up in the log; if a custom
  *   policy ever wants per-tool task-scoped allow, this is the matcher.
@@ -40,15 +43,35 @@ export function canonicalPattern(call: ToolCallInput): string {
   }
   const command = typeof call.input.command === "string" ? call.input.command.trim() : "";
   if (command.length === 0) return "Bash()";
-  // Take the first sub-command — compound chains have multiple, but the
-  // policy already prompts on the worst-case sub, and the user's tap
-  // applies to the whole compound. Storing the head sub-command keeps
-  // the matcher simple.
-  const firstSub = command.split(/&&|\|\||;|\|/)[0]?.trim() ?? command;
-  const tokens = firstSub.split(/\s+/).filter((t) => t.length > 0);
+  const subs = command
+    .split(/&&|\|\||;|\|/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (subs.length === 0) return "Bash()";
+
+  // First pass: pick the prompt-worthy sub if any. Worst-case wins, just
+  // like `policy.evaluate` does for compound commands. This keeps log
+  // replay aligned with what the user was actually answering for.
+  for (const sub of subs) {
+    const matched = matchPromptPattern(sub);
+    if (matched) return matched;
+  }
+
+  // No sub matches the prompt set — fall back to the head of the first
+  // sub. Coarse but consistent with how unmatched commands canonicalise.
+  const tokens = (subs[0] ?? "").split(/\s+/).filter((t) => t.length > 0);
+  const head = tokens[0] ?? "";
+  return `Bash(${head} *)`;
+}
+
+/**
+ * Return the canonical pattern for `sub` if it matches a prompt-worthy
+ * shape, else null. Mirrors the verb set in `policy.ts`.
+ */
+function matchPromptPattern(sub: string): string | null {
+  const tokens = sub.split(/\s+/).filter((t) => t.length > 0);
   const head = tokens[0] ?? "";
 
-  // Two-word verbs we recognise — keep the verb in the pattern.
   if (head === "git" && tokens[1] === "push") return "Bash(git push *)";
   if (head === "gh" && tokens[1] === "pr" && tokens[2]) return `Bash(gh pr ${tokens[2]} *)`;
   if (head === "gh" && tokens[1] === "issue" && tokens[2]) {
@@ -72,12 +95,10 @@ export function canonicalPattern(call: ToolCallInput): string {
   if (head === "curl" || head === "wget") {
     // Don't try to encode the URL — it's variable per request. The
     // user's tap on `curl POST https://api.foo.com/x` allows future
-    // `curl` calls to non-localhost. Coarse, but matches the design
-    // (single-user; user re-prompted is a feature not a bug).
+    // `curl` calls to non-localhost. Coarse, but matches the design.
     return `Bash(${head} *)`;
   }
-
-  return `Bash(${head} *)`;
+  return null;
 }
 
 /**

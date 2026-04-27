@@ -110,8 +110,15 @@ function evaluateBashSubcommand(sub: string): PolicyResult {
   const tokens = tokenize(sub);
   const head = tokens[0] ?? "";
 
-  if (head === "git" && tokens[1] === "push") {
-    return { decision: "prompt", reason: "git push modifies remote state" };
+  // git supports global options before the subcommand: `git -C <path> push`,
+  // `git --git-dir=<path> push`, `git -c <key>=<val> push`, etc. Walk
+  // past them via `gitSubcommand` so a positional `tokens[1]` check
+  // doesn't get fooled by `git -C /repo push`.
+  if (head === "git") {
+    const subcommand = gitSubcommand(tokens);
+    if (subcommand === "push") {
+      return { decision: "prompt", reason: "git push modifies remote state" };
+    }
   }
 
   if (head === "gh") {
@@ -151,7 +158,7 @@ function evaluateBashSubcommand(sub: string): PolicyResult {
   }
 
   if (head === "curl") {
-    const verb = extractCurlVerb(tokens);
+    const verb = effectiveCurlVerb(tokens);
     if (verb && WRITE_HTTP_VERBS.has(verb)) {
       const url = extractFirstHttpUrl(tokens);
       if (url && !isLocalhostUrl(url)) {
@@ -196,10 +203,49 @@ function tokenize(cmd: string): string[] {
 }
 
 /**
- * Pull the verb out of `curl -X <verb>` / `curl --request <verb>`. Returns
- * the upper-cased verb if found.
+ * Walk past git's global-options layer to find the subcommand. Handles:
+ *   git push                                  → push
+ *   git -C /path push                         → push
+ *   git --git-dir=/path push                  → push
+ *   git -c user.email=x@y push                → push
+ *   git -c user.email=x@y -C /repo push       → push
+ *
+ * Tokens whose value lives in the next position (`-C`, `--git-dir`, `-c`,
+ * `--namespace`, `--exec-path`, `--work-tree`) consume two slots; their
+ * `--key=value` forms consume one. Anything else that starts with `-` is
+ * a flag we don't recognise — skip one slot and keep looking. The first
+ * non-`-` token after the global layer is the subcommand.
  */
-function extractCurlVerb(tokens: string[]): string | null {
+const GIT_GLOBAL_TWO_SLOT = new Set([
+  "-C",
+  "-c",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--exec-path",
+  "--super-prefix",
+]);
+
+function gitSubcommand(tokens: string[]): string | null {
+  let i = 1;
+  while (i < tokens.length) {
+    const t = tokens[i] as string;
+    if (!t.startsWith("-")) return t;
+    if (GIT_GLOBAL_TWO_SLOT.has(t)) {
+      i += 2;
+      continue;
+    }
+    // `--key=value` form, or unknown short flag — consume one slot.
+    i += 1;
+  }
+  return null;
+}
+
+/**
+ * Pull the explicit verb out of `curl -X <verb>` / `curl --request <verb>` /
+ * `curl --request=<verb>`. Returns the upper-cased verb if found.
+ */
+function extractExplicitCurlVerb(tokens: string[]): string | null {
   for (let i = 0; i < tokens.length - 1; i += 1) {
     const t = tokens[i];
     if (t === "-X" || t === "--request") {
@@ -214,6 +260,42 @@ function extractCurlVerb(tokens: string[]): string | null {
     }
   }
   return null;
+}
+
+/** curl flags that imply a POST request when no explicit `-X` is set. */
+const CURL_IMPLIES_POST = new Set([
+  "-d",
+  "--data",
+  "--data-raw",
+  "--data-binary",
+  "--data-urlencode",
+  "--data-ascii",
+  "-F",
+  "--form",
+  "--form-string",
+  "-T",
+  "--upload-file",
+]);
+
+/**
+ * Effective verb a curl invocation will issue. Honours an explicit
+ * `-X / --request <verb>` if present; otherwise falls back to curl's
+ * default — POST when any of `-d`, `--data*`, `-F`, `--form*`, or upload
+ * flags are set; HEAD on `-I / --head`; otherwise GET.
+ *
+ * Without this, `curl --data foo https://example.com/r` was missed
+ * because the dispatcher only checked for `-X POST`.
+ */
+function effectiveCurlVerb(tokens: string[]): string | null {
+  const explicit = extractExplicitCurlVerb(tokens);
+  if (explicit) return explicit;
+  for (const t of tokens) {
+    if (!t) continue;
+    const flag = t.includes("=") ? t.slice(0, t.indexOf("=")) : t;
+    if (CURL_IMPLIES_POST.has(flag)) return "POST";
+    if (flag === "-I" || flag === "--head") return "HEAD";
+  }
+  return "GET";
 }
 
 /** First token that looks like an http(s) URL. */

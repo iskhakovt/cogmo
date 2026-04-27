@@ -268,22 +268,26 @@ export class LocalInProcessSandbox implements Sandbox {
     const rows = await this.#store.listContainersForTask(rootTaskId);
     // Cascade order: deepest first, so a parent isn't reaped while a child still depends on it.
     const ordered = [...rows].sort((a, b) => b.depth - a.depth);
-    for (const row of ordered) {
-      if (row.status === "reaped") continue;
-      await this.#killAndRemove(row.dockerId);
-      await this.#store.updateContainerStatus({
-        id: row.id,
-        status: "reaped",
-        exitedAt: new Date(),
-      });
-    }
-    // Tear down the per-task proxy socket. Idempotent — safe to call when no
-    // proxy is configured or when the task was never registered (e.g. the
-    // container creation failed before registerTask).
-    if (this.#proxy) {
-      await this.#proxy.unregisterTask(rootTaskId).catch((err: unknown) => {
-        log.warn({ err, taskId: rootTaskId }, "proxy unregisterTask failed during stopTask");
-      });
+    try {
+      for (const row of ordered) {
+        if (row.status === "reaped") continue;
+        await this.#killAndRemove(row.dockerId);
+        await this.#store.updateContainerStatus({
+          id: row.id,
+          status: "reaped",
+          exitedAt: new Date(),
+        });
+      }
+    } finally {
+      // Tear down the per-task proxy socket regardless of whether the
+      // cascade reap succeeded — leaving the socket file around (and the
+      // listener bound) leaks resources across crashes. Idempotent: safe
+      // when no proxy is configured or when the task was never registered.
+      if (this.#proxy) {
+        await this.#proxy.unregisterTask(rootTaskId).catch((err: unknown) => {
+          log.warn({ err, taskId: rootTaskId }, "proxy unregisterTask failed during stopTask");
+        });
+      }
     }
   }
 

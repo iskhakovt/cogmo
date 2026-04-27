@@ -65,10 +65,22 @@ describe("canonicalPattern", () => {
     expect(canonicalPattern({ tool: "Bash", input: { command: cmd } })).toBe(expected);
   });
 
-  it("compound commands take the first sub-command", () => {
+  it("compound commands canonicalise to the prompt-worthy sub-command (worst-case wins)", () => {
+    // `pnpm test` alone would auto-allow; `git push` is prompt-worthy,
+    // so the user's "Allow for task" tap must record the push pattern.
     expect(
       canonicalPattern({ tool: "Bash", input: { command: "pnpm test && git push origin main" } }),
-    ).toBe("Bash(pnpm *)");
+    ).toBe("Bash(git push *)");
+    // Same with `||` and `;` separators.
+    expect(canonicalPattern({ tool: "Bash", input: { command: "pnpm test; npm publish" } })).toBe(
+      "Bash(npm publish *)",
+    );
+  });
+
+  it("compound commands fall back to the first sub-head when no sub is prompt-worthy", () => {
+    expect(canonicalPattern({ tool: "Bash", input: { command: "pnpm test && pnpm lint" } })).toBe(
+      "Bash(pnpm *)",
+    );
   });
 
   it("empty / missing command falls back to a stable string", () => {

@@ -14,6 +14,15 @@ const log = logger.child({ component: "sandbox.proxy" });
 const DEFAULT_HOST_DOCKER_SOCKET = "/var/run/docker.sock";
 
 /**
+ * Hard cap on the buffered body size for `POST /containers/create`. Docker's
+ * daemon doesn't enforce a small limit either, but we read the whole body
+ * before forwarding (to inspect + mutate); without this cap a hostile
+ * caller could ask us to allocate gigabytes. 1 MiB is far above any real
+ * container spec — published images don't exceed a few KB of JSON.
+ */
+const CONTAINER_CREATE_MAX_BODY_BYTES = 1 * 1024 * 1024;
+
+/**
  * Per-connection task-id tag — set by the per-task net.Server's `connection`
  * listener. Connection handlers look up the live scope via `#scopes.get(taskId)`
  * each request, so a `registerTask` update mid-flight (e.g. once the
@@ -184,7 +193,24 @@ export class CogmoSocketProxy {
     res: http.ServerResponse,
     scope: TaskScope,
   ): Promise<void> {
-    const body = await readBody(req);
+    let body: Buffer;
+    try {
+      body = await readBody(req, CONTAINER_CREATE_MAX_BODY_BYTES);
+    } catch (err) {
+      if ((err as Error).message === "body_too_large") {
+        // Write the 413 first, then drain whatever's still in flight so
+        // the client gets a clean response instead of ECONNRESET. Node
+        // discards drained chunks; for a hostile multi-GB body we'd want
+        // to bound the drain too, but at slice 3 scale the cap is small
+        // enough that draining the rest is cheap.
+        respondJson(res, 413, {
+          message: `Cogmo proxy: request body exceeds ${CONTAINER_CREATE_MAX_BODY_BYTES} bytes`,
+        });
+        req.resume();
+        return;
+      }
+      throw err;
+    }
     const decision = applyContainerCreatePolicy(body, scope);
     if (decision.kind === "deny") {
       log.info(
@@ -296,8 +322,33 @@ export class CogmoSocketProxy {
    * Same raw-pipe treatment as #hijackRequest, but Node hands us the head
    * buffer (any bytes the client sent after the headers but before we
    * accepted the upgrade), which we replay to the upstream.
+   *
+   * Same scope + classify checks as #handleRequest. Without them an
+   * `Upgrade: tcp` to `/swarm/*` would slip past the deny prefix.
    */
   #handleUpgrade(req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer): void {
+    const taskId = TASK_ID_BY_SOCKET.get(req.socket);
+    if (!taskId || !this.#scopes.has(taskId)) {
+      writeRawHttpStatusAndDestroy(clientSocket, 500, "Cogmo proxy: connection has no task scope");
+      return;
+    }
+    const route = classify(req.method ?? "GET", req.url ?? "/");
+    if (route.kind === "deny") {
+      writeRawHttpStatusAndDestroy(clientSocket, route.status, route.reason);
+      return;
+    }
+    // `policy` outcomes wouldn't happen via Upgrade (`POST /containers/create`
+    // doesn't use Upgrade), and `forward` is a normal request — neither
+    // should reach the upgrade handler. Only `hijack` is expected here.
+    if (route.kind !== "hijack") {
+      writeRawHttpStatusAndDestroy(
+        clientSocket,
+        400,
+        `Cogmo proxy: ${route.kind} endpoint cannot be upgraded`,
+      );
+      return;
+    }
+
     const upstream = net.createConnection({ path: this.#hostDockerSocket });
     upstream.once("connect", () => {
       upstream.write(buildHttpRequestPreamble(req));
@@ -310,6 +361,35 @@ export class CogmoSocketProxy {
       clientSocket.destroy(err);
     });
     clientSocket.on("error", () => upstream.destroy());
+  }
+}
+
+/**
+ * Write a minimal HTTP/1.1 response on a hijacked client socket and close
+ * it. Used by the upgrade handler when no `http.ServerResponse` is around
+ * to format a clean reply.
+ */
+function writeRawHttpStatusAndDestroy(socket: net.Socket, status: number, message: string): void {
+  const body = `${JSON.stringify({ message })}\n`;
+  const reply =
+    `HTTP/1.1 ${status} ${statusText(status)}\r\n` +
+    `Content-Type: application/json\r\n` +
+    `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+    `Connection: close\r\n` +
+    `\r\n${body}`;
+  socket.end(reply);
+}
+
+function statusText(status: number): string {
+  switch (status) {
+    case 400:
+      return "Bad Request";
+    case 403:
+      return "Forbidden";
+    case 500:
+      return "Internal Server Error";
+    default:
+      return "OK";
   }
 }
 
@@ -349,10 +429,19 @@ function respondJson(res: http.ServerResponse, status: number, body: object): vo
   res.end(payload);
 }
 
-async function readBody(req: http.IncomingMessage): Promise<Buffer> {
+async function readBody(req: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
+  let total = 0;
   for await (const chunk of req) {
-    chunks.push(chunk as Buffer);
+    const buf = chunk as Buffer;
+    total += buf.length;
+    if (total > maxBytes) {
+      // Surface to the caller so it can write a 413 response. The caller
+      // is responsible for draining the rest of the body (`req.resume()`)
+      // so the client connection closes cleanly rather than RST'ing.
+      throw new Error("body_too_large");
+    }
+    chunks.push(buf);
   }
   return Buffer.concat(chunks);
 }

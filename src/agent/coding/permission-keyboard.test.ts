@@ -53,6 +53,21 @@ describe("permission-keyboard", () => {
     expect(shortenRequestId("req with spaces")).toBe("reqwithspaces");
   });
 
+  it.each([
+    "",
+    ":::",
+    "..",
+    "  ",
+    "🔥💥",
+  ])("shortenRequestId(%s) falls back to a parseable placeholder", (input) => {
+    const short = shortenRequestId(input);
+    expect(short.length).toBeGreaterThan(0);
+    // Must round-trip through the parse regex so callback_data stays
+    // valid even if Claude Code ever ships a weird request_id.
+    const callback = encodePermissionCallback(TASK_ID, short, "deny");
+    expect(parsePermissionCallback(callback)?.requestIdShort).toBe(short);
+  });
+
   it("callback_data stays under Telegram's 64-byte limit for a full-UUID + 16-char id + worst-case action", () => {
     for (const action of ["allow_once", "allow_task", "deny"] as const) {
       const data = encodePermissionCallback(TASK_ID, "0123456789abcdef", action);
