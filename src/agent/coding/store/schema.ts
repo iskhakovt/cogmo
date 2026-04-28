@@ -67,6 +67,12 @@ export const codingRepos = pgTable("coding_repos", {
   // are useful when one project's PRs should be authored under a different
   // bot account (e.g. an org with separate per-team review trails).
   identityName: text("identity_name").notNull().default("default"),
+  // Wall-clock cap for the post-hoc verify step. The CLI already had
+  // `task_wall_time_seconds` during execute; this caps the single-shot verify
+  // exec separately so a runaway test suite is killed without affecting the
+  // CLI's iteration budget. 600s default covers `pnpm test` for most repos;
+  // monorepos override.
+  verifyTimeoutSeconds: integer("verify_timeout_seconds").notNull().default(600),
   createdAt: ts(),
 });
 

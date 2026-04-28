@@ -204,6 +204,7 @@ coding_repos (
   task_wall_time_seconds  INT NOT NULL,                           -- per-task wall-time ceiling
   max_concurrent_tasks    INT NOT NULL,                           -- hard cap on active tasks per repo; default 1 (serial)
   identity_name           TEXT NOT NULL DEFAULT 'default',        -- selects `github_identity:<name>` row in the secrets table; one bot account per identity
+  verify_timeout_seconds  INT NOT NULL DEFAULT 600,                -- wall-clock cap for the post-hoc verify step (slice 4.0e)
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 ```

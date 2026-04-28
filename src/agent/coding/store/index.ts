@@ -53,6 +53,8 @@ export interface CodingRepoRow {
    * are useful when an org maintains multiple bot accounts.
    */
   identityName: string;
+  /** Wall-clock cap for the post-hoc verify step (slice 4.0e). */
+  verifyTimeoutSeconds: number;
   createdAt: Date;
 }
 
@@ -97,8 +99,8 @@ export interface CodingStore {
   // --- Repos ---
 
   /** Insert a new repo. Throws on `name` collision (UNIQUE). `identityName`
-   * is optional — omitted callers inherit the DB default `'default'` so
-   * single-account setups stay one-line. */
+   * and `verifyTimeoutSeconds` are optional — omitted callers inherit the
+   * DB defaults so single-account setups stay one-line. */
   insertRepo(params: {
     name: string;
     localPath: string;
@@ -111,6 +113,7 @@ export interface CodingStore {
     taskWallTimeSeconds: number;
     maxConcurrentTasks: number;
     identityName?: string;
+    verifyTimeoutSeconds?: number;
   }): Promise<CodingRepoRow>;
 
   /** Look up a repo by its admin-set name. */
@@ -295,6 +298,7 @@ export class DrizzleCodingStore implements CodingStore {
     taskWallTimeSeconds: number;
     maxConcurrentTasks: number;
     identityName?: string;
+    verifyTimeoutSeconds?: number;
   }): Promise<CodingRepoRow> {
     const devcontainer = params.devcontainer
       ? DevcontainerSpecSchema.parse(params.devcontainer)
@@ -315,6 +319,9 @@ export class DrizzleCodingStore implements CodingStore {
             taskWallTimeSeconds: params.taskWallTimeSeconds,
             maxConcurrentTasks: params.maxConcurrentTasks,
             ...(params.identityName !== undefined && { identityName: params.identityName }),
+            ...(params.verifyTimeoutSeconds !== undefined && {
+              verifyTimeoutSeconds: params.verifyTimeoutSeconds,
+            }),
           })
           .returning(),
       );
@@ -653,6 +660,7 @@ function parseRepoRow(row: typeof codingRepos.$inferSelect): CodingRepoRow {
     taskWallTimeSeconds: row.taskWallTimeSeconds,
     maxConcurrentTasks: row.maxConcurrentTasks,
     identityName: row.identityName,
+    verifyTimeoutSeconds: row.verifyTimeoutSeconds,
     createdAt: row.createdAt,
   };
 }
