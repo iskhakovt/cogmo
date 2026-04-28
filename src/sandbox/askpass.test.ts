@@ -28,14 +28,20 @@ describe("provisionAskpass", () => {
     expect(existsSync(m.hostDir)).toBe(true);
   });
 
-  it("writes pat / helper / signing-key / signing-key.pub with the right modes", () => {
+  it("writes pat / helper / signing-key / signing-key.pub world-readable inside a 0700 parent", () => {
     const m = provisionAskpass({ baseDir, rootTaskId: "t", identity: VALID_IDENTITY });
+    const dirMode = statSync(m.hostDir).mode & 0o777;
     const patMode = statSync(join(m.hostDir, "pat")).mode & 0o777;
     const helperMode = statSync(join(m.hostDir, "helper")).mode & 0o777;
     const keyMode = statSync(join(m.hostDir, "signing-key")).mode & 0o777;
     const pubMode = statSync(join(m.hostDir, "signing-key.pub")).mode & 0o777;
-    expect(patMode).toBe(0o600);
-    expect(helperMode).toBe(0o700);
+    // Parent locked so other host users can't traverse; files world-readable
+    // so userns-remapped container uids can still read them via the bind mount.
+    expect(dirMode).toBe(0o700);
+    expect(patMode).toBe(0o644);
+    expect(helperMode).toBe(0o755);
+    // Signing key stays 0o600 — ssh-keygen -Y sign refuses to load a key
+    // with broader permissions, regardless of userns mapping.
     expect(keyMode).toBe(0o600);
     expect(pubMode).toBe(0o644);
   });

@@ -79,7 +79,26 @@ export function provisionAskpass(opts: {
   const signingKeyPath = join(hostDir, "signing-key");
   const signingKeyPubPath = join(hostDir, "signing-key.pub");
 
-  writeFileSync(patPath, opts.identity.pat, { mode: 0o600 });
+  // Modes are calibrated against two competing constraints:
+  //
+  // - The container needs to read these files via the bind mount. Under
+  //   runtimes that map the container's uid to a host subordinate uid
+  //   (plain runc with userns, idmapped mounts without shift), 0o600 files
+  //   owned by the host's cogmo uid are unreadable inside the container.
+  //   World-readable file modes work everywhere; confidentiality on the
+  //   host comes from the parent dir's 0o700 (only the cogmo runtime user
+  //   can traverse).
+  //
+  // - `ssh-keygen -Y sign` (the SSH commit signing path) STRICTLY requires
+  //   the private key file to be 0o600 — it refuses to load a key with
+  //   broader permissions and aborts the signing operation. This overrides
+  //   the userns concern: signing always needs 0o600 on the key, so the
+  //   slice-1 contract that the container CLI user matches the host cogmo
+  //   uid (vscode = 1000) is what makes this work in practice.
+  //
+  // Helper script + PAT + public key are world-readable (cat-only access,
+  // no embedded secrets in the helper). Signing key is 0o600 by necessity.
+  writeFileSync(patPath, opts.identity.pat, { mode: 0o644 });
   writeFileSync(signingKeyPath, normaliseTrailingNewline(opts.identity.sshPrivateKey), {
     mode: 0o600,
   });
@@ -95,7 +114,7 @@ export function provisionAskpass(opts: {
   // happy path.
   const containerPatPath = `${CONTAINER_ASKPASS_DIR}/pat`;
   const helperBody = `#!/bin/sh\nexec /bin/cat ${shellQuote(containerPatPath)}\n`;
-  writeFileSync(helperPath, helperBody, { mode: 0o700 });
+  writeFileSync(helperPath, helperBody, { mode: 0o755 });
 
   const env: Readonly<Record<string, string>> = Object.freeze({
     GIT_ASKPASS: `${CONTAINER_ASKPASS_DIR}/helper`,
