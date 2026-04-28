@@ -551,6 +551,15 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       store.updateTaskStatus({ id: taskId, status: "pending_verify" }),
     );
     await stepRun("teardown", () => sandbox.stopTask(taskId).catch(() => {}));
+    // Hand off to the slice 4.0h verify orchestrator. The dedicated function
+    // re-creates a container with the askpass mount, runs verify → push → PR,
+    // and tears down on its own. Emitting after the teardown means a concurrent
+    // verify run can't reuse this container, which is good — it gets a fresh
+    // one with the right secrets bound. `step.run` boundary ensures the event
+    // is sent exactly once even if Inngest replays the post-pending-verify path.
+    await stepRun("emit-cli-done", () =>
+      inngest.send({ name: "coding/task/cli-done", data: { taskId } }).then(() => undefined),
+    );
     const completionTokens =
       result.usage?.inputTokens != null && result.usage?.outputTokens != null
         ? { input: result.usage.inputTokens, output: result.usage.outputTokens }

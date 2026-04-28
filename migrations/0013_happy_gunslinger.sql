@@ -1,0 +1,1 @@
+ALTER TABLE "coding_repos" ADD COLUMN "identity_name" text DEFAULT 'default' NOT NULL;

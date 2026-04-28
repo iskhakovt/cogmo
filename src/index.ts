@@ -14,6 +14,7 @@ import { createCodingService } from "./agent/coding/service.js";
 import { DrizzleCodingStore } from "./agent/coding/store/index.js";
 import { CodingStreamingRegistry } from "./agent/coding/streaming-registry.js";
 import { DELEGATE_CODING_GUIDANCE, delegateCodingTool } from "./agent/coding/tool.js";
+import { createCodingVerifyOrchestrator } from "./agent/coding/verify-orchestrator.js";
 import { coreMemoryTools } from "./agent/core-memory-tools.js";
 import { createDebounceFunctions, type DebounceConfig } from "./agent/debounce.js";
 import { createObserver } from "./agent/evolution/index.js";
@@ -98,6 +99,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       runtime: env.SANDBOX_RUNTIME,
       instanceId: instance.id,
       proxy,
+      askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
     });
     const { orphansReaped } = await sandbox.reconcileCrashedInstances(instance.id);
     if (orphansReaped > 0) {
@@ -244,6 +246,21 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     };
     codingFunctions.push(createCodingOrchestrator(orchestratorDeps, inngest));
     codingFunctions.push(createCodingExecuteOrchestrator(orchestratorDeps, inngest));
+    codingFunctions.push(
+      createCodingVerifyOrchestrator(
+        {
+          store: codingStore,
+          sandbox,
+          secretsStore,
+          askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
+          devbaseImage: env.COGMO_DEVBASE_IMAGE,
+          defaultResourceLimits: orchestratorDeps.defaultResourceLimits,
+          taskTtlMs: orchestratorDeps.taskTtlMs,
+          openExecuteStream: orchestratorDeps.openExecuteStream,
+        },
+        inngest,
+      ),
+    );
 
     // Sandbox reaper — runs every minute, kills TTL-expired containers,
     // discovers orphans tagged with dead instance ids, marks stale DB
@@ -313,6 +330,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     attachments: attachmentStore,
     idleTimeoutMs,
     secretsStore,
+    reposDir: env.COGMO_REPOS_DIR,
   });
 
   const deliveryRouter = createDeliveryRouter({ adapters: adapterMap, transportStore });

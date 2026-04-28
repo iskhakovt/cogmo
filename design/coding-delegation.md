@@ -184,7 +184,7 @@ coding_tasks (
   allow_privileged_runc   BOOLEAN NOT NULL,                       -- compat escape hatch; explicit at insert (no default)
   plan                    TEXT,                                   -- set after plan phase
   plan_approved_at        TIMESTAMPTZ,                            -- null for automated triggers (plan gate skipped)
-  pr_url                  TEXT,
+  pr_metadata             JSONB,                                  -- PrMetadataSchema = { url, number, branchSha, openedAt }; null until 4.0g opens the draft PR. Atomic-by-Zod — no half-recorded state. Replaces the previous `pr_url TEXT` column.
   status                  coding_task_status NOT NULL,
   failure_reason          TEXT,
   resource_usage          JSONB,                                  -- ResourceUsageSchema; nullable = no stats poll yet; populated by sandbox aggregator from turn.completed events
@@ -203,6 +203,8 @@ coding_repos (
   task_token_budget       INT NOT NULL,                           -- per-task token ceiling; see Prompt Construction → Self-verify clause for enforcement boundary
   task_wall_time_seconds  INT NOT NULL,                           -- per-task wall-time ceiling
   max_concurrent_tasks    INT NOT NULL,                           -- hard cap on active tasks per repo; default 1 (serial)
+  identity_name           TEXT NOT NULL DEFAULT 'default',        -- selects `github_identity:<name>` row in the secrets table; one bot account per identity
+  verify_timeout_seconds  INT NOT NULL DEFAULT 600,                -- wall-clock cap for the post-hoc verify step (slice 4.0e)
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 ```
@@ -350,7 +352,7 @@ Derivation beats new tables — rolling quota counts come from `SELECT count(*) 
 
 Lands as part of P2 phase 12 (automated self-modification surface). Without it, `evolution` tasks ship disabled.
 
-## Flow `[proposed]`
+## Flow `[confirmed]`
 
 ```text
 [Telegram: "refactor steering rules to support per-channel scoping"]
@@ -406,10 +408,12 @@ Same pattern as `handle-message` ([crash-recovery.md](crash-recovery.md)) — du
 | `persist-plan` | `step.run` | Writes `coding_tasks.plan`, status `awaiting_approval` |
 | `wait-for-approval` | `step.waitForEvent` | Hours-to-days acceptable; Inngest durably parks the run |
 | *execute streaming* | non-durable | Same pattern as plan streaming — `--resume <sid>`, permission responses over stdin |
-| `verify` | `step.run` | Single post-hoc execution of `<coding_repos.verify_command>` inside the container (via `bash -lc`). **No retry loop in this step.** Iterating on failure was the CLI's job during the execute phase per *Prompt Construction → Self-verify clause*; this step exists only to confirm the CLI's "done" claim. Pass → proceed to push + PR; fail → mark task failed with the verify output. Budget caps (`task_token_budget`, `task_wall_time_seconds`) enforce termination of the execute phase upstream; this step is bounded by a single command timeout, not by a retry count. |
-| `push` | `step.run` | `git push origin cogmo/<id-short>`; non-fast-forward fails the task, no force |
-| `create-pr` | `step.run` | `gh pr create --draft`; idempotent — if a PR already exists for the branch, update body instead |
-| `teardown` | `step.run` | WIP-ref push if dirty, worktree remove, `sandbox.stopTask(id)` — always runs, even on failure, via `onFailure` hook |
+| `verify` | `step.run` | Single post-hoc execution of `<coding_repos.verify_command>` inside the container (via `bash -lc`). **No retry loop in this step.** Iterating on failure was the CLI's job during the execute phase per *Prompt Construction → Self-verify clause*; this step exists only to confirm the CLI's "done" claim. Pass → proceed to push + PR; fail → mark task failed with the verify output. Budget caps (`task_token_budget`, `task_wall_time_seconds`) enforce termination of the execute phase upstream; this step is bounded by `coding_repos.verify_timeout_seconds`. |
+| `push` | `step.run` | `git push origin cogmo/<id-short>` via slice 4.0f's `runCommitAndPush`. Non-fast-forward / rejected → `branch_conflict`; PAT auth fail → `auth_failed`; both surface as task failure with discriminated reason, no force push. |
+| `create-pr` | `step.run` | `octokit.pulls.create({draft:true})` via slice 4.0g. Captured into `coding_tasks.pr_metadata` (atomic JSONB blob). Idempotent: 422 "already exists" surfaces as `validation_failed` with the existing PR's number in the message. |
+| `teardown` | `try/finally` | `sandbox.stopTask(id)` cascades container kill + clears the per-task askpass dir (slice 4.0d). Runs whether the orchestrator path succeeded or threw. WIP-ref push deferred to a follow-up (todo `p3`). |
+
+**Slice 4.0h orchestrator function.** The verify → push → PR sequence runs in its own Inngest function (`coding-task-verify`), triggered by `coding/task/cli-done` which the execute orchestrator emits after the durable `pending_verify` transition. The hand-off pattern keeps each function's retry policy independent and lets the execute container be torn down cleanly before verify spins up a fresh one with the askpass mount bound. Fires `coding/task/verify-complete`, `coding/task/pushed`, and `coding/task/pr-opened` events for observability + Telegram delivery.
 
 Streaming sections re-execute on retry. `--resume <sid>` plus idempotent durable steps around them keeps the task convergent — replays don't produce double commits, double pushes, or double PRs. Mirrors the tradeoff we already accepted for `handle-message` message streaming.
 
@@ -454,15 +458,19 @@ Compound commands prompt if any sub-command is in the prompt set (worst-case win
 
 **Block indefinitely on Telegram outage.** Slice 3 design: the CLI just waits. Implementation uses a 7-day `step.waitForEvent` timeout as an abandoned-task safety net, not a deny-on-timeout. If a prompt hits the safety-net deny, it's logged for surfacing to the operator.
 
-### Merge gate
+### Merge gate `[confirmed]`
 
 The final artifact is a **draft PR**. Cogmo never pushes to `main`, never merges, never marks ready-for-review. The user reviews the diff in GitHub Mobile (or desktop) using their normal review flow — branch protection, required checks, and reviewers apply.
 
-## Git Identity `[proposed]`
+## Git Identity `[confirmed]`
 
-**P1:** Fine-grained PAT on a dedicated `cogmo-bot` GitHub account. Stored in Cogmo's `secrets` table. Per-repo scope, short expiry. Delivered into the task container at task start via the mechanism chosen in *Credential delivery* below (P1 ships the disk-backed `~/.git-credentials` path with aggressive wipe on teardown; vault socket is the P2 hardening).
+**P1 (slice 4):** Fine-grained PAT + Ed25519 SSH signing keypair on a dedicated `cogmo-bot` GitHub account. The PAT and signing key for one bot account are inseparable — they're stored as a single JSON-encoded bundle (`{ pat, sshPrivateKey, sshPublicKey }`, validated by `GitHubIdentitySchema`) in Cogmo's `secrets` table under the name `github_identity:<name>`. The setup wizard provisions `github_identity:default`; multiple identities can coexist and each repo selects one via `coding_repos.identity_name`.
 
-**SSH commit signing:** `git config gpg.format ssh` + an SSH signing key owned by the bot account. Commits show "Verified" on GitHub. Uses OpenSSH, no GPG faff.
+**Setup wizard (slice 4.0b):** prompts for the PAT, validates against `GET https://api.github.com/user`, generates an Ed25519 keypair via `micro-key-producer/ssh.js` (returns OpenSSH-armored `privateKey` + `publicKey` strings + SHA-256 fingerprint), and prints the public key with a `https://github.com/settings/ssh/new` link instructing the operator to install it as a **signing key**. The private key never leaves the encrypted DB. Non-interactive setup accepts `COGMO_GITHUB_PAT` (with `_FILE` variant); pre-supplied private keys are not yet importable (slice 4 always generates a fresh keypair and prints the public key for installation).
+
+**Per-task delivery (slice 4.0d):** the PAT is materialised into a per-task `GIT_ASKPASS` helper file under `/run/cogmo/askpass/<task-id>/`; the SSH private key is dropped alongside and referenced per-invocation via `git -c gpg.format=ssh -c user.signingkey=<path> commit -S` (no global config — the per-`-c` form keeps the signing scope to the single commit and avoids polluting the in-container repo's `.git/config`). Both files are wiped on teardown.
+
+**SSH commit signing:** OpenSSH key + the per-invocation `-c gpg.format=ssh -c user.signingkey=<path>` flags above. Commits show "Verified" on GitHub once the public key is registered as a *signing key* on the bot account. No GPG faff.
 
 **P2+:** Migrate to GitHub App with installation tokens. Short-lived tokens per task, cleaner audit trail, standard practice (Dependabot, Renovate, Copilot cloud agent all use this). Deferred because App setup is fiddly for a one-user tool and P1's PAT model is functionally equivalent for audit trail + signing.
 
@@ -489,7 +497,19 @@ Two viable patterns, each with real costs:
 
 **P1 decision: ship pattern A.** Pair it with short-lived PATs (fine-grained, per-repo, quarterly rotation on the bot account) and aggressive teardown. Revisit vault socket in P2 alongside the GitHub App migration, when we'll have installation tokens that auto-expire in 1 hour and benefit most from no-disk storage.
 
-## Repo Registry `[proposed]`
+**Slice 4.0d wiring (concrete shape).** The orchestrator provisions a per-task askpass directory before `createTaskContainer`:
+
+```
+${SANDBOX_ASKPASS_DIR}/<rootTaskId>/
+  helper           0700  — `#!/bin/sh; exec /bin/cat /.cogmo-askpass/pat`
+  pat              0600  — bot account's fine-grained PAT
+  signing-key      0600  — OpenSSH-armored Ed25519 private key
+  signing-key.pub  0644  — corresponding `ssh-ed25519 ...` line
+```
+
+The directory is bind-mounted **read-only** at `/.cogmo-askpass/` inside the container. `provisionAskpass` returns env vars to thread into `exec` — `GIT_ASKPASS=/.cogmo-askpass/helper` and `GIT_TERMINAL_PROMPT=0`; commit signing happens via `git -c gpg.format=ssh -c user.signingkey=/.cogmo-askpass/signing-key` (env vars don't drive the signing path). `LocalInProcessSandbox.stopTask` calls `cleanupAskpass` in its `try/finally`, idempotent under retries and a no-op when the directory was never provisioned. See `src/sandbox/askpass.ts`.
+
+## Repo Registry `[confirmed]`
 
 Repos are first-class. A repo must be registered (via CLI or control command) before Cogmo will work on it:
 
@@ -498,6 +518,8 @@ cogmo repo add <name> --path /path/to/clone --remote git@github.com:user/repo.gi
 cogmo repo list
 cogmo repo remove <name>
 ```
+
+**Telegram surface (slice 4.0c):** `/repo add` with no positional args opens a guided three-step dialog (name → remoteUrl → confirm). On confirm Cogmo clones the remote into `${COGMO_REPOS_DIR}/${name}` itself, threading the default GitHub identity's PAT through a one-shot `GIT_ASKPASS` helper (host-side, wiped on completion — see `src/secrets/git-askpass.ts`). The positional `/repo add <name> <path> <url>` form stays for scripting and for already-cloned repos (no PAT, no clone, just register).
 
 Each repo can override:
 

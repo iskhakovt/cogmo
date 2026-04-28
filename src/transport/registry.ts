@@ -28,6 +28,8 @@ export interface RegistryDeps {
   idleTimeoutMs: number;
   /** Resolves secret references in channel credentials before passing to adapters. */
   secretsStore: SecretsStore;
+  /** Host root for git clones registered via `/repo add`. */
+  reposDir?: string;
 }
 
 export interface RegistryResult {
@@ -69,6 +71,8 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       transportStore,
       agentStore,
       ...(deps.codingStore && { codingStore: deps.codingStore }),
+      secretsStore: deps.secretsStore,
+      ...(deps.reposDir && { reposDir: deps.reposDir }),
       inngest: deps.inngest,
       inboundArrived: deps.inboundArrived,
       attachments: deps.attachments,

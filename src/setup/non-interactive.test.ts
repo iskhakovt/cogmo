@@ -58,6 +58,9 @@ function validators(overrides?: Partial<Validators>): Validators {
     llmOpenAICompatible: vi.fn().mockResolvedValue(okResult),
     telegram: vi.fn().mockResolvedValue({ valid: true, meta: { botUsername: "cogmo_test_bot" } }),
     tavily: vi.fn().mockResolvedValue(okResult),
+    githubPat: vi
+      .fn()
+      .mockResolvedValue({ valid: true, meta: { login: "cogmo-bot", id: "12345" } }),
     ...overrides,
   };
 }
@@ -306,6 +309,108 @@ describe("runNonInteractive", () => {
       }),
     ).rejects.toBeInstanceOf(NonInteractiveValidationError);
 
+    expect(await rowCount(db, secretsTable)).toBe(0);
+  });
+
+  it("persists a GitHub identity bundle when COGMO_GITHUB_PAT is supplied", async () => {
+    const v = validators();
+    await runNonInteractive({
+      agentStore,
+      transportStore,
+      secretsStore,
+      env: baseEnv({ COGMO_GITHUB_PAT: "ghp_test_xxxxxxxxxxxxxxxxxxxx" }),
+      validators: v,
+    });
+
+    expect(v.githubPat).toHaveBeenCalledWith("ghp_test_xxxxxxxxxxxxxxxxxxxx");
+
+    const raw = await secretsStore.getSecret("github_identity:default");
+    expect(raw).not.toBeNull();
+    const parsed = JSON.parse(raw ?? "{}");
+    expect(parsed.pat).toBe("ghp_test_xxxxxxxxxxxxxxxxxxxx");
+    expect(parsed.sshPrivateKey).toMatch(/-----BEGIN OPENSSH PRIVATE KEY-----/);
+    expect(parsed.sshPublicKey).toMatch(/^ssh-ed25519 /);
+    expect(parsed.login).toBe("cogmo-bot");
+    expect(parsed.id).toBe("12345");
+
+    const meta = await secretsStore.getSecretMeta("github_identity:default");
+    expect(meta?.description).toBe("GitHub identity (@cogmo-bot)");
+    expect(meta?.validatedAt).toBeInstanceOf(Date);
+  });
+
+  it("does not store a GitHub identity when no PAT is supplied", async () => {
+    const v = validators();
+    await runNonInteractive({
+      agentStore,
+      transportStore,
+      secretsStore,
+      env: baseEnv(),
+      validators: v,
+    });
+
+    expect(v.githubPat).not.toHaveBeenCalled();
+    expect(await secretsStore.getSecret("github_identity:default")).toBeNull();
+  });
+
+  it("ignores COGMO_GITHUB_SSH_PRIVATE_KEY when no PAT is supplied", async () => {
+    // Stale leftover env var on a wrapper script must not fail an
+    // otherwise valid non-GitHub setup. The SSH key has no effect
+    // without a PAT (no identity gets persisted), so silently dropping
+    // it is the friendly behaviour.
+    const v = validators();
+    await runNonInteractive({
+      agentStore,
+      transportStore,
+      secretsStore,
+      env: baseEnv({
+        COGMO_GITHUB_SSH_PRIVATE_KEY:
+          "-----BEGIN OPENSSH PRIVATE KEY-----\nfoo\n-----END OPENSSH PRIVATE KEY-----",
+      }),
+      validators: v,
+    });
+
+    expect(v.githubPat).not.toHaveBeenCalled();
+    expect(await secretsStore.getSecret("github_identity:default")).toBeNull();
+  });
+
+  it("rejects COGMO_GITHUB_SSH_PRIVATE_KEY loudly (importing keys not yet supported)", async () => {
+    const v = validators();
+    await expect(
+      runNonInteractive({
+        agentStore,
+        transportStore,
+        secretsStore,
+        env: baseEnv({
+          COGMO_GITHUB_PAT: "ghp_test_xxxxxxxxxxxxxxxxxxxx",
+          COGMO_GITHUB_SSH_PRIVATE_KEY:
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nfoo\n-----END OPENSSH PRIVATE KEY-----",
+        }),
+        validators: v,
+      }),
+    ).rejects.toThrowError(/COGMO_GITHUB_SSH_PRIVATE_KEY.*supported/);
+
+    // No identity persisted — the validation gate aborts before any DB write.
+    expect(await secretsStore.getSecret("github_identity:default")).toBeNull();
+  });
+
+  it("fails fast with no DB writes when COGMO_GITHUB_PAT is rejected", async () => {
+    const v = validators({
+      githubPat: vi
+        .fn()
+        .mockResolvedValue({ valid: false, error: "PAT rejected (401 Unauthorized)" }),
+    });
+
+    await expect(
+      runNonInteractive({
+        agentStore,
+        transportStore,
+        secretsStore,
+        env: baseEnv({ COGMO_GITHUB_PAT: "ghp_invalid_xxxxxxxxxxxxxxx" }),
+        validators: v,
+      }),
+    ).rejects.toBeInstanceOf(NonInteractiveValidationError);
+
+    expect(await rowCount(db, llmProviders)).toBe(0);
     expect(await rowCount(db, secretsTable)).toBe(0);
   });
 

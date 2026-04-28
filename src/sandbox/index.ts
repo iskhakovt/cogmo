@@ -27,6 +27,16 @@ export interface TaskContainerSpec {
    * always pass `false`.
    */
   allowPrivilegedRunc: boolean;
+  /**
+   * Optional bind-mount for the per-task `GIT_ASKPASS` directory provisioned
+   * by `src/sandbox/askpass.ts`. When provided, the host dir is mounted
+   * read-only at the container target (always `/.cogmo-askpass`). The
+   * sandbox supervisor doesn't write into the directory itself — the
+   * orchestrator provisions it before calling `createTaskContainer` and the
+   * supervisor cleans it up via `cleanupAskpass` inside `stopTask`'s
+   * `try/finally` so a teardown failure doesn't leave secrets on disk.
+   */
+  askpassMount?: { hostDir: string; containerDir: string };
 }
 
 export interface ExecOptions {

@@ -85,6 +85,46 @@ export async function validateTavilyKey(apiKey: string): Promise<ValidationResul
   }
 }
 
+/**
+ * Validate a GitHub fine-grained PAT via `GET https://api.github.com/user`.
+ *
+ * Returns the authenticated bot account login in `meta.login` so the wizard
+ * can echo it back to the operator before they wire the key into a repo
+ * (catches "I pasted the wrong account's PAT" before any push happens).
+ */
+export async function validateGitHubPat(pat: string): Promise<ValidationResult> {
+  try {
+    const res = await fetch("https://api.github.com/user", {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "cogmo-setup",
+      },
+    });
+    if (res.status === 401) return { valid: false, error: "PAT rejected (401 Unauthorized)" };
+    if (res.status === 403) {
+      // GitHub returns 403 for both insufficient scopes AND secondary rate
+      // limits / abuse detection. Don't claim "lacks scopes" definitively —
+      // the operator-facing message would mislead troubleshooting when the
+      // real cause is a rate limit.
+      return {
+        valid: false,
+        error: "GitHub API returned 403 Forbidden (insufficient scopes or rate-limited)",
+      };
+    }
+    if (!res.ok) return { valid: false, error: `Unexpected response: ${res.status}` };
+    const body = (await res.json()) as { login?: string; id?: number };
+    if (!body.login) return { valid: false, error: "GitHub /user response missing `login`" };
+    if (typeof body.id !== "number") {
+      return { valid: false, error: "GitHub /user response missing `id`" };
+    }
+    return { valid: true, meta: { login: body.login, id: String(body.id) } };
+  } catch (err) {
+    return { valid: false, error: `Connection failed: ${(err as Error).message}` };
+  }
+}
+
 /** Validate Hindsight server connectivity. */
 export async function validateHindsight(url: string): Promise<ValidationResult> {
   try {

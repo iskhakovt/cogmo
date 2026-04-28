@@ -275,6 +275,102 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     expect(binds.find((b) => b.includes("/var/run/docker.sock"))).toBeUndefined();
   });
 
+  it("bind-mounts the askpass dir read-only when askpassMount is provided", async () => {
+    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    const { docker, calls } = fakeDocker({ dockerId: "docker-askpass" });
+    docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
+    const sandbox = await LocalInProcessSandbox.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
+      docker: docker as any,
+      store,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    await sandbox.createTaskContainer({
+      rootTaskId: "019d0000-0000-7000-8000-000000000fff",
+      worktreePath: "/tmp/wt",
+      homeVolumeName: "vol-ap",
+      image: "alpine",
+      resourceLimits: RESOURCE_LIMITS,
+      ttl: { expiresAt: new Date(Date.now() + 60_000) },
+      allowPrivilegedRunc: false,
+      askpassMount: {
+        hostDir: "/run/cogmo/askpass/019d0000-0000-7000-8000-000000000fff",
+        containerDir: "/.cogmo-askpass",
+      },
+    });
+
+    const binds = calls.create[0].HostConfig?.Binds ?? [];
+    expect(binds).toContain(
+      "/run/cogmo/askpass/019d0000-0000-7000-8000-000000000fff:/.cogmo-askpass:ro",
+    );
+  });
+
+  it("stopTask wipes the askpass dir when askpassBaseDir is configured", async () => {
+    const { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    const baseDir = mkdtempSync(join(tmpdir(), "cogmo-supervisor-askpass-"));
+    const taskDir = join(baseDir, "019d0000-0000-7000-8000-000000abcdef");
+    mkdirSync(taskDir, { recursive: true });
+    writeFileSync(join(taskDir, "pat"), "secret");
+
+    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    const { docker } = fakeDocker({ dockerId: "docker-stopAskpass" });
+    docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
+    const sandbox = await LocalInProcessSandbox.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
+      docker: docker as any,
+      store,
+      runtime: "runc",
+      instanceId: inst.id,
+      askpassBaseDir: baseDir,
+    });
+
+    await sandbox.createTaskContainer({
+      rootTaskId: "019d0000-0000-7000-8000-000000abcdef",
+      worktreePath: "/tmp/wt",
+      homeVolumeName: "vol-stop-askpass",
+      image: "alpine",
+      resourceLimits: RESOURCE_LIMITS,
+      ttl: { expiresAt: new Date(Date.now() + 60_000) },
+      allowPrivilegedRunc: false,
+    });
+    expect(existsSync(taskDir)).toBe(true);
+
+    await sandbox.stopTask("019d0000-0000-7000-8000-000000abcdef");
+    expect(existsSync(taskDir)).toBe(false);
+
+    rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  it("stopTask is a no-op for askpass when no baseDir is configured", async () => {
+    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    const { docker } = fakeDocker({ dockerId: "docker-noaskpass" });
+    docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
+    const sandbox = await LocalInProcessSandbox.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
+      docker: docker as any,
+      store,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    await sandbox.createTaskContainer({
+      rootTaskId: "019d0000-0000-7000-8000-0000000fffff",
+      worktreePath: "/tmp/wt",
+      homeVolumeName: "vol-no-askpass",
+      image: "alpine",
+      resourceLimits: RESOURCE_LIMITS,
+      ttl: { expiresAt: new Date(Date.now() + 60_000) },
+      allowPrivilegedRunc: false,
+    });
+    // Just shouldn't throw — there's nothing on disk to clean.
+    await sandbox.stopTask("019d0000-0000-7000-8000-0000000fffff");
+  });
+
   it("shutdown closes the proxy", async () => {
     const inst = await store.insertInstance({ host: "h", pid: 1 });
     const { docker } = fakeDocker();

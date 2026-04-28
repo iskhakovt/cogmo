@@ -1,6 +1,7 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import type Docker from "dockerode";
 import { logger } from "../logger.js";
+import { cleanupAskpass } from "./askpass.js";
 import { taskSliceName } from "./cgroup-parent.js";
 import type {
   ExecHandle,
@@ -40,6 +41,15 @@ interface CreateOptions {
    * slice 1's plan-only path doesn't spawn children).
    */
   proxy?: CogmoSocketProxy;
+  /**
+   * Optional host root for per-task `GIT_ASKPASS` material. When set,
+   * `stopTask` calls `cleanupAskpass({ baseDir, rootTaskId })` in the
+   * `try/finally` — even tasks that never provisioned askpass material
+   * (e.g. plan-only tasks) get a no-op recursive remove on a non-existent
+   * directory, which is harmless. Provisioning itself happens in the
+   * orchestrator before `createTaskContainer`.
+   */
+  askpassBaseDir?: string;
 }
 
 /**
@@ -55,6 +65,7 @@ export class LocalInProcessSandbox implements Sandbox {
   #runtime: SandboxRuntime;
   #instanceId: string;
   #proxy?: CogmoSocketProxy;
+  #askpassBaseDir?: string;
 
   private constructor(opts: CreateOptions) {
     this.#docker = opts.docker;
@@ -62,6 +73,7 @@ export class LocalInProcessSandbox implements Sandbox {
     this.#runtime = opts.runtime;
     this.#instanceId = opts.instanceId;
     if (opts.proxy) this.#proxy = opts.proxy;
+    if (opts.askpassBaseDir) this.#askpassBaseDir = opts.askpassBaseDir;
   }
 
   static async create(opts: CreateOptions): Promise<LocalInProcessSandbox> {
@@ -145,6 +157,13 @@ export class LocalInProcessSandbox implements Sandbox {
     const binds = [`${spec.worktreePath}:/workspace`];
     if (proxySocketPath) {
       binds.push(`${proxySocketPath}:/var/run/docker.sock`);
+    }
+    if (spec.askpassMount) {
+      // Read-only — the in-container helper only `cat`s the secret file;
+      // no process inside the container has any reason to write here, and
+      // the supervisor regenerates the directory on retry rather than
+      // expecting in-container edits to persist.
+      binds.push(`${spec.askpassMount.hostDir}:${spec.askpassMount.containerDir}:ro`);
     }
 
     let container: Docker.Container;
@@ -287,6 +306,13 @@ export class LocalInProcessSandbox implements Sandbox {
         await this.#proxy.unregisterTask(rootTaskId).catch((err: unknown) => {
           log.warn({ err, taskId: rootTaskId }, "proxy unregisterTask failed during stopTask");
         });
+      }
+      // Wipe per-task askpass material. Idempotent — a missing directory
+      // (no provisioning happened, or already cleaned up by a previous
+      // stopTask call on retry) is a no-op. Failure is logged inside
+      // `cleanupAskpass`; we never throw out of the finally.
+      if (this.#askpassBaseDir) {
+        cleanupAskpass({ baseDir: this.#askpassBaseDir, rootTaskId });
       }
     }
   }
