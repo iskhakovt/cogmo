@@ -258,12 +258,15 @@ async function validateAll(
       githubUserId = gh.meta?.id;
     }
   }
-  // Reject `COGMO_GITHUB_SSH_PRIVATE_KEY` loudly — silently substituting a
-  // freshly-generated key would mean the operator's CI script believes its
-  // bundle is the persisted bundle, when in fact ours is. Better to surface
-  // the gap up front so they remove the var and accept that we generate the
-  // key for now (or fail the run if they need a specific key).
-  if (answers.githubSshPrivateKey) {
+  // Reject `COGMO_GITHUB_SSH_PRIVATE_KEY` loudly — but only when GitHub
+  // setup is actually enabled (PAT supplied). Silently substituting a
+  // freshly-generated key for an operator-provided one would mean their
+  // CI script believes its bundle is the persisted bundle when in fact
+  // ours is, so when GitHub setup is on we want a hard validation error.
+  // When GitHub setup is off (no PAT), the SSH-key var has no effect
+  // anyway — ignore it so a stale leftover env var on a wrapper script
+  // doesn't fail an otherwise valid non-GitHub setup.
+  if (answers.githubSshPrivateKey && answers.githubPat) {
     failures.push(
       "COGMO_GITHUB_SSH_PRIVATE_KEY: importing pre-generated OpenSSH keys isn't supported yet. " +
         "Remove the variable and rerun setup; Cogmo will generate a fresh keypair and print the public key for you to install on github.com.",

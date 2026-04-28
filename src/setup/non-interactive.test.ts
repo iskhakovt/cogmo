@@ -352,6 +352,27 @@ describe("runNonInteractive", () => {
     expect(await secretsStore.getSecret("github_identity:default")).toBeNull();
   });
 
+  it("ignores COGMO_GITHUB_SSH_PRIVATE_KEY when no PAT is supplied", async () => {
+    // Stale leftover env var on a wrapper script must not fail an
+    // otherwise valid non-GitHub setup. The SSH key has no effect
+    // without a PAT (no identity gets persisted), so silently dropping
+    // it is the friendly behaviour.
+    const v = validators();
+    await runNonInteractive({
+      agentStore,
+      transportStore,
+      secretsStore,
+      env: baseEnv({
+        COGMO_GITHUB_SSH_PRIVATE_KEY:
+          "-----BEGIN OPENSSH PRIVATE KEY-----\nfoo\n-----END OPENSSH PRIVATE KEY-----",
+      }),
+      validators: v,
+    });
+
+    expect(v.githubPat).not.toHaveBeenCalled();
+    expect(await secretsStore.getSecret("github_identity:default")).toBeNull();
+  });
+
   it("rejects COGMO_GITHUB_SSH_PRIVATE_KEY loudly (importing keys not yet supported)", async () => {
     const v = validators();
     await expect(
