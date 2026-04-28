@@ -552,6 +552,15 @@ async function seedExecutableTask(
   return { task: reloaded, dockerId };
 }
 
+// Shared fakes for the runCodingExecute tests. The pending_verify path
+// emits `coding/task/cli-done` (slice 4.0h handoff) — a no-op send is
+// required to avoid the orchestrator throwing on the emit step. The
+// tool gate isn't exercised here (no permission_request events in these
+// backends), so `stepWaitForEvent` is a stub that never fires.
+// biome-ignore lint/suspicious/noExplicitAny: test shim — never awaited
+const fakeStepWaitForEvent = (async () => null) as any;
+const fakeInngest = { send: vi.fn().mockResolvedValue(undefined) };
+
 describe("runCodingExecute", () => {
   it("happy path: container reused, deltas streamed, status → pending_verify, usage persisted", async () => {
     const repo = await seedRepo();
@@ -612,6 +621,8 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
+      stepWaitForEvent: fakeStepWaitForEvent,
+      inngest: fakeInngest,
     });
 
     expect(result.status).toBe("pending_verify");
@@ -655,6 +666,8 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
+      stepWaitForEvent: fakeStepWaitForEvent,
+      inngest: fakeInngest,
     });
 
     expect(result.status).toBe("pending_verify");
@@ -679,6 +692,8 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
+      stepWaitForEvent: fakeStepWaitForEvent,
+      inngest: fakeInngest,
     });
 
     expect(result.status).toBe("failed");

@@ -124,6 +124,59 @@ export const codingTaskPermissionDecision = eventType("coding/task/permission-de
 });
 
 /**
+ * Coding delegation — execute phase reached `pending_verify`. Triggers
+ * the slice 4.0h `coding-task-verify` orchestrator function which runs
+ * verify → push → draft PR. Emitted by the execute orchestrator after
+ * the status transition committed durably; consumed exactly once per
+ * task (Inngest dedup on the event id is implicit via task id).
+ */
+export const codingTaskCliDone = eventType("coding/task/cli-done", {
+  schema: z.object({
+    taskId: z.string(),
+  }),
+});
+
+/**
+ * Coding delegation — verify step finished. Observability only; the
+ * `coding-task-verify` function continues with push + PR (or marks the
+ * task failed) inline. Consumed by metrics + future replay tooling.
+ */
+export const codingTaskVerifyComplete = eventType("coding/task/verify-complete", {
+  schema: z.object({
+    taskId: z.string(),
+    ok: z.boolean(),
+    exitCode: z.number().int(),
+    durationMs: z.number().int().nonnegative(),
+  }),
+});
+
+/**
+ * Coding delegation — `git push` succeeded. Observability + Telegram
+ * delivery hook (slice 4.0c progress message can show "branch pushed"
+ * before the PR opens, useful when octokit is slow). `branchSha` is the
+ * head sha of the just-pushed branch.
+ */
+export const codingTaskPushed = eventType("coding/task/pushed", {
+  schema: z.object({
+    taskId: z.string(),
+    branchSha: z.string(),
+  }),
+});
+
+/**
+ * Coding delegation — draft PR opened on GitHub. Consumed by the
+ * Telegram adapter to post the final progress edit (`✅ PR opened: <url>`)
+ * and by metrics / observer extraction.
+ */
+export const codingTaskPrOpened = eventType("coding/task/pr-opened", {
+  schema: z.object({
+    taskId: z.string(),
+    prUrl: z.string().url(),
+    prNumber: z.number().int().positive(),
+  }),
+});
+
+/**
  * Direct channel — external clients emit this to send messages.
  * The direct-inbound Inngest function translates to inbound/arrived.
  */

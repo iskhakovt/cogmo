@@ -52,7 +52,6 @@ export type OpenDraftPrResult =
       branchSha: string;
       openedAt: string;
     }
-  | { kind: "remote_url_unparseable"; remoteUrl: string }
   | { kind: "auth_failed"; status: number; message: string }
   | { kind: "validation_failed"; status: number; message: string }
   | { kind: "failed"; message: string };
