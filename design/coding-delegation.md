@@ -203,6 +203,7 @@ coding_repos (
   task_token_budget       INT NOT NULL,                           -- per-task token ceiling; see Prompt Construction → Self-verify clause for enforcement boundary
   task_wall_time_seconds  INT NOT NULL,                           -- per-task wall-time ceiling
   max_concurrent_tasks    INT NOT NULL,                           -- hard cap on active tasks per repo; default 1 (serial)
+  identity_name           TEXT NOT NULL DEFAULT 'default',        -- selects `github_identity:<name>` row in the secrets table; one bot account per identity
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 ```

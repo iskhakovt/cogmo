@@ -90,11 +90,24 @@ describe("DrizzleCodingStore", () => {
       expect(row.allowedBackends).toEqual(["claude"]);
       expect(row.devcontainer).toBeNull();
       expect(row.maxConcurrentTasks).toBe(1);
+      expect(row.identityName).toBe("default");
 
       const byName = await store.getRepoByName("cogmo");
       expect(byName?.id).toBe(row.id);
       const byId = await store.getRepoById(row.id);
       expect(byId?.name).toBe("cogmo");
+    });
+
+    it("identityName overrides the default when provided", async () => {
+      const row = await store.insertRepo({
+        name: "acme",
+        localPath: "/repos/acme",
+        ...REPO_DEFAULTS,
+        identityName: "acme-bot",
+      });
+      expect(row.identityName).toBe("acme-bot");
+      const reloaded = await store.getRepoById(row.id);
+      expect(reloaded?.identityName).toBe("acme-bot");
     });
 
     it("rejects duplicate repo name", async () => {
@@ -333,8 +346,8 @@ describe("DrizzleCodingStore", () => {
         allowPrivilegedRunc: false,
       });
       await expect(
-        // biome-ignore lint/suspicious/noExplicitAny: intentionally invalid input
-        store.setTaskResourceUsage(t.id, { unknown_field: 1 } as any),
+        // @ts-expect-error: intentionally invalid input — verifies runtime Zod rejection
+        store.setTaskResourceUsage(t.id, { unknown_field: 1 }),
       ).rejects.toThrow();
     });
 

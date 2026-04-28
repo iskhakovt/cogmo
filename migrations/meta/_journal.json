@@ -92,6 +92,13 @@
       "when": 1777292568482,
       "tag": "0012_gifted_jubilee",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1777365316455,
+      "tag": "0013_happy_gunslinger",
+      "breakpoints": true
     }
   ]
 }

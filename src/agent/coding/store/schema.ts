@@ -60,6 +60,13 @@ export const codingRepos = pgTable("coding_repos", {
   taskTokenBudget: integer("task_token_budget").notNull(),
   taskWallTimeSeconds: integer("task_wall_time_seconds").notNull(),
   maxConcurrentTasks: integer("max_concurrent_tasks").notNull(),
+  // Selects which GitHub identity (PAT + SSH signing key bundle, stored under
+  // `github_identity:<name>` in the secrets table) the orchestrator uses for
+  // this repo's verify → push → PR pipeline. Default `'default'` covers
+  // single-account setups (one bot account for all repos); per-repo overrides
+  // are useful when one project's PRs should be authored under a different
+  // bot account (e.g. an org with separate per-team review trails).
+  identityName: text("identity_name").notNull().default("default"),
   createdAt: ts(),
 });
 

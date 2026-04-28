@@ -46,6 +46,13 @@ export interface CodingRepoRow {
   taskTokenBudget: number;
   taskWallTimeSeconds: number;
   maxConcurrentTasks: number;
+  /**
+   * Selects the GitHub identity bundle (`github_identity:<name>` in the
+   * secrets table) used by the verify → push → PR pipeline for this repo.
+   * Default `'default'` covers single-account setups; per-repo overrides
+   * are useful when an org maintains multiple bot accounts.
+   */
+  identityName: string;
   createdAt: Date;
 }
 
@@ -89,7 +96,9 @@ export interface CodingTaskRow {
 export interface CodingStore {
   // --- Repos ---
 
-  /** Insert a new repo. Throws on `name` collision (UNIQUE). */
+  /** Insert a new repo. Throws on `name` collision (UNIQUE). `identityName`
+   * is optional — omitted callers inherit the DB default `'default'` so
+   * single-account setups stay one-line. */
   insertRepo(params: {
     name: string;
     localPath: string;
@@ -101,6 +110,7 @@ export interface CodingStore {
     taskTokenBudget: number;
     taskWallTimeSeconds: number;
     maxConcurrentTasks: number;
+    identityName?: string;
   }): Promise<CodingRepoRow>;
 
   /** Look up a repo by its admin-set name. */
@@ -284,6 +294,7 @@ export class DrizzleCodingStore implements CodingStore {
     taskTokenBudget: number;
     taskWallTimeSeconds: number;
     maxConcurrentTasks: number;
+    identityName?: string;
   }): Promise<CodingRepoRow> {
     const devcontainer = params.devcontainer
       ? DevcontainerSpecSchema.parse(params.devcontainer)
@@ -303,6 +314,7 @@ export class DrizzleCodingStore implements CodingStore {
             taskTokenBudget: params.taskTokenBudget,
             taskWallTimeSeconds: params.taskWallTimeSeconds,
             maxConcurrentTasks: params.maxConcurrentTasks,
+            ...(params.identityName !== undefined && { identityName: params.identityName }),
           })
           .returning(),
       );
@@ -640,6 +652,7 @@ function parseRepoRow(row: typeof codingRepos.$inferSelect): CodingRepoRow {
     taskTokenBudget: row.taskTokenBudget,
     taskWallTimeSeconds: row.taskWallTimeSeconds,
     maxConcurrentTasks: row.maxConcurrentTasks,
+    identityName: row.identityName,
     createdAt: row.createdAt,
   };
 }
