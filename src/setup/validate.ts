@@ -104,7 +104,14 @@ export async function validateGitHubPat(pat: string): Promise<ValidationResult> 
     });
     if (res.status === 401) return { valid: false, error: "PAT rejected (401 Unauthorized)" };
     if (res.status === 403) {
-      return { valid: false, error: "PAT lacks the required scopes (403 Forbidden)" };
+      // GitHub returns 403 for both insufficient scopes AND secondary rate
+      // limits / abuse detection. Don't claim "lacks scopes" definitively —
+      // the operator-facing message would mislead troubleshooting when the
+      // real cause is a rate limit.
+      return {
+        valid: false,
+        error: "GitHub API returned 403 Forbidden (insufficient scopes or rate-limited)",
+      };
     }
     if (!res.ok) return { valid: false, error: `Unexpected response: ${res.status}` };
     const body = (await res.json()) as { login?: string };

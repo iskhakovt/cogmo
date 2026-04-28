@@ -252,6 +252,17 @@ async function validateAll(
       githubLogin = gh.meta?.login;
     }
   }
+  // Reject `COGMO_GITHUB_SSH_PRIVATE_KEY` loudly — silently substituting a
+  // freshly-generated key would mean the operator's CI script believes its
+  // bundle is the persisted bundle, when in fact ours is. Better to surface
+  // the gap up front so they remove the var and accept that we generate the
+  // key for now (or fail the run if they need a specific key).
+  if (answers.githubSshPrivateKey) {
+    failures.push(
+      "COGMO_GITHUB_SSH_PRIVATE_KEY: importing pre-generated OpenSSH keys isn't supported yet. " +
+        "Remove the variable and rerun setup; Cogmo will generate a fresh keypair and print the public key for you to install on github.com.",
+    );
+  }
 
   // fal.ai has no cheap ping endpoint — errors surface on first use.
 
@@ -380,12 +391,9 @@ async function persistGitHubIdentity(
     throw new Error("persistGitHubIdentity called without a PAT");
   }
 
-  if (answers.githubSshPrivateKey) {
-    logger.warn(
-      "COGMO_GITHUB_SSH_PRIVATE_KEY is set but importing pre-generated OpenSSH keys isn't supported yet; generating a fresh keypair.",
-    );
-  }
-
+  // `githubSshPrivateKey` is rejected at the validation phase — by the time
+  // we get here, the field is guaranteed to be undefined (or the run already
+  // aborted). Always generate.
   const keys = generateSshKeyPair(`cogmo-bot@${githubLogin ?? "github"}`);
 
   const identity: GitHubIdentity = {

@@ -348,6 +348,26 @@ describe("runNonInteractive", () => {
     expect(await secretsStore.getSecret("github_identity:default")).toBeNull();
   });
 
+  it("rejects COGMO_GITHUB_SSH_PRIVATE_KEY loudly (importing keys not yet supported)", async () => {
+    const v = validators();
+    await expect(
+      runNonInteractive({
+        agentStore,
+        transportStore,
+        secretsStore,
+        env: baseEnv({
+          COGMO_GITHUB_PAT: "ghp_test_xxxxxxxxxxxxxxxxxxxx",
+          COGMO_GITHUB_SSH_PRIVATE_KEY:
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nfoo\n-----END OPENSSH PRIVATE KEY-----",
+        }),
+        validators: v,
+      }),
+    ).rejects.toThrowError(/COGMO_GITHUB_SSH_PRIVATE_KEY.*supported/);
+
+    // No identity persisted — the validation gate aborts before any DB write.
+    expect(await secretsStore.getSecret("github_identity:default")).toBeNull();
+  });
+
   it("fails fast with no DB writes when COGMO_GITHUB_PAT is rejected", async () => {
     const v = validators({
       githubPat: vi

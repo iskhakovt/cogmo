@@ -126,11 +126,12 @@ describe("validateGitHubPat", () => {
     expect(result.error).toMatch(/401/);
   });
 
-  it("returns invalid on 403 with scope hint", async () => {
+  it("returns invalid on 403 mentioning both scope + rate-limit possibilities", async () => {
     vi.stubGlobal("fetch", mockFetch(403));
     const result = await validateGitHubPat("scoped-too-narrow");
     expect(result.valid).toBe(false);
     expect(result.error).toMatch(/scopes/i);
+    expect(result.error).toMatch(/rate-limited/i);
   });
 
   it("returns invalid when /user response is missing login", async () => {

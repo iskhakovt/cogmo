@@ -468,10 +468,12 @@ async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
     "Install the SSH signing key",
   );
 
-  await p.confirm({
-    message: "Press Enter once you've installed the signing key on github.com.",
-    initialValue: true,
-  });
+  cancelGuard(
+    await p.confirm({
+      message: "Press Enter once you've installed the signing key on github.com.",
+      initialValue: true,
+    }),
+  );
 
   p.log.success(`GitHub identity '${DEFAULT_GITHUB_IDENTITY_NAME}' stored.`);
 }
