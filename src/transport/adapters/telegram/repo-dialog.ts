@@ -13,6 +13,7 @@
  * through the dialog.
  */
 
+import { parseRemoteUrl } from "../../../agent/coding/draft-pr.js";
 import type { RepoSummary, Transport, TransportError } from "../../transport.js";
 import type { TelegramCommandContext } from "./commands.js";
 
@@ -121,6 +122,23 @@ export class RepoDialogs {
   ): Promise<void> {
     if (!text) {
       await ctx.reply("Remote URL can't be empty. Reply with the URL, or /cancel.");
+      return;
+    }
+    // Catch typos ("htps://", missing host) before paying the network
+    // round-trip on `git clone`. The verify orchestrator (slice 4.0h)
+    // also requires the URL to parse as `owner/repo` for the PR step,
+    // so a URL the dialog accepts but the orchestrator can't parse
+    // would surface as a confusing post-clone failure.
+    if (!parseRemoteUrl(text)) {
+      await ctx.reply(
+        [
+          "That doesn't look like a git remote URL. Examples:",
+          "  https://github.com/user/repo.git",
+          "  git@github.com:user/repo.git",
+          "",
+          "Reply with the URL, or /cancel.",
+        ].join("\n"),
+      );
       return;
     }
     state.draft.remoteUrl = text;
