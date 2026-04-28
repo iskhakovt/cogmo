@@ -315,6 +315,18 @@ export class SkillRunnerImpl implements SkillRunner {
     });
 
     const inputsValidator = this.#ajv.compile(manifest.inputs as Record<string, unknown>);
+    // Ajv attaches `.$async = true` to validators compiled from
+    // `$async: true` schemas — those return Promises instead of booleans,
+    // which our truthy-check at invoke time would treat as valid and
+    // bypass validation. Skill manifests have no business declaring async
+    // schemas; reject at compile time. (Cast to access the runtime property
+    // — ajv's overloaded type signature doesn't expose `$async` on the
+    // generic `ValidateFunction<T>`.)
+    if ((inputsValidator as { $async?: boolean }).$async === true) {
+      throw new Error(
+        `__registerForTests: skill '${params.name}' uses an $async JSON Schema; not supported`,
+      );
+    }
     this.#sourceCache.set(manifest.name, {
       manifest,
       body: params.body,

@@ -51,48 +51,51 @@ describe("migration 0017_tough_bedlam (skills foundation)", () => {
     expect(rows.map((r) => r.enumlabel)).toEqual([...expected]);
   });
 
-  it("skills.name is UNIQUE", async () => {
-    const rows = await sql<{ indexdef: string }[]>`
-      SELECT indexdef FROM pg_indexes
-      WHERE tablename = 'skills' AND indexdef LIKE '%UNIQUE%name%'
+  it("skills.name has an exact-column UNIQUE constraint", async () => {
+    // Verify a UNIQUE constraint that targets exactly the `name` column —
+    // not a multi-column UNIQUE that happens to include `name`.
+    const rows = await sql<{ constraint_name: string }[]>`
+      SELECT tc.constraint_name
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.constraint_column_usage ccu
+        ON tc.constraint_name = ccu.constraint_name
+        AND tc.table_name = ccu.table_name
+      WHERE tc.table_name = 'skills'
+        AND tc.constraint_type = 'UNIQUE'
+        AND ccu.column_name = 'name'
+        AND (
+          SELECT count(*) FROM information_schema.constraint_column_usage
+          WHERE constraint_name = tc.constraint_name AND table_name = tc.table_name
+        ) = 1
     `;
-    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.length).toBe(1);
   });
 
-  it("skill_deploys.skill_id has an FK to skills.id", async () => {
-    const rows = await sql<{ count: number }[]>`
-      SELECT count(*)::int AS count
-      FROM information_schema.referential_constraints rc
+  it.each([
+    ["skill_deploys", "skill_id", "skills", "id"],
+    ["skill_runs", "skill_id", "skills", "id"],
+    ["skill_context_calls", "run_id", "skill_runs", "id"],
+    ["skill_deploys", "approved_by", "user_identities", "id"],
+  ] as const)("%s.%s → %s.%s FK", async (fromTable, fromCol, toTable, toCol) => {
+    // Verify the FK actually points where it should — column AND target,
+    // not just "an FK exists somewhere on this column".
+    const rows = await sql<{ constraint_name: string }[]>`
+      SELECT tc.constraint_name
+      FROM information_schema.table_constraints tc
       JOIN information_schema.key_column_usage kcu
-        ON rc.constraint_name = kcu.constraint_name
-      WHERE kcu.table_name = 'skill_deploys'
-        AND kcu.column_name = 'skill_id'
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_name = kcu.table_name
+      JOIN information_schema.referential_constraints rc
+        ON tc.constraint_name = rc.constraint_name
+      JOIN information_schema.constraint_column_usage ccu
+        ON rc.unique_constraint_name = ccu.constraint_name
+      WHERE tc.constraint_type = 'FOREIGN KEY'
+        AND tc.table_name = ${fromTable}
+        AND kcu.column_name = ${fromCol}
+        AND ccu.table_name = ${toTable}
+        AND ccu.column_name = ${toCol}
     `;
-    expect(rows[0]?.count).toBeGreaterThan(0);
-  });
-
-  it("skill_runs.skill_id has an FK to skills.id", async () => {
-    const rows = await sql<{ count: number }[]>`
-      SELECT count(*)::int AS count
-      FROM information_schema.referential_constraints rc
-      JOIN information_schema.key_column_usage kcu
-        ON rc.constraint_name = kcu.constraint_name
-      WHERE kcu.table_name = 'skill_runs'
-        AND kcu.column_name = 'skill_id'
-    `;
-    expect(rows[0]?.count).toBeGreaterThan(0);
-  });
-
-  it("skill_context_calls.run_id has an FK to skill_runs.id", async () => {
-    const rows = await sql<{ count: number }[]>`
-      SELECT count(*)::int AS count
-      FROM information_schema.referential_constraints rc
-      JOIN information_schema.key_column_usage kcu
-        ON rc.constraint_name = kcu.constraint_name
-      WHERE kcu.table_name = 'skill_context_calls'
-        AND kcu.column_name = 'run_id'
-    `;
-    expect(rows[0]?.count).toBeGreaterThan(0);
+    expect(rows.length).toBe(1);
   });
 
   it.each([

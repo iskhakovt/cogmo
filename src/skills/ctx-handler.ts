@@ -163,9 +163,15 @@ export class DefaultCtxHandler implements CtxHandler {
       );
     }
     const result = await this.#memory.recall(this.#memoryBankId, parsed.data.query, {});
+    // Hindsight's RecallOptions takes `maxTokens`, not a per-item count.
+    // The Python-facing `limit` is "max number of memories" — apply it
+    // client-side after the recall returns. This also caps payload size
+    // when the backend returns more than the skill asked for.
+    const limit = parsed.data.limit;
+    const sliced = limit === undefined ? result.memories : result.memories.slice(0, limit);
     await this.#audit("memory.recall", null, true, null);
     return {
-      memories: result.memories.map((m) => ({ content: m.content, type: m.type })),
+      memories: sliced.map((m) => ({ content: m.content, type: m.type })),
     };
   }
 
@@ -214,9 +220,13 @@ export class DefaultCtxHandler implements CtxHandler {
     }
     log.info(
       {
+        // Skill-supplied fields go FIRST so the trusted host fields below
+        // can't be spoofed (object-spread later wins). A skill calling
+        // `ctx.log.info("hi", skillRunId="evil")` will have its `skillRunId`
+        // overwritten by the real one.
+        ...parsed.data.fields,
         skillRunId: this.#runId,
         skillName: this.#manifest.name,
-        ...parsed.data.fields,
       },
       parsed.data.message,
     );

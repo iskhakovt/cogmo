@@ -46,7 +46,15 @@ const bridge = {
     const id = `ctx-${nextCtxId++}`;
     return new Promise((resolve, reject) => {
       pendingCtxCalls.set(id, { resolve, reject });
-      port.postMessage({ type: "ctx_call", id, method, args });
+      try {
+        port.postMessage({ type: "ctx_call", id, method, args });
+      } catch (e) {
+        // Send failed (port closed, transferable detached) — drop the
+        // pending entry so it doesn't leak, and reject the awaiting Python
+        // coroutine instead of leaving it hung on a never-arriving result.
+        pendingCtxCalls.delete(id);
+        reject(e instanceof Error ? e : new Error(String(e)));
+      }
     });
   },
 };

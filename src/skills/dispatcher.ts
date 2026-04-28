@@ -146,9 +146,18 @@ export class Dispatcher {
       return;
     }
     if (pending.id !== message.id) {
+      // The worker is in an inconsistent state — surface it as a task
+      // failure rather than waiting for the wall-clock timeout. Logging-
+      // and-returning would leave `invoke()` hanging forever.
       log.warn(
         { expected: pending.id, got: message.id },
-        "task_result id does not match in-flight task",
+        "task_result id does not match in-flight task — rejecting",
+      );
+      this.#pendingTask = null;
+      pending.reject(
+        new Error(
+          `dispatcher: task_result id mismatch (expected ${pending.id}, got ${message.id})`,
+        ),
       );
       return;
     }
@@ -181,6 +190,19 @@ export class Dispatcher {
         };
       }
     }
-    this.#transport.postMessage(response);
+    try {
+      this.#transport.postMessage(response);
+    } catch (e) {
+      // Send failed (port closed mid-task, e.g.). Surface as a task failure
+      // so `invoke()` rejects rather than hanging on the worker awaiting a
+      // ctx_result that never arrives.
+      const sendError = e instanceof Error ? e.message : String(e);
+      log.warn({ ctxId: call.id, err: sendError }, "ctx_result send failed");
+      const pending = this.#pendingTask;
+      if (pending) {
+        this.#pendingTask = null;
+        pending.reject(new Error(`dispatcher: ctx_result send failed: ${sendError}`));
+      }
+    }
   }
 }

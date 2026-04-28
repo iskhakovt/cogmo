@@ -215,17 +215,16 @@ describe("Dispatcher", () => {
     d.close();
   });
 
-  it("ignores task_result with mismatched id", async () => {
+  it("rejects the in-flight task on task_result id mismatch", async () => {
     const { host, worker } = makeTransportPair();
     const d = new Dispatcher({ transport: host, ctxHandler: noopHandler() });
 
     const promise = d.invoke(INVOKE);
-    // Stale id from a prior task — should be discarded.
+    // The worker is in an inconsistent state (sent the wrong task id).
+    // Rejecting surfaces the bug; logging+waiting would hang indefinitely.
     worker.postMessage({ type: "task_result", id: "wrong", ok: true, output: null });
-    worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: { ok: true } });
 
-    const result = await promise;
-    expect(result).toMatchObject({ id: "task-1", output: { ok: true } });
+    await expect(promise).rejects.toThrow(/id mismatch/);
     d.close();
   });
 

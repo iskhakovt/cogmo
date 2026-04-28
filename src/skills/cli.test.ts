@@ -151,12 +151,14 @@ describe("runSkillsCli", () => {
     });
   });
 
-  it("propagates a runner.invoke exception as exit 1 with stderr", async () => {
+  it("catches a runner.invoke exception and exits 1 with stderr", async () => {
     const io = makeIo();
     const runner = makeRunner({
       invoke: vi.fn().mockRejectedValue(new Error("not found")),
     });
-    await expect(runSkillsCli(["run", "echo", "{}"], runner, io)).rejects.toThrow(/not found/);
+    const code = await runSkillsCli(["run", "echo", "{}"], runner, io);
+    expect(code).toBe(1);
+    expect(io.stderr.join("\n")).toMatch(/invoke failed: not found/);
   });
 
   it("printed JSON output is valid (round-trips through JSON.parse)", async () => {

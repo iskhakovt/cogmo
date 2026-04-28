@@ -67,18 +67,36 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
   });
 
   // Wait for the worker's `ready` message before sending task_invoke.
+  // Also reject on `worker.error` / `worker.exit` so a synchronous Pyodide
+  // load failure (missing WASM, libc mismatch, etc) surfaces immediately
+  // instead of waiting for the wall-clock timeout.
   const ready = new Promise<void>((resolve, reject) => {
-    const handler = (raw: unknown): void => {
+    const onMessage = (raw: unknown): void => {
       const msg = raw as { type?: string; error?: string };
       if (msg?.type === "ready") {
-        hostPort.off("message", handler);
+        cleanup();
         resolve();
       } else if (msg?.type === "fatal") {
-        hostPort.off("message", handler);
+        cleanup();
         reject(new Error(`worker init failed: ${msg.error ?? "unknown"}`));
       }
     };
-    hostPort.on("message", handler);
+    const onError = (e: Error): void => {
+      cleanup();
+      reject(new Error(`worker init crashed: ${e.message}`));
+    };
+    const onExit = (code: number): void => {
+      cleanup();
+      reject(new Error(`worker exited before ready (code ${code})`));
+    };
+    function cleanup(): void {
+      hostPort.off("message", onMessage);
+      worker.off("error", onError);
+      worker.off("exit", onExit);
+    }
+    hostPort.on("message", onMessage);
+    worker.on("error", onError);
+    worker.on("exit", onExit);
   });
 
   let finished = false;

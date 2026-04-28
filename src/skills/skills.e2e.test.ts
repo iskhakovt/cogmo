@@ -53,13 +53,11 @@ async function findAppContainer(): Promise<string> {
 
 async function dockerExec(args: readonly string[]): Promise<DockerExec> {
   const containerId = await findAppContainer();
-  try {
-    const { stdout, stderr } = await execFile("docker", ["exec", containerId, ...args]);
-    return { stdout, stderr };
-  } catch (e) {
-    const err = e as { stdout?: string; stderr?: string; code?: number };
-    return { stdout: err.stdout ?? "", stderr: err.stderr ?? "" };
-  }
+  // Don't swallow `docker exec` failures — non-zero exit codes signal real
+  // container-side errors that should fail the test loudly. Tests that
+  // exercise an in-container failure path can `await expect(...).rejects.…`.
+  const { stdout, stderr } = await execFile("docker", ["exec", containerId, ...args]);
+  return { stdout, stderr };
 }
 
 describe("skills e2e (production Docker image)", { timeout: 120_000 }, () => {

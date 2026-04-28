@@ -67,9 +67,14 @@ export async function runSkillsCli(
         io.err(`invalid JSON inputs: ${e instanceof Error ? e.message : String(e)}`);
         return 2;
       }
-      const result = await runner.invoke({ name, inputs, trigger: "manual" });
-      io.out(JSON.stringify(result, null, 2));
-      return result.status === "success" ? 0 : 1;
+      try {
+        const result = await runner.invoke({ name, inputs, trigger: "manual" });
+        io.out(JSON.stringify(result, null, 2));
+        return result.status === "success" ? 0 : 1;
+      } catch (e) {
+        io.err(`invoke failed: ${e instanceof Error ? e.message : String(e)}`);
+        return 1;
+      }
     }
 
     default:

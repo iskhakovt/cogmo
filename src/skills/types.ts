@@ -26,12 +26,29 @@ export type SkillEffect = (typeof SKILL_EFFECTS)[number];
 export type SkillEffects = z.infer<typeof SkillEffectsSchema>;
 
 /**
+ * JSON-serialisable value — the closure of what survives a JSONB round-trip
+ * cleanly. `z.unknown()` would let `Date`, `BigInt`, `undefined` keys, or
+ * functions through and they'd either throw on `JSON.stringify` or get
+ * silently coerced.
+ */
+const JsonValueSchema: z.ZodType<unknown> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.array(JsonValueSchema),
+    z.record(z.string(), JsonValueSchema),
+  ]),
+);
+
+/**
  * Opaque-JSON-Schema wrapper. The actual shape is whatever the skill declared
  * in its manifest; we validate inputs at invoke time via ajv, not at the store
- * boundary. Zod's job here is "this is a JSON object" — that's all the store
- * needs to round-trip JSONB safely.
+ * boundary. Zod's job here is "this is a JSON-serialisable object" — that's
+ * all the store needs to round-trip JSONB safely.
  */
-export const SkillIoSchema = z.record(z.string(), z.unknown());
+export const SkillIoSchema = z.record(z.string(), JsonValueSchema);
 export type SkillIo = z.infer<typeof SkillIoSchema>;
 
 /**
