@@ -504,6 +504,8 @@ cogmo repo list
 cogmo repo remove <name>
 ```
 
+**Telegram surface (slice 4.0c):** `/repo add` with no positional args opens a guided three-step dialog (name → remoteUrl → confirm). On confirm Cogmo clones the remote into `${COGMO_REPOS_DIR}/${name}` itself, threading the default GitHub identity's PAT through a one-shot `GIT_ASKPASS` helper (host-side, wiped on completion — see `src/secrets/git-askpass.ts`). The positional `/repo add <name> <path> <url>` form stays for scripting and for already-cloned repos (no PAT, no clone, just register).
+
 Each repo can override:
 
 - **Devcontainer**: `.devcontainer/devcontainer.json` in the repo takes precedence; if absent, falls back to `cogmo/devbase` (opinionated image with node, python, common CLIs, claude, codex).

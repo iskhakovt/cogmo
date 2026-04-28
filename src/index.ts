@@ -313,6 +313,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     attachments: attachmentStore,
     idleTimeoutMs,
     secretsStore,
+    reposDir: env.COGMO_REPOS_DIR,
   });
 
   const deliveryRouter = createDeliveryRouter({ adapters: adapterMap, transportStore });

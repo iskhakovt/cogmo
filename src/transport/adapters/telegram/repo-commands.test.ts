@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mockTransport } from "../../../test/factories.js";
 import type { Transport } from "../../transport.js";
 import { handleRepo, type TelegramCommandContext } from "./commands.js";
+import { RepoDialogs } from "./repo-dialog.js";
 
 function mkCtx(match?: string): TelegramCommandContext & { reply: ReturnType<typeof vi.fn> } {
   return {
@@ -100,10 +101,36 @@ describe("handleRepo", () => {
         repos: {
           list: vi.fn(),
           add: vi.fn(),
+          cloneAndAdd: vi.fn(),
           remove: vi.fn(),
         },
       });
       const ctx = mkCtx("add cogmo");
+      await handleRepo(transport, ctx);
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Usage: /repo"));
+    });
+
+    it("bare `/repo add` without args starts the FSM dialog when one is supplied", async () => {
+      const transport = transportWith({
+        repos: {
+          list: vi.fn().mockResolvedValue(ok([])),
+          add: vi.fn(),
+          cloneAndAdd: vi.fn(),
+          remove: vi.fn(),
+        },
+      });
+      const dialogs = new RepoDialogs();
+      const ctx = mkCtx("add");
+      await handleRepo(transport, ctx, dialogs);
+      expect(dialogs.has(ctx.chat.id)).toBe(true);
+      expect(ctx.reply.mock.calls[0]?.[0]).toMatch(/Step 1\/3/);
+    });
+
+    it("bare `/repo add` falls back to the usage hint when no dialog is supplied", async () => {
+      const transport = transportWith({
+        repos: { list: vi.fn(), add: vi.fn(), cloneAndAdd: vi.fn(), remove: vi.fn() },
+      });
+      const ctx = mkCtx("add");
       await handleRepo(transport, ctx);
       expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Usage: /repo"));
     });

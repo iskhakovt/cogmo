@@ -37,6 +37,7 @@ import {
 } from "./commands.js";
 import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml, stripHtmlTags } from "./render.js";
+import { RepoDialogs } from "./repo-dialog.js";
 
 export const channelType = "telegram";
 
@@ -282,6 +283,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   const bot = new Bot(creds.token, creds.apiRoot ? { client: { apiRoot: creds.apiRoot } } : {});
   const adapter = new TelegramAdapter(bot, attachments);
   const profileDialogs = new ProfileDialogs();
+  const repoDialogs = new RepoDialogs();
 
   bot.command("start", async (ctx) => {
     await ctx.reply(
@@ -316,11 +318,11 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("end", (ctx) => handleEnd(transport, toCmdCtx(ctx)));
   bot.command("profile", (ctx) => handleProfile(transport, toCmdCtx(ctx), profileDialogs));
   bot.command("model", (ctx) => handleModel(transport, toCmdCtx(ctx)));
-  bot.command("repo", (ctx) => handleRepo(transport, toCmdCtx(ctx)));
+  bot.command("repo", (ctx) => handleRepo(transport, toCmdCtx(ctx), repoDialogs));
 
-  // Mid-dialog abort for /profile new|edit flows.
+  // Mid-dialog abort for /profile new|edit and /repo add flows.
   bot.command("cancel", async (ctx) => {
-    if (profileDialogs.cancel(ctx.chat.id)) {
+    if (profileDialogs.cancel(ctx.chat.id) || repoDialogs.cancel(ctx.chat.id)) {
       await ctx.reply("Cancelled.");
     } else {
       await ctx.reply("Nothing to cancel.");
@@ -416,6 +418,10 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     // otherwise the draft text leaks into conversation history.
     if (profileDialogs.has(ctx.chat.id)) {
       await profileDialogs.handleMessage(transport, toCmdCtx(ctx, ctx.message.text));
+      return;
+    }
+    if (repoDialogs.has(ctx.chat.id)) {
+      await repoDialogs.handleMessage(transport, toCmdCtx(ctx, ctx.message.text));
       return;
     }
 

@@ -1,4 +1,5 @@
-import { isAbsolute } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { JsonValue } from "type-fest";
@@ -7,6 +8,13 @@ import { ProfileInUseError, UniqueViolationError } from "../agent/store/errors.j
 import type { AgentStore, ConversationSummary, Profile } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
+import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
+import {
+  DEFAULT_GITHUB_IDENTITY_NAME,
+  describeResolveIdentityError,
+  resolveGitHubIdentity,
+} from "../secrets/github.js";
+import type { SecretsStore } from "../secrets/store/index.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { Session, TransportStore } from "./store/index.js";
 
@@ -30,9 +38,8 @@ export interface RepoSummary {
 }
 
 /**
- * Input for `repos.add` (slice 1 — minimal positional form). FSM dialog with
- * auto-clone + private-repo PAT injection lands in slice 4 alongside the
- * push/PR flow that needs credentials.
+ * Input for `repos.add` — register a pre-existing local clone. Used by the
+ * positional `/repo add <name> <path> <url>` scripting form.
  */
 export interface RepoInput {
   name: string;
@@ -46,6 +53,24 @@ export interface RepoInput {
    * value and the user can update via `/repo edit` (later) or SQL meanwhile.
    */
   verifyCommand?: string;
+  /** Optional override; defaults to `'default'` (the wizard-provisioned bot). */
+  identityName?: string;
+}
+
+/**
+ * Input for `repos.cloneAndAdd` — clone the remote, then register. Used by
+ * the slice 4.0c FSM dialog. `localPath` is derived from `${reposDir}/${name}`
+ * inside the implementation; the caller doesn't choose it.
+ */
+export interface RepoCloneAndAddInput {
+  name: string;
+  remoteUrl: string;
+  /** Optional override; defaults to "main" when omitted. */
+  defaultBranch?: string;
+  /** Optional override; defaults to `"true"` until `/repo edit` ships. */
+  verifyCommand?: string;
+  /** Optional override; defaults to `'default'` (the wizard-provisioned bot). */
+  identityName?: string;
 }
 
 export interface CurrentConversation {
@@ -70,6 +95,9 @@ export type TransportError =
   | { code: "repo_name_taken"; name: string }
   | { code: "repo_in_use"; name: string; activeTasks: number }
   | { code: "repo_invalid_input"; field: string; reason: string }
+  | { code: "repo_clone_failed"; reason: string }
+  | { code: "repo_local_path_exists"; path: string }
+  | { code: "github_identity_unavailable"; reason: string }
   | { code: "sandbox_disabled" }
   | { code: "task_not_found"; taskId: string }
   | { code: "task_already_approved"; taskId: string }
@@ -151,12 +179,22 @@ export interface Transport {
 
   /**
    * Coding-repo registry. Returns `sandbox_disabled` when the sandbox module
-   * isn't initialized (no `SANDBOX_RUNTIME` env). Slice-1.0j ships the
-   * positional surface; FSM dialog with auto-clone is slice 4.
+   * isn't initialized (no `SANDBOX_RUNTIME` env).
    */
   repos: {
     list(): Promise<Result<ReadonlyArray<RepoSummary>, TransportError>>;
+    /** Register an already-cloned repo by absolute path (positional / scripting form). */
     add(input: RepoInput): Promise<Result<RepoSummary, TransportError>>;
+    /**
+     * Clone the remote into `${reposDir}/${name}` using the default GitHub
+     * identity's PAT, then register it. Used by the slice 4.0c FSM dialog
+     * (name → remoteUrl → confirm) so the operator never has to think about
+     * paths or pre-clone manually. Returns `github_identity_unavailable`
+     * when no identity is provisioned, `repo_local_path_exists` when the
+     * target directory is already populated, and `repo_clone_failed` for
+     * git-side failures (auth, network, bad URL).
+     */
+    cloneAndAdd(input: RepoCloneAndAddInput): Promise<Result<RepoSummary, TransportError>>;
     remove(name: string): Promise<Result<void, TransportError>>;
   };
 
@@ -217,6 +255,19 @@ export function createTransport(deps: {
    * Bootstrap supplies it whenever the sandbox module is initialized.
    */
   codingStore?: CodingStore;
+  /**
+   * Optional — when undefined, `repos.cloneAndAdd` returns
+   * `github_identity_unavailable`. Bootstrap supplies it once the
+   * encrypted-secrets store is initialized.
+   */
+  secretsStore?: SecretsStore;
+  /**
+   * Host root for git clones registered via `/repo add`. When undefined,
+   * `repos.cloneAndAdd` returns `github_identity_unavailable` (we
+   * intentionally re-use the same error rather than introducing a third
+   * code; both indicate "the orchestrator can't talk to GitHub yet").
+   */
+  reposDir?: string;
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
@@ -224,11 +275,12 @@ export function createTransport(deps: {
 }): Transport {
   const {
     channelId,
-    defaultUserId,
     defaultProfileId,
     transportStore,
     agentStore,
     codingStore,
+    secretsStore,
+    reposDir,
     inngest,
     inboundArrived,
     attachments,
@@ -557,6 +609,80 @@ export function createTransport(deps: {
             taskTokenBudget: 200_000,
             taskWallTimeSeconds: 1800,
             maxConcurrentTasks: 1,
+          });
+          return ok({
+            id: row.id,
+            name: row.name,
+            localPath: row.localPath,
+            defaultBranch: row.defaultBranch,
+            remoteUrl: row.remoteUrl,
+            verifyCommand: row.verifyCommand,
+          });
+        } catch (e) {
+          if (e instanceof UniqueViolationError) {
+            return err({ code: "repo_name_taken" as const, name: input.name });
+          }
+          throw e;
+        }
+      },
+      async cloneAndAdd(input) {
+        if (!codingStore) return err({ code: "sandbox_disabled" as const });
+        if (!secretsStore || !reposDir) {
+          return err({
+            code: "github_identity_unavailable" as const,
+            reason:
+              "Encrypted secrets or repos directory not configured; run setup before /repo add.",
+          });
+        }
+        const identityName = input.identityName ?? DEFAULT_GITHUB_IDENTITY_NAME;
+        const identity = await resolveGitHubIdentity(secretsStore, identityName);
+        if (identity.isErr()) {
+          return err({
+            code: "github_identity_unavailable" as const,
+            reason: describeResolveIdentityError(identity.error),
+          });
+        }
+
+        const localPath = join(reposDir, input.name);
+        const validation = validateRepoInput({
+          name: input.name,
+          localPath,
+          remoteUrl: input.remoteUrl,
+        });
+        if (validation) return err(validation);
+
+        if (existsSync(localPath)) {
+          return err({ code: "repo_local_path_exists" as const, path: localPath });
+        }
+
+        if (!existsSync(reposDir)) {
+          mkdirSync(reposDir, { recursive: true, mode: 0o700 });
+        }
+
+        try {
+          await withGitAskpass(identity.value.pat, async (env) => {
+            await runGit(["clone", "--quiet", input.remoteUrl, localPath], env);
+          });
+        } catch (e) {
+          return err({
+            code: "repo_clone_failed" as const,
+            reason: (e as Error).message,
+          });
+        }
+
+        try {
+          const row = await codingStore.insertRepo({
+            name: input.name,
+            localPath,
+            defaultBranch: input.defaultBranch ?? "main",
+            remoteUrl: input.remoteUrl,
+            devcontainer: null,
+            allowedBackends: ["claude"],
+            verifyCommand: input.verifyCommand ?? "true",
+            taskTokenBudget: 200_000,
+            taskWallTimeSeconds: 1800,
+            maxConcurrentTasks: 1,
+            ...(input.identityName !== undefined && { identityName: input.identityName }),
           });
           return ok({
             id: row.id,
