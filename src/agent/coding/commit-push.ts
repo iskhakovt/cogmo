@@ -185,7 +185,10 @@ function looksLikeAuthFailure(output: string): boolean {
   return (
     /authentication failed/i.test(output) ||
     /could not read username/i.test(output) ||
-    /403/i.test(output) ||
+    // Anchored on word boundaries so a SHA, line number, or branch name
+    // containing the digits 403 (e.g. `cogmo/403-fix-bug`) doesn't get
+    // misclassified as an auth failure.
+    /\b403\b/.test(output) ||
     /permission denied \(publickey/i.test(output)
   );
 }
