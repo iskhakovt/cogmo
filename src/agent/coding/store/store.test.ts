@@ -180,10 +180,11 @@ describe("DrizzleCodingStore", () => {
       expect(row.worktreeAssignment).toBeNull();
       expect(row.plan).toBeNull();
       expect(row.planApprovedAt).toBeNull();
-      expect(row.prUrl).toBeNull();
+      expect(row.prMetadata).toBeNull();
       expect(row.failureReason).toBeNull();
       expect(row.resourceUsage).toBeNull();
       expect(row.allowPrivilegedRunc).toBe(false);
+      expect(row.prMetadata).toBeNull();
     });
 
     it("setTaskWorktreeAssignment persists branch + worktreePath atomically as JSONB", async () => {
@@ -294,7 +295,7 @@ describe("DrizzleCodingStore", () => {
       expect(failed?.failureReason).toBe("verify failed: 3 tests");
     });
 
-    it("setTaskSessionId / setTaskContainerId / setTaskPlan / setTaskPrUrl persist their fields", async () => {
+    it("setTaskSessionId / setTaskContainerId / setTaskPlan / setTaskPrMetadata persist their fields", async () => {
       const repoId = await seedRepo();
       const t = await store.insertTask({
         repoId,
@@ -308,13 +309,42 @@ describe("DrizzleCodingStore", () => {
       await store.setTaskSessionId(t.id, "sess-uuid-1");
       await store.setTaskContainerId(t.id, containerId);
       await store.setTaskPlan(t.id, "## Plan\n1. ...");
-      await store.setTaskPrUrl(t.id, "https://github.com/user/repo/pull/42");
+      await store.setTaskPrMetadata(t.id, {
+        url: "https://github.com/user/repo/pull/42",
+        number: 42,
+        branchSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        openedAt: "2026-04-28T12:00:00.000Z",
+      });
 
       const row = await store.getTask(t.id);
       expect(row?.sessionId).toBe("sess-uuid-1");
       expect(row?.containerId).toBe(containerId);
       expect(row?.plan).toBe("## Plan\n1. ...");
-      expect(row?.prUrl).toBe("https://github.com/user/repo/pull/42");
+      expect(row?.prMetadata).toEqual({
+        url: "https://github.com/user/repo/pull/42",
+        number: 42,
+        branchSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        openedAt: "2026-04-28T12:00:00.000Z",
+      });
+    });
+
+    it("setTaskPrMetadata rejects malformed input via Zod", async () => {
+      const repoId = await seedRepo();
+      const t = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      await expect(
+        store.setTaskPrMetadata(t.id, {
+          url: "not-a-url",
+          number: 1,
+          branchSha: "tooshort",
+          openedAt: "not-a-date",
+        }),
+      ).rejects.toThrow();
     });
 
     it("setTaskResourceUsage validates and persists JSONB", async () => {

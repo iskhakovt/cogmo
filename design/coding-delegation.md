@@ -184,7 +184,7 @@ coding_tasks (
   allow_privileged_runc   BOOLEAN NOT NULL,                       -- compat escape hatch; explicit at insert (no default)
   plan                    TEXT,                                   -- set after plan phase
   plan_approved_at        TIMESTAMPTZ,                            -- null for automated triggers (plan gate skipped)
-  pr_url                  TEXT,
+  pr_metadata             JSONB,                                  -- PrMetadataSchema = { url, number, branchSha, openedAt }; null until 4.0g opens the draft PR. Atomic-by-Zod — no half-recorded state. Replaces the previous `pr_url TEXT` column.
   status                  coding_task_status NOT NULL,
   failure_reason          TEXT,
   resource_usage          JSONB,                                  -- ResourceUsageSchema; nullable = no stats poll yet; populated by sandbox aggregator from turn.completed events

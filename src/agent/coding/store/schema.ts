@@ -109,7 +109,11 @@ export const codingTasks = pgTable("coding_tasks", {
   allowPrivilegedRunc: boolean("allow_privileged_runc").notNull(), // explicit at insert (no default)
   plan: text("plan"),
   planApprovedAt: timestamp("plan_approved_at", { withTimezone: true }),
-  prUrl: text("pr_url"),
+  // Slice 4.0g: PrMetadataSchema = { url, number, branchSha, openedAt };
+  // null until the draft PR step populates it. Replaces the prior
+  // `pr_url TEXT` column (no in-flight data — slice 4 is the first to
+  // populate PR state).
+  prMetadata: jsonb("pr_metadata"),
   status: codingTaskStatus("status").notNull(),
   failureReason: text("failure_reason"),
   resourceUsage: jsonb("resource_usage"), // ResourceUsageSchema; null = no stats poll yet

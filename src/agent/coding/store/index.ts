@@ -4,6 +4,8 @@ import type { Database } from "../../../db/index.js";
 import {
   type DevcontainerSpec,
   DevcontainerSpecSchema,
+  type PrMetadata,
+  PrMetadataSchema,
   type ResourceUsage,
   ResourceUsageSchema,
   type WorktreeAssignment,
@@ -88,7 +90,8 @@ export interface CodingTaskRow {
   allowPrivilegedRunc: boolean;
   plan: string | null;
   planApprovedAt: Date | null;
-  prUrl: string | null;
+  /** PR state, atomic — null until 4.0g's draft-PR step populates it. */
+  prMetadata: PrMetadata | null;
   status: CodingTaskStatus;
   failureReason: string | null;
   resourceUsage: ResourceUsage | null;
@@ -189,8 +192,8 @@ export interface CodingStore {
   /** Persist the plan text once the plan phase produces it. */
   setTaskPlan(id: string, plan: string): Promise<void>;
 
-  /** Persist the PR URL once the PR is opened. */
-  setTaskPrUrl(id: string, prUrl: string): Promise<void>;
+  /** Persist the PR metadata blob once the draft PR is opened (slice 4.0g). */
+  setTaskPrMetadata(id: string, metadata: PrMetadata): Promise<void>;
 
   /**
    * **Replace** (not merge) the resource_usage JSONB column with the
@@ -477,9 +480,10 @@ export class DrizzleCodingStore implements CodingStore {
     });
   }
 
-  async setTaskPrUrl(id: string, prUrl: string): Promise<void> {
+  async setTaskPrMetadata(id: string, metadata: PrMetadata): Promise<void> {
+    const parsed = PrMetadataSchema.parse(metadata);
     await this.#db.transaction(async (tx) => {
-      await tx.update(codingTasks).set({ prUrl }).where(eq(codingTasks.id, id));
+      await tx.update(codingTasks).set({ prMetadata: parsed }).where(eq(codingTasks.id, id));
     });
   }
 
@@ -694,7 +698,7 @@ function parseTaskRow(row: typeof codingTasks.$inferSelect): CodingTaskRow {
     allowPrivilegedRunc: row.allowPrivilegedRunc,
     plan: row.plan,
     planApprovedAt: row.planApprovedAt,
-    prUrl: row.prUrl,
+    prMetadata: row.prMetadata ? PrMetadataSchema.parse(row.prMetadata) : null,
     status: row.status,
     failureReason: row.failureReason,
     resourceUsage: row.resourceUsage ? ResourceUsageSchema.parse(row.resourceUsage) : null,

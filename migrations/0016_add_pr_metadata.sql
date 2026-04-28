@@ -1,0 +1,1 @@
+ALTER TABLE "coding_tasks" ADD COLUMN "pr_metadata" jsonb;
