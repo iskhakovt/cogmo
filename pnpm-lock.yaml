@@ -131,8 +131,8 @@ importers:
         specifier: ^2.4.13
         version: 2.4.13
       '@copilotkit/aimock':
-        specifier: ^1.13.0
-        version: 1.13.0
+        specifier: ^1.15.1
+        version: 1.15.1(vitest@4.1.5)
       '@electric-sql/pglite':
         specifier: ^0.4.5
         version: 0.4.5
@@ -482,10 +482,18 @@ packages:
   '@clack/prompts@1.2.0':
     resolution: {integrity: sha512-4jmztR9fMqPMjz6H/UZXj0zEmE43ha1euENwkckKKel4XpSfokExPo5AiVStdHSAlHekz4d0CA/r45Ok1E4D3w==}
 
-  '@copilotkit/aimock@1.13.0':
-    resolution: {integrity: sha512-wcNQdicxSuaHf4MLtoC9bouKeYGcV9aBoIVJbeLtrBUhqz5LUAmo/U/S1WT69kyAEuM0uO1XyD3Jz+V+H9jsUw==}
-    engines: {node: '>=20.15.0'}
+  '@copilotkit/aimock@1.15.1':
+    resolution: {integrity: sha512-DG9p6fKdYmuTW0zaUe9iDbgB/CM3SWhpdhVBrszQ6+L2UW4+DZB0gvICFQXRWhVXMpqxEkI9Pqhm/MtMb8li9A==}
+    engines: {node: '>=24.0.0'}
     hasBin: true
+    peerDependencies:
+      jest: '>=29'
+      vitest: '>=3'
+    peerDependenciesMeta:
+      jest:
+        optional: true
+      vitest:
+        optional: true
 
   '@csstools/color-helpers@6.0.2':
     resolution: {integrity: sha512-LMGQLS9EuADloEFkcTBR3BwV/CGHV7zyDxVRtVDTwdI2Ca4it0CCVTT9wCkxSgokjE5Ho41hEPgb8OEUwoXr6Q==}
@@ -4743,7 +4751,9 @@ snapshots:
       fast-wrap-ansi: 0.1.6
       sisteransi: 1.0.5
 
-  '@copilotkit/aimock@1.13.0': {}
+  '@copilotkit/aimock@1.15.1(vitest@4.1.5)':
+    optionalDependencies:
+      vitest: 4.1.5(@opentelemetry/api@1.9.1)(@types/node@25.6.0)(@vitest/coverage-v8@4.1.5)(jsdom@29.0.2(@noble/hashes@2.2.0))(msw@2.13.3(@types/node@25.6.0)(typescript@6.0.3))(vite@8.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@25.6.0)(esbuild@0.27.4)(tsx@4.21.0)(yaml@2.8.3))
 
   '@csstools/color-helpers@6.0.2': {}
 
