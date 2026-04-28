@@ -609,6 +609,7 @@ export function createTransport(deps: {
             taskTokenBudget: 200_000,
             taskWallTimeSeconds: 1800,
             maxConcurrentTasks: 1,
+            ...(input.identityName !== undefined && { identityName: input.identityName }),
           });
           return ok({
             id: row.id,
@@ -650,6 +651,17 @@ export function createTransport(deps: {
           remoteUrl: input.remoteUrl,
         });
         if (validation) return err(validation);
+
+        // Pre-check the registry by name — otherwise we'd clone (slow, network
+        // egress, Gitea/GitHub side effects) and only fail on the DB insert,
+        // leaving an orphaned working tree on disk that the operator has to
+        // clean up by hand. Tiny TOCTOU window between this check and
+        // `insertRepo` below; UNIQUE(name) still catches the race so the
+        // worst case is the rare orphan rather than the common one.
+        const existing = await codingStore.getRepoByName(input.name);
+        if (existing) {
+          return err({ code: "repo_name_taken" as const, name: input.name });
+        }
 
         if (existsSync(localPath)) {
           return err({ code: "repo_local_path_exists" as const, path: localPath });
@@ -846,6 +858,17 @@ function validateRepoInput(input: {
       code: "repo_invalid_input",
       field: "name",
       reason: "must match [a-zA-Z0-9._-]+ (no path separators, spaces, or shell metacharacters)",
+    };
+  }
+  // Reject `.` / `..` even though they pass the alphabet — `path.join(reposDir,
+  // "..")` escapes the intended subtree, and `repo add . /...` would treat the
+  // whole reposDir as a single repo. Empty-after-strip is impossible here
+  // (regex requires at least one char) but guard anyway.
+  if (input.name === "." || input.name === "..") {
+    return {
+      code: "repo_invalid_input",
+      field: "name",
+      reason: "must not be '.' or '..'",
     };
   }
   if (!isAbsolute(input.localPath)) {

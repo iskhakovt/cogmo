@@ -240,15 +240,33 @@ describe("Transport.repos.cloneAndAdd", () => {
     expect(codingStore.insertRepo).toHaveBeenCalledTimes(1);
   });
 
-  it("returns repo_local_path_exists when the target directory is already there", async () => {
+  it("returns repo_name_taken when a repo with the same name is already registered", async () => {
+    // Pre-check on `getRepoByName` short-circuits before the clone, so a
+    // re-add with the same name surfaces the registry collision rather
+    // than running the clone and tripping `repo_local_path_exists`.
     tempRoot = mkdtempSync(join(tmpdir(), "cogmo-cloneAndAdd-r-"));
     const transport = makeTransport({ reposDir: tempRoot });
-    // First clone succeeds and creates the directory.
     await transport.repos.cloneAndAdd({ name: "twice", remoteUrl: bareRepoUrl });
 
-    // Second clone with the same name now collides on disk.
     const result = await transport.repos.cloneAndAdd({
       name: "twice",
+      remoteUrl: bareRepoUrl,
+    });
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.code).toBe("repo_name_taken");
+  });
+
+  it("returns repo_local_path_exists when the dir is on disk but no DB row exists", async () => {
+    // Stale-checkout case: a directory was left behind by a prior failed
+    // run (or manual operator action), but no `coding_repos` row points at
+    // it. The DB pre-check passes, the filesystem check fires next.
+    tempRoot = mkdtempSync(join(tmpdir(), "cogmo-cloneAndAdd-r-"));
+    const transport = makeTransport({ reposDir: tempRoot });
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(join(tempRoot, "stale"));
+
+    const result = await transport.repos.cloneAndAdd({
+      name: "stale",
       remoteUrl: bareRepoUrl,
     });
     expect(result.isErr()).toBe(true);
