@@ -60,6 +60,19 @@ export const codingRepos = pgTable("coding_repos", {
   taskTokenBudget: integer("task_token_budget").notNull(),
   taskWallTimeSeconds: integer("task_wall_time_seconds").notNull(),
   maxConcurrentTasks: integer("max_concurrent_tasks").notNull(),
+  // Selects which GitHub identity (PAT + SSH signing key bundle, stored under
+  // `github_identity:<name>` in the secrets table) the orchestrator uses for
+  // this repo's verify → push → PR pipeline. Default `'default'` covers
+  // single-account setups (one bot account for all repos); per-repo overrides
+  // are useful when one project's PRs should be authored under a different
+  // bot account (e.g. an org with separate per-team review trails).
+  identityName: text("identity_name").notNull().default("default"),
+  // Wall-clock cap for the post-hoc verify step. The CLI already had
+  // `task_wall_time_seconds` during execute; this caps the single-shot verify
+  // exec separately so a runaway test suite is killed without affecting the
+  // CLI's iteration budget. 600s default covers `pnpm test` for most repos;
+  // monorepos override.
+  verifyTimeoutSeconds: integer("verify_timeout_seconds").notNull().default(600),
   createdAt: ts(),
 });
 
@@ -96,7 +109,11 @@ export const codingTasks = pgTable("coding_tasks", {
   allowPrivilegedRunc: boolean("allow_privileged_runc").notNull(), // explicit at insert (no default)
   plan: text("plan"),
   planApprovedAt: timestamp("plan_approved_at", { withTimezone: true }),
-  prUrl: text("pr_url"),
+  // Slice 4.0g: PrMetadataSchema = { url, number, branchSha, openedAt };
+  // null until the draft PR step populates it. Replaces the prior
+  // `pr_url TEXT` column (no in-flight data — slice 4 is the first to
+  // populate PR state).
+  prMetadata: jsonb("pr_metadata"),
   status: codingTaskStatus("status").notNull(),
   failureReason: text("failure_reason"),
   resourceUsage: jsonb("resource_usage"), // ResourceUsageSchema; null = no stats poll yet

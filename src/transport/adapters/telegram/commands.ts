@@ -11,6 +11,7 @@ import type { Profile } from "../../../agent/store/index.js";
 import { isUuid } from "../../../util/uuid.js";
 import type { Transport, TransportError } from "../../transport.js";
 import type { ProfileDialogs } from "./profile-dialog.js";
+import type { RepoDialogs } from "./repo-dialog.js";
 import {
   type InlineButton,
   renderModelList,
@@ -42,8 +43,9 @@ const USAGE = {
   profile: "Usage: /profile [list|switch <name>|new <name>|edit <name>|delete <name>]",
   model: "Usage: /model [<model>]",
   repo:
-    "Usage: /repo [list|add <name> <local_path> <remote_url>|remove <name>]\n" +
-    "Slice 1: positional add (FSM dialog + auto-clone ship in slice 4).",
+    "Usage: /repo [list|add [<name> <local_path> <remote_url>]|remove <name>]\n" +
+    "  /repo add (no args)            → guided dialog: clones via the bot PAT\n" +
+    "  /repo add <name> <path> <url>  → register an already-cloned repo (scripting)",
 };
 
 // ---- Public handlers ----
@@ -507,7 +509,11 @@ async function replyProfileDelete(
 
 // ── /repo ─────────────────────────────────────────────────────────────
 
-export async function handleRepo(transport: Transport, ctx: TelegramCommandContext): Promise<void> {
+export async function handleRepo(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  repoDialogs?: RepoDialogs,
+): Promise<void> {
   const args = (ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
   const subcommand = args[0]?.toLowerCase() ?? "list";
 
@@ -519,7 +525,7 @@ export async function handleRepo(transport: Transport, ctx: TelegramCommandConte
     }
     if (res.value.length === 0) {
       await ctx.reply(
-        "No repos registered. Add one with:\n  /repo add <name> <local_path> <remote_url>",
+        "No repos registered. Add one with:\n  /repo add — guided clone\n  /repo add <name> <path> <url> — register existing clone",
       );
       return;
     }
@@ -530,6 +536,17 @@ export async function handleRepo(transport: Transport, ctx: TelegramCommandConte
 
   if (subcommand === "add") {
     const [, name, localPath, remoteUrl] = args;
+    // No positional args → guided dialog (slice 4.0c). When the FSM isn't
+    // wired (e.g. unit tests for the positional path), fall through to the
+    // usage hint so the operator gets a clear nudge instead of silence.
+    if (!name && !localPath && !remoteUrl) {
+      if (repoDialogs) {
+        await repoDialogs.start(ctx);
+        return;
+      }
+      await ctx.reply(USAGE.repo);
+      return;
+    }
     if (!name || !localPath || !remoteUrl) {
       await ctx.reply(USAGE.repo);
       return;
@@ -543,7 +560,7 @@ export async function handleRepo(transport: Transport, ctx: TelegramCommandConte
       `Repo "${res.value.name}" added.\n` +
         `Path: ${res.value.localPath}\n` +
         `Remote: ${res.value.remoteUrl}\n` +
-        `Verify: ${res.value.verifyCommand} (slice-1 default — update via SQL until /repo edit ships in slice 4)`,
+        `Verify: ${res.value.verifyCommand} (default — update via SQL until /repo edit ships)`,
     );
     return;
   }
@@ -596,6 +613,12 @@ function errorMessage(err: TransportError): string {
       return `Repo "${err.name}" has ${err.activeTasks} active task(s). Wait for them to finish first.`;
     case "repo_invalid_input":
       return `Invalid ${err.field}: ${err.reason}`;
+    case "repo_clone_failed":
+      return `Clone failed: ${err.reason}`;
+    case "repo_local_path_exists":
+      return `A directory already exists at ${err.path}. Move it aside or pick a different name.`;
+    case "github_identity_unavailable":
+      return `GitHub identity unavailable: ${err.reason}`;
     case "sandbox_disabled":
       return "Coding-delegation features are unavailable — set SANDBOX_RUNTIME and restart Cogmo.";
     case "task_not_found":

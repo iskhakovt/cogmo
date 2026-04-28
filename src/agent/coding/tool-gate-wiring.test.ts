@@ -215,8 +215,10 @@ describe("tool gate wiring", () => {
       inngest: { send: inngestSend } as unknown as Inngest,
     });
 
-    // Auto-allow path: no prompt event, no waitForEvent.
-    expect(inngestSend).not.toHaveBeenCalled();
+    // Auto-allow path: no permission_request event, no waitForEvent. The
+    // cli-done event still fires at the end of execute (slice 4.0h handoff).
+    const eventNames = inngestSend.mock.calls.map((c) => c[0].name);
+    expect(eventNames).not.toContain("coding/task/permission-requested");
     expect(stepWaitForEvent).not.toHaveBeenCalled();
     expect(handle.responses).toEqual([
       { requestId: "req_read_1", response: { behavior: "allow" } },
@@ -262,9 +264,10 @@ describe("tool gate wiring", () => {
       inngest: { send: inngestSend } as unknown as Inngest,
     });
 
-    // Replay path: no prompt, no policy persistence, the task-scoped row
-    // wins immediately.
-    expect(inngestSend).not.toHaveBeenCalled();
+    // Replay path: no permission_request emit, no waitForEvent. The
+    // cli-done event still fires at the end of execute (slice 4.0h handoff).
+    const eventNames = inngestSend.mock.calls.map((c) => c[0].name);
+    expect(eventNames).not.toContain("coding/task/permission-requested");
     expect(stepWaitForEvent).not.toHaveBeenCalled();
     expect(handle.responses[0]?.response).toEqual({ behavior: "allow" });
     // Log unchanged (only the seeded task row remains).

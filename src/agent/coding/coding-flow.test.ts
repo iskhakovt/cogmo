@@ -164,7 +164,7 @@ function fakeSandbox(): {
 describe("coding flow — plan → approve → execute → pending_verify", () => {
   it("end-to-end: delegate submits, plan posts, approve fires execute, status reaches pending_verify", async () => {
     // ── Setup ──────────────────────────────────────────────────────────
-    const repo = await store.insertRepo({
+    const _repo = await store.insertRepo({
       name: "cogmo",
       localPath: repoPath,
       defaultBranch: "main",
@@ -352,6 +352,9 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         openExecuteStream: async () => executeStream,
       },
       stepRun,
+      // biome-ignore lint/suspicious/noExplicitAny: test shim — never awaited
+      stepWaitForEvent: (async () => null) as any,
+      inngest: { send: vi.fn().mockResolvedValue(undefined) },
     });
 
     expect(executeResult.status).toBe("pending_verify");

@@ -34,6 +34,28 @@ export const WorktreeAssignmentSchema = z
 export type WorktreeAssignment = z.infer<typeof WorktreeAssignmentSchema>;
 
 /**
+ * PR metadata captured by slice 4.0g's draft-PR step. Stored as one JSONB
+ * blob (`coding_tasks.pr_metadata`) rather than four nullable columns so the
+ * fields are atomic by construction: either the PR is open (all four
+ * present, validated by Zod on read and write) or it isn't (column is
+ * null). No "PR opened but URL not yet recorded" intermediate state is
+ * representable.
+ */
+export const PrMetadataSchema = z
+  .object({
+    /** GitHub PR URL — `https://github.com/<owner>/<repo>/pull/<number>`. */
+    url: z.string().url(),
+    /** PR number — used by GitHub Mobile + future status updates. */
+    number: z.number().int().positive(),
+    /** Commit SHA the PR points at — captured from the `git push` step (4.0f). */
+    branchSha: z.string().regex(/^[0-9a-f]{40}$/, "expected 40-char lowercase hex SHA"),
+    /** ISO timestamp from the orchestrator at PR-open. */
+    openedAt: z.string().datetime(),
+  })
+  .strict();
+export type PrMetadata = z.infer<typeof PrMetadataSchema>;
+
+/**
  * Aggregated stats per coding task. All fields optional — populated
  * incrementally as the task runs (memory_bytes at task start from CLAUDE.md
  * `stat`, token counts from `turn.completed` events, container stats from

@@ -1,0 +1,1 @@
+ALTER TABLE "coding_repos" ADD COLUMN "verify_timeout_seconds" integer DEFAULT 600 NOT NULL;

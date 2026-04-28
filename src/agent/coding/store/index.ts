@@ -4,6 +4,8 @@ import type { Database } from "../../../db/index.js";
 import {
   type DevcontainerSpec,
   DevcontainerSpecSchema,
+  type PrMetadata,
+  PrMetadataSchema,
   type ResourceUsage,
   ResourceUsageSchema,
   type WorktreeAssignment,
@@ -46,6 +48,15 @@ export interface CodingRepoRow {
   taskTokenBudget: number;
   taskWallTimeSeconds: number;
   maxConcurrentTasks: number;
+  /**
+   * Selects the GitHub identity bundle (`github_identity:<name>` in the
+   * secrets table) used by the verify → push → PR pipeline for this repo.
+   * Default `'default'` covers single-account setups; per-repo overrides
+   * are useful when an org maintains multiple bot accounts.
+   */
+  identityName: string;
+  /** Wall-clock cap for the post-hoc verify step (slice 4.0e). */
+  verifyTimeoutSeconds: number;
   createdAt: Date;
 }
 
@@ -79,7 +90,8 @@ export interface CodingTaskRow {
   allowPrivilegedRunc: boolean;
   plan: string | null;
   planApprovedAt: Date | null;
-  prUrl: string | null;
+  /** PR state, atomic — null until 4.0g's draft-PR step populates it. */
+  prMetadata: PrMetadata | null;
   status: CodingTaskStatus;
   failureReason: string | null;
   resourceUsage: ResourceUsage | null;
@@ -89,7 +101,9 @@ export interface CodingTaskRow {
 export interface CodingStore {
   // --- Repos ---
 
-  /** Insert a new repo. Throws on `name` collision (UNIQUE). */
+  /** Insert a new repo. Throws on `name` collision (UNIQUE). `identityName`
+   * and `verifyTimeoutSeconds` are optional — omitted callers inherit the
+   * DB defaults so single-account setups stay one-line. */
   insertRepo(params: {
     name: string;
     localPath: string;
@@ -101,6 +115,8 @@ export interface CodingStore {
     taskTokenBudget: number;
     taskWallTimeSeconds: number;
     maxConcurrentTasks: number;
+    identityName?: string;
+    verifyTimeoutSeconds?: number;
   }): Promise<CodingRepoRow>;
 
   /** Look up a repo by its admin-set name. */
@@ -176,8 +192,8 @@ export interface CodingStore {
   /** Persist the plan text once the plan phase produces it. */
   setTaskPlan(id: string, plan: string): Promise<void>;
 
-  /** Persist the PR URL once the PR is opened. */
-  setTaskPrUrl(id: string, prUrl: string): Promise<void>;
+  /** Persist the PR metadata blob once the draft PR is opened (slice 4.0g). */
+  setTaskPrMetadata(id: string, metadata: PrMetadata): Promise<void>;
 
   /**
    * **Replace** (not merge) the resource_usage JSONB column with the
@@ -284,6 +300,8 @@ export class DrizzleCodingStore implements CodingStore {
     taskTokenBudget: number;
     taskWallTimeSeconds: number;
     maxConcurrentTasks: number;
+    identityName?: string;
+    verifyTimeoutSeconds?: number;
   }): Promise<CodingRepoRow> {
     const devcontainer = params.devcontainer
       ? DevcontainerSpecSchema.parse(params.devcontainer)
@@ -303,6 +321,10 @@ export class DrizzleCodingStore implements CodingStore {
             taskTokenBudget: params.taskTokenBudget,
             taskWallTimeSeconds: params.taskWallTimeSeconds,
             maxConcurrentTasks: params.maxConcurrentTasks,
+            ...(params.identityName !== undefined && { identityName: params.identityName }),
+            ...(params.verifyTimeoutSeconds !== undefined && {
+              verifyTimeoutSeconds: params.verifyTimeoutSeconds,
+            }),
           })
           .returning(),
       );
@@ -458,9 +480,10 @@ export class DrizzleCodingStore implements CodingStore {
     });
   }
 
-  async setTaskPrUrl(id: string, prUrl: string): Promise<void> {
+  async setTaskPrMetadata(id: string, metadata: PrMetadata): Promise<void> {
+    const parsed = PrMetadataSchema.parse(metadata);
     await this.#db.transaction(async (tx) => {
-      await tx.update(codingTasks).set({ prUrl }).where(eq(codingTasks.id, id));
+      await tx.update(codingTasks).set({ prMetadata: parsed }).where(eq(codingTasks.id, id));
     });
   }
 
@@ -640,6 +663,8 @@ function parseRepoRow(row: typeof codingRepos.$inferSelect): CodingRepoRow {
     taskTokenBudget: row.taskTokenBudget,
     taskWallTimeSeconds: row.taskWallTimeSeconds,
     maxConcurrentTasks: row.maxConcurrentTasks,
+    identityName: row.identityName,
+    verifyTimeoutSeconds: row.verifyTimeoutSeconds,
     createdAt: row.createdAt,
   };
 }
@@ -673,7 +698,7 @@ function parseTaskRow(row: typeof codingTasks.$inferSelect): CodingTaskRow {
     allowPrivilegedRunc: row.allowPrivilegedRunc,
     plan: row.plan,
     planApprovedAt: row.planApprovedAt,
-    prUrl: row.prUrl,
+    prMetadata: row.prMetadata ? PrMetadataSchema.parse(row.prMetadata) : null,
     status: row.status,
     failureReason: row.failureReason,
     resourceUsage: row.resourceUsage ? ResourceUsageSchema.parse(row.resourceUsage) : null,

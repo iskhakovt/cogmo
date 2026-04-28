@@ -34,7 +34,7 @@ function task(overrides: Partial<CodingTaskRow> = {}): CodingTaskRow {
     allowPrivilegedRunc: false,
     plan: null,
     planApprovedAt: null,
-    prUrl: null,
+    prMetadata: null,
     status: "queued",
     failureReason: null,
     resourceUsage: null,
