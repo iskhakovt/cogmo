@@ -29,6 +29,7 @@ import { execFile } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import type { Octokit } from "@octokit/rest";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
@@ -309,10 +310,9 @@ function fakeSandbox(opts: { worktreePath: string }): {
   };
 }
 
-function streamFromBuffer(buf: Buffer): NodeJS.ReadableStream {
-  // @ts-expect-error: minimal Readable subset that satisfies for-await + typing
-  return Object.assign(new (require("node:stream").Readable)(), {
-    _read() {
+function streamFromBuffer(buf: Buffer): Readable {
+  return new Readable({
+    read() {
       this.push(buf);
       this.push(null);
     },
