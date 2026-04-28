@@ -352,7 +352,7 @@ Derivation beats new tables — rolling quota counts come from `SELECT count(*) 
 
 Lands as part of P2 phase 12 (automated self-modification surface). Without it, `evolution` tasks ship disabled.
 
-## Flow `[proposed]`
+## Flow `[confirmed]`
 
 ```text
 [Telegram: "refactor steering rules to support per-channel scoping"]
@@ -458,11 +458,11 @@ Compound commands prompt if any sub-command is in the prompt set (worst-case win
 
 **Block indefinitely on Telegram outage.** Slice 3 design: the CLI just waits. Implementation uses a 7-day `step.waitForEvent` timeout as an abandoned-task safety net, not a deny-on-timeout. If a prompt hits the safety-net deny, it's logged for surfacing to the operator.
 
-### Merge gate
+### Merge gate `[confirmed]`
 
 The final artifact is a **draft PR**. Cogmo never pushes to `main`, never merges, never marks ready-for-review. The user reviews the diff in GitHub Mobile (or desktop) using their normal review flow — branch protection, required checks, and reviewers apply.
 
-## Git Identity `[proposed]`
+## Git Identity `[confirmed]`
 
 **P1 (slice 4):** Fine-grained PAT + Ed25519 SSH signing keypair on a dedicated `cogmo-bot` GitHub account. The PAT and signing key for one bot account are inseparable — they're stored as a single JSON-encoded bundle (`{ pat, sshPrivateKey, sshPublicKey }`, validated by `GitHubIdentitySchema`) in Cogmo's `secrets` table under the name `github_identity:<name>`. The setup wizard provisions `github_identity:default`; multiple identities can coexist and each repo selects one via `coding_repos.identity_name`.
 
@@ -509,7 +509,7 @@ ${SANDBOX_ASKPASS_DIR}/<rootTaskId>/
 
 The directory is bind-mounted **read-only** at `/.cogmo-askpass/` inside the container. `provisionAskpass` returns env vars to thread into `exec` — `GIT_ASKPASS=/.cogmo-askpass/helper` and `GIT_TERMINAL_PROMPT=0`; commit signing happens via `git -c gpg.format=ssh -c user.signingkey=/.cogmo-askpass/signing-key` (env vars don't drive the signing path). `LocalInProcessSandbox.stopTask` calls `cleanupAskpass` in its `try/finally`, idempotent under retries and a no-op when the directory was never provisioned. See `src/sandbox/askpass.ts`.
 
-## Repo Registry `[proposed]`
+## Repo Registry `[confirmed]`
 
 Repos are first-class. A repo must be registered (via CLI or control command) before Cogmo will work on it:
 

@@ -141,6 +141,28 @@ export function hindsightSlim(
     .withStartupTimeout(300_000);
 }
 
+/**
+ * Gitea container — local GitHub-shaped git host for the slice 4 verify
+ * orchestrator integration test. Real `git push`; the REST endpoint
+ * (Gitea's `/api/v1/repos/{owner}/{repo}/pulls`) is **not** exercised —
+ * Cogmo's octokit calls are intercepted at the fetch layer in the test.
+ *
+ * `INSTALL_LOCK=true` skips the web-installer first-run wizard so the
+ * API is usable immediately. SQLite + Gitea's default paths under
+ * `/data/gitea/` keep this single-container — no second DB instance.
+ */
+export function gitea(network: StartedNetwork) {
+  return new GenericContainer("gitea/gitea:1.22")
+    .withNetwork(network)
+    .withNetworkAliases("gitea")
+    .withExposedPorts(3000)
+    .withEnvironment({
+      GITEA__security__INSTALL_LOCK: "true",
+    })
+    .withWaitStrategy(Wait.forHttp("/api/v1/version", 3000))
+    .withStartupTimeout(60_000);
+}
+
 interface ContainerEndpoint {
   getHost(): string;
   getMappedPort(p: number): number;
