@@ -76,6 +76,13 @@ export const env = createEnv({
      * the task container at `/.cogmo-askpass/`. Wiped on `stopTask`.
      */
     SANDBOX_ASKPASS_DIR: z.string().default("/run/cogmo/askpass"),
+    /**
+     * Host path of the bare git repo backing the skill library. Initialized
+     * on first boot via `bootstrapSkillsRepo`; advanced exclusively by the
+     * `register` RPC (direct pushes to `main` are rejected by a pre-receive
+     * hook). See `design/skills.md` → Skill storage.
+     */
+    COGMO_SKILLS_PATH: z.string().default("/var/lib/cogmo/skills"),
   },
   runtimeEnv: resolved,
   emptyStringAsUndefined: true,

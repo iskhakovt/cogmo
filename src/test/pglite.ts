@@ -8,6 +8,7 @@ import * as agentSchema from "../agent/store/schema.js";
 import type { Database } from "../db/index.js";
 import * as sandboxSchema from "../sandbox/store/schema.js";
 import * as secretsSchema from "../secrets/store/schema.js";
+import * as skillsSchema from "../skills/store/schema.js";
 import * as transportSchema from "../transport/store/schema.js";
 
 const schema = {
@@ -16,6 +17,7 @@ const schema = {
   ...secretsSchema,
   ...sandboxSchema,
   ...codingSchema,
+  ...skillsSchema,
 };
 
 /**
