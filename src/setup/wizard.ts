@@ -401,9 +401,16 @@ async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
     }
     // fall-through to full re-provision
   } else if (existing.error.code !== "missing") {
-    p.log.warn(
-      `Existing identity could not be parsed (${existing.error.code}); re-creating it from scratch.`,
-    );
+    // Stored identity exists but doesn't parse — most likely a hand-edited
+    // secrets row. Confirm before overwriting; the operator may want to
+    // bail out and inspect the row first rather than letting the wizard
+    // silently replace it with a fresh PAT + keypair.
+    p.log.warn(`Existing GitHub identity could not be parsed (${existing.error.code}).`);
+    const proceed = await p.confirm({
+      message: "Replace it with a fresh PAT + signing keypair?",
+      initialValue: false,
+    });
+    if (!cancelGuard(proceed)) return;
   } else {
     const proceed = await p.confirm({
       message: "Configure a GitHub identity for the coding-delegation pipeline? (optional)",
