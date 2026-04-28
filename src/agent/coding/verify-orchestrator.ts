@@ -44,7 +44,14 @@ const log = logger.child({ component: "coding.verify-orchestrator" });
 
 const HOME_VOLUME_PREFIX = "cogmo-task-home";
 const WORKTREE_DIR_IN_CONTAINER = "/workspace";
-const COMMIT_AUTHOR = { name: "Cogmo Bot", email: "cogmo-bot@noreply" };
+// `users.noreply.github.com` is GitHub's documented suffix for
+// non-routable git author emails — using it keeps GitHub's email-to-account
+// matcher from rejecting the commit author and (when paired with the bot's
+// real login or numeric id) lets PRs render with the bot account's avatar.
+// The full canonical form is `<id>+<login>@users.noreply.github.com` but
+// resolving the numeric id requires another API call against the PAT;
+// deferred until the identity bundle persists the login (todo `p3`).
+const COMMIT_AUTHOR = { name: "Cogmo Bot", email: "cogmo-bot@users.noreply.github.com" };
 
 export interface VerifyOrchestratorDeps {
   store: CodingStore;
