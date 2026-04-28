@@ -61,18 +61,22 @@ export async function runVerifyStreaming(params: VerifyParams): Promise<VerifyRe
 
   const handle = await container.exec(["bash", "-lc", verifyCommand]);
 
-  const decoder = new TextDecoder("utf8");
+  // One decoder per stream — TextDecoder carries streaming state for
+  // multi-byte UTF-8 sequences split across chunk boundaries. Sharing one
+  // decoder across stdout + stderr could splice a half-character from
+  // stream A onto a chunk from stream B, corrupting the captured text.
+  const stdoutDecoder = new TextDecoder("utf8");
+  const stderrDecoder = new TextDecoder("utf8");
   let captured = "";
   let truncated = false;
 
-  function record(chunk: Buffer): void {
+  function record(text: string): void {
     if (truncated) return;
     const remaining = OUTPUT_CAP_BYTES - captured.length;
     if (remaining <= 0) {
       truncated = true;
       return;
     }
-    const text = decoder.decode(chunk, { stream: true });
     if (text.length <= remaining) {
       captured += text;
     } else {
@@ -84,15 +88,17 @@ export async function runVerifyStreaming(params: VerifyParams): Promise<VerifyRe
   // Pipe both streams in parallel: capture into the buffer + forward to the
   // executeStream's appendText so the operator sees `pnpm test` output live.
   const stdoutDone = pumpStream(handle.stdout, async (chunk: Buffer) => {
-    record(chunk);
+    const text = stdoutDecoder.decode(chunk, { stream: true });
+    record(text);
     if (executeStream) {
-      await executeStream.appendText(chunk.toString("utf8")).catch(() => {});
+      await executeStream.appendText(text).catch(() => {});
     }
   });
   const stderrDone = pumpStream(handle.stderr, async (chunk: Buffer) => {
-    record(chunk);
+    const text = stderrDecoder.decode(chunk, { stream: true });
+    record(text);
     if (executeStream) {
-      await executeStream.appendText(chunk.toString("utf8")).catch(() => {});
+      await executeStream.appendText(text).catch(() => {});
     }
   });
 

@@ -106,10 +106,15 @@ describe("runVerifyStreaming", () => {
     expect(result.ok).toBe(true);
     expect(result.exitCode).toBe(0);
     expect(result.timedOut).toBe(false);
-    // capture has both streams interleaved (order is best-effort, but content is preserved).
-    expect(result.output).toContain("hello world");
+    // stdout and stderr are pumped concurrently — assert each chunk
+    // independently rather than as one substring, since the runner could
+    // legitimately interleave them before "hello " and "world\n" land
+    // contiguously in the capture buffer.
+    expect(result.output).toContain("hello ");
+    expect(result.output).toContain("world");
     expect(result.output).toContain("warn");
-    expect(stream.capture).toContain("hello world");
+    expect(stream.capture).toContain("hello ");
+    expect(stream.capture).toContain("world");
   });
 
   it("returns ok=false on non-zero exit", async () => {
