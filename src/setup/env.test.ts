@@ -102,4 +102,37 @@ describe("parseNonInteractiveEnv", () => {
     if (!r.isErr()) return;
     expect(r.error.issues.join("\n")).toMatch(/COGMO_TELEGRAM_ALLOWED_USERS/);
   });
+
+  it("accepts COGMO_GITHUB_PAT and exposes it as `githubPat`", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+      COGMO_GITHUB_PAT: "ghp_test_xxxxxxxxxxxxxxxxxxxx",
+    });
+    if (r.isErr()) throw r.error;
+    expect(r.value.githubPat).toBe("ghp_test_xxxxxxxxxxxxxxxxxxxx");
+  });
+
+  it("reads COGMO_GITHUB_PAT from the _FILE variant", () => {
+    const path = tempFile("ghp_from_file_xxxxxxxxxxxxxxx");
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+      COGMO_GITHUB_PAT_FILE: path,
+    });
+    if (r.isErr()) throw r.error;
+    expect(r.value.githubPat).toBe("ghp_from_file_xxxxxxxxxxxxxxx");
+  });
+
+  it("accepts COGMO_GITHUB_SSH_PRIVATE_KEY alongside the PAT", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+      COGMO_GITHUB_PAT: "ghp_test_xxxxxxxxxxxxxxxxxxxx",
+      COGMO_GITHUB_SSH_PRIVATE_KEY:
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nfoo\n-----END OPENSSH PRIVATE KEY-----",
+    });
+    if (r.isErr()) throw r.error;
+    expect(r.value.githubSshPrivateKey).toContain("BEGIN OPENSSH PRIVATE KEY");
+  });
 });

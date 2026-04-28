@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   validateAnthropicKey,
+  validateGitHubPat,
   validateHindsight,
   validateOpenAICompatibleKey,
   validateTavilyKey,
@@ -95,6 +96,55 @@ describe("validateTavilyKey", () => {
     vi.stubGlobal("fetch", mockFetch(401));
     const result = await validateTavilyKey("bad");
     expect(result).toEqual({ valid: false, error: "Invalid API key" });
+  });
+});
+
+describe("validateGitHubPat", () => {
+  it("returns valid with login on 200", async () => {
+    vi.stubGlobal("fetch", mockFetch(200, { login: "cogmo-bot" }));
+    const result = await validateGitHubPat("ghp_test");
+    expect(result.valid).toBe(true);
+    expect(result.meta?.login).toBe("cogmo-bot");
+  });
+
+  it("calls api.github.com/user with the bearer header", async () => {
+    const f = mockFetch(200, { login: "x" });
+    vi.stubGlobal("fetch", f);
+    await validateGitHubPat("ghp_test");
+    expect(f).toHaveBeenCalledWith(
+      "https://api.github.com/user",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer ghp_test" }),
+      }),
+    );
+  });
+
+  it("returns invalid on 401", async () => {
+    vi.stubGlobal("fetch", mockFetch(401));
+    const result = await validateGitHubPat("bad");
+    expect(result.valid).toBe(false);
+    expect(result.error).toMatch(/401/);
+  });
+
+  it("returns invalid on 403 with scope hint", async () => {
+    vi.stubGlobal("fetch", mockFetch(403));
+    const result = await validateGitHubPat("scoped-too-narrow");
+    expect(result.valid).toBe(false);
+    expect(result.error).toMatch(/scopes/i);
+  });
+
+  it("returns invalid when /user response is missing login", async () => {
+    vi.stubGlobal("fetch", mockFetch(200, {}));
+    const result = await validateGitHubPat("pat");
+    expect(result.valid).toBe(false);
+    expect(result.error).toMatch(/login/);
+  });
+
+  it("returns error on network failure", async () => {
+    vi.stubGlobal("fetch", mockFetchError("ECONNREFUSED"));
+    const result = await validateGitHubPat("pat");
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain("ECONNREFUSED");
   });
 });
 

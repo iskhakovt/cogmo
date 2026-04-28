@@ -461,9 +461,13 @@ The final artifact is a **draft PR**. Cogmo never pushes to `main`, never merges
 
 ## Git Identity `[proposed]`
 
-**P1:** Fine-grained PAT on a dedicated `cogmo-bot` GitHub account. Stored in Cogmo's `secrets` table. Per-repo scope, short expiry. Delivered into the task container at task start via the mechanism chosen in *Credential delivery* below (P1 ships the disk-backed `~/.git-credentials` path with aggressive wipe on teardown; vault socket is the P2 hardening).
+**P1 (slice 4):** Fine-grained PAT + Ed25519 SSH signing keypair on a dedicated `cogmo-bot` GitHub account. The PAT and signing key for one bot account are inseparable — they're stored as a single JSON-encoded bundle (`{ pat, sshPrivateKey, sshPublicKey }`, validated by `GitHubIdentitySchema`) in Cogmo's `secrets` table under the name `github_identity:<name>`. The setup wizard provisions `github_identity:default`; multiple identities can coexist and each repo selects one via `coding_repos.identity_name`.
 
-**SSH commit signing:** `git config gpg.format ssh` + an SSH signing key owned by the bot account. Commits show "Verified" on GitHub. Uses OpenSSH, no GPG faff.
+**Setup wizard (slice 4.0b):** prompts for the PAT, validates against `GET https://api.github.com/user`, generates an Ed25519 keypair via `micro-key-producer/ssh.js` (returns OpenSSH-armored `privateKey` + `publicKey` strings + SHA-256 fingerprint), and prints the public key with a `https://github.com/settings/ssh/new` link instructing the operator to install it as a **signing key**. The private key never leaves the encrypted DB. Non-interactive setup accepts `COGMO_GITHUB_PAT` (with `_FILE` variant); pre-supplied private keys are not yet importable (slice 4 always generates a fresh keypair and prints the public key for installation).
+
+**Per-task delivery (slice 4.0d):** the PAT is materialised into a per-task `GIT_ASKPASS` helper file under `/run/cogmo/askpass/<task-id>/`; the SSH private key is dropped alongside and referenced via `git config user.signingkey <path>`. Both are wiped on teardown.
+
+**SSH commit signing:** `git config gpg.format ssh` + the per-task signing key file. Commits show "Verified" on GitHub. Uses OpenSSH, no GPG faff.
 
 **P2+:** Migrate to GitHub App with installation tokens. Short-lived tokens per task, cleaner audit trail, standard practice (Dependabot, Renovate, Copilot cloud agent all use this). Deferred because App setup is fiddly for a one-user tool and P1's PAT model is functionally equivalent for audit trail + signing.
 

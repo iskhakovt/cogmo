@@ -48,6 +48,11 @@ export const NonInteractiveAnswersSchema = z
     telegramAllowedUsers: commaSeparated.optional(),
     tavilyApiKey: z.string().min(10).optional(),
     falApiKey: z.string().min(10).optional(),
+    githubPat: z.string().min(20).optional(),
+    /** Pre-generated OpenSSH-armored Ed25519 private key. When omitted but
+     * `githubPat` is set, the runner generates a fresh keypair and prints
+     * the public key for the operator to install on github.com. */
+    githubSshPrivateKey: z.string().min(1).optional(),
   })
   .superRefine((v, ctx) => {
     if (v.llmProviderType === "custom" && !v.llmBaseUrl) {
@@ -83,6 +88,8 @@ const FILE_BACKED = [
   "COGMO_TELEGRAM_BOT_TOKEN",
   "COGMO_TAVILY_API_KEY",
   "COGMO_FAL_API_KEY",
+  "COGMO_GITHUB_PAT",
+  "COGMO_GITHUB_SSH_PRIVATE_KEY",
 ] as const;
 
 /** Plain env var names (no `_FILE` variant, value used as-is). */
@@ -142,6 +149,8 @@ export function parseNonInteractiveEnv(
     telegramAllowedUsers: resolved.COGMO_TELEGRAM_ALLOWED_USERS,
     tavilyApiKey: resolved.COGMO_TAVILY_API_KEY,
     falApiKey: resolved.COGMO_FAL_API_KEY,
+    githubPat: resolved.COGMO_GITHUB_PAT,
+    githubSshPrivateKey: resolved.COGMO_GITHUB_SSH_PRIVATE_KEY,
   });
 
   if (!parsed.success) {
@@ -163,6 +172,8 @@ const FIELD_TO_ENV: Record<string, string> = {
   telegramAllowedUsers: "COGMO_TELEGRAM_ALLOWED_USERS",
   tavilyApiKey: "COGMO_TAVILY_API_KEY",
   falApiKey: "COGMO_FAL_API_KEY",
+  githubPat: "COGMO_GITHUB_PAT",
+  githubSshPrivateKey: "COGMO_GITHUB_SSH_PRIVATE_KEY",
 };
 
 function fieldToEnv(field: unknown): string {

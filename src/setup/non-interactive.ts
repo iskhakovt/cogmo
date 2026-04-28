@@ -12,6 +12,13 @@ import { err, ok, type Result } from "neverthrow";
 import type { JsonValue } from "type-fest";
 import type { AgentStore } from "../agent/store/index.js";
 import { logger } from "../logger.js";
+import {
+  DEFAULT_GITHUB_IDENTITY_NAME,
+  type GitHubIdentity,
+  gitHubIdentitySecretName,
+  serializeGitHubIdentity,
+} from "../secrets/github.js";
+import { generateSshKeyPair } from "../secrets/ssh-keygen.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { TransportStore } from "../transport/store/index.js";
 import type { NonInteractiveAnswers } from "./env.js";
@@ -21,6 +28,7 @@ import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
   type ValidationResult,
   validateAnthropicKey,
+  validateGitHubPat,
   validateOpenAICompatibleKey,
   validateTavilyKey,
   validateTelegramToken,
@@ -32,6 +40,7 @@ export interface Validators {
   llmOpenAICompatible: (apiKey: string, baseUrl: string) => Promise<ValidationResult>;
   telegram: (token: string) => Promise<ValidationResult>;
   tavily: (apiKey: string) => Promise<ValidationResult>;
+  githubPat: (pat: string) => Promise<ValidationResult>;
 }
 
 export const defaultValidators: Validators = {
@@ -39,6 +48,7 @@ export const defaultValidators: Validators = {
   llmOpenAICompatible: validateOpenAICompatibleKey,
   telegram: validateTelegramToken,
   tavily: validateTavilyKey,
+  githubPat: validateGitHubPat,
 };
 
 export interface PersistDeps {
@@ -56,6 +66,8 @@ export interface NonInteractiveDeps extends PersistDeps {
 export interface ValidatedNonInteractive {
   answers: NonInteractiveAnswers;
   telegramBotUsername?: string;
+  /** GitHub bot account login (from `GET /user`); `undefined` when no PAT was supplied. */
+  githubLogin?: string;
 }
 
 /** Thrown when one or more provider/channel validations fail. */
@@ -91,6 +103,7 @@ export async function validateNonInteractive(
   return ok({
     answers: parsed.value,
     ...(summary.telegramBotUsername && { telegramBotUsername: summary.telegramBotUsername }),
+    ...(summary.githubLogin && { githubLogin: summary.githubLogin }),
   });
 }
 
@@ -103,7 +116,7 @@ export async function persistNonInteractive(
   deps: PersistDeps,
   validated: ValidatedNonInteractive,
 ): Promise<void> {
-  const { answers, telegramBotUsername } = validated;
+  const { answers, telegramBotUsername, githubLogin } = validated;
 
   const { userId } = await seedDefaults(deps.agentStore, deps.transportStore);
 
@@ -130,15 +143,40 @@ export async function persistNonInteractive(
     });
   }
 
+  let generatedSshPublicKey: string | undefined;
+  if (answers.githubPat) {
+    generatedSshPublicKey = await persistGitHubIdentity(deps, answers, githubLogin);
+  }
+
   logger.info(
     {
       provider: answers.llmProviderType,
       telegram: Boolean(answers.telegramBotToken),
       tavily: Boolean(answers.tavilyApiKey),
       fal: Boolean(answers.falApiKey),
+      github: Boolean(answers.githubPat),
+      githubGeneratedSshKey: Boolean(generatedSshPublicKey),
     },
     "non-interactive setup complete",
   );
+
+  if (generatedSshPublicKey) {
+    // Stdout (not the logger) so the operator's wrapper script can capture it.
+    // Non-interactive runs typically log JSON; a clear delimiter makes parsing
+    // unambiguous without forcing the operator to filter logger output.
+    process.stdout.write(
+      [
+        "",
+        "=== Cogmo: install the generated SSH signing key on github.com ===",
+        "Add the following public key as a *signing key* (not authentication):",
+        "  https://github.com/settings/ssh/new",
+        "",
+        generatedSshPublicKey,
+        "===",
+        "",
+      ].join("\n"),
+    );
+  }
 }
 
 /**
@@ -161,6 +199,7 @@ export async function runNonInteractive(deps: NonInteractiveDeps): Promise<void>
 interface ValidationSummary {
   failures: string[];
   telegramBotUsername?: string;
+  githubLogin?: string;
 }
 
 async function validateAll(
@@ -202,9 +241,25 @@ async function validateAll(
     }
   }
 
+  // GitHub PAT (optional — required only when the operator is wiring up the
+  // coding-delegation pipeline).
+  let githubLogin: string | undefined;
+  if (answers.githubPat) {
+    const gh = await validators.githubPat(answers.githubPat);
+    if (!gh.valid) {
+      failures.push(`GitHub PAT: ${gh.error ?? "invalid"}`);
+    } else {
+      githubLogin = gh.meta?.login;
+    }
+  }
+
   // fal.ai has no cheap ping endpoint — errors surface on first use.
 
-  return { failures, ...(telegramBotUsername && { telegramBotUsername }) };
+  return {
+    failures,
+    ...(telegramBotUsername && { telegramBotUsername }),
+    ...(githubLogin && { githubLogin }),
+  };
 }
 
 /** Translate the wizard's provider label to the adapter type stored in `llm_providers.type`. */
@@ -302,6 +357,52 @@ async function persistTelegram(
       platformHandle: telegramUserId,
     });
   }
+}
+
+/**
+ * Persist a GitHub identity bundle: the validated PAT plus a freshly
+ * generated Ed25519 signing keypair. Returns the public key so the caller
+ * can print it for the operator to install on github.com.
+ *
+ * Operator-supplied keys (`COGMO_GITHUB_SSH_PRIVATE_KEY`) are accepted but
+ * trigger a warning and full regeneration — extracting the public key from
+ * an arbitrary OpenSSH private blob without `ssh-keygen` on the host needs
+ * a parser that isn't worth shipping in slice 4. Generation is reproducible
+ * (the operator can re-run setup to get a different key) and the public key
+ * has to be hand-installed on github.com either way.
+ */
+async function persistGitHubIdentity(
+  deps: PersistDeps,
+  answers: NonInteractiveAnswers,
+  githubLogin: string | undefined,
+): Promise<string> {
+  if (!answers.githubPat) {
+    throw new Error("persistGitHubIdentity called without a PAT");
+  }
+
+  if (answers.githubSshPrivateKey) {
+    logger.warn(
+      "COGMO_GITHUB_SSH_PRIVATE_KEY is set but importing pre-generated OpenSSH keys isn't supported yet; generating a fresh keypair.",
+    );
+  }
+
+  const keys = generateSshKeyPair(`cogmo-bot@${githubLogin ?? "github"}`);
+
+  const identity: GitHubIdentity = {
+    pat: answers.githubPat,
+    sshPrivateKey: keys.privateKey,
+    sshPublicKey: keys.publicKey,
+  };
+
+  const secretName = gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME);
+  await deps.secretsStore.putSecret({
+    name: secretName,
+    plaintext: serializeGitHubIdentity(identity),
+    description: `GitHub identity (@${githubLogin ?? "unknown"})`,
+  });
+  await deps.secretsStore.markValidated(secretName);
+
+  return keys.publicKey;
 }
 
 /** Re-export for consumers that want to surface env-parse errors separately. */
