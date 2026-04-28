@@ -94,8 +94,7 @@ describe("bootstrapSkillsRepo", () => {
     const content = await readFile(hookPath, "utf8");
     expect(content).toBe(PRE_RECEIVE_HOOK_CONTENT);
     const st = await stat(hookPath);
-    // Mode bits: world-readable + owner-executable.
-    // biome-ignore lint/style/noMagicNumbers: 0o755 is the standard executable mode for hooks
+    // Mode bits: world-readable + owner-executable (0o755).
     expect(st.mode & 0o777).toBe(0o755);
   });
 
@@ -149,12 +148,9 @@ describe("bootstrapSkillsRepo", () => {
     const repoPath = join(workDir, "skills");
     await bootstrapSkillsRepo({ path: repoPath });
     const hookPath = join(repoPath, "hooks", "pre-receive");
-    // biome-ignore lint/style/noMagicNumbers: explicit mode bits
     await chmod(hookPath, 0o644);
-    // biome-ignore lint/style/noMagicNumbers: explicit mode bits
     expect((await stat(hookPath)).mode & 0o777).toBe(0o644);
     await bootstrapSkillsRepo({ path: repoPath });
-    // biome-ignore lint/style/noMagicNumbers: explicit mode bits
     expect((await stat(hookPath)).mode & 0o777).toBe(0o755);
   });
 
