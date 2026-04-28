@@ -45,6 +45,9 @@ import { createSandboxReaper } from "./sandbox/reaper.js";
 import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
 import { DrizzleSecretsStore, type SecretsStore } from "./secrets/store/index.js";
+import { bootstrapSkillsRepo } from "./skills/repo.js";
+import { SkillRunnerImpl } from "./skills/runner.js";
+import { DrizzleSkillStore } from "./skills/store/index.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
 import { createDeliveryRouter } from "./transport/delivery-router.js";
 import { startChannels } from "./transport/registry.js";
@@ -71,6 +74,15 @@ export interface BootstrapOptions {
 export async function bootstrap(opts: BootstrapOptions = {}) {
   await migrate(db, { migrationsFolder: "./migrations" });
   logger.info("database migrations applied");
+
+  // Bring the skills bare repo to its expected state on every boot —
+  // idempotent. The pre-receive hook is rewritten unconditionally so a Cogmo
+  // upgrade that tightens the policy takes effect on existing deployments.
+  // See `design/skills.md` → Skill storage.
+  const skillsRepo = await bootstrapSkillsRepo({ path: env.COGMO_SKILLS_PATH });
+  if (skillsRepo.initialized) {
+    logger.info({ path: skillsRepo.path }, "skills bare repo initialized");
+  }
 
   const agentStore = new DrizzleAgentStore(db);
   const transportStore = new DrizzleTransportStore(db);
@@ -307,6 +319,24 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   });
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL);
 
+  // Skills runtime — Tier 1 ready in P3.1; register / classifier ship in P3.3.
+  // The runner is exposed so the `cogmo skills` CLI subcommand can drive it
+  // without re-bootstrapping. Bank id is the user id (per `design/memory.md`
+  // single-user single-bank model).
+  const skillStore = new DrizzleSkillStore(db);
+  const skillRunner = await SkillRunnerImpl.create({
+    store: skillStore,
+    secretsStore,
+    memory,
+    user: { id: user.id, timezone: env.USER_TIMEZONE },
+    memoryBankId: user.id,
+    // Cache Pyodide's pre-built packages under the skills repo's git dir
+    // so JsDelivr fetches don't repeat across worker spawns. Only matters
+    // for skills that micropip-install pure-Python wheels — the stdlib is
+    // always bundled.
+    pyodidePackageCacheDir: `${env.COGMO_SKILLS_PATH}/.pyodide-cache`,
+  });
+
   const idleTimeoutMs = env.SESSION_IDLE_TIMEOUT_MINUTES * 60 * 1000;
   const debounceConfig: DebounceConfig = {
     idleTimeoutMs: env.DEBOUNCE_IDLE_SECONDS * 1000,
@@ -382,6 +412,8 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     sandboxInstanceId,
     provider,
     memory,
+    skillRunner,
+    skillStore,
   };
 }
 

@@ -1,5 +1,8 @@
 import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { loadEnvFile } from "node:process";
 import type { LLMock } from "@copilotkit/aimock";
 import type { StartedTestContainer } from "testcontainers";
@@ -16,6 +19,7 @@ if (existsSync(".env")) loadEnvFile(".env");
 const containers: StartedTestContainer[] = [];
 let network: Awaited<ReturnType<InstanceType<typeof Network>["start"]>> | null = null;
 let mock: LLMock | null = null;
+let skillsPath: string | null = null;
 
 export async function setup({ provide }: GlobalSetupContext) {
   network = await new Network().start();
@@ -87,6 +91,12 @@ export async function setup({ provide }: GlobalSetupContext) {
   // operator sets it locally: RECORD=1 FAL_API_KEY=... pnpm test:integration.
   process.env.FAL_API_KEY = process.env.FAL_API_KEY ?? "test-fal-key";
 
+  // Skills bare repo lives on the host (not in a container) — bootstrap
+  // initializes it on every boot. Use a tempdir so tests don't try to write
+  // to the production default `/var/lib/cogmo/skills`.
+  skillsPath = await mkdtemp(join(tmpdir(), "cogmo-skills-it-"));
+  process.env.COGMO_SKILLS_PATH = skillsPath;
+
   const gatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;
   process.env.INNGEST_CONNECT_GATEWAY_URL = gatewayUrl;
 
@@ -119,5 +129,8 @@ export async function teardown() {
     await container.stop();
   }
   if (network) await network.stop();
+  if (skillsPath) {
+    await rm(skillsPath, { recursive: true, force: true });
+  }
   console.log("Test containers stopped.");
 }

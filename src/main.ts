@@ -33,9 +33,21 @@ switch (command) {
     );
     break;
   }
+  case "skills": {
+    const { runSkillsCli } = await import("./skills/cli.js");
+    const { bootstrap } = await import("./index.js");
+    const { skillRunner } = await bootstrap();
+    if (!skillRunner) {
+      console.error("Skill runner failed to initialize.");
+      process.exit(1);
+    }
+    const code = await runSkillsCli(process.argv.slice(3), skillRunner);
+    process.exit(code);
+    break;
+  }
   default:
     console.error(`Unknown command: ${command}`);
-    console.error("Usage: main.js [serve|seed|setup|gen-key]");
+    console.error("Usage: main.js [serve|seed|setup|gen-key|skills]");
     process.exit(1);
 }
 
