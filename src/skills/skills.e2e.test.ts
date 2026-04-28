@@ -30,19 +30,24 @@ interface DockerExec {
 }
 
 /**
- * Find the running app container by image label. Avoids hard-coding the
- * container name (testcontainers picks a random one).
+ * Find the running app container by image ancestor. Image name comes from the
+ * same `E2E_IMAGE` env var the e2e setup uses (CI: `cogmo:ci`, local default:
+ * `cogmo-e2e`) — testcontainers picks a random container name, so filter by
+ * the image instead.
  */
 async function findAppContainer(): Promise<string> {
+  const imageName = process.env.E2E_IMAGE ?? "cogmo-e2e";
   const { stdout } = await execFile("docker", [
     "ps",
     "--filter",
-    "ancestor=cogmo-e2e",
+    `ancestor=${imageName}`,
     "--format",
     "{{.ID}}",
   ]);
   const id = stdout.trim().split("\n")[0];
-  if (!id) throw new Error("no cogmo-e2e container found via `docker ps`");
+  if (!id) {
+    throw new Error(`no container found via 'docker ps --filter ancestor=${imageName}'`);
+  }
   return id;
 }
 
