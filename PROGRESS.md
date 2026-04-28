@@ -97,8 +97,8 @@ The agent extends its own capabilities — authors small Python programs ("skill
 - [ ] Worker JSON-RPC protocol — framing over stdin/stdout, request/response shape per [skills.md](design/skills.md) → Host context; typed Python exceptions → typed TS errors
 - [ ] Tier 1 worker (WASM/Pyodide) — Pyodide instance in a Node worker thread, fresh globals scope per task, V8 heap limit + host-side wall-clock timer; Pyodide-compatibility lint (no `subprocess`, no `os.fork`, only available wheels)
 - [ ] Tier 2 worker (sysbox container) — Python subprocess inside a sysbox container (reuses [sandbox.md](design/sandbox.md) `Sandbox` interface), subinterpreter per task (Python 3.13+, PEP 684), per-run cgroup slice via sandbox cgroup parent; `isolation: recycle` opt-out path
-- [ ] Pool + Dispatcher — min=1 / max=3 warm workers per tier, queue-with-spawn-on-threshold, worker replacement every 500 tasks or 30min idle, health checks
-- [ ] Python `ctx` SDK — shipped into every worker image; RPC-backed methods for `secrets.get`, `memory.recall`, `memory.remember`, `attachments.upload/download`, `llm.complete`, `now`, `user`, `notify`, `log.info`; manifest-gated at host side
+- [ ] Pool + Dispatcher — min=1 / max=3 warm workers per tier, queue-with-spawn-on-threshold, worker replacement every 500 tasks or 30min idle, health checks. Also: deep-walk PyProxy destruction in `worker-entry.runTask` (P3.1 only destroys the top-level proxy because workers are one-shot; warm pool means nested PyProxies leak across tasks unless the conversion does a recursive destroy or `ctx.py` uses `pyodide.ffi.create_proxy` discipline).
+- [ ] Python `ctx` SDK — shipped into every worker image; RPC-backed methods for `secrets.get`, `memory.recall`, `memory.remember`, `attachments.upload/download`, `llm.complete`, `now`, `user`, `notify`, `log.info`; manifest-gated at host side. Also: plumb `memory.recall.limit` to `maxTokens` proportionally instead of slicing client-side (P3.1 fetches the full result then slices — wastes bandwidth on high-recall queries; Hindsight's `RecallOptions` takes `maxTokens`, not item count).
 
 ### P3.3 — Deployment pipeline
 
@@ -111,6 +111,7 @@ The agent extends its own capabilities — authors small Python programs ("skill
 ### P3.4 — Invocation
 
 - [ ] Dynamic tool registration — orchestrator rebuilds tool list each turn from `SkillRunner.list()`; one tool per skill (name + tier-1 description + compiled `inputs` schema); tier-2 SKILL.md body swapped into tool description on selection (progressive disclosure)
+- [ ] Outputs validation against `manifest.outputs` JSON Schema in `runner.invoke` — P3.1 only validates inputs via ajv; a skill declaring `outputs: {type: "object"}` and returning a string silently stores the string in `skill_runs.output`. Outputs become load-bearing for tool-registration shapes, so validation has to land alongside dynamic tool registration. (TODO marker in `src/skills/runner.ts` `runner.invoke`.)
 - [ ] Cron scheduling — one Inngest cron per scheduled skill (from `SKILL.md.schedule`), dispatcher fire-and-forget
 - [ ] Failure handling — Inngest retries → Telegram notification on final failure → auto-disable after 3 consecutive failures → `/enable` / `/rollback` recovery
 - [ ] Skill discovery retrieval layer — `search_skills(query)` tool (semantic search over manifest descriptions). Added when tool-list tokens exceed ~5k or tool-selection accuracy drops on evals
@@ -126,6 +127,7 @@ The agent extends its own capabilities — authors small Python programs ("skill
 - [ ] Egress-proxy secret substitution — UUID placeholder + HTTP egress proxy that validates destination against secret binding and substitutes on the fly
 - [ ] Inter-skill composition — `ctx.skills.invoke(name, inputs)` orchestrator-mediated, recursion cap, permission intersection
 - [ ] Agent-led repair loop — on `skill/failed`, spawn an orchestrator run to diagnose + patch + re-register (aligns with evolution stage 3+)
+- [ ] Audit fail-closed semantics for sensitive ctx methods — P3.1 `ctx-handler.#audit` is fail-open: a DB hiccup logs a warn but lets the skill continue, so a successful `secrets.get` can return the value to Python without the audit row landing. Decide (after threat-model review) whether sensitive methods like `secrets.get` should refuse to return on audit failure while low-risk methods like `now()` stay fail-open. (TODO marker in `src/skills/ctx-handler.ts` `#audit`.)
 - [ ] Additional integrations (as needed): Strava, banking, GitHub — Phase 3 scope retained
 
 ## Phase 4: Prompt Optimization
