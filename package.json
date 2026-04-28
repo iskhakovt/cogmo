@@ -50,7 +50,7 @@
     "@opentelemetry/resources": "^2.6.1",
     "@opentelemetry/sdk-metrics": "^2.7.0",
     "@opentelemetry/sdk-node": "^0.214.0",
-    "@opentelemetry/sdk-trace-base": "^2.6.1",
+    "@opentelemetry/sdk-trace-base": "^2.7.0",
     "@opentelemetry/semantic-conventions": "^1.40.0",
     "@t3-oss/env-core": "^0.13.11",
     "@vectorize-io/hindsight-client": "^0.5.4",
