@@ -330,6 +330,11 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     memory,
     user: { id: user.id, timezone: env.USER_TIMEZONE },
     memoryBankId: user.id,
+    // Cache Pyodide's pre-built packages under the skills repo's git dir
+    // so JsDelivr fetches don't repeat across worker spawns. Only matters
+    // for skills that micropip-install pure-Python wheels — the stdlib is
+    // always bundled.
+    pyodidePackageCacheDir: `${env.COGMO_SKILLS_PATH}/.pyodide-cache`,
   });
 
   const idleTimeoutMs = env.SESSION_IDLE_TIMEOUT_MINUTES * 60 * 1000;

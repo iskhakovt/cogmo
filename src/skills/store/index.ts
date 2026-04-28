@@ -6,6 +6,8 @@ import {
   ClassifierLogSchema,
   type SkillEffects,
   SkillEffectsSchema,
+  SkillInvocationInputsSchema,
+  SkillInvocationOutputSchema,
   type SkillIo,
   SkillIoSchema,
 } from "../types.js";
@@ -267,6 +269,7 @@ export class DrizzleSkillStore implements SkillStore {
       // an empty object rather than relying on null/undefined coercion.
       throw new Error("insertRun: inputs must not be null/undefined");
     }
+    const inputs = SkillInvocationInputsSchema.parse(params.inputs);
     return this.#db.transaction(async (tx) => {
       const row = single(
         await tx
@@ -274,7 +277,7 @@ export class DrizzleSkillStore implements SkillStore {
           .values({
             skillId: params.skillId,
             trigger: params.trigger,
-            inputs: params.inputs,
+            inputs,
             status: "running",
           })
           .returning(),
@@ -284,12 +287,13 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async updateRunResult(params: UpdateRunResultParams): Promise<void> {
+    const output = params.output === null ? null : SkillInvocationOutputSchema.parse(params.output);
     await this.#db.transaction(async (tx) => {
       await tx
         .update(skillRuns)
         .set({
           status: params.status,
-          output: params.output ?? null,
+          output,
           error: params.error,
           finishedAt: params.finishedAt,
         })
@@ -371,9 +375,9 @@ function parseSkillRunRow(row: typeof skillRuns.$inferSelect): SkillRunRow {
     id: row.id,
     skillId: row.skillId,
     trigger: row.trigger,
-    inputs: row.inputs,
+    inputs: SkillInvocationInputsSchema.parse(row.inputs),
     status: row.status,
-    output: row.output,
+    output: row.output === null ? null : SkillInvocationOutputSchema.parse(row.output),
     error: row.error,
     createdAt: row.createdAt,
     finishedAt: row.finishedAt,

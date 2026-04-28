@@ -22,7 +22,10 @@ const log = logger.child({ component: "skills.repo" });
  */
 const ZERO_REF = "0000000000000000000000000000000000000000";
 
-const PRE_RECEIVE_HOOK = `#!/usr/bin/env bash
+// POSIX `/bin/sh` (no bash-isms in the body) so the hook runs on hosts
+// shipping only dash/busybox-ash. The script uses only `[ ... ]`, `read`,
+// `echo`, and `git` — all in POSIX.
+const PRE_RECEIVE_HOOK = `#!/bin/sh
 # Managed by Cogmo (src/skills/repo.ts). Do not edit — overwritten on boot.
 
 while read oldrev newrev refname; do

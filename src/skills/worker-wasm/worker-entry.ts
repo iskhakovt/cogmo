@@ -111,6 +111,12 @@ async function runTask(invoke: { id: string; inputs: unknown }): Promise<TaskRes
     if (typeof proxy.destroy === "function") proxy.destroy();
   }
   inputsPy.destroy?.();
+  // Only the top-level PyProxy is destroyed explicitly. If `run()` returned
+  // a nested dict, `toJs` recursively converts but the inner PyProxies
+  // aren't tracked individually — they leak until the worker thread exits.
+  // Acceptable because workers are one-shot in P3.1; revisit when P3.2's
+  // warm pool reuses workers across tasks (would need deep-walk + destroy,
+  // or `pyodide.ffi.create_proxy` discipline in ctx.py).
 
   return { type: "task_result", id: invoke.id, ok: true, output };
 }

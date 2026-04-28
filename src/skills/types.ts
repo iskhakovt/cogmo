@@ -156,10 +156,13 @@ export const ClassifierLogSchema = z.object({
 export type ClassifierLog = z.infer<typeof ClassifierLogSchema>;
 
 /**
- * Per-invocation input/output blobs. Pass-through `z.unknown()` wrappers — the
- * per-skill JSON Schema is enforced at invoke time by ajv against the manifest's
- * declared `inputs`/`outputs`, not at the store layer. The store only needs to
- * guarantee "valid JSON".
+ * Per-invocation input/output blobs. The per-skill JSON Schema is enforced
+ * at invoke time by ajv against the manifest's declared `inputs`/`outputs`;
+ * here we just guarantee "valid JSON-shaped" — using `JsonValueSchema`
+ * rather than `z.unknown()` so a bypass writer (future bug, store called
+ * from another path) can't slip a `Date`/`BigInt`/`undefined` past the
+ * JSONB boundary. CLAUDE.md mandates Zod on read AND write for every JSONB
+ * column.
  */
-export const SkillInvocationInputsSchema = z.unknown();
-export const SkillInvocationOutputSchema = z.unknown();
+export const SkillInvocationInputsSchema = JsonValueSchema;
+export const SkillInvocationOutputSchema = JsonValueSchema;

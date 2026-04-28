@@ -133,6 +133,13 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#ajv = new Ajv({ allErrors: true, strict: false });
   }
 
+  /**
+   * P3.1 does no async work — the factory is shaped this way for forward
+   * compat with P3.3, which will pre-load skill source from git, eagerly
+   * compile validators, and warm the Pyodide pool on boot. Keeping the
+   * `static async create()` shape now means the wiring in `src/index.ts`
+   * doesn't need to change again when that lands.
+   */
   static async create(opts: SkillRunnerOptions): Promise<SkillRunnerImpl> {
     return new SkillRunnerImpl(opts);
   }
@@ -243,6 +250,11 @@ export class SkillRunnerImpl implements SkillRunner {
 
     const finishedAt = new Date();
     if (result.ok) {
+      // TODO(P3.3): validate `result.output` against `cached.manifest.outputs`
+      // (when declared) the same way we validate inputs above. Today a
+      // skill declaring `outputs: {type: "object"}` and returning a string
+      // silently stores the string. Lands with the classifier work since
+      // `outputs` becomes load-bearing for tool-registration shapes.
       await this.#store.updateRunResult({
         id: run.id,
         status: "success",
@@ -314,19 +326,7 @@ export class SkillRunnerImpl implements SkillRunner {
       classifierLog: STUB_CLASSIFIER_LOG,
     });
 
-    const inputsValidator = this.#ajv.compile(manifest.inputs as Record<string, unknown>);
-    // Ajv attaches `.$async = true` to validators compiled from
-    // `$async: true` schemas — those return Promises instead of booleans,
-    // which our truthy-check at invoke time would treat as valid and
-    // bypass validation. Skill manifests have no business declaring async
-    // schemas; reject at compile time. (Cast to access the runtime property
-    // — ajv's overloaded type signature doesn't expose `$async` on the
-    // generic `ValidateFunction<T>`.)
-    if ((inputsValidator as { $async?: boolean }).$async === true) {
-      throw new Error(
-        `__registerForTests: skill '${params.name}' uses an $async JSON Schema; not supported`,
-      );
-    }
+    const inputsValidator = this.#compileInputsValidator(manifest, params.name);
     this.#sourceCache.set(manifest.name, {
       manifest,
       body: params.body,
@@ -334,6 +334,29 @@ export class SkillRunnerImpl implements SkillRunner {
     });
 
     return row;
+  }
+
+  /**
+   * Compile the manifest's `inputs` JSON Schema and reject any
+   * `$async: true` schema. Ajv attaches `.$async = true` to validators
+   * compiled from async schemas — those return Promises instead of
+   * booleans, which our truthy-check at invoke time would treat as valid
+   * and silently bypass validation. Skill manifests have no business
+   * declaring async schemas; reject at compile time.
+   *
+   * Used by `__registerForTests` today; P3.3's `register` RPC must call
+   * this on its load-from-git path too — otherwise the bypass returns.
+   * (Cast to access the runtime property — Ajv's overloaded type
+   * signature doesn't expose `$async` on the generic `ValidateFunction<T>`.)
+   */
+  #compileInputsValidator(manifest: SkillManifest, contextName: string): ValidateFunction {
+    const validator = this.#ajv.compile(manifest.inputs as Record<string, unknown>);
+    if ((validator as { $async?: boolean }).$async === true) {
+      throw new Error(
+        `${contextName}: skill '${manifest.name}' uses an $async JSON Schema; not supported`,
+      );
+    }
+    return validator;
   }
 }
 

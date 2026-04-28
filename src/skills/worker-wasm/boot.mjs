@@ -8,4 +8,9 @@ if (isSource) {
   const { register } = await import("tsx/esm/api");
   register();
 }
-await import("./worker-entry.ts" + ""); // string concat so tsup doesn't try to bundle this
+// `"./worker-entry.ts" + ""` defeats tsup/esbuild's static dynamic-import
+// analyzer — without the concat, the bundler tries to bundle the .ts as
+// part of this .mjs and breaks the loader. Equivalent in spirit to
+// vite-ignore / webpackIgnore comments, but esbuild has no such directive
+// today (see evanw/esbuild#700). Don't simplify.
+await import("./worker-entry.ts" + "");

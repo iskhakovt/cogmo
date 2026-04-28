@@ -234,6 +234,17 @@ export class DefaultCtxHandler implements CtxHandler {
     return null;
   }
 
+  /**
+   * Audit failures are logged (warn) but do NOT propagate. Trade-off: a DB
+   * hiccup shouldn't break skill execution mid-flight, but the consequence
+   * is that a successful `secrets.get` can return the secret value to
+   * Python without a corresponding audit row landing in `skill_context_calls`.
+   *
+   * TODO(P3.3): when the design's threat model gets a formal review,
+   * decide whether audit-failure should be fail-closed (refuse to return
+   * the value) for sensitive methods like `secrets.get` while staying
+   * fail-open for low-risk methods like `now()`.
+   */
   async #audit(
     method: CtxMethod | string,
     target: string | null,

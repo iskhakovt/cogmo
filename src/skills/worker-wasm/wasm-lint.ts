@@ -9,6 +9,15 @@ import { err, ok, type Result } from "neverthrow";
  * The check is a deterministic text scan: cheap, deterministic, false-positive
  * tolerant. P3.3 will replace it with a real Python AST pass run inside the
  * same Pyodide instance used for execution. v1 catches the common cases.
+ *
+ * **Threat model:** this lint is UX, not security. A determined skill can
+ * trivially bypass it via `__import__("subprocess")` or
+ * `importlib.import_module("os").system(...)` — a regex-based scanner has no
+ * chance against runtime indirection. The actual security boundary is the
+ * Pyodide WASM sandbox, which doesn't ship those host APIs anyway. The lint
+ * exists so a skill author writing `import subprocess` gets a clear "won't
+ * work in tier-1" at deploy time instead of a Pyodide ImportError at
+ * runtime.
  */
 
 interface RulePattern {
