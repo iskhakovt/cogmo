@@ -105,15 +105,8 @@ export class DefaultCtxHandler implements CtxHandler {
       await this.#audit(method, null, false, "unknown_method");
       throw new CtxError("unknown_method", `unknown ctx method: ${method}`);
     }
-    try {
-      const value = await this.#dispatch(method, call.args);
-      return value;
-    } catch (e) {
-      // #audit was already called inside #dispatch on the failure path so
-      // the audit row carries the exact error kind (not_in_allowlist,
-      // invalid_args, …). Rethrow to the dispatcher.
-      throw e;
-    }
+    const value = await this.#dispatch(method, call.args);
+    return value;
   }
 
   async #dispatch(method: CtxMethod, args: unknown): Promise<unknown> {

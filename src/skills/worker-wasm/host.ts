@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url";
 import { MessageChannel, Worker } from "node:worker_threads";
 import { logger } from "../../logger.js";
 import { CtxError, type CtxHandler, Dispatcher, type RpcTransport } from "../dispatcher.js";

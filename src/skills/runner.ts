@@ -8,7 +8,6 @@ import type {
   InsertSkillParams,
   SkillRiskTier,
   SkillRow,
-  SkillRunRow,
   SkillRunTrigger,
   SkillStore,
   SkillTier,
