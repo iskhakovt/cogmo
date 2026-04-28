@@ -153,6 +153,10 @@ export async function setup({ provide }: GlobalSetupContext) {
       DEBOUNCE_IDLE_SECONDS: "0",
       DEBOUNCE_MAXWAIT_SECONDS: "0",
       LOG_LEVEL: "info",
+      // COGMO_SKILLS_PATH falls back to its production default
+      // (/var/lib/cogmo/skills) — the Dockerfile pre-creates that dir with
+      // `nonroot` ownership so bootstrap can `git init --bare` into it.
+      // Override only if the e2e suite needs a different mount.
       // Surface transient container/network blips as hard failures
       // instead of letting withRetry mask them. See src/util/with-retry.ts.
       RETRY_DISABLED: "true",
