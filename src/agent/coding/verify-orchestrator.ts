@@ -52,21 +52,12 @@ const WORKTREE_DIR_IN_CONTAINER = "/workspace";
  * on github.com (right avatar, right "authored by" link), and the
  * email never delivers anywhere because GitHub blocks delivery to that
  * suffix. The author *name* is a freeform display label.
- *
- * Falls back to a generic `cogmo-bot@users.noreply.github.com` author
- * when the bundle was provisioned before slice 4.0i added `login` + `id`
- * — keeps tasks running on a stale bundle without forcing a setup
- * re-run; the operator gets the canonical-form upgrade automatically
- * the next time they re-run `cogmo setup`.
  */
 function commitAuthorFor(identity: GitHubIdentity): { name: string; email: string } {
-  if (identity.login && identity.id) {
-    return {
-      name: identity.login,
-      email: `${identity.id}+${identity.login}@users.noreply.github.com`,
-    };
-  }
-  return { name: "Cogmo Bot", email: "cogmo-bot@users.noreply.github.com" };
+  return {
+    name: identity.login,
+    email: `${identity.id}+${identity.login}@users.noreply.github.com`,
+  };
 }
 
 export interface VerifyOrchestratorDeps {
