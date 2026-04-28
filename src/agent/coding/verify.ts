@@ -115,20 +115,25 @@ export async function runVerifyStreaming(params: VerifyParams): Promise<VerifyRe
   const winner = await Promise.race([waitPromise, timeoutPromise]);
   if (timeoutHandle) clearTimeout(timeoutHandle);
 
-  // Drain whatever the streams already buffered. We don't wait for `wait()`
-  // on the timeout branch — the process is still running but the orchestrator
-  // will tear the container down via `stopTask`, which cascades the kill.
-  await Promise.race([
-    Promise.all([stdoutDone, stderrDone]),
-    new Promise<void>((resolve) => setTimeout(resolve, 250)),
-  ]);
+  // Drain logic differs by branch:
+  // - On normal exit, wait for both pumps to finish so the tail of the
+  //   verify output (especially a large final write that docker hasn't
+  //   yet flushed through the PassThroughs) lands in the captured buffer.
+  //   Slow CI hosts can take longer than any fixed cap to drain.
+  // - On timeout, the process is still running — the streams may never
+  //   end on their own. Cap the drain at 250 ms; the orchestrator's outer
+  //   `stopTask` cascades the kill.
+  if (winner.kind === "exit") {
+    await Promise.all([stdoutDone, stderrDone]);
+  } else {
+    await Promise.race([
+      Promise.all([stdoutDone, stderrDone]),
+      new Promise<void>((resolve) => setTimeout(resolve, 250)),
+    ]);
+  }
 
   const durationMs = Date.now() - start;
   if (winner.kind === "timeout") {
-    if (truncated || captured.length > 0) {
-      // mark truncated output explicitly when present; otherwise leave it
-      // empty so the operator-facing message reads cleanly.
-    }
     const note = `\n\n[verify timed out after ${timeoutSeconds}s]`;
     const output = appendNote(captured, note, truncated);
     return { ok: false, exitCode: TIMEOUT_EXIT_CODE, output, durationMs, timedOut: true };
