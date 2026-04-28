@@ -100,15 +100,18 @@ describe("validateTavilyKey", () => {
 });
 
 describe("validateGitHubPat", () => {
-  it("returns valid with login on 200", async () => {
-    vi.stubGlobal("fetch", mockFetch(200, { login: "cogmo-bot" }));
+  it("returns valid with login + id on 200", async () => {
+    vi.stubGlobal("fetch", mockFetch(200, { login: "cogmo-bot", id: 12345 }));
     const result = await validateGitHubPat("ghp_test");
     expect(result.valid).toBe(true);
     expect(result.meta?.login).toBe("cogmo-bot");
+    // `id` is stringified in the meta so JSON round-trips don't lose
+    // precision on >32-bit numerics.
+    expect(result.meta?.id).toBe("12345");
   });
 
   it("calls api.github.com/user with the bearer header", async () => {
-    const f = mockFetch(200, { login: "x" });
+    const f = mockFetch(200, { login: "x", id: 1 });
     vi.stubGlobal("fetch", f);
     await validateGitHubPat("ghp_test");
     expect(f).toHaveBeenCalledWith(
@@ -135,10 +138,17 @@ describe("validateGitHubPat", () => {
   });
 
   it("returns invalid when /user response is missing login", async () => {
-    vi.stubGlobal("fetch", mockFetch(200, {}));
+    vi.stubGlobal("fetch", mockFetch(200, { id: 12345 }));
     const result = await validateGitHubPat("pat");
     expect(result.valid).toBe(false);
     expect(result.error).toMatch(/login/);
+  });
+
+  it("returns invalid when /user response is missing id", async () => {
+    vi.stubGlobal("fetch", mockFetch(200, { login: "cogmo-bot" }));
+    const result = await validateGitHubPat("pat");
+    expect(result.valid).toBe(false);
+    expect(result.error).toMatch(/id/);
   });
 
   it("returns error on network failure", async () => {

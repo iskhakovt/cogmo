@@ -29,6 +29,8 @@ const VALID_IDENTITY: GitHubIdentity = {
   pat: "ghp_dummy_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   sshPrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nABC\n-----END OPENSSH PRIVATE KEY-----",
   sshPublicKey: "ssh-ed25519 AAAA cogmo-bot",
+  login: "cogmo-bot",
+  id: "12345",
 };
 
 class FakeSecretsStore {
@@ -221,6 +223,17 @@ describe("runCodingVerify", () => {
       branchSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
       openedAt: expect.any(String),
     });
+
+    // Commit step received the canonical noreply author derived from the
+    // identity bundle (`<id>+<login>@users.noreply.github.com`).
+    const execMock = handle.exec as unknown as ReturnType<typeof vi.fn>;
+    const commitCall = execMock.mock.calls.find(
+      (c) => Array.isArray(c[0]) && (c[0] as string[]).includes("commit"),
+    );
+    expect(commitCall).toBeDefined();
+    const commitArgs = commitCall?.[0] as string[];
+    expect(commitArgs).toContain(`user.email=12345+cogmo-bot@users.noreply.github.com`);
+    expect(commitArgs).toContain(`user.name=cogmo-bot`);
 
     // Octokit was called with the per-task PAT and the parsed owner/repo.
     expect(create).toHaveBeenCalledTimes(1);

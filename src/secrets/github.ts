@@ -28,6 +28,15 @@ export const GitHubIdentitySchema = z
      * key for fingerprint display and re-export to the user when they need
      * to re-add it as a signing key on github.com. */
     sshPublicKey: z.string().min(1),
+    /** GitHub username. Captured by `validateGitHubPat` against
+     * `GET /user` at setup time. Used to compose the canonical noreply
+     * commit author email (`<id>+<login>@users.noreply.github.com`),
+     * which matches the bot account so PRs render the right avatar. */
+    login: z.string().min(1),
+    /** GitHub numeric user id. Captured alongside `login` from `GET /user`.
+     * Stored as a string so JSON round-trips losslessly across any
+     * downstream that parses through 32-bit numerics. */
+    id: z.string().regex(/^\d+$/, "expected numeric GitHub user id"),
   })
   .strict();
 export type GitHubIdentity = z.infer<typeof GitHubIdentitySchema>;

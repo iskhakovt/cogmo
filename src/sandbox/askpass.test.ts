@@ -9,6 +9,8 @@ const VALID_IDENTITY: GitHubIdentity = {
   pat: "ghp_dummy_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   sshPrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nABC\n-----END OPENSSH PRIVATE KEY-----",
   sshPublicKey: "ssh-ed25519 AAAA cogmo-bot",
+  login: "cogmo-bot",
+  id: "1",
 };
 
 let baseDir: string;

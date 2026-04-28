@@ -58,7 +58,9 @@ function validators(overrides?: Partial<Validators>): Validators {
     llmOpenAICompatible: vi.fn().mockResolvedValue(okResult),
     telegram: vi.fn().mockResolvedValue({ valid: true, meta: { botUsername: "cogmo_test_bot" } }),
     tavily: vi.fn().mockResolvedValue(okResult),
-    githubPat: vi.fn().mockResolvedValue({ valid: true, meta: { login: "cogmo-bot" } }),
+    githubPat: vi
+      .fn()
+      .mockResolvedValue({ valid: true, meta: { login: "cogmo-bot", id: "12345" } }),
     ...overrides,
   };
 }
@@ -328,6 +330,8 @@ describe("runNonInteractive", () => {
     expect(parsed.pat).toBe("ghp_test_xxxxxxxxxxxxxxxxxxxx");
     expect(parsed.sshPrivateKey).toMatch(/-----BEGIN OPENSSH PRIVATE KEY-----/);
     expect(parsed.sshPublicKey).toMatch(/^ssh-ed25519 /);
+    expect(parsed.login).toBe("cogmo-bot");
+    expect(parsed.id).toBe("12345");
 
     const meta = await secretsStore.getSecretMeta("github_identity:default");
     expect(meta?.description).toBe("GitHub identity (@cogmo-bot)");

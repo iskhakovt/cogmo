@@ -114,9 +114,12 @@ export async function validateGitHubPat(pat: string): Promise<ValidationResult> 
       };
     }
     if (!res.ok) return { valid: false, error: `Unexpected response: ${res.status}` };
-    const body = (await res.json()) as { login?: string };
+    const body = (await res.json()) as { login?: string; id?: number };
     if (!body.login) return { valid: false, error: "GitHub /user response missing `login`" };
-    return { valid: true, meta: { login: body.login } };
+    if (typeof body.id !== "number") {
+      return { valid: false, error: "GitHub /user response missing `id`" };
+    }
+    return { valid: true, meta: { login: body.login, id: String(body.id) } };
   } catch (err) {
     return { valid: false, error: `Connection failed: ${(err as Error).message}` };
   }

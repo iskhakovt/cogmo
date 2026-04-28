@@ -44,14 +44,21 @@ const log = logger.child({ component: "coding.verify-orchestrator" });
 
 const HOME_VOLUME_PREFIX = "cogmo-task-home";
 const WORKTREE_DIR_IN_CONTAINER = "/workspace";
-// `users.noreply.github.com` is GitHub's documented suffix for
-// non-routable git author emails — using it keeps GitHub's email-to-account
-// matcher from rejecting the commit author and (when paired with the bot's
-// real login or numeric id) lets PRs render with the bot account's avatar.
-// The full canonical form is `<id>+<login>@users.noreply.github.com` but
-// resolving the numeric id requires another API call against the PAT;
-// deferred until the identity bundle persists the login (todo `p3`).
-const COMMIT_AUTHOR = { name: "Cogmo Bot", email: "cogmo-bot@users.noreply.github.com" };
+
+/**
+ * Build the commit author for a given identity. GitHub's canonical
+ * non-routable suffix is `<id>+<login>@users.noreply.github.com` —
+ * commits authored under this email reverse-resolve to the bot account
+ * on github.com (right avatar, right "authored by" link), and the
+ * email never delivers anywhere because GitHub blocks delivery to that
+ * suffix. The author *name* is a freeform display label.
+ */
+function commitAuthorFor(identity: GitHubIdentity): { name: string; email: string } {
+  return {
+    name: identity.login,
+    email: `${identity.id}+${identity.login}@users.noreply.github.com`,
+  };
+}
 
 export interface VerifyOrchestratorDeps {
   store: CodingStore;
@@ -243,7 +250,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       commitMessage: task.goal,
       signingKeyPath: askpass.signingKeyPath,
       askpassEnv: askpass.env,
-      author: COMMIT_AUTHOR,
+      author: commitAuthorFor(identity),
     });
 
     if (commitResult.kind === "branch_conflict") {

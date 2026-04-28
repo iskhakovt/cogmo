@@ -373,6 +373,8 @@ beforeEach(async () => {
     pat: giteaPat,
     sshPrivateKey: keys.privateKey,
     sshPublicKey: keys.publicKey,
+    login: GITEA_USER,
+    id: "1",
   };
   secrets.set(gitHubIdentitySecretName("default"), serializeGitHubIdentity(identity));
 

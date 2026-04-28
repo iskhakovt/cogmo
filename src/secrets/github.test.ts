@@ -16,6 +16,8 @@ const VALID: GitHubIdentity = {
   sshPrivateKey:
     "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA...AAAA\n-----END OPENSSH PRIVATE KEY-----",
   sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK... cogmo-bot",
+  login: "cogmo-bot",
+  id: "12345",
 };
 
 class FakeLookup implements GitHubIdentitySecretsLookup {
@@ -48,9 +50,15 @@ describe("GitHubIdentitySchema", () => {
   it("rejects missing fields", () => {
     expect(GitHubIdentitySchema.safeParse({ ...VALID, pat: undefined }).success).toBe(false);
     expect(GitHubIdentitySchema.safeParse({ ...VALID, sshPrivateKey: "" }).success).toBe(false);
+    expect(GitHubIdentitySchema.safeParse({ ...VALID, login: undefined }).success).toBe(false);
+    expect(GitHubIdentitySchema.safeParse({ ...VALID, id: undefined }).success).toBe(false);
     expect(
       GitHubIdentitySchema.safeParse({ pat: VALID.pat, sshPublicKey: VALID.sshPublicKey }).success,
     ).toBe(false);
+  });
+
+  it("rejects non-numeric id", () => {
+    expect(GitHubIdentitySchema.safeParse({ ...VALID, id: "not-a-number" }).success).toBe(false);
   });
 
   it("rejects unknown fields (strict)", () => {

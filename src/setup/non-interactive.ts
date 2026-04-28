@@ -68,6 +68,8 @@ export interface ValidatedNonInteractive {
   telegramBotUsername?: string;
   /** GitHub bot account login (from `GET /user`); `undefined` when no PAT was supplied. */
   githubLogin?: string;
+  /** GitHub bot account numeric id, as a string. Pairs with `githubLogin`. */
+  githubUserId?: string;
 }
 
 /** Thrown when one or more provider/channel validations fail. */
@@ -104,6 +106,7 @@ export async function validateNonInteractive(
     answers: parsed.value,
     ...(summary.telegramBotUsername && { telegramBotUsername: summary.telegramBotUsername }),
     ...(summary.githubLogin && { githubLogin: summary.githubLogin }),
+    ...(summary.githubUserId && { githubUserId: summary.githubUserId }),
   });
 }
 
@@ -116,7 +119,7 @@ export async function persistNonInteractive(
   deps: PersistDeps,
   validated: ValidatedNonInteractive,
 ): Promise<void> {
-  const { answers, telegramBotUsername, githubLogin } = validated;
+  const { answers, telegramBotUsername, githubLogin, githubUserId } = validated;
 
   const { userId } = await seedDefaults(deps.agentStore, deps.transportStore);
 
@@ -145,7 +148,7 @@ export async function persistNonInteractive(
 
   let generatedSshPublicKey: string | undefined;
   if (answers.githubPat) {
-    generatedSshPublicKey = await persistGitHubIdentity(deps, answers, githubLogin);
+    generatedSshPublicKey = await persistGitHubIdentity(deps, answers, githubLogin, githubUserId);
   }
 
   logger.info(
@@ -200,6 +203,7 @@ interface ValidationSummary {
   failures: string[];
   telegramBotUsername?: string;
   githubLogin?: string;
+  githubUserId?: string;
 }
 
 async function validateAll(
@@ -244,12 +248,14 @@ async function validateAll(
   // GitHub PAT (optional — required only when the operator is wiring up the
   // coding-delegation pipeline).
   let githubLogin: string | undefined;
+  let githubUserId: string | undefined;
   if (answers.githubPat) {
     const gh = await validators.githubPat(answers.githubPat);
     if (!gh.valid) {
       failures.push(`GitHub PAT: ${gh.error ?? "invalid"}`);
     } else {
       githubLogin = gh.meta?.login;
+      githubUserId = gh.meta?.id;
     }
   }
   // Reject `COGMO_GITHUB_SSH_PRIVATE_KEY` loudly — silently substituting a
@@ -270,6 +276,7 @@ async function validateAll(
     failures,
     ...(telegramBotUsername && { telegramBotUsername }),
     ...(githubLogin && { githubLogin }),
+    ...(githubUserId && { githubUserId }),
   };
 }
 
@@ -386,20 +393,29 @@ async function persistGitHubIdentity(
   deps: PersistDeps,
   answers: NonInteractiveAnswers,
   githubLogin: string | undefined,
+  githubUserId: string | undefined,
 ): Promise<string> {
   if (!answers.githubPat) {
     throw new Error("persistGitHubIdentity called without a PAT");
+  }
+  if (!githubLogin || !githubUserId) {
+    // `validateGitHubPat` returns valid:false when either field is missing,
+    // so by here the validation gate guarantees both are set. Defensive
+    // throw for the type-narrow.
+    throw new Error("persistGitHubIdentity called without a validated login + id");
   }
 
   // `githubSshPrivateKey` is rejected at the validation phase — by the time
   // we get here, the field is guaranteed to be undefined (or the run already
   // aborted). Always generate.
-  const keys = generateSshKeyPair(`cogmo-bot@${githubLogin ?? "github"}`);
+  const keys = generateSshKeyPair(`cogmo-bot@${githubLogin}`);
 
   const identity: GitHubIdentity = {
     pat: answers.githubPat,
     sshPrivateKey: keys.privateKey,
     sshPublicKey: keys.publicKey,
+    login: githubLogin,
+    id: githubUserId,
   };
 
   const secretName = gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME);

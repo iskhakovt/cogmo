@@ -447,20 +447,31 @@ async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
     p.log.warn("Skipping GitHub identity. Re-run `cogmo setup` to try again.");
     return;
   }
-  s.stop(`PAT validated as @${result.meta?.login}.`);
+  // login + id come from `GET /user`; both are required by the schema.
+  // `validateGitHubPat` already short-circuits with `valid:false` when
+  // either is absent, so by here we trust them.
+  const login = result.meta?.login ?? "";
+  const userId = result.meta?.id ?? "";
+  if (!login || !userId) {
+    s.stop("Validation succeeded but `login`/`id` were missing — aborting.");
+    return;
+  }
+  s.stop(`PAT validated as @${login} (id ${userId}).`);
 
-  const keys = generateSshKeyPair(`cogmo-bot@${result.meta?.login ?? "github"}`);
+  const keys = generateSshKeyPair(`cogmo-bot@${login}`);
 
   const identity: GitHubIdentity = {
     pat,
     sshPrivateKey: keys.privateKey,
     sshPublicKey: keys.publicKey,
+    login,
+    id: userId,
   };
 
   await deps.secretsStore.putSecret({
     name: gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME),
     plaintext: serializeGitHubIdentity(identity),
-    description: `GitHub identity (@${result.meta?.login ?? "unknown"})`,
+    description: `GitHub identity (@${login})`,
   });
   await deps.secretsStore.markValidated(gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME));
 
@@ -504,18 +515,35 @@ async function collectAndStorePat(deps: WizardDeps, existing: GitHubIdentity): P
     p.log.warn("Keeping the previous PAT.");
     return;
   }
-  s.stop(`PAT validated as @${result.meta?.login}.`);
+  const login = result.meta?.login ?? "";
+  const userId = result.meta?.id ?? "";
+  if (!login || !userId) {
+    s.stop("Validation succeeded but `login`/`id` were missing — keeping the previous PAT.");
+    return;
+  }
+  // Reject a PAT that authenticates as a different account — the existing
+  // signing key wouldn't match, so commit signatures would show "Unverified"
+  // on github.com. The operator should pick "Regenerate" instead.
+  if (existing.login !== login) {
+    s.stop(
+      `New PAT authenticates as @${login}, but the stored signing key is for @${existing.login}. Run "Regenerate" to rotate both together.`,
+    );
+    return;
+  }
+  s.stop(`PAT validated as @${login}.`);
 
   const identity: GitHubIdentity = {
     pat,
     sshPrivateKey: existing.sshPrivateKey,
     sshPublicKey: existing.sshPublicKey,
+    login,
+    id: userId,
   };
 
   await deps.secretsStore.putSecret({
     name: gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME),
     plaintext: serializeGitHubIdentity(identity),
-    description: `GitHub identity (@${result.meta?.login ?? "unknown"})`,
+    description: `GitHub identity (@${login})`,
   });
   await deps.secretsStore.markValidated(gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME));
   p.log.success("GitHub PAT rotated.");
