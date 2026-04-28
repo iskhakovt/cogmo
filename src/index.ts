@@ -98,6 +98,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       runtime: env.SANDBOX_RUNTIME,
       instanceId: instance.id,
       proxy,
+      askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
     });
     const { orphansReaped } = await sandbox.reconcileCrashedInstances(instance.id);
     if (orphansReaped > 0) {

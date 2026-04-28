@@ -494,6 +494,18 @@ Two viable patterns, each with real costs:
 
 **P1 decision: ship pattern A.** Pair it with short-lived PATs (fine-grained, per-repo, quarterly rotation on the bot account) and aggressive teardown. Revisit vault socket in P2 alongside the GitHub App migration, when we'll have installation tokens that auto-expire in 1 hour and benefit most from no-disk storage.
 
+**Slice 4.0d wiring (concrete shape).** The orchestrator provisions a per-task askpass directory before `createTaskContainer`:
+
+```
+${SANDBOX_ASKPASS_DIR}/<rootTaskId>/
+  helper           0700  — `#!/bin/sh; exec /bin/cat /.cogmo-askpass/pat`
+  pat              0600  — bot account's fine-grained PAT
+  signing-key      0600  — OpenSSH-armored Ed25519 private key
+  signing-key.pub  0644  — corresponding `ssh-ed25519 ...` line
+```
+
+The directory is bind-mounted **read-only** at `/.cogmo-askpass/` inside the container. `provisionAskpass` returns env vars to thread into `exec` — `GIT_ASKPASS=/.cogmo-askpass/helper` and `GIT_TERMINAL_PROMPT=0`; commit signing happens via `git -c gpg.format=ssh -c user.signingkey=/.cogmo-askpass/signing-key` (env vars don't drive the signing path). `LocalInProcessSandbox.stopTask` calls `cleanupAskpass` in its `try/finally`, idempotent under retries and a no-op when the directory was never provisioned. See `src/sandbox/askpass.ts`.
+
 ## Repo Registry `[proposed]`
 
 Repos are first-class. A repo must be registered (via CLI or control command) before Cogmo will work on it:
