@@ -330,6 +330,42 @@ describe("runCodingVerify", () => {
     expect(reloaded?.status).toBe("queued");
   });
 
+  it("legacy bundle (no login + id) commits with the fallback author", async () => {
+    // Identities provisioned before the canonical-author change lack
+    // login + id. The orchestrator must still drive verify → commit →
+    // push → PR using a generic noreply email rather than failing on
+    // the missing fields.
+    secrets = new FakeSecretsStore();
+    const { login, id, ...legacy } = VALID_IDENTITY;
+    void login;
+    void id;
+    secrets.set(gitHubIdentitySecretName("default"), serializeGitHubIdentity(legacy));
+
+    const handle = fakeContainerHandle(successScript);
+    const deps = makeDeps(handle);
+    deps.secretsStore = secrets as unknown as SecretsStore;
+    const create = vi.fn(async () => ({
+      data: { html_url: "https://github.com/user/cogmo/pull/99", number: 99 },
+    }));
+    deps.octokitFactory = fakeOctokitFactory(create);
+    const inngest = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Pick<
+      import("inngest").Inngest,
+      "send"
+    >;
+
+    const { taskId } = await seedTask();
+    const result = await runCodingVerify({ taskId, deps, stepRun, inngest });
+    expect(result.status).toBe("pr_open");
+
+    const execMock = handle.exec as unknown as ReturnType<typeof vi.fn>;
+    const commitCall = execMock.mock.calls.find(
+      (c) => Array.isArray(c[0]) && (c[0] as string[]).includes("commit"),
+    );
+    const commitArgs = commitCall?.[0] as string[];
+    expect(commitArgs).toContain("user.email=cogmo-bot@users.noreply.github.com");
+    expect(commitArgs).toContain("user.name=Cogmo Bot");
+  });
+
   it("calls stopTask in the finally even when verify fails", async () => {
     const handle = fakeContainerHandle({
       verify: { stdout: "boom\n", exitCode: 1 },

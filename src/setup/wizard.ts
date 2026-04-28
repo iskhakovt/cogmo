@@ -521,10 +521,15 @@ async function collectAndStorePat(deps: WizardDeps, existing: GitHubIdentity): P
     s.stop("Validation succeeded but `login`/`id` were missing — keeping the previous PAT.");
     return;
   }
-  // Reject a PAT that authenticates as a different account — the existing
-  // signing key wouldn't match, so commit signatures would show "Unverified"
-  // on github.com. The operator should pick "Regenerate" instead.
-  if (existing.login !== login) {
+  // Reject a PAT that authenticates as a different account when we know
+  // the previous account — the existing signing key wouldn't match, so
+  // commit signatures would show "Unverified" on github.com. The operator
+  // should pick "Regenerate" instead.
+  //
+  // `existing.login` may be absent on bundles provisioned before slice 4.0i
+  // added the field; in that case we can't compare and just trust the new
+  // PAT (the next read augments the bundle with the captured login + id).
+  if (existing.login && existing.login !== login) {
     s.stop(
       `New PAT authenticates as @${login}, but the stored signing key is for @${existing.login}. Run "Regenerate" to rotate both together.`,
     );

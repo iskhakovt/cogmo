@@ -47,18 +47,36 @@ describe("GitHubIdentitySchema", () => {
     expect(GitHubIdentitySchema.safeParse(VALID).success).toBe(true);
   });
 
-  it("rejects missing fields", () => {
+  it("rejects missing required fields", () => {
     expect(GitHubIdentitySchema.safeParse({ ...VALID, pat: undefined }).success).toBe(false);
     expect(GitHubIdentitySchema.safeParse({ ...VALID, sshPrivateKey: "" }).success).toBe(false);
-    expect(GitHubIdentitySchema.safeParse({ ...VALID, login: undefined }).success).toBe(false);
-    expect(GitHubIdentitySchema.safeParse({ ...VALID, id: undefined }).success).toBe(false);
     expect(
       GitHubIdentitySchema.safeParse({ pat: VALID.pat, sshPublicKey: VALID.sshPublicKey }).success,
     ).toBe(false);
   });
 
-  it("rejects non-numeric id", () => {
+  it("accepts legacy bundles without login + id (pre-4.0i provisions)", () => {
+    // Identities provisioned before the canonical-author change lack
+    // these two fields. They must still parse so a Cogmo upgrade doesn't
+    // break the operator's next coding task; downstream commit author
+    // derivation falls back to a generic noreply email.
+    const { login, id, ...legacy } = VALID;
+    void login;
+    void id;
+    const result = GitHubIdentitySchema.safeParse(legacy);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.login).toBeUndefined();
+      expect(result.data.id).toBeUndefined();
+    }
+  });
+
+  it("rejects non-numeric id when the field IS present", () => {
     expect(GitHubIdentitySchema.safeParse({ ...VALID, id: "not-a-number" }).success).toBe(false);
+  });
+
+  it("rejects empty-string login when the field IS present", () => {
+    expect(GitHubIdentitySchema.safeParse({ ...VALID, login: "" }).success).toBe(false);
   });
 
   it("rejects unknown fields (strict)", () => {
