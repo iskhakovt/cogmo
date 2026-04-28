@@ -24,7 +24,7 @@ import type { Inngest } from "inngest";
 import { codingTaskCliDone } from "../../inngest/events.js";
 import type { StepRun } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
-import { provisionAskpass } from "../../sandbox/askpass.js";
+import { cleanupAskpass, provisionAskpass } from "../../sandbox/askpass.js";
 import type { Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import {
@@ -154,6 +154,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
 
   let executeStream: ExecuteStreamHandle | null = null;
   let containerCreated = false;
+  let askpassProvisioned = false;
 
   try {
     // Conditional UPDATE pending_verify → verifying so a duplicate
@@ -170,7 +171,12 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       return { status: "skipped" };
     }
 
-    // Provision askpass material — host-side, per-task, wiped on stopTask.
+    // Provision askpass material — host-side, per-task. Mark before the
+    // step body executes so a partial provision (mkdir succeeded but a
+    // writeFileSync threw) still triggers cleanup in the finally block.
+    // The cleanup is a recursive `rm -rf`; absent or partial dirs are
+    // no-ops so over-cleaning is harmless.
+    askpassProvisioned = true;
     const askpass = await stepRun("provision-askpass", async () =>
       provisionAskpass({ baseDir: askpassBaseDir, rootTaskId: taskId, identity }),
     );
@@ -218,7 +224,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     );
     if (!verifyResult.ok) {
       const reason = `verify failed (exit ${verifyResult.exitCode})\n\n${verifyResult.output}`;
-      return await failTask(stepRun, store, taskId, reason);
+      return await failTask(stepRun, store, taskId, reason, executeStream);
     }
 
     // 2. Commit + push ────────────────────────────────────────────────
@@ -239,6 +245,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         store,
         taskId,
         `push rejected — branch conflict on cogmo/<idShort>:\n\n${commitResult.output}`,
+        executeStream,
       );
     }
     if (commitResult.kind === "auth_failed") {
@@ -247,6 +254,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         store,
         taskId,
         `push rejected — GitHub authentication failed:\n\n${commitResult.output}`,
+        executeStream,
       );
     }
     if (commitResult.kind === "failed") {
@@ -255,6 +263,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         store,
         taskId,
         `commit+push failed:\n\n${commitResult.output}`,
+        executeStream,
       );
     }
 
@@ -299,6 +308,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         store,
         taskId,
         `draft PR open failed (auth): ${prResult.message}`,
+        executeStream,
       );
     }
     if (prResult.kind === "validation_failed") {
@@ -307,6 +317,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         store,
         taskId,
         `draft PR open failed (validation): ${prResult.message}`,
+        executeStream,
       );
     }
     if (prResult.kind === "failed") {
@@ -314,7 +325,13 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       // slice4-plan.md. Surface as failed so the operator sees it on
       // Telegram and can re-delegate; the pushed branch is preserved
       // upstream.
-      return await failTask(stepRun, store, taskId, `draft PR open failed: ${prResult.message}`);
+      return await failTask(
+        stepRun,
+        store,
+        taskId,
+        `draft PR open failed: ${prResult.message}`,
+        executeStream,
+      );
     }
 
     const metadata: PrMetadata = {
@@ -357,11 +374,17 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     if (containerCreated) {
       // stopTask cascades the container kill AND wipes the per-task askpass
       // dir (slice 4.0d). Idempotent — safe to call even when create-
-      // container failed mid-flight (the partial state is the askpass
-      // dir, which `cleanupAskpass` removes).
+      // container failed mid-flight.
       await sandbox.stopTask(taskId).catch((err: unknown) => {
         log.warn({ err, taskId }, "verify: stopTask failed");
       });
+    } else if (askpassProvisioned) {
+      // Container creation never started (or failed before stopTask could
+      // be wired up), so `sandbox.stopTask` would be a no-op and the
+      // askpass dir would leak the PAT + signing key. Wipe explicitly.
+      // Idempotent + tolerant of missing dirs (the recursive remove uses
+      // force:true), so it's safe even when provisioning itself threw.
+      cleanupAskpass({ baseDir: askpassBaseDir, rootTaskId: taskId });
     }
   }
 }
@@ -371,10 +394,18 @@ async function failTask(
   store: CodingStore,
   taskId: string,
   reason: string,
+  executeStream?: ExecuteStreamHandle | null,
 ): Promise<VerifyOrchestratorResult> {
   await stepRun("set-status-failed", () =>
     store.updateTaskStatus({ id: taskId, status: "failed", failureReason: reason }),
   );
+  // Notify the Telegram-visible stream so the operator-facing message
+  // shows the failure reason rather than freezing on the last edit.
+  // Wrapped — a delivery hiccup must not bubble out of `failTask` and
+  // overwrite the reason we just persisted.
+  if (executeStream) {
+    await executeStream.fail(reason).catch(() => {});
+  }
   return { status: "failed", failureReason: reason };
 }
 
