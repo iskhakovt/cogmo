@@ -97,13 +97,9 @@ export async function runVerifyStreaming(params: VerifyParams): Promise<VerifyRe
   });
 
   let timeoutHandle: NodeJS.Timeout | undefined;
-  let timedOut = false;
   const timeoutPromise = new Promise<{ kind: "timeout" }>((resolve) => {
     timeoutHandle = setTimeout(
-      () => {
-        timedOut = true;
-        resolve({ kind: "timeout" });
-      },
+      () => resolve({ kind: "timeout" }),
       Math.max(1, timeoutSeconds * 1000),
     );
   });
