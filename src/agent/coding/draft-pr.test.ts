@@ -86,6 +86,26 @@ describe("buildBody", () => {
     expect(body).toContain("_(no plan recorded)_");
     expect(body).toContain("_(no output)_");
   });
+
+  it("widens the fence past any backtick run in the verify output", () => {
+    // Verify output contains a 3-backtick run (a literal markdown fence).
+    // The wrapping fence must be >=4 backticks or the inner ``` would close
+    // the outer fence prematurely and leak the rest of the body as raw text.
+    const body = buildBody({
+      plan: "p",
+      verifyOutput: "before\n```\nfence inside\n```\nafter",
+    });
+    expect(body).toMatch(/\n````\nbefore\n```\nfence inside\n```\nafter\n````\n/);
+  });
+
+  it("widens further when the inner content contains 4+ backticks", () => {
+    const body = buildBody({
+      plan: "p",
+      verifyOutput: "````\ndeep\n````",
+    });
+    // Outer fence must be at least 5 backticks.
+    expect(body).toMatch(/\n`````\n````\ndeep\n````\n`````\n/);
+  });
 });
 
 const BASE_PARAMS = {

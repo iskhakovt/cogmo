@@ -468,9 +468,9 @@ The final artifact is a **draft PR**. Cogmo never pushes to `main`, never merges
 
 **Setup wizard (slice 4.0b):** prompts for the PAT, validates against `GET https://api.github.com/user`, generates an Ed25519 keypair via `micro-key-producer/ssh.js` (returns OpenSSH-armored `privateKey` + `publicKey` strings + SHA-256 fingerprint), and prints the public key with a `https://github.com/settings/ssh/new` link instructing the operator to install it as a **signing key**. The private key never leaves the encrypted DB. Non-interactive setup accepts `COGMO_GITHUB_PAT` (with `_FILE` variant); pre-supplied private keys are not yet importable (slice 4 always generates a fresh keypair and prints the public key for installation).
 
-**Per-task delivery (slice 4.0d):** the PAT is materialised into a per-task `GIT_ASKPASS` helper file under `/run/cogmo/askpass/<task-id>/`; the SSH private key is dropped alongside and referenced via `git config user.signingkey <path>`. Both are wiped on teardown.
+**Per-task delivery (slice 4.0d):** the PAT is materialised into a per-task `GIT_ASKPASS` helper file under `/run/cogmo/askpass/<task-id>/`; the SSH private key is dropped alongside and referenced per-invocation via `git -c gpg.format=ssh -c user.signingkey=<path> commit -S` (no global config — the per-`-c` form keeps the signing scope to the single commit and avoids polluting the in-container repo's `.git/config`). Both files are wiped on teardown.
 
-**SSH commit signing:** `git config gpg.format ssh` + the per-task signing key file. Commits show "Verified" on GitHub. Uses OpenSSH, no GPG faff.
+**SSH commit signing:** OpenSSH key + the per-invocation `-c gpg.format=ssh -c user.signingkey=<path>` flags above. Commits show "Verified" on GitHub once the public key is registered as a *signing key* on the bot account. No GPG faff.
 
 **P2+:** Migrate to GitHub App with installation tokens. Short-lived tokens per task, cleaner audit trail, standard practice (Dependabot, Renovate, Copilot cloud agent all use this). Deferred because App setup is fiddly for a one-user tool and P1's PAT model is functionally equivalent for audit trail + signing.
 

@@ -320,9 +320,15 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("model", (ctx) => handleModel(transport, toCmdCtx(ctx)));
   bot.command("repo", (ctx) => handleRepo(transport, toCmdCtx(ctx), repoDialogs));
 
-  // Mid-dialog abort for /profile new|edit and /repo add flows.
+  // Mid-dialog abort for /profile new|edit and /repo add flows. Evaluate
+  // both branches (no `||` short-circuit) so a hypothetical "both dialogs
+  // simultaneously active" state — possible only if a future code path
+  // forgets to clear one before opening the other — gets fully torn down
+  // rather than leaving the second FSM live.
   bot.command("cancel", async (ctx) => {
-    if (profileDialogs.cancel(ctx.chat.id) || repoDialogs.cancel(ctx.chat.id)) {
+    const cancelledProfile = profileDialogs.cancel(ctx.chat.id);
+    const cancelledRepo = repoDialogs.cancel(ctx.chat.id);
+    if (cancelledProfile || cancelledRepo) {
       await ctx.reply("Cancelled.");
     } else {
       await ctx.reply("Nothing to cancel.");

@@ -100,6 +100,12 @@ export function truncateTitle(goal: string): string {
 export function buildBody(params: { plan: string; verifyOutput: string }): string {
   const plan = params.plan.trim() || "_(no plan recorded)_";
   const verify = params.verifyOutput.trim() || "_(no output)_";
+  // CommonMark closes a fenced block on a line whose backtick run is at
+  // least as long as the opening fence. Pick a fence that's strictly
+  // longer than any backtick run inside the body so verify output
+  // containing literal triple-backticks (markdown rendered docs in test
+  // output, etc.) doesn't truncate the fence early.
+  const fence = "`".repeat(Math.max(3, longestBacktickRun(verify) + 1));
   return [
     BODY_PLAN_HEADER,
     "",
@@ -107,13 +113,28 @@ export function buildBody(params: { plan: string; verifyOutput: string }): strin
     "",
     BODY_VERIFY_HEADER,
     "",
-    "```",
+    fence,
     verify,
-    "```",
+    fence,
     "",
     BODY_FOOTER,
     "",
   ].join("\n");
+}
+
+/** Length of the longest run of consecutive backticks in `s`. */
+function longestBacktickRun(s: string): number {
+  let max = 0;
+  let cur = 0;
+  for (const ch of s) {
+    if (ch === "`") {
+      cur += 1;
+      if (cur > max) max = cur;
+    } else {
+      cur = 0;
+    }
+  }
+  return max;
 }
 
 export async function runOpenDraftPr(params: OpenDraftPrParams): Promise<OpenDraftPrResult> {
