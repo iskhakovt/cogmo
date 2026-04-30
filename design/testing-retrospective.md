@@ -372,20 +372,16 @@ Ordered by leverage (bang-for-buck). Each is a PR-sized scope.
 
 ---
 
-### Slice B: Stream-JSON Error Paths (plan, execute, verify)
+### Slice B: Stream-JSON Error Paths (plan, execute, verify) — **shipped 2026-04-30**
 
-**Files:** `src/agent/coding/claude.test.ts`, `src/agent/coding/backend.ts`.
+**Files:** `src/agent/coding/claude.test.ts`.
 
-**Work:**
-- Add tests for malformed JSONL (truncated JSON, missing fields, unknown event kinds).
-- Add tests for backpressure / early stdin close.
-- Add tests for timeout (no plan_ready after N seconds).
-- Add tests for event out-of-order (e.g., tool_call before session_id).
-- ~10 tests, ~100 lines of code.
+**Work delivered:**
+- 10 new tests under `describe("ClaudeCodeBackend stream-json schema robustness")` covering: unknown top-level event types, missing `type` field, malformed system events (no session_id, non-init subtypes), idempotent `session_started` on repeated init events, tool_use blocks missing `id` / `name`, tool_result with non-string content, can_use_tool control_request without `tool_name`, result with no usage block, tool_result-before-tool_use id-as-name fallback, text_delta-before-session_started ordering contract.
 
-**Effort:** ~4 hours.
-
-**Payoff:** Robustness against real CLI misbehavior; catches parser bugs early.
+**Deferred (out of scope for parser tests):**
+- Backpressure / early stdin close — runner-level (`runClaudePlan` / `runClaudeExecute` lifecycle), not parser-level. Best exercised via the integration test tier with a real subprocess.
+- Plan-ready timeout — orchestrator concern (Inngest `step.run` boundary). Belongs in `orchestrator.test.ts` or a new integration test, not `claude.test.ts`.
 
 ---
 
