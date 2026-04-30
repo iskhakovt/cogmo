@@ -2,6 +2,7 @@ import type { Inngest } from "inngest";
 import type { JsonValue } from "type-fest";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CodingStreamingRegistry } from "../agent/coding/streaming-registry.js";
+import type { SkillStore } from "../skills/store/index.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { TransportStore } from "./store/index.js";
 import type { Transport } from "./transport.js";
@@ -22,6 +23,19 @@ export interface CodingProgressDeps {
 }
 
 /**
+ * Skills-approval wiring — adapters that show approve-tier deploy keyboards
+ * (today: Telegram) use this to register an Inngest function listening on
+ * `skills/deploy/approval-requested`. Posts the inline keyboard into the
+ * originating conversation's active session. Adapters without skills UX
+ * leave it undefined.
+ */
+export interface SkillsApprovalDeps {
+  inngest: Inngest;
+  skillStore: SkillStore;
+  transportStore: TransportStore;
+}
+
+/**
  * Dependencies available to adapter setup.
  */
 export interface AdapterDeps {
@@ -32,6 +46,8 @@ export interface AdapterDeps {
   attachments: AttachmentStore;
   /** Optional — present only when the sandbox module is initialized. */
   codingProgress?: CodingProgressDeps;
+  /** Optional — present only when the skills module is wired. */
+  skillsApproval?: SkillsApprovalDeps;
 }
 
 /**

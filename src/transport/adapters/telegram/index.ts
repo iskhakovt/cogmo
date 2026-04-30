@@ -8,9 +8,18 @@ import {
 import { PLAN_CALLBACK_REGEX, parsePlanCallback } from "../../../agent/coding/plan-keyboard.js";
 import { CodingProgressSubscriber } from "../../../agent/coding/progress-subscriber.js";
 import { parseGeneratedImagePayload } from "../../../agent/image-tools.js";
-import { codingTaskPermissionRequested, codingTaskStart } from "../../../inngest/events.js";
+import {
+  codingTaskPermissionRequested,
+  codingTaskStart,
+  skillsDeployApprovalRequested,
+} from "../../../inngest/events.js";
 import type { StreamEvent } from "../../../llm/types.js";
 import { logger } from "../../../logger.js";
+import {
+  buildSkillsApprovalKeyboard,
+  parseSkillsApprovalCallback,
+  SKILLS_APPROVAL_CALLBACK_REGEX,
+} from "../../../skills/skills-keyboard.js";
 import {
   type AdapterDeps,
   type AdapterModule,
@@ -33,6 +42,7 @@ import {
   handleResume,
   handleResumeCallback,
   handleSessions,
+  handleSkillsApprovalCallback,
   type TelegramCommandContext,
 } from "./commands.js";
 import { ProfileDialogs } from "./profile-dialog.js";
@@ -401,6 +411,29 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     await ctx.answerCallbackQuery({ text: outcome.toast });
   });
 
+  // Skills approval keyboard: Approve / Deny — callback_data =
+  // "skill:<pendingId>:<approve|deny>"
+  bot.callbackQuery(SKILLS_APPROVAL_CALLBACK_REGEX, async (ctx) => {
+    const data = ctx.callbackQuery?.data;
+    const fromId = ctx.from?.id;
+    if (!data || fromId === undefined) return;
+    const parsed = parseSkillsApprovalCallback(data);
+    if (!parsed) return;
+
+    const outcome = await handleSkillsApprovalCallback(transport, parsed, String(fromId));
+    try {
+      await ctx.editMessageText(outcome.editText, {
+        reply_markup: { inline_keyboard: [] },
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "";
+      if (!msg.includes("message is not modified")) {
+        logger.warn({ err }, "telegram: failed to edit skills approval message");
+      }
+    }
+    await ctx.answerCallbackQuery({ text: outcome.toast });
+  });
+
   async function resolveOrCreateSession(addr: string, handle: string) {
     let session = await transport.resolveSession(addr);
     if (!session) {
@@ -567,6 +600,56 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
           // escape-or-break tradeoff entirely; the prompt is short and
           // doesn't need formatting.
           const text = `🔐 Permission requested: ${tool}\n\nAllow this tool call?`;
+          await bot.api.sendMessage(Number(tgSession.platformAddress), text, {
+            reply_markup: keyboard,
+          });
+          return { posted: true };
+        },
+      ),
+    );
+  }
+
+  // Skills approve-tier deploy gate — listen on
+  // skills/deploy/approval-requested, post the inline keyboard message into
+  // the originating conversation's session. The runner's register call has
+  // already returned with status=pending_approval; the keyboard tap routes
+  // straight to transport.skills.approveDeploy/denyDeploy.
+  if (deps.skillsApproval) {
+    const { inngest, skillStore, transportStore } = deps.skillsApproval;
+    const channelId = deps.channelId;
+    functions.push(
+      inngest.createFunction(
+        {
+          id: `telegram-skills-approval-${channelId}`,
+          triggers: [skillsDeployApprovalRequested],
+          retries: 0,
+        },
+        async ({ event }) => {
+          const { pendingId, skillName, gitSha, conversationId } = event.data;
+
+          const sessions = await transportStore.getActiveSessionsForConversation(conversationId);
+          const tgSession = sessions.find((s) => s.channelId === channelId);
+          if (!tgSession) return { skipped: "no telegram session for this conversation" };
+
+          // Fetch the deploy + skill row to surface declared effects on the
+          // approval prompt — gives the user the "what am I approving"
+          // context without requiring it on the wire.
+          const deploy = await skillStore.getDeployById(pendingId);
+          const skill = deploy ? await skillStore.getSkillById(deploy.skillId) : null;
+          const effects =
+            skill && skill.effects.length > 0 ? skill.effects.join(", ") : "(none declared)";
+
+          const keyboard = buildSkillsApprovalKeyboard(pendingId);
+          // Plain text — skill names and effect labels are user-controlled
+          // (manifest authors include the agent itself); a Markdown parse
+          // failure would 400 the whole send. Same reasoning as the
+          // permission-requested message above.
+          const text =
+            `🛡️ Skill deploy awaiting approval: ${skillName}\n\n` +
+            `Declared effects: ${effects}\n` +
+            `Commit: ${gitSha.slice(0, 7)}\n\n` +
+            `Approve to advance main; deny to leave the deploy pending. ` +
+            `You can also re-register a different version.`;
           await bot.api.sendMessage(Number(tgSession.platformAddress), text, {
             reply_markup: keyboard,
           });
