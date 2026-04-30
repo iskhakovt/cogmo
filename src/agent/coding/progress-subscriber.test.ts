@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CodingProgressSubscriber, type ProgressBot } from "./progress-subscriber.js";
 import { CodingStreamingRegistry } from "./streaming-registry.js";
 
@@ -193,5 +193,149 @@ describe("CodingProgressSubscriber", () => {
     });
     expect(() => registry.publish(TASK_ID, { kind: "text", delta: "y" })).not.toThrow();
     await new Promise((r) => setImmediate(r));
+  });
+
+  describe("single-message-edit invariant", () => {
+    it("uses the same telegram message_id across many text deltas", async () => {
+      const { registry, bot } = start();
+
+      // 20 text deltas, no throttle — every one must edit the SAME message
+      // returned by the initial sendMessage. The chat must never see a
+      // second post.
+      for (let i = 0; i < 20; i++) {
+        registry.publish(TASK_ID, { kind: "text", delta: `chunk-${i} ` });
+        await new Promise((r) => setImmediate(r));
+      }
+
+      expect(bot.sent).toHaveLength(1);
+      expect(bot.edits).toHaveLength(19);
+      // Every edit targets the single message_id returned by sendMessage —
+      // the fake bot returns 1001 for the first (and only) sendMessage call.
+      const distinctEditedIds = new Set(bot.edits.map((e) => e.messageId));
+      expect(distinctEditedIds.size).toBe(1);
+      expect(distinctEditedIds.has(1001)).toBe(true);
+    });
+
+    it("keeps the message_id stable across plan -> execute -> complete phases", async () => {
+      const { registry, bot } = start();
+
+      // Walk the full lifecycle: planning deltas, plan_finalized,
+      // execute_started, execute deltas, execute_complete. All edits must
+      // target the same message_id.
+      registry.publish(TASK_ID, { kind: "text", delta: "draft " });
+      await new Promise((r) => setImmediate(r));
+      registry.publish(TASK_ID, { kind: "text", delta: "plan body" });
+      await new Promise((r) => setImmediate(r));
+      registry.publish(TASK_ID, { kind: "plan_finalized", plan: "## Plan\nfinal" });
+      await new Promise((r) => setImmediate(r));
+      registry.publish(TASK_ID, { kind: "execute_started" });
+      await new Promise((r) => setImmediate(r));
+      registry.publish(TASK_ID, { kind: "tool_call", tool: "Read" });
+      await new Promise((r) => setImmediate(r));
+      registry.publish(TASK_ID, { kind: "tool_result", tool: "Read", ok: true });
+      await new Promise((r) => setImmediate(r));
+      registry.publish(TASK_ID, {
+        kind: "execute_complete",
+        ok: true,
+        tokens: { input: 10, output: 5 },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // Exactly one initial post; everything else is an in-place edit.
+      expect(bot.sent).toHaveLength(1);
+      expect(bot.edits.length).toBeGreaterThanOrEqual(6);
+
+      const ids = new Set(bot.edits.map((e) => e.messageId));
+      expect(ids.size).toBe(1);
+      expect(ids.has(1001)).toBe(true);
+    });
+  });
+
+  describe("edit throttle", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("rate-limits text-delta edits within the configured interval", async () => {
+      // Fake only Date so setImmediate / microtasks still run normally.
+      // The subscriber's throttle uses Date.now() comparisons; `setImmediate`
+      // remains real so the queued bot.* promises drain between publishes.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(0));
+
+      const { registry, bot } = start({ editIntervalMs: 500 });
+
+      // First delta posts the message (initial post bypasses throttle).
+      registry.publish(TASK_ID, { kind: "text", delta: "a" });
+      await new Promise((r) => setImmediate(r));
+      expect(bot.sent).toHaveLength(1);
+      expect(bot.edits).toHaveLength(0);
+
+      // 10 deltas in a tight burst inside the 500ms window. Throttle should
+      // suppress all of them — Date.now() doesn't advance until we say so.
+      for (let i = 0; i < 10; i++) {
+        registry.publish(TASK_ID, { kind: "text", delta: `${i}` });
+        await new Promise((r) => setImmediate(r));
+      }
+      expect(bot.edits).toHaveLength(0);
+
+      // Cross the threshold; the next delta should produce one edit.
+      vi.setSystemTime(new Date(600));
+      registry.publish(TASK_ID, { kind: "text", delta: "after" });
+      await new Promise((r) => setImmediate(r));
+      expect(bot.edits).toHaveLength(1);
+      expect(bot.edits[0].text).toContain("after");
+    });
+
+    it("force-edits on plan_finalized even when the throttle window is open", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(0));
+
+      const { registry, bot } = start({ editIntervalMs: 500 });
+
+      // Initial post via a text delta.
+      registry.publish(TASK_ID, { kind: "text", delta: "drafting " });
+      await new Promise((r) => setImmediate(r));
+      expect(bot.sent).toHaveLength(1);
+
+      // A second text delta inside the window is throttled away.
+      vi.setSystemTime(new Date(50));
+      registry.publish(TASK_ID, { kind: "text", delta: "more" });
+      await new Promise((r) => setImmediate(r));
+      expect(bot.edits).toHaveLength(0);
+
+      // plan_finalized arrives while the throttle window is still open.
+      // Design contract: it must force-edit so the keyboard ships with the
+      // final plan body, not on a later throttled tick.
+      vi.setSystemTime(new Date(100));
+      registry.publish(TASK_ID, { kind: "plan_finalized", plan: "## Plan\nbody" });
+      await new Promise((r) => setImmediate(r));
+
+      expect(bot.edits).toHaveLength(1);
+      expect(bot.edits[0].text).toContain("Plan ready");
+      expect(bot.edits[0].text).toContain("## Plan\nbody");
+      expect(bot.edits[0].replyMarkup).toBeDefined();
+    });
+
+    it("force-edits on terminal failed event regardless of throttle", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(0));
+
+      const { registry, bot } = start({ editIntervalMs: 500 });
+
+      registry.publish(TASK_ID, { kind: "text", delta: "x" });
+      await new Promise((r) => setImmediate(r));
+      expect(bot.sent).toHaveLength(1);
+
+      // Failure arrives well inside the throttle window — must still edit
+      // immediately so the user sees the failure reason without delay.
+      vi.setSystemTime(new Date(20));
+      registry.publish(TASK_ID, { kind: "failed", reason: "boom" });
+      await new Promise((r) => setImmediate(r));
+
+      expect(bot.edits).toHaveLength(1);
+      expect(bot.edits[0].text).toContain("❌ Failed");
+      expect(bot.edits[0].text).toContain("boom");
+    });
   });
 });
