@@ -191,6 +191,16 @@ export class SkillRunnerImpl implements SkillRunner {
   async register(opts: { branch: string }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("register");
 
+    // Reject branch=main at the boundary. Without this guard, the register
+    // flow would (a) "fast-forward" main onto itself (no-op) and then
+    // (b) call `deleteRef("refs/heads/main")` in the same applyFilesystem
+    // step, which would drop the only authoritative ref. The deleteRef
+    // helper now refuses too (defense in depth), but rejecting at the entry
+    // gives a clear error before any git/DB work runs.
+    if (opts.branch === "main" || opts.branch === "refs/heads/main") {
+      return rejectedResult("", "invalid_branch: cannot register from 'main' itself");
+    }
+
     let branchSha: string;
     try {
       branchSha = await revParse(repoPath, `refs/heads/${opts.branch}`);
@@ -239,6 +249,23 @@ export class SkillRunnerImpl implements SkillRunner {
       };
     }
     const manifest = parsed.value.manifest;
+
+    // Compile the manifest's JSON Schemas BEFORE any filesystem / DB write.
+    // Without this, an invalid `inputs` / `outputs` schema would only surface
+    // at first invoke — by which point `update-ref refs/heads/main` has
+    // already moved main + the skills row is committed. Running ajv up-front
+    // makes "schema parses" part of the deploy contract, alongside manifest
+    // YAML and effect declarations.
+    const schemaErrors = this.#prevalidateSchemas(manifest);
+    if (schemaErrors.length > 0) {
+      return {
+        name: manifest.name,
+        riskTier: "notify",
+        status: "rejected",
+        gitSha: branchSha,
+        errors: schemaErrors,
+      };
+    }
 
     const classifierLog = classifyManifest(manifest);
 
@@ -291,15 +318,80 @@ export class SkillRunnerImpl implements SkillRunner {
       return rejectedResult(deploy.gitSha, "non_fast_forward_at_approve_time");
     }
 
+    // Re-read the manifest at deploy.gitSha so executeApprove can write the
+    // full set of manifest-derived columns (tier/effects/inputs/outputs/etc.)
+    // alongside gitSha. Without this projection the row would still reflect
+    // the prior live commit's manifest while pointing at the approved sha,
+    // which would silently mismatch tool definitions and ajv input
+    // validation against the actual code on disk.
+    let manifest: SkillManifest;
+    let body: string;
+    try {
+      const manifestSource = await gitShow(repoPath, deploy.gitSha, "SKILL.md");
+      body = await gitShow(repoPath, deploy.gitSha, "skill.py");
+      const parsed = parseManifest(manifestSource);
+      if (!parsed.isOk()) {
+        return rejectedResult(
+          deploy.gitSha,
+          `target_manifest_invalid: ${
+            parsed.error.kind === "invalid_manifest"
+              ? parsed.error.issues.join("; ")
+              : parsed.error.message
+          }`,
+        );
+      }
+      manifest = parsed.value.manifest;
+    } catch (e) {
+      if (e instanceof GitOpsError && e.code === "file_not_found") {
+        return rejectedResult(deploy.gitSha, "target_missing_source");
+      }
+      throw e;
+    }
+
+    if (manifest.name !== skill.name) {
+      return rejectedResult(
+        deploy.gitSha,
+        `target_skill_mismatch: deploy sha belongs to skill '${manifest.name}', not '${skill.name}'`,
+      );
+    }
+
+    const schemaErrors = this.#prevalidateSchemas(manifest);
+    if (schemaErrors.length > 0) {
+      return {
+        name: skill.name,
+        riskTier: deploy.riskTier,
+        status: "rejected",
+        gitSha: deploy.gitSha,
+        errors: schemaErrors,
+      };
+    }
+
     const result = await this.#store.executeApprove({
       pendingId: opts.pendingId,
       approvedBy: opts.approvedBy ?? null,
+      tier: manifest.tier,
+      // Preserve the deploy row's classified tier (which is what the user
+      // approved). Re-classifying here could promote an `approve` deploy to a
+      // different tier mid-flow, which would be confusing.
+      riskTier: deploy.riskTier,
+      effects: manifest.effects,
+      schedule: manifest.schedule ?? null,
+      inputs: manifest.inputs,
+      outputs: manifest.outputs ?? null,
       applyFilesystem: async () => {
         await updateRef(repoPath, "refs/heads/main", deploy.gitSha, mainSha ?? ZERO_SHA);
       },
     });
 
     if (result.kind === "live") {
+      // Warm the source cache with the just-approved manifest so the next
+      // listToolDefs / invoke read doesn't re-fetch from git.
+      const inputsValidator = this.#compileInputsValidator(manifest, "approve-warm");
+      this.#sourceCache.set(cacheKey(skill.name, deploy.gitSha), {
+        manifest,
+        body,
+        inputsValidator,
+      });
       return {
         name: result.skill.name,
         riskTier: result.skill.riskTier,
@@ -330,12 +422,18 @@ export class SkillRunnerImpl implements SkillRunner {
       throw e;
     }
 
-    // Re-classify the target sha so the audit trail records what we're
-    // rolling back *to* — useful if the prior code shape would now classify
-    // differently under a newer classifier version.
-    let classifierLog: ClassifierLog;
+    // Re-read the manifest at the target sha. We need it for two things:
+    // (a) verify manifest.name matches opts.name — without this, rolling
+    // back skill X to a sha that originally belonged to skill Y would
+    // silently rebind X to Y's code; (b) project the full set of
+    // manifest-derived columns (tier, effects, schedule, inputs, outputs,
+    // riskTier) into the skills row, so tool definitions and validation
+    // reflect what's actually on disk at the rolled-back sha.
+    let manifest: SkillManifest;
+    let body: string;
     try {
       const manifestSource = await gitShow(repoPath, targetSha, "SKILL.md");
+      body = await gitShow(repoPath, targetSha, "skill.py");
       const parsed = parseManifest(manifestSource);
       if (!parsed.isOk()) {
         return rejectedResult(
@@ -347,22 +445,45 @@ export class SkillRunnerImpl implements SkillRunner {
           }`,
         );
       }
-      classifierLog = {
-        ...classifyManifest(parsed.value.manifest),
-        risk_tier: "notify",
-      };
+      manifest = parsed.value.manifest;
     } catch (e) {
       if (e instanceof GitOpsError && e.code === "file_not_found") {
-        return rejectedResult(targetSha, "target_missing_skill_md");
+        return rejectedResult(targetSha, "target_missing_source");
       }
       throw e;
     }
+
+    if (manifest.name !== opts.name) {
+      return rejectedResult(
+        targetSha,
+        `target_skill_mismatch: target sha belongs to skill '${manifest.name}', not '${opts.name}'`,
+      );
+    }
+
+    const schemaErrors = this.#prevalidateSchemas(manifest);
+    if (schemaErrors.length > 0) {
+      return {
+        name: opts.name,
+        riskTier: "notify",
+        status: "rejected",
+        gitSha: targetSha,
+        errors: schemaErrors,
+      };
+    }
+
+    const classifierLog = classifyManifest(manifest);
 
     const mainSha = await getMainSha(repoPath);
 
     const result = await this.#store.executeRollback({
       name: opts.name,
       toGitSha: targetSha,
+      tier: manifest.tier,
+      riskTier: classifierLog.risk_tier,
+      effects: manifest.effects,
+      schedule: manifest.schedule ?? null,
+      inputs: manifest.inputs,
+      outputs: manifest.outputs ?? null,
       classifierLog,
       applyFilesystem: async () => {
         // Rollback rewrites main backward — pre-receive hook would normally
@@ -371,6 +492,17 @@ export class SkillRunnerImpl implements SkillRunner {
         await updateRef(repoPath, "refs/heads/main", targetSha, mainSha ?? ZERO_SHA);
       },
     });
+
+    // Warm the source cache with the rolled-back manifest+body so the next
+    // invoke or listToolDefs read doesn't re-fetch from git.
+    if (result.kind === "live") {
+      const inputsValidator = this.#compileInputsValidator(manifest, "rollback-warm");
+      this.#sourceCache.set(cacheKey(opts.name, targetSha), {
+        manifest,
+        body,
+        inputsValidator,
+      });
+    }
 
     if (result.kind === "live") {
       return {
@@ -617,6 +749,40 @@ export class SkillRunnerImpl implements SkillRunner {
       );
     }
     return validator;
+  }
+
+  /**
+   * Compile the manifest's `inputs` and (if declared) `outputs` JSON Schemas
+   * with ajv to catch shape errors *before* the register flow advances main
+   * or writes DB rows. Returns a flat list of human-readable errors; an empty
+   * list means both schemas compile cleanly.
+   *
+   * Compilation failures (`ajv.compile` throws) and `$async` schemas are both
+   * treated as deploy errors — they would either crash the worker on first
+   * invoke or silently bypass validation, which is worse than a register
+   * rejection up front.
+   */
+  #prevalidateSchemas(manifest: SkillManifest): string[] {
+    const errors: string[] = [];
+
+    try {
+      this.#compileInputsValidator(manifest, "register-prevalidate");
+    } catch (e) {
+      errors.push(`invalid_inputs_schema: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    if (manifest.outputs !== undefined) {
+      try {
+        const v = this.#ajv.compile(manifest.outputs as Record<string, unknown>);
+        if ((v as { $async?: boolean }).$async === true) {
+          errors.push("invalid_outputs_schema: $async schemas are not supported");
+        }
+      } catch (e) {
+        errors.push(`invalid_outputs_schema: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    return errors;
   }
 
   /**

@@ -173,5 +173,26 @@ describe("git-ops", () => {
       cleanup.push(bare, work);
       await expect(deleteRef(bare, "refs/heads/missing")).resolves.toBeUndefined();
     });
+
+    it("refuses refs/heads/main (defense in depth against caller bugs)", async () => {
+      const { bare, work, shaA } = await makeRepos();
+      cleanup.push(bare, work);
+      await updateRef(bare, "refs/heads/main", shaA, "0000000000000000000000000000000000000000");
+      await expect(deleteRef(bare, "refs/heads/main")).rejects.toMatchObject({
+        code: "exec_failed",
+        message: expect.stringMatching(/refuses to delete refs\/heads\/main/),
+      });
+      // main still exists.
+      expect(await revParse(bare, "refs/heads/main")).toBe(shaA);
+    });
+
+    it("refuses bare 'main' too", async () => {
+      const { bare, work } = await makeRepos();
+      cleanup.push(bare, work);
+      await expect(deleteRef(bare, "main")).rejects.toMatchObject({
+        code: "exec_failed",
+        message: expect.stringMatching(/refuses to delete refs\/heads\/main/),
+      });
+    });
   });
 });

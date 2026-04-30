@@ -14,7 +14,11 @@ export {
   type SkillSummary,
   type SkillToolDef,
 } from "./runner.js";
-export { buildSkillToolSpec, buildSkillTools } from "./skill-tool-builder.js";
+export {
+  buildSkillToolSpec,
+  buildSkillTools,
+  mergeBuiltInsAndSkillTools,
+} from "./skill-tool-builder.js";
 export { createSkillsService, type SkillsService } from "./skills-service.js";
 export { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills-tool.js";
 export { DrizzleSkillStore, type SkillStore } from "./store/index.js";

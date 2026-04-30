@@ -130,8 +130,20 @@ export async function updateRef(
  * feature branch into main — the branch is no longer needed; the audit trail
  * lives on `skill_deploys.git_sha`. No-op if the ref doesn't exist (best-effort
  * cleanup; we don't want to fail the register path on a stale delete).
+ *
+ * Refuses `refs/heads/main` (or bare `main`) at the boundary — `main` is only
+ * advanced via {@link updateRef}, never deleted. Defense in depth against a
+ * caller bug computing the wrong branch name (e.g. registering from `main`
+ * itself); without this guard, a misuse silently drops the skills repo's only
+ * authoritative ref.
  */
 export async function deleteRef(repoPath: string, ref: string): Promise<void> {
+  if (ref === "main" || ref === "refs/heads/main") {
+    throw new GitOpsError(
+      "exec_failed",
+      "deleteRef refuses to delete refs/heads/main — main is advanced via updateRef only",
+    );
+  }
   try {
     await execFileP("git", ["-C", repoPath, "update-ref", "-d", ref]);
   } catch (e) {

@@ -481,4 +481,262 @@ tier: wasm
       await expect(runner.deregister({ name: "missing" })).rejects.toThrow(/not found/);
     });
   });
+
+  // --- Review-comment regressions (cubic PR #112 review) ---
+
+  describe("safety: register is locked away from main", () => {
+    it("rejects branch == 'main' before touching git or DB", async () => {
+      const runner = await makeRunner();
+      const result = await runner.register({ branch: "main" });
+      expect(result.status).toBe("rejected");
+      expect(result.errors?.[0]).toMatch(/invalid_branch/);
+      // No skills row created.
+      expect(await store.getSkillByName("echo")).toBeNull();
+    });
+
+    it("rejects branch == 'refs/heads/main' too", async () => {
+      const runner = await makeRunner();
+      const result = await runner.register({ branch: "refs/heads/main" });
+      expect(result.status).toBe("rejected");
+      expect(result.errors?.[0]).toMatch(/invalid_branch/);
+    });
+  });
+
+  describe("safety: schema pre-validation runs before update-ref", () => {
+    it("rejects a manifest with an invalid inputs JSON Schema without moving main", async () => {
+      const runner = await makeRunner();
+      // ajv will reject "type: not_a_real_type" — manifest YAML is fine,
+      // SkillManifestSchema accepts arbitrary JSON, but ajv compile fails.
+      const badInputs = `---
+name: bad-schema
+description: a skill whose inputs schema is malformed
+tier: wasm
+inputs:
+  type: not_a_real_type
+---
+`;
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/bad-schema",
+        manifest: badInputs,
+        body: ECHO_BODY,
+      });
+      const before = await getMainSha(repo.bare);
+      const result = await runner.register({ branch: "skill/bad-schema" });
+      expect(result.status).toBe("rejected");
+      expect(result.errors?.[0]).toMatch(/invalid_inputs_schema/);
+      // main is unchanged — no half-deploy.
+      expect(await getMainSha(repo.bare)).toBe(before);
+      // No skills row.
+      expect(await store.getSkillByName("bad-schema")).toBeNull();
+    });
+  });
+
+  describe("safety: classifier promotes destructive effects to approve", () => {
+    it("a skill declaring sends_message lands as pending_approval, not live", async () => {
+      const runner = await makeRunner();
+      const sendingManifest = `---
+name: notifier
+description: a skill that sends notifications to the user
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+effects:
+  - sends_message
+---
+`;
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/notifier",
+        manifest: sendingManifest,
+        body: ECHO_BODY,
+      });
+      const before = await getMainSha(repo.bare);
+      const result = await runner.register({ branch: "skill/notifier" });
+      expect(result.status).toBe("pending_approval");
+      expect(result.riskTier).toBe("approve");
+      expect(result.pendingId).toBeTruthy();
+      // main is NOT advanced for approve-tier.
+      expect(await getMainSha(repo.bare)).toBe(before);
+    });
+
+    it("approve-tier register can be approved end-to-end", async () => {
+      const runner = await makeRunner();
+      const sendingManifest = `---
+name: notifier
+description: a skill that sends notifications to the user
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+effects:
+  - sends_message
+---
+`;
+      const sha = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/notifier",
+        manifest: sendingManifest,
+        body: ECHO_BODY,
+      });
+      const reg = await runner.register({ branch: "skill/notifier" });
+      expect(reg.status).toBe("pending_approval");
+      const pendingId = reg.pendingId;
+      if (!pendingId) throw new Error("expected pendingId");
+
+      const approved = await runner.approveDeploy({ pendingId });
+      expect(approved.status).toBe("live");
+      expect(approved.gitSha).toBe(sha);
+
+      // main moved + skills row reflects the approved sha.
+      expect(await getMainSha(repo.bare)).toBe(sha);
+      const skill = await store.getSkillByName("notifier");
+      expect(skill?.gitSha).toBe(sha);
+      expect(skill?.disabled).toBe(false);
+      // Manifest-derived columns projected from the approved sha.
+      expect(skill?.effects).toEqual(["sends_message"]);
+    });
+  });
+
+  describe("safety: rollback verifies target sha belongs to this skill", () => {
+    it("refuses to rollback skill A to a sha that belongs to skill B", async () => {
+      const runner = await makeRunner();
+      // Register skill A.
+      const aSha = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/alpha",
+        manifest: ECHO_MANIFEST.replace("name: echo", "name: alpha"),
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/alpha" });
+
+      // Register skill B (separate name, different sha).
+      const bSha = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/beta",
+        manifest: ECHO_MANIFEST.replace("name: echo", "name: beta"),
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/beta" });
+
+      // Try to roll back A to B's sha — must reject; otherwise A would
+      // silently start running B's code.
+      const result = await runner.rollback({ name: "alpha", toGitSha: bSha });
+      expect(result.status).toBe("rejected");
+      expect(result.errors?.[0]).toMatch(/target_skill_mismatch/);
+
+      // A's sha is unchanged.
+      const skillA = await store.getSkillByName("alpha");
+      expect(skillA?.gitSha).toBe(aSha);
+    });
+  });
+
+  describe("safety: approve / rollback project the full manifest", () => {
+    it("approve writes manifest-derived columns from the approved sha, not the prior live ones", async () => {
+      const runner = await makeRunner();
+      const v1Manifest = `---
+name: shapeshift
+description: v1 manifest with one input field
+tier: wasm
+inputs:
+  type: object
+  properties:
+    a:
+      type: integer
+  required:
+    - a
+effects:
+  - sends_message
+---
+`;
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/shapeshift-v1",
+        manifest: v1Manifest,
+        body: ECHO_BODY,
+      });
+      const reg = await runner.register({ branch: "skill/shapeshift-v1" });
+      if (!reg.pendingId) throw new Error("expected pendingId for sends_message skill");
+      await runner.approveDeploy({ pendingId: reg.pendingId });
+
+      // Now stage v2 with a different inputs schema + extra effect.
+      const v2Manifest = `---
+name: shapeshift
+description: v2 manifest with a different field shape
+tier: wasm
+inputs:
+  type: object
+  properties:
+    b:
+      type: string
+  required:
+    - b
+effects:
+  - sends_message
+  - posts_public
+---
+`;
+      const v2Sha = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/shapeshift-v2",
+        manifest: v2Manifest,
+        body: ECHO_BODY,
+      });
+      const reg2 = await runner.register({ branch: "skill/shapeshift-v2" });
+      if (!reg2.pendingId) throw new Error("expected pendingId for v2 register");
+      const approved = await runner.approveDeploy({ pendingId: reg2.pendingId });
+      expect(approved.status).toBe("live");
+
+      const skill = await store.getSkillByName("shapeshift");
+      expect(skill?.gitSha).toBe(v2Sha);
+      expect(skill?.inputs).toMatchObject({
+        properties: { b: { type: "string" } },
+      });
+      expect(skill?.effects).toEqual(["sends_message", "posts_public"]);
+    });
+
+    it("rollback writes the target sha's manifest-derived columns, not the current ones", async () => {
+      const runner = await makeRunner();
+      const v1Manifest = ECHO_MANIFEST.replace("name: echo", "name: shape");
+      const v1Sha = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/shape-v1",
+        manifest: v1Manifest,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/shape-v1" });
+
+      const v2Manifest = `---
+name: shape
+description: v2 manifest with a totally different inputs shape
+tier: wasm
+inputs:
+  type: object
+  properties:
+    different:
+      type: string
+  required:
+    - different
+---
+`;
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/shape-v2",
+        manifest: v2Manifest,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/shape-v2" });
+
+      const result = await runner.rollback({ name: "shape", toGitSha: v1Sha });
+      expect(result.status).toBe("live");
+
+      const skill = await store.getSkillByName("shape");
+      expect(skill?.gitSha).toBe(v1Sha);
+      // inputs match v1's schema (x: integer), not v2's (different: string).
+      expect(skill?.inputs).toMatchObject({
+        properties: { x: { type: "integer" } },
+      });
+    });
+  });
 });

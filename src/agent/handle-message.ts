@@ -6,7 +6,7 @@ import type { ContentBlock, Message, StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SkillRunner } from "../skills/runner.js";
-import { buildSkillTools } from "../skills/skill-tool-builder.js";
+import { buildSkillTools, mergeBuiltInsAndSkillTools } from "../skills/skill-tool-builder.js";
 import { createSkillsService } from "../skills/skills-service.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { contentToBlocks, contentToText } from "../transport/content.js";
@@ -22,7 +22,7 @@ import { shouldSkipRecall } from "./recall-gate.js";
 import type { Service } from "./service.js";
 import { createService } from "./service.js";
 import type { AgentStore } from "./store/index.js";
-import { ToolRegistry } from "./tools.js";
+import type { ToolRegistry } from "./tools.js";
 
 export interface HandleMessageDeps {
   agentStore: AgentStore;
@@ -263,16 +263,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // appear immediately and rolled-back / disabled skills disappear. The
       // skill-tool builder is fault-tolerant: a single skill with unreadable
       // git source is logged and dropped, the rest of the list still loads.
-      const turnTools = new ToolRegistry();
-      for (const spec of tools.snapshot()) {
-        turnTools.register(spec);
-      }
-      if (deps.skillRunner) {
-        const skillTools = await buildSkillTools(deps.skillRunner);
-        for (const spec of skillTools) {
-          turnTools.register(spec);
-        }
-      }
+      // Name-collision rule (built-ins win) lives in
+      // mergeBuiltInsAndSkillTools — see its docstring.
+      const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
+      const turnTools = mergeBuiltInsAndSkillTools(tools.snapshot(), skillTools);
       const toolDefs = turnTools.definitions();
 
       const lastTokens = await agentStore.getLastTokens(conversationId);

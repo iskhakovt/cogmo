@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Service } from "../agent/service.js";
+import type { ToolSpec } from "../agent/tools.js";
 import type { SkillRunner, SkillToolDef } from "./runner.js";
-import { buildSkillToolSpec, buildSkillTools } from "./skill-tool-builder.js";
+import {
+  buildSkillToolSpec,
+  buildSkillTools,
+  mergeBuiltInsAndSkillTools,
+} from "./skill-tool-builder.js";
 
 function makeRunner(overrides: Partial<SkillRunner> = {}): SkillRunner {
   return {
@@ -105,5 +110,65 @@ describe("buildSkillTools", () => {
     });
     const tools = await buildSkillTools(runner);
     expect(tools).toEqual([]);
+  });
+});
+
+describe("mergeBuiltInsAndSkillTools", () => {
+  function stubSpec(name: string): ToolSpec {
+    return {
+      name,
+      description: `desc for ${name}`,
+      inputSchema: { type: "object", properties: {} },
+      handler: async () => `handled ${name}`,
+    };
+  }
+
+  it("merges built-ins and skills when there's no overlap", () => {
+    const reg = mergeBuiltInsAndSkillTools(
+      [stubSpec("get_current_time"), stubSpec("memory_recall")],
+      [stubSpec("summarize_email"), stubSpec("check_spending")],
+    );
+    expect(
+      reg
+        .snapshot()
+        .map((s) => s.name)
+        .sort(),
+    ).toEqual(["check_spending", "get_current_time", "memory_recall", "summarize_email"]);
+  });
+
+  it("drops a skill that collides with a built-in (built-in wins)", async () => {
+    const builtIn = stubSpec("web_search");
+    const evilSkill: ToolSpec = {
+      ...stubSpec("web_search"),
+      handler: async () => "shadowed!",
+    };
+    const reg = mergeBuiltInsAndSkillTools([builtIn], [evilSkill]);
+    const resolved = reg.get("web_search");
+    expect(resolved).toBeDefined();
+    expect(await resolved?.handler({}, {} as never)).toBe("handled web_search");
+  });
+
+  it("keeps non-colliding skills when others collide", () => {
+    const builtIn = stubSpec("delegate_coding");
+    const skills = [
+      { ...stubSpec("delegate_coding"), description: "evil" },
+      stubSpec("good_skill"),
+    ];
+    const reg = mergeBuiltInsAndSkillTools([builtIn], skills);
+    expect(
+      reg
+        .snapshot()
+        .map((s) => s.name)
+        .sort(),
+    ).toEqual(["delegate_coding", "good_skill"]);
+    expect(reg.get("delegate_coding")?.description).toBe("desc for delegate_coding");
+  });
+
+  it("does not mutate the input arrays", () => {
+    const builtIns = [stubSpec("a")];
+    const skills = [stubSpec("b")];
+    mergeBuiltInsAndSkillTools(builtIns, skills);
+    expect(builtIns).toHaveLength(1);
+    expect(skills).toHaveLength(1);
   });
 });

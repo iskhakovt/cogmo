@@ -1,4 +1,4 @@
-import type { ToolSpec } from "../agent/tools.js";
+import { ToolRegistry, type ToolSpec } from "../agent/tools.js";
 import type { JsonSchema } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { SkillRunner, SkillToolDef } from "./runner.js";
@@ -61,4 +61,37 @@ export async function buildSkillTools(runner: SkillRunner): Promise<readonly Too
     log.warn({ err: e }, "skill tool list build failed — proceeding with built-in tools only");
     return [];
   }
+}
+
+/**
+ * Compose the per-turn `ToolRegistry`: built-ins win on any name collision
+ * with a skill. A skill that happens to share a name with a built-in tool
+ * (`web_search`, `delegate_coding`, `register_skill`, etc.) is dropped with a
+ * warning instead of silently overwriting the built-in handler — that path
+ * would let a skill author ship arbitrary code under a built-in's identity,
+ * which the LLM trusts.
+ *
+ * Returns the new registry. Source registries are not mutated.
+ */
+export function mergeBuiltInsAndSkillTools(
+  builtIns: ReadonlyArray<ToolSpec>,
+  skillTools: ReadonlyArray<ToolSpec>,
+): ToolRegistry {
+  const merged = new ToolRegistry();
+  const builtInNames = new Set<string>();
+  for (const spec of builtIns) {
+    merged.register(spec);
+    builtInNames.add(spec.name);
+  }
+  for (const spec of skillTools) {
+    if (builtInNames.has(spec.name)) {
+      log.warn(
+        { skillName: spec.name },
+        "skipping skill — name collides with a built-in tool; built-in wins",
+      );
+      continue;
+    }
+    merged.register(spec);
+  }
+  return merged;
 }

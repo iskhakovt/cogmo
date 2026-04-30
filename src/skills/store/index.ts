@@ -161,16 +161,44 @@ export type ExecuteRegisterResult =
       reason: string;
     };
 
-/** Atomic resolve-pending-deploy + advance-main + update-skills-row. */
+/**
+ * Atomic resolve-pending-deploy + advance-main + update-skills-row.
+ *
+ * Caller re-reads the manifest from git at `deploy.gitSha` and passes the full
+ * set of manifest-derived columns. Without this, approving a pending deploy
+ * would only flip `gitSha`/`disabled` while leaving `tier`/`riskTier`/
+ * `effects`/`schedule`/`inputs`/`outputs` stale from whatever the row was
+ * before the pending-approval insert — so the LLM tool definition and ajv
+ * input validator would diverge from the source on disk that just got
+ * promoted to main.
+ */
 export interface ExecuteApproveParams {
   pendingId: string;
   approvedBy: string | null;
+  tier: SkillTier;
+  riskTier: SkillRiskTier;
+  effects: SkillEffects;
+  schedule: string | null;
+  inputs: SkillIo;
+  outputs: SkillIo | null;
   applyFilesystem(): Promise<void>;
 }
 
+/**
+ * Same projection rationale as {@link ExecuteApproveParams}: the rolled-back
+ * sha may have a different manifest shape than the current live one
+ * (different `inputs` schema, different `effects`, etc.); the skills row has
+ * to follow.
+ */
 export interface ExecuteRollbackParams {
   name: string;
   toGitSha: string;
+  tier: SkillTier;
+  riskTier: SkillRiskTier;
+  effects: SkillEffects;
+  schedule: string | null;
+  inputs: SkillIo;
+  outputs: SkillIo | null;
   classifierLog: ClassifierLog;
   applyFilesystem(): Promise<void>;
 }
@@ -412,6 +440,10 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async executeApprove(params: ExecuteApproveParams): Promise<ExecuteRegisterResult> {
+    const effects = SkillEffectsSchema.parse(params.effects);
+    const inputs = SkillIoSchema.parse(params.inputs);
+    const outputs = params.outputs === null ? null : SkillIoSchema.parse(params.outputs);
+
     return this.#db.transaction(async (tx) => {
       const deployRows = await tx
         .select()
@@ -453,9 +485,24 @@ export class DrizzleSkillStore implements SkillStore {
       // Filesystem first — same atomicity reasoning as executeRegister.
       await params.applyFilesystem();
 
+      // Project the full manifest into the skills row alongside gitSha +
+      // disabled. Approving an `approve`-tier deploy promotes the source on
+      // disk to live; without copying the manifest-derived columns over, the
+      // stored row would drift from what's actually at deploy.gitSha (e.g.
+      // `inputs` schema would still match the prior live commit, not the
+      // approved one).
       const updatedSkillRows = await tx
         .update(skills)
-        .set({ gitSha: deploy.gitSha, disabled: false })
+        .set({
+          gitSha: deploy.gitSha,
+          disabled: false,
+          tier: params.tier,
+          riskTier: params.riskTier,
+          effects,
+          schedule: params.schedule,
+          inputs,
+          outputs,
+        })
         .where(eq(skills.id, skill.id))
         .returning();
       const updatedSkill = parseSkillRow(single(updatedSkillRows));
@@ -499,6 +546,9 @@ export class DrizzleSkillStore implements SkillStore {
 
   async executeRollback(params: ExecuteRollbackParams): Promise<ExecuteRegisterResult> {
     const classifierLog = ClassifierLogSchema.parse(params.classifierLog);
+    const effects = SkillEffectsSchema.parse(params.effects);
+    const inputs = SkillIoSchema.parse(params.inputs);
+    const outputs = params.outputs === null ? null : SkillIoSchema.parse(params.outputs);
 
     return this.#db.transaction(async (tx) => {
       await tx.execute(
@@ -518,9 +568,21 @@ export class DrizzleSkillStore implements SkillStore {
       // Filesystem first — same atomicity reasoning as executeRegister.
       await params.applyFilesystem();
 
+      // Project the full manifest from the rolled-back sha. Same rationale
+      // as executeApprove — the prior code likely had a different `inputs`
+      // schema / different declared effects, and the row has to follow.
       const updatedRows = await tx
         .update(skills)
-        .set({ gitSha: params.toGitSha, disabled: false })
+        .set({
+          gitSha: params.toGitSha,
+          disabled: false,
+          tier: params.tier,
+          riskTier: params.riskTier,
+          effects,
+          schedule: params.schedule,
+          inputs,
+          outputs,
+        })
         .where(eq(skills.id, existing.id))
         .returning();
       const updated = parseSkillRow(single(updatedRows));
