@@ -79,6 +79,12 @@ export async function teardownWorktree(opts: TeardownWorktreeOpts): Promise<Tear
   const { repoPath, worktreePath, branch, taskId, identity, remoteName = "origin" } = opts;
 
   if (!existsSync(worktreePath)) {
+    // Even when the path is gone, the parent repo's `.git/worktrees/<name>`
+    // metadata can linger from a prior crashed teardown. `removeWorktree`
+    // detects the missing path and falls back to `git worktree prune`,
+    // clearing the stale entry so a later `allocateWorktree` at the same
+    // path doesn't fail with "already registered".
+    await removeWorktree(repoPath, worktreePath);
     return { kind: "no_worktree" };
   }
 
@@ -193,19 +199,23 @@ export async function safeTeardownWorktree(opts: {
   /** Optional pre-resolved identity — if supplied, secretsStore is ignored. */
   identity?: GitHubIdentity;
 }): Promise<void> {
-  let identity: GitHubIdentity | undefined = opts.identity;
-  if (!identity && opts.secretsStore) {
-    const result = await resolveGitHubIdentity(opts.secretsStore, opts.repo.identityName);
-    if (result.isOk()) {
-      identity = result.value;
-    } else {
-      log.warn(
-        { taskId: opts.taskId, reason: describeResolveIdentityError(result.error) },
-        "teardown-worktree: identity resolve failed — proceeding without WIP push",
-      );
-    }
-  }
   try {
+    let identity: GitHubIdentity | undefined = opts.identity;
+    if (!identity && opts.secretsStore) {
+      // resolveGitHubIdentity can throw on a DB-level failure
+      // (`secretsStore.getSecret` underlying error) — keep it inside the
+      // try block so `safeTeardownWorktree` actually honors its "never
+      // throws" contract.
+      const result = await resolveGitHubIdentity(opts.secretsStore, opts.repo.identityName);
+      if (result.isOk()) {
+        identity = result.value;
+      } else {
+        log.warn(
+          { taskId: opts.taskId, reason: describeResolveIdentityError(result.error) },
+          "teardown-worktree: identity resolve failed — proceeding without WIP push",
+        );
+      }
+    }
     const r = await teardownWorktree({
       repoPath: opts.repo.localPath,
       worktreePath: opts.worktreeAssignment.worktreePath,

@@ -86,6 +86,30 @@ describe("teardownWorktree", () => {
     expect(result.kind).toBe("no_worktree");
   });
 
+  it("prunes stale `.git/worktrees/<name>` metadata when the worktree dir is gone", async () => {
+    // Models a host crash mid-teardown: the worktree directory was deleted
+    // (or never created on disk) but the parent repo still tracks it under
+    // `.git/worktrees/<name>`. Without a `git worktree prune`, a later
+    // `allocateWorktree` at the same path fails with "already registered".
+    const taskId = uniqueTaskId();
+    const branch = uniqueBranch(taskId);
+    const worktreePath = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath });
+    // Delete the worktree dir directly without notifying git.
+    rmSync(worktreePath, { recursive: true, force: true });
+
+    const result = await teardownWorktree({ repoPath, worktreePath, branch, taskId });
+    expect(result.kind).toBe("no_worktree");
+
+    // Stale metadata should be pruned — re-allocating at the same path
+    // succeeds (would fail with "already registered" if the prune was
+    // skipped). Use a different branch since the prior one still exists.
+    const newBranch = uniqueBranch(uniqueTaskId());
+    await expect(
+      allocateWorktree({ repoPath, branch: newBranch, worktreePath }),
+    ).resolves.toBeDefined();
+  });
+
   it("removes a clean worktree without pushing anything", async () => {
     const taskId = uniqueTaskId();
     const branch = uniqueBranch(taskId);
