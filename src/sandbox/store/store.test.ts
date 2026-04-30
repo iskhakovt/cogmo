@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "../../db/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
@@ -160,6 +161,22 @@ describe("DrizzleSandboxStore", () => {
       ).rejects.toThrow();
     });
 
+    it("rejects malformed labels via raw SQL on read", async () => {
+      const instanceId = await seedInstance();
+      const id = await insertTaskContainer({ instanceId });
+      await db.execute(sql`UPDATE containers SET labels = '{"junk":true}'::jsonb WHERE id = ${id}`);
+      await expect(store.getContainer(id)).rejects.toThrow();
+    });
+
+    it("rejects malformed resourceLimits via raw SQL on read", async () => {
+      const instanceId = await seedInstance();
+      const id = await insertTaskContainer({ instanceId });
+      await db.execute(
+        sql`UPDATE containers SET resource_limits = '{"junk":true}'::jsonb WHERE id = ${id}`,
+      );
+      await expect(store.getContainer(id)).rejects.toThrow();
+    });
+
     it("enforces unique docker_id", async () => {
       const instanceId = await seedInstance();
       await insertTaskContainer({ instanceId, dockerId: "dup" });
@@ -292,6 +309,23 @@ describe("DrizzleSandboxStore", () => {
           instanceId,
         }),
       ).rejects.toThrow();
+    });
+
+    it("rejects malformed labels via raw SQL on read", async () => {
+      const instanceId = await seedInstance();
+      const row = await store.insertNetwork({
+        dockerId: "net-corrupt",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId,
+      });
+      await db.execute(
+        sql`UPDATE networks SET labels = '{"junk":true}'::jsonb WHERE id = ${row.id}`,
+      );
+      await expect(store.getNetwork(row.id)).rejects.toThrow();
     });
 
     it("enforces unique docker_id", async () => {
@@ -440,6 +474,23 @@ describe("DrizzleSandboxStore", () => {
           instanceId,
         }),
       ).rejects.toThrow();
+    });
+
+    it("rejects malformed labels via raw SQL on read", async () => {
+      const instanceId = await seedInstance();
+      const row = await store.insertVolume({
+        dockerId: "vol-corrupt",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(),
+        instanceId,
+      });
+      await db.execute(
+        sql`UPDATE volumes SET labels = '{"junk":true}'::jsonb WHERE id = ${row.id}`,
+      );
+      await expect(store.getVolume(row.id)).rejects.toThrow();
     });
 
     it("updateVolumeStatus + lookups round-trip", async () => {

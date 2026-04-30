@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "../../../db/index.js";
 import { DrizzleSandboxStore } from "../../../sandbox/store/index.js";
@@ -130,6 +131,17 @@ describe("DrizzleCodingStore", () => {
       expect(row.devcontainer?.image).toBe("ghcr.io/example/devcontainer:1");
       const reloaded = await store.getRepoById(row.id);
       expect(reloaded?.devcontainer?.forwardPorts).toEqual([3000, "5432:5432"]);
+    });
+
+    it("rejects malformed devcontainer via raw SQL on read", async () => {
+      // DevcontainerSpecSchema is `.passthrough()`, so unknown keys are
+      // accepted (forward compat); typed fields still validate. Corrupt
+      // `image` with a non-string value to trigger Zod rejection on read.
+      const id = await seedRepo();
+      await db.execute(
+        sql`UPDATE coding_repos SET devcontainer = '{"image":123}'::jsonb WHERE id = ${id}`,
+      );
+      await expect(store.getRepoById(id)).rejects.toThrow();
     });
 
     it("supports both backends in allowedBackends", async () => {
@@ -379,6 +391,55 @@ describe("DrizzleCodingStore", () => {
         // @ts-expect-error: intentionally invalid input — verifies runtime Zod rejection
         store.setTaskResourceUsage(t.id, { unknown_field: 1 }),
       ).rejects.toThrow();
+    });
+
+    it("rejects malformed worktree_assignment via raw SQL on read", async () => {
+      const repoId = await seedRepo();
+      const t = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      await store.setTaskWorktreeAssignment(t.id, {
+        branch: "cogmo/abc",
+        worktreePath: "/p",
+      });
+      await db.execute(
+        sql`UPDATE coding_tasks SET worktree_assignment = '{"junk":true}'::jsonb WHERE id = ${t.id}`,
+      );
+      await expect(store.getTask(t.id)).rejects.toThrow();
+    });
+
+    it("rejects malformed pr_metadata via raw SQL on read", async () => {
+      const repoId = await seedRepo();
+      const t = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      await db.execute(
+        sql`UPDATE coding_tasks SET pr_metadata = '{"junk":true}'::jsonb WHERE id = ${t.id}`,
+      );
+      await expect(store.getTask(t.id)).rejects.toThrow();
+    });
+
+    it("rejects malformed resource_usage via raw SQL on read", async () => {
+      const repoId = await seedRepo();
+      const t = await store.insertTask({
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      });
+      await db.execute(
+        sql`UPDATE coding_tasks SET resource_usage = '{"junk":true}'::jsonb WHERE id = ${t.id}`,
+      );
+      await expect(store.getTask(t.id)).rejects.toThrow();
     });
 
     it("countActiveTasksForRepo excludes terminal statuses", async () => {

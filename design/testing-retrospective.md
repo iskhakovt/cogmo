@@ -361,18 +361,14 @@ The patterns from PR #87 (skills P3.1 tier1) that produced 1696 passing tests ac
 
 Ordered by leverage (bang-for-buck). Each is a PR-sized scope.
 
-### Slice A: JSONB Raw-SQL Validation Tests (low effort, high value)
+### Slice A: JSONB Raw-SQL Validation Tests (low effort, high value) — **shipped 2026-04-30**
 
-**Files:** `src/sandbox/store/store.test.ts`, `src/agent/coding/store/store.test.ts`, `src/secrets/store/store.test.ts` (if it has JSONB).
+**Files:** `src/sandbox/store/store.test.ts`, `src/agent/coding/store/store.test.ts`.
 
-**Work:**
-- Add test per JSONB column: mutate via raw SQL, call the read method, expect `ZodError`.
-- Example: `"rejects malformed container.labels via raw SQL on read"`, `"rejects malformed coding_task.pr_metadata via raw SQL on read"`.
-- ~3 tests × 3 stores = ~9 tests, ~50 lines of code.
-
-**Effort:** ~2 hours.
-
-**Payoff:** Catches schema drift and provides confidence in the CLAUDE.md rule "Zod on read AND write".
+**Work delivered:**
+- 8 tests added: `containers.labels`, `containers.resource_limits`, `networks.labels`, `volumes.labels` (sandbox); `coding_repos.devcontainer`, `coding_tasks.worktree_assignment`, `coding_tasks.pr_metadata`, `coding_tasks.resource_usage` (coding).
+- `secrets` store has no JSONB columns (`github_identity` is encrypted ciphertext stored as `text`), so no tests required there.
+- `DevcontainerSpecSchema` uses `.passthrough()` for forward-compat — corrupting a typed field (`image` as number) is what triggers Zod rejection, not unknown keys.
 
 ---
 
