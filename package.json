@@ -64,7 +64,7 @@
     "grammy": "^1.42.0",
     "inngest": "^4.2.5",
     "js-tiktoken": "^1.0.21",
-    "jsdom": "^29.0.2",
+    "jsdom": "^29.1.1",
     "marked": "^18.0.2",
     "micro-key-producer": "^0.8.6",
     "neverthrow": "^8.2.0",
