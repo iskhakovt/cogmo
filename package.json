@@ -34,7 +34,7 @@
     "node": ">=24"
   },
   "dependencies": {
-    "@ai-sdk/fal": "^2.0.30",
+    "@ai-sdk/fal": "^2.0.31",
     "@anthropic-ai/sdk": "^0.91.1",
     "@aws-sdk/client-s3": "^3.1038.0",
     "@clack/prompts": "^1.2.0",
@@ -55,8 +55,8 @@
     "@opentelemetry/sdk-trace-base": "^2.6.1",
     "@opentelemetry/semantic-conventions": "^1.40.0",
     "@t3-oss/env-core": "^0.13.11",
-    "@vectorize-io/hindsight-client": "^0.5.4",
-    "ai": "^6.0.168",
+    "@vectorize-io/hindsight-client": "^0.5.6",
+    "ai": "^6.0.170",
     "ajv": "^8.20.0",
     "date-fns": "^4.1.0",
     "dockerode": "5.0.0",
