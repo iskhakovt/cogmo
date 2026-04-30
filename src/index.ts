@@ -366,6 +366,8 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     agentStore,
     codingStore,
     codingStreamingRegistry,
+    skillRunner,
+    skillStore,
     inngest,
     inboundArrived,
     attachments: attachmentStore,

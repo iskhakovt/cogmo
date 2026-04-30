@@ -15,6 +15,8 @@ import {
   resolveGitHubIdentity,
 } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import type { SkillRunner } from "../skills/runner.js";
+import type { SkillStore } from "../skills/store/index.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { Session, TransportStore } from "./store/index.js";
 
@@ -102,7 +104,11 @@ export type TransportError =
   | { code: "task_not_found"; taskId: string }
   | { code: "task_already_approved"; taskId: string }
   | { code: "task_not_pending_approval"; taskId: string; status: string }
-  | { code: "task_already_terminal"; taskId: string; status: string };
+  | { code: "task_already_terminal"; taskId: string; status: string }
+  | { code: "skills_disabled" }
+  | { code: "skill_deploy_not_found"; pendingId: string }
+  | { code: "skill_deploy_not_pending"; pendingId: string; status: string }
+  | { code: "skill_deploy_register_failed"; pendingId: string; reason: string };
 
 /**
  * Transport — the adapter-facing contract for session management and inbound emission.
@@ -239,6 +245,36 @@ export interface Transport {
       tapperPlatformHandle: string,
     ): Promise<Result<{ taskId: string }, TransportError>>;
   };
+
+  /**
+   * Skills-deploy approval surface for the approve-tier inline keyboard.
+   * Mirrors the `coding` namespace shape: identity-checked, calls into the
+   * existing `SkillRunner` RPCs, returns `Result` with skills-specific
+   * error codes. Returns `skills_disabled` when the skills module isn't
+   * wired (skipped in some test setups).
+   */
+  skills: {
+    /**
+     * Approve a pending-approval deploy by its `skill_deploys.id`. Calls
+     * `runner.approveDeploy` which advances main + flips the row live.
+     * Idempotent on already-resolved deploys via the underlying store
+     * method.
+     */
+    approveDeploy(
+      pendingId: string,
+      tapperPlatformHandle: string,
+    ): Promise<Result<{ pendingId: string; skillName: string; gitSha: string }, TransportError>>;
+    /**
+     * Deny a pending-approval deploy. Resolves the row to `denied`; the
+     * skills row stays at its existing state (live skill stays live, never-
+     * activated skill stays disabled). Idempotent.
+     */
+    denyDeploy(
+      pendingId: string,
+      tapperPlatformHandle: string,
+      reason?: string,
+    ): Promise<Result<{ pendingId: string }, TransportError>>;
+  };
 }
 
 /**
@@ -268,6 +304,17 @@ export function createTransport(deps: {
    * code; both indicate "the orchestrator can't talk to GitHub yet").
    */
   reposDir?: string;
+  /**
+   * Skills runner for the approve-tier callback. Optional — when
+   * undefined, `skills.*` returns `skills_disabled`. Production wiring
+   * always supplies it; some test setups omit.
+   */
+  skillRunner?: SkillRunner;
+  /**
+   * Skills store for resolving the deploy → skill → user owner during the
+   * Telegram callback identity check. Optional — see `skillRunner`.
+   */
+  skillStore?: SkillStore;
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
@@ -281,6 +328,8 @@ export function createTransport(deps: {
     codingStore,
     secretsStore,
     reposDir,
+    skillRunner,
+    skillStore,
     inngest,
     inboundArrived,
     attachments,
@@ -804,6 +853,75 @@ export function createTransport(deps: {
         return ok({ taskId: params.taskId });
       },
     },
+
+    skills: {
+      async approveDeploy(pendingId, tapperPlatformHandle) {
+        if (!skillRunner || !skillStore) return err({ code: "skills_disabled" as const });
+        const identityCheck = await checkSkillsTapper(tapperPlatformHandle);
+        if (identityCheck.isErr()) return err(identityCheck.error);
+
+        // Pre-check the deploy's status so we can return a precise error
+        // code when it's already resolved (avoids the `runner.approveDeploy
+        // → "rejected"` → string-parsing dance). Race window: the deploy
+        // could resolve between this read and the actual approve call;
+        // that's fine — runner.approveDeploy is itself atomic and the
+        // worst case is we return "live" when the user expected
+        // already-resolved.
+        const deploy = await skillStore.getDeployById(pendingId);
+        if (!deploy) return err({ code: "skill_deploy_not_found" as const, pendingId });
+        if (deploy.status !== "pending_approval") {
+          return err({
+            code: "skill_deploy_not_pending" as const,
+            pendingId,
+            status: deploy.status,
+          });
+        }
+
+        const result = await skillRunner.approveDeploy({
+          pendingId,
+          approvedBy: tapperPlatformHandle,
+        });
+        if (result.status === "live") {
+          return ok({
+            pendingId,
+            skillName: result.name,
+            gitSha: result.gitSha,
+          });
+        }
+        // Runner rejected — surface the runner's reason verbatim so the
+        // Telegram callback handler can show a useful toast.
+        return err({
+          code: "skill_deploy_register_failed" as const,
+          pendingId,
+          reason: result.errors?.[0] ?? `unexpected status '${result.status}'`,
+        });
+      },
+      async denyDeploy(pendingId, tapperPlatformHandle, reason) {
+        if (!skillRunner || !skillStore) return err({ code: "skills_disabled" as const });
+        const identityCheck = await checkSkillsTapper(tapperPlatformHandle);
+        if (identityCheck.isErr()) return err(identityCheck.error);
+
+        const deploy = await skillStore.getDeployById(pendingId);
+        if (!deploy) return err({ code: "skill_deploy_not_found" as const, pendingId });
+        // denyDeploy is idempotent on already-resolved deploys (the store
+        // method skips the update + returns silently). We still surface a
+        // distinct error code for clarity at this layer — a tap on an
+        // already-denied keyboard should toast "already resolved", not
+        // "denied successfully".
+        if (deploy.status !== "pending_approval") {
+          return err({
+            code: "skill_deploy_not_pending" as const,
+            pendingId,
+            status: deploy.status,
+          });
+        }
+        await skillRunner.denyDeploy({
+          pendingId,
+          ...(reason !== undefined && { reason }),
+        });
+        return ok({ pendingId });
+      },
+    },
   };
 
   /**
@@ -836,6 +954,28 @@ export function createTransport(deps: {
     if (!conv) return err({ code: "conversation_not_found" as const });
     const tapper = await transportStore.resolveUser(channelId, tapperPlatformHandle);
     if (!tapper || tapper.userId !== conv.userId) {
+      return err({ code: "identity_rejected" as const });
+    }
+    return ok(undefined);
+  }
+
+  /**
+   * Identity check for skills-deploy callbacks. Skills aren't bound to a
+   * conversation (they live on the user, not on a chat), so the check is
+   * "is the tapper a known user of this channel". `resolveUser` returns
+   * non-null iff the platform handle is allowlisted; that's the same gate
+   * the inbound message path already enforces.
+   *
+   * Caveat (same as checkTaskOwnership): single-user wildcard mode resolves
+   * any handle to the same userId, so this degenerates to "channel is
+   * known". Acceptable at personal scale; multi-user deployments get the
+   * stricter handle→userId mapping for free.
+   */
+  async function checkSkillsTapper(
+    tapperPlatformHandle: string,
+  ): Promise<Result<void, TransportError>> {
+    const tapper = await transportStore.resolveUser(channelId, tapperPlatformHandle);
+    if (!tapper) {
       return err({ code: "identity_rejected" as const });
     }
     return ok(undefined);

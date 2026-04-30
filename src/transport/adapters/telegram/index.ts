@@ -8,9 +8,17 @@ import {
 import { PLAN_CALLBACK_REGEX, parsePlanCallback } from "../../../agent/coding/plan-keyboard.js";
 import { CodingProgressSubscriber } from "../../../agent/coding/progress-subscriber.js";
 import { parseGeneratedImagePayload } from "../../../agent/image-tools.js";
-import { codingTaskPermissionRequested, codingTaskStart } from "../../../inngest/events.js";
+import {
+  codingTaskPermissionRequested,
+  codingTaskStart,
+  skillsDeployApprovalRequested,
+} from "../../../inngest/events.js";
 import type { StreamEvent } from "../../../llm/types.js";
 import { logger } from "../../../logger.js";
+import {
+  parseSkillsApprovalCallback,
+  SKILLS_APPROVAL_CALLBACK_REGEX,
+} from "../../../skills/skills-keyboard.js";
 import {
   type AdapterDeps,
   type AdapterModule,
@@ -33,11 +41,13 @@ import {
   handleResume,
   handleResumeCallback,
   handleSessions,
+  handleSkillsApprovalCallback,
   type TelegramCommandContext,
 } from "./commands.js";
 import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml, stripHtmlTags } from "./render.js";
 import { RepoDialogs } from "./repo-dialog.js";
+import { postSkillsApprovalKeyboard } from "./skills-approval-poster.js";
 
 export const channelType = "telegram";
 
@@ -401,6 +411,29 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     await ctx.answerCallbackQuery({ text: outcome.toast });
   });
 
+  // Skills approval keyboard: Approve / Deny — callback_data =
+  // "skill:<pendingId>:<approve|deny>"
+  bot.callbackQuery(SKILLS_APPROVAL_CALLBACK_REGEX, async (ctx) => {
+    const data = ctx.callbackQuery?.data;
+    const fromId = ctx.from?.id;
+    if (!data || fromId === undefined) return;
+    const parsed = parseSkillsApprovalCallback(data);
+    if (!parsed) return;
+
+    const outcome = await handleSkillsApprovalCallback(transport, parsed, String(fromId));
+    try {
+      await ctx.editMessageText(outcome.editText, {
+        reply_markup: { inline_keyboard: [] },
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "";
+      if (!msg.includes("message is not modified")) {
+        logger.warn({ err }, "telegram: failed to edit skills approval message");
+      }
+    }
+    await ctx.answerCallbackQuery({ text: outcome.toast });
+  });
+
   async function resolveOrCreateSession(addr: string, handle: string) {
     let session = await transport.resolveSession(addr);
     if (!session) {
@@ -572,6 +605,33 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
           });
           return { posted: true };
         },
+      ),
+    );
+  }
+
+  // Skills approve-tier deploy gate — listen on
+  // skills/deploy/approval-requested, post the inline keyboard message into
+  // the originating conversation's session. The runner's register call has
+  // already returned with status=pending_approval; the keyboard tap routes
+  // straight to transport.skills.approveDeploy/denyDeploy.
+  if (deps.skillsApproval) {
+    const { inngest, skillStore, transportStore } = deps.skillsApproval;
+    const channelId = deps.channelId;
+    functions.push(
+      inngest.createFunction(
+        {
+          id: `telegram-skills-approval-${channelId}`,
+          triggers: [skillsDeployApprovalRequested],
+          retries: 0,
+        },
+        async ({ event }) =>
+          postSkillsApprovalKeyboard({
+            event: event.data,
+            channelId,
+            skillStore,
+            transportStore,
+            sendMessage: (chatId, text, opts) => bot.api.sendMessage(chatId, text, opts),
+          }),
       ),
     );
   }

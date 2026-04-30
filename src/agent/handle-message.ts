@@ -209,7 +209,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       };
 
       const codingService = deps.codingServiceFactory?.(conversationId);
-      const skillsService = deps.skillRunner ? createSkillsService(deps.skillRunner) : undefined;
+      const skillsService = deps.skillRunner
+        ? createSkillsService({
+            runner: deps.skillRunner,
+            inngest,
+            conversationId,
+          })
+        : undefined;
       const service = createService(
         memory,
         userId,

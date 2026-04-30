@@ -6,6 +6,8 @@ import type { AgentStore } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import type { SkillRunner } from "../skills/runner.js";
+import type { SkillStore } from "../skills/store/index.js";
 import { adaptersByType } from "./adapters/index.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { AdapterEntry } from "./delivery-router.js";
@@ -30,6 +32,14 @@ export interface RegistryDeps {
   secretsStore: SecretsStore;
   /** Host root for git clones registered via `/repo add`. */
   reposDir?: string;
+  /**
+   * Skills runner — wired into `transport.skills.{approveDeploy,denyDeploy}`
+   * so the Telegram approve-tier callback handler can drive the registered
+   * RPCs. Optional only because some test setups skip skills wiring.
+   */
+  skillRunner?: SkillRunner;
+  /** Skills store — paired with `skillRunner` for the Transport identity check. */
+  skillStore?: SkillStore;
 }
 
 export interface RegistryResult {
@@ -73,6 +83,8 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       ...(deps.codingStore && { codingStore: deps.codingStore }),
       secretsStore: deps.secretsStore,
       ...(deps.reposDir && { reposDir: deps.reposDir }),
+      ...(deps.skillRunner && { skillRunner: deps.skillRunner }),
+      ...(deps.skillStore && { skillStore: deps.skillStore }),
       inngest: deps.inngest,
       inboundArrived: deps.inboundArrived,
       attachments: deps.attachments,
@@ -98,6 +110,13 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
             streamingRegistry: deps.codingStreamingRegistry,
           },
         }),
+      ...(deps.skillStore && {
+        skillsApproval: {
+          inngest: deps.inngest,
+          skillStore: deps.skillStore,
+          transportStore: deps.transportStore,
+        },
+      }),
     });
 
     adapters.push(result.adapter);
