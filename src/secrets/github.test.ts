@@ -64,6 +64,108 @@ describe("GitHubIdentitySchema", () => {
   it("rejects unknown fields (strict)", () => {
     expect(GitHubIdentitySchema.safeParse({ ...VALID, extra: "nope" }).success).toBe(false);
   });
+
+  it("rejects each required field individually when missing, with that field on the issue path", () => {
+    // Build an explicit list of required fields rather than looping over keys —
+    // a regression that drops one of these from the schema should fail loudly,
+    // and grepping for the field name should land here.
+    const requiredFields: ReadonlyArray<keyof GitHubIdentity> = [
+      "pat",
+      "sshPrivateKey",
+      "sshPublicKey",
+      "login",
+      "id",
+    ];
+    for (const field of requiredFields) {
+      const { [field]: _omitted, ...rest } = VALID;
+      const result = GitHubIdentitySchema.safeParse(rest);
+      expect(result.success, `expected missing '${field}' to fail parse`).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.some((i) => i.path[0] === field)).toBe(true);
+      }
+    }
+  });
+
+  it("rejects each required string field when set to the empty string", () => {
+    // `.min(1)` on every string field — empty string is not a stand-in for "absent".
+    const stringFields: ReadonlyArray<keyof GitHubIdentity> = [
+      "pat",
+      "sshPrivateKey",
+      "sshPublicKey",
+      "login",
+    ];
+    for (const field of stringFields) {
+      const result = GitHubIdentitySchema.safeParse({ ...VALID, [field]: "" });
+      expect(result.success, `expected empty '${field}' to fail parse`).toBe(false);
+    }
+  });
+
+  it("rejects an `id` that is empty, signed, decimal, hex, or otherwise non-digits", () => {
+    const badIds = ["", "-1", "1.5", "0x1f", "12345 ", " 12345", "12 345", "abc", "1e3"];
+    for (const id of badIds) {
+      const result = GitHubIdentitySchema.safeParse({ ...VALID, id });
+      expect(result.success, `expected id='${id}' to fail parse`).toBe(false);
+    }
+  });
+
+  it("accepts arbitrary digit strings for `id` (including leading zeros and very long ids)", () => {
+    // The regex is `^\d+$` — no length cap, no leading-zero rule. Pin that.
+    for (const id of ["0", "00", "01", "1", "999999999999999999999"]) {
+      expect(GitHubIdentitySchema.safeParse({ ...VALID, id }).success).toBe(true);
+    }
+  });
+
+  // The schema deliberately does NOT enforce GitHub-specific formats on the
+  // PAT or the SSH keypair. Capturing/validating those formats is the job of
+  // the setup wizard (where the operator can be re-prompted with a useful
+  // message); the storage schema just guards "non-empty string". These tests
+  // pin that contract — bumping validation stricter would break them on
+  // purpose, forcing a deliberate decision.
+  it("does not enforce a GitHub PAT prefix — any non-empty string is accepted", () => {
+    for (const pat of [
+      "ghp_realLookingButFake",
+      "github_pat_realLookingButFake",
+      "ghs_serverToken",
+      "no-prefix-at-all",
+      "totally bogus value with spaces",
+      "x", // single char, still passes min(1)
+    ]) {
+      expect(
+        GitHubIdentitySchema.safeParse({ ...VALID, pat }).success,
+        `expected pat='${pat}' to pass`,
+      ).toBe(true);
+    }
+  });
+
+  it("does not enforce an OpenSSH public-key format — any non-empty string is accepted", () => {
+    for (const sshPublicKey of [
+      "ssh-ed25519 AAAAC3Nz... cogmo-bot", // well-formed
+      "ssh-rsa AAAAB3Nz... cogmo-bot", // well-formed (other algo)
+      "not-a-key",
+      "AAAAC3NzaC1lZDI1NTE5AAAAIK...", // base64 alone, no algo prefix
+      "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA...\n-----END PUBLIC KEY-----", // PEM, not OpenSSH
+    ]) {
+      expect(
+        GitHubIdentitySchema.safeParse({ ...VALID, sshPublicKey }).success,
+        `expected sshPublicKey='${sshPublicKey.slice(0, 32)}...' to pass`,
+      ).toBe(true);
+    }
+  });
+
+  it("does not enforce OpenSSH armor on the private key — truncated/missing armor is accepted", () => {
+    for (const sshPrivateKey of [
+      "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blbn...\n-----END OPENSSH PRIVATE KEY-----", // well-formed
+      "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blbn...", // truncated end armor
+      "b3BlbnNzaC1rZXktdjEAAAAA...", // raw base64, no armor at all
+      "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----", // wrong armor type (PEM RSA, not OpenSSH)
+      "garbage",
+    ]) {
+      expect(
+        GitHubIdentitySchema.safeParse({ ...VALID, sshPrivateKey }).success,
+        `expected sshPrivateKey='${sshPrivateKey.slice(0, 32)}...' to pass`,
+      ).toBe(true);
+    }
+  });
 });
 
 describe("serializeGitHubIdentity", () => {
