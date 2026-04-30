@@ -84,7 +84,7 @@ Reference: `src/skills/store/store.test.ts` "rejects malformed classifier_log vi
 
 Every union arm should have a positive test (valid input → expected variant) and a negative test (invalid shape → rejected or fallback). Particularly for parsers consuming external streams (CLI stream-json, webhook payloads). Pin the *permissive* arms explicitly — "unknown event type silently dropped" is a contract worth a test, since a refactor that starts throwing would surface as a runtime crash otherwise.
 
-Reference: `src/agent/coding/claude.test.ts → describe("stream-json schema robustness")`.
+Reference: `src/agent/coding/claude.test.ts → describe("ClaudeCodeBackend stream-json schema robustness")`.
 
 ### Store happy-path + error-path coverage matrix
 
@@ -139,11 +139,11 @@ For SQL-level atomic operations (`approvePlanIfPending`, `transitionTaskStatus`)
 
 Reference: `src/agent/coding/streaming-registry.test.ts → describe("concurrency invariants")`.
 
-## Telegram Testing `[proposed]`
+## Telegram Testing `[confirmed]`
 
 - **Unit (current):** `vi.mock("grammy")`, mock Transport. Tests adapter logic without network.
-- **Unit (future enhancement):** grammY `bot.handleUpdate()` + `bot.api.config.use(transformer)` — tests against real grammY framework, catches API contract drift.
-- **E2e (future):** Telegram Test DC + tgintegration (TypeScript/mtcute). Real user on Telegram's test servers. Network-dependent, run on schedule.
+- **Unit (future enhancement) `[proposed]`:** grammY `bot.handleUpdate()` + `bot.api.config.use(transformer)` — tests against real grammY framework, catches API contract drift. Tracked as `p3` in `todo.md`.
+- **E2e (future) `[research]`:** Telegram Test DC + tgintegration (TypeScript/mtcute). Real user on Telegram's test servers. Network-dependent, run on schedule. Tracked as `p3` in `todo.md`.
 
 ## LLM Tests (Non-Deterministic) `[research]`
 
