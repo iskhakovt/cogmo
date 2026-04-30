@@ -452,3 +452,97 @@ describe("runReap — resilience", () => {
     expect((await store.getContainer(aliveB))?.status).toBe("starting");
   });
 });
+
+describe("runReap — concurrent invocation", () => {
+  // Production guarantee: Inngest's singleton-by-name semantics on the
+  // cron function id `sandbox-reaper` (see reaper.ts:223) prevent two
+  // ticks from overlapping. The reaper itself takes no DB advisory lock
+  // — its concurrency safety relies on that scheduler property.
+  //
+  // These tests pin the *post-interleave* contract: if two `runReap`
+  // calls did somehow overlap (duplicate dispatch, manual invocation
+  // alongside a tick, future scheduler swap), the terminal DB state
+  // remains consistent — every targeted row lands in `reaped`, and the
+  // sum of `ttlReaped` across both calls covers every container at
+  // least once.
+  //
+  // What this suite intentionally does NOT pin: that each Docker
+  // `kill` call happens exactly once, or that the totals sum to
+  // exactly N. With no advisory lock around the TTL pass, both calls
+  // can read the same `running` rows before either writes `reaped`,
+  // so each row gets killed twice and counted twice. That's the
+  // observed behaviour and is acceptable because (a) `killAndRemove`
+  // tolerates a 304/404 (already-killed/already-gone) and (b) the
+  // singleton scheduler keeps it out of production. If we ever add a
+  // row-level lock, these tests will tighten.
+
+  it("two interleaved runReap calls reach a consistent terminal DB state", async () => {
+    const dockerSide: DockerSideContainer[] = [
+      { Id: "c-a", Labels: labels() },
+      { Id: "c-b", Labels: labels() },
+    ];
+    const { docker, killCalls, removeCalls } = fakeDocker({ containers: dockerSide });
+    const idA = await insertContainer({ dockerId: "c-a", ttlMs: -1000, status: "running" });
+    const idB = await insertContainer({ dockerId: "c-b", ttlMs: -2000, status: "running" });
+
+    const [r1, r2] = await Promise.all([
+      runReap({ docker, store, instanceId, now: NOW }),
+      runReap({ docker, store, instanceId, now: NOW }),
+    ]);
+
+    // Terminal DB state is identical to a single-run terminal state.
+    // `updateContainerStatus({status: "reaped"})` is idempotent at the
+    // row level — a second write of the same value is a no-op-equivalent
+    // — so whichever call commits last lands the same row contents.
+    expect((await store.getContainer(idA))?.status).toBe("reaped");
+    expect((await store.getContainer(idB))?.status).toBe("reaped");
+
+    // Every TTL-expired container is killed at least once. The exact
+    // count may be 1 or 2 per container depending on interleave —
+    // `killAndRemove` is tolerant of repeats (statusCode 304/404 are
+    // swallowed), so we only assert coverage.
+    expect(new Set(killCalls)).toEqual(new Set(["c-a", "c-b"]));
+    expect(new Set(removeCalls)).toEqual(new Set(["c-a", "c-b"]));
+
+    // Sum of ttlReaped covers every container at least once. Without an
+    // advisory lock, both calls can read the same `running` rows and
+    // each claims an increment, so the sum can be up to 2 * N.
+    expect(r1.ttlReaped + r2.ttlReaped).toBeGreaterThanOrEqual(2);
+    expect(r1.ttlReaped + r2.ttlReaped).toBeLessThanOrEqual(4);
+  });
+
+  it("a second runReap after the first finished sees nothing to do", async () => {
+    // Sequential, not interleaved: the second call starts cleanly after
+    // the first has committed its terminal `reaped` row. This is the
+    // "next cron tick" scenario — the production-realistic flow given
+    // Inngest's singleton-by-name. Must be a complete no-op.
+    const { docker, killCalls } = fakeDocker({
+      containers: [{ Id: "c-seq", Labels: labels() }],
+    });
+    const cogmoId = await insertContainer({
+      dockerId: "c-seq",
+      ttlMs: -1000,
+      status: "running",
+    });
+
+    const r1 = await runReap({ docker, store, instanceId, now: NOW });
+    expect(r1.ttlReaped).toBe(1);
+    expect(killCalls).toEqual(["c-seq"]);
+
+    // Second tick. The DB row is already `reaped`, so the TTL filter
+    // (status === "running" || "starting") excludes it. The orphan
+    // pass sees the Docker listing still contains c-seq (our stub
+    // doesn't remove it) but `getContainerByDockerId` returns the
+    // reaped row, which counts as "DB row present + live instance"
+    // → not an orphan. The stale-DB pass also skips it because the
+    // row is no longer running. Strict no-op.
+    const r2 = await runReap({ docker, store, instanceId, now: NOW });
+    expect(r2.ttlReaped).toBe(0);
+    expect(r2.staleMarked).toBe(0);
+    expect(r2.orphansReaped).toBe(0);
+    // killCalls is cumulative across both runs; only the first touched
+    // the daemon.
+    expect(killCalls).toEqual(["c-seq"]);
+    expect((await store.getContainer(cogmoId))?.status).toBe("reaped");
+  });
+});
