@@ -315,6 +315,43 @@ export async function handlePermissionCallback(
   }
 }
 
+export interface SkillsApprovalCallbackOutcome {
+  editText: string;
+  toast: string;
+}
+
+/**
+ * Skills-deploy approve-tier callback handler — translates a parsed Approve /
+ * Deny tap into a `transport.skills.{approveDeploy,denyDeploy}` call and an
+ * outcome the adapter renders. Identity check happens inside the Transport
+ * layer (`checkSkillsTapper`).
+ */
+export async function handleSkillsApprovalCallback(
+  transport: Transport,
+  parsed: { pendingId: string; action: "approve" | "deny" },
+  tapperPlatformHandle: string,
+): Promise<SkillsApprovalCallbackOutcome> {
+  if (parsed.action === "approve") {
+    const res = await transport.skills.approveDeploy(parsed.pendingId, tapperPlatformHandle);
+    if (res.isErr()) {
+      return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+    }
+    return {
+      editText: `✅ Approved: '${res.value.skillName}' is now live (${res.value.gitSha.slice(0, 7)}).`,
+      toast: "Approved",
+    };
+  }
+  // deny
+  const res = await transport.skills.denyDeploy(parsed.pendingId, tapperPlatformHandle);
+  if (res.isErr()) {
+    return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+  }
+  return {
+    editText: "❌ Deploy denied — no main advance. Re-register a different version to retry.",
+    toast: "Denied",
+  };
+}
+
 /** Callback-query handler for inline-keyboard taps from /sessions. */
 export async function handleResumeCallback(
   transport: Transport,
@@ -629,6 +666,14 @@ function errorMessage(err: TransportError): string {
       return `This plan can't be approved (status: ${err.status}).`;
     case "task_already_terminal":
       return `Task already finished (status: ${err.status}).`;
+    case "skills_disabled":
+      return "Skills runtime is unavailable — bootstrap missing skillRunner wiring.";
+    case "skill_deploy_not_found":
+      return `Skill deploy ${shortenId(err.pendingId)} not found.`;
+    case "skill_deploy_not_pending":
+      return `This deploy can't be acted on (status: ${err.status}).`;
+    case "skill_deploy_register_failed":
+      return `Approve failed: ${err.reason}`;
   }
   // Exhaustive — if a new TransportError code is added, TypeScript will warn
   // at call sites that return `string` (the inferred return becomes `string | undefined`).

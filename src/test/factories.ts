@@ -219,6 +219,12 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       cancelTask: vi.fn().mockResolvedValue(ok({ taskId: "t-1" })),
       respondPermission: vi.fn().mockResolvedValue(ok({ taskId: "t-1" })),
     },
+    skills: {
+      approveDeploy: vi
+        .fn()
+        .mockResolvedValue(ok({ pendingId: "p-1", skillName: "echo", gitSha: "abc1234" })),
+      denyDeploy: vi.fn().mockResolvedValue(ok({ pendingId: "p-1" })),
+    },
     ...overrides,
   };
 }

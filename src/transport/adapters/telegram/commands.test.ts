@@ -11,6 +11,7 @@ import {
   handleResume,
   handleResumeCallback,
   handleSessions,
+  handleSkillsApprovalCallback,
   type TelegramCommandContext,
 } from "./commands.js";
 import { ProfileDialogs } from "./profile-dialog.js";
@@ -547,5 +548,122 @@ describe("handlePlanCallback", () => {
 
     expect(outcome.editText).toMatch(/already finished/);
     expect(outcome.editText).toMatch(/failed/);
+  });
+});
+
+describe("handleSkillsApprovalCallback", () => {
+  const pendingId = "019d0000-0000-7000-8000-000000000099";
+
+  it("Approve dispatches to skills.approveDeploy and reports the live skill name + sha", async () => {
+    const approve = vi
+      .fn()
+      .mockResolvedValue(ok({ pendingId, skillName: "echo", gitSha: "abcdef0123" }));
+    const transport = transportWith({
+      skills: {
+        approveDeploy: approve,
+        denyDeploy: vi.fn(),
+      },
+    });
+
+    const outcome = await handleSkillsApprovalCallback(
+      transport,
+      { pendingId, action: "approve" },
+      "user-tg-1",
+    );
+
+    expect(approve).toHaveBeenCalledWith(pendingId, "user-tg-1");
+    expect(outcome.editText).toMatch(/Approved/);
+    expect(outcome.editText).toMatch(/echo/);
+    expect(outcome.editText).toMatch(/abcdef0/);
+    expect(outcome.toast).toBe("Approved");
+  });
+
+  it("Deny dispatches to skills.denyDeploy without a reason and clears the keyboard", async () => {
+    const deny = vi.fn().mockResolvedValue(ok({ pendingId }));
+    const transport = transportWith({
+      skills: {
+        approveDeploy: vi.fn(),
+        denyDeploy: deny,
+      },
+    });
+
+    const outcome = await handleSkillsApprovalCallback(
+      transport,
+      { pendingId, action: "deny" },
+      "user-tg-1",
+    );
+
+    expect(deny).toHaveBeenCalledWith(pendingId, "user-tg-1");
+    expect(outcome.editText).toMatch(/denied/);
+    expect(outcome.editText).toMatch(/no main advance/);
+    expect(outcome.toast).toBe("Denied");
+  });
+
+  it("identity_rejected from Transport surfaces an unauthorized message", async () => {
+    const approve = vi.fn().mockResolvedValue(err({ code: "identity_rejected" as const }));
+    const transport = transportWith({
+      skills: {
+        approveDeploy: approve,
+        denyDeploy: vi.fn(),
+      },
+    });
+
+    const outcome = await handleSkillsApprovalCallback(
+      transport,
+      { pendingId, action: "approve" },
+      "wrong-user",
+    );
+
+    expect(outcome.editText).toMatch(/not authorized/);
+    expect(outcome.toast).toMatch(/not authorized/);
+  });
+
+  it("double-tap on already-resolved deploy gets skill_deploy_not_pending", async () => {
+    const approve = vi.fn().mockResolvedValue(
+      err({
+        code: "skill_deploy_not_pending" as const,
+        pendingId,
+        status: "denied",
+      }),
+    );
+    const transport = transportWith({
+      skills: {
+        approveDeploy: approve,
+        denyDeploy: vi.fn(),
+      },
+    });
+
+    const outcome = await handleSkillsApprovalCallback(
+      transport,
+      { pendingId, action: "approve" },
+      "user-tg-1",
+    );
+
+    expect(outcome.editText).toMatch(/can't be acted on/);
+    expect(outcome.editText).toMatch(/denied/);
+  });
+
+  it("approve runner failure (skill_deploy_register_failed) surfaces the runner reason", async () => {
+    const approve = vi.fn().mockResolvedValue(
+      err({
+        code: "skill_deploy_register_failed" as const,
+        pendingId,
+        reason: "non_fast_forward_at_approve_time",
+      }),
+    );
+    const transport = transportWith({
+      skills: {
+        approveDeploy: approve,
+        denyDeploy: vi.fn(),
+      },
+    });
+
+    const outcome = await handleSkillsApprovalCallback(
+      transport,
+      { pendingId, action: "approve" },
+      "user-tg-1",
+    );
+
+    expect(outcome.editText).toMatch(/non_fast_forward_at_approve_time/);
   });
 });

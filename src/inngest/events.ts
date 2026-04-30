@@ -177,6 +177,30 @@ export const codingTaskPrOpened = eventType("coding/task/pr-opened", {
 });
 
 /**
+ * Skills deploy gate — `register` produced an `approve`-tier deploy that
+ * needs human signoff before main is advanced. Emitted by Service.skills
+ * after the runner returns `pending_approval`. The per-channel Telegram
+ * function consumes this and posts the Approve / Deny inline keyboard into
+ * the originating conversation's active session. The keyboard's callback
+ * tap dispatches directly to `transport.skills.approveDeploy` /
+ * `denyDeploy` — no `step.waitForEvent` orchestration on the runner side
+ * (the runner already returned).
+ *
+ * `pendingId` is the `skill_deploys.id` UUID; the per-channel Telegram
+ * function fetches the manifest-derived details (declared effects, risk
+ * tier, classifier log) from `skill_deploys` + `skills` at post time —
+ * keeps the event payload minimal and avoids data duplication.
+ */
+export const skillsDeployApprovalRequested = eventType("skills/deploy/approval-requested", {
+  schema: z.object({
+    pendingId: z.string(),
+    skillName: z.string(),
+    gitSha: z.string(),
+    conversationId: z.string(),
+  }),
+});
+
+/**
  * Direct channel — external clients emit this to send messages.
  * The direct-inbound Inngest function translates to inbound/arrived.
  */
