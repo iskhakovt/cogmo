@@ -65,6 +65,80 @@ Full deployment-like stack — cogmo as a subprocess in connect mode. Smoke test
 | Migrations | App subprocess applies migrations on boot. Verify tables queryable. |
 | Smoke | Emit one event via Inngest API → assert assistant response in DB |
 
+## Coverage Patterns `[confirmed]`
+
+Concrete test recipes that should be applied alongside the tier guidance above. Distilled from the audit of Phase 6 P1 PRs (#76 / #78 / #80 / #86), shipped 2026-04-30.
+
+### JSONB raw-SQL bypass tests
+
+Every JSONB column has a Zod schema enforced at the store boundary on **both** read and write (CLAUDE.md → Architecture Rules). Tests must exercise both directions — write-side via `insertX({ malformed })` is the easy half; read-side requires bypassing the writer:
+
+```ts
+await db.execute(sql`UPDATE <table> SET <col> = '{"junk":true}'::jsonb WHERE id = ${id}`);
+await expect(store.getX(id)).rejects.toThrow();
+```
+
+Reference: `src/skills/store/store.test.ts` "rejects malformed classifier_log via raw SQL on read"; `src/sandbox/store/store.test.ts` for `containers.labels` / `resource_limits` etc.
+
+### Discriminated-union exhaustive parse tests
+
+Every union arm should have a positive test (valid input → expected variant) and a negative test (invalid shape → rejected or fallback). Particularly for parsers consuming external streams (CLI stream-json, webhook payloads). Pin the *permissive* arms explicitly — "unknown event type silently dropped" is a contract worth a test, since a refactor that starts throwing would surface as a runtime crash otherwise.
+
+Reference: `src/agent/coding/claude.test.ts → describe("stream-json schema robustness")`.
+
+### Store happy-path + error-path coverage matrix
+
+Beyond "insert then retrieve":
+- **Atomic multi-field state** — JSONB blobs that group correlated fields (e.g. `worktree_assignment: {branch, worktreePath}`) should have null-until-both-set + reject-half-set tests.
+- **Idempotent replay** — store methods invoked twice (Inngest retry simulation) produce the same terminal state without errors.
+- **Missing-row behaviors** — `getById("nonexistent")` returns `null`, not throws.
+- **Constraint collisions** — UNIQUE / FK violations surface as the right typed error (e.g. `UniqueViolationError` mapped to `repo_name_taken`).
+
+### Error-path coverage matrix per module
+
+For each command surface (CLI tool, orchestrator function, Telegram command), enumerate and test:
+- Invalid args (per Zod schema)
+- Missing required effects / dependencies (e.g. `service.coding` not provided)
+- External service timeout / auth failure
+- Concurrent contention (atomic conditional updates losing the race)
+- Idempotent retries
+- Cleanup on crash (try/finally invariants pinned)
+
+### Resource cleanup invariants
+
+Every operation that allocates a resource (worktree, container, askpass dir, advisory lock) needs a test asserting the cleanup path runs even when the operation fails mid-flight. The `try/finally` is the typical implementation; the test is a fake sandbox / store where the operation throws and the asserter checks the resource is gone.
+
+Reference: `src/sandbox/supervisor.test.ts` "stopTask still calls cleanupAskpass when Docker kill throws"; `src/agent/coding/teardown.test.ts`.
+
+### Audit row invariants ("every X produces a Y")
+
+Cross-module contracts that no single module test can verify:
+- Every `setTaskStatus(...)` produces the corresponding `coding/task/<status>` event on the bus.
+- Every tool permission decision produces a `coding_tool_decisions` row with the correct scope.
+- Every `ctx.*` skill RPC produces a `skill_context_calls` audit row with method + target.
+
+These belong in **integration tests** that exercise the orchestrator + event bus + audit table together, not in module-isolated unit tests.
+
+### CLI exit-code matrices
+
+For every command surface (Telegram `/repo`, agent tools), enumerate the discriminated error codes and pin the user-visible response per code. Prevents drift where a new error code returns a generic fallback instead of a tailored message.
+
+Reference: `src/transport/adapters/telegram/repo-commands.test.ts`; `src/agent/coding/tool.test.ts`.
+
+### Version-pinning canaries
+
+Runtime deps with breaking-change history (octokit, dockerode, sysbox image tags, Claude CLI flag set) deserve explicit tests that the API surface our code uses still exists. Today a runtime regression only surfaces in integration tests; a unit-tier schema validation against the SDK's request/response types catches it earlier.
+
+(Currently aspirational — listed in PROGRESS.md → Phase 6 → Test infrastructure as a future canary.)
+
+### Concurrency invariants
+
+For in-process pub/sub (`CodingStreamingRegistry`, `EventEmitter` wrappers): pin listener-set snapshot semantics (subscribers added mid-emit don't fire for the in-flight event), self-unsubscribe-during-emit, re-entrant publish, and burst ordering across multiple subscribers. Catches refactors that introduce async dispatch or live-iteration regressions.
+
+For SQL-level atomic operations (`approvePlanIfPending`, `transitionTaskStatus`): the atomic SQL is the contract; module tests verify the discriminated outcomes (`approved` / `already_approved` / `not_pending`). End-to-end "two concurrent Telegram callbacks" tests are deferred to the integration tier with real Postgres.
+
+Reference: `src/agent/coding/streaming-registry.test.ts → describe("concurrency invariants")`.
+
 ## Telegram Testing `[proposed]`
 
 - **Unit (current):** `vi.mock("grammy")`, mock Transport. Tests adapter logic without network.
