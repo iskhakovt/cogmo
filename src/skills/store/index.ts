@@ -381,31 +381,44 @@ export class DrizzleSkillStore implements SkillStore {
       // applyFilesystem succeeded" — narrower than "any DB write after FS
       // succeeds fails", which is what the previous FS-then-DB ordering
       // exposed. Documented on ExecuteRegisterParams.applyFilesystem.
+      //
+      // Pending-approval semantics for an existing skill:
+      // - The currently-live skill (at existing.gitSha) STAYS LIVE during
+      //   the approval window. Pending deploys live entirely on
+      //   skill_deploys; the skills row is the projection of `main`, not of
+      //   "what someone wants to deploy."
+      // - Without this rule, queuing an approve-tier upgrade for a
+      //   currently-notify skill would disable the live version for the
+      //   duration of the approval — and forever if the deploy is denied
+      //   (denyPendingDeploy doesn't reset the row).
       let skillRow: SkillRow;
       if (existing) {
-        const updatedRows = await tx
-          .update(skills)
-          .set(
-            goesLive
-              ? {
-                  tier: params.tier,
-                  riskTier: params.riskTier,
-                  effects,
-                  schedule: params.schedule,
-                  gitSha: params.branchTipSha,
-                  inputs,
-                  outputs,
-                  disabled: false,
-                }
-              : { tier: params.tier, riskTier: params.riskTier, disabled: true },
-          )
-          .where(eq(skills.id, existing.id))
-          .returning();
-        skillRow = parseSkillRow(single(updatedRows));
+        if (goesLive) {
+          const updatedRows = await tx
+            .update(skills)
+            .set({
+              tier: params.tier,
+              riskTier: params.riskTier,
+              effects,
+              schedule: params.schedule,
+              gitSha: params.branchTipSha,
+              inputs,
+              outputs,
+              disabled: false,
+            })
+            .where(eq(skills.id, existing.id))
+            .returning();
+          skillRow = parseSkillRow(single(updatedRows));
+        } else {
+          // Pending-approval re-deploy on a live skill — leave the existing
+          // row untouched. The pending state lives on skill_deploys.
+          skillRow = existing;
+        }
       } else {
-        // First-ever deploy for this name. Pending-approval deploys still get
-        // a row (so the deploy record can FK to skill_id) but it stays
-        // disabled until the follow-up approve flips it on.
+        // First-ever deploy for this name. Pending-approval deploys still
+        // get a row (the skill_deploys row needs a skill_id FK target) but
+        // it stays disabled — there's no prior live version to preserve.
+        // approveDeploy flips disabled=false when the human signs off.
         const insertedRows = await tx
           .insert(skills)
           .values({

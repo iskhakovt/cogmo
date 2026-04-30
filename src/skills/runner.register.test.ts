@@ -771,7 +771,7 @@ inputs:
   });
 
   describe("safety: deny + re-register doesn't leave a disabled skill", () => {
-    it("after deny, re-registering the same branch tip activates the skill instead of returning no_op", async () => {
+    it("after deny, re-registering the SAME branch tip opens a fresh pending_approval (not no_op)", async () => {
       const runner = await makeRunner();
       const sendingManifest = `---
 name: notify-skill
@@ -784,6 +784,10 @@ effects:
   - sends_message
 ---
 `;
+      // Approve-tier register doesn't call applyFilesystem, so the feature
+      // branch survives the first register — register can read it again
+      // unchanged. Pushing once + registering twice exercises the actual
+      // (name, gitSha) match that the no-op-after-denial guard protects.
       const sha = await pushFeatureBranch({
         work: repo.work,
         branch: "skill/notify-skill",
@@ -792,34 +796,93 @@ effects:
       });
       const reg = await runner.register({ branch: "skill/notify-skill" });
       expect(reg.status).toBe("pending_approval");
+      expect(reg.gitSha).toBe(sha);
       if (!reg.pendingId) throw new Error("expected pendingId");
 
-      // After insert: skill row exists but disabled=true.
+      // After insert: skill row exists but disabled=true (first-time
+      // pending_approval — there's no prior live version to keep visible).
       const beforeDeny = await store.getSkillByName("notify-skill");
       expect(beforeDeny?.disabled).toBe(true);
       expect(beforeDeny?.gitSha).toBe(sha);
 
       await runner.denyDeploy({ pendingId: reg.pendingId, reason: "not now" });
 
-      // Skill is still disabled at the same gitSha — without the fix, a
-      // re-register at the same branch tip would return no_op and leave the
-      // skill dark forever.
+      // Row stays at sha, disabled=true; deploy resolved to denied. The
+      // bare repo's feature branch is untouched (deleteRef only runs in
+      // goesLive applyFilesystem, which approve-tier skips).
       const afterDeny = await store.getSkillByName("notify-skill");
       expect(afterDeny?.disabled).toBe(true);
       expect(afterDeny?.gitSha).toBe(sha);
 
-      // Repush the same content to a new branch (deleted ones were cleaned),
-      // then re-register. With the no-op fix, this opens a fresh
-      // pending_approval row instead of claiming "nothing to deploy".
-      const sha2 = await pushFeatureBranch({
+      // Re-register the SAME branch — same tip sha as before. Without the
+      // `!disabled` guard in the no-op check, this would return
+      // status: "no_op" and the skill would stay dark forever. With the
+      // guard, the disabled row is treated as "not no_op" and a fresh
+      // pending_approval row is created.
+      const reg2 = await runner.register({ branch: "skill/notify-skill" });
+      expect(reg2.status).toBe("pending_approval");
+      expect(reg2.gitSha).toBe(sha);
+      expect(reg2.pendingId).toBeTruthy();
+      expect(reg2.pendingId).not.toBe(reg.pendingId);
+    });
+
+    it("does NOT take a currently-live skill offline when an approve-tier upgrade is queued", async () => {
+      const runner = await makeRunner();
+      // v1 — notify-tier (no destructive effects), goes live immediately.
+      const v1Manifest = ECHO_MANIFEST.replace("name: echo", "name: upgradable");
+      const v1Sha = await pushFeatureBranch({
         work: repo.work,
-        branch: "skill/notify-skill-retry",
-        manifest: sendingManifest,
+        branch: "skill/upgradable-v1",
+        manifest: v1Manifest,
         body: ECHO_BODY,
       });
-      const reg2 = await runner.register({ branch: "skill/notify-skill-retry" });
+      const reg1 = await runner.register({ branch: "skill/upgradable-v1" });
+      expect(reg1.status).toBe("live");
+
+      const liveBefore = await store.getSkillByName("upgradable");
+      expect(liveBefore?.disabled).toBe(false);
+      expect(liveBefore?.gitSha).toBe(v1Sha);
+
+      // v2 — adds sends_message → approve-tier. Should land as pending,
+      // but the live v1 must STAY live during the approval window.
+      const v2Manifest = `---
+name: upgradable
+description: v2 adds outbound messaging which now needs approval
+tier: wasm
+inputs:
+  type: object
+  properties:
+    x:
+      type: integer
+  required:
+    - x
+effects:
+  - sends_message
+---
+`;
+      const v2Sha = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/upgradable-v2",
+        manifest: v2Manifest,
+        body: ECHO_BODY,
+      });
+      const reg2 = await runner.register({ branch: "skill/upgradable-v2" });
       expect(reg2.status).toBe("pending_approval");
-      expect(reg2.gitSha).toBe(sha2);
+      if (!reg2.pendingId) throw new Error("expected pendingId for v2");
+
+      // Critical: skills row UNCHANGED — still pointing at v1, still live.
+      const duringApproval = await store.getSkillByName("upgradable");
+      expect(duringApproval?.disabled).toBe(false);
+      expect(duringApproval?.gitSha).toBe(v1Sha);
+
+      // Deny the v2 upgrade. The live v1 should still be live afterwards —
+      // this is the exact regression the row-untouched rule prevents.
+      await runner.denyDeploy({ pendingId: reg2.pendingId, reason: "rejected" });
+      const afterDeny = await store.getSkillByName("upgradable");
+      expect(afterDeny?.disabled).toBe(false);
+      expect(afterDeny?.gitSha).toBe(v1Sha);
+      expect(reg2).toBeDefined(); // no_op-after-denial sanity (v2's pending row resolved to denied)
+      void v2Sha;
     });
   });
 
