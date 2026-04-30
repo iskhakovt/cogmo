@@ -346,6 +346,71 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     rmSync(baseDir, { recursive: true, force: true });
   });
 
+  it("stopTask wipes the askpass dir even when the cascade kill throws", async () => {
+    // Pins the `try/finally` invariant in `stopTask`: an unexpected Docker
+    // error during the cascade kill must NOT prevent askpass cleanup.
+    // Without this guarantee a kill-side flake leaks per-task PAT +
+    // signing-key material under `${askpassBaseDir}/<taskId>`. Companion to
+    // the happy-path test above — together they cover both branches of
+    // the finally.
+    const { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    const baseDir = mkdtempSync(join(tmpdir(), "cogmo-supervisor-askpass-fail-"));
+    const taskId = "019d0000-0000-7000-8000-000000feedee";
+    const taskDir = join(baseDir, taskId);
+    mkdirSync(taskDir, { recursive: true });
+    writeFileSync(join(taskDir, "pat"), "secret");
+
+    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    // Custom docker stub: kill rejects with a non-recoverable error
+    // (statusCode 500 — not the 304/404 the supervisor swallows). The
+    // error must propagate out of the for-loop into the finally without
+    // skipping cleanupAskpass.
+    const start = vi.fn(async () => {});
+    const inspect = vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} }));
+    const kill = vi.fn(async () => {
+      const err: Error & { statusCode?: number } = new Error("daemon i/o error");
+      err.statusCode = 500;
+      throw err;
+    });
+    const remove = vi.fn(async () => {});
+    const docker = {
+      createContainer: vi.fn(async () => ({ id: "docker-killfail", start, remove, inspect })),
+      listContainers: vi.fn(async () => []),
+      getContainer: () => ({ inspect, kill, remove }),
+      info: vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } })),
+    };
+    const sandbox = await LocalInProcessSandbox.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
+      docker: docker as any,
+      store,
+      runtime: "runc",
+      instanceId: inst.id,
+      askpassBaseDir: baseDir,
+    });
+
+    await sandbox.createTaskContainer({
+      rootTaskId: taskId,
+      worktreePath: "/tmp/wt",
+      homeVolumeName: "vol-killfail",
+      image: "alpine",
+      resourceLimits: RESOURCE_LIMITS,
+      ttl: { expiresAt: new Date(Date.now() + 60_000) },
+      allowPrivilegedRunc: false,
+    });
+    expect(existsSync(taskDir)).toBe(true);
+
+    // The thrown kill error escapes stopTask (the finally re-raises after
+    // running cleanup), but the askpass dir must already be gone by then.
+    await expect(sandbox.stopTask(taskId)).rejects.toThrow("daemon i/o error");
+    expect(kill).toHaveBeenCalled();
+    expect(existsSync(taskDir)).toBe(false);
+
+    rmSync(baseDir, { recursive: true, force: true });
+  });
+
   it("stopTask is a no-op for askpass when no baseDir is configured", async () => {
     const inst = await store.insertInstance({ host: "h", pid: 1 });
     const { docker } = fakeDocker({ dockerId: "docker-noaskpass" });
