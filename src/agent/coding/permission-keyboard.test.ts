@@ -87,6 +87,67 @@ describe("permission-keyboard", () => {
     }
   });
 
+  it.each([
+    "allow_once" as const,
+    "allow_task" as const,
+    "deny" as const,
+  ])("worst-case encoded callback_data for %s is exactly 60 bytes (well under 64)", (action) => {
+    // perm(4) + :(1) + UUID(36) + :(1) + requestId(16) + :(1) + code(1) = 60.
+    // Pinning the exact byte length protects the budget: any change to the
+    // prefix, separator count, or action-code width that would push past
+    // 64 (Telegram's hard limit) breaks this test before it ships.
+    const data = encodePermissionCallback(TASK_ID, "0123456789abcdef", action);
+    expect(Buffer.byteLength(data)).toBe(60);
+  });
+
+  it.each([
+    { code: "o", expected: { decision: "allow", scope: "once" } },
+    { code: "t", expected: { decision: "allow", scope: "task" } },
+    { code: "d", expected: { decision: "deny", scope: "once" } },
+  ])("wire code $code decodes to the same {decision, scope} as encode→parse→actionToDecision", ({
+    code,
+    expected,
+  }) => {
+    // The wire code on the keyboard must agree with the (decision, scope)
+    // pair the orchestrator logs. This pins the full chain so any drift
+    // between wire codes and semantic values is caught here, not in
+    // production logs.
+    const data = `perm:${TASK_ID}:reqA:${code}`;
+    const parsed = parsePermissionCallback(data);
+    expect(parsed).not.toBeNull();
+    if (!parsed) return;
+    expect(actionToDecision(parsed.action)).toEqual(expected);
+
+    // Reverse: encoding from the action recovers the same wire code.
+    const reEncoded = encodePermissionCallback(TASK_ID, "reqA", parsed.action);
+    expect(reEncoded.endsWith(`:${code}`)).toBe(true);
+  });
+
+  it("decode rejects unknown wire codes by returning null", () => {
+    // Pin: silent-skip via null (caller surfaces it), not throw.
+    for (const bad of ["x", "a", "z", "O", "T", "D", "ot", ""]) {
+      expect(parsePermissionCallback(`perm:${TASK_ID}:reqA:${bad}`)).toBeNull();
+    }
+  });
+
+  it("encoder does NOT truncate an over-long requestId — caller must shortenRequestId first", () => {
+    // Current behaviour: `encodePermissionCallback` is a pure template. The
+    // 16-char cap is enforced upstream by `shortenRequestId`. Passing a
+    // raw 20-char id produces output that exceeds the parse regex bound
+    // and Telegram's 64-byte budget — pinning this contract makes the
+    // boundary explicit.
+    const overLong = "0123456789abcdef0000"; // 20 chars
+    const data = encodePermissionCallback(TASK_ID, overLong, "deny");
+
+    // The over-long id is embedded verbatim, with no truncation.
+    expect(data).toBe(`perm:${TASK_ID}:${overLong}:d`);
+
+    // It overflows the parse regex's `{1,16}` bound, so the resulting
+    // callback_data is unparseable — encoder is not self-protective.
+    expect(parsePermissionCallback(data)).toBeNull();
+    expect(PERMISSION_CALLBACK_REGEX.test(data)).toBe(false);
+  });
+
   describe("actionToDecision", () => {
     it("maps allow_once → allow/once", () => {
       expect(actionToDecision("allow_once")).toEqual({ decision: "allow", scope: "once" });
