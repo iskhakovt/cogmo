@@ -198,10 +198,12 @@ async def run(inputs, ctx):
     await expect(runner.invoke({ name: "echo", inputs: { x: 1 } })).rejects.toThrow(/disabled/);
   });
 
-  it("public register / approveDeploy throw not_implemented in P3.1", async () => {
+  it("public register without skillsRepoPath throws clear config error", async () => {
     const runner = await makeRunner();
-    await expect(runner.register({ branch: "x" })).rejects.toThrow(/not_implemented/);
-    await expect(runner.approveDeploy({ pendingId: "x" })).rejects.toThrow(/not_implemented/);
+    await expect(runner.register({ branch: "x" })).rejects.toThrow(/skillsRepoPath not configured/);
+    await expect(runner.approveDeploy({ pendingId: "x" })).rejects.toThrow(
+      /skillsRepoPath not configured/,
+    );
   });
 
   it("__registerForTests rejects when manifest.name != params.name", async () => {
@@ -262,13 +264,17 @@ inputs:
     expect(run?.trigger).toBe("cron");
   });
 
-  it("rejects all P3.3 stub methods with not_implemented", async () => {
+  it("rollback / register / approveDeploy require skillsRepoPath", async () => {
     const runner = await makeRunner();
-    await expect(runner.register({ branch: "x" })).rejects.toThrow(/not_implemented/);
-    await expect(runner.approveDeploy({ pendingId: "x" })).rejects.toThrow(/not_implemented/);
-    await expect(runner.denyDeploy({ pendingId: "x" })).rejects.toThrow(/not_implemented/);
-    await expect(runner.rollback({ name: "x" })).rejects.toThrow(/not_implemented/);
-    await expect(runner.deregister({ name: "x" })).rejects.toThrow(/not_implemented/);
+    await expect(runner.register({ branch: "x" })).rejects.toThrow(/skillsRepoPath/);
+    await expect(runner.approveDeploy({ pendingId: "x" })).rejects.toThrow(/skillsRepoPath/);
+    await expect(runner.rollback({ name: "x", toGitSha: "y" })).rejects.toThrow(/skillsRepoPath/);
+    // denyDeploy + deregister are pure DB updates — no git access needed.
+    // deregister throws on a non-existent skill, denyDeploy is idempotent.
+    await expect(
+      runner.denyDeploy({ pendingId: "00000000-0000-0000-0000-000000000000" }),
+    ).resolves.toBeUndefined();
+    await expect(runner.deregister({ name: "x" })).rejects.toThrow(/not found/);
   });
 
   it("list excludes disabled skills", async () => {

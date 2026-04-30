@@ -47,6 +47,7 @@ import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
 import { DrizzleSecretsStore, type SecretsStore } from "./secrets/store/index.js";
 import { bootstrapSkillsRepo } from "./skills/repo.js";
 import { SkillRunnerImpl } from "./skills/runner.js";
+import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
 import { DrizzleSkillStore } from "./skills/store/index.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
 import { createDeliveryRouter } from "./transport/delivery-router.js";
@@ -304,6 +305,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       ...coreMemoryTools,
       ...imageTools,
       delegateCodingTool,
+      registerSkillTool,
     ],
     env.USER_TIMEZONE,
   );
@@ -315,6 +317,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       FILES_PROMPT_GUIDANCE,
       CORE_MEMORY_PROMPT_GUIDANCE,
       DELEGATE_CODING_GUIDANCE,
+      SKILLS_PROMPT_GUIDANCE,
     ],
     getUserContext: async () => {
       const blocks = await agentStore.getCoreMemoryBlocks(user.id);
@@ -327,7 +330,9 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // Skills runtime — Tier 1 ready in P3.1; register / classifier ship in P3.3.
   // The runner is exposed so the `cogmo skills` CLI subcommand can drive it
   // without re-bootstrapping. Bank id is the user id (per `design/memory.md`
-  // single-user single-bank model).
+  // single-user single-bank model). `skillsRepoPath` is what enables the
+  // register / rollback flows to read SKILL.md from git and advance
+  // `refs/heads/main`.
   const skillStore = new DrizzleSkillStore(db);
   const skillRunner = await SkillRunnerImpl.create({
     store: skillStore,
@@ -335,6 +340,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     memory,
     user: { id: user.id, timezone: env.USER_TIMEZONE },
     memoryBankId: user.id,
+    skillsRepoPath: env.COGMO_SKILLS_PATH,
     // Cache Pyodide's pre-built packages under the skills repo's git dir
     // so JsDelivr fetches don't repeat across worker spawns. Only matters
     // for skills that micropip-install pure-Python wheels — the stdlib is
@@ -385,6 +391,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     deliveryRouter,
     runStreamingAgentLoop,
     codingServiceFactory,
+    skillRunner,
     ...(profile.summarizationModel && { summarizationModel: profile.summarizationModel }),
   });
 

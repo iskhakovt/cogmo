@@ -78,8 +78,12 @@ export type Message = {
  */
 export interface JsonSchema {
   type: "object";
-  properties?: Record<string, unknown>;
-  required?: string[];
+  // Optional fields explicitly include `| undefined` so Zod's `optional()`
+  // output (which emits `T | undefined`) is assignable under
+  // `exactOptionalPropertyTypes: true`. Runtime behaviour is identical —
+  // serialisation drops undefined values either way.
+  properties?: Record<string, unknown> | undefined;
+  required?: string[] | undefined;
   [key: string]: unknown;
 }
 

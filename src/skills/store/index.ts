@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
 import {
@@ -6,6 +6,8 @@ import {
   ClassifierLogSchema,
   type SkillEffects,
   SkillEffectsSchema,
+  type SkillInputs,
+  SkillInputsSchema,
   SkillInvocationInputsSchema,
   SkillInvocationOutputSchema,
   type SkillIo,
@@ -27,7 +29,7 @@ export interface SkillRow {
   effects: SkillEffects;
   schedule: string | null;
   gitSha: string;
-  inputs: SkillIo;
+  inputs: SkillInputs;
   outputs: SkillIo | null;
   disabled: boolean;
   createdAt: Date;
@@ -75,7 +77,7 @@ export interface InsertSkillParams {
   effects: SkillEffects;
   schedule: string | null;
   gitSha: string;
-  inputs: SkillIo;
+  inputs: SkillInputs;
   outputs: SkillIo | null;
 }
 
@@ -110,6 +112,102 @@ export interface RecordContextCallParams {
   error: string | null;
 }
 
+/**
+ * Atomic register operation. Caller hands in already-validated state (parsed
+ * manifest, classifier output, branch tip sha) plus an `applyFilesystem`
+ * callback that performs the `git update-ref refs/heads/main` advance and
+ * any branch cleanup.
+ *
+ * The store opens one transaction, takes a per-skill-name advisory lock,
+ * runs the no-op + pending-deploy checks, writes DB rows, then invokes the
+ * callback. Both DB-write failure and filesystem failure roll the entire
+ * transaction back. The only remaining inconsistency window is "tx commit
+ * fails after applyFilesystem succeeded" — narrower than the reverse
+ * ordering, where any DB write after FS would leave main advanced with no
+ * skills row. Logged + reconcilable manually via the `skill_deploys` audit
+ * history.
+ */
+export interface ExecuteRegisterParams {
+  name: string;
+  tier: SkillTier;
+  riskTier: SkillRiskTier;
+  effects: SkillEffects;
+  schedule: string | null;
+  branchTipSha: string;
+  inputs: SkillInputs;
+  outputs: SkillIo | null;
+  classifierLog: ClassifierLog;
+  /**
+   * Called inside the register transaction *after* DB rows are written and
+   * *before* the transaction commits. Throw to abort the register — the DB
+   * tx will roll back. This is the last step before commit so a successful
+   * filesystem update is followed only by the commit itself.
+   */
+  applyFilesystem(): Promise<void>;
+}
+
+export type ExecuteRegisterResult =
+  | {
+      kind: "live";
+      skill: SkillRow;
+      deploy: SkillDeployRow;
+    }
+  | {
+      kind: "pending_approval";
+      skill: SkillRow;
+      deploy: SkillDeployRow;
+    }
+  | {
+      kind: "no_op";
+      skill: SkillRow;
+    }
+  | {
+      kind: "rejected";
+      reason: string;
+    };
+
+/**
+ * Atomic resolve-pending-deploy + advance-main + update-skills-row.
+ *
+ * Caller re-reads the manifest from git at `deploy.gitSha` and passes the full
+ * set of manifest-derived columns. Without this, approving a pending deploy
+ * would only flip `gitSha`/`disabled` while leaving `tier`/`riskTier`/
+ * `effects`/`schedule`/`inputs`/`outputs` stale from whatever the row was
+ * before the pending-approval insert — so the LLM tool definition and ajv
+ * input validator would diverge from the source on disk that just got
+ * promoted to main.
+ */
+export interface ExecuteApproveParams {
+  pendingId: string;
+  approvedBy: string | null;
+  tier: SkillTier;
+  riskTier: SkillRiskTier;
+  effects: SkillEffects;
+  schedule: string | null;
+  inputs: SkillInputs;
+  outputs: SkillIo | null;
+  applyFilesystem(): Promise<void>;
+}
+
+/**
+ * Same projection rationale as {@link ExecuteApproveParams}: the rolled-back
+ * sha may have a different manifest shape than the current live one
+ * (different `inputs` schema, different `effects`, etc.); the skills row has
+ * to follow.
+ */
+export interface ExecuteRollbackParams {
+  name: string;
+  toGitSha: string;
+  tier: SkillTier;
+  riskTier: SkillRiskTier;
+  effects: SkillEffects;
+  schedule: string | null;
+  inputs: SkillInputs;
+  outputs: SkillIo | null;
+  classifierLog: ClassifierLog;
+  applyFilesystem(): Promise<void>;
+}
+
 export interface SkillStore {
   // --- skills ---
   insertSkill(params: InsertSkillParams): Promise<SkillRow>;
@@ -119,11 +217,25 @@ export interface SkillStore {
   listEnabledSkills(): Promise<readonly SkillRow[]>;
   updateSkillSha(params: { id: string; gitSha: string }): Promise<void>;
   setSkillDisabled(params: { id: string; disabled: boolean }): Promise<void>;
+  /** P3.3: atomic register flow — see {@link ExecuteRegisterParams}. */
+  executeRegister(params: ExecuteRegisterParams): Promise<ExecuteRegisterResult>;
+  /** P3.3: atomic approve flow for an `approve`-tier pending deploy. */
+  executeApprove(params: ExecuteApproveParams): Promise<ExecuteRegisterResult>;
+  /** P3.3: atomic deny flow — resolves the pending row to `denied`, no main update. */
+  denyPendingDeploy(params: { pendingId: string; reason: string | null }): Promise<void>;
+  /**
+   * P3.3: atomic rollback — re-points `main` and `skills.git_sha` to a prior
+   * sha while inserting a new `skill_deploys` row with status `live` and
+   * `prior_git_sha` set to the previous live sha.
+   */
+  executeRollback(params: ExecuteRollbackParams): Promise<ExecuteRegisterResult>;
 
   // --- skill_deploys ---
   insertDeploy(params: InsertDeployParams): Promise<SkillDeployRow>;
   /** Returns the single pending-approval deploy for a skill, or null. */
   getPendingDeploy(skillId: string): Promise<SkillDeployRow | null>;
+  /** Returns the deploy row by id, or null. */
+  getDeployById(id: string): Promise<SkillDeployRow | null>;
   resolveDeploy(params: {
     id: string;
     status: SkillDeployStatus;
@@ -151,7 +263,7 @@ export class DrizzleSkillStore implements SkillStore {
 
   async insertSkill(params: InsertSkillParams): Promise<SkillRow> {
     const effects = SkillEffectsSchema.parse(params.effects);
-    const inputs = SkillIoSchema.parse(params.inputs);
+    const inputs = SkillInputsSchema.parse(params.inputs);
     const outputs = params.outputs === null ? null : SkillIoSchema.parse(params.outputs);
     return this.#db.transaction(async (tx) => {
       const row = single(
@@ -210,6 +322,306 @@ export class DrizzleSkillStore implements SkillStore {
     });
   }
 
+  async executeRegister(params: ExecuteRegisterParams): Promise<ExecuteRegisterResult> {
+    const effects = SkillEffectsSchema.parse(params.effects);
+    const inputs = SkillInputsSchema.parse(params.inputs);
+    const outputs = params.outputs === null ? null : SkillIoSchema.parse(params.outputs);
+    const classifierLog = ClassifierLogSchema.parse(params.classifierLog);
+
+    return this.#db.transaction(async (tx) => {
+      // Serialize concurrent registers on the same skill name. Released at
+      // tx commit/rollback.
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtext(${`skill_register:${params.name}`})::bigint)`,
+      );
+
+      const existingRows = await tx
+        .select()
+        .from(skills)
+        .where(eq(skills.name, params.name))
+        .limit(1);
+      const existing = existingRows[0] ? parseSkillRow(existingRows[0]) : null;
+
+      // No-op: branch tip already matches main AND the row is currently live.
+      // The `!disabled` guard handles the deny-then-re-register case: a denied
+      // pending-approval register leaves the skills row at branchTipSha but
+      // disabled=true; without this check the user re-running register against
+      // the same branch would get "nothing to deploy" while the skill stayed
+      // dark.
+      if (existing && existing.gitSha === params.branchTipSha && !existing.disabled) {
+        return { kind: "no_op", skill: existing } as const;
+      }
+
+      // Pending-approval guard: refuse to start a new register while one is
+      // already waiting for human approval. Caller must approve or deny first.
+      if (existing) {
+        const pendingRows = await tx
+          .select()
+          .from(skillDeploys)
+          .where(
+            and(eq(skillDeploys.skillId, existing.id), eq(skillDeploys.status, "pending_approval")),
+          )
+          .limit(1);
+        if (pendingRows.length > 0) {
+          return {
+            kind: "rejected" as const,
+            reason: "pending_deploy_exists: approve or deny the pending deploy first",
+          };
+        }
+      }
+
+      const goesLive = params.riskTier !== "approve";
+      const deployStatus: SkillDeployStatus = goesLive ? "live" : "pending_approval";
+      const priorGitSha = existing?.gitSha ?? null;
+
+      // Ordering: DB writes FIRST, applyFilesystem LAST. If any DB write
+      // fails, the tx rolls back before main moves; if applyFilesystem
+      // fails, the tx still rolls back (we throw out of the callback). The
+      // only remaining inconsistency window is "tx commit fails after
+      // applyFilesystem succeeded" — narrower than "any DB write after FS
+      // succeeds fails", which is what the previous FS-then-DB ordering
+      // exposed. Documented on ExecuteRegisterParams.applyFilesystem.
+      //
+      // Pending-approval semantics for an existing skill:
+      // - The currently-live skill (at existing.gitSha) STAYS LIVE during
+      //   the approval window. Pending deploys live entirely on
+      //   skill_deploys; the skills row is the projection of `main`, not of
+      //   "what someone wants to deploy."
+      // - Without this rule, queuing an approve-tier upgrade for a
+      //   currently-notify skill would disable the live version for the
+      //   duration of the approval — and forever if the deploy is denied
+      //   (denyPendingDeploy doesn't reset the row).
+      let skillRow: SkillRow;
+      if (existing) {
+        if (goesLive) {
+          const updatedRows = await tx
+            .update(skills)
+            .set({
+              tier: params.tier,
+              riskTier: params.riskTier,
+              effects,
+              schedule: params.schedule,
+              gitSha: params.branchTipSha,
+              inputs,
+              outputs,
+              disabled: false,
+            })
+            .where(eq(skills.id, existing.id))
+            .returning();
+          skillRow = parseSkillRow(single(updatedRows));
+        } else {
+          // Pending-approval re-deploy on a live skill — leave the existing
+          // row untouched. The pending state lives on skill_deploys.
+          skillRow = existing;
+        }
+      } else {
+        // First-ever deploy for this name. Pending-approval deploys still
+        // get a row (the skill_deploys row needs a skill_id FK target) but
+        // it stays disabled — there's no prior live version to preserve.
+        // approveDeploy flips disabled=false when the human signs off.
+        const insertedRows = await tx
+          .insert(skills)
+          .values({
+            name: params.name,
+            tier: params.tier,
+            riskTier: params.riskTier,
+            effects,
+            schedule: params.schedule,
+            gitSha: params.branchTipSha,
+            inputs,
+            outputs,
+            disabled: !goesLive,
+          })
+          .returning();
+        skillRow = parseSkillRow(single(insertedRows));
+      }
+
+      const deployRows = await tx
+        .insert(skillDeploys)
+        .values({
+          skillId: skillRow.id,
+          gitSha: params.branchTipSha,
+          priorGitSha,
+          riskTier: params.riskTier,
+          status: deployStatus,
+          classifierLog,
+          ...(goesLive && { resolvedAt: new Date() }),
+        })
+        .returning();
+      const deploy = parseSkillDeployRow(single(deployRows));
+
+      if (goesLive) {
+        await params.applyFilesystem();
+      }
+
+      return goesLive
+        ? ({ kind: "live", skill: skillRow, deploy } as const)
+        : ({ kind: "pending_approval", skill: skillRow, deploy } as const);
+    });
+  }
+
+  async executeApprove(params: ExecuteApproveParams): Promise<ExecuteRegisterResult> {
+    const effects = SkillEffectsSchema.parse(params.effects);
+    const inputs = SkillInputsSchema.parse(params.inputs);
+    const outputs = params.outputs === null ? null : SkillIoSchema.parse(params.outputs);
+
+    return this.#db.transaction(async (tx) => {
+      const deployRows = await tx
+        .select()
+        .from(skillDeploys)
+        .where(eq(skillDeploys.id, params.pendingId))
+        .limit(1);
+      const deployRowRaw = deployRows[0];
+      if (!deployRowRaw) {
+        return { kind: "rejected", reason: "deploy_not_found" } as const;
+      }
+      const deploy = parseSkillDeployRow(deployRowRaw);
+      if (deploy.status !== "pending_approval") {
+        return {
+          kind: "rejected",
+          reason: `deploy_not_pending: status is '${deploy.status}'`,
+        } as const;
+      }
+
+      const skillRows = await tx
+        .select()
+        .from(skills)
+        .where(eq(skills.id, deploy.skillId))
+        .limit(1);
+      const skillRowRaw = skillRows[0];
+      if (!skillRowRaw) {
+        return { kind: "rejected", reason: "skill_not_found" } as const;
+      }
+      const skill = parseSkillRow(skillRowRaw);
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtext(${`skill_register:${skill.name}`})::bigint)`,
+      );
+
+      // Project the full manifest into the skills row alongside gitSha +
+      // disabled. Approving an `approve`-tier deploy promotes the source on
+      // disk to live; without copying the manifest-derived columns over, the
+      // stored row would drift from what's actually at deploy.gitSha (e.g.
+      // `inputs` schema would still match the prior live commit, not the
+      // approved one).
+      //
+      // Ordering matches executeRegister: DB writes first, applyFilesystem
+      // last. See the comment in executeRegister.
+      const updatedSkillRows = await tx
+        .update(skills)
+        .set({
+          gitSha: deploy.gitSha,
+          disabled: false,
+          tier: params.tier,
+          riskTier: params.riskTier,
+          effects,
+          schedule: params.schedule,
+          inputs,
+          outputs,
+        })
+        .where(eq(skills.id, skill.id))
+        .returning();
+      const updatedSkill = parseSkillRow(single(updatedSkillRows));
+
+      const resolvedDeployRows = await tx
+        .update(skillDeploys)
+        .set({
+          status: "live",
+          approvedBy: params.approvedBy,
+          resolvedAt: new Date(),
+        })
+        .where(eq(skillDeploys.id, params.pendingId))
+        .returning();
+      const resolvedDeploy = parseSkillDeployRow(single(resolvedDeployRows));
+
+      await params.applyFilesystem();
+
+      return { kind: "live", skill: updatedSkill, deploy: resolvedDeploy };
+    });
+  }
+
+  async denyPendingDeploy(params: { pendingId: string; reason: string | null }): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .update(skillDeploys)
+        .set({ status: "denied", resolvedAt: new Date() })
+        .where(
+          and(eq(skillDeploys.id, params.pendingId), eq(skillDeploys.status, "pending_approval")),
+        )
+        .returning();
+      if (rows.length === 0) {
+        // Either the id is unknown or it's already resolved. Caller can
+        // distinguish by following up with getDeployById; for the deny path
+        // it's acceptable to be idempotent here.
+        return;
+      }
+      // The reason is logged via the ctx-call audit / runner-side log; not
+      // stored on the deploy row to keep the schema lean. Future work can
+      // add a `denied_reason` column if recall becomes useful.
+      void params.reason;
+    });
+  }
+
+  async executeRollback(params: ExecuteRollbackParams): Promise<ExecuteRegisterResult> {
+    const classifierLog = ClassifierLogSchema.parse(params.classifierLog);
+    const effects = SkillEffectsSchema.parse(params.effects);
+    const inputs = SkillInputsSchema.parse(params.inputs);
+    const outputs = params.outputs === null ? null : SkillIoSchema.parse(params.outputs);
+
+    return this.#db.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtext(${`skill_register:${params.name}`})::bigint)`,
+      );
+
+      const skillRows = await tx.select().from(skills).where(eq(skills.name, params.name)).limit(1);
+      const skillRowRaw = skillRows[0];
+      if (!skillRowRaw) {
+        return { kind: "rejected", reason: "skill_not_found" } as const;
+      }
+      const existing = parseSkillRow(skillRowRaw);
+      if (existing.gitSha === params.toGitSha && !existing.disabled) {
+        return { kind: "no_op", skill: existing } as const;
+      }
+
+      // Project the full manifest from the rolled-back sha. Same rationale
+      // as executeApprove — the prior code likely had a different `inputs`
+      // schema / different declared effects, and the row has to follow.
+      // DB-first ordering matches executeRegister.
+      const updatedRows = await tx
+        .update(skills)
+        .set({
+          gitSha: params.toGitSha,
+          disabled: false,
+          tier: params.tier,
+          riskTier: params.riskTier,
+          effects,
+          schedule: params.schedule,
+          inputs,
+          outputs,
+        })
+        .where(eq(skills.id, existing.id))
+        .returning();
+      const updated = parseSkillRow(single(updatedRows));
+
+      const deployRows = await tx
+        .insert(skillDeploys)
+        .values({
+          skillId: existing.id,
+          gitSha: params.toGitSha,
+          priorGitSha: existing.gitSha,
+          riskTier: classifierLog.risk_tier,
+          status: "rolled_back",
+          classifierLog,
+          resolvedAt: new Date(),
+        })
+        .returning();
+      const deploy = parseSkillDeployRow(single(deployRows));
+
+      await params.applyFilesystem();
+
+      return { kind: "live", skill: updated, deploy };
+    });
+  }
+
   // --- skill_deploys ---
 
   async insertDeploy(params: InsertDeployParams): Promise<SkillDeployRow> {
@@ -239,6 +651,13 @@ export class DrizzleSkillStore implements SkillStore {
         .from(skillDeploys)
         .where(and(eq(skillDeploys.skillId, skillId), eq(skillDeploys.status, "pending_approval")))
         .limit(1);
+      return rows[0] ? parseSkillDeployRow(rows[0]) : null;
+    });
+  }
+
+  async getDeployById(id: string): Promise<SkillDeployRow | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx.select().from(skillDeploys).where(eq(skillDeploys.id, id)).limit(1);
       return rows[0] ? parseSkillDeployRow(rows[0]) : null;
     });
   }
@@ -348,7 +767,7 @@ function parseSkillRow(row: typeof skills.$inferSelect): SkillRow {
     effects: SkillEffectsSchema.parse(row.effects),
     schedule: row.schedule,
     gitSha: row.gitSha,
-    inputs: SkillIoSchema.parse(row.inputs),
+    inputs: SkillInputsSchema.parse(row.inputs),
     outputs: row.outputs === null ? null : SkillIoSchema.parse(row.outputs),
     disabled: row.disabled,
     createdAt: row.createdAt,

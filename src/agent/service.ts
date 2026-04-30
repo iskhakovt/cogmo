@@ -6,6 +6,7 @@ import type {
   ReflectResult,
   RetainOptions,
 } from "../memory/provider.js";
+import type { SkillsService } from "../skills/skills-service.js";
 import type { CodingService } from "./coding/service.js";
 
 /**
@@ -63,6 +64,12 @@ export interface Service {
    * fail with a clear error when absent.
    */
   coding?: CodingService;
+  /**
+   * Skills authoring surface — register / approve / deny / rollback.
+   * Optional because some tests skip the skills runner; production wiring
+   * always populates it.
+   */
+  skills?: SkillsService;
 }
 
 /**
@@ -79,6 +86,7 @@ export function createService(
   files: Service["files"],
   coreMemory: Service["coreMemory"],
   coding?: CodingService,
+  skills?: SkillsService,
 ): Service {
   function attachProfileTags(opts: { tags?: string[] } | undefined) {
     return {
@@ -96,5 +104,6 @@ export function createService(
     files,
     coreMemory,
     ...(coding !== undefined && { coding }),
+    ...(skills !== undefined && { skills }),
   };
 }
