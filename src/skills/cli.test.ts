@@ -21,6 +21,7 @@ function makeRunner(overrides: Partial<SkillRunner> = {}): SkillRunner {
     rollback: vi.fn(),
     deregister: vi.fn(),
     list: vi.fn().mockResolvedValue([]),
+    listToolDefs: vi.fn().mockResolvedValue([]),
     invoke: vi.fn(),
     ...overrides,
     // biome-ignore lint/suspicious/noExplicitAny: test fixture
@@ -159,6 +160,91 @@ describe("runSkillsCli", () => {
     const code = await runSkillsCli(["run", "echo", "{}"], runner, io);
     expect(code).toBe(1);
     expect(io.stderr.join("\n")).toMatch(/invoke failed: not found/);
+  });
+
+  describe("register / approve / deny / rollback / deregister subcommands", () => {
+    it("`register <branch>` calls runner.register and exits 0 on live", async () => {
+      const io = makeIo();
+      const register = vi.fn().mockResolvedValue({
+        name: "echo",
+        riskTier: "notify",
+        status: "live",
+        gitSha: "abc",
+      });
+      const code = await runSkillsCli(["register", "skill/echo"], makeRunner({ register }), io);
+      expect(register).toHaveBeenCalledWith({ branch: "skill/echo" });
+      expect(code).toBe(0);
+      expect(io.stdout.join("\n")).toContain('"status": "live"');
+    });
+
+    it("`register` exits 1 on rejected", async () => {
+      const io = makeIo();
+      const register = vi.fn().mockResolvedValue({
+        name: "",
+        riskTier: "notify",
+        status: "rejected",
+        gitSha: "",
+        errors: ["non_fast_forward"],
+      });
+      const code = await runSkillsCli(["register", "x"], makeRunner({ register }), io);
+      expect(code).toBe(1);
+    });
+
+    it("`register` without branch exits 2", async () => {
+      const io = makeIo();
+      const code = await runSkillsCli(["register"], makeRunner(), io);
+      expect(code).toBe(2);
+    });
+
+    it("`approve <pendingId>` calls runner.approveDeploy and exits 0 on live", async () => {
+      const io = makeIo();
+      const approveDeploy = vi.fn().mockResolvedValue({
+        name: "echo",
+        riskTier: "approve",
+        status: "live",
+        gitSha: "abc",
+      });
+      const code = await runSkillsCli(["approve", "deploy-1"], makeRunner({ approveDeploy }), io);
+      expect(approveDeploy).toHaveBeenCalledWith({ pendingId: "deploy-1" });
+      expect(code).toBe(0);
+    });
+
+    it("`deny <pendingId> reason words` joins reason and exits 0", async () => {
+      const io = makeIo();
+      const denyDeploy = vi.fn().mockResolvedValue(undefined);
+      const code = await runSkillsCli(
+        ["deny", "deploy-1", "looks", "sketchy"],
+        makeRunner({ denyDeploy }),
+        io,
+      );
+      expect(denyDeploy).toHaveBeenCalledWith({
+        pendingId: "deploy-1",
+        reason: "looks sketchy",
+      });
+      expect(code).toBe(0);
+    });
+
+    it("`rollback <name> <sha>` calls runner.rollback", async () => {
+      const io = makeIo();
+      const rollback = vi.fn().mockResolvedValue({
+        name: "echo",
+        riskTier: "notify",
+        status: "live",
+        gitSha: "older",
+      });
+      const code = await runSkillsCli(["rollback", "echo", "older"], makeRunner({ rollback }), io);
+      expect(rollback).toHaveBeenCalledWith({ name: "echo", toGitSha: "older" });
+      expect(code).toBe(0);
+    });
+
+    it("`deregister <name>` calls runner.deregister", async () => {
+      const io = makeIo();
+      const deregister = vi.fn().mockResolvedValue(undefined);
+      const code = await runSkillsCli(["deregister", "echo"], makeRunner({ deregister }), io);
+      expect(deregister).toHaveBeenCalledWith({ name: "echo" });
+      expect(code).toBe(0);
+      expect(io.stdout.join("\n")).toContain('"status": "disabled"');
+    });
   });
 
   it("printed JSON output is valid (round-trips through JSON.parse)", async () => {

@@ -5,6 +5,9 @@ import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, Message, StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
+import type { SkillRunner } from "../skills/runner.js";
+import { buildSkillTools, mergeBuiltInsAndSkillTools } from "../skills/skill-tool-builder.js";
+import { createSkillsService } from "../skills/skills-service.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { contentToBlocks, contentToText } from "../transport/content.js";
 import type { DeliveryRouter } from "../transport/delivery-router.js";
@@ -40,6 +43,13 @@ export interface HandleMessageDeps {
    * coding-delegation).
    */
   codingServiceFactory?: (conversationId: string) => CodingService;
+  /**
+   * Skills runtime — drives both the per-turn dynamic tool list rebuild
+   * (one tool per registered skill) and the `Service.skills` namespace that
+   * `register_skill` calls through. Optional only because some unit tests
+   * skip skills wiring entirely; production wiring always populates it.
+   */
+  skillRunner?: SkillRunner;
   summarizationModel?: string;
 }
 
@@ -199,6 +209,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       };
 
       const codingService = deps.codingServiceFactory?.(conversationId);
+      const skillsService = deps.skillRunner ? createSkillsService(deps.skillRunner) : undefined;
       const service = createService(
         memory,
         userId,
@@ -206,6 +217,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         fileService,
         coreMemoryService,
         codingService,
+        skillsService,
       );
       const delivery = await deliveryRouter.prepare({
         conversationId,
@@ -245,7 +257,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       const model = snapshot.model;
       const budget = computeBudget(model);
-      const toolDefs = tools.definitions();
+
+      // Per-turn tool registry — built-ins from bootstrap + one dynamic tool
+      // per live skill. Rebuilt every turn so skills registered between turns
+      // appear immediately and rolled-back / disabled skills disappear. The
+      // skill-tool builder is fault-tolerant: a single skill with unreadable
+      // git source is logged and dropped, the rest of the list still loads.
+      // Name-collision rule (built-ins win) lives in
+      // mergeBuiltInsAndSkillTools — see its docstring.
+      const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
+      const turnTools = mergeBuiltInsAndSkillTools(tools.snapshot(), skillTools);
+      const toolDefs = turnTools.definitions();
 
       const lastTokens = await agentStore.getLastTokens(conversationId);
       const skip = shouldSkipCounting(
@@ -293,7 +315,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           model,
           systemPrompt: fullPrompt,
           messages: historyMessages,
-          tools,
+          tools: turnTools,
           service,
           onEvent: (event: StreamEvent) => delivery.push(event),
           // Opt-in per-tool durability. The streaming section itself is

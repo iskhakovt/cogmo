@@ -43,13 +43,46 @@ const JsonValueSchema: z.ZodType<unknown> = z.lazy(() =>
 );
 
 /**
- * Opaque-JSON-Schema wrapper. The actual shape is whatever the skill declared
- * in its manifest; we validate inputs at invoke time via ajv, not at the store
- * boundary. Zod's job here is "this is a JSON-serialisable object" — that's
- * all the store needs to round-trip JSONB safely.
+ * Generic JSON-Schema wrapper used for skill *outputs*. Outputs may be any
+ * JSON Schema (string, number, array, object) — a skill that returns a
+ * formatted message, a count, or an array doesn't need to wrap it in an
+ * object. Zod's only job here is "this is a JSON-serialisable record" so the
+ * store layer can round-trip JSONB safely; structural validation against the
+ * schema itself happens at ajv-invoke time.
+ *
+ * Inputs use the stricter {@link SkillInputsSchema} — see its docstring.
  */
 export const SkillIoSchema = z.record(z.string(), JsonValueSchema);
 export type SkillIo = z.infer<typeof SkillIoSchema>;
+
+/**
+ * JSON-Schema wrapper for skill *inputs*. Inputs describe the LLM tool's
+ * parameter object — both the Anthropic and OpenAI tool-call APIs require
+ * `type: "object"`, and our internal `JsonSchema` (in `src/llm/types.ts`)
+ * enforces the same literal. Pinning that constraint here at the manifest
+ * boundary means:
+ *
+ * 1. `register` rejects bad inputs schemas at manifest-parse time with a
+ *    precise error path (`inputs.type: expected literal "object"`), before
+ *    any filesystem or DB write.
+ * 2. The inferred TypeScript type for `manifest.inputs` carries `type:
+ *    "object"` as a literal — the dynamic-tool-list builder can hand the
+ *    value straight to the LLM provider's `JsonSchema` slot without an
+ *    `as unknown` cast (the structural shapes match).
+ *
+ * `passthrough` keeps additional JSON-Schema keys (`additionalProperties`,
+ * `enum`, `pattern`, etc.) without dropping or re-typing them — they're
+ * round-tripped as `unknown` to the LLM, which is exactly what `JsonSchema`'s
+ * index signature accepts.
+ */
+export const SkillInputsSchema = z
+  .object({
+    type: z.literal("object"),
+    properties: z.record(z.string(), JsonValueSchema).optional(),
+    required: z.array(z.string()).optional(),
+  })
+  .passthrough();
+export type SkillInputs = z.infer<typeof SkillInputsSchema>;
 
 /**
  * Manifest-declared secret entry. v1 supports a string (secret name only); the
@@ -107,7 +140,7 @@ export const SkillManifestSchema = z
     triggers: z.array(z.enum(["manual", "cron", "event"])).default(["manual"]),
     schedule: z.string().optional(),
 
-    inputs: SkillIoSchema,
+    inputs: SkillInputsSchema,
     outputs: SkillIoSchema.optional(),
 
     effects: SkillEffectsSchema.default([]),
