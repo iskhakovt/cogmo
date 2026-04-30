@@ -529,3 +529,243 @@ describe("ClaudeCodeBackend.execute", () => {
     });
   });
 });
+
+// Schema robustness: parser is intentionally permissive — every event is
+// `safeParse`d via the discriminated union, blocks via per-block schemas,
+// and unknown / malformed shapes silently fall through. These tests pin
+// that contract so a future refactor doesn't accidentally start throwing
+// (the CLI emits forward-compatible additions all the time, and one bad
+// event must not abort the whole run).
+describe("ClaudeCodeBackend stream-json schema robustness", () => {
+  it("silently drops events with unknown top-level type", async () => {
+    const fixture = [
+      '{"type":"system","subtype":"init","session_id":"sess-u","model":"m"}',
+      '{"type":"future_event_kind","data":{"foo":"bar"}}',
+      '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}',
+      '{"type":"result","subtype":"success","is_error":false}',
+      "",
+    ].join("\n");
+    const { container } = fakeContainer(fixture);
+    const events = await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
+    expect(events.map((e) => e.kind)).toEqual([
+      "session_started",
+      "text_delta",
+      "plan_ready",
+      "complete",
+    ]);
+  });
+
+  it("silently drops events with missing 'type' field", async () => {
+    const fixture = [
+      '{"type":"system","subtype":"init","session_id":"sess-nt","model":"m"}',
+      '{"subtype":"init","session_id":"orphan"}',
+      '{"type":"result","subtype":"success","is_error":false}',
+      "",
+    ].join("\n");
+    const { container } = fakeContainer(fixture);
+    const events = await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
+    // Only the well-formed system event surfaces session_started.
+    const sessions = events.filter((e) => e.kind === "session_started");
+    expect(sessions).toHaveLength(1);
+    expect((sessions[0] as Extract<CodingEvent, { kind: "session_started" }>).sessionId).toBe(
+      "sess-nt",
+    );
+  });
+
+  it("does not emit session_started when system event has no session_id", async () => {
+    const fixture = [
+      '{"type":"system","subtype":"init"}',
+      '{"type":"result","subtype":"success","is_error":false}',
+      "",
+    ].join("\n");
+    const { container } = fakeContainer(fixture);
+    const events = await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
+    expect(events.find((e) => e.kind === "session_started")).toBeUndefined();
+  });
+
+  it("does not emit session_started for non-init system subtypes", async () => {
+    const fixture = [
+      '{"type":"system","subtype":"compact","session_id":"ignored"}',
+      '{"type":"result","subtype":"success","is_error":false}',
+      "",
+    ].join("\n");
+    const { container } = fakeContainer(fixture);
+    const events = await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
+    expect(events.find((e) => e.kind === "session_started")).toBeUndefined();
+  });
+
+  it("emits session_started only once even if multiple init events arrive", async () => {
+    // Anthropic occasionally re-emits init when a sub-agent boots; we must
+    // surface the first session id and ignore the rest (the orchestrator
+    // persists session_id on first arrival via setTaskSessionId, which is
+    // not a no-op on the second write).
+    const fixture = [
+      '{"type":"system","subtype":"init","session_id":"sess-1","model":"m"}',
+      '{"type":"system","subtype":"init","session_id":"sess-2","model":"m"}',
+      '{"type":"result","subtype":"success","is_error":false}',
+      "",
+    ].join("\n");
+    const { container } = fakeContainer(fixture);
+    const events = await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
+    const sessions = events.filter((e) => e.kind === "session_started");
+    expect(sessions).toHaveLength(1);
+    expect((sessions[0] as Extract<CodingEvent, { kind: "session_started" }>).sessionId).toBe(
+      "sess-1",
+    );
+  });
+
+  it("skips assistant tool_use blocks missing required fields", async () => {
+    // Missing `id` and missing `name` each fail ToolUseBlockSchema.safeParse
+    // and get skipped without aborting the surrounding message.
+    const fixture = [
+      '{"type":"system","subtype":"init","session_id":"sess-tu","model":"m"}',
+      '{"type":"assistant","message":{"role":"assistant","content":[' +
+        '{"type":"tool_use","name":"Read","input":{}},' +
+        '{"type":"tool_use","id":"toolu_ok","name":"Edit","input":{"x":1}},' +
+        '{"type":"tool_use","id":"toolu_no_name","input":{}}' +
+        "]}}",
+      '{"type":"result","subtype":"success","is_error":false}',
+      "",
+    ].join("\n");
+    const { container } = fakeContainer(fixture);
+    const handle = await new ClaudeCodeBackend().execute(
+      { task: { ...task, sessionId: "sess-tu" }, repo, container },
+      "sess-tu",
+    );
+    const events = await collect(handle.events);
+    const calls = events.filter((e) => e.kind === "tool_call") as Extract<
+      CodingEvent,
+      { kind: "tool_call" }
+    >[];
+    expect(calls).toHaveLength(1);
+    expect(calls[0].tool).toBe("Edit");
+  });
+
+  it("emits tool_result without summary when content is not a string", async () => {
+    // Anthropic sometimes returns structured content (array of blocks for
+    // multimodal results). The parser only surfaces a `summary` field when
+    // content is a plain string; structured shapes flow through as `ok`/`tool`
+    // only, no summary.
+    const fixture = [
+      '{"type":"system","subtype":"init","session_id":"sess-tr","model":"m"}',
+      '{"type":"assistant","message":{"role":"assistant","content":[' +
+        '{"type":"tool_use","id":"t1","name":"Read","input":{}}' +
+        "]}}",
+      '{"type":"user","message":{"role":"user","content":[' +
+        '{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"x"}]}' +
+        "]}}",
+      '{"type":"result","subtype":"success","is_error":false}',
+      "",
+    ].join("\n");
+    const { container } = fakeContainer(fixture);
+    const handle = await new ClaudeCodeBackend().execute(
+      { task: { ...task, sessionId: "sess-tr" }, repo, container },
+      "sess-tr",
+    );
+    const events = await collect(handle.events);
+    const result = events.find((e) => e.kind === "tool_result") as Extract<
+      CodingEvent,
+      { kind: "tool_result" }
+    >;
+    expect(result).toBeDefined();
+    expect(result.tool).toBe("Read");
+    expect(result.ok).toBe(true);
+    expect(result.summary).toBeUndefined();
+  });
+
+  it("ignores can_use_tool control_request missing tool_name", async () => {
+    const fixture = [
+      '{"type":"system","subtype":"init","session_id":"sess-cr","model":"m"}',
+      '{"type":"control_request","request_id":"req_no_name","request":{"subtype":"can_use_tool","input":{}}}',
+      '{"type":"result","subtype":"success","is_error":false}',
+      "",
+    ].join("\n");
+    const { container } = fakeContainer(fixture);
+    const handle = await new ClaudeCodeBackend().execute(
+      { task: { ...task, sessionId: "sess-cr" }, repo, container },
+      "sess-cr",
+    );
+    const events = await collect(handle.events);
+    expect(events.find((e) => e.kind === "permission_request")).toBeUndefined();
+  });
+
+  it("emits complete with no token counts when result has no usage block", async () => {
+    // Pins observable behavior: when the CLI's `result` event omits both
+    // `usage` and `total_cost_usd`, the resulting `complete` event MUST NOT
+    // expose token counts or cost (downstream surfaces this as "no usage
+    // data"). Implementation detail: an empty object may still be present
+    // — the contract is "no fields", not "no key".
+    const fixture = [
+      '{"type":"system","subtype":"init","session_id":"sess-nu","model":"m"}',
+      '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}',
+      '{"type":"result","subtype":"success","is_error":false}',
+      "",
+    ].join("\n");
+    const { container } = fakeContainer(fixture);
+    const events = await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
+    const complete = events.at(-1) as Extract<CodingEvent, { kind: "complete" }>;
+    expect(complete.kind).toBe("complete");
+    expect(complete.usage?.inputTokens).toBeUndefined();
+    expect(complete.usage?.outputTokens).toBeUndefined();
+    expect(complete.usage?.costUsd).toBeUndefined();
+    expect(complete.exitCode).toBe(0);
+    expect(complete.isError).toBe(false);
+  });
+
+  it("falls back to tool_use_id as tool name when tool_result arrives before tool_use", async () => {
+    // Anthropic emits assistant.tool_use BEFORE user.tool_result in normal
+    // order. The fallback path exists for defensive parsing — assert it
+    // produces a usable tool_result event with id-as-name rather than
+    // dropping the result entirely.
+    const fixture = [
+      '{"type":"system","subtype":"init","session_id":"sess-oo","model":"m"}',
+      '{"type":"user","message":{"role":"user","content":[' +
+        '{"type":"tool_result","tool_use_id":"toolu_orphan","content":"ok"}' +
+        "]}}",
+      '{"type":"result","subtype":"success","is_error":false}',
+      "",
+    ].join("\n");
+    const { container } = fakeContainer(fixture);
+    const handle = await new ClaudeCodeBackend().execute(
+      { task: { ...task, sessionId: "sess-oo" }, repo, container },
+      "sess-oo",
+    );
+    const events = await collect(handle.events);
+    const result = events.find((e) => e.kind === "tool_result") as Extract<
+      CodingEvent,
+      { kind: "tool_result" }
+    >;
+    expect(result).toBeDefined();
+    expect(result.tool).toBe("toolu_orphan");
+    expect(result.ok).toBe(true);
+  });
+
+  it("text_delta arriving before session_started still streams (parser does not reorder)", async () => {
+    // The contract is "events surface in stdout arrival order". Out-of-order
+    // arrival isn't expected from the CLI, but the parser must not gate
+    // text_delta on session_started having fired — pinning that contract so
+    // a future refactor doesn't introduce a stall.
+    const fixture = [
+      '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"early"}}}',
+      '{"type":"system","subtype":"init","session_id":"sess-ord","model":"m"}',
+      '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"late"}}}',
+      '{"type":"result","subtype":"success","is_error":false}',
+      "",
+    ].join("\n");
+    const { container } = fakeContainer(fixture);
+    const events = await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toEqual([
+      "text_delta",
+      "session_started",
+      "text_delta",
+      "plan_ready",
+      "complete",
+    ]);
+    const planReady = events.find((e) => e.kind === "plan_ready") as Extract<
+      CodingEvent,
+      { kind: "plan_ready" }
+    >;
+    expect(planReady.plan).toBe("earlylate");
+  });
+});
