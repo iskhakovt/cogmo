@@ -15,8 +15,40 @@ updates:
     #
     # Majors stay ungrouped — they deserve individual review.
     # Security and version updates can't share a group (Dependabot rule),
-    # hence the third group.
+    # hence the security group.
+    #
+    # Family-specific groups precede the catch-alls so peer-dep-coupled
+    # packages (OTel, Vitest, Drizzle, etc.) merge into a single PR even
+    # when Dependabot's broad grouping splits them.
     groups:
+      opentelemetry:
+        applies-to: version-updates
+        patterns: ["@opentelemetry/*"]
+        update-types: ["minor", "patch"]
+      vitest:
+        applies-to: version-updates
+        patterns: ["vitest", "@vitest/*"]
+        update-types: ["minor", "patch"]
+      drizzle:
+        applies-to: version-updates
+        patterns: ["drizzle-orm", "drizzle-kit"]
+        update-types: ["minor", "patch"]
+      inngest:
+        applies-to: version-updates
+        patterns: ["inngest", "@inngest/*"]
+        update-types: ["minor", "patch"]
+      octokit:
+        applies-to: version-updates
+        patterns: ["@octokit/*"]
+        update-types: ["minor", "patch"]
+      noble:
+        applies-to: version-updates
+        patterns: ["@noble/*"]
+        update-types: ["minor", "patch"]
+      types:
+        applies-to: version-updates
+        patterns: ["@types/*"]
+        update-types: ["minor", "patch"]
       npm-patch:
         applies-to: version-updates
         patterns: ["*"]
