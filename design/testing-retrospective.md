@@ -416,37 +416,22 @@ Ordered by leverage (bang-for-buck). Each is a PR-sized scope.
 
 ---
 
-### Slice E: Worktree + Git Integration Tests
+### Slice E: Worktree + Git Integration Tests — **already covered**
 
-**Files:** New: `src/agent/coding/worktree.integration.test.ts`.
-
-**Work:**
-- Real git repo, real `git worktree add`.
-- Happy path: allocate, verify branch exists and is checked out.
-- Idempotent retry: second allocate with same inputs succeeds and doesn't create duplicate.
-- Cleanup: remove the worktree after the test.
-- ~5 tests, ~200 lines of code.
-
-**Effort:** ~4 hours.
-
-**Payoff:** Validates worktree orchestration against real git; catches TOCTOU bugs.
+The retrospective was outdated on this point. `src/agent/coding/worktree.test.ts` already spawns real `git` subprocesses (`git init`, `git worktree add`, `git branch`, `git rev-parse`) against a temp repo: 8 tests cover happy path, branch-exists re-attach, adopt-on-retry (crash recovery), wrong-branch rejection, non-worktree rejection, parent-dir creation, removal, and removal of nonexistent paths. No new file required.
 
 ---
 
-### Slice F: Concurrency + Idempotency Tests
+### Slice F: Concurrency + Idempotency Tests — **partial: streaming-registry shipped 2026-04-30**
 
-**Files:** Various `*.test.ts` files that mock contention scenarios.
+**Streaming registry concurrency** (shipped):
+- `src/agent/coding/streaming-registry.test.ts` — 4 new tests in `describe("concurrency invariants")`: high-volume burst across 3 subscribers (500 events, identical ordering), listener-set-snapshotted-at-publish-start (added-during-emit subscribers don't fire for current event), self-unsubscribe during emit doesn't affect siblings, re-entrant publish from inside a listener.
+- The retrospective's claim that the file uses `vi.mock('events')` was outdated — it has always exercised real `EventEmitter`.
 
-**Work:**
-- EventEmitter concurrency: spawn 5 concurrent subscribers, emit 100 events, verify all received.
-- Double-tap approval: two concurrent approve callbacks on same task, expect only one execute.
-- Concurrent tool decisions: two tools request permission in parallel, both decisions logged in order.
-- Reaper concurrent cleanup: two reaper runs simultaneously (via advisory lock in the real impl).
-- ~10 tests, ~250 lines of code.
-
-**Effort:** ~8 hours.
-
-**Payoff:** Catches race conditions in production.
+**Still uncovered:**
+- Double-tap approval — partially covered: `approvePlanIfPending` is atomic at the SQL level (`.for("update")` row lock, see `coding/store/index.ts:556`), and store-level tests verify the atomic outcome. End-to-end "two concurrent Telegram callbacks" is not exercised — needs orchestrator-level integration test.
+- Concurrent tool decisions — two tools requesting permission in parallel. Today the CLI runs serially per task, so this isn't reachable in practice; lower priority.
+- Reaper concurrent cleanup — two reaper ticks racing. Inngest cron singleton-by-name should prevent this, but a unit test against the reaper function with a stubbed advisory-lock would pin the contract.
 
 ---
 
