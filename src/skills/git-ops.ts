@@ -32,9 +32,7 @@ export async function revParse(repoPath: string, ref: string): Promise<string> {
     return stdout.trim();
   } catch (e) {
     const stderr = (e as { stderr?: string }).stderr ?? "";
-    if (
-      /unknown revision|bad revision|Needed a single revision|invalid object name/.test(stderr)
-    ) {
+    if (/unknown revision|bad revision|Needed a single revision|invalid object name/.test(stderr)) {
       throw new GitOpsError("ref_not_found", `ref not found: ${ref}`, stderr);
     }
     throw new GitOpsError("exec_failed", `git rev-parse failed: ${(e as Error).message}`, stderr);
