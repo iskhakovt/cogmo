@@ -10,10 +10,12 @@ import type { StepRun, StepWaitForEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import type { Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
+import type { SecretsStore } from "../../secrets/store/index.js";
 import type { CodingBackend, PermissionResponse } from "./backend.js";
 import { shortenRequestId } from "./permission-keyboard.js";
 import * as policy from "./policy.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow, ToolDecision } from "./store/index.js";
+import { safeTeardownWorktree } from "./teardown.js";
 import { canonicalPattern, replayDecisionLog } from "./tool-gate.js";
 import { allocateWorktree } from "./worktree.js";
 
@@ -67,6 +69,12 @@ export interface CodingOrchestratorDeps {
   store: CodingStore;
   sandbox: Sandbox;
   backend: CodingBackend;
+  /**
+   * Resolves `github_identity:<name>` rows for the failure-cascade WIP
+   * push (see `teardownWorktree`). When omitted (e.g. tests that don't
+   * exercise teardown), failed worktrees stay on disk.
+   */
+  secretsStore?: SecretsStore;
   /** Default base image when the repo has no devcontainer override. */
   devbaseImage: string;
   /** Per-task resource caps. P2 reads these from `coding_repos` overrides. */
@@ -250,6 +258,17 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       await stepRun("set-status-failed", () =>
         store.updateTaskStatus({ id: taskId, status: "failed", failureReason: reason }),
       );
+      const a = assignment;
+      if (a) {
+        await stepRun("teardown-worktree", () =>
+          safeTeardownWorktree({
+            ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
+            repo,
+            taskId,
+            worktreeAssignment: a,
+          }),
+        );
+      }
       await stepRun("teardown", () => sandbox.stopTask(taskId).catch(() => {}));
       // Stream notification post-commit — wrap so a subscriber error
       // doesn't escape into the outer catch and write a second failed
@@ -290,6 +309,14 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     await store
       .updateTaskStatus({ id: taskId, status: "failed", failureReason: reason })
       .catch(() => {});
+    if (assignment) {
+      await safeTeardownWorktree({
+        ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
+        repo,
+        taskId,
+        worktreeAssignment: assignment,
+      }).catch(() => {});
+    }
     if (containerCreated) {
       await sandbox.stopTask(taskId).catch(() => {});
     }
@@ -516,6 +543,14 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       await stepRun("set-status-failed", () =>
         store.updateTaskStatus({ id: taskId, status: "failed", failureReason: reason }),
       );
+      await stepRun("teardown-worktree", () =>
+        safeTeardownWorktree({
+          ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
+          repo,
+          taskId,
+          worktreeAssignment,
+        }),
+      );
       await stepRun("teardown", () => sandbox.stopTask(taskId).catch(() => {}));
       // Stream notifications post-commit — wrap so a subscriber failure
       // doesn't bubble into the outer catch, which would write a second
@@ -584,6 +619,12 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     await store
       .updateTaskStatus({ id: taskId, status: "failed", failureReason: reason })
       .catch(() => {});
+    await safeTeardownWorktree({
+      ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
+      repo,
+      taskId,
+      worktreeAssignment,
+    }).catch(() => {});
     if (containerCreated) {
       await sandbox.stopTask(taskId).catch(() => {});
     }

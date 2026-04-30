@@ -180,6 +180,22 @@ Cogmo delegates heavy coding tasks (and evolution-driven code changes) to `claud
 - [ ] Observer repo-knowledge loop — post-task Observer files a `trigger_source='evolution'` coding task whose goal is a `CLAUDE.md` edit; native Claude Code memory loads it on future tasks (no Cogmo-private store)
 - [ ] Plan-age confirmation — "still want to proceed?" Telegram prompt when execution would start >24h after approval
 
+### Test infrastructure & e2e coverage (deferred to broader integration tier)
+
+These items came out of the testing retrospective on PRs #76/#78/#80/#86 (resolved 2026-04-30). They aren't slices of the coding loop itself; they all need integration-tier infra not yet in place (real Inngest in test, testcontainers-backed Docker, Telegram Test DC, real GitHub PAT). Promote to Next individually when the underlying infra lands.
+
+- [ ] **Real Inngest in integration tier** — current integration tests use a `stepRun` shim that bypasses Inngest's re-execution semantics. With real Inngest, exercise: orchestrator step boundaries under retry (verify orchestrator idempotent retries, tool-gate `step.waitForEvent` 7-day timeout, plan-approval timeout); `runCodingTask` durable boundaries; cross-event-handler flow on real `step.sendEvent`. Blocks slice C audit-invariant integration tests and the Inngest distributed-transaction tests (retrospective common-pattern #10).
+- [ ] **Reaper actual-Docker integration** — testcontainers-backed test that creates real containers, lets TTL expire, runs `runReap`, asserts containers are gone from Docker AND DB rows are marked `reaped`. Slice G item.
+- [ ] **Container teardown on task failure (real Docker)** — task fails during plan/execute → orchestrator's failure cascade → container actually stopped via Docker API (not just `stopTask()` mocked). Slice G item.
+- [ ] **Cgroup parent enforcement (sysbox)** — spawn a memory-hog workload inside a task container with a 128 MB limit; expect OOM kill; verify the kernel enforces at the slice level. e2e GHA job already installs sysbox 0.7.0.
+- [ ] **Sysbox + buildx siblings** — inside a sysbox task container, run `docker buildx build`; verify a buildkitd sibling appears with correct `cogmo.*` labels and the proxy's HTTP/1.1 upgrade handler proxies the gRPC-over-HTTP/2 traffic. Covers the slice 3 `/session` upgrade path end-to-end.
+- [ ] **Full delegate→PR e2e** — single test exercising the full flow: real Inngest + real Postgres + real Docker + sysbox + Claude Code CLI + Gitea (or GitHub test repo). Today each phase has its own integration test; nothing covers all four phases as one flow.
+- [ ] **Octokit real-API smoke** — at minimum, validate the `pulls.create` request payload shape against octokit's schema locally (without a real API call). Optionally a manual job against a test-org repo with a stored PAT.
+- [ ] **Telegram message delivery integration** — real Telegram Test DC + tgintegration (TypeScript/mtcute), validate progress-message editing, plan-approval keyboard tap, permission-prompt round-trip. Already noted as `p3` in `todo.md`.
+- [ ] **PR-open → Telegram audit invariant** — cross-module test asserting `status === pr_open` produces `coding/task/pr-opened` event AND a Telegram message reaches the conversation's session.
+- [ ] **Setup wizard e2e** — fake-tty test running `cogmo setup` with scripted input, asserting config is written correctly.
+- [ ] **Version-pinning canaries** — explicit tests that octokit, dockerode, sysbox image tag, Claude CLI flag set haven't drifted. Pin versions in fixtures and assert the CLI/API surface our code uses still exists. Currently a runtime regression would only surface in an integration test.
+
 ## Monitoring Thresholds (Scaling Triggers)
 
 | Signal | Action |
