@@ -594,7 +594,8 @@ describe("handleSkillsApprovalCallback", () => {
     );
 
     expect(deny).toHaveBeenCalledWith(pendingId, "user-tg-1");
-    expect(outcome.editText).toMatch(/Denied/);
+    expect(outcome.editText).toMatch(/denied/);
+    expect(outcome.editText).toMatch(/no main advance/);
     expect(outcome.toast).toBe("Denied");
   });
 

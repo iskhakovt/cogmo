@@ -347,7 +347,7 @@ export async function handleSkillsApprovalCallback(
     return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
   }
   return {
-    editText: "❌ Denied. The deploy stays pending — no main advance.",
+    editText: "❌ Deploy denied — no main advance. Re-register a different version to retry.",
     toast: "Denied",
   };
 }
