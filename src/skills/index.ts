@@ -26,6 +26,8 @@ export {
   ClassifierLogSchema,
   SKILL_EFFECTS,
   type SkillEffect,
+  type SkillInputs,
+  SkillInputsSchema,
   type SkillManifest,
   SkillManifestSchema,
 } from "./types.js";

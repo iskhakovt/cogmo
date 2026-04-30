@@ -503,10 +503,11 @@ tier: wasm
   });
 
   describe("safety: schema pre-validation runs before update-ref", () => {
-    it("rejects a manifest with an invalid inputs JSON Schema without moving main", async () => {
+    it("rejects a manifest whose inputs aren't an object schema (manifest layer)", async () => {
       const runner = await makeRunner();
-      // ajv will reject "type: not_a_real_type" — manifest YAML is fine,
-      // SkillManifestSchema accepts arbitrary JSON, but ajv compile fails.
+      // SkillInputsSchema requires `type: "object"` at the manifest boundary
+      // — `type: not_a_real_type` fails parse before the runner even calls
+      // executeRegister, let alone applyFilesystem.
       const badInputs = `---
 name: bad-schema
 description: a skill whose inputs schema is malformed
@@ -524,11 +525,40 @@ inputs:
       const before = await getMainSha(repo.bare);
       const result = await runner.register({ branch: "skill/bad-schema" });
       expect(result.status).toBe("rejected");
-      expect(result.errors?.[0]).toMatch(/invalid_inputs_schema/);
+      expect(result.errors?.[0]).toMatch(/inputs\.type/);
       // main is unchanged — no half-deploy.
       expect(await getMainSha(repo.bare)).toBe(before);
       // No skills row.
       expect(await store.getSkillByName("bad-schema")).toBeNull();
+    });
+
+    it("rejects a manifest with an inputs schema ajv can't compile (runner prevalidate)", async () => {
+      const runner = await makeRunner();
+      // Survives the manifest layer (`type: "object"` is set) but ajv chokes
+      // on a malformed `properties` field — exercises the runner's
+      // #prevalidateSchemas path before any filesystem write.
+      const badInputs = `---
+name: bad-properties
+description: object-typed inputs but properties is not a record
+tier: wasm
+inputs:
+  type: object
+  properties: not_a_record
+---
+`;
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/bad-properties",
+        manifest: badInputs,
+        body: ECHO_BODY,
+      });
+      const before = await getMainSha(repo.bare);
+      const result = await runner.register({ branch: "skill/bad-properties" });
+      expect(result.status).toBe("rejected");
+      // Either layer is acceptable — what matters is no main advance.
+      expect(result.errors?.length).toBeGreaterThan(0);
+      expect(await getMainSha(repo.bare)).toBe(before);
+      expect(await store.getSkillByName("bad-properties")).toBeNull();
     });
   });
 
@@ -737,6 +767,94 @@ inputs:
       expect(skill?.inputs).toMatchObject({
         properties: { x: { type: "integer" } },
       });
+    });
+  });
+
+  describe("safety: deny + re-register doesn't leave a disabled skill", () => {
+    it("after deny, re-registering the same branch tip activates the skill instead of returning no_op", async () => {
+      const runner = await makeRunner();
+      const sendingManifest = `---
+name: notify-skill
+description: a skill that sends notifications via approve-tier path
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+effects:
+  - sends_message
+---
+`;
+      const sha = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/notify-skill",
+        manifest: sendingManifest,
+        body: ECHO_BODY,
+      });
+      const reg = await runner.register({ branch: "skill/notify-skill" });
+      expect(reg.status).toBe("pending_approval");
+      if (!reg.pendingId) throw new Error("expected pendingId");
+
+      // After insert: skill row exists but disabled=true.
+      const beforeDeny = await store.getSkillByName("notify-skill");
+      expect(beforeDeny?.disabled).toBe(true);
+      expect(beforeDeny?.gitSha).toBe(sha);
+
+      await runner.denyDeploy({ pendingId: reg.pendingId, reason: "not now" });
+
+      // Skill is still disabled at the same gitSha — without the fix, a
+      // re-register at the same branch tip would return no_op and leave the
+      // skill dark forever.
+      const afterDeny = await store.getSkillByName("notify-skill");
+      expect(afterDeny?.disabled).toBe(true);
+      expect(afterDeny?.gitSha).toBe(sha);
+
+      // Repush the same content to a new branch (deleted ones were cleaned),
+      // then re-register. With the no-op fix, this opens a fresh
+      // pending_approval row instead of claiming "nothing to deploy".
+      const sha2 = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/notify-skill-retry",
+        manifest: sendingManifest,
+        body: ECHO_BODY,
+      });
+      const reg2 = await runner.register({ branch: "skill/notify-skill-retry" });
+      expect(reg2.status).toBe("pending_approval");
+      expect(reg2.gitSha).toBe(sha2);
+    });
+  });
+
+  describe("safety: filesystem failure rolls back DB writes (FS-last ordering)", () => {
+    it("executeRegister rolls back skills + skill_deploys when applyFilesystem throws", async () => {
+      // Direct store-level test: pass an applyFilesystem callback that
+      // throws synchronously, assert no rows persist. This is the
+      // structural invariant — register, approveDeploy, and rollback all
+      // route through executeRegister/Approve/Rollback and inherit it.
+      await expect(
+        store.executeRegister({
+          name: "would-be-skill",
+          tier: "wasm",
+          riskTier: "notify",
+          effects: [],
+          schedule: null,
+          branchTipSha: "0000000000000000000000000000000000000abc",
+          inputs: { type: "object", properties: {} },
+          outputs: null,
+          classifierLog: {
+            classifier_version: "test",
+            risk_tier: "notify",
+            declared_effects: [],
+            detected_effects: [],
+            declared_secrets: [],
+            validation_errors: [],
+          },
+          applyFilesystem: async () => {
+            throw new Error("simulated git update-ref failure");
+          },
+        }),
+      ).rejects.toThrow(/simulated git update-ref failure/);
+
+      // Both rows rolled back — no skills row, no skill_deploys row.
+      expect(await store.getSkillByName("would-be-skill")).toBeNull();
     });
   });
 });

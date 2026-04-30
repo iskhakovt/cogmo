@@ -1,5 +1,4 @@
 import { ToolRegistry, type ToolSpec } from "../agent/tools.js";
-import type { JsonSchema } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { SkillRunner, SkillToolDef } from "./runner.js";
 
@@ -20,7 +19,11 @@ export function buildSkillToolSpec(def: SkillToolDef, runner: SkillRunner): Tool
   return {
     name: def.name,
     description: def.description,
-    inputSchema: def.inputs as unknown as JsonSchema,
+    // `SkillInputs` is structurally `JsonSchema` — both pin `type: "object"`
+    // (literal) + optional `properties`/`required` + a permissive index
+    // signature. SkillManifestSchema enforces this at register time, so the
+    // assignment needs no cast.
+    inputSchema: def.inputs,
     handler: async (input) => {
       const result = await runner.invoke({
         name: def.name,

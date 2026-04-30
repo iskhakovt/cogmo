@@ -23,21 +23,12 @@ import type {
   SkillStore,
   SkillTier,
 } from "./store/index.js";
-import type { ClassifierLog, SkillIo, SkillManifest } from "./types.js";
+import type { ClassifierLog, SkillInputs, SkillManifest } from "./types.js";
 import { runOnWorker } from "./worker-wasm/host.js";
 
 const log = logger.child({ component: "skills.runner" });
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
-
-const STUB_CLASSIFIER_LOG: ClassifierLog = {
-  classifier_version: STUB_CLASSIFIER_VERSION,
-  risk_tier: "auto",
-  declared_effects: [],
-  detected_effects: [],
-  declared_secrets: [],
-  validation_errors: [],
-};
 
 export interface RegisterResult {
   name: string;
@@ -76,8 +67,13 @@ export interface SkillToolDef {
    * preamble too. Bounded ≤500 chars (manifest validator already caps).
    */
   description: string;
-  /** JSON Schema as declared in the manifest. Forwarded directly to the LLM. */
-  inputs: SkillIo;
+  /**
+   * JSON Schema as declared in the manifest. Structurally compatible with
+   * `JsonSchema` (in `src/llm/types.ts`) — both pin `type: "object"` and
+   * permit extra keys via index signature — so the dynamic-tool-list builder
+   * forwards it to the LLM without an `as unknown` cast.
+   */
+  inputs: SkillInputs;
   tier: SkillTier;
   riskTier: SkillRiskTier;
   gitSha: string;
@@ -152,6 +148,13 @@ interface SkillSourceCacheEntry {
   manifest: SkillManifest;
   body: string;
   inputsValidator: ValidateFunction;
+  /**
+   * Compiled lazily on first invoke that has a manifest.outputs to validate
+   * against. Stored on the cache entry itself so subsequent invocations reuse
+   * the validator instead of re-compiling per call. `undefined` until first
+   * use; remains `undefined` for skills without declared outputs.
+   */
+  outputsValidator?: ValidateFunction;
 }
 
 export class SkillRunnerImpl implements SkillRunner {
@@ -403,6 +406,12 @@ export class SkillRunnerImpl implements SkillRunner {
   }
 
   async denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void> {
+    // Log the reason here — denyPendingDeploy intentionally drops it (no
+    // `denied_reason` column yet) and the CLI accepts a multi-word reason
+    // that would otherwise vanish without a trace. Audit trail lives in the
+    // log line for now; promote to a column once a real consumer needs to
+    // query it.
+    log.info({ pendingId: opts.pendingId, reason: opts.reason ?? null }, "denying skill deploy");
     await this.#store.denyPendingDeploy({
       pendingId: opts.pendingId,
       reason: opts.reason ?? null,
@@ -711,13 +720,23 @@ export class SkillRunnerImpl implements SkillRunner {
     };
 
     const row = await this.#store.insertSkill(insertParams);
+    // Test-only fixed classifier log — bypasses the real classifier so tests
+    // that don't care about risk-tier promotion can seed a skill cleanly.
+    const testClassifierLog: ClassifierLog = {
+      classifier_version: STUB_CLASSIFIER_VERSION,
+      risk_tier: "auto",
+      declared_effects: [],
+      detected_effects: [],
+      declared_secrets: [],
+      validation_errors: [],
+    };
     await this.#store.insertDeploy({
       skillId: row.id,
       gitSha,
       priorGitSha: null,
       riskTier: "auto",
       status: "live",
-      classifierLog: STUB_CLASSIFIER_LOG,
+      classifierLog: testClassifierLog,
     });
 
     const inputsValidator = this.#compileInputsValidator(manifest, params.name);
@@ -834,14 +853,14 @@ export class SkillRunnerImpl implements SkillRunner {
     skillName: string,
   ): string | null {
     if (cached.manifest.outputs === undefined) return null;
-    // Compile once per skill source — reuse via attaching to the entry.
-    const validator =
-      (
-        cached as SkillSourceCacheEntry & {
-          outputsValidator?: ValidateFunction;
-        }
-      ).outputsValidator ?? this.#ajv.compile(cached.manifest.outputs as Record<string, unknown>);
-    (cached as { outputsValidator?: ValidateFunction }).outputsValidator = validator;
+    // Lazy-compile per skill source — first invoke pays the cost, subsequent
+    // invokes reuse the cached validator on the entry.
+    if (cached.outputsValidator === undefined) {
+      cached.outputsValidator = this.#ajv.compile(
+        cached.manifest.outputs as Record<string, unknown>,
+      );
+    }
+    const validator = cached.outputsValidator;
     if ((validator as { $async?: boolean }).$async === true) {
       // Defensive — manifest should never compile to async, but if it
       // somehow did the truthy check below would silently bypass validation.
