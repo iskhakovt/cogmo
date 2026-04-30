@@ -173,6 +173,71 @@ describe("RepoDialogs", () => {
     expect(dlg.has(100)).toBe(false);
   });
 
+  it("surfaces repo_local_path_exists and clears the dialog", async () => {
+    // The transport rejects when the host directory is already populated
+    // (the operator manually placed something there, or a prior aborted
+    // clone left files). The dialog must surface the path and clear
+    // state — the user can't retry from the same dialog without first
+    // moving the directory aside.
+    const dlg = new RepoDialogs();
+    const transport = transportWith({
+      repos: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        add: vi.fn(),
+        cloneAndAdd: vi.fn().mockResolvedValue(
+          err({
+            code: "repo_local_path_exists" as const,
+            path: "/var/lib/cogmo/repos/notes",
+          }),
+        ),
+        remove: vi.fn(),
+      },
+    });
+    await dlg.start(mkCtx());
+    await dlg.handleMessage(transport, mkCtx("notes"));
+    await dlg.handleMessage(transport, mkCtx("https://github.com/u/notes.git"));
+    const ctx = mkCtx("save");
+    await dlg.handleMessage(transport, ctx);
+    expect(ctx.reply.mock.calls.at(-1)?.[0]).toMatch(/\/var\/lib\/cogmo\/repos\/notes/);
+    expect(dlg.has(100)).toBe(false);
+  });
+
+  it("surfaces transport-side repo_invalid_input with field+reason and clears the dialog", async () => {
+    // The dialog has client-side regex validation for the name; this
+    // covers the *transport* rejecting input it considers invalid (e.g.
+    // a remote URL the parser cannot interpret, even if it passed the
+    // dialog's permissive textual check). Distinct error path from the
+    // earlier "rejects names with disallowed characters" client-side
+    // tests.
+    const dlg = new RepoDialogs();
+    const transport = transportWith({
+      repos: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        add: vi.fn(),
+        cloneAndAdd: vi.fn().mockResolvedValue(
+          err({
+            code: "repo_invalid_input" as const,
+            field: "remoteUrl",
+            reason: "could not parse owner/repo from URL",
+          }),
+        ),
+        remove: vi.fn(),
+      },
+    });
+    await dlg.start(mkCtx());
+    await dlg.handleMessage(transport, mkCtx("notes"));
+    // URL passes the dialog's permissive client-side regex; the
+    // transport-side validator is mocked to reject it. The dialog
+    // surfaces whatever the transport returned.
+    await dlg.handleMessage(transport, mkCtx("https://github.com/u/notes.git"));
+    const ctx = mkCtx("save");
+    await dlg.handleMessage(transport, ctx);
+    const reply = ctx.reply.mock.calls.at(-1)?.[0] as string;
+    expect(reply).toMatch(/remoteUrl/);
+    expect(reply).toMatch(/could not parse/);
+    expect(dlg.has(100)).toBe(false);
+  });
+
   it("surfaces github_identity_unavailable verbatim", async () => {
     const dlg = new RepoDialogs();
     const transport = transportWith({
