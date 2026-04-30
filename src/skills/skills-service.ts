@@ -27,6 +27,12 @@ export interface SkillsService {
   rollback(opts: { name: string; toGitSha: string }): Promise<RegisterResult>;
 }
 
+/**
+ * Conversation-scoped — `conversationId` is required so the approval-keyboard
+ * event can be routed back to the originating chat. Construct one per
+ * conversation turn (see `handle-message.ts`); the CLI calls
+ * `runner.register` directly and skips this layer.
+ */
 export interface SkillsServiceDeps {
   runner: SkillRunner;
   /** Inngest client used to fire approval-requested events. */

@@ -16,7 +16,6 @@ import {
 import type { StreamEvent } from "../../../llm/types.js";
 import { logger } from "../../../logger.js";
 import {
-  buildSkillsApprovalKeyboard,
   parseSkillsApprovalCallback,
   SKILLS_APPROVAL_CALLBACK_REGEX,
 } from "../../../skills/skills-keyboard.js";
@@ -48,6 +47,7 @@ import {
 import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml, stripHtmlTags } from "./render.js";
 import { RepoDialogs } from "./repo-dialog.js";
+import { postSkillsApprovalKeyboard } from "./skills-approval-poster.js";
 
 export const channelType = "telegram";
 
@@ -624,37 +624,14 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
           triggers: [skillsDeployApprovalRequested],
           retries: 0,
         },
-        async ({ event }) => {
-          const { pendingId, skillName, gitSha, conversationId } = event.data;
-
-          const sessions = await transportStore.getActiveSessionsForConversation(conversationId);
-          const tgSession = sessions.find((s) => s.channelId === channelId);
-          if (!tgSession) return { skipped: "no telegram session for this conversation" };
-
-          // Fetch the deploy + skill row to surface declared effects on the
-          // approval prompt — gives the user the "what am I approving"
-          // context without requiring it on the wire.
-          const deploy = await skillStore.getDeployById(pendingId);
-          const skill = deploy ? await skillStore.getSkillById(deploy.skillId) : null;
-          const effects =
-            skill && skill.effects.length > 0 ? skill.effects.join(", ") : "(none declared)";
-
-          const keyboard = buildSkillsApprovalKeyboard(pendingId);
-          // Plain text — skill names and effect labels are user-controlled
-          // (manifest authors include the agent itself); a Markdown parse
-          // failure would 400 the whole send. Same reasoning as the
-          // permission-requested message above.
-          const text =
-            `🛡️ Skill deploy awaiting approval: ${skillName}\n\n` +
-            `Declared effects: ${effects}\n` +
-            `Commit: ${gitSha.slice(0, 7)}\n\n` +
-            `Approve to advance main; deny to leave the deploy pending. ` +
-            `You can also re-register a different version.`;
-          await bot.api.sendMessage(Number(tgSession.platformAddress), text, {
-            reply_markup: keyboard,
-          });
-          return { posted: true };
-        },
+        async ({ event }) =>
+          postSkillsApprovalKeyboard({
+            event: event.data,
+            channelId,
+            skillStore,
+            transportStore,
+            sendMessage: (chatId, text, opts) => bot.api.sendMessage(chatId, text, opts),
+          }),
       ),
     );
   }
