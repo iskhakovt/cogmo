@@ -184,11 +184,7 @@ The patterns from PR #87 (skills P3.1 tier1) that produced 1696 passing tests ac
 - **Proxy router HTTP/1.1 upgrade handling not tested.** `proxy/router.test.ts` (119 lines) tests the routing logic (which endpoints are intercepted vs. passed through). But the **upgrade events** (for `/build`, `/session`, etc.) are not tested. The implementation (proxy/index.ts line ~144) pipes raw sockets on upgrade — there's no unit test for this because it requires real socket handling.
   - **Remediation:** Add integration test (below).
 
-- **Reaper TTL + orphan detection incomplete.** `reaper.test.ts` (395 lines) has happy-path tests for TTL expiry and orphan cleanup. **Missing:**
-  - Test for the boundary case: container.ttl_expires_at is exactly now() — should it be reaped or not? (should be "expires_at < now()", boundary-inclusive check)
-  - Test for cascade delete: parent container reaped → all children should be reaped (the design says "same root_task_id, cascade together").
-  - Test for the three-pass order: TTL, then orphan, then stale-DB. What if an orphan is also stale? Does it get handled twice (benign) or does one pass skip it?
-  - **Remediation:** Add tests for TTL boundary, cascade behavior, three-pass interaction.
+- **Reaper TTL + orphan detection — partial coverage added 2026-04-30.** Two regression canaries shipped: TTL boundary (`expires_at === now()` does NOT reap, pinning strict `<` semantics) and stale-DB pass skipped on `listContainers` failure (preventing the "every live row marked exited" failure mode). Still uncovered: cross-pass interactions (orphan + stale collision), and cascade-by-`root_task_id` — but the reaper as written does NOT cascade by root task; cascading is at the orchestrator's `stopTask` level, not the reaper's. The retrospective's claim about cascade behavior was a design misread.
 
 - **Cgroup parent systemd slice naming.** `cgroup-parent.test.ts` (23 lines) is minimal — it just tests the format function. **Missing:**
   - UUID → slice name conversion: strip dashes, append `.slice`, keep the chars valid for systemd (alphanumeric + dash + dot only).

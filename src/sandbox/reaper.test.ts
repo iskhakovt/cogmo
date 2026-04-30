@@ -199,6 +199,26 @@ describe("runReap — TTL pass", () => {
     expect(result.ttlReaped).toBe(0);
     expect(killCalls).toEqual([]);
   });
+
+  it("does NOT reap a container whose TTL is exactly now() (filter uses strict <)", async () => {
+    // Boundary case: a container whose TTL lands precisely on the reaper's
+    // current clock should remain alive for one more tick. The filter at
+    // reaper.ts:75 uses `< now`, not `<=`. A regression to `<=` would
+    // shave a minute off every container's effective TTL — small in
+    // absolute terms but a silent contract drift.
+    const cogmoId = await insertContainer({
+      dockerId: "c-boundary",
+      ttlMs: 0, // expires_at === NOW()
+      status: "running",
+    });
+    const { docker, killCalls } = fakeDocker({
+      containers: [{ Id: "c-boundary", Labels: labels() }],
+    });
+    const result = await runReap({ docker, store, instanceId, now: NOW });
+    expect(result.ttlReaped).toBe(0);
+    expect(killCalls).toEqual([]);
+    expect((await store.getContainer(cogmoId))?.status).toBe("running");
+  });
 });
 
 describe("runReap — orphan pass", () => {
@@ -391,5 +411,44 @@ describe("runReap — resilience", () => {
     expect(result.ttlReaped).toBe(1);
     // Orphan pass got 0 (listContainers threw, dockerContainers is empty).
     expect(result.orphansReaped).toBe(0);
+  });
+
+  it("skips the stale-DB pass entirely when listContainers fails (regression canary)", async () => {
+    // Disastrous failure mode if the stale pass ran on a failed listContainers:
+    // an empty `dockerContainers` array is indistinguishable from "no
+    // containers exist", so every live DB row would get its `dockerIdSet`
+    // miss and be marked `exited`. Every running task would lose its
+    // admission slot and be reported as terminal — silent data loss.
+    //
+    // The reaper guards this via the `dockerListOk` flag (reaper.ts:138).
+    // This test asserts the guard works: with several live containers in
+    // the DB and a thrown listContainers, NONE of them are marked exited
+    // by the stale pass. The TTL pass is independently exercised in the
+    // sibling test above.
+    const aliveA = await insertContainer({
+      dockerId: "c-alive-a",
+      ttlMs: 60_000,
+      status: "running",
+    });
+    const aliveB = await insertContainer({
+      dockerId: "c-alive-b",
+      ttlMs: 60_000,
+      status: "starting",
+    });
+    const docker = {
+      listContainers: vi.fn(async () => {
+        throw new Error("daemon down");
+      }),
+      getContainer: () => ({ kill: vi.fn(), remove: vi.fn() }),
+      // biome-ignore lint/suspicious/noExplicitAny: stub
+      getNetwork: () => ({ remove: vi.fn() }) as any,
+      // biome-ignore lint/suspicious/noExplicitAny: stub
+      getVolume: () => ({ remove: vi.fn() }) as any,
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: minimal docker stub
+    const result = await runReap({ docker: docker as any, store, instanceId, now: NOW });
+    expect(result.staleMarked).toBe(0);
+    expect((await store.getContainer(aliveA))?.status).toBe("running");
+    expect((await store.getContainer(aliveB))?.status).toBe("starting");
   });
 });
