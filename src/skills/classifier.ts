@@ -28,9 +28,10 @@ export const STUB_CLASSIFIER_VERSION = "stub-2-effect-aware";
 
 /**
  * Effects that force the `approve` tier. Mirrors `design/skills.md`'s
- * destructive / external-messaging / financial set. Anything in this set means
- * a misbehaving skill could send messages, delete external resources, move
- * money, or shell out — outcomes the user wants to gate explicitly.
+ * destructive / external-messaging / financial / host-mutation set. Anything
+ * in this set means a misbehaving skill could send messages, delete external
+ * resources, move money, write to the host filesystem, or shell out —
+ * outcomes the user wants to gate explicitly.
  */
 const APPROVE_GATING_EFFECTS: ReadonlySet<SkillEffect> = new Set<SkillEffect>([
   "deletes_external",
@@ -39,6 +40,7 @@ const APPROVE_GATING_EFFECTS: ReadonlySet<SkillEffect> = new Set<SkillEffect>([
   "posts_public",
   "financial",
   "spawns_subprocess",
+  "writes_filesystem",
 ]);
 
 const APPROVE_SECRETS_THRESHOLD = 3;

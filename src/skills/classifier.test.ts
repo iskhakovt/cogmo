@@ -36,6 +36,7 @@ describe("classifyManifest", () => {
     "posts_public",
     "financial",
     "spawns_subprocess",
+    "writes_filesystem",
   ])("promotes %s to approve tier", (effect) => {
     const log = classifyManifest(makeManifest({ effects: [effect] }));
     expect(log.risk_tier).toBe("approve");
