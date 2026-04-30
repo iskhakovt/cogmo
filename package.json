@@ -62,7 +62,7 @@
     "dockerode": "5.0.0",
     "drizzle-orm": "^0.45.2",
     "grammy": "^1.42.0",
-    "inngest": "^4.2.5",
+    "inngest": "^4.2.6",
     "js-tiktoken": "^1.0.21",
     "jsdom": "^29.1.1",
     "marked": "^18.0.2",
