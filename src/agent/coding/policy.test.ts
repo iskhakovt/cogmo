@@ -227,12 +227,52 @@ describe("policy.evaluate", () => {
       expect(bash("curl -X POST http://[::1]:9000/r").decision).toBe("allow");
     });
 
+    it.each([
+      "curl -X POST http://[::1]:8080/r -d foo",
+      "curl --request=PUT http://[::1]/r",
+      "curl -F 'file=@x' http://[::1]:3000/upload",
+    ])("allows IPv6 bracketed localhost write: %s", (cmd) => {
+      expect(bash(cmd).decision).toBe("allow");
+    });
+
+    it("allows POST to 0.0.0.0 (treated as local-bind)", () => {
+      expect(bash("curl -X POST http://0.0.0.0:8080/r -d foo").decision).toBe("allow");
+    });
+
+    it("prompts on unbracketed IPv6 (URL parse fails, treated as non-local)", () => {
+      // `http://::1/` is not a valid URL per Node's parser — IPv6 hosts
+      // must be bracketed. The `try { new URL(...) } catch` branch in
+      // isLocalhostUrl returns false, so this falls into the prompt path.
+      expect(bash("curl 'http://::1/' -X POST -d foo").decision).toBe("prompt");
+    });
+
+    it("allows POST to *.localhost / *.local subdomains", () => {
+      expect(bash("curl -X POST http://api.localhost/r -d foo").decision).toBe("allow");
+      expect(bash("curl -X POST http://dev.local/r -d foo").decision).toBe("allow");
+    });
+
     it("prompts on wget --post-data to external URL", () => {
       expect(bash("wget --post-data='a=b' https://example.com/r").decision).toBe("prompt");
     });
 
+    it("allows wget --post-data to IPv6 bracketed localhost", () => {
+      expect(bash("wget --post-data='a=b' http://[::1]:8080/r").decision).toBe("allow");
+    });
+
     it("allows wget GET", () => {
       expect(bash("wget https://example.com/file.tar.gz").decision).toBe("allow");
+    });
+
+    it("prompts on quoted URL containing `&` query separator (single-`&` is not a compound op)", () => {
+      // The shell-splitter only matches `&&` (compound), not bare `&`, so
+      // a query string with `?q=foo&bar` stays atomic and the curl branch
+      // sees the full URL — host resolves to api.github.com → external →
+      // prompt. This pins behaviour for the comment in splitShellCommand
+      // about quoted operators not being respected: `&` happens to be
+      // safe by accident because `&&` is the matched token, not `&`.
+      const r = bash('curl "http://api.github.com/repos?q=foo&bar" -X POST -d a=b');
+      expect(r.decision).toBe("prompt");
+      expect(r.reason).toContain("api.github.com");
     });
   });
 
@@ -247,6 +287,16 @@ describe("policy.evaluate", () => {
       expect(bash("pnpm test && pnpm lint && pnpm typecheck").decision).toBe("allow");
     });
 
+    it("allows `&&` chain of read-only git commands", () => {
+      expect(bash("git status && git diff").decision).toBe("allow");
+    });
+
+    it("prompts on `&&` chain when right side is npm publish", () => {
+      const r = bash("npm install && npm publish");
+      expect(r.decision).toBe("prompt");
+      expect(r.reason).toContain("publish");
+    });
+
     it("prompts on `||` chains too", () => {
       expect(bash("pnpm test || git push --force origin main").decision).toBe("prompt");
     });
@@ -255,8 +305,28 @@ describe("policy.evaluate", () => {
       expect(bash("pnpm test; git push").decision).toBe("prompt");
     });
 
+    it("allows `;` chain when all sub-commands are allow", () => {
+      expect(bash("pnpm test; pnpm lint").decision).toBe("allow");
+    });
+
     it("prompts on pipes", () => {
       expect(bash("echo foo | curl -X POST https://example.com/r -d @-").decision).toBe("prompt");
+    });
+
+    it("prompts on pipe chain when downstream command is a prompt-trigger", () => {
+      const r = bash("cat changelog.md | gh release create v1.0.0 --notes-file -");
+      expect(r.decision).toBe("prompt");
+      expect(r.reason.toLowerCase()).toContain("release");
+    });
+
+    it("returns the first prompt reason in a multi-prompt chain", () => {
+      // Worst-case-wins: scanner walks left to right and the first prompt
+      // result is locked in (`worst.decision === "allow"` guard skips
+      // later prompts). Pinning the order so a future change to the
+      // walker is a deliberate decision, not a silent shift.
+      const r = bash("git push && npm publish");
+      expect(r.decision).toBe("prompt");
+      expect(r.reason).toContain("git push");
     });
   });
 
