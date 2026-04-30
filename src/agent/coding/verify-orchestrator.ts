@@ -37,6 +37,7 @@ import { runCommitAndPush } from "./commit-push.js";
 import { parseRemoteUrl, runOpenDraftPr } from "./draft-pr.js";
 import { type ExecuteStreamHandle, NULL_EXECUTE_STREAM } from "./orchestrator.js";
 import type { CodingStore } from "./store/index.js";
+import { safeTeardownWorktree } from "./teardown.js";
 import type { PrMetadata } from "./types.js";
 import { runVerifyStreaming } from "./verify.js";
 
@@ -142,14 +143,32 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   }
   const worktreeAssignment = task.worktreeAssignment;
 
+  /**
+   * Local helper bundling status=failed + worktree teardown + stream
+   * notification for every verify-orchestrator failure exit. Inlined as
+   * a closure (rather than a top-level function with many params)
+   * because it captures `stepRun`, `store`, `secretsStore`, `repo`,
+   * `taskId`, `worktreeAssignment` from this scope.
+   */
+  const failAndTeardown = async (
+    reason: string,
+    stream?: ExecuteStreamHandle | null,
+  ): Promise<VerifyOrchestratorResult> => {
+    await stepRun("set-status-failed", () =>
+      store.updateTaskStatus({ id: taskId, status: "failed", failureReason: reason }),
+    );
+    await stepRun("teardown-worktree", () =>
+      safeTeardownWorktree({ secretsStore, repo, taskId, worktreeAssignment }),
+    ).catch(() => undefined);
+    if (stream) {
+      await stream.fail(reason).catch(() => {});
+    }
+    return { status: "failed", failureReason: reason };
+  };
+
   const remote = parseRemoteUrl(repo.remoteUrl);
   if (!remote) {
-    return await failTask(
-      stepRun,
-      store,
-      taskId,
-      `cannot parse owner/repo from remote URL: ${repo.remoteUrl}`,
-    );
+    return await failAndTeardown(`cannot parse owner/repo from remote URL: ${repo.remoteUrl}`);
   }
 
   // Identity resolution happens before any container work — fast-fail when
@@ -157,12 +176,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   // throw away.
   const identityResult = await resolveGitHubIdentity(secretsStore, repo.identityName);
   if (identityResult.isErr()) {
-    return await failTask(
-      stepRun,
-      store,
-      taskId,
-      describeResolveIdentityError(identityResult.error),
-    );
+    return await failAndTeardown(describeResolveIdentityError(identityResult.error));
   }
   const identity: GitHubIdentity = identityResult.value;
 
@@ -238,7 +252,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     );
     if (!verifyResult.ok) {
       const reason = `verify failed (exit ${verifyResult.exitCode})\n\n${verifyResult.output}`;
-      return await failTask(stepRun, store, taskId, reason, executeStream);
+      return await failAndTeardown(reason, executeStream);
     }
 
     // 2. Commit + push ────────────────────────────────────────────────
@@ -254,31 +268,19 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     });
 
     if (commitResult.kind === "branch_conflict") {
-      return await failTask(
-        stepRun,
-        store,
-        taskId,
+      return await failAndTeardown(
         `push rejected — branch conflict on cogmo/<idShort>:\n\n${commitResult.output}`,
         executeStream,
       );
     }
     if (commitResult.kind === "auth_failed") {
-      return await failTask(
-        stepRun,
-        store,
-        taskId,
+      return await failAndTeardown(
         `push rejected — GitHub authentication failed:\n\n${commitResult.output}`,
         executeStream,
       );
     }
     if (commitResult.kind === "failed") {
-      return await failTask(
-        stepRun,
-        store,
-        taskId,
-        `commit+push failed:\n\n${commitResult.output}`,
-        executeStream,
-      );
+      return await failAndTeardown(`commit+push failed:\n\n${commitResult.output}`, executeStream);
     }
 
     // `nothing_to_commit` is a valid outcome — the verify passed on a
@@ -317,19 +319,13 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     });
 
     if (prResult.kind === "auth_failed") {
-      return await failTask(
-        stepRun,
-        store,
-        taskId,
+      return await failAndTeardown(
         `draft PR open failed (auth): ${prResult.message}`,
         executeStream,
       );
     }
     if (prResult.kind === "validation_failed") {
-      return await failTask(
-        stepRun,
-        store,
-        taskId,
+      return await failAndTeardown(
         `draft PR open failed (validation): ${prResult.message}`,
         executeStream,
       );
@@ -339,13 +335,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       // slice4-plan.md. Surface as failed so the operator sees it on
       // Telegram and can re-delegate; the pushed branch is preserved
       // upstream.
-      return await failTask(
-        stepRun,
-        store,
-        taskId,
-        `draft PR open failed: ${prResult.message}`,
-        executeStream,
-      );
+      return await failAndTeardown(`draft PR open failed: ${prResult.message}`, executeStream);
     }
 
     const metadata: PrMetadata = {
@@ -380,6 +370,9 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     await store
       .updateTaskStatus({ id: taskId, status: "failed", failureReason: reason })
       .catch(() => {});
+    await safeTeardownWorktree({ secretsStore, repo, taskId, worktreeAssignment }).catch(
+      () => undefined,
+    );
     if (executeStream) {
       await executeStream.fail(reason).catch(() => {});
     }
@@ -401,26 +394,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       cleanupAskpass({ baseDir: askpassBaseDir, rootTaskId: taskId });
     }
   }
-}
-
-async function failTask(
-  stepRun: StepRun,
-  store: CodingStore,
-  taskId: string,
-  reason: string,
-  executeStream?: ExecuteStreamHandle | null,
-): Promise<VerifyOrchestratorResult> {
-  await stepRun("set-status-failed", () =>
-    store.updateTaskStatus({ id: taskId, status: "failed", failureReason: reason }),
-  );
-  // Notify the Telegram-visible stream so the operator-facing message
-  // shows the failure reason rather than freezing on the last edit.
-  // Wrapped — a delivery hiccup must not bubble out of `failTask` and
-  // overwrite the reason we just persisted.
-  if (executeStream) {
-    await executeStream.fail(reason).catch(() => {});
-  }
-  return { status: "failed", failureReason: reason };
 }
 
 async function readHeadSha(container: Pick<TaskContainerHandle, "exec">): Promise<string> {

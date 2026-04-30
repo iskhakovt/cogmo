@@ -211,6 +211,11 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       store: codingStore,
       sandbox,
       backend: codingBackend,
+      // Threaded for the failure-cascade WIP-ref push (`safeTeardownWorktree`).
+      // Verify-orchestrator already needs it for commit signing + push auth;
+      // the plan/execute orchestrators reuse the same identity to push
+      // dirty/unpushed worktrees to `refs/cogmo-wip/<taskId>` on failure.
+      secretsStore,
       devbaseImage: env.COGMO_DEVBASE_IMAGE,
       defaultResourceLimits: { cpus: 2, memory_bytes: 2 * 1024 * 1024 * 1024, pids: 256 },
       taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
