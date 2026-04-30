@@ -157,6 +157,7 @@ Each domain module owns its DB access in a `store/` subdirectory:
 - **Test contracts, not internals** — test the interface a consumer depends on. If changing an implementation detail breaks a test, the test is too coupled. If a contract changes and no test breaks, there's a gap.
 - **Boundary behavior matters** — defensive copies, error propagation, unknown/missing inputs, edge cases at module boundaries. This is where real bugs live.
 - **Test helpers for readability** — factory functions (`mockProvider()`, `textResponse()`) keep tests scannable. Prefer building test data declaratively over inline object literals repeated across tests.
+- **Coverage patterns** — `design/testing.md` → "Coverage Patterns" lists concrete recipes (JSONB raw-SQL bypass, discriminated-union parse tests, audit invariants, error-path matrix, resource-cleanup invariants, concurrency invariants, CLI exit-code matrix). Apply to new test code.
 - **Framework:** Vitest. See `design/testing.md` for full details.
 
 ### Three-Tier Structure
