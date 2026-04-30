@@ -100,6 +100,93 @@ describe("formatProgressMessage", () => {
     // No blank-line-then-body: just the header line(s).
     expect(out).toBe("🧠 Planning — g");
   });
+
+  it("goal of exactly 80 chars is rendered verbatim (no ellipsis)", () => {
+    const goal = "x".repeat(80);
+    const out = formatProgressMessage({ goal, phase: "planning", body: "" });
+    expect(out).toBe(`🧠 Planning — ${goal}`);
+    expect(out).not.toContain("…");
+  });
+
+  it("goal of 81 chars triggers truncation (off-by-one canary)", () => {
+    const goal = "x".repeat(81);
+    const out = formatProgressMessage({ goal, phase: "planning", body: "" });
+    // 79 retained chars + single ellipsis char.
+    expect(out).toBe(`🧠 Planning — ${"x".repeat(79)}…`);
+  });
+
+  it("very long goal (5000 chars) does not blow up the header", () => {
+    const out = formatProgressMessage({
+      goal: "x".repeat(5000),
+      phase: "planning",
+      body: "",
+    });
+    const headerLine = out.split("\n")[0];
+    expect(headerLine.length).toBeLessThanOrEqual("🧠 Planning — ".length + 80);
+    expect(headerLine).toMatch(/…$/);
+    // Whole message stays well under Telegram's 4096 cap.
+    expect(out.length).toBeLessThan(4096);
+  });
+
+  it("goal containing newlines is passed through verbatim into the header", () => {
+    // Pin observable behavior: the formatter does not strip or collapse
+    // newlines in the goal preview. The goal is short enough to skip
+    // truncation, so the embedded newline lands as-is and the rendered
+    // output spans extra lines. Subscribers that need single-line headers
+    // must sanitise upstream.
+    const out = formatProgressMessage({
+      goal: "line one\nline two",
+      phase: "planning",
+      body: "",
+    });
+    expect(out).toBe("🧠 Planning — line one\nline two");
+  });
+
+  it("goal with HTML special chars and emoji is not escaped (plain-text contract)", () => {
+    // Per the module header, the formatter emits Telegram-safe plain text
+    // and relies on the adapter to escape if it sets parse_mode. The
+    // current progress subscriber sends without parse_mode, so raw
+    // `<`/`>`/`&`/emoji round-trip through Telegram unparsed.
+    const goal = '<script>alert(&"x")</script> 🎉';
+    const out = formatProgressMessage({ goal, phase: "planning", body: "" });
+    expect(out).toBe(`🧠 Planning — ${goal}`);
+  });
+
+  it("missing tokens field omits the status line entirely (no 'null tokens' literal)", () => {
+    const out = formatProgressMessage({
+      goal: "g",
+      phase: "planning",
+      body: "",
+      tokens: undefined,
+    });
+    expect(out).toBe("🧠 Planning — g");
+    expect(out).not.toMatch(/null|undefined|NaN/i);
+    expect(out).not.toContain("tokens");
+  });
+
+  it("zero token counts render the status line and are distinct from missing", () => {
+    const out = formatProgressMessage({
+      goal: "g",
+      phase: "executing",
+      body: "",
+      tokens: { input: 0, output: 0 },
+    });
+    expect(out).toContain("0 tokens (in 0 / out 0)");
+  });
+
+  it("failure reason containing newlines is rendered verbatim in the status line", () => {
+    // Pin observable behavior: the formatter does not collapse or
+    // pre-format multi-line failure reasons. Callers passing structured
+    // errors get a multi-line status section.
+    const out = formatProgressMessage({
+      goal: "g",
+      phase: "failed",
+      body: "",
+      failureReason: "exit 2\nstderr: boom",
+    });
+    expect(out).toContain("❌ Failed — g");
+    expect(out).toContain("exit 2\nstderr: boom");
+  });
 });
 
 describe("describeToolCall / describeToolResult", () => {
