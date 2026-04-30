@@ -247,6 +247,7 @@ export function mockToolRegistry(): ToolRegistry {
     register: vi.fn(),
     get: vi.fn().mockReturnValue(undefined),
     definitions: vi.fn().mockReturnValue([]),
+    snapshot: vi.fn().mockReturnValue([]),
   } as unknown as ToolRegistry;
 }
 

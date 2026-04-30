@@ -2,9 +2,20 @@ import { Ajv, type ValidateFunction } from "ajv";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
 import { type CtxUser, DefaultCtxHandler } from "./ctx-handler.js";
+import {
+  deleteRef,
+  GitOpsError,
+  getMainSha,
+  gitShow,
+  isAncestor,
+  revParse,
+  updateRef,
+} from "./git-ops.js";
 import { parseManifest } from "./manifest.js";
 import type {
+  ExecuteRegisterResult,
   InsertSkillParams,
   SkillRiskTier,
   SkillRow,
@@ -12,13 +23,15 @@ import type {
   SkillStore,
   SkillTier,
 } from "./store/index.js";
-import type { ClassifierLog, SkillManifest } from "./types.js";
+import type { ClassifierLog, SkillIo, SkillManifest } from "./types.js";
 import { runOnWorker } from "./worker-wasm/host.js";
 
 const log = logger.child({ component: "skills.runner" });
 
+const ZERO_SHA = "0000000000000000000000000000000000000000";
+
 const STUB_CLASSIFIER_LOG: ClassifierLog = {
-  classifier_version: "stub-0",
+  classifier_version: STUB_CLASSIFIER_VERSION,
   risk_tier: "auto",
   declared_effects: [],
   detected_effects: [],
@@ -29,7 +42,7 @@ const STUB_CLASSIFIER_LOG: ClassifierLog = {
 export interface RegisterResult {
   name: string;
   riskTier: SkillRiskTier;
-  status: "live" | "pending_approval" | "rejected";
+  status: "live" | "pending_approval" | "rejected" | "no_op";
   gitSha: string;
   errors?: readonly string[];
   pendingId?: string;
@@ -51,26 +64,47 @@ export interface SkillSummary {
 }
 
 /**
- * Public contract for the skills runtime. P3.1 ships `list` + `invoke` end
- * to end; `register` / `approveDeploy` / `denyDeploy` / `rollback` /
- * `deregister` are part of the contract but throw `not_implemented` until
- * P3.3 fills in the classifier + git-merge flow. The interface is locked now
- * so consumers (CLI, future orchestrator tool registrar) don't change shape
- * across phases.
+ * The full per-skill descriptor needed to register the skill as an LLM tool.
+ * Returned by {@link SkillRunner.listToolDefs} so the orchestrator can rebuild
+ * the per-turn tool list without re-reading git for each entry.
+ */
+export interface SkillToolDef {
+  name: string;
+  /**
+   * From `SKILL.md` frontmatter. The first line of the body is appended when
+   * present so the LLM-facing description picks up the human-readable
+   * preamble too. Bounded ≤500 chars (manifest validator already caps).
+   */
+  description: string;
+  /** JSON Schema as declared in the manifest. Forwarded directly to the LLM. */
+  inputs: SkillIo;
+  tier: SkillTier;
+  riskTier: SkillRiskTier;
+  gitSha: string;
+}
+
+/**
+ * Public contract for the skills runtime. P3.3 fills in the deployment-pipeline
+ * RPCs (`register` / `approveDeploy` / `denyDeploy` / `rollback` / `deregister`)
+ * around the P3.1 invocation loop. The interface is the boundary the CLI, agent
+ * tool, and dynamic-tool registrar all depend on.
  */
 export interface SkillRunner {
-  /** P3.3. */
   register(opts: { branch: string }): Promise<RegisterResult>;
-  /** P3.3. */
-  approveDeploy(opts: { pendingId: string }): Promise<RegisterResult>;
-  /** P3.3. */
+  approveDeploy(opts: { pendingId: string; approvedBy?: string }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
-  /** P3.3. */
-  rollback(opts: { name: string; toGitSha?: string }): Promise<RegisterResult>;
-  /** P3.3. */
+  rollback(opts: { name: string; toGitSha: string }): Promise<RegisterResult>;
   deregister(opts: { name: string }): Promise<void>;
 
   list(): Promise<readonly SkillSummary[]>;
+  /**
+   * Like {@link list} but loads the per-skill manifest from git so each entry
+   * carries the description + input JSON Schema needed for LLM tool
+   * registration. One filesystem read per skill, deduped by `(name, gitSha)`
+   * via the runner's internal source cache — turn-N rebuild reuses turn-(N-1)
+   * cache entries when SHAs match.
+   */
+  listToolDefs(): Promise<readonly SkillToolDef[]>;
   invoke(opts: {
     name: string;
     inputs: unknown;
@@ -79,10 +113,13 @@ export interface SkillRunner {
 }
 
 /**
- * P3.1-only test helper. Inserts a skills row + live skill_deploys row from
- * a directly-handed manifest+body. Lets the runner test exercise `invoke`
- * end-to-end without going through git/classifier (P3.3 territory). Also
- * caches the body keyed by name so `invoke` can read it back.
+ * P3.1 test seeding helper. Inserts a skills row + live skill_deploys row from
+ * a directly-handed manifest+body, populating the source cache so `invoke()`
+ * can find it without going through git. Used by store-level tests where
+ * spinning up a real bare repo would be overkill.
+ *
+ * The real `register` RPC (now implemented) is the production path; tests
+ * touching the deploy pipeline use that, not this.
  */
 export interface RegisterForTestsParams {
   name: string;
@@ -99,6 +136,14 @@ export interface SkillRunnerOptions {
   user: CtxUser;
   /** Memory bank id passed to ctx.memory.* — typically the user's bank. */
   memoryBankId: string;
+  /**
+   * Path to the bare skills repo (`$COGMO_SKILLS_PATH`). Required for the
+   * register / rollback flows that read SKILL.md from git and advance
+   * `refs/heads/main` via `git update-ref`. Tests that only exercise
+   * `__registerForTests` + `invoke` may omit this; calling `register` /
+   * `rollback` without it throws a clear error.
+   */
+  skillsRepoPath?: string;
   /** Pyodide package cache directory — speeds up cold starts. Optional. */
   pyodidePackageCacheDir?: string;
 }
@@ -115,11 +160,14 @@ export class SkillRunnerImpl implements SkillRunner {
   #memory: MemoryProvider;
   #user: CtxUser;
   #memoryBankId: string;
+  #skillsRepoPath: string | undefined;
   #pyodidePackageCacheDir: string | undefined;
   #ajv: Ajv;
   /**
-   * Registered skill source — populated by `__registerForTests` until P3.3
-   * swaps in a `git show <sha>:SKILL.md/.py` reader. Keyed by skill name.
+   * Parsed manifest + compiled validator cache, keyed by `<name>@<sha>`. A new
+   * deploy invalidates by virtue of the new SHA being in the key — no manual
+   * eviction needed. `__registerForTests` writes via the same cache keyed by
+   * the stub SHA it generated, so test invocations don't re-read.
    */
   #sourceCache = new Map<string, SkillSourceCacheEntry>();
 
@@ -129,40 +177,233 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#memory = opts.memory;
     this.#user = opts.user;
     this.#memoryBankId = opts.memoryBankId;
+    this.#skillsRepoPath = opts.skillsRepoPath;
     this.#pyodidePackageCacheDir = opts.pyodidePackageCacheDir;
     this.#ajv = new Ajv({ allErrors: true, strict: false });
   }
 
-  /**
-   * P3.1 does no async work — the factory is shaped this way for forward
-   * compat with P3.3, which will pre-load skill source from git, eagerly
-   * compile validators, and warm the Pyodide pool on boot. Keeping the
-   * `static async create()` shape now means the wiring in `src/index.ts`
-   * doesn't need to change again when that lands.
-   */
   static async create(opts: SkillRunnerOptions): Promise<SkillRunnerImpl> {
     return new SkillRunnerImpl(opts);
   }
 
-  // --- Public interface (P3.3 stubs) ---
+  // --- Deployment pipeline ---
 
-  register(_opts: { branch: string }): Promise<RegisterResult> {
-    return Promise.reject(
-      new Error("SkillRunner.register: not_implemented_in_p3_1 (lands with classifier in P3.3)"),
-    );
+  async register(opts: { branch: string }): Promise<RegisterResult> {
+    const repoPath = this.#requireRepoPath("register");
+
+    let branchSha: string;
+    try {
+      branchSha = await revParse(repoPath, `refs/heads/${opts.branch}`);
+    } catch (e) {
+      if (e instanceof GitOpsError && e.code === "ref_not_found") {
+        return rejectedResult("", `branch_not_found: ${opts.branch}`);
+      }
+      throw e;
+    }
+
+    const mainSha = await getMainSha(repoPath);
+    // Fast-forward check: feature branch must descend from current main.
+    if (mainSha && !(await isAncestor(repoPath, mainSha, branchSha))) {
+      return rejectedResult(branchSha, "non_fast_forward: rebase branch onto main and retry");
+    }
+
+    let manifestSource: string;
+    let body: string;
+    try {
+      manifestSource = await gitShow(repoPath, branchSha, "SKILL.md");
+    } catch (e) {
+      if (e instanceof GitOpsError && e.code === "file_not_found") {
+        return rejectedResult(branchSha, "missing_skill_md: SKILL.md not found at branch tip");
+      }
+      throw e;
+    }
+    try {
+      body = await gitShow(repoPath, branchSha, "skill.py");
+    } catch (e) {
+      if (e instanceof GitOpsError && e.code === "file_not_found") {
+        return rejectedResult(branchSha, "missing_skill_py: skill.py not found at branch tip");
+      }
+      throw e;
+    }
+
+    const parsed = parseManifest(manifestSource);
+    if (!parsed.isOk()) {
+      const errors =
+        parsed.error.kind === "invalid_manifest" ? parsed.error.issues : [parsed.error.message];
+      return {
+        name: "",
+        riskTier: "notify",
+        status: "rejected",
+        gitSha: branchSha,
+        errors,
+      };
+    }
+    const manifest = parsed.value.manifest;
+
+    const classifierLog = classifyManifest(manifest);
+
+    const result = await this.#store.executeRegister({
+      name: manifest.name,
+      tier: manifest.tier,
+      riskTier: classifierLog.risk_tier,
+      effects: manifest.effects,
+      schedule: manifest.schedule ?? null,
+      branchTipSha: branchSha,
+      inputs: manifest.inputs,
+      outputs: manifest.outputs ?? null,
+      classifierLog,
+      applyFilesystem: async () => {
+        await updateRef(repoPath, "refs/heads/main", branchSha, mainSha ?? ZERO_SHA);
+        await deleteRef(repoPath, `refs/heads/${opts.branch}`);
+      },
+    });
+
+    return this.#registerResultToRpc({
+      name: manifest.name,
+      branchSha,
+      classifierLog,
+      result,
+      manifest,
+      body,
+    });
   }
-  approveDeploy(_opts: { pendingId: string }): Promise<RegisterResult> {
-    return Promise.reject(new Error("SkillRunner.approveDeploy: not_implemented_in_p3_1"));
+
+  async approveDeploy(opts: { pendingId: string; approvedBy?: string }): Promise<RegisterResult> {
+    const repoPath = this.#requireRepoPath("approveDeploy");
+
+    const deploy = await this.#store.getDeployById(opts.pendingId);
+    if (!deploy) {
+      return rejectedResult("", `deploy_not_found: ${opts.pendingId}`);
+    }
+    if (deploy.status !== "pending_approval") {
+      return rejectedResult(deploy.gitSha, `deploy_not_pending: status is '${deploy.status}'`);
+    }
+
+    const skill = await this.#store.getSkillById(deploy.skillId);
+    if (!skill) {
+      return rejectedResult(deploy.gitSha, "skill_not_found");
+    }
+
+    const mainSha = await getMainSha(repoPath);
+    // Fast-forward check at approve time too — main may have moved since the
+    // approve-tier deploy was created.
+    if (mainSha && !(await isAncestor(repoPath, mainSha, deploy.gitSha))) {
+      return rejectedResult(deploy.gitSha, "non_fast_forward_at_approve_time");
+    }
+
+    const result = await this.#store.executeApprove({
+      pendingId: opts.pendingId,
+      approvedBy: opts.approvedBy ?? null,
+      applyFilesystem: async () => {
+        await updateRef(repoPath, "refs/heads/main", deploy.gitSha, mainSha ?? ZERO_SHA);
+      },
+    });
+
+    if (result.kind === "live") {
+      return {
+        name: result.skill.name,
+        riskTier: result.skill.riskTier,
+        status: "live",
+        gitSha: result.skill.gitSha,
+      };
+    }
+    return rejectedResult(deploy.gitSha, result.kind === "rejected" ? result.reason : result.kind);
   }
-  denyDeploy(_opts: { pendingId: string; reason?: string }): Promise<void> {
-    return Promise.reject(new Error("SkillRunner.denyDeploy: not_implemented_in_p3_1"));
+
+  async denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void> {
+    await this.#store.denyPendingDeploy({
+      pendingId: opts.pendingId,
+      reason: opts.reason ?? null,
+    });
   }
-  rollback(_opts: { name: string; toGitSha?: string }): Promise<RegisterResult> {
-    return Promise.reject(new Error("SkillRunner.rollback: not_implemented_in_p3_1"));
+
+  async rollback(opts: { name: string; toGitSha: string }): Promise<RegisterResult> {
+    const repoPath = this.#requireRepoPath("rollback");
+
+    let targetSha: string;
+    try {
+      targetSha = await revParse(repoPath, opts.toGitSha);
+    } catch (e) {
+      if (e instanceof GitOpsError && e.code === "ref_not_found") {
+        return rejectedResult(opts.toGitSha, `target_sha_not_found: ${opts.toGitSha}`);
+      }
+      throw e;
+    }
+
+    // Re-classify the target sha so the audit trail records what we're
+    // rolling back *to* — useful if the prior code shape would now classify
+    // differently under a newer classifier version.
+    let classifierLog: ClassifierLog;
+    try {
+      const manifestSource = await gitShow(repoPath, targetSha, "SKILL.md");
+      const parsed = parseManifest(manifestSource);
+      if (!parsed.isOk()) {
+        return rejectedResult(
+          targetSha,
+          `target_manifest_invalid: ${
+            parsed.error.kind === "invalid_manifest"
+              ? parsed.error.issues.join("; ")
+              : parsed.error.message
+          }`,
+        );
+      }
+      classifierLog = {
+        ...classifyManifest(parsed.value.manifest),
+        risk_tier: "notify",
+      };
+    } catch (e) {
+      if (e instanceof GitOpsError && e.code === "file_not_found") {
+        return rejectedResult(targetSha, "target_missing_skill_md");
+      }
+      throw e;
+    }
+
+    const mainSha = await getMainSha(repoPath);
+
+    const result = await this.#store.executeRollback({
+      name: opts.name,
+      toGitSha: targetSha,
+      classifierLog,
+      applyFilesystem: async () => {
+        // Rollback rewrites main backward — pre-receive hook would normally
+        // reject this, but `update-ref` bypasses hooks by design (see
+        // bootstrapSkillsRepo). Pass `mainSha` as expectedOldSha for CAS.
+        await updateRef(repoPath, "refs/heads/main", targetSha, mainSha ?? ZERO_SHA);
+      },
+    });
+
+    if (result.kind === "live") {
+      return {
+        name: result.skill.name,
+        riskTier: result.skill.riskTier,
+        status: "live",
+        gitSha: result.skill.gitSha,
+      };
+    }
+    if (result.kind === "no_op") {
+      return {
+        name: result.skill.name,
+        riskTier: result.skill.riskTier,
+        status: "no_op",
+        gitSha: result.skill.gitSha,
+      };
+    }
+    return rejectedResult(targetSha, result.kind === "rejected" ? result.reason : result.kind);
   }
-  deregister(_opts: { name: string }): Promise<void> {
-    return Promise.reject(new Error("SkillRunner.deregister: not_implemented_in_p3_1"));
+
+  async deregister(opts: { name: string }): Promise<void> {
+    const skill = await this.#store.getSkillByName(opts.name);
+    if (!skill) {
+      throw new Error(`skill not found: ${opts.name}`);
+    }
+    // Soft-disable rather than physically deleting — preserves the audit
+    // trail in skill_deploys and skill_runs. A future hard-delete RPC could
+    // exist, but at personal scale soft-disable covers the use case (revoke
+    // an unsafe skill, retain the history).
+    await this.#store.setSkillDisabled({ id: skill.id, disabled: true });
   }
+
+  // --- Read paths ---
 
   async list(): Promise<readonly SkillSummary[]> {
     const rows = await this.#store.listEnabledSkills();
@@ -173,6 +414,34 @@ export class SkillRunnerImpl implements SkillRunner {
       disabled: r.disabled,
       gitSha: r.gitSha,
     }));
+  }
+
+  async listToolDefs(): Promise<readonly SkillToolDef[]> {
+    const rows = await this.#store.listEnabledSkills();
+    const defs: SkillToolDef[] = [];
+    for (const row of rows) {
+      try {
+        const cached = await this.#loadSourceForRow(row);
+        defs.push({
+          name: row.name,
+          description: cached.manifest.description,
+          inputs: row.inputs,
+          tier: row.tier,
+          riskTier: row.riskTier,
+          gitSha: row.gitSha,
+        });
+      } catch (e) {
+        // A skill row whose git source is unreadable shouldn't poison the
+        // whole tool list — log and skip. Most likely cause: the repo was
+        // moved/wiped between deploy and read; the user notices via the
+        // missing tool and re-registers.
+        log.warn(
+          { skillName: row.name, gitSha: row.gitSha, err: e },
+          "skipping skill in tool list — source unreadable",
+        );
+      }
+    }
+    return defs;
   }
 
   async invoke(opts: {
@@ -188,14 +457,7 @@ export class SkillRunnerImpl implements SkillRunner {
       throw new Error(`skill is disabled: ${opts.name}`);
     }
 
-    const cached = this.#sourceCache.get(opts.name);
-    if (!cached) {
-      // Without git-show source loading (lands in P3.3), every invocable
-      // skill must have been seeded via `__registerForTests` first.
-      throw new Error(
-        `no source for skill '${opts.name}' — register the skill first (P3.3 ships git-show)`,
-      );
-    }
+    const cached = await this.#loadSourceForRow(skill);
 
     const validInputs = cached.inputsValidator(opts.inputs);
     if (!validInputs) {
@@ -250,11 +512,17 @@ export class SkillRunnerImpl implements SkillRunner {
 
     const finishedAt = new Date();
     if (result.ok) {
-      // TODO(P3.3): validate `result.output` against `cached.manifest.outputs`
-      // (when declared) the same way we validate inputs above. Today a
-      // skill declaring `outputs: {type: "object"}` and returning a string
-      // silently stores the string. Lands with the classifier work since
-      // `outputs` becomes load-bearing for tool-registration shapes.
+      const outputsValidationErr = this.#validateOutput(cached, result.output, opts.name);
+      if (outputsValidationErr !== null) {
+        await this.#store.updateRunResult({
+          id: run.id,
+          status: "error",
+          output: null,
+          error: outputsValidationErr,
+          finishedAt,
+        });
+        return { runId: run.id, status: "error", error: outputsValidationErr };
+      }
       await this.#store.updateRunResult({
         id: run.id,
         status: "success",
@@ -280,12 +548,6 @@ export class SkillRunnerImpl implements SkillRunner {
 
   // --- Test-only helper ---
 
-  /**
-   * P3.1-only seeding path. Inserts a skills row + live skill_deploys row
-   * from a directly-handed manifest+body, populates the source cache so
-   * `invoke()` can find it. Replaced by the real git-driven `register` RPC
-   * in P3.3; the underscored name signals "tests only".
-   */
   async __registerForTests(params: RegisterForTestsParams): Promise<SkillRow> {
     const parsed = parseManifest(params.manifestSource);
     if (!parsed.isOk()) {
@@ -327,7 +589,7 @@ export class SkillRunnerImpl implements SkillRunner {
     });
 
     const inputsValidator = this.#compileInputsValidator(manifest, params.name);
-    this.#sourceCache.set(manifest.name, {
+    this.#sourceCache.set(cacheKey(manifest.name, gitSha), {
       manifest,
       body: params.body,
       inputsValidator,
@@ -336,19 +598,17 @@ export class SkillRunnerImpl implements SkillRunner {
     return row;
   }
 
-  /**
-   * Compile the manifest's `inputs` JSON Schema and reject any
-   * `$async: true` schema. Ajv attaches `.$async = true` to validators
-   * compiled from async schemas — those return Promises instead of
-   * booleans, which our truthy-check at invoke time would treat as valid
-   * and silently bypass validation. Skill manifests have no business
-   * declaring async schemas; reject at compile time.
-   *
-   * Used by `__registerForTests` today; P3.3's `register` RPC must call
-   * this on its load-from-git path too — otherwise the bypass returns.
-   * (Cast to access the runtime property — Ajv's overloaded type
-   * signature doesn't expose `$async` on the generic `ValidateFunction<T>`.)
-   */
+  // --- internals ---
+
+  #requireRepoPath(method: string): string {
+    if (!this.#skillsRepoPath) {
+      throw new Error(
+        `SkillRunner.${method}: skillsRepoPath not configured — set SkillRunnerOptions.skillsRepoPath`,
+      );
+    }
+    return this.#skillsRepoPath;
+  }
+
   #compileInputsValidator(manifest: SkillManifest, contextName: string): ValidateFunction {
     const validator = this.#ajv.compile(manifest.inputs as Record<string, unknown>);
     if ((validator as { $async?: boolean }).$async === true) {
@@ -358,6 +618,128 @@ export class SkillRunnerImpl implements SkillRunner {
     }
     return validator;
   }
+
+  /**
+   * Load + cache the parsed manifest + compiled inputs validator for a
+   * specific (name, gitSha) pair. Reads from the bare repo via `git show`
+   * if not cached. The cache is keyed by SHA so a re-deploy automatically
+   * picks up the new source on the next read.
+   */
+  async #loadSourceForRow(row: SkillRow): Promise<SkillSourceCacheEntry> {
+    const key = cacheKey(row.name, row.gitSha);
+    const cached = this.#sourceCache.get(key);
+    if (cached) return cached;
+
+    if (!this.#skillsRepoPath) {
+      throw new Error(
+        `no source for skill '${row.name}' — skillsRepoPath not configured and no test seed cached`,
+      );
+    }
+
+    let manifestSource: string;
+    let body: string;
+    try {
+      manifestSource = await gitShow(this.#skillsRepoPath, row.gitSha, "SKILL.md");
+      body = await gitShow(this.#skillsRepoPath, row.gitSha, "skill.py");
+    } catch (e) {
+      if (e instanceof GitOpsError && (e.code === "ref_not_found" || e.code === "file_not_found")) {
+        throw new Error(
+          `no source for skill '${row.name}' at ${row.gitSha} (${e.code}) — repo and DB are out of sync`,
+        );
+      }
+      throw e;
+    }
+    const parsed = parseManifest(manifestSource);
+    if (!parsed.isOk()) {
+      throw new Error(
+        `cached SKILL.md for '${row.name}' @ ${row.gitSha} fails parse — registration drift?`,
+      );
+    }
+    const manifest = parsed.value.manifest;
+    const inputsValidator = this.#compileInputsValidator(manifest, "loadSource");
+    const entry: SkillSourceCacheEntry = { manifest, body, inputsValidator };
+    this.#sourceCache.set(key, entry);
+    return entry;
+  }
+
+  #validateOutput(
+    cached: SkillSourceCacheEntry,
+    output: unknown,
+    skillName: string,
+  ): string | null {
+    if (cached.manifest.outputs === undefined) return null;
+    // Compile once per skill source — reuse via attaching to the entry.
+    const validator =
+      (
+        cached as SkillSourceCacheEntry & {
+          outputsValidator?: ValidateFunction;
+        }
+      ).outputsValidator ?? this.#ajv.compile(cached.manifest.outputs as Record<string, unknown>);
+    (cached as { outputsValidator?: ValidateFunction }).outputsValidator = validator;
+    if ((validator as { $async?: boolean }).$async === true) {
+      // Defensive — manifest should never compile to async, but if it
+      // somehow did the truthy check below would silently bypass validation.
+      return `outputs schema for skill '${skillName}' is async — rejecting`;
+    }
+    const valid = validator(output);
+    if (valid) return null;
+    const issues = (validator.errors ?? []).map(
+      (e) => `${e.instancePath || "<root>"} ${e.message ?? "invalid"}`,
+    );
+    return `output failed schema validation for skill '${skillName}': ${issues.join("; ")}`;
+  }
+
+  #registerResultToRpc(args: {
+    name: string;
+    branchSha: string;
+    classifierLog: ClassifierLog;
+    result: ExecuteRegisterResult;
+    manifest: SkillManifest;
+    body: string;
+  }): RegisterResult {
+    const { name, branchSha, classifierLog, result, manifest, body } = args;
+    if (result.kind === "rejected") {
+      return rejectedResult(branchSha, result.reason);
+    }
+    if (result.kind === "no_op") {
+      return {
+        name,
+        riskTier: result.skill.riskTier,
+        status: "no_op",
+        gitSha: result.skill.gitSha,
+      };
+    }
+    if (result.kind === "live") {
+      // Warm the source cache with the just-registered manifest+body so the
+      // next `invoke` (or tool-list rebuild) doesn't re-read git.
+      const inputsValidator = this.#compileInputsValidator(manifest, "register-warm");
+      this.#sourceCache.set(cacheKey(name, branchSha), {
+        manifest,
+        body,
+        inputsValidator,
+      });
+      return {
+        name,
+        riskTier: classifierLog.risk_tier,
+        status: "live",
+        gitSha: result.skill.gitSha,
+      };
+    }
+    // pending_approval — also warm cache so a follow-up approve doesn't re-read.
+    const inputsValidator = this.#compileInputsValidator(manifest, "register-warm");
+    this.#sourceCache.set(cacheKey(name, branchSha), {
+      manifest,
+      body,
+      inputsValidator,
+    });
+    return {
+      name,
+      riskTier: classifierLog.risk_tier,
+      status: "pending_approval",
+      gitSha: branchSha,
+      pendingId: result.deploy.id,
+    };
+  }
 }
 
 export class InputValidationError extends Error {
@@ -365,6 +747,20 @@ export class InputValidationError extends Error {
     super(message);
     this.name = "InputValidationError";
   }
+}
+
+function rejectedResult(gitSha: string, reason: string): RegisterResult {
+  return {
+    name: "",
+    riskTier: "notify",
+    status: "rejected",
+    gitSha,
+    errors: [reason],
+  };
+}
+
+function cacheKey(name: string, gitSha: string): string {
+  return `${name}@${gitSha}`;
 }
 
 /**

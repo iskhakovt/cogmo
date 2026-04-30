@@ -88,39 +88,49 @@ The agent extends its own capabilities — authors small Python programs ("skill
 
 ### P3.1 — Foundation
 
-- [ ] Skills store — `skills`, `skill_deploys`, `skill_runs`, `skill_context_calls` tables; Drizzle schema; `SkillStore` interface + impl; PGlite unit tests
-- [ ] `SkillManifestSchema` — canonical Zod schema for `SKILL.md` frontmatter (name, description, tier, isolation, triggers, schedule, inputs/outputs, effects, secrets, resources, budget, cost_per_call_usd); `SKILL_EFFECTS` constant; manifest parser that strips frontmatter from markdown body
-- [ ] Local skills repo bootstrap — initialize bare git repo at `$COGMO_SKILLS_PATH` (default `/var/lib/cogmo/skills`) on first boot; install `pre-receive` hook enforcing "main only via Cogmo" + force-push ban; `settings.local.json` config key
+- [x] Skills store — `skills`, `skill_deploys`, `skill_runs`, `skill_context_calls` tables; Drizzle schema (`src/skills/store/schema.ts`, migration `0017_tough_bedlam.sql`); `SkillStore` interface + `DrizzleSkillStore` impl; PGlite unit tests
+- [x] `SkillManifestSchema` — canonical Zod schema in `src/skills/types.ts` (name, description, tier, isolation, triggers, schedule, inputs/outputs, effects, secrets, resources, budget, cost_per_call_usd); `SKILL_EFFECTS` constant; manifest parser in `src/skills/manifest.ts` strips frontmatter, returns `Result`
+- [x] Local skills repo bootstrap — `bootstrapSkillsRepo()` in `src/skills/repo.ts` idempotently initializes bare git repo at `$COGMO_SKILLS_PATH`; pre-receive hook enforces "main only via Cogmo" + force-push ban; wired into `src/index.ts` boot path
 
 ### P3.2 — Runtime
 
-- [ ] Worker JSON-RPC protocol — framing over stdin/stdout, request/response shape per [skills.md](design/skills.md) → Host context; typed Python exceptions → typed TS errors
-- [ ] Tier 1 worker (WASM/Pyodide) — Pyodide instance in a Node worker thread, fresh globals scope per task, V8 heap limit + host-side wall-clock timer; Pyodide-compatibility lint (no `subprocess`, no `os.fork`, only available wheels)
+- [x] Worker JSON-RPC protocol — framing + request/response shapes in `src/skills/protocol.ts`; Zod schemas for `TaskInvoke` / `TaskResult` / `CtxCall` / `CtxResult`; typed Python exceptions → typed TS errors
+- [x] Tier 1 worker (WASM/Pyodide) — `runOnWorker()` in `src/skills/worker-wasm/host.ts` spawns fresh worker per task, SAB interrupt + hard-terminate fallback on wall-clock cap; Pyodide-compatibility lint in `src/skills/worker-wasm/wasm-lint.ts` (no `subprocess`, no `os.fork`, only available wheels)
 - [ ] Tier 2 worker (sysbox container) — Python subprocess inside a sysbox container (reuses [sandbox.md](design/sandbox.md) `Sandbox` interface), subinterpreter per task (Python 3.13+, PEP 684), per-run cgroup slice via sandbox cgroup parent; `isolation: recycle` opt-out path
-- [ ] Pool + Dispatcher — min=1 / max=3 warm workers per tier, queue-with-spawn-on-threshold, worker replacement every 500 tasks or 30min idle, health checks. Also: deep-walk PyProxy destruction in `worker-entry.runTask` (P3.1 only destroys the top-level proxy because workers are one-shot; warm pool means nested PyProxies leak across tasks unless the conversion does a recursive destroy or `ctx.py` uses `pyodide.ffi.create_proxy` discipline).
-- [ ] Python `ctx` SDK — shipped into every worker image; RPC-backed methods for `secrets.get`, `memory.recall`, `memory.remember`, `attachments.upload/download`, `llm.complete`, `now`, `user`, `notify`, `log.info`; manifest-gated at host side. Also: stop fetching the full recall result then slicing client-side for `memory.recall.limit`. Hindsight's `RecallOptions` only exposes `maxTokens` (a token budget, not an item count) so a proportional `limit→maxTokens` mapping is unit-confused. Real fix is one of: (a) add an item-count `limit` field upstream in Hindsight's `RecallOptions`, (b) keep slicing client-side and accept the bandwidth cost, or (c) drop the `limit` parameter from the Python ctx surface entirely if no skill author actually uses it. Decide once a real consumer materialises.
+- [x] Dispatcher (P3.1 shape) — `Dispatcher` in `src/skills/dispatcher.ts` drives a single task over the transport with concurrent ctx-call correlation. Pool warming, min/max worker tracking, replacement-after-N-tasks, health checks deferred until Tier 2 lands.
+  - [ ] Pool warming + sizing — min=1 / max=3 warm workers per tier, queue-with-spawn-on-threshold, worker replacement every 500 tasks or 30min idle, health checks
+  - [ ] Deep-walk PyProxy destruction in `worker-entry.runTask` — P3.1 destroys only the top-level proxy because workers are one-shot; warm pool means nested PyProxies leak across tasks unless the conversion does a recursive destroy or `ctx.py` uses `pyodide.ffi.create_proxy` discipline
+- [x] Python `ctx` SDK (v1 subset) — `DefaultCtxHandler` in `src/skills/ctx-handler.ts` ships 6 methods: `secrets.get`, `memory.recall`, `memory.remember`, `now`, `user`, `log.info`; manifest-gated; audit row per call
+  - [ ] `attachments.upload/download` (Service.files via S3) — needed before image-producing skills
+  - [ ] `llm.complete` — needed before any skill calls an LLM through Cogmo's provider routing (also unblocks cost tracking in P3.5)
+  - [ ] `notify(channel, message)` — outbound delivery via existing `DeliveryRouter` for cron/event-driven skills
+  - [ ] `memory.recall.limit` semantics — currently slices client-side from a `maxTokens` budget; decide between adding an item-count `limit` upstream in Hindsight, keeping the client-side slice, or dropping `limit` from the Python ctx surface entirely. Decide once a real consumer materialises.
 
 ### P3.3 — Deployment pipeline
 
-- [ ] Risk classifier — deterministic, consumes `SkillManifestSchema` + static-analysis pass (AST lint for `subprocess`, `os.remove`, destructive SDK methods); assigns `auto` / `notify` / `approve`; forces declaration of any undeclared effect it detects
-- [ ] `register` RPC — branch + fast-forward check + advisory lock (`pg_advisory_xact_lock` per skill name) + pending-deploy check + classify + atomic merge-and-write; returns `RegisterResult` synchronously
-- [ ] `approveDeploy` / `denyDeploy` / `rollback` RPCs — Telegram approval flow for `approve` tier, `git update-ref` rollback to prior SHA with classifier re-run
-- [ ] `cogmo skills` CLI — `register --branch X`, `rollback X`, `deregister X`, `list`, `run X '{}'` wrappers over the RPCs
+- [x] Risk classifier (stub) — `classifyManifest` in `src/skills/classifier.ts` pins every register to `notify`. The full deterministic+AST-lint classifier is a follow-up:
+  - [ ] Real classifier with static-analysis pass (AST lint for `subprocess`, `os.remove`, destructive SDK methods); assigns `auto` / `notify` / `approve`; forces declaration of any undeclared effect it detects
+- [x] `register` RPC — `SkillRunner.register({branch})` reads SKILL.md + skill.py from the branch tip, advisory-lock per skill name (`pg_advisory_xact_lock(hashtext("skill_register:" + name))`), no-op + pending-deploy + fast-forward checks, atomic `git update-ref refs/heads/main` + DB upsert in one transaction. Returns synchronous `RegisterResult` (`live` / `pending_approval` / `no_op` / `rejected`).
+- [x] `approveDeploy` / `denyDeploy` / `rollback` RPCs — `approveDeploy({pendingId})` advances main + flips deploy to `live` (re-checks fast-forward at approve time); `denyDeploy({pendingId, reason})` resolves the pending row to `denied` (idempotent on missing/already-resolved); `rollback({name, toGitSha})` rewinds main + re-classifies the target SHA. Telegram approval keyboard wiring is a follow-up sub-item below.
+  - [ ] Telegram approval inline keyboard for `approve`-tier deploys (Approve / Deny) — wires the existing RPCs into the Telegram callback handler
+- [x] `register_skill` agent tool — `src/skills/skills-tool.ts` + `Service.skills` namespace; wraps the RPC. `SKILLS_PROMPT_GUIDANCE` instructs the agent to author via `delegate_coding` then register.
+- [x] `cogmo skills` CLI — full surface: `register <branch>`, `approve <pendingId>`, `deny <pendingId> [reason]`, `rollback <name> <sha>`, `deregister <name>`, plus the existing `list` / `run`.
 - [ ] `/disable <skill>`, `/enable <skill>` channel commands — Telegram shortcuts for the same RPCs
 
 ### P3.4 — Invocation
 
-- [ ] Dynamic tool registration — orchestrator rebuilds tool list each turn from `SkillRunner.list()`; one tool per skill (name + tier-1 description + compiled `inputs` schema); tier-2 SKILL.md body swapped into tool description on selection (progressive disclosure)
-- [ ] Outputs validation against `manifest.outputs` JSON Schema in `runner.invoke` — P3.1 only validates inputs via ajv; a skill declaring `outputs: {type: "object"}` and returning a string silently stores the string in `skill_runs.output`. Outputs become load-bearing for tool-registration shapes, so validation has to land alongside dynamic tool registration. (TODO marker in `src/skills/runner.ts` `runner.invoke`.)
+- [x] Dynamic tool registration — `handle-message` rebuilds the tool list each turn: clones the bootstrap registry via `ToolRegistry.snapshot()`, then merges in one tool per live skill via `SkillRunner.listToolDefs()` + `buildSkillToolSpec`. Skills registered between turns appear immediately; disabled / rolled-back skills disappear. Source loading is keyed by `(name, gitSha)` so re-deploys invalidate cache automatically. Tier-2 SKILL.md body swapping on selection is a follow-up:
+  - [ ] Progressive disclosure: swap the full SKILL.md body into the tool description on selection (today the description is the manifest's one-line `description` field only)
+- [x] Outputs validation against `manifest.outputs` JSON Schema in `runner.invoke` — ajv-compiled and run before persisting; mismatch becomes `status=error` with the schema-failure detail.
 - [ ] Cron scheduling — one Inngest cron per scheduled skill (from `SKILL.md.schedule`), dispatcher fire-and-forget
 - [ ] Failure handling — Inngest retries → Telegram notification on final failure → auto-disable after 3 consecutive failures → `/enable` / `/rollback` recovery
 - [ ] Skill discovery retrieval layer — `search_skills(query)` tool (semantic search over manifest descriptions). Added when tool-list tokens exceed ~5k or tool-selection accuracy drops on evals
 
 ### P3.5 — Telemetry & cost
 
-- [ ] `skill_runs` tracking — wall_clock_ms, peak memory (cgroup/isolate stats), status, error; Inngest step-wrapped for exactly-once
-- [ ] `skill_context_calls` audit log — every `ctx.*` RPC with method + target (never value); retention policy
-- [ ] Cost accounting — LLM tokens via `ctx.llm.complete()` (pricing table per model), declared `cost_per_call_usd` summed per run, dispatcher enforces daily/monthly budgets from `SKILL.md.budget`
+- [x] `skill_context_calls` audit log — every `ctx.*` RPC persisted with method + target (name only, never value), indexed by `run_id`; retention policy deferred
+- [ ] `skill_runs` tracking — `wall_clock_ms`, peak memory (cgroup/isolate stats), Inngest step-wrapped for exactly-once. P3.1 records `status`, `output`/`error`, `started_at`/`finished_at` only.
+- [ ] Cost accounting — LLM tokens via `ctx.llm.complete()` (pricing table per model), declared `cost_per_call_usd` summed per run, dispatcher enforces daily/monthly budgets from `SKILL.md.budget`. Blocked on `ctx.llm.complete` (P3.2 remainder).
 
 ### P3.6 — Deferred (future `[research]`)
 

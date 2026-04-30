@@ -88,6 +88,15 @@ export class ToolRegistry {
       parameters: t.inputSchema,
     }));
   }
+
+  /**
+   * Return all registered specs as an array. Used by callers that need to
+   * build a per-turn registry layered on top of this one (e.g. handle-message
+   * adds dynamically-registered skill tools each turn).
+   */
+  snapshot(): readonly ToolSpec[] {
+    return [...this.#tools.values()];
+  }
 }
 
 /**
