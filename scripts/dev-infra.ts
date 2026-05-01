@@ -75,7 +75,7 @@ async function main() {
   }
 
   // Spawn the app with infra env vars injected
-  console.log("Starting app...\n");
+  console.log("Running app (tsx watch src/index.ts). Ctrl+C to stop.\n");
   const child = spawn("tsx", ["watch", "src/index.ts"], {
     stdio: "inherit",
     env: { ...process.env, ...envVars },
