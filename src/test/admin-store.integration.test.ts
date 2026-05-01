@@ -157,7 +157,7 @@ describe("AgentStore admin (real Postgres)", () => {
 
     // Upsert on same conversation — alias replaces, old alias becomes unresolvable
     await store.setAlias(userId, c1, name("dayjob"));
-    expect(await store.findConversationByAlias(userId, name("work"))).toBeNull();
+    expect(await store.findConversationByAlias(userId, name("work"))).toBeUndefined();
     expect(await store.findConversationByAlias(userId, name("dayjob"))).toEqual({
       conversationId: c1,
     });
