@@ -1,5 +1,6 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
+import postgres from "postgres";
 import { DrizzleAgentStore } from "./agent/store/index.js";
 import * as schema from "./db/schemas.js";
 import { logger } from "./logger.js";
@@ -20,7 +21,13 @@ import { DrizzleTransportStore } from "./transport/store/index.js";
  */
 export async function seed(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL ?? "postgresql://cogmo@localhost/cogmo";
-  const db = drizzle({ connection: databaseUrl, schema });
+  // Mirror `db/index.ts`'s NOTICE handling so seed-time `relation already
+  // exists` chatter doesn't dump raw notice objects to stdout via the
+  // driver's default console.log.
+  const client = postgres(databaseUrl, {
+    onnotice: (n) => logger.trace({ pgNotice: n }, "postgres notice"),
+  });
+  const db = drizzle({ client, schema });
 
   try {
     await migrate(db, { migrationsFolder: "./migrations" });

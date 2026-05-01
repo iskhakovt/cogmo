@@ -11,10 +11,11 @@
  * Ctrl+C stops the app; containers keep running (reuse). Use `docker stop` to kill them.
  */
 import { spawn } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Network } from "testcontainers";
 import * as c from "../dev/containers.js";
+import { generateMasterKey } from "../src/secrets/encryption.js";
 
 /**
  * Project-local scratch root for `pnpm dev`. Holds skills repo, cloned
@@ -62,20 +63,55 @@ async function main() {
   const inngestBaseUrl = `http://${inn.getHost()}:${inn.getMappedPort(8288)}`;
   const hindsightUrl = `http://${hindsightContainer.getHost()}:${hindsightContainer.getMappedPort(8888)}`;
 
-  // Run seed (applies migrations + creates default data, idempotent)
-  console.log("\nRunning seed...");
-  const { execSync } = await import("node:child_process");
-  execSync("tsx src/main.ts seed", {
-    stdio: "inherit",
-    env: { NODE_ENV: "development", ...process.env, DATABASE_URL: databaseUrl },
-  });
-  console.log("Seed complete.\n");
-
   // Override the prod-flavoured `/var/lib/cogmo/...` and `/run/cogmo/...`
   // defaults from `env.ts` with project-local scratch paths under `.dev/`
   // so `pnpm dev` runs without sudo. Anything the developer pre-exports
   // wins (`process.env.X` spread last).
   mkdirSync(DEV_ROOT, { recursive: true });
+
+  // Auto-generate and persist a master key on first run so devs don't have
+  // to run `cogmo gen-key` + edit `.env` manually. Stored under .dev/ so it
+  // shares the gitignored scratch lifecycle.
+  const masterKeyPath = join(DEV_ROOT, "master-key");
+  let masterKey = process.env.COGMO_MASTER_KEY;
+  if (!masterKey) {
+    if (existsSync(masterKeyPath)) {
+      masterKey = readFileSync(masterKeyPath, "utf8").trim();
+    } else {
+      masterKey = generateMasterKey();
+      writeFileSync(masterKeyPath, masterKey, { mode: 0o600 });
+      console.log(`Generated dev master key at ${masterKeyPath}`);
+    }
+  }
+
+  // Run seed (applies migrations + creates default data, idempotent)
+  console.log("\nRunning seed...");
+  const { execSync } = await import("node:child_process");
+  const seedEnv = {
+    NODE_ENV: "development",
+    ...process.env,
+    DATABASE_URL: databaseUrl,
+    COGMO_MASTER_KEY: masterKey,
+  };
+  execSync("tsx src/main.ts seed", { stdio: "inherit", env: seedEnv });
+  console.log("Seed complete.\n");
+
+  // Run non-interactive setup if ANTHROPIC_API_KEY is present and no
+  // provider is configured yet — devs already export that var for
+  // Hindsight, so registering it as the LLM provider too saves them a
+  // separate `cogmo setup` step. Idempotent: the wizard's non-interactive
+  // path replaces an existing provider with the same name.
+  console.log("Configuring LLM provider...");
+  execSync("tsx src/main.ts setup --non-interactive", {
+    stdio: "inherit",
+    env: {
+      ...seedEnv,
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: apiKey,
+    },
+  });
+  console.log("Setup complete.\n");
+
   const envVars = {
     NODE_ENV: "development",
     COGMO_SKILLS_PATH: join(DEV_ROOT, "skills"),
@@ -84,6 +120,7 @@ async function main() {
     SANDBOX_PROXY_SOCKET_DIR: join(DEV_ROOT, "sockets"),
     SANDBOX_ASKPASS_DIR: join(DEV_ROOT, "askpass"),
     ...process.env,
+    COGMO_MASTER_KEY: masterKey,
     DATABASE_URL: databaseUrl,
     INNGEST_BASE_URL: inngestBaseUrl,
     HINDSIGHT_URL: hindsightUrl,
