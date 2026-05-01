@@ -7,6 +7,9 @@ vi.mock("./env.js", () => ({
   env: {
     VERSION: "1.2.3",
     GIT_SHA: "abc1234",
+    // logger.ts (transitively imported via health.ts) reads these.
+    LOG_LEVEL: "info",
+    NODE_ENV: "test",
   },
 }));
 

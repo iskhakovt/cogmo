@@ -1,54 +1,55 @@
 #!/usr/bin/env node
 
 const command = process.argv[2] ?? "serve";
+process.exit(await dispatch(command));
 
-switch (command) {
-  case "serve":
-    await main();
-    break;
-  case "seed": {
-    const { seed } = await import("./seed.js");
-    await seed();
-    break;
-  }
-  case "setup": {
-    const { runSetup } = await import("./setup/index.js");
-    const args = process.argv.slice(3);
-    const resetIdx = args.indexOf("--reset");
-    const reset =
-      resetIdx >= 0 ? (args[resetIdx + 1] as "secrets" | "channels" | "all") : undefined;
-    const nonInteractive = args.includes("--non-interactive");
-    await runSetup({ ...(reset && { reset }), ...(nonInteractive && { nonInteractive }) });
-    break;
-  }
-  case "gen-key": {
-    const { generateMasterKey } = await import("./secrets/encryption.js");
-    const key = generateMasterKey();
-    console.log(`COGMO_MASTER_KEY=${key}`);
-    console.log(
-      "# Add this to your docker-compose.yml environment block,\n" +
-        "# or write to a Docker secret and set COGMO_MASTER_KEY_FILE.\n" +
-        "# This key encrypts all credentials in the database.\n" +
-        "# Store it securely — losing it means re-entering all credentials.",
-    );
-    break;
-  }
-  case "skills": {
-    const { runSkillsCli } = await import("./skills/cli.js");
-    const { bootstrap } = await import("./index.js");
-    const { skillRunner } = await bootstrap();
-    if (!skillRunner) {
-      console.error("Skill runner failed to initialize.");
-      process.exit(1);
+async function dispatch(cmd: string): Promise<number> {
+  switch (cmd) {
+    case "serve":
+      await main();
+      return 0;
+    case "seed": {
+      const { seed } = await import("./seed.js");
+      await seed();
+      return 0;
     }
-    const code = await runSkillsCli(process.argv.slice(3), skillRunner);
-    process.exit(code);
-    break;
+    case "setup": {
+      const { runSetup } = await import("./setup/index.js");
+      const args = process.argv.slice(3);
+      const resetIdx = args.indexOf("--reset");
+      const reset =
+        resetIdx >= 0 ? (args[resetIdx + 1] as "secrets" | "channels" | "all") : undefined;
+      const nonInteractive = args.includes("--non-interactive");
+      await runSetup({ ...(reset && { reset }), ...(nonInteractive && { nonInteractive }) });
+      return 0;
+    }
+    case "gen-key": {
+      const { generateMasterKey } = await import("./secrets/encryption.js");
+      const key = generateMasterKey();
+      console.log(`COGMO_MASTER_KEY=${key}`);
+      console.log(
+        "# Add this to your docker-compose.yml environment block,\n" +
+          "# or write to a Docker secret and set COGMO_MASTER_KEY_FILE.\n" +
+          "# This key encrypts all credentials in the database.\n" +
+          "# Store it securely — losing it means re-entering all credentials.",
+      );
+      return 0;
+    }
+    case "skills": {
+      const { runSkillsCli } = await import("./skills/cli.js");
+      const { bootstrap } = await import("./index.js");
+      const { skillRunner } = await bootstrap();
+      if (!skillRunner) {
+        console.error("Skill runner failed to initialize.");
+        return 1;
+      }
+      return runSkillsCli(process.argv.slice(3), skillRunner);
+    }
+    default:
+      console.error(`Unknown command: ${cmd}`);
+      console.error("Usage: main.js [serve|seed|setup|gen-key|skills]");
+      return 1;
   }
-  default:
-    console.error(`Unknown command: ${command}`);
-    console.error("Usage: main.js [serve|seed|setup|gen-key|skills]");
-    process.exit(1);
 }
 
 async function main() {

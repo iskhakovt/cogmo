@@ -82,7 +82,7 @@ export interface SandboxStore {
   closeInstance(id: string): Promise<void>;
 
   /** Load an instance row by id. */
-  getInstance(id: string): Promise<CogmoInstance | null>;
+  getInstance(id: string): Promise<CogmoInstance | undefined>;
 
   /** List instances that are still considered live (stopped_at IS NULL). */
   listLiveInstances(): Promise<readonly CogmoInstance[]>;
@@ -117,10 +117,10 @@ export interface SandboxStore {
   }): Promise<void>;
 
   /** Load a container row by Cogmo id. */
-  getContainer(id: string): Promise<ContainerRow | null>;
+  getContainer(id: string): Promise<ContainerRow | undefined>;
 
   /** Load a container row by Docker id. */
-  getContainerByDockerId(dockerId: string): Promise<ContainerRow | null>;
+  getContainerByDockerId(dockerId: string): Promise<ContainerRow | undefined>;
 
   /**
    * List every container belonging to an instance, regardless of status.
@@ -141,10 +141,10 @@ export interface SandboxStore {
   updateNetworkStatus(params: { id: string; status: NetworkStatus }): Promise<void>;
 
   /** Load a network by Cogmo id. */
-  getNetwork(id: string): Promise<NetworkRow | null>;
+  getNetwork(id: string): Promise<NetworkRow | undefined>;
 
   /** Load a network by Docker id (the daemon's network id). */
-  getNetworkByDockerId(dockerId: string): Promise<NetworkRow | null>;
+  getNetworkByDockerId(dockerId: string): Promise<NetworkRow | undefined>;
 
   /** List every network for an instance. Used by crash recovery. */
   listNetworksForInstance(instanceId: string): Promise<readonly NetworkRow[]>;
@@ -161,10 +161,10 @@ export interface SandboxStore {
   updateVolumeStatus(params: { id: string; status: VolumeStatus }): Promise<void>;
 
   /** Load a volume by Cogmo id. */
-  getVolume(id: string): Promise<VolumeRow | null>;
+  getVolume(id: string): Promise<VolumeRow | undefined>;
 
   /** Load a volume by Docker id (the volume name). */
-  getVolumeByDockerId(dockerId: string): Promise<VolumeRow | null>;
+  getVolumeByDockerId(dockerId: string): Promise<VolumeRow | undefined>;
 
   /** List every volume for an instance. Used by crash recovery. */
   listVolumesForInstance(instanceId: string): Promise<readonly VolumeRow[]>;
@@ -204,7 +204,7 @@ export class DrizzleSandboxStore implements SandboxStore {
     });
   }
 
-  async getInstance(id: string): Promise<CogmoInstance | null> {
+  async getInstance(id: string): Promise<CogmoInstance | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -217,7 +217,7 @@ export class DrizzleSandboxStore implements SandboxStore {
         .from(cogmoInstances)
         .where(eq(cogmoInstances.id, id))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -295,21 +295,21 @@ export class DrizzleSandboxStore implements SandboxStore {
     });
   }
 
-  async getContainer(id: string): Promise<ContainerRow | null> {
+  async getContainer(id: string): Promise<ContainerRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(containers).where(eq(containers.id, id)).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
-  async getContainerByDockerId(dockerId: string): Promise<ContainerRow | null> {
+  async getContainerByDockerId(dockerId: string): Promise<ContainerRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select()
         .from(containers)
         .where(eq(containers.dockerId, dockerId))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -365,17 +365,17 @@ export class DrizzleSandboxStore implements SandboxStore {
     });
   }
 
-  async getNetwork(id: string): Promise<NetworkRow | null> {
+  async getNetwork(id: string): Promise<NetworkRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(networks).where(eq(networks.id, id)).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
-  async getNetworkByDockerId(dockerId: string): Promise<NetworkRow | null> {
+  async getNetworkByDockerId(dockerId: string): Promise<NetworkRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(networks).where(eq(networks.dockerId, dockerId)).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -434,17 +434,17 @@ export class DrizzleSandboxStore implements SandboxStore {
     });
   }
 
-  async getVolume(id: string): Promise<VolumeRow | null> {
+  async getVolume(id: string): Promise<VolumeRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(volumes).where(eq(volumes.id, id)).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
-  async getVolumeByDockerId(dockerId: string): Promise<VolumeRow | null> {
+  async getVolumeByDockerId(dockerId: string): Promise<VolumeRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(volumes).where(eq(volumes.dockerId, dockerId)).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 

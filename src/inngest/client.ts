@@ -1,4 +1,5 @@
 import { Inngest } from "inngest";
+import { env } from "../env.js";
 
 // Note on Inngest + OTel:
 //
@@ -18,5 +19,5 @@ import { Inngest } from "inngest";
 // it keeps setup minimal; re-add if we adopt traceparent propagation.
 export const inngest = new Inngest({
   id: "cogmo",
-  isDev: process.env.INNGEST_DEV === "true" || process.env.INNGEST_DEV === "1",
+  isDev: env.INNGEST_DEV,
 });

@@ -22,8 +22,8 @@ const VALID: GitHubIdentity = {
 
 class FakeLookup implements GitHubIdentitySecretsLookup {
   #values = new Map<string, string>();
-  async getSecret(name: string): Promise<string | null> {
-    return this.#values.get(name) ?? null;
+  async getSecret(name: string): Promise<string | undefined> {
+    return this.#values.get(name);
   }
   set(name: string, value: string): void {
     this.#values.set(name, value);

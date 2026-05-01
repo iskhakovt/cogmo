@@ -20,6 +20,17 @@ export default defineConfig({
           // and takes 2–7s each under parallel CPU contention. The default
           // 10s hookTimeout flakes once enough store files exist.
           hookTimeout: 30_000,
+          env: {
+            NODE_ENV: "test",
+            // Populate the required infra URLs that `src/env.ts` validates at
+            // boot, so any module can transitively import the typed `env`
+            // without forcing every test file to materialise them. Unit
+            // tests mock the actual stores — these values exist purely to
+            // satisfy the schema's required-string check; the URLs are
+            // never hit. Integration + e2e set their own real values.
+            HINDSIGHT_URL: "http://localhost:8080",
+            INNGEST_BASE_URL: "http://localhost:8288",
+          },
         },
       },
       {

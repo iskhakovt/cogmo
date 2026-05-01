@@ -15,18 +15,21 @@ export interface SecretsStore {
   }): Promise<{ id: string }>;
 
   /** Get a decrypted secret by name. Returns null if not found. */
-  getSecret(name: string): Promise<string | null>;
+  getSecret(name: string): Promise<string | undefined>;
 
   /** Get a decrypted secret by row ID. Returns null if not found. */
-  getSecretById(id: string): Promise<string | null>;
+  getSecretById(id: string): Promise<string | undefined>;
 
   /** Get secret metadata without decrypting (for display). */
-  getSecretMeta(name: string): Promise<{
-    id: string;
-    name: string;
-    description: string | null;
-    validatedAt: Date | null;
-  } | null>;
+  getSecretMeta(name: string): Promise<
+    | {
+        id: string;
+        name: string;
+        description: string | null;
+        validatedAt: Date | null;
+      }
+    | undefined
+  >;
 
   /** List all secret names (no values). */
   listSecrets(): Promise<
@@ -89,7 +92,7 @@ export class DrizzleSecretsStore implements SecretsStore {
     });
   }
 
-  async getSecret(name: string): Promise<string | null> {
+  async getSecret(name: string): Promise<string | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({ ciphertext: secrets.ciphertext, nonce: secrets.nonce })
@@ -97,12 +100,12 @@ export class DrizzleSecretsStore implements SecretsStore {
         .where(eq(secrets.name, name))
         .limit(1);
       const row = rows[0];
-      if (!row) return null;
+      if (!row) return undefined;
       return decrypt(this.#key, fromBase64(row.ciphertext), fromBase64(row.nonce));
     });
   }
 
-  async getSecretById(id: string): Promise<string | null> {
+  async getSecretById(id: string): Promise<string | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({ ciphertext: secrets.ciphertext, nonce: secrets.nonce })
@@ -110,17 +113,20 @@ export class DrizzleSecretsStore implements SecretsStore {
         .where(eq(secrets.id, id))
         .limit(1);
       const row = rows[0];
-      if (!row) return null;
+      if (!row) return undefined;
       return decrypt(this.#key, fromBase64(row.ciphertext), fromBase64(row.nonce));
     });
   }
 
-  async getSecretMeta(name: string): Promise<{
-    id: string;
-    name: string;
-    description: string | null;
-    validatedAt: Date | null;
-  } | null> {
+  async getSecretMeta(name: string): Promise<
+    | {
+        id: string;
+        name: string;
+        description: string | null;
+        validatedAt: Date | null;
+      }
+    | undefined
+  > {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -132,7 +138,7 @@ export class DrizzleSecretsStore implements SecretsStore {
         .from(secrets)
         .where(eq(secrets.name, name))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 

@@ -31,7 +31,7 @@ interface Deps {
 function deps(overrides?: Partial<Deps>): Deps {
   return {
     secretsStore: {
-      getSecret: vi.fn().mockResolvedValue(null),
+      getSecret: vi.fn().mockResolvedValue(undefined),
       getSecretById: vi.fn(),
       getSecretMeta: vi.fn(),
       listSecretNames: vi.fn(),
@@ -107,7 +107,7 @@ describe("DefaultCtxHandler", () => {
     it("returns secret_not_found when the manifest declares it but the DB is empty", async () => {
       const m = manifest("secrets:\n  - api_key");
       const d = deps();
-      vi.mocked(d.secretsStore.getSecret).mockResolvedValue(null);
+      vi.mocked(d.secretsStore.getSecret).mockResolvedValue(undefined);
       const h = makeHandler(m, d);
 
       await expect(

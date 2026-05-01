@@ -93,7 +93,7 @@ describe("DrizzleSandboxStore", () => {
     });
 
     it("getInstance returns null for unknown id", async () => {
-      expect(await store.getInstance("019d0000-0000-7000-8000-000000000099")).toBeNull();
+      expect(await store.getInstance("019d0000-0000-7000-8000-000000000099")).toBeUndefined();
     });
   });
 
@@ -208,7 +208,7 @@ describe("DrizzleSandboxStore", () => {
     });
 
     it("getContainer returns null for unknown id", async () => {
-      expect(await store.getContainer("019d0000-0000-7000-8000-000000000099")).toBeNull();
+      expect(await store.getContainer("019d0000-0000-7000-8000-000000000099")).toBeUndefined();
     });
 
     it("listContainersForInstance returns all rows for the instance, ordered by createdAt", async () => {

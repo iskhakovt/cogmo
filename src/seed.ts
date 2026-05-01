@@ -2,6 +2,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { DrizzleAgentStore } from "./agent/store/index.js";
 import * as schema from "./db/schemas.js";
+import { env } from "./env.js";
 import { logger } from "./logger.js";
 import { seedDefaults } from "./setup/seed.js";
 import { DrizzleTransportStore } from "./transport/store/index.js";
@@ -15,8 +16,7 @@ import { DrizzleTransportStore } from "./transport/store/index.js";
  * Only requires DATABASE_URL — no other env vars needed.
  */
 export async function seed(): Promise<void> {
-  const databaseUrl = process.env.DATABASE_URL ?? "postgresql://cogmo@localhost/cogmo";
-  const db = drizzle({ connection: databaseUrl, schema });
+  const db = drizzle({ connection: env.DATABASE_URL, schema });
 
   try {
     await migrate(db, { migrationsFolder: "./migrations" });
