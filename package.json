@@ -11,7 +11,7 @@
   ],
   "scripts": {
     "dev": "tsx --env-file-if-exists=.env scripts/dev-infra.ts",
-    "dev:app": "tsx --env-file-if-exists=.env watch src/index.ts",
+    "dev:app": "tsx --env-file-if-exists=.env watch src/main.ts serve",
     "console": "tsx --env-file-if-exists=.env scripts/console.ts",
     "dev:infra": "tsx --env-file-if-exists=.env scripts/dev-infra.ts --only",
     "build": "tsc && tsup",

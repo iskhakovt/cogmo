@@ -74,9 +74,12 @@ async function main() {
     return;
   }
 
-  // Spawn the app with infra env vars injected
-  console.log("Running app (tsx watch src/index.ts). Ctrl+C to stop.\n");
-  const child = spawn("tsx", ["watch", "src/index.ts"], {
+  // Spawn the app with infra env vars injected. `src/main.ts` is the actual
+  // entrypoint (it calls bootstrap() and starts the health server);
+  // `src/index.ts` only exports bootstrap() and never executes anything at
+  // module load.
+  console.log("Running app (tsx watch src/main.ts serve). Ctrl+C to stop.\n");
+  const child = spawn("tsx", ["watch", "src/main.ts", "serve"], {
     stdio: "inherit",
     env: { ...process.env, ...envVars },
   });
