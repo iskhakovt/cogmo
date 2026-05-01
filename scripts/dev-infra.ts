@@ -11,8 +11,21 @@
  * Ctrl+C stops the app; containers keep running (reuse). Use `docker stop` to kill them.
  */
 import { spawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { Network } from "testcontainers";
 import * as c from "../dev/containers.js";
+
+/**
+ * Project-local scratch root for `pnpm dev`. Holds skills repo, cloned
+ * repos, worktrees, sockets, askpass material — anything `env.ts` would
+ * default to `/var/lib/cogmo/...` or `/run/cogmo/...` in production.
+ *
+ * In-repo (gitignored) follows the same convention as `node_modules`,
+ * `.next`, `.turbo`, `target/`, `.gradle/` — dev artifacts owned by the
+ * checkout, scoped per clone, wiped by `git clean -fdx`.
+ */
+const DEV_ROOT = ".dev";
 
 async function main() {
   const infraOnly = process.argv.includes("--only");
@@ -58,8 +71,19 @@ async function main() {
   });
   console.log("Seed complete.\n");
 
+  // Override the prod-flavoured `/var/lib/cogmo/...` and `/run/cogmo/...`
+  // defaults from `env.ts` with project-local scratch paths under `.dev/`
+  // so `pnpm dev` runs without sudo. Anything the developer pre-exports
+  // wins (`process.env.X` spread last).
+  mkdirSync(DEV_ROOT, { recursive: true });
   const envVars = {
-    NODE_ENV: process.env.NODE_ENV ?? "development",
+    NODE_ENV: "development",
+    COGMO_SKILLS_PATH: join(DEV_ROOT, "skills"),
+    COGMO_REPOS_DIR: join(DEV_ROOT, "repos"),
+    COGMO_WORKTREES_DIR: join(DEV_ROOT, "worktrees"),
+    SANDBOX_PROXY_SOCKET_DIR: join(DEV_ROOT, "sockets"),
+    SANDBOX_ASKPASS_DIR: join(DEV_ROOT, "askpass"),
+    ...process.env,
     DATABASE_URL: databaseUrl,
     INNGEST_BASE_URL: inngestBaseUrl,
     HINDSIGHT_URL: hindsightUrl,
