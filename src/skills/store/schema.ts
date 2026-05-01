@@ -1,6 +1,14 @@
-import { boolean, index, jsonb, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
-import { pk, ts } from "../../db/helpers.js";
+import { boolean, index, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { userIdentities } from "../../transport/store/schema.js";
+import {
+  ClassifierLogSchema,
+  SkillEffectsSchema,
+  SkillInputsSchema,
+  SkillInvocationInputsSchema,
+  SkillInvocationOutputSchema,
+  SkillIoSchema,
+} from "../types.js";
 
 // --- Enums ---
 
@@ -34,11 +42,11 @@ export const skills = pgTable("skills", {
   name: text("name").notNull().unique(),
   tier: skillTier("tier").notNull(),
   riskTier: skillRiskTier("risk_tier").notNull(),
-  effects: jsonb("effects").notNull(), // SkillEffectsSchema
+  effects: jsonbZod("effects", SkillEffectsSchema).notNull(),
   schedule: text("schedule"), // cron expression; null = not scheduled
   gitSha: text("git_sha").notNull(),
-  inputs: jsonb("inputs").notNull(), // SkillIoSchema (opaque JSON Schema)
-  outputs: jsonb("outputs"), // SkillIoSchema; null for side-effect-only skills
+  inputs: jsonbZod("inputs", SkillInputsSchema).notNull(),
+  outputs: jsonbZod("outputs", SkillIoSchema), // null for side-effect-only skills
   disabled: boolean("disabled").notNull().default(false),
   createdAt: ts(),
 });
@@ -62,7 +70,7 @@ export const skillDeploys = pgTable(
     riskTier: skillRiskTier("risk_tier").notNull(),
     status: skillDeployStatus("status").notNull(),
     approvedBy: uuid("approved_by").references(() => userIdentities.id),
-    classifierLog: jsonb("classifier_log").notNull(), // ClassifierLogSchema
+    classifierLog: jsonbZod("classifier_log", ClassifierLogSchema).notNull(),
     createdAt: ts(),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   },
@@ -82,9 +90,9 @@ export const skillRuns = pgTable(
       .notNull()
       .references(() => skills.id),
     trigger: skillRunTrigger("trigger").notNull(),
-    inputs: jsonb("inputs").notNull(), // SkillInvocationInputsSchema (pass-through)
+    inputs: jsonbZod("inputs", SkillInvocationInputsSchema).notNull(), // pass-through
     status: skillRunStatus("status").notNull(),
-    output: jsonb("output"), // SkillInvocationOutputSchema; null on error
+    output: jsonbZod("output", SkillInvocationOutputSchema), // null on error
     error: text("error"),
     // CLAUDE.md mandates `created_at` on every table; for an append-only run
     // log the row's creation time IS the start-of-execution time.

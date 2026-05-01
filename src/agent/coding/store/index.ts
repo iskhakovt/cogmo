@@ -1,16 +1,7 @@
 import { and, asc, count, desc, eq, ne } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Database } from "../../../db/index.js";
-import {
-  type DevcontainerSpec,
-  DevcontainerSpecSchema,
-  type PrMetadata,
-  PrMetadataSchema,
-  type ResourceUsage,
-  ResourceUsageSchema,
-  type WorktreeAssignment,
-  WorktreeAssignmentSchema,
-} from "../types.js";
+import type { DevcontainerSpec, PrMetadata, ResourceUsage, WorktreeAssignment } from "../types.js";
 import { codingRepos, codingTasks, codingToolDecisions } from "./schema.js";
 
 export type CodingBackend = "claude" | "codex";
@@ -303,9 +294,6 @@ export class DrizzleCodingStore implements CodingStore {
     identityName?: string;
     verifyTimeoutSeconds?: number;
   }): Promise<CodingRepoRow> {
-    const devcontainer = params.devcontainer
-      ? DevcontainerSpecSchema.parse(params.devcontainer)
-      : null;
     return this.#db.transaction(async (tx) => {
       const row = single(
         await tx
@@ -315,7 +303,7 @@ export class DrizzleCodingStore implements CodingStore {
             localPath: params.localPath,
             defaultBranch: params.defaultBranch,
             remoteUrl: params.remoteUrl,
-            devcontainer,
+            devcontainer: params.devcontainer ?? null,
             allowedBackends: [...params.allowedBackends],
             verifyCommand: params.verifyCommand,
             taskTokenBudget: params.taskTokenBudget,
@@ -328,29 +316,28 @@ export class DrizzleCodingStore implements CodingStore {
           })
           .returning(),
       );
-      return parseRepoRow(row);
+      return row;
     });
   }
 
   async getRepoByName(name: string): Promise<CodingRepoRow | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(codingRepos).where(eq(codingRepos.name, name)).limit(1);
-      return rows[0] ? parseRepoRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
   async getRepoById(id: string): Promise<CodingRepoRow | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(codingRepos).where(eq(codingRepos.id, id)).limit(1);
-      return rows[0] ? parseRepoRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
   async listRepos(): Promise<readonly CodingRepoRow[]> {
-    return this.#db.transaction(async (tx) => {
-      const rows = await tx.select().from(codingRepos).orderBy(asc(codingRepos.name));
-      return rows.map(parseRepoRow);
-    });
+    return this.#db.transaction((tx) =>
+      tx.select().from(codingRepos).orderBy(asc(codingRepos.name)),
+    );
   }
 
   async removeRepo(id: string): Promise<void> {
@@ -412,35 +399,33 @@ export class DrizzleCodingStore implements CodingStore {
           })
           .returning(),
       );
-      return parseTaskRow(row);
+      return row;
     });
   }
 
   async setTaskWorktreeAssignment(id: string, assignment: WorktreeAssignment): Promise<void> {
-    const parsed = WorktreeAssignmentSchema.parse(assignment);
     await this.#db.transaction(async (tx) => {
       await tx
         .update(codingTasks)
-        .set({ worktreeAssignment: parsed })
+        .set({ worktreeAssignment: assignment })
         .where(eq(codingTasks.id, id));
     });
   }
 
   async listTasksForConversation(conversationId: string): Promise<readonly CodingTaskRow[]> {
-    return this.#db.transaction(async (tx) => {
-      const rows = await tx
+    return this.#db.transaction((tx) =>
+      tx
         .select()
         .from(codingTasks)
         .where(eq(codingTasks.conversationId, conversationId))
-        .orderBy(desc(codingTasks.createdAt));
-      return rows.map(parseTaskRow);
-    });
+        .orderBy(desc(codingTasks.createdAt)),
+    );
   }
 
   async getTask(id: string): Promise<CodingTaskRow | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(codingTasks).where(eq(codingTasks.id, id)).limit(1);
-      return rows[0] ? parseTaskRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
@@ -481,16 +466,14 @@ export class DrizzleCodingStore implements CodingStore {
   }
 
   async setTaskPrMetadata(id: string, metadata: PrMetadata): Promise<void> {
-    const parsed = PrMetadataSchema.parse(metadata);
     await this.#db.transaction(async (tx) => {
-      await tx.update(codingTasks).set({ prMetadata: parsed }).where(eq(codingTasks.id, id));
+      await tx.update(codingTasks).set({ prMetadata: metadata }).where(eq(codingTasks.id, id));
     });
   }
 
   async setTaskResourceUsage(id: string, usage: ResourceUsage): Promise<void> {
-    const parsed = ResourceUsageSchema.parse(usage);
     await this.#db.transaction(async (tx) => {
-      await tx.update(codingTasks).set({ resourceUsage: parsed }).where(eq(codingTasks.id, id));
+      await tx.update(codingTasks).set({ resourceUsage: usage }).where(eq(codingTasks.id, id));
     });
   }
 
@@ -599,19 +582,18 @@ export class DrizzleCodingStore implements CodingStore {
           })
           .returning(),
       );
-      return parseToolDecisionRow(row);
+      return row;
     });
   }
 
   async listToolDecisionsForTask(taskId: string): Promise<readonly CodingToolDecisionRow[]> {
-    return this.#db.transaction(async (tx) => {
-      const rows = await tx
+    return this.#db.transaction((tx) =>
+      tx
         .select()
         .from(codingToolDecisions)
         .where(eq(codingToolDecisions.taskId, taskId))
-        .orderBy(asc(codingToolDecisions.createdAt));
-      return rows.map(parseToolDecisionRow);
-    });
+        .orderBy(asc(codingToolDecisions.createdAt)),
+    );
   }
 
   async cancelTaskIfActive(
@@ -648,60 +630,4 @@ export class DrizzleCodingStore implements CodingStore {
       return { kind: "cancelled" as const, conversationId: row.conversationId };
     });
   }
-}
-
-function parseRepoRow(row: typeof codingRepos.$inferSelect): CodingRepoRow {
-  return {
-    id: row.id,
-    name: row.name,
-    localPath: row.localPath,
-    defaultBranch: row.defaultBranch,
-    remoteUrl: row.remoteUrl,
-    devcontainer: row.devcontainer ? DevcontainerSpecSchema.parse(row.devcontainer) : null,
-    allowedBackends: row.allowedBackends,
-    verifyCommand: row.verifyCommand,
-    taskTokenBudget: row.taskTokenBudget,
-    taskWallTimeSeconds: row.taskWallTimeSeconds,
-    maxConcurrentTasks: row.maxConcurrentTasks,
-    identityName: row.identityName,
-    verifyTimeoutSeconds: row.verifyTimeoutSeconds,
-    createdAt: row.createdAt,
-  };
-}
-
-function parseToolDecisionRow(row: typeof codingToolDecisions.$inferSelect): CodingToolDecisionRow {
-  return {
-    id: row.id,
-    taskId: row.taskId,
-    tool: row.tool,
-    pattern: row.pattern,
-    decision: row.decision,
-    scope: row.scope,
-    createdAt: row.createdAt,
-  };
-}
-
-function parseTaskRow(row: typeof codingTasks.$inferSelect): CodingTaskRow {
-  return {
-    id: row.id,
-    repoId: row.repoId,
-    conversationId: row.conversationId,
-    goal: row.goal,
-    triggerSource: row.triggerSource,
-    triggerRef: row.triggerRef,
-    backend: row.backend,
-    worktreeAssignment: row.worktreeAssignment
-      ? WorktreeAssignmentSchema.parse(row.worktreeAssignment)
-      : null,
-    sessionId: row.sessionId,
-    containerId: row.containerId,
-    allowPrivilegedRunc: row.allowPrivilegedRunc,
-    plan: row.plan,
-    planApprovedAt: row.planApprovedAt,
-    prMetadata: row.prMetadata ? PrMetadataSchema.parse(row.prMetadata) : null,
-    status: row.status,
-    failureReason: row.failureReason,
-    resourceUsage: row.resourceUsage ? ResourceUsageSchema.parse(row.resourceUsage) : null,
-    createdAt: row.createdAt,
-  };
 }

@@ -1,18 +1,7 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
-import {
-  type ClassifierLog,
-  ClassifierLogSchema,
-  type SkillEffects,
-  SkillEffectsSchema,
-  type SkillInputs,
-  SkillInputsSchema,
-  SkillInvocationInputsSchema,
-  SkillInvocationOutputSchema,
-  type SkillIo,
-  SkillIoSchema,
-} from "../types.js";
+import type { ClassifierLog, SkillEffects, SkillInputs, SkillIo } from "../types.js";
 import { skillContextCalls, skillDeploys, skillRuns, skills } from "./schema.js";
 
 export type SkillTier = "wasm" | "container";
@@ -262,52 +251,43 @@ export class DrizzleSkillStore implements SkillStore {
   // --- skills ---
 
   async insertSkill(params: InsertSkillParams): Promise<SkillRow> {
-    const effects = SkillEffectsSchema.parse(params.effects);
-    const inputs = SkillInputsSchema.parse(params.inputs);
-    const outputs = params.outputs === null ? null : SkillIoSchema.parse(params.outputs);
     return this.#db.transaction(async (tx) => {
-      const row = single(
+      return single(
         await tx
           .insert(skills)
           .values({
             name: params.name,
             tier: params.tier,
             riskTier: params.riskTier,
-            effects,
+            effects: params.effects,
             schedule: params.schedule,
             gitSha: params.gitSha,
-            inputs,
-            outputs,
+            inputs: params.inputs,
+            outputs: params.outputs,
           })
           .returning(),
       );
-      return parseSkillRow(row);
     });
   }
 
   async getSkillByName(name: string): Promise<SkillRow | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(skills).where(eq(skills.name, name)).limit(1);
-      return rows[0] ? parseSkillRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
   async getSkillById(id: string): Promise<SkillRow | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(skills).where(eq(skills.id, id)).limit(1);
-      return rows[0] ? parseSkillRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
   async listEnabledSkills(): Promise<readonly SkillRow[]> {
-    return this.#db.transaction(async (tx) => {
-      const rows = await tx
-        .select()
-        .from(skills)
-        .where(eq(skills.disabled, false))
-        .orderBy(asc(skills.name));
-      return rows.map(parseSkillRow);
-    });
+    return this.#db.transaction((tx) =>
+      tx.select().from(skills).where(eq(skills.disabled, false)).orderBy(asc(skills.name)),
+    );
   }
 
   async updateSkillSha(params: { id: string; gitSha: string }): Promise<void> {
@@ -323,11 +303,6 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async executeRegister(params: ExecuteRegisterParams): Promise<ExecuteRegisterResult> {
-    const effects = SkillEffectsSchema.parse(params.effects);
-    const inputs = SkillInputsSchema.parse(params.inputs);
-    const outputs = params.outputs === null ? null : SkillIoSchema.parse(params.outputs);
-    const classifierLog = ClassifierLogSchema.parse(params.classifierLog);
-
     return this.#db.transaction(async (tx) => {
       // Serialize concurrent registers on the same skill name. Released at
       // tx commit/rollback.
@@ -340,7 +315,7 @@ export class DrizzleSkillStore implements SkillStore {
         .from(skills)
         .where(eq(skills.name, params.name))
         .limit(1);
-      const existing = existingRows[0] ? parseSkillRow(existingRows[0]) : null;
+      const existing = existingRows[0] ?? null;
 
       // No-op: branch tip already matches main AND the row is currently live.
       // The `!disabled` guard handles the deny-then-re-register case: a denied
@@ -399,16 +374,16 @@ export class DrizzleSkillStore implements SkillStore {
             .set({
               tier: params.tier,
               riskTier: params.riskTier,
-              effects,
+              effects: params.effects,
               schedule: params.schedule,
               gitSha: params.branchTipSha,
-              inputs,
-              outputs,
+              inputs: params.inputs,
+              outputs: params.outputs,
               disabled: false,
             })
             .where(eq(skills.id, existing.id))
             .returning();
-          skillRow = parseSkillRow(single(updatedRows));
+          skillRow = single(updatedRows);
         } else {
           // Pending-approval re-deploy on a live skill — leave the existing
           // row untouched. The pending state lives on skill_deploys.
@@ -425,15 +400,15 @@ export class DrizzleSkillStore implements SkillStore {
             name: params.name,
             tier: params.tier,
             riskTier: params.riskTier,
-            effects,
+            effects: params.effects,
             schedule: params.schedule,
             gitSha: params.branchTipSha,
-            inputs,
-            outputs,
+            inputs: params.inputs,
+            outputs: params.outputs,
             disabled: !goesLive,
           })
           .returning();
-        skillRow = parseSkillRow(single(insertedRows));
+        skillRow = single(insertedRows);
       }
 
       const deployRows = await tx
@@ -444,11 +419,11 @@ export class DrizzleSkillStore implements SkillStore {
           priorGitSha,
           riskTier: params.riskTier,
           status: deployStatus,
-          classifierLog,
+          classifierLog: params.classifierLog,
           ...(goesLive && { resolvedAt: new Date() }),
         })
         .returning();
-      const deploy = parseSkillDeployRow(single(deployRows));
+      const deploy = single(deployRows);
 
       if (goesLive) {
         await params.applyFilesystem();
@@ -461,10 +436,6 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async executeApprove(params: ExecuteApproveParams): Promise<ExecuteRegisterResult> {
-    const effects = SkillEffectsSchema.parse(params.effects);
-    const inputs = SkillInputsSchema.parse(params.inputs);
-    const outputs = params.outputs === null ? null : SkillIoSchema.parse(params.outputs);
-
     return this.#db.transaction(async (tx) => {
       const deployRows = await tx
         .select()
@@ -475,7 +446,7 @@ export class DrizzleSkillStore implements SkillStore {
       if (!deployRowRaw) {
         return { kind: "rejected", reason: "deploy_not_found" } as const;
       }
-      const deploy = parseSkillDeployRow(deployRowRaw);
+      const deploy = deployRowRaw;
       if (deploy.status !== "pending_approval") {
         return {
           kind: "rejected",
@@ -492,7 +463,7 @@ export class DrizzleSkillStore implements SkillStore {
       if (!skillRowRaw) {
         return { kind: "rejected", reason: "skill_not_found" } as const;
       }
-      const skill = parseSkillRow(skillRowRaw);
+      const skill = skillRowRaw;
       await tx.execute(
         sql`SELECT pg_advisory_xact_lock(hashtext(${`skill_register:${skill.name}`})::bigint)`,
       );
@@ -513,14 +484,14 @@ export class DrizzleSkillStore implements SkillStore {
           disabled: false,
           tier: params.tier,
           riskTier: params.riskTier,
-          effects,
+          effects: params.effects,
           schedule: params.schedule,
-          inputs,
-          outputs,
+          inputs: params.inputs,
+          outputs: params.outputs,
         })
         .where(eq(skills.id, skill.id))
         .returning();
-      const updatedSkill = parseSkillRow(single(updatedSkillRows));
+      const updatedSkill = single(updatedSkillRows);
 
       const resolvedDeployRows = await tx
         .update(skillDeploys)
@@ -531,7 +502,7 @@ export class DrizzleSkillStore implements SkillStore {
         })
         .where(eq(skillDeploys.id, params.pendingId))
         .returning();
-      const resolvedDeploy = parseSkillDeployRow(single(resolvedDeployRows));
+      const resolvedDeploy = single(resolvedDeployRows);
 
       await params.applyFilesystem();
 
@@ -562,11 +533,6 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async executeRollback(params: ExecuteRollbackParams): Promise<ExecuteRegisterResult> {
-    const classifierLog = ClassifierLogSchema.parse(params.classifierLog);
-    const effects = SkillEffectsSchema.parse(params.effects);
-    const inputs = SkillInputsSchema.parse(params.inputs);
-    const outputs = params.outputs === null ? null : SkillIoSchema.parse(params.outputs);
-
     return this.#db.transaction(async (tx) => {
       await tx.execute(
         sql`SELECT pg_advisory_xact_lock(hashtext(${`skill_register:${params.name}`})::bigint)`,
@@ -577,7 +543,7 @@ export class DrizzleSkillStore implements SkillStore {
       if (!skillRowRaw) {
         return { kind: "rejected", reason: "skill_not_found" } as const;
       }
-      const existing = parseSkillRow(skillRowRaw);
+      const existing = skillRowRaw;
       if (existing.gitSha === params.toGitSha && !existing.disabled) {
         return { kind: "no_op", skill: existing } as const;
       }
@@ -593,14 +559,14 @@ export class DrizzleSkillStore implements SkillStore {
           disabled: false,
           tier: params.tier,
           riskTier: params.riskTier,
-          effects,
+          effects: params.effects,
           schedule: params.schedule,
-          inputs,
-          outputs,
+          inputs: params.inputs,
+          outputs: params.outputs,
         })
         .where(eq(skills.id, existing.id))
         .returning();
-      const updated = parseSkillRow(single(updatedRows));
+      const updated = single(updatedRows);
 
       const deployRows = await tx
         .insert(skillDeploys)
@@ -608,13 +574,13 @@ export class DrizzleSkillStore implements SkillStore {
           skillId: existing.id,
           gitSha: params.toGitSha,
           priorGitSha: existing.gitSha,
-          riskTier: classifierLog.risk_tier,
+          riskTier: params.classifierLog.risk_tier,
           status: "rolled_back",
-          classifierLog,
+          classifierLog: params.classifierLog,
           resolvedAt: new Date(),
         })
         .returning();
-      const deploy = parseSkillDeployRow(single(deployRows));
+      const deploy = single(deployRows);
 
       await params.applyFilesystem();
 
@@ -625,9 +591,8 @@ export class DrizzleSkillStore implements SkillStore {
   // --- skill_deploys ---
 
   async insertDeploy(params: InsertDeployParams): Promise<SkillDeployRow> {
-    const classifierLog = ClassifierLogSchema.parse(params.classifierLog);
     return this.#db.transaction(async (tx) => {
-      const row = single(
+      return single(
         await tx
           .insert(skillDeploys)
           .values({
@@ -636,11 +601,10 @@ export class DrizzleSkillStore implements SkillStore {
             priorGitSha: params.priorGitSha,
             riskTier: params.riskTier,
             status: params.status,
-            classifierLog,
+            classifierLog: params.classifierLog,
           })
           .returning(),
       );
-      return parseSkillDeployRow(row);
     });
   }
 
@@ -651,14 +615,14 @@ export class DrizzleSkillStore implements SkillStore {
         .from(skillDeploys)
         .where(and(eq(skillDeploys.skillId, skillId), eq(skillDeploys.status, "pending_approval")))
         .limit(1);
-      return rows[0] ? parseSkillDeployRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
   async getDeployById(id: string): Promise<SkillDeployRow | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(skillDeploys).where(eq(skillDeploys.id, id)).limit(1);
-      return rows[0] ? parseSkillDeployRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
@@ -688,31 +652,28 @@ export class DrizzleSkillStore implements SkillStore {
       // an empty object rather than relying on null/undefined coercion.
       throw new Error("insertRun: inputs must not be null/undefined");
     }
-    const inputs = SkillInvocationInputsSchema.parse(params.inputs);
     return this.#db.transaction(async (tx) => {
-      const row = single(
+      return single(
         await tx
           .insert(skillRuns)
           .values({
             skillId: params.skillId,
             trigger: params.trigger,
-            inputs,
+            inputs: params.inputs,
             status: "running",
           })
           .returning(),
       );
-      return parseSkillRunRow(row);
     });
   }
 
   async updateRunResult(params: UpdateRunResultParams): Promise<void> {
-    const output = params.output === null ? null : SkillInvocationOutputSchema.parse(params.output);
     await this.#db.transaction(async (tx) => {
       await tx
         .update(skillRuns)
         .set({
           status: params.status,
-          output,
+          output: params.output,
           error: params.error,
           finishedAt: params.finishedAt,
         })
@@ -723,7 +684,7 @@ export class DrizzleSkillStore implements SkillStore {
   async getRun(id: string): Promise<SkillRunRow | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(skillRuns).where(eq(skillRuns.id, id)).limit(1);
-      return rows[0] ? parseSkillRunRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
@@ -742,75 +703,12 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async listContextCallsForRun(runId: string): Promise<readonly SkillContextCallRow[]> {
-    return this.#db.transaction(async (tx) => {
-      const rows = await tx
+    return this.#db.transaction((tx) =>
+      tx
         .select()
         .from(skillContextCalls)
         .where(eq(skillContextCalls.runId, runId))
-        .orderBy(asc(skillContextCalls.createdAt));
-      return rows.map(parseSkillContextCallRow);
-    });
+        .orderBy(asc(skillContextCalls.createdAt)),
+    );
   }
-}
-
-/**
- * Validate JSONB columns at the store boundary (CLAUDE.md: every JSONB column
- * gets a Zod schema parsed on read AND write). Drizzle marks JSONB-typed
- * columns as `unknown`; we narrow here.
- */
-function parseSkillRow(row: typeof skills.$inferSelect): SkillRow {
-  return {
-    id: row.id,
-    name: row.name,
-    tier: row.tier,
-    riskTier: row.riskTier,
-    effects: SkillEffectsSchema.parse(row.effects),
-    schedule: row.schedule,
-    gitSha: row.gitSha,
-    inputs: SkillInputsSchema.parse(row.inputs),
-    outputs: row.outputs === null ? null : SkillIoSchema.parse(row.outputs),
-    disabled: row.disabled,
-    createdAt: row.createdAt,
-  };
-}
-
-function parseSkillDeployRow(row: typeof skillDeploys.$inferSelect): SkillDeployRow {
-  return {
-    id: row.id,
-    skillId: row.skillId,
-    gitSha: row.gitSha,
-    priorGitSha: row.priorGitSha,
-    riskTier: row.riskTier,
-    status: row.status,
-    approvedBy: row.approvedBy,
-    classifierLog: ClassifierLogSchema.parse(row.classifierLog),
-    createdAt: row.createdAt,
-    resolvedAt: row.resolvedAt,
-  };
-}
-
-function parseSkillRunRow(row: typeof skillRuns.$inferSelect): SkillRunRow {
-  return {
-    id: row.id,
-    skillId: row.skillId,
-    trigger: row.trigger,
-    inputs: SkillInvocationInputsSchema.parse(row.inputs),
-    status: row.status,
-    output: row.output === null ? null : SkillInvocationOutputSchema.parse(row.output),
-    error: row.error,
-    createdAt: row.createdAt,
-    finishedAt: row.finishedAt,
-  };
-}
-
-function parseSkillContextCallRow(row: typeof skillContextCalls.$inferSelect): SkillContextCallRow {
-  return {
-    id: row.id,
-    runId: row.runId,
-    method: row.method,
-    target: row.target,
-    ok: row.ok,
-    error: row.error,
-    createdAt: row.createdAt,
-  };
 }

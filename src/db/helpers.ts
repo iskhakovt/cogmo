@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
-import { timestamp, uuid } from "drizzle-orm/pg-core";
+import { customType, timestamp, uuid } from "drizzle-orm/pg-core";
+import type { z } from "zod";
 
 /**
  * Extract exactly one row from a query result. Throws if zero or multiple rows.
@@ -25,4 +26,32 @@ export function pk() {
 /** created_at TIMESTAMPTZ DEFAULT now() */
 export function ts() {
   return timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
+}
+
+/**
+ * JSONB column with Zod validation enforced at the driver boundary.
+ *
+ * The schema runs on every read (`fromDriver`) and every write (`toDriver`),
+ * so unparseable shapes throw at the store layer instead of leaking into
+ * domain code. Drizzle infers the column's TS type as `z.infer<typeof S>`,
+ * eliminating the `JsonValue` cast pattern at call sites.
+ *
+ * `toDriver` returns a JSON string — Drizzle's built-in `jsonb()` does this
+ * implicitly, but `customType` doesn't, so the wire format would be a raw
+ * Postgres text literal otherwise (`hello` instead of `"hello"`) and the
+ * server rejects it as invalid JSON. `fromDriver` receives the already-decoded
+ * JS value because both postgres-js and PGlite parse JSONB on the way in.
+ */
+export function jsonbZod<S extends z.ZodType>(name: string, schema: S) {
+  return customType<{ data: z.infer<S>; driverData: string }>({
+    dataType() {
+      return "jsonb";
+    },
+    toDriver(value) {
+      return JSON.stringify(schema.parse(value));
+    },
+    fromDriver(value) {
+      return schema.parse(value);
+    },
+  })(name);
 }

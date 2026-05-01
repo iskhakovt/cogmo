@@ -2,7 +2,6 @@ import {
   boolean,
   index,
   integer,
-  jsonb,
   pgEnum,
   pgTable,
   text,
@@ -10,12 +9,38 @@ import {
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
-import { pk, ts } from "../../db/helpers.js";
+import { z } from "zod";
+import { jsonbZod, pk, ts } from "../../db/helpers.js";
+import { MessageContentSchema } from "../../llm/types.js";
 import { secrets } from "../../secrets/store/schema.js";
 
 // --- Enums ---
 
 export const autoRecallMode = pgEnum("auto_recall_mode", ["off", "always", "heuristic", "llm"]);
+
+// --- JSONB shapes ---
+
+/**
+ * `llm_providers.attrs` — adapter-specific knobs. `promptCaching` enables
+ * Anthropic-style cache_control hints for OpenRouter routing; `headers` sets
+ * extra default headers on the OpenAI SDK client (e.g. `HTTP-Referer` for
+ * OpenRouter usage attribution).
+ */
+export const ProviderAttrsSchema = z.object({
+  promptCaching: z.boolean().optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+});
+export type ProviderAttrs = z.infer<typeof ProviderAttrsSchema>;
+
+/**
+ * `profiles.tool_set` — list of tool names enabled for this profile. Empty
+ * array = no tools (chat-only profile). Tool names are matched against the
+ * registered tool registry at request time; unknown names are silently
+ * dropped (logged) rather than rejected, so deleting a tool doesn't brick
+ * existing profiles.
+ */
+export const ToolSetSchema = z.array(z.string());
+export type ToolSet = z.infer<typeof ToolSetSchema>;
 
 // --- Tables ---
 
@@ -32,7 +57,7 @@ export const llmProviders = pgTable("llm_providers", {
   secretId: uuid("secret_id")
     .notNull()
     .references(() => secrets.id),
-  attrs: jsonb("attrs").notNull(), // { promptCaching?: boolean, headers?: Record<string, string> }
+  attrs: jsonbZod("attrs", ProviderAttrsSchema).notNull(),
   createdAt: ts(),
 });
 
@@ -66,7 +91,7 @@ export const profiles = pgTable(
     summarizationModel: text("summarization_model"), // null = use main model
     extractionModel: text("extraction_model"), // null = use main model
     autoRecall: autoRecallMode("auto_recall").notNull().default("heuristic"),
-    toolSet: jsonb("tool_set").notNull(),
+    toolSet: jsonbZod("tool_set", ToolSetSchema).notNull(),
     createdAt: ts(),
   },
   (t) => [unique("uq_profiles_user_name").on(t.userId, t.name).nullsNotDistinct()],
@@ -96,7 +121,7 @@ export const messages = pgTable(
       .notNull()
       .references(() => conversations.id),
     role: text("role").notNull(), // 'user' | 'assistant'
-    content: jsonb("content").notNull(),
+    content: jsonbZod("content", MessageContentSchema).notNull(),
     profileId: uuid("profile_id")
       .notNull()
       .references(() => profiles.id), // profile active for the turn this row belongs to

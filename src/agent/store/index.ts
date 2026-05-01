@@ -1,9 +1,8 @@
 import { and, asc, count, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import * as R from "remeda";
-import type { JsonValue } from "type-fest";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
-import { type ContentBlock, type Message, MessageContentSchema } from "../../llm/types.js";
+import type { ContentBlock, Message } from "../../llm/types.js";
 import type { AutoRecallMode } from "../recall-gate.js";
 import { ProfileInUseError, translateUniqueViolation } from "./errors.js";
 import {
@@ -13,8 +12,10 @@ import {
   llmProviders,
   messages,
   modelProviders,
+  type ProviderAttrs,
   profiles,
   steeringRules,
+  type ToolSet,
   users,
 } from "./schema.js";
 
@@ -37,7 +38,7 @@ export interface Profile {
   summarizationModel: string | null;
   extractionModel: string | null;
   autoRecall: AutoRecallMode;
-  toolSet: JsonValue;
+  toolSet: ToolSet;
 }
 
 export interface ProfileUpdates {
@@ -47,7 +48,7 @@ export interface ProfileUpdates {
   summarizationModel?: string | null;
   extractionModel?: string | null;
   autoRecall?: AutoRecallMode;
-  toolSet?: JsonValue;
+  toolSet?: ToolSet;
 }
 
 export interface ConversationSummary {
@@ -153,7 +154,7 @@ export interface AgentStore {
     name: string;
     basePrompt: string;
     model: string;
-    toolSet: JsonValue;
+    toolSet: ToolSet;
   }): Promise<Profile>;
 
   /** List profiles visible to `userId`: org profiles (user_id IS NULL) + the user's own profiles. */
@@ -243,7 +244,7 @@ export interface AgentStore {
     type: string;
     baseUrl?: string;
     secretId: string;
-    attrs: JsonValue;
+    attrs: ProviderAttrs;
   }): Promise<{ id: string }>;
 
   /** Get a provider by ID. */
@@ -253,7 +254,7 @@ export interface AgentStore {
     type: string;
     baseUrl: string | null;
     secretId: string;
-    attrs: JsonValue;
+    attrs: ProviderAttrs;
   } | null>;
 
   /** List all providers. */
@@ -285,7 +286,7 @@ export interface AgentStore {
     type: string;
     baseUrl: string | null;
     secretId: string;
-    attrs: JsonValue;
+    attrs: ProviderAttrs;
   } | null>;
 
   /**
@@ -300,7 +301,7 @@ export interface AgentStore {
       type: string;
       baseUrl: string | null;
       secretId: string;
-      attrs: JsonValue;
+      attrs: ProviderAttrs;
     }>
   >;
 
@@ -412,14 +413,13 @@ export class DrizzleAgentStore implements AgentStore {
     inputTokens?: number;
   }): Promise<{ id: string }> {
     return this.#db.transaction(async (tx) => {
-      const content = MessageContentSchema.parse(params.content);
       return single(
         await tx
           .insert(messages)
           .values({
             conversationId: params.conversationId,
             role: params.role,
-            content,
+            content: params.content,
             profileId: params.profileId,
             model: params.model,
             lastInboundMessageId: params.lastInboundMessageId,
@@ -452,7 +452,7 @@ export class DrizzleAgentStore implements AgentStore {
       const values = R.map(params.messages, (msg, i) => ({
         conversationId: params.conversationId,
         role: msg.role,
-        content: MessageContentSchema.parse(msg.content),
+        content: msg.content,
         profileId: params.profileId,
         model: params.model,
         lastInboundMessageId: params.lastInboundMessageId,
@@ -539,7 +539,7 @@ export class DrizzleAgentStore implements AgentStore {
     name: string;
     basePrompt: string;
     model: string;
-    toolSet: JsonValue;
+    toolSet: ToolSet;
   }): Promise<Profile> {
     return translateUniqueViolation(() =>
       this.#db.transaction(async (tx) => {
@@ -664,7 +664,7 @@ export class DrizzleAgentStore implements AgentStore {
         .from(messages)
         .where(eq(messages.id, messageId))
         .limit(1);
-      return (rows[0] as { id: string; role: string; content: string | ContentBlock[] }) ?? null;
+      return rows[0] ?? null;
     });
   }
 
@@ -867,7 +867,7 @@ export class DrizzleAgentStore implements AgentStore {
     type: string;
     baseUrl?: string;
     secretId: string;
-    attrs: JsonValue;
+    attrs: ProviderAttrs;
   }): Promise<{ id: string }> {
     return this.#db.transaction(async (tx) => {
       return single(
@@ -891,7 +891,7 @@ export class DrizzleAgentStore implements AgentStore {
     type: string;
     baseUrl: string | null;
     secretId: string;
-    attrs: JsonValue;
+    attrs: ProviderAttrs;
   } | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
@@ -906,7 +906,7 @@ export class DrizzleAgentStore implements AgentStore {
         .from(llmProviders)
         .where(eq(llmProviders.id, providerId))
         .limit(1);
-      return (rows[0] as (typeof rows)[0] & { attrs: JsonValue }) ?? null;
+      return rows[0] ?? null;
     });
   }
 
@@ -956,7 +956,7 @@ export class DrizzleAgentStore implements AgentStore {
     type: string;
     baseUrl: string | null;
     secretId: string;
-    attrs: JsonValue;
+    attrs: ProviderAttrs;
   } | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
@@ -973,7 +973,7 @@ export class DrizzleAgentStore implements AgentStore {
         .where(eq(modelProviders.model, model))
         .orderBy(asc(modelProviders.position))
         .limit(1);
-      return (rows[0] as (typeof rows)[0] & { attrs: JsonValue }) ?? null;
+      return rows[0] ?? null;
     });
   }
 
@@ -984,7 +984,7 @@ export class DrizzleAgentStore implements AgentStore {
       type: string;
       baseUrl: string | null;
       secretId: string;
-      attrs: JsonValue;
+      attrs: ProviderAttrs;
     }>
   > {
     return this.#db.transaction(async (tx) => {
@@ -1001,7 +1001,7 @@ export class DrizzleAgentStore implements AgentStore {
         .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
         .where(eq(modelProviders.model, model))
         .orderBy(asc(modelProviders.position));
-      return rows as ReadonlyArray<(typeof rows)[number] & { attrs: JsonValue }>;
+      return rows;
     });
   }
 
