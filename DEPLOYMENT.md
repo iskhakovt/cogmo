@@ -74,7 +74,7 @@ If UID 1000 collides with an existing user on your host, pick any free UID, chow
 
 **Podman convenience.** Podman supports a `:U` mount flag that recursively chowns the bind-mount source to the container UID on each start (`-v /var/lib/cogmo:/var/lib/cogmo:U`). Avoids the pre-chown step at the cost of a recursive `chown` every time the container starts; pick whichever you prefer.
 
-**Kubernetes hostPath.** `securityContext.fsGroup` does not apply to hostPath volumes (only to dynamically provisioned PVs). Either pre-chown the host path, or run an `initContainer` with `runAsUser: 0` and `CAP_CHOWN` to fix permissions before the main container starts.
+**Kubernetes hostPath.** `securityContext.fsGroup` does not apply to hostPath volumes — the kubelet doesn't take ownership of arbitrary host directories (it works for many other volume types, including most CSI-backed PVs and `emptyDir`). Either pre-chown the host path, or run an `initContainer` with `runAsUser: 0` and `CAP_CHOWN` to fix permissions before the main container starts.
 
 **NixOS.** Use a `systemd.tmpfiles.rules` entry like `"d /var/lib/cogmo 0750 1000 1000 -"` so the directory exists with the right owner before the unit starts.
 
