@@ -9,8 +9,8 @@
  */
 
 import { err, ok, type Result } from "neverthrow";
-import type { JsonValue } from "type-fest";
 import type { AgentStore } from "../agent/store/index.js";
+import type { ProviderAttrs } from "../agent/store/schema.js";
 import { logger } from "../logger.js";
 import {
   DEFAULT_GITHUB_IDENTITY_NAME,
@@ -308,7 +308,7 @@ async function persistProvider(deps: PersistDeps, answers: NonInteractiveAnswers
   });
   await deps.secretsStore.markValidated(`${providerName}_api_key`);
 
-  const attrs: Record<string, boolean> = {};
+  const attrs: ProviderAttrs = {};
   if (answers.llmProviderType === "openrouter") {
     attrs.promptCaching = true;
   }
@@ -318,7 +318,7 @@ async function persistProvider(deps: PersistDeps, answers: NonInteractiveAnswers
     type: adapterType,
     ...(baseUrl && { baseUrl }),
     secretId,
-    attrs: attrs as JsonValue,
+    attrs,
   });
 
   const defaultProfile = await deps.agentStore.getDefaultProfile();

@@ -6,8 +6,8 @@ describe("contentToText", () => {
     expect(contentToText("hello")).toBe("hello");
   });
 
-  it("stringifies objects", () => {
-    expect(contentToText({ foo: "bar" })).toBe('{"foo":"bar"}');
+  it("stringifies block arrays", () => {
+    expect(contentToText([{ type: "text", text: "hi" }])).toBe('[{"type":"text","text":"hi"}]');
   });
 });
 
@@ -16,56 +16,35 @@ describe("contentToBlocks", () => {
     expect(contentToBlocks("hello")).toEqual([{ type: "text", text: "hello" }]);
   });
 
-  it("converts array of strings", () => {
-    expect(contentToBlocks(["a", "b"])).toEqual([
-      { type: "text", text: "a" },
-      { type: "text", text: "b" },
-    ]);
+  it("converts image-ref array element to ImageRef", () => {
+    expect(
+      contentToBlocks([{ type: "image", path: "inbound/abc.jpg", mediaType: "image/jpeg" }]),
+    ).toEqual([{ type: "image_ref", path: "inbound/abc.jpg", mediaType: "image/jpeg" }]);
   });
 
-  it("converts image reference with path to ImageRef", () => {
-    const content = { type: "image", path: "inbound/abc.jpg", mediaType: "image/jpeg" };
-    expect(contentToBlocks(content)).toEqual([
-      { type: "image_ref", path: "inbound/abc.jpg", mediaType: "image/jpeg" },
-    ]);
+  it("converts inline-image array element to ImageBlock", () => {
+    expect(
+      contentToBlocks([
+        { type: "image", source: "base64", data: "abc123", mediaType: "image/png" },
+      ]),
+    ).toEqual([{ type: "image", source: "base64", data: "abc123", mediaType: "image/png" }]);
   });
 
-  it("converts inline image with data to ImageBlock", () => {
-    const content = {
-      type: "image",
-      source: "base64",
-      data: "abc123",
-      mediaType: "image/png",
-    };
-    expect(contentToBlocks(content)).toEqual([
+  it("defaults inline-image source to 'base64' when omitted", () => {
+    expect(contentToBlocks([{ type: "image", data: "abc123", mediaType: "image/png" }])).toEqual([
       { type: "image", source: "base64", data: "abc123", mediaType: "image/png" },
     ]);
   });
 
-  it("converts text object to TextBlock", () => {
-    expect(contentToBlocks({ type: "text", text: "hello" })).toEqual([
-      { type: "text", text: "hello" },
-    ]);
-  });
-
   it("converts mixed array (text + image ref)", () => {
-    const content = [
-      { type: "text", text: "caption" },
-      { type: "image", path: "inbound/abc.jpg", mediaType: "image/jpeg" },
-    ];
-    expect(contentToBlocks(content)).toEqual([
+    expect(
+      contentToBlocks([
+        { type: "text", text: "caption" },
+        { type: "image", path: "inbound/abc.jpg", mediaType: "image/jpeg" },
+      ]),
+    ).toEqual([
       { type: "text", text: "caption" },
       { type: "image_ref", path: "inbound/abc.jpg", mediaType: "image/jpeg" },
     ]);
-  });
-
-  it("falls back to JSON.stringify for unknown objects", () => {
-    expect(contentToBlocks({ unknown: true })).toEqual([
-      { type: "text", text: '{"unknown":true}' },
-    ]);
-  });
-
-  it("handles null", () => {
-    expect(contentToBlocks(null)).toEqual([{ type: "text", text: "null" }]);
   });
 });

@@ -463,8 +463,6 @@ async function resolveProviderForModel(
       );
     }
 
-    const attrs = row.attrs as Record<string, unknown>;
-
     switch (row.type) {
       case "anthropic":
         providers.push(new AnthropicProvider(apiKey, row.baseUrl ?? undefined));
@@ -479,8 +477,8 @@ async function resolveProviderForModel(
           new OpenAICompatibleProvider(row.name, {
             apiKey,
             baseURL: row.baseUrl,
-            headers: (attrs.headers as Record<string, string>) ?? undefined,
-            promptCaching: (attrs.promptCaching as boolean) ?? false,
+            ...(row.attrs.headers && { headers: row.attrs.headers }),
+            promptCaching: row.attrs.promptCaching ?? false,
           }),
         );
         break;

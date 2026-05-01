@@ -8,8 +8,8 @@
  */
 
 import * as p from "@clack/prompts";
-import type { JsonValue } from "type-fest";
 import type { AgentStore } from "../agent/store/index.js";
+import type { ProviderAttrs } from "../agent/store/schema.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import {
   DEFAULT_GITHUB_IDENTITY_NAME,
@@ -198,7 +198,7 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     await deps.secretsStore.markValidated(`${providerName}_api_key`);
   }
 
-  const attrs: Record<string, boolean> = {};
+  const attrs: ProviderAttrs = {};
   if (providerType === "openrouter") {
     attrs.promptCaching = true;
   }
@@ -208,7 +208,7 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     type: adapterType,
     ...(baseUrl && { baseUrl }),
     secretId,
-    attrs: attrs as JsonValue,
+    attrs,
   });
 
   // Register this provider for the default profile's model.

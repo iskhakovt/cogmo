@@ -27,7 +27,7 @@ import {
   type RenderedMessage,
 } from "../../adapter-module.js";
 import { type AttachmentStore, mediaTypeToExt } from "../../attachment-store.js";
-import { contentToText } from "../../content.js";
+import type { InboundContent } from "../../content.js";
 import type { Adapter, StreamHandle, StreamingAdapter } from "../../types.js";
 import {
   handleEnd,
@@ -85,7 +85,8 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
         );
       }
     } else {
-      await this.#bot.api.sendMessage(chatId, contentToText(content as JsonValue));
+      const text = typeof content === "string" ? content : JSON.stringify(content);
+      await this.#bot.api.sendMessage(chatId, text);
     }
   }
 
@@ -502,7 +503,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       const path = await transport.uploadAttachment(buffer, "image/jpeg");
       const caption = ctx.message.caption ?? "";
 
-      const content: JsonValue[] = [];
+      const content: InboundContent = [];
       if (caption) content.push({ type: "text", text: caption });
       content.push({ type: "image", path, mediaType: "image/jpeg" });
 

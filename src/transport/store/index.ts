@@ -2,6 +2,7 @@ import { and, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-or
 import type { JsonValue } from "type-fest";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
+import type { InboundContent } from "../content.js";
 import { channelSessions, channels, inboundMessages, userIdentities } from "./schema.js";
 
 export interface Session {
@@ -66,7 +67,7 @@ export interface TransportStore {
   persistInbound(params: {
     channelSessionId: string;
     conversationId: string;
-    content: JsonValue;
+    content: InboundContent;
     platformTs: Date;
   }): Promise<{ id: string }>;
 
@@ -74,7 +75,7 @@ export interface TransportStore {
   getUnbatchedInbound(
     conversationId: string,
     afterId: string | null,
-  ): Promise<ReadonlyArray<{ id: string; content: JsonValue }>>;
+  ): Promise<ReadonlyArray<{ id: string; content: InboundContent }>>;
 
   /** Get a session by ID. */
   getSession(sessionId: string): Promise<Session | null>;
@@ -151,6 +152,9 @@ export class DrizzleTransportStore implements TransportStore {
         .from(channels)
         .where(eq(channels.type, type))
         .limit(1);
+      // `credentials` is opaque ciphertext (raw `jsonb()`, no Zod schema),
+      // so Drizzle infers it as `unknown`; cast restores the JsonValue
+      // contract the adapter wire format depends on.
       return (rows[0] as { id: string; identityMode: string; credentials: JsonValue }) ?? null;
     });
   }
@@ -250,7 +254,7 @@ export class DrizzleTransportStore implements TransportStore {
   async persistInbound(params: {
     channelSessionId: string;
     conversationId: string;
-    content: JsonValue;
+    content: InboundContent;
     platformTs: Date;
   }): Promise<{ id: string }> {
     return this.#db.transaction(async (tx) => {
@@ -263,7 +267,7 @@ export class DrizzleTransportStore implements TransportStore {
   async getUnbatchedInbound(
     conversationId: string,
     afterId: string | null,
-  ): Promise<ReadonlyArray<{ id: string; content: JsonValue }>> {
+  ): Promise<ReadonlyArray<{ id: string; content: InboundContent }>> {
     return this.#db.transaction(async (tx) => {
       const conditions = [eq(inboundMessages.conversationId, conversationId)];
       if (afterId) {
@@ -273,7 +277,7 @@ export class DrizzleTransportStore implements TransportStore {
         .select({ id: inboundMessages.id, content: inboundMessages.content })
         .from(inboundMessages)
         .where(and(...conditions))
-        .orderBy(inboundMessages.id) as Promise<ReadonlyArray<{ id: string; content: JsonValue }>>;
+        .orderBy(inboundMessages.id);
     });
   }
 
