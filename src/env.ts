@@ -1,5 +1,6 @@
 import { createEnv } from "@t3-oss/env-core";
 import { z } from "zod";
+import { bootstrapEnv } from "./env-bootstrap.js";
 import { resolveEnvFile } from "./secrets/env-file.js";
 
 // Apply _FILE convention for Docker secrets before Zod validation.
@@ -10,10 +11,15 @@ for (const name of ["COGMO_MASTER_KEY", "DATABASE_URL"]) {
   if (val !== undefined) resolved[name] = val;
 }
 
+/**
+ * Full runtime env. Extends `bootstrapEnv` (NODE_ENV / LOG_LEVEL) with
+ * infrastructure vars that only the server entrypoint needs. Bootstrap-tier
+ * modules (logger, seed) import `bootstrapEnv` directly so they don't
+ * trigger validation of the required infra URLs.
+ */
 export const env = createEnv({
+  extends: [bootstrapEnv],
   server: {
-    NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
-    LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
     DATABASE_URL: z.string().default("postgresql://cogmo@localhost/cogmo"),
     HINDSIGHT_URL: z.string().url(),
     INNGEST_MODE: z.enum(["connect", "serve"]).default("connect"),

@@ -47,8 +47,9 @@ export function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise
   // retry. Retry behaviour itself is exercised in with-retry.test.ts;
   // integration and e2e tests verify the pipeline, not the retry layer.
   // Production never sets this var.
-  // Read at call time — `vi.stubEnv` in tests mutates `process.env` after
-  // module load, and the typed `env` snapshot wouldn't reflect that.
+  // Test-only escape hatch — read at call time so `vi.stubEnv` works.
+  // Stays out of the typed env schema because it's a test concern, not
+  // production config.
   if (process.env.RETRY_DISABLED === "true") {
     return fn();
   }
