@@ -2,14 +2,14 @@ import {
   type AnyPgColumn,
   index,
   integer,
-  jsonb,
   pgEnum,
   pgTable,
   text,
   timestamp,
   uuid,
 } from "drizzle-orm/pg-core";
-import { pk, ts } from "../../db/helpers.js";
+import { jsonbZod, pk, ts } from "../../db/helpers.js";
+import { ContainerLabelsSchema, ResourceLimitsSchema } from "../types.js";
 
 // --- Enums ---
 
@@ -58,8 +58,8 @@ export const containers = pgTable(
     depth: integer("depth").notNull(),
     image: text("image").notNull(),
     runtime: containerRuntime("runtime").notNull(),
-    labels: jsonb("labels").notNull(), // ContainerLabelsSchema
-    resourceLimits: jsonb("resource_limits").notNull(), // ResourceLimitsSchema
+    labels: jsonbZod("labels", ContainerLabelsSchema).notNull(),
+    resourceLimits: jsonbZod("resource_limits", ResourceLimitsSchema).notNull(),
     status: containerStatus("status").notNull(),
     exitCode: integer("exit_code"),
     ttlExpiresAt: timestamp("ttl_expires_at", { withTimezone: true }).notNull(),
@@ -93,7 +93,7 @@ export const networks = pgTable(
     parentId: uuid("parent_id").references(() => containers.id),
     rootTaskId: uuid("root_task_id").notNull(),
     depth: integer("depth").notNull(),
-    labels: jsonb("labels").notNull(), // ContainerLabelsSchema
+    labels: jsonbZod("labels", ContainerLabelsSchema).notNull(),
     status: networkStatus("status").notNull(),
     ttlExpiresAt: timestamp("ttl_expires_at", { withTimezone: true }).notNull(),
     instanceId: uuid("instance_id")
@@ -120,7 +120,7 @@ export const volumes = pgTable(
     parentId: uuid("parent_id").references(() => containers.id),
     rootTaskId: uuid("root_task_id").notNull(),
     depth: integer("depth").notNull(),
-    labels: jsonb("labels").notNull(), // ContainerLabelsSchema
+    labels: jsonbZod("labels", ContainerLabelsSchema).notNull(),
     status: volumeStatus("status").notNull(),
     ttlExpiresAt: timestamp("ttl_expires_at", { withTimezone: true }).notNull(),
     instanceId: uuid("instance_id")

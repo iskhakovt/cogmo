@@ -2,15 +2,20 @@ import {
   boolean,
   index,
   integer,
-  jsonb,
   pgEnum,
   pgTable,
   text,
   timestamp,
   uuid,
 } from "drizzle-orm/pg-core";
-import { pk, ts } from "../../../db/helpers.js";
+import { jsonbZod, pk, ts } from "../../../db/helpers.js";
 import { containers } from "../../../sandbox/store/schema.js";
+import {
+  DevcontainerSpecSchema,
+  PrMetadataSchema,
+  ResourceUsageSchema,
+  WorktreeAssignmentSchema,
+} from "../types.js";
 
 // --- Enums ---
 
@@ -54,7 +59,7 @@ export const codingRepos = pgTable("coding_repos", {
   localPath: text("local_path").notNull(),
   defaultBranch: text("default_branch").notNull(),
   remoteUrl: text("remote_url").notNull(),
-  devcontainer: jsonb("devcontainer"), // DevcontainerSpecSchema; null = use cogmo/devbase
+  devcontainer: jsonbZod("devcontainer", DevcontainerSpecSchema), // null = use cogmo/devbase
   allowedBackends: codingBackend("allowed_backends").array().notNull(),
   verifyCommand: text("verify_command").notNull(),
   taskTokenBudget: integer("task_token_budget").notNull(),
@@ -103,7 +108,7 @@ export const codingTasks = pgTable("coding_tasks", {
   // shape so the two fields are atomic by construction (no "half-allocated"
   // state). Null until allocate-worktree runs — same lifecycle pattern as
   // session_id, container_id, plan, etc. on this table.
-  worktreeAssignment: jsonb("worktree_assignment"), // WorktreeAssignmentSchema
+  worktreeAssignment: jsonbZod("worktree_assignment", WorktreeAssignmentSchema),
   sessionId: text("session_id"), // CLI session id captured on first event
   containerId: uuid("container_id").references(() => containers.id), // set after sandbox.createTaskContainer
   allowPrivilegedRunc: boolean("allow_privileged_runc").notNull(), // explicit at insert (no default)
@@ -113,10 +118,10 @@ export const codingTasks = pgTable("coding_tasks", {
   // null until the draft PR step populates it. Replaces the prior
   // `pr_url TEXT` column (no in-flight data — slice 4 is the first to
   // populate PR state).
-  prMetadata: jsonb("pr_metadata"),
+  prMetadata: jsonbZod("pr_metadata", PrMetadataSchema),
   status: codingTaskStatus("status").notNull(),
   failureReason: text("failure_reason"),
-  resourceUsage: jsonb("resource_usage"), // ResourceUsageSchema; null = no stats poll yet
+  resourceUsage: jsonbZod("resource_usage", ResourceUsageSchema), // null = no stats poll yet
   createdAt: ts(),
 });
 

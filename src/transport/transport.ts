@@ -2,10 +2,10 @@ import { existsSync, mkdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
-import type { JsonValue } from "type-fest";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import { ProfileInUseError, UniqueViolationError } from "../agent/store/errors.js";
 import type { AgentStore, ConversationSummary, Profile } from "../agent/store/index.js";
+import type { ToolSet } from "../agent/store/schema.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
@@ -18,13 +18,14 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import type { SkillRunner } from "../skills/runner.js";
 import type { SkillStore } from "../skills/store/index.js";
 import type { AttachmentStore } from "./attachment-store.js";
+import type { InboundContent } from "./content.js";
 import type { Session, TransportStore } from "./store/index.js";
 
 export interface ProfileInput {
   name: string;
   basePrompt: string;
   model: string;
-  toolSet: JsonValue;
+  toolSet: ToolSet;
   // summarizationModel / extractionModel are profile-level fields in the DB but not yet exposed
   // via Transport — /profile edit doesn't cover them. Add back here when the dialog does.
 }
@@ -128,7 +129,7 @@ export interface Transport {
   closeSession(sessionId: string): Promise<void>;
   emit(
     sessionId: string,
-    content: JsonValue,
+    content: InboundContent,
     platformTs: Date,
   ): Promise<Result<void, TransportError>>;
   /** Upload an attachment (image, file) as raw bytes to storage. Returns the storage path. */

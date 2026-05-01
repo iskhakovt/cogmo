@@ -1,12 +1,7 @@
 import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
-import {
-  type ContainerLabels,
-  ContainerLabelsSchema,
-  type ResourceLimits,
-  ResourceLimitsSchema,
-} from "../types.js";
+import type { ContainerLabels, ResourceLimits } from "../types.js";
 import { cogmoInstances, containers, networks, volumes } from "./schema.js";
 
 export type ContainerRuntime = "sysbox-runc" | "runc";
@@ -256,8 +251,6 @@ export class DrizzleSandboxStore implements SandboxStore {
     ttlExpiresAt: Date;
     instanceId: string;
   }): Promise<ContainerRow> {
-    const labels = ContainerLabelsSchema.parse(params.labels);
-    const resourceLimits = ResourceLimitsSchema.parse(params.resourceLimits);
     return this.#db.transaction(async (tx) => {
       const row = single(
         await tx
@@ -269,15 +262,15 @@ export class DrizzleSandboxStore implements SandboxStore {
             depth: params.depth,
             image: params.image,
             runtime: params.runtime,
-            labels,
-            resourceLimits,
+            labels: params.labels,
+            resourceLimits: params.resourceLimits,
             status: "starting",
             ttlExpiresAt: params.ttlExpiresAt,
             instanceId: params.instanceId,
           })
           .returning(),
       );
-      return parseContainerRow(row);
+      return row;
     });
   }
 
@@ -305,7 +298,7 @@ export class DrizzleSandboxStore implements SandboxStore {
   async getContainer(id: string): Promise<ContainerRow | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(containers).where(eq(containers.id, id)).limit(1);
-      return rows[0] ? parseContainerRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
@@ -316,39 +309,36 @@ export class DrizzleSandboxStore implements SandboxStore {
         .from(containers)
         .where(eq(containers.dockerId, dockerId))
         .limit(1);
-      return rows[0] ? parseContainerRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
   async listContainersForInstance(instanceId: string): Promise<readonly ContainerRow[]> {
-    return this.#db.transaction(async (tx) => {
-      const rows = await tx
+    return this.#db.transaction((tx) =>
+      tx
         .select()
         .from(containers)
         .where(eq(containers.instanceId, instanceId))
-        .orderBy(asc(containers.createdAt));
-      return rows.map(parseContainerRow);
-    });
+        .orderBy(asc(containers.createdAt)),
+    );
   }
 
   async listContainersForTask(rootTaskId: string): Promise<readonly ContainerRow[]> {
-    return this.#db.transaction(async (tx) => {
-      const rows = await tx
+    // depth DESC: callers iterate to tear down children before parents
+    // (a parent reaped first leaves orphaned children that the daemon
+    // refuses to remove because they reference the parent's namespace).
+    return this.#db.transaction((tx) =>
+      tx
         .select()
         .from(containers)
-        // depth DESC: callers iterate to tear down children before parents
-        // (a parent reaped first leaves orphaned children that the daemon
-        // refuses to remove because they reference the parent's namespace).
         .where(and(eq(containers.rootTaskId, rootTaskId)))
-        .orderBy(desc(containers.depth));
-      return rows.map(parseContainerRow);
-    });
+        .orderBy(desc(containers.depth)),
+    );
   }
 
   // --- Networks ---
 
   async insertNetwork(params: SandboxObjectInsert): Promise<NetworkRow> {
-    const labels = ContainerLabelsSchema.parse(params.labels);
     return this.#db.transaction(async (tx) => {
       const row = single(
         await tx
@@ -358,14 +348,14 @@ export class DrizzleSandboxStore implements SandboxStore {
             parentId: params.parentId,
             rootTaskId: params.rootTaskId,
             depth: params.depth,
-            labels,
+            labels: params.labels,
             status: "created",
             ttlExpiresAt: params.ttlExpiresAt,
             instanceId: params.instanceId,
           })
           .returning(),
       );
-      return parseNetworkRow(row);
+      return row;
     });
   }
 
@@ -378,49 +368,46 @@ export class DrizzleSandboxStore implements SandboxStore {
   async getNetwork(id: string): Promise<NetworkRow | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(networks).where(eq(networks.id, id)).limit(1);
-      return rows[0] ? parseNetworkRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
   async getNetworkByDockerId(dockerId: string): Promise<NetworkRow | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(networks).where(eq(networks.dockerId, dockerId)).limit(1);
-      return rows[0] ? parseNetworkRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
   async listNetworksForInstance(instanceId: string): Promise<readonly NetworkRow[]> {
-    return this.#db.transaction(async (tx) => {
-      // depth DESC, then createdAt DESC: callers (the reaper) iterate
-      // the result and reap each row. If a daemon-side parent-child
-      // dependency ever shows up among networks (today none does, but
-      // `parent_id` + `depth` are in the schema for it), removing the
-      // parent first would orphan the children. Ordering matches
-      // listContainersForInstance / listNetworksForTask.
-      const rows = await tx
+    // depth DESC, then createdAt DESC: callers (the reaper) iterate the
+    // result and reap each row. If a daemon-side parent-child dependency
+    // ever shows up among networks (today none does, but `parent_id` +
+    // `depth` are in the schema for it), removing the parent first would
+    // orphan the children. Ordering matches listContainersForInstance /
+    // listNetworksForTask.
+    return this.#db.transaction((tx) =>
+      tx
         .select()
         .from(networks)
         .where(eq(networks.instanceId, instanceId))
-        .orderBy(desc(networks.depth), desc(networks.createdAt));
-      return rows.map(parseNetworkRow);
-    });
+        .orderBy(desc(networks.depth), desc(networks.createdAt)),
+    );
   }
 
   async listNetworksForTask(rootTaskId: string): Promise<readonly NetworkRow[]> {
-    return this.#db.transaction(async (tx) => {
-      const rows = await tx
+    return this.#db.transaction((tx) =>
+      tx
         .select()
         .from(networks)
         .where(eq(networks.rootTaskId, rootTaskId))
-        .orderBy(desc(networks.depth));
-      return rows.map(parseNetworkRow);
-    });
+        .orderBy(desc(networks.depth)),
+    );
   }
 
   // --- Volumes ---
 
   async insertVolume(params: SandboxObjectInsert): Promise<VolumeRow> {
-    const labels = ContainerLabelsSchema.parse(params.labels);
     return this.#db.transaction(async (tx) => {
       const row = single(
         await tx
@@ -430,14 +417,14 @@ export class DrizzleSandboxStore implements SandboxStore {
             parentId: params.parentId,
             rootTaskId: params.rootTaskId,
             depth: params.depth,
-            labels,
+            labels: params.labels,
             status: "created",
             ttlExpiresAt: params.ttlExpiresAt,
             instanceId: params.instanceId,
           })
           .returning(),
       );
-      return parseVolumeRow(row);
+      return row;
     });
   }
 
@@ -450,97 +437,38 @@ export class DrizzleSandboxStore implements SandboxStore {
   async getVolume(id: string): Promise<VolumeRow | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(volumes).where(eq(volumes.id, id)).limit(1);
-      return rows[0] ? parseVolumeRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
   async getVolumeByDockerId(dockerId: string): Promise<VolumeRow | null> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(volumes).where(eq(volumes.dockerId, dockerId)).limit(1);
-      return rows[0] ? parseVolumeRow(rows[0]) : null;
+      return rows[0] ?? null;
     });
   }
 
   async listVolumesForInstance(instanceId: string): Promise<readonly VolumeRow[]> {
-    return this.#db.transaction(async (tx) => {
-      // depth DESC, then createdAt DESC — same reasoning as
-      // listNetworksForInstance: the reaper reaps the result in order,
-      // and a daemon-side parent-child dependency among volumes (none
-      // today, but the schema supports it) needs the leaf reaped
-      // before the root.
-      const rows = await tx
+    // depth DESC, then createdAt DESC — same reasoning as
+    // listNetworksForInstance: the reaper reaps the result in order, and
+    // a daemon-side parent-child dependency among volumes (none today, but
+    // the schema supports it) needs the leaf reaped before the root.
+    return this.#db.transaction((tx) =>
+      tx
         .select()
         .from(volumes)
         .where(eq(volumes.instanceId, instanceId))
-        .orderBy(desc(volumes.depth), desc(volumes.createdAt));
-      return rows.map(parseVolumeRow);
-    });
+        .orderBy(desc(volumes.depth), desc(volumes.createdAt)),
+    );
   }
 
   async listVolumesForTask(rootTaskId: string): Promise<readonly VolumeRow[]> {
-    return this.#db.transaction(async (tx) => {
-      const rows = await tx
+    return this.#db.transaction((tx) =>
+      tx
         .select()
         .from(volumes)
         .where(eq(volumes.rootTaskId, rootTaskId))
-        .orderBy(desc(volumes.depth));
-      return rows.map(parseVolumeRow);
-    });
+        .orderBy(desc(volumes.depth)),
+    );
   }
-}
-
-/**
- * Validate JSONB columns at the store boundary (CLAUDE.md rule: every JSONB
- * column has a Zod schema enforced on read and write). Drizzle's row type
- * marks `labels` / `resource_limits` as `unknown`; we narrow here.
- */
-function parseContainerRow(row: typeof containers.$inferSelect): ContainerRow {
-  return {
-    id: row.id,
-    dockerId: row.dockerId,
-    parentId: row.parentId,
-    rootTaskId: row.rootTaskId,
-    depth: row.depth,
-    image: row.image,
-    runtime: row.runtime,
-    labels: ContainerLabelsSchema.parse(row.labels),
-    resourceLimits: ResourceLimitsSchema.parse(row.resourceLimits),
-    status: row.status,
-    exitCode: row.exitCode,
-    ttlExpiresAt: row.ttlExpiresAt,
-    startedAt: row.startedAt,
-    exitedAt: row.exitedAt,
-    instanceId: row.instanceId,
-    createdAt: row.createdAt,
-  };
-}
-
-function parseNetworkRow(row: typeof networks.$inferSelect): NetworkRow {
-  return {
-    id: row.id,
-    dockerId: row.dockerId,
-    parentId: row.parentId,
-    rootTaskId: row.rootTaskId,
-    depth: row.depth,
-    labels: ContainerLabelsSchema.parse(row.labels),
-    status: row.status,
-    ttlExpiresAt: row.ttlExpiresAt,
-    instanceId: row.instanceId,
-    createdAt: row.createdAt,
-  };
-}
-
-function parseVolumeRow(row: typeof volumes.$inferSelect): VolumeRow {
-  return {
-    id: row.id,
-    dockerId: row.dockerId,
-    parentId: row.parentId,
-    rootTaskId: row.rootTaskId,
-    depth: row.depth,
-    labels: ContainerLabelsSchema.parse(row.labels),
-    status: row.status,
-    ttlExpiresAt: row.ttlExpiresAt,
-    instanceId: row.instanceId,
-    createdAt: row.createdAt,
-  };
 }

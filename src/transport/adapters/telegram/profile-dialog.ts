@@ -17,7 +17,6 @@
  * routes the text here instead of emitting to the agent.
  */
 
-import type { JsonValue } from "type-fest";
 import type { Profile } from "../../../agent/store/index.js";
 import type { Transport } from "../../transport.js";
 import type { TelegramCommandContext } from "./commands.js";
@@ -252,7 +251,7 @@ export class ProfileDialogs {
         name: state.name,
         basePrompt: state.draft.basePrompt ?? "",
         model: state.draft.model ?? "",
-        toolSet: defaultToolSetFor(state) as JsonValue,
+        toolSet: defaultToolSetFor(state),
       });
       if (res.isErr()) {
         await ctx.reply(friendlyError(res.error));

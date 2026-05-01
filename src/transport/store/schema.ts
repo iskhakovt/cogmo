@@ -11,12 +11,18 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { conversations, users } from "../../agent/store/schema.js";
-import { pk, ts } from "../../db/helpers.js";
+import { jsonbZod, pk, ts } from "../../db/helpers.js";
+import { InboundContentSchema } from "../content.js";
 
 export const channels = pgTable("channels", {
   id: pk(),
   type: text("type").notNull(), // 'telegram' | 'cli' | 'slack' | 'web'
-  credentials: jsonb("credentials").notNull(), // encrypted: token, OAuth, etc.
+  // OPAQUE — encrypted ciphertext or plaintext credentials handed back to the
+  // adapter SDK unchanged (Telegram bot token, OAuth bundle, etc.). Cogmo
+  // never inspects the contents, so it stays raw `jsonb` rather than being
+  // gated by a Zod schema (CLAUDE.md JSONB rule explicitly exempts opaque
+  // payloads).
+  credentials: jsonb("credentials").notNull(),
   identityMode: text("identity_mode").notNull(), // 'fixed' | 'mapped' | 'create'
   createdAt: ts(),
 });
@@ -53,7 +59,7 @@ export const inboundMessages = pgTable("inbound_messages", {
   conversationId: uuid("conversation_id")
     .notNull()
     .references(() => conversations.id), // denormalized for query performance
-  content: jsonb("content").notNull(), // structured content (text, images, files, voice)
+  content: jsonbZod("content", InboundContentSchema).notNull(),
   platformTs: timestamp("platform_ts", { withTimezone: true }).notNull(), // when the user sent it
   createdAt: ts(),
 });

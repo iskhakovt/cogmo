@@ -1,19 +1,49 @@
-import type { JsonValue } from "type-fest";
+import { z } from "zod";
 import type { ContentBlock } from "../llm/types.js";
 
 /**
- * Convert message content to displayable text.
+ * Inbound block shapes — what adapters pack into `inbound_messages.content`.
+ * `text` is a plain text run; `image` carries either an S3 path (after
+ * `uploadAttachment`) or inline base64/url data.
  *
- * TODO: Replace with proper InboundContent schema (Zod).
- * For now, content is JsonValue — strings pass through, objects get stringified.
+ * The two image variants share `type: "image"`, so they live in a single
+ * object schema with `path` and `data` both optional and a `refine` that
+ * requires at least one. `discriminatedUnion` can't represent overlapping
+ * literals, and the alternative — splitting into two object schemas in a
+ * `z.union` — would deserialise ambiguously when both keys are present.
  */
-export function contentToText(content: JsonValue): string {
+const InboundTextBlockSchema = z.object({
+  type: z.literal("text"),
+  text: z.string(),
+});
+
+const InboundImageBlockSchema = z
+  .object({
+    type: z.literal("image"),
+    path: z.string().optional(),
+    data: z.string().optional(),
+    mediaType: z.string(),
+    source: z.enum(["base64", "url"]).optional(),
+  })
+  .refine((v) => v.path != null || v.data != null, {
+    message: "image block requires either path or data",
+  });
+
+const InboundBlockSchema = z.union([InboundTextBlockSchema, InboundImageBlockSchema]);
+
+/**
+ * Inbound message content as persisted in `inbound_messages.content`.
+ * A bare string is the wire-cheap form for text-only messages; the array
+ * form is used when an adapter packages text + attachments together.
+ */
+export const InboundContentSchema = z.union([z.string(), z.array(InboundBlockSchema)]);
+export type InboundContent = z.infer<typeof InboundContentSchema>;
+
+export function contentToText(content: InboundContent): string {
   return typeof content === "string" ? content : JSON.stringify(content);
 }
 
-/**
- * Inbound image reference — S3 path, needs resolution before sending to LLM.
- */
+/** Inbound image reference — S3 path, needs resolution before sending to LLM. */
 export interface ImageRef {
   type: "image_ref";
   path: string;
@@ -25,42 +55,32 @@ export type InboundBlock = ContentBlock | ImageRef;
 /**
  * Convert inbound message content to blocks.
  *
- * Returns a mix of ContentBlock (ready for LLM) and ImageRef (needs S3 resolution).
- * The orchestrator resolves ImageRefs before passing to the agent loop.
+ * Returns a mix of ContentBlock (ready for LLM) and ImageRef (needs S3
+ * resolution). The orchestrator resolves ImageRefs before passing to the
+ * agent loop.
  */
-export function contentToBlocks(content: JsonValue): InboundBlock[] {
+export function contentToBlocks(content: InboundContent): InboundBlock[] {
   if (typeof content === "string") {
     return [{ type: "text", text: content }];
   }
 
-  if (Array.isArray(content)) {
-    return content.flatMap((item) => contentToBlocks(item as JsonValue));
-  }
-
-  if (content !== null && typeof content === "object") {
-    const obj = content as Record<string, unknown>;
-
-    // Image reference with S3 path — emitted by adapters after uploadAttachment
-    if (obj.type === "image" && typeof obj.path === "string" && typeof obj.mediaType === "string") {
-      return [{ type: "image_ref", path: obj.path as string, mediaType: obj.mediaType as string }];
+  return content.flatMap<InboundBlock>((block) => {
+    if (block.type === "text") {
+      return [{ type: "text", text: block.text }];
     }
-
-    // Image with inline data
-    if (obj.type === "image" && typeof obj.data === "string" && typeof obj.mediaType === "string") {
+    if (block.path != null) {
+      return [{ type: "image_ref", path: block.path, mediaType: block.mediaType }];
+    }
+    if (block.data != null) {
       return [
         {
           type: "image",
-          source: (obj.source as "base64" | "url") ?? "base64",
-          data: obj.data as string,
-          mediaType: obj.mediaType as string,
+          source: block.source ?? "base64",
+          data: block.data,
+          mediaType: block.mediaType,
         },
       ];
     }
-
-    if (obj.type === "text" && typeof obj.text === "string") {
-      return [{ type: "text", text: obj.text as string }];
-    }
-  }
-
-  return [{ type: "text", text: JSON.stringify(content) }];
+    return [];
+  });
 }

@@ -1,4 +1,3 @@
-import type { JsonValue } from "type-fest";
 import { inngest } from "../../inngest/client.js";
 import { directInbound, directOutbound } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
@@ -8,7 +7,6 @@ import {
   type AdapterSetupResult,
   isRenderedMessage,
 } from "../adapter-module.js";
-import { contentToText } from "../content.js";
 
 export const channelType = "direct";
 
@@ -75,10 +73,11 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
             }),
           );
         } else {
+          const text = typeof content === "string" ? content : JSON.stringify(content);
           await inngest.send(
             directOutbound.create({
               platformAddress,
-              content: contentToText(content as JsonValue),
+              content: text,
             }),
           );
         }
