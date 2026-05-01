@@ -10,10 +10,10 @@
     "migrations"
   ],
   "scripts": {
-    "dev": "tsx scripts/dev-infra.ts",
-    "dev:app": "tsx watch src/index.ts",
-    "console": "tsx scripts/console.ts",
-    "dev:infra": "tsx scripts/dev-infra.ts --only",
+    "dev": "tsx --env-file-if-exists=.env scripts/dev-infra.ts",
+    "dev:app": "tsx --env-file-if-exists=.env watch src/index.ts",
+    "console": "tsx --env-file-if-exists=.env scripts/console.ts",
+    "dev:infra": "tsx --env-file-if-exists=.env scripts/dev-infra.ts --only",
     "build": "tsc && tsup",
     "typecheck": "tsc",
     "test": "vitest run --project unit",
