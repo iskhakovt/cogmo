@@ -28,6 +28,7 @@
 - [ ] `p2` Observer channel-scoped extraction — query conversation's active channels via `channel_sessions → channels`, pass to extraction prompt, extend Zod schema with optional `channelType`, let LLM decide if correction is channel-specific or general. Also: add `channelType` to `getCorrections()` return shape so dedup key distinguishes channel-scoped from global corrections.
 - [ ] `p3` Composite index on `steering_rules(profile_id, channel_type)` — premature at personal scale (~30 rules), add when rule count or query latency grows
 - [ ] `p3` grammY native test primitives — use `bot.handleUpdate()` + `bot.api.config.use(transformer)` instead of `vi.mock("grammy")`
+- [ ] `p3` Rename `DEPLOYMENT.md` → `deploy.md` and `PROGRESS.md` → `progress.md` for consistency with the project's lowercase-hyphenated naming convention. Update inbound links across the repo (`README.md`, `CLAUDE.md`, design docs, CI workflows, `todo.md`). Keep `README.md`/`CHANGELOG.md`/`CONTRIBUTING.md`/`CLAUDE.md` as-is — universal or tool-enforced conventions.
 - [ ] `p3` Telegram e2e via Test DC + tgintegration — real user on Telegram test servers, TypeScript/mtcute client
 - [ ] `p3` Consider web interface adapter for e2e testing
 - [ ] `p3` Evaluate DI library (ditox/awilix) when adapter count exceeds 5

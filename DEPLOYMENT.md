@@ -1,6 +1,6 @@
 # Deployment
 
-This is the canonical install guide. Cogmo is a single Node.js process distributed as a distroless Docker image; you bring the supporting infrastructure.
+This is the canonical install guide. Cogmo is a single Node.js process distributed as a Docker image; you bring the supporting infrastructure.
 
 ## Prerequisites
 
@@ -42,7 +42,41 @@ docker build -t cogmo .                              # version = "dev" (Dockerfi
 docker build --build-arg VERSION=0.0.0-dev -t cogmo . # override the embedded version string
 ```
 
-The image is `gcr.io/distroless/nodejs24-debian13`, runs as `nonroot`, and exposes port 9090 (health). Default entrypoint: `node --import ./dist/otel.js dist/main.js serve`. The `--import` hook initializes OpenTelemetry if configured (see [Observability](#observability)) and is a no-op otherwise.
+The image is based on `node:24-slim`, runs as the `node` user (UID 1000), and exposes port 9090 (health). Default entrypoint: `node --import ./dist/otel.js dist/main.js serve`. The `--import` hook initializes OpenTelemetry if configured (see [Observability](#observability)) and is a no-op otherwise.
+
+## Persistent state
+
+Cogmo writes runtime state under `/var/lib/cogmo` inside the container:
+
+| Path | Contents |
+|-|-|
+| `/var/lib/cogmo/skills` | Bare git repository for the skill library. Authoritative — losing it means losing every registered skill. |
+| `/var/lib/cogmo/repos` | Cached clones of external repos (read-only sources for skills). Regenerable. |
+| `/var/lib/cogmo/worktrees` | Ephemeral working trees for skill execution. Regenerable. |
+| `/var/lib/cogmo/askpass` | Short-lived credential helpers for git over HTTPS. Regenerable. |
+
+The image pre-creates all four with `node:node` ownership. If you don't bind-mount, state lives inside the container's writable layer and is lost when the container is removed — fine for kicking the tires, **never for production**: the skills repo is irreplaceable.
+
+### Bind-mount permissions
+
+When you bind-mount a host directory over `/var/lib/cogmo`, the host directory's ownership shadows the in-image chown. The container process runs as **UID 1000**, so the host directory must be owned by UID 1000 (or be world-writable, which you don't want).
+
+```bash
+# Once, before first start, on the host:
+sudo install -d -o 1000 -g 1000 /var/lib/cogmo
+
+docker run -d \
+  -v /var/lib/cogmo:/var/lib/cogmo \
+  ghcr.io/iskhakovt/cogmo:<version>
+```
+
+If UID 1000 collides with an existing user on your host, pick any free UID, chown the host directory to it, and pass `--user <uid>:<gid>` to `docker run` — the container will run under that UID instead of 1000.
+
+**Podman convenience.** Podman supports a `:U` mount flag that recursively chowns the bind-mount source to the container UID on each start (`-v /var/lib/cogmo:/var/lib/cogmo:U`). Avoids the pre-chown step at the cost of a recursive `chown` every time the container starts; pick whichever you prefer.
+
+**Kubernetes hostPath.** `securityContext.fsGroup` does not apply to hostPath volumes (only to dynamically provisioned PVs). Either pre-chown the host path, or run an `initContainer` with `runAsUser: 0` and `CAP_CHOWN` to fix permissions before the main container starts.
+
+**NixOS.** Use a `systemd.tmpfiles.rules` entry like `"d /var/lib/cogmo 0750 1000 1000 -"` so the directory exists with the right owner before the unit starts.
 
 ## Configuration
 
