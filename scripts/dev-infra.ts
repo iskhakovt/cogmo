@@ -132,6 +132,20 @@ async function main() {
     HINDSIGHT_URL: hindsightUrl,
   };
 
+  // Write the resolved infra URLs to a sidecar env file so other dev tools
+  // (e.g. `pnpm console`, ad-hoc `tsx --env-file=.dev/env scripts/foo.ts`)
+  // can pick them up via Node's `--env-file-if-exists=.dev/env`. Filtered
+  // to the truly-dynamic vars — paths are project-local and don't need
+  // exporting; secrets like COGMO_MASTER_KEY stay in `.dev/master-key`.
+  const sidecarKeys = [
+    "DATABASE_URL",
+    "INNGEST_BASE_URL",
+    "INNGEST_CONNECT_GATEWAY_URL",
+    "HINDSIGHT_URL",
+  ];
+  const sidecar = sidecarKeys.map((k) => `${k}=${envVars[k as keyof typeof envVars]}`).join("\n");
+  writeFileSync(join(DEV_ROOT, "env"), `${sidecar}\n`);
+
   if (infraOnly) {
     console.log("--- Environment variables ---\n");
     for (const [k, v] of Object.entries(envVars)) {
