@@ -61,6 +61,11 @@ async function main() {
   // Build env vars
   const databaseUrl = `postgresql://cogmo@${pg.getHost()}:${pg.getMappedPort(5432)}/cogmo`;
   const inngestBaseUrl = `http://${inn.getHost()}:${inn.getMappedPort(8288)}`;
+  // Inngest dev server exposes the connect WebSocket gateway on a separate
+  // port (8289). The Inngest SDK's `connect()` reads this env var; without
+  // it the SDK falls back to a default that doesn't match the local
+  // container, manifesting as "Reconnecting after failure" in a loop.
+  const inngestConnectGatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;
   const hindsightUrl = `http://${hindsightContainer.getHost()}:${hindsightContainer.getMappedPort(8888)}`;
 
   // Override the prod-flavoured `/var/lib/cogmo/...` and `/run/cogmo/...`
@@ -123,6 +128,7 @@ async function main() {
     COGMO_MASTER_KEY: masterKey,
     DATABASE_URL: databaseUrl,
     INNGEST_BASE_URL: inngestBaseUrl,
+    INNGEST_CONNECT_GATEWAY_URL: inngestConnectGatewayUrl,
     HINDSIGHT_URL: hindsightUrl,
   };
 

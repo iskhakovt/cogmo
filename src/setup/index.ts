@@ -1,5 +1,6 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
+import postgres from "postgres";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import * as schema from "../db/schemas.js";
 import { logger } from "../logger.js";
@@ -46,7 +47,12 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
 
   const databaseUrl =
     resolveEnvFile(process.env, "DATABASE_URL") ?? "postgresql://cogmo@localhost/cogmo";
-  const db = drizzle({ connection: databaseUrl, schema });
+  // Mirror `db/index.ts` / `seed.ts`: route postgres NOTICEs through pino
+  // so the driver's default `console.log` doesn't spew during migrations.
+  const client = postgres(databaseUrl, {
+    onnotice: (n) => logger.trace({ pgNotice: n }, "postgres notice"),
+  });
+  const db = drizzle({ client, schema });
 
   try {
     // For non-interactive: validate env + credentials before any DB mutation,
