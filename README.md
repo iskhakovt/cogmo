@@ -33,7 +33,7 @@ Cogmo runs as a single container that talks to your own infrastructure. You prov
 
 Cogmo provides:
 
-- A distroless Docker image at `ghcr.io/iskhakovt/cogmo` (released on every semantic-release; check [packages](https://github.com/iskhakovt/cogmo/pkgs/container/cogmo) for the latest tag)
+- A Docker image at `ghcr.io/iskhakovt/cogmo` (released on every semantic-release; check [packages](https://github.com/iskhakovt/cogmo/pkgs/container/cogmo) for the latest tag)
 - A guided setup wizard (`cogmo setup`) that validates credentials live and writes them encrypted to your DB
 - A `serve` entrypoint that connects to Inngest and starts your channel adapters
 
