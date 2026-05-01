@@ -66,11 +66,12 @@ async function main() {
   const { execSync } = await import("node:child_process");
   execSync("tsx src/main.ts seed", {
     stdio: "inherit",
-    env: { ...process.env, DATABASE_URL: databaseUrl },
+    env: { NODE_ENV: "development", ...process.env, DATABASE_URL: databaseUrl },
   });
   console.log("Seed complete.\n");
 
   const envVars = {
+    NODE_ENV: process.env.NODE_ENV ?? "development",
     DATABASE_URL: databaseUrl,
     INNGEST_BASE_URL: inngestBaseUrl,
     HINDSIGHT_URL: hindsightUrl,
