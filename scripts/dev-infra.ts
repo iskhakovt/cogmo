@@ -20,31 +20,18 @@ async function main() {
 
   console.log("Starting dev infrastructure...\n");
 
+  function startWithProgress<T>(name: string, factory: () => Promise<T>): Promise<T> {
+    console.log(`  ${name} starting...`);
+    return factory().then((ct) => {
+      console.log(`  ${name} ready`);
+      return ct;
+    });
+  }
+
   const [pg, _rd, inn] = await Promise.all([
-    c
-      .postgres(network)
-      .withReuse()
-      .start()
-      .then((ct) => {
-        console.log("  Postgres ready");
-        return ct;
-      }),
-    c
-      .redis(network)
-      .withReuse()
-      .start()
-      .then((ct) => {
-        console.log("  Redis ready");
-        return ct;
-      }),
-    c
-      .inngest(network)
-      .withReuse()
-      .start()
-      .then((ct) => {
-        console.log("  Inngest ready");
-        return ct;
-      }),
+    startWithProgress("Postgres", () => c.postgres(network).withReuse().start()),
+    startWithProgress("Redis", () => c.redis(network).withReuse().start()),
+    startWithProgress("Inngest", () => c.inngest(network).withReuse().start()),
   ]);
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -53,8 +40,9 @@ async function main() {
     process.exit(1);
   }
 
-  const hindsightContainer = await c.hindsight(network, { apiKey }).withReuse().start();
-  console.log("  Hindsight ready");
+  const hindsightContainer = await startWithProgress("Hindsight", () =>
+    c.hindsight(network, { apiKey }).withReuse().start(),
+  );
 
   // Build env vars
   const databaseUrl = `postgresql://cogmo@${pg.getHost()}:${pg.getMappedPort(5432)}/cogmo`;
