@@ -59,7 +59,7 @@ export type ResolveIdentityError =
  * locally rather than importing `SecretsStore` directly so this module stays
  * dependency-light — any object that can fetch a secret by name fits. */
 export interface GitHubIdentitySecretsLookup {
-  getSecret(name: string): Promise<string | null>;
+  getSecret(name: string): Promise<string | undefined>;
 }
 
 /**
@@ -78,7 +78,7 @@ export async function resolveGitHubIdentity(
   identityName: string,
 ): Promise<Result<GitHubIdentity, ResolveIdentityError>> {
   const raw = await secrets.getSecret(gitHubIdentitySecretName(identityName));
-  if (raw === null) return err({ code: "missing", identityName });
+  if (raw === undefined) return err({ code: "missing", identityName });
 
   let parsed: unknown;
   try {

@@ -111,10 +111,10 @@ export interface CodingStore {
   }): Promise<CodingRepoRow>;
 
   /** Look up a repo by its admin-set name. */
-  getRepoByName(name: string): Promise<CodingRepoRow | null>;
+  getRepoByName(name: string): Promise<CodingRepoRow | undefined>;
 
   /** Look up a repo by id. */
-  getRepoById(id: string): Promise<CodingRepoRow | null>;
+  getRepoById(id: string): Promise<CodingRepoRow | undefined>;
 
   /** List all repos in name order. */
   listRepos(): Promise<readonly CodingRepoRow[]>;
@@ -153,7 +153,7 @@ export interface CodingStore {
   /** List tasks for a conversation, ordered by createdAt DESC (newest first). */
   listTasksForConversation(conversationId: string): Promise<readonly CodingTaskRow[]>;
 
-  getTask(id: string): Promise<CodingTaskRow | null>;
+  getTask(id: string): Promise<CodingTaskRow | undefined>;
 
   /**
    * Persist the worktree assignment derived by the orchestrator's
@@ -320,17 +320,17 @@ export class DrizzleCodingStore implements CodingStore {
     });
   }
 
-  async getRepoByName(name: string): Promise<CodingRepoRow | null> {
+  async getRepoByName(name: string): Promise<CodingRepoRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(codingRepos).where(eq(codingRepos.name, name)).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
-  async getRepoById(id: string): Promise<CodingRepoRow | null> {
+  async getRepoById(id: string): Promise<CodingRepoRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(codingRepos).where(eq(codingRepos.id, id)).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -422,10 +422,10 @@ export class DrizzleCodingStore implements CodingStore {
     );
   }
 
-  async getTask(id: string): Promise<CodingTaskRow | null> {
+  async getTask(id: string): Promise<CodingTaskRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(codingTasks).where(eq(codingTasks.id, id)).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 

@@ -141,7 +141,7 @@ export class DefaultCtxHandler implements CtxHandler {
       );
     }
     const value = await this.#secretsStore.getSecret(name);
-    if (value === null) {
+    if (value === undefined) {
       await this.#audit("secrets.get", name, false, "secret_not_found");
       throw new CtxError("secret_not_found", `secret '${name}' is declared but not configured`);
     }

@@ -20,6 +20,18 @@ export default defineConfig({
           // and takes 2–7s each under parallel CPU contention. The default
           // 10s hookTimeout flakes once enough store files exist.
           hookTimeout: 30_000,
+          env: {
+            NODE_ENV: "test",
+            // Required by the runtime schema in `src/env.ts`. Modules that
+            // only need the bootstrap tier (`logger`, `seed`) import
+            // `env-bootstrap.ts` and don't trigger validation of these,
+            // but any test that touches code importing the full `env`
+            // (e.g. `db/index.ts`, `health.ts`) needs them populated.
+            // Unit tests mock the actual stores — these placeholders
+            // exist purely to satisfy the schema, the URLs are never hit.
+            HINDSIGHT_URL: "http://localhost:8080",
+            INNGEST_BASE_URL: "http://localhost:8288",
+          },
         },
       },
       {
@@ -48,6 +60,9 @@ export default defineConfig({
           globalSetup: "./test/e2e-setup.ts",
           testTimeout: 120_000,
           hookTimeout: 600_000,
+          env: {
+            NODE_ENV: "test",
+          },
         },
       },
     ],

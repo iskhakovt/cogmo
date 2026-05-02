@@ -74,7 +74,7 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("returns null when no users exist", async () => {
-      expect(await store.getFirstUser()).toBeNull();
+      expect(await store.getFirstUser()).toBeUndefined();
     });
   });
 
@@ -103,11 +103,11 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("returns null for unknown profile", async () => {
-      expect(await store.getProfile("019d0000-0000-7000-8000-000000000000")).toBeNull();
+      expect(await store.getProfile("019d0000-0000-7000-8000-000000000000")).toBeUndefined();
     });
 
     it("getDefaultProfile returns first profile", async () => {
-      expect(await store.getDefaultProfile()).toBeNull();
+      expect(await store.getDefaultProfile()).toBeUndefined();
       const { id } = await store.createProfile({
         userId: null,
         name: "default",
@@ -194,7 +194,7 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("returns null for unknown conversation", async () => {
-      expect(await store.getConversation("019d0000-0000-7000-8000-000000000000")).toBeNull();
+      expect(await store.getConversation("019d0000-0000-7000-8000-000000000000")).toBeUndefined();
     });
 
     it("rejects conversation with nonexistent userId", async () => {
@@ -265,7 +265,7 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("returns null for unknown message", async () => {
-      expect(await store.getMessage("019d0000-0000-7000-8000-000000000000")).toBeNull();
+      expect(await store.getMessage("019d0000-0000-7000-8000-000000000000")).toBeUndefined();
     });
 
     it("insertMessages batch inserts with tool_use/tool_result pairing", async () => {
@@ -370,7 +370,7 @@ describe("DrizzleAgentStore", () => {
       const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
-      expect(await store.getLastAssistantMessage(conversationId)).toBeNull();
+      expect(await store.getLastAssistantMessage(conversationId)).toBeUndefined();
 
       await store.insertMessage({
         conversationId,
@@ -422,7 +422,7 @@ describe("DrizzleAgentStore", () => {
 
     it("getLastTokens returns null when no assistant messages", async () => {
       const { conversationId } = await seedConversation();
-      expect(await store.getLastTokens(conversationId)).toBeNull();
+      expect(await store.getLastTokens(conversationId)).toBeUndefined();
     });
 
     it("getLastTokens returns the most recent assistant row's tokens", async () => {
@@ -477,7 +477,7 @@ describe("DrizzleAgentStore", () => {
       expect(rows[0]!.outputTokens).toBe(-1);
 
       // And getLastTokens still returns null — no assistant row exists.
-      expect(await store.getLastTokens(conversationId)).toBeNull();
+      expect(await store.getLastTokens(conversationId)).toBeUndefined();
     });
   });
 
@@ -654,10 +654,10 @@ describe("DrizzleAgentStore", () => {
       expect(time).toBeInstanceOf(Date);
     });
 
-    it("returns null for conversation with no messages", async () => {
+    it("returns undefined for conversation with no messages", async () => {
       const { conversationId } = await seedConversation();
       const time = await store.getLastMessageTime(conversationId);
-      expect(time).toBeNull();
+      expect(time).toBeUndefined();
     });
   });
 
@@ -699,8 +699,8 @@ describe("DrizzleAgentStore", () => {
 
       await store.deleteProvider(providerId);
 
-      expect(await store.getProvider(providerId)).toBeNull();
-      expect(await store.resolveProviderForModel("claude-test")).toBeNull();
+      expect(await store.getProvider(providerId)).toBeUndefined();
+      expect(await store.resolveProviderForModel("claude-test")).toBeUndefined();
     });
   });
 
@@ -734,9 +734,9 @@ describe("DrizzleAgentStore", () => {
       expect(resolved?.name).toBe("primary");
     });
 
-    it("returns null when no provider is registered for a model", async () => {
+    it("returns undefined when no provider is registered for a model", async () => {
       const resolved = await store.resolveProviderForModel("nonexistent-model");
-      expect(resolved).toBeNull();
+      expect(resolved).toBeUndefined();
     });
 
     it("removes model_providers by provider", async () => {
@@ -756,8 +756,8 @@ describe("DrizzleAgentStore", () => {
 
       await store.removeModelProvidersByProvider(providerId);
 
-      expect(await store.resolveProviderForModel("model-a")).toBeNull();
-      expect(await store.resolveProviderForModel("model-b")).toBeNull();
+      expect(await store.resolveProviderForModel("model-a")).toBeUndefined();
+      expect(await store.resolveProviderForModel("model-b")).toBeUndefined();
     });
 
     it("enforces unique (model, position)", async () => {
@@ -894,7 +894,7 @@ describe("DrizzleAgentStore", () => {
       ).id;
       expect(await store.getProfileOwner(orgId)).toEqual({ userId: null });
       expect(await store.getProfileOwner(mineId)).toEqual({ userId: u });
-      expect(await store.getProfileOwner("019d0000-0000-7000-8000-000000000000")).toBeNull();
+      expect(await store.getProfileOwner("019d0000-0000-7000-8000-000000000000")).toBeUndefined();
     });
 
     it("updateProfile applies partial changes and preserves unlisted fields", async () => {
@@ -978,7 +978,7 @@ describe("DrizzleAgentStore", () => {
         toolSet: [],
       });
       await store.deleteProfile(id);
-      expect(await store.getProfile(id)).toBeNull();
+      expect(await store.getProfile(id)).toBeUndefined();
     });
 
     it("deleteProfile throws ProfileInUseError when conversations reference it", async () => {
@@ -994,7 +994,7 @@ describe("DrizzleAgentStore", () => {
       const { ProfileInUseError } = await import("./errors.js");
       await expect(store.deleteProfile(profileId)).rejects.toThrow(ProfileInUseError);
       // Profile still exists — delete rolled back.
-      expect(await store.getProfile(profileId)).not.toBeNull();
+      expect(await store.getProfile(profileId)).not.toBeUndefined();
     });
 
     it("deleteProfile throws ProfileInUseError when only message history references it", async () => {
@@ -1141,7 +1141,7 @@ describe("DrizzleAgentStore", () => {
       expect(await store.findConversationByAlias(userId, "work")).toEqual({ conversationId });
 
       await store.setAlias(userId, conversationId, "personal");
-      expect(await store.findConversationByAlias(userId, "work")).toBeNull();
+      expect(await store.findConversationByAlias(userId, "work")).toBeUndefined();
       expect(await store.findConversationByAlias(userId, "personal")).toEqual({
         conversationId,
       });
@@ -1151,7 +1151,7 @@ describe("DrizzleAgentStore", () => {
       const { userId, conversationId } = await seedConversation();
       await store.setAlias(userId, conversationId, "work");
       await store.setAlias(userId, conversationId, null);
-      expect(await store.findConversationByAlias(userId, "work")).toBeNull();
+      expect(await store.findConversationByAlias(userId, "work")).toBeUndefined();
     });
 
     it("setAlias collision across conversations throws UniqueViolationError", async () => {
@@ -1171,7 +1171,7 @@ describe("DrizzleAgentStore", () => {
       const conv = (await store.createConversation({ userId: u1, profileId, isPrivate: true })).id;
       await store.setAlias(u1, conv, "shared");
       // u2 searching for same alias should see nothing
-      expect(await store.findConversationByAlias(u2, "shared")).toBeNull();
+      expect(await store.findConversationByAlias(u2, "shared")).toBeUndefined();
     });
   });
 

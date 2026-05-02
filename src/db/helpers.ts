@@ -1,6 +1,24 @@
 import { sql } from "drizzle-orm";
 import { customType, timestamp, uuid } from "drizzle-orm/pg-core";
+import type { Notice } from "postgres";
 import type { z } from "zod";
+import { logger } from "../logger.js";
+
+/**
+ * Shared `onnotice` handler for postgres-js clients. Postgres' informational
+ * levels (DEBUG / LOG / INFO / NOTICE) go to `trace` — most are migration-time
+ * `relation already exists` skips. WARNING (and any unrecognised severity) is
+ * promoted to `warn` so it surfaces at default `LOG_LEVEL=info`. ERROR-class
+ * messages don't reach `onnotice` — postgres-js rejects the query Promise.
+ */
+const NOTICE_INFORMATIONAL = new Set(["DEBUG", "LOG", "INFO", "NOTICE"]);
+export function pinoNoticeHandler(notice: Notice): void {
+  if (notice.severity && NOTICE_INFORMATIONAL.has(notice.severity)) {
+    logger.trace({ pgNotice: notice }, "postgres notice");
+  } else {
+    logger.warn({ pgNotice: notice }, "postgres notice");
+  }
+}
 
 /**
  * Extract exactly one row from a query result. Throws if zero or multiple rows.

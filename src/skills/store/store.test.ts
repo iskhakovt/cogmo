@@ -82,7 +82,7 @@ describe("DrizzleSkillStore", () => {
     });
 
     it("getSkillByName returns null for an unknown name", async () => {
-      expect(await store.getSkillByName("nope")).toBeNull();
+      expect(await store.getSkillByName("nope")).toBeUndefined();
     });
 
     it("listEnabledSkills excludes disabled rows and sorts by name", async () => {
@@ -170,7 +170,7 @@ describe("DrizzleSkillStore", () => {
         resolvedAt,
       });
 
-      expect(await store.getPendingDeploy(skill.id)).toBeNull();
+      expect(await store.getPendingDeploy(skill.id)).toBeUndefined();
     });
 
     it("getPendingDeploy returns null when no pending row exists", async () => {
@@ -183,7 +183,7 @@ describe("DrizzleSkillStore", () => {
         status: "live",
         classifierLog: STUB_LOG,
       });
-      expect(await store.getPendingDeploy(skill.id)).toBeNull();
+      expect(await store.getPendingDeploy(skill.id)).toBeUndefined();
     });
 
     it("resolveDeploy updates approvedBy + resolvedAt", async () => {
@@ -203,7 +203,7 @@ describe("DrizzleSkillStore", () => {
         approvedBy: null,
         resolvedAt,
       });
-      expect(await store.getPendingDeploy(skill.id)).toBeNull();
+      expect(await store.getPendingDeploy(skill.id)).toBeUndefined();
       // No public getter for skill_deploys today (P3.3 will add one); read
       // back via the schema directly to assert the audit fields landed.
       const rows = await db

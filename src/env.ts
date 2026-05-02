@@ -10,15 +10,31 @@ for (const name of ["COGMO_MASTER_KEY", "DATABASE_URL"]) {
   if (val !== undefined) resolved[name] = val;
 }
 
+/**
+ * Full runtime env, validated at module load. Server entrypoints (`cogmo
+ * serve`, `cogmo skills`) import this and get a typed `env` covering all
+ * the infrastructure vars they need. Bootstrap-tier code (`logger`,
+ * `with-retry`) reads `process.env` directly so a misconfigured env
+ * doesn't crash logging before the real error can surface — symmetric
+ * across both leaves.
+ */
 export const env = createEnv({
   server: {
-    NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+    NODE_ENV: z.enum(["development", "production", "test"]),
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
     DATABASE_URL: z.string().default("postgresql://cogmo@localhost/cogmo"),
     HINDSIGHT_URL: z.string().url(),
     INNGEST_MODE: z.enum(["connect", "serve"]).default("connect"),
     INNGEST_SERVE_PORT: z.coerce.number().default(3000),
-    INNGEST_DEV: z.coerce.boolean().default(true),
+    // `z.coerce.boolean()` is JS-truthy on any non-empty string —
+    // `INNGEST_DEV=false` or `INNGEST_DEV=0` would both come out `true`,
+    // which would force Dev mode in production and disable the SDK's
+    // Cloud-mode signature verification. Match the explicit "true" / "1"
+    // semantics the original raw-`process.env` check used.
+    INNGEST_DEV: z
+      .string()
+      .optional()
+      .transform((v) => v === "true" || v === "1"),
     INNGEST_EVENT_KEY: z.string().optional(),
     INNGEST_SIGNING_KEY: z.string().optional(),
     INNGEST_BASE_URL: z.string().url(),

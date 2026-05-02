@@ -90,7 +90,7 @@ describe("DrizzleTransportStore", () => {
     });
 
     it("returns null for unknown channel type", async () => {
-      expect(await store.getChannelByType("nonexistent")).toBeNull();
+      expect(await store.getChannelByType("nonexistent")).toBeUndefined();
     });
   });
 
@@ -118,7 +118,7 @@ describe("DrizzleTransportStore", () => {
 
       await store.closeSession(sessionId);
 
-      expect(await store.resolveSession(channelId, "user-123")).toBeNull();
+      expect(await store.resolveSession(channelId, "user-123")).toBeUndefined();
     });
 
     it("resolveSession ignores expired sessions", async () => {
@@ -136,7 +136,7 @@ describe("DrizzleTransportStore", () => {
         expiresAt: new Date("2020-01-01"),
       });
 
-      expect(await store.resolveSession(channelId, "user-expired")).toBeNull();
+      expect(await store.resolveSession(channelId, "user-expired")).toBeUndefined();
     });
 
     it("getSession returns by ID", async () => {
@@ -535,7 +535,7 @@ describe("DrizzleTransportStore", () => {
 
     it("returns null when no identity matches", async () => {
       const channelId = await seedChannel();
-      expect(await store.resolveUser(channelId, "unknown")).toBeNull();
+      expect(await store.resolveUser(channelId, "unknown")).toBeUndefined();
     });
   });
 });

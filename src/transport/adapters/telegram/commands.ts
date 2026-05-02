@@ -675,10 +675,6 @@ function errorMessage(err: TransportError): string {
     case "skill_deploy_register_failed":
       return `Approve failed: ${err.reason}`;
   }
-  // Exhaustive — if a new TransportError code is added, TypeScript will warn
-  // at call sites that return `string` (the inferred return becomes `string | undefined`).
-  // Belt-and-suspenders: surface a generic message rather than passing undefined to ctx.reply.
-  return "Something went wrong.";
 }
 
 function shortenId(id: string): string {

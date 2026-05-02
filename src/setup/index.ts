@@ -1,6 +1,8 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
+import postgres from "postgres";
 import { DrizzleAgentStore } from "../agent/store/index.js";
+import { pinoNoticeHandler } from "../db/helpers.js";
 import * as schema from "../db/schemas.js";
 import { logger } from "../logger.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
@@ -46,23 +48,8 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
 
   const databaseUrl =
     resolveEnvFile(process.env, "DATABASE_URL") ?? "postgresql://cogmo@localhost/cogmo";
-
-  // Suppress NOTICE-severity backend messages during setup. Drizzle's
-  // `migrate()` issues `CREATE SCHEMA IF NOT EXISTS drizzle` and
-  // `CREATE TABLE IF NOT EXISTS __drizzle_migrations` on every run, which
-  // postgres emits as "already exists, skipping" notices. Operator-facing
-  // wizard output should stay clean. WARNING+ still surfaces via logger.
-  const db = drizzle({
-    connection: {
-      url: databaseUrl,
-      onnotice: (notice) => {
-        if (notice.severity !== "NOTICE") {
-          logger.warn({ notice }, "postgres backend notice");
-        }
-      },
-    },
-    schema,
-  });
+  const client = postgres(databaseUrl, { onnotice: pinoNoticeHandler });
+  const db = drizzle({ client, schema });
 
   try {
     // For non-interactive: validate env + credentials before any DB mutation,
