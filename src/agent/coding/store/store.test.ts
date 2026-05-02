@@ -165,11 +165,11 @@ describe("DrizzleCodingStore", () => {
     it("removeRepo deletes the row", async () => {
       const id = await seedRepo();
       await store.removeRepo(id);
-      expect(await store.getRepoById(id)).toBeNull();
+      expect(await store.getRepoById(id)).toBeUndefined();
     });
 
     it("getRepoByName returns null for unknown name", async () => {
-      expect(await store.getRepoByName("nope")).toBeNull();
+      expect(await store.getRepoByName("nope")).toBeUndefined();
     });
   });
 
@@ -481,7 +481,7 @@ describe("DrizzleCodingStore", () => {
     });
 
     it("getTask returns null for unknown id", async () => {
-      expect(await store.getTask("019d0000-0000-7000-8000-000000000099")).toBeNull();
+      expect(await store.getTask("019d0000-0000-7000-8000-000000000099")).toBeUndefined();
     });
 
     it("supports evolution and signal_pipeline trigger sources with triggerRef", async () => {

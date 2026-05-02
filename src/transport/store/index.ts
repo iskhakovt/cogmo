@@ -23,7 +23,7 @@ export interface TransportStore {
   /** Find channel by type. */
   getChannelByType(
     type: string,
-  ): Promise<{ id: string; identityMode: string; credentials: JsonValue } | null>;
+  ): Promise<{ id: string; identityMode: string; credentials: JsonValue } | undefined>;
 
   /** Create a channel. */
   createChannel(params: {
@@ -33,7 +33,7 @@ export interface TransportStore {
   }): Promise<{ id: string }>;
 
   /** Find the active session for a platform address (not closed, not expired). */
-  resolveSession(channelId: string, platformAddress: string): Promise<Session | null>;
+  resolveSession(channelId: string, platformAddress: string): Promise<Session | undefined>;
 
   /** Create a new session linking a platform address to a conversation. */
   createSession(params: {
@@ -78,7 +78,7 @@ export interface TransportStore {
   ): Promise<ReadonlyArray<{ id: string; content: InboundContent }>>;
 
   /** Get a session by ID. */
-  getSession(sessionId: string): Promise<Session | null>;
+  getSession(sessionId: string): Promise<Session | undefined>;
 
   /** Find all active sessions for a conversation (for lifecycle management). */
   getActiveSessionsForConversation(conversationId: string): Promise<ReadonlyArray<Session>>;
@@ -97,7 +97,7 @@ export interface TransportStore {
   getReceiveAllSessions(conversationId: string): Promise<ReadonlyArray<Session>>;
 
   /** Resolve user by platform handle on a channel. Stub — identity resolution is a future feature. */
-  resolveUser(channelId: string, platformHandle: string): Promise<{ userId: string } | null>;
+  resolveUser(channelId: string, platformHandle: string): Promise<{ userId: string } | undefined>;
 
   /** Create a wildcard identity for a channel. */
   createWildcardIdentity(params: { userId: string; channelId: string }): Promise<{ id: string }>;
@@ -141,7 +141,7 @@ export class DrizzleTransportStore implements TransportStore {
 
   async getChannelByType(
     type: string,
-  ): Promise<{ id: string; identityMode: string; credentials: JsonValue } | null> {
+  ): Promise<{ id: string; identityMode: string; credentials: JsonValue } | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -155,7 +155,7 @@ export class DrizzleTransportStore implements TransportStore {
       // `credentials` is opaque ciphertext (raw `jsonb()`, no Zod schema),
       // so Drizzle infers it as `unknown`; cast restores the JsonValue
       // contract the adapter wire format depends on.
-      return (rows[0] as { id: string; identityMode: string; credentials: JsonValue }) ?? null;
+      return rows[0] as { id: string; identityMode: string; credentials: JsonValue } | undefined;
     });
   }
 
@@ -169,7 +169,7 @@ export class DrizzleTransportStore implements TransportStore {
     });
   }
 
-  async resolveSession(channelId: string, platformAddress: string): Promise<Session | null> {
+  async resolveSession(channelId: string, platformAddress: string): Promise<Session | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -191,7 +191,7 @@ export class DrizzleTransportStore implements TransportStore {
         )
         .orderBy(desc(channelSessions.id))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -281,7 +281,7 @@ export class DrizzleTransportStore implements TransportStore {
     });
   }
 
-  async getSession(sessionId: string): Promise<Session | null> {
+  async getSession(sessionId: string): Promise<Session | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -295,7 +295,7 @@ export class DrizzleTransportStore implements TransportStore {
         .from(channelSessions)
         .where(eq(channelSessions.id, sessionId))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -392,7 +392,10 @@ export class DrizzleTransportStore implements TransportStore {
     });
   }
 
-  async resolveUser(channelId: string, platformHandle: string): Promise<{ userId: string } | null> {
+  async resolveUser(
+    channelId: string,
+    platformHandle: string,
+  ): Promise<{ userId: string } | undefined> {
     return this.#db.transaction(async (tx) => {
       // Check wildcard first
       const wildcard = await tx
@@ -413,7 +416,7 @@ export class DrizzleTransportStore implements TransportStore {
           ),
         )
         .limit(1);
-      return exact[0] ?? null;
+      return exact[0];
     });
   }
 

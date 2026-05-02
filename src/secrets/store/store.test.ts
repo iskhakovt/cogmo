@@ -32,9 +32,9 @@ describe("DrizzleSecretsStore", () => {
       expect(value).toBe("sk-test-123");
     });
 
-    it("returns null for missing secret", async () => {
+    it("returns undefined for missing secret", async () => {
       const value = await store.getSecret("nonexistent");
-      expect(value).toBeNull();
+      expect(value).toBeUndefined();
     });
 
     it("upserts on duplicate name", async () => {
@@ -78,9 +78,9 @@ describe("DrizzleSecretsStore", () => {
       expect(value).toBe("secret-val");
     });
 
-    it("returns null for missing ID", async () => {
+    it("returns undefined for missing ID", async () => {
       const value = await store.getSecretById("019d0000-0000-7000-8000-000000000099");
-      expect(value).toBeNull();
+      expect(value).toBeUndefined();
     });
   });
 
@@ -137,7 +137,7 @@ describe("DrizzleSecretsStore", () => {
       await store.putSecret({ name: "to_delete", plaintext: "gone" });
       await store.deleteSecret("to_delete");
       const value = await store.getSecret("to_delete");
-      expect(value).toBeNull();
+      expect(value).toBeUndefined();
     });
   });
 

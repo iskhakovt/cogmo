@@ -4,6 +4,7 @@ build/
 coverage/
 test-results/
 .env
+.dev/
 *.tfvars
 !*.tfvars.example
 .claude/*

@@ -200,8 +200,8 @@ export interface ExecuteRollbackParams {
 export interface SkillStore {
   // --- skills ---
   insertSkill(params: InsertSkillParams): Promise<SkillRow>;
-  getSkillByName(name: string): Promise<SkillRow | null>;
-  getSkillById(id: string): Promise<SkillRow | null>;
+  getSkillByName(name: string): Promise<SkillRow | undefined>;
+  getSkillById(id: string): Promise<SkillRow | undefined>;
   /** Live (non-disabled) rows, ordered by name for stable tool-list output. */
   listEnabledSkills(): Promise<readonly SkillRow[]>;
   updateSkillSha(params: { id: string; gitSha: string }): Promise<void>;
@@ -222,9 +222,9 @@ export interface SkillStore {
   // --- skill_deploys ---
   insertDeploy(params: InsertDeployParams): Promise<SkillDeployRow>;
   /** Returns the single pending-approval deploy for a skill, or null. */
-  getPendingDeploy(skillId: string): Promise<SkillDeployRow | null>;
+  getPendingDeploy(skillId: string): Promise<SkillDeployRow | undefined>;
   /** Returns the deploy row by id, or null. */
-  getDeployById(id: string): Promise<SkillDeployRow | null>;
+  getDeployById(id: string): Promise<SkillDeployRow | undefined>;
   resolveDeploy(params: {
     id: string;
     status: SkillDeployStatus;
@@ -235,7 +235,7 @@ export interface SkillStore {
   // --- skill_runs ---
   insertRun(params: InsertRunParams): Promise<SkillRunRow>;
   updateRunResult(params: UpdateRunResultParams): Promise<void>;
-  getRun(id: string): Promise<SkillRunRow | null>;
+  getRun(id: string): Promise<SkillRunRow | undefined>;
 
   // --- skill_context_calls ---
   recordContextCall(params: RecordContextCallParams): Promise<void>;
@@ -270,17 +270,17 @@ export class DrizzleSkillStore implements SkillStore {
     });
   }
 
-  async getSkillByName(name: string): Promise<SkillRow | null> {
+  async getSkillByName(name: string): Promise<SkillRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(skills).where(eq(skills.name, name)).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
-  async getSkillById(id: string): Promise<SkillRow | null> {
+  async getSkillById(id: string): Promise<SkillRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(skills).where(eq(skills.id, id)).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -315,7 +315,7 @@ export class DrizzleSkillStore implements SkillStore {
         .from(skills)
         .where(eq(skills.name, params.name))
         .limit(1);
-      const existing = existingRows[0] ?? null;
+      const existing = existingRows[0];
 
       // No-op: branch tip already matches main AND the row is currently live.
       // The `!disabled` guard handles the deny-then-re-register case: a denied
@@ -608,21 +608,21 @@ export class DrizzleSkillStore implements SkillStore {
     });
   }
 
-  async getPendingDeploy(skillId: string): Promise<SkillDeployRow | null> {
+  async getPendingDeploy(skillId: string): Promise<SkillDeployRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select()
         .from(skillDeploys)
         .where(and(eq(skillDeploys.skillId, skillId), eq(skillDeploys.status, "pending_approval")))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
-  async getDeployById(id: string): Promise<SkillDeployRow | null> {
+  async getDeployById(id: string): Promise<SkillDeployRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(skillDeploys).where(eq(skillDeploys.id, id)).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -681,10 +681,10 @@ export class DrizzleSkillStore implements SkillStore {
     });
   }
 
-  async getRun(id: string): Promise<SkillRunRow | null> {
+  async getRun(id: string): Promise<SkillRunRow | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select().from(skillRuns).where(eq(skillRuns.id, id)).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 

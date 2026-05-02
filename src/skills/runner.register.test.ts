@@ -491,7 +491,7 @@ tier: wasm
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/invalid_branch/);
       // No skills row created.
-      expect(await store.getSkillByName("echo")).toBeNull();
+      expect(await store.getSkillByName("echo")).toBeUndefined();
     });
 
     it("rejects branch == 'refs/heads/main' too", async () => {
@@ -529,7 +529,7 @@ inputs:
       // main is unchanged — no half-deploy.
       expect(await getMainSha(repo.bare)).toBe(before);
       // No skills row.
-      expect(await store.getSkillByName("bad-schema")).toBeNull();
+      expect(await store.getSkillByName("bad-schema")).toBeUndefined();
     });
 
     it("rejects a manifest with an inputs schema ajv can't compile (runner prevalidate)", async () => {
@@ -558,7 +558,7 @@ inputs:
       // Either layer is acceptable — what matters is no main advance.
       expect(result.errors?.length).toBeGreaterThan(0);
       expect(await getMainSha(repo.bare)).toBe(before);
-      expect(await store.getSkillByName("bad-properties")).toBeNull();
+      expect(await store.getSkillByName("bad-properties")).toBeUndefined();
     });
   });
 
@@ -917,7 +917,7 @@ effects:
       ).rejects.toThrow(/simulated git update-ref failure/);
 
       // Both rows rolled back — no skills row, no skill_deploys row.
-      expect(await store.getSkillByName("would-be-skill")).toBeNull();
+      expect(await store.getSkillByName("would-be-skill")).toBeUndefined();
     });
   });
 });

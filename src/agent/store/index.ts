@@ -98,7 +98,7 @@ export interface AgentStore {
   /** Load a conversation by ID. */
   getConversation(
     conversationId: string,
-  ): Promise<{ id: string; userId: string; profileId: string; isPrivate: boolean } | null>;
+  ): Promise<{ id: string; userId: string; profileId: string; isPrivate: boolean } | undefined>;
 
   /** Insert a message (user or assistant). Returns the new message ID. `profileId` + `model` stamp the turn snapshot (see design/transport/overview.md → Profile and Model Stamping). */
   insertMessage(params: {
@@ -134,19 +134,19 @@ export interface AgentStore {
   /** Get the most recent assistant message for a conversation (for cursor chain). */
   getLastAssistantMessage(
     conversationId: string,
-  ): Promise<{ id: string; lastInboundMessageId: string } | null>;
+  ): Promise<{ id: string; lastInboundMessageId: string } | undefined>;
 
   /** Load full message history for a conversation, ordered by id. */
   getHistory(conversationId: string): Promise<ReadonlyArray<Message>>;
 
   /** Load a profile by ID (returns the full `Profile` including `userId` and `name`). */
-  getProfile(profileId: string): Promise<Profile | null>;
+  getProfile(profileId: string): Promise<Profile | undefined>;
 
   /** Get the first user (for bootstrapping). */
-  getFirstUser(): Promise<{ id: string } | null>;
+  getFirstUser(): Promise<{ id: string } | undefined>;
 
   /** Get the first profile (for bootstrapping). */
-  getDefaultProfile(): Promise<{ id: string } | null>;
+  getDefaultProfile(): Promise<{ id: string } | undefined>;
 
   /** Create a profile and return the full row. `userId: null` = org profile (read-only via Transport); `userId: <id>` = user profile (owned by that user). Throws `UniqueViolationError` on (user_id, name) collision. */
   createProfile(params: {
@@ -160,8 +160,8 @@ export interface AgentStore {
   /** List profiles visible to `userId`: org profiles (user_id IS NULL) + the user's own profiles. */
   listProfiles(userId: string): Promise<ReadonlyArray<Profile>>;
 
-  /** Return ownership info for a profile, or null if it doesn't exist. `userId: null` = org profile. */
-  getProfileOwner(profileId: string): Promise<{ userId: string | null } | null>;
+  /** Return ownership info for a profile, or `undefined` if the profile doesn't exist. The inner `userId: null` means "org profile" — that's a real value stored in the row, distinct from "row not found". */
+  getProfileOwner(profileId: string): Promise<{ userId: string | null } | undefined>;
 
   /** Update a profile in place. Caller must verify ownership. Throws `UniqueViolationError` on name collision. */
   updateProfile(profileId: string, changes: ProfileUpdates): Promise<Profile>;
@@ -182,7 +182,7 @@ export interface AgentStore {
   /** Load a single message by ID. */
   getMessage(
     messageId: string,
-  ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | null>;
+  ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | undefined>;
 
   /** Load active steering rules for a profile + active channels (ordered by priority). */
   getActiveRules(
@@ -196,20 +196,24 @@ export interface AgentStore {
   /** Upsert a core memory block. Creates if key doesn't exist, updates if it does. */
   upsertCoreMemoryBlock(params: { userId: string; key: string; content: string }): Promise<void>;
 
-  /** Get the timestamp of the most recent message in a conversation (any role). */
-  getLastMessageTime(conversationId: string): Promise<Date | null>;
+  /** Get the timestamp of the most recent message in a conversation (any role). `undefined` when no messages. */
+  getLastMessageTime(conversationId: string): Promise<Date | undefined>;
 
   /**
    * Get `{ inputTokens, outputTokens }` from the most recent assistant
-   * message, for the fast-path budget estimator. Returns `null` if no
-   * assistant row exists. Either field may be `null` (never written, e.g.
-   * legacy inputTokens column) or `-1` (pre-migration sentinel for
-   * outputTokens). The fast path treats both as "unknown → force count".
+   * message, for the fast-path budget estimator. Returns `undefined` if no
+   * assistant row exists. The inner `inputTokens` may be `null` (column was
+   * never written for legacy rows) or the actual integer; `-1` is the
+   * pre-migration sentinel for `outputTokens`. The fast path treats both
+   * as "unknown → force count".
    */
-  getLastTokens(conversationId: string): Promise<{
-    inputTokens: number | null;
-    outputTokens: number;
-  } | null>;
+  getLastTokens(conversationId: string): Promise<
+    | {
+        inputTokens: number | null;
+        outputTokens: number;
+      }
+    | undefined
+  >;
 
   // --- Conversation admin (Transport-facing) ---
 
@@ -222,11 +226,11 @@ export interface AgentStore {
   /** Upsert or clear a conversation's alias. `alias: null` removes the alias row. Throws `UniqueViolationError` if the alias is taken. */
   setAlias(userId: string, conversationId: string, alias: string | null): Promise<void>;
 
-  /** Resolve an alias to a conversation ID for a user. Returns null if no match. */
+  /** Resolve an alias to a conversation ID for a user. Returns `undefined` if no match. */
   findConversationByAlias(
     userId: string,
     alias: string,
-  ): Promise<{ conversationId: string } | null>;
+  ): Promise<{ conversationId: string } | undefined>;
 
   // --- Model discovery (Transport-facing) ---
 
@@ -248,14 +252,17 @@ export interface AgentStore {
   }): Promise<{ id: string }>;
 
   /** Get a provider by ID. */
-  getProvider(providerId: string): Promise<{
-    id: string;
-    name: string;
-    type: string;
-    baseUrl: string | null;
-    secretId: string;
-    attrs: ProviderAttrs;
-  } | null>;
+  getProvider(providerId: string): Promise<
+    | {
+        id: string;
+        name: string;
+        type: string;
+        baseUrl: string | null;
+        secretId: string;
+        attrs: ProviderAttrs;
+      }
+    | undefined
+  >;
 
   /** List all providers. */
   listProviders(): Promise<
@@ -280,14 +287,17 @@ export interface AgentStore {
   }): Promise<{ id: string }>;
 
   /** Resolve the best provider for a model (lowest position). */
-  resolveProviderForModel(model: string): Promise<{
-    id: string;
-    name: string;
-    type: string;
-    baseUrl: string | null;
-    secretId: string;
-    attrs: ProviderAttrs;
-  } | null>;
+  resolveProviderForModel(model: string): Promise<
+    | {
+        id: string;
+        name: string;
+        type: string;
+        baseUrl: string | null;
+        secretId: string;
+        attrs: ProviderAttrs;
+      }
+    | undefined
+  >;
 
   /**
    * List every provider registered for a model, ordered by position ASC
@@ -387,7 +397,7 @@ export class DrizzleAgentStore implements AgentStore {
 
   async getConversation(
     conversationId: string,
-  ): Promise<{ id: string; userId: string; profileId: string; isPrivate: boolean } | null> {
+  ): Promise<{ id: string; userId: string; profileId: string; isPrivate: boolean } | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -399,7 +409,7 @@ export class DrizzleAgentStore implements AgentStore {
         .from(conversations)
         .where(eq(conversations.id, conversationId))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -473,7 +483,7 @@ export class DrizzleAgentStore implements AgentStore {
 
   async getLastAssistantMessage(
     conversationId: string,
-  ): Promise<{ id: string; lastInboundMessageId: string } | null> {
+  ): Promise<{ id: string; lastInboundMessageId: string } | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -484,7 +494,7 @@ export class DrizzleAgentStore implements AgentStore {
         .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
         .orderBy(desc(messages.id))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -499,7 +509,7 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getProfile(profileId: string): Promise<Profile | null> {
+  async getProfile(profileId: string): Promise<Profile | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -516,21 +526,21 @@ export class DrizzleAgentStore implements AgentStore {
         .from(profiles)
         .where(eq(profiles.id, profileId))
         .limit(1);
-      return (rows[0] as Profile | undefined) ?? null;
+      return rows[0];
     });
   }
 
-  async getFirstUser(): Promise<{ id: string } | null> {
+  async getFirstUser(): Promise<{ id: string } | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select({ id: users.id }).from(users).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
-  async getDefaultProfile(): Promise<{ id: string } | null> {
+  async getDefaultProfile(): Promise<{ id: string } | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx.select({ id: profiles.id }).from(profiles).limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -582,14 +592,14 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getProfileOwner(profileId: string): Promise<{ userId: string | null } | null> {
+  async getProfileOwner(profileId: string): Promise<{ userId: string | null } | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({ userId: profiles.userId })
         .from(profiles)
         .where(eq(profiles.id, profileId))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -657,14 +667,14 @@ export class DrizzleAgentStore implements AgentStore {
 
   async getMessage(
     messageId: string,
-  ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | null> {
+  ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({ id: messages.id, role: messages.role, content: messages.content })
         .from(messages)
         .where(eq(messages.id, messageId))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -720,10 +730,13 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getLastTokens(conversationId: string): Promise<{
-    inputTokens: number | null;
-    outputTokens: number;
-  } | null> {
+  async getLastTokens(conversationId: string): Promise<
+    | {
+        inputTokens: number | null;
+        outputTokens: number;
+      }
+    | undefined
+  > {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -734,11 +747,11 @@ export class DrizzleAgentStore implements AgentStore {
         .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
         .orderBy(desc(messages.id))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
-  async getLastMessageTime(conversationId: string): Promise<Date | null> {
+  async getLastMessageTime(conversationId: string): Promise<Date | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({ createdAt: messages.createdAt })
@@ -746,7 +759,7 @@ export class DrizzleAgentStore implements AgentStore {
         .where(eq(messages.conversationId, conversationId))
         .orderBy(desc(messages.id))
         .limit(1);
-      return rows[0]?.createdAt ?? null;
+      return rows[0]?.createdAt;
     });
   }
 
@@ -825,14 +838,14 @@ export class DrizzleAgentStore implements AgentStore {
   async findConversationByAlias(
     userId: string,
     alias: string,
-  ): Promise<{ conversationId: string } | null> {
+  ): Promise<{ conversationId: string } | undefined> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({ conversationId: aliases.conversationId })
         .from(aliases)
         .where(and(eq(aliases.userId, userId), eq(aliases.alias, alias)))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -885,14 +898,17 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getProvider(providerId: string): Promise<{
-    id: string;
-    name: string;
-    type: string;
-    baseUrl: string | null;
-    secretId: string;
-    attrs: ProviderAttrs;
-  } | null> {
+  async getProvider(providerId: string): Promise<
+    | {
+        id: string;
+        name: string;
+        type: string;
+        baseUrl: string | null;
+        secretId: string;
+        attrs: ProviderAttrs;
+      }
+    | undefined
+  > {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -906,7 +922,7 @@ export class DrizzleAgentStore implements AgentStore {
         .from(llmProviders)
         .where(eq(llmProviders.id, providerId))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 
@@ -950,14 +966,17 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async resolveProviderForModel(model: string): Promise<{
-    id: string;
-    name: string;
-    type: string;
-    baseUrl: string | null;
-    secretId: string;
-    attrs: ProviderAttrs;
-  } | null> {
+  async resolveProviderForModel(model: string): Promise<
+    | {
+        id: string;
+        name: string;
+        type: string;
+        baseUrl: string | null;
+        secretId: string;
+        attrs: ProviderAttrs;
+      }
+    | undefined
+  > {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -973,7 +992,7 @@ export class DrizzleAgentStore implements AgentStore {
         .where(eq(modelProviders.model, model))
         .orderBy(asc(modelProviders.position))
         .limit(1);
-      return rows[0] ?? null;
+      return rows[0];
     });
   }
 

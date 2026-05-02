@@ -349,7 +349,7 @@ describe("runNonInteractive", () => {
     });
 
     expect(v.githubPat).not.toHaveBeenCalled();
-    expect(await secretsStore.getSecret("github_identity:default")).toBeNull();
+    expect(await secretsStore.getSecret("github_identity:default")).toBeUndefined();
   });
 
   it("ignores COGMO_GITHUB_SSH_PRIVATE_KEY when no PAT is supplied", async () => {
@@ -370,7 +370,7 @@ describe("runNonInteractive", () => {
     });
 
     expect(v.githubPat).not.toHaveBeenCalled();
-    expect(await secretsStore.getSecret("github_identity:default")).toBeNull();
+    expect(await secretsStore.getSecret("github_identity:default")).toBeUndefined();
   });
 
   it("rejects COGMO_GITHUB_SSH_PRIVATE_KEY loudly (importing keys not yet supported)", async () => {
@@ -390,7 +390,7 @@ describe("runNonInteractive", () => {
     ).rejects.toThrowError(/COGMO_GITHUB_SSH_PRIVATE_KEY.*supported/);
 
     // No identity persisted — the validation gate aborts before any DB write.
-    expect(await secretsStore.getSecret("github_identity:default")).toBeNull();
+    expect(await secretsStore.getSecret("github_identity:default")).toBeUndefined();
   });
 
   it("fails fast with no DB writes when COGMO_GITHUB_PAT is rejected", async () => {
