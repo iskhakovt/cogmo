@@ -101,16 +101,18 @@ async function main() {
   execSync("tsx src/main.ts seed", { stdio: "inherit", env: seedEnv });
   console.log("Seed complete.\n");
 
-  // Run non-interactive setup if ANTHROPIC_API_KEY is present and no
-  // provider is configured yet — devs already export that var for
-  // Hindsight, so registering it as the LLM provider too saves them a
-  // separate `cogmo setup` step. Idempotent: the wizard's non-interactive
-  // path replaces an existing provider with the same name.
+  // Allow-list the env so a stray `COGMO_TELEGRAM_BOT_TOKEN` / `_TAVILY_*`
+  // / `_GITHUB_*` in the dev's shell doesn't drag the wizard into
+  // configuring those channels too.
   console.log("Configuring LLM provider...");
   execSync("tsx src/main.ts setup --non-interactive", {
     stdio: "inherit",
     env: {
-      ...seedEnv,
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      NODE_ENV: "development",
+      DATABASE_URL: databaseUrl,
+      COGMO_MASTER_KEY: masterKey,
       COGMO_LLM_PROVIDER_TYPE: "anthropic",
       COGMO_LLM_API_KEY: apiKey,
     },
