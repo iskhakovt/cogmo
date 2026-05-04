@@ -178,15 +178,15 @@ describe("handle-message — crash recovery / step replay", () => {
       provider: mockProvider({ countTokens, chat }),
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 150_000, outputTokens: 2_000 }),
-        getHistory: vi.fn().mockResolvedValue([
-          { role: "user", content: "m1" },
-          { role: "assistant", content: "r1" },
-          { role: "user", content: "m2" },
-          { role: "assistant", content: "r2" },
-          { role: "user", content: "m3" },
-          { role: "assistant", content: "r3" },
-          { role: "user", content: "m4" },
-          { role: "assistant", content: "r4" },
+        getHistoryWithIds: vi.fn().mockResolvedValue([
+          { id: "m1", message: { role: "user", content: "m1" } },
+          { id: "m2", message: { role: "assistant", content: "r1" } },
+          { id: "m3", message: { role: "user", content: "m2" } },
+          { id: "m4", message: { role: "assistant", content: "r2" } },
+          { id: "m5", message: { role: "user", content: "m3" } },
+          { id: "m6", message: { role: "assistant", content: "r3" } },
+          { id: "m7", message: { role: "user", content: "m4" } },
+          { id: "m8", message: { role: "assistant", content: "r4" } },
         ]),
       }),
     });

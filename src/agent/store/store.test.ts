@@ -186,11 +186,28 @@ describe("DrizzleAgentStore", () => {
   });
 
   describe("conversations", () => {
-    it("creates and retrieves a conversation", async () => {
+    it("creates and retrieves a conversation with default 'active' status", async () => {
       const { userId, profileId, conversationId } = await seedConversation();
 
       const conv = await store.getConversation(conversationId);
-      expect(conv).toEqual({ id: conversationId, userId, profileId, isPrivate: true });
+      expect(conv).toEqual({
+        id: conversationId,
+        userId,
+        profileId,
+        isPrivate: true,
+        status: "active",
+      });
+    });
+
+    it("setConversationStatus flips status and getConversation reflects it", async () => {
+      const { conversationId } = await seedConversation();
+      await store.setConversationStatus(conversationId, "errored");
+      const conv = await store.getConversation(conversationId);
+      expect(conv?.status).toBe("errored");
+      // Reversibility — recovery / /repair flips back
+      await store.setConversationStatus(conversationId, "active");
+      const conv2 = await store.getConversation(conversationId);
+      expect(conv2?.status).toBe("active");
     });
 
     it("returns null for unknown conversation", async () => {
@@ -266,6 +283,146 @@ describe("DrizzleAgentStore", () => {
 
     it("returns null for unknown message", async () => {
       expect(await store.getMessage("019d0000-0000-7000-8000-000000000000")).toBeUndefined();
+    });
+
+    it("getHistoryWithIds returns rows with ids attached", async () => {
+      const { conversationId, stamp } = await seedConversation();
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+
+      const { id: m1 } = await store.insertMessage({
+        conversationId,
+        role: "user",
+        content: "hi",
+        lastInboundMessageId: inboundId,
+        ...stamp,
+      });
+
+      const rows = await store.getHistoryWithIds(conversationId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual({ id: m1, message: { role: "user", content: "hi" } });
+    });
+
+    it("applyHeal supersedes rows and inserts replacements transactionally", async () => {
+      const { conversationId, stamp } = await seedConversation();
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+
+      const { id: m1 } = await store.insertMessage({
+        conversationId,
+        role: "user",
+        content: "hi",
+        lastInboundMessageId: inboundId,
+        ...stamp,
+      });
+      await new Promise((r) => setTimeout(r, 2));
+      const { id: m2 } = await store.insertMessage({
+        conversationId,
+        role: "assistant",
+        content: [{ type: "tool_use", id: "t1", name: "echo", input: {} }],
+        lastInboundMessageId: inboundId,
+        ...stamp,
+      });
+      await new Promise((r) => setTimeout(r, 2));
+      const { id: m3 } = await store.insertMessage({
+        conversationId,
+        role: "user",
+        content: "are you there?",
+        lastInboundMessageId: inboundId,
+        ...stamp,
+      });
+
+      const { insertedIds } = await store.applyHeal({
+        conversationId,
+        supersededIds: [m3],
+        insertions: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                toolUseId: "t1",
+                content: "tool execution did not complete (recovered)",
+                isError: true,
+              },
+              { type: "text", text: "are you there?" },
+            ],
+          },
+        ],
+        lastInboundMessageId: inboundId,
+        ...stamp,
+      });
+
+      expect(insertedIds).toHaveLength(1);
+
+      // getHistory hides the superseded m3, includes m1, m2, and the heal row
+      const history = await store.getHistory(conversationId);
+      expect(history).toHaveLength(3);
+      const contents = history.map((m) => m.content);
+      expect(contents).toContainEqual("hi");
+      expect(contents).toContainEqual([{ type: "tool_use", id: "t1", name: "echo", input: {} }]);
+      expect(contents).toContainEqual([
+        {
+          type: "tool_result",
+          toolUseId: "t1",
+          content: "tool execution did not complete (recovered)",
+          isError: true,
+        },
+        { type: "text", text: "are you there?" },
+      ]);
+      // m3's "are you there?" content is NOT visible — superseded
+      expect(contents).not.toContainEqual("are you there?");
+
+      // m1, m2 remain visible (untouched)
+      const withIds = await store.getHistoryWithIds(conversationId);
+      const visibleIds = withIds.map((r) => r.id);
+      expect(visibleIds).toContain(m1);
+      expect(visibleIds).toContain(m2);
+      expect(visibleIds).not.toContain(m3);
+    });
+
+    it("applyHeal can supersede without inserting (drop-only repair)", async () => {
+      const { conversationId, stamp } = await seedConversation();
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+
+      const { id: m1 } = await store.insertMessage({
+        conversationId,
+        role: "user",
+        content: "hi",
+        lastInboundMessageId: inboundId,
+        ...stamp,
+      });
+      await new Promise((r) => setTimeout(r, 2));
+      const { id: m2 } = await store.insertMessage({
+        conversationId,
+        role: "assistant",
+        content: [],
+        lastInboundMessageId: inboundId,
+        ...stamp,
+      });
+
+      const { insertedIds } = await store.applyHeal({
+        conversationId,
+        supersededIds: [m2],
+        insertions: [],
+        lastInboundMessageId: inboundId,
+        ...stamp,
+      });
+      expect(insertedIds).toEqual([]);
+
+      // Hidden by superseded_at IS NOT NULL even with no replacement linked
+      const visible = await store.getHistoryWithIds(conversationId);
+      expect(visible.map((r) => r.id)).toEqual([m1]);
+    });
+
+    it("applyHeal is a no-op when both arrays are empty", async () => {
+      const { conversationId, stamp } = await seedConversation();
+      const result = await store.applyHeal({
+        conversationId,
+        supersededIds: [],
+        insertions: [],
+        lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+        ...stamp,
+      });
+      expect(result.insertedIds).toEqual([]);
     });
 
     it("insertMessages batch inserts with tool_use/tool_result pairing", async () => {

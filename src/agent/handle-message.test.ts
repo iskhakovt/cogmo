@@ -450,6 +450,93 @@ describe("createHandleMessage", () => {
     expect(notifyConversation).toHaveBeenCalledTimes(1);
   });
 
+  // Status guard — `recover-conversation` marks a conversation `errored`
+  // after exhausting its repair attempts. handle-message must refuse to
+  // spend more LLM calls until status flips back to `active` (via /repair
+  // or operator action).
+  it("early-returns with reason: errored when conversations.status is 'errored'", async () => {
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "conv-1",
+          userId: "user-1",
+          profileId: "profile-1",
+          isPrivate: true,
+          status: "errored",
+        }),
+      }),
+    });
+    const result = await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+    expect(result).toEqual({ status: "skipped", reason: "errored" });
+    expect(deps.runStreamingAgentLoop).not.toHaveBeenCalled();
+    expect(deps.agentStore.insertMessage).not.toHaveBeenCalled();
+  });
+
+  // Heal-on-persist — when the loaded history contains an orphan tool_use
+  // (a historical bug, a crash mid-write), the orchestrator runs
+  // `validateHistory` before the agent loop and persists the repair via
+  // `applyHeal`. Future turns load clean state.
+  it("runs heal-history step when validator finds repairs in loaded history", async () => {
+    // Orphan: assistant tool_use followed by user text with no answering tool_result.
+    // Note: getHistoryWithIds is the read path the heal step uses; the
+    // current-turn user-message insert below is fine because the test
+    // doesn't exercise the new-row injection (the heal targets the orphan
+    // pair already in history).
+    const orphanHistory = [
+      { id: "m1", message: { role: "user", content: "hi" } },
+      {
+        id: "m2",
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "echo", input: {} }],
+        },
+      },
+      { id: "m3", message: { role: "user", content: "are you there?" } },
+    ];
+    const applyHeal = vi.fn().mockResolvedValue({ insertedIds: ["heal-1"] });
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getHistoryWithIds: vi.fn().mockResolvedValue(orphanHistory),
+        applyHeal,
+      }),
+    });
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+    expect(applyHeal).toHaveBeenCalledTimes(1);
+    const call = applyHeal.mock.calls[0]![0];
+    expect(call.conversationId).toBe("conv-1");
+    expect(call.supersededIds).toEqual(["m3"]);
+    expect(call.insertions).toHaveLength(1);
+    expect(call.profileId).toBe("profile-1");
+  });
+
+  it("skips heal-history step when loaded history is clean", async () => {
+    const cleanHistory = [
+      { id: "m1", message: { role: "user", content: "hi" } },
+      { id: "m2", message: { role: "assistant", content: [{ type: "text", text: "hello" }] } },
+    ];
+    const applyHeal = vi.fn().mockResolvedValue({ insertedIds: [] });
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getHistoryWithIds: vi.fn().mockResolvedValue(cleanHistory),
+        applyHeal,
+      }),
+    });
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+    expect(applyHeal).not.toHaveBeenCalled();
+  });
+
   it("rethrows retriable provider errors as-is so Inngest retries them", async () => {
     const handle = mockDeliveryHandle();
     const transientError = Object.assign(new Error("rate limited"), { status: 429 });

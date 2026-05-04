@@ -29,6 +29,9 @@ import {
  */
 export const UNKNOWN_OUTPUT_TOKENS = -1;
 
+/** Mirrors the `conversation_status` PG enum. */
+export type ConversationStatus = "active" | "errored";
+
 export interface Profile {
   id: string;
   userId: string | null; // null = org profile (read-only via Transport)
@@ -96,9 +99,25 @@ export interface AgentStore {
   }): Promise<{ id: string }>;
 
   /** Load a conversation by ID. */
-  getConversation(
-    conversationId: string,
-  ): Promise<{ id: string; userId: string; profileId: string; isPrivate: boolean } | undefined>;
+  getConversation(conversationId: string): Promise<
+    | {
+        id: string;
+        userId: string;
+        profileId: string;
+        isPrivate: boolean;
+        status: ConversationStatus;
+      }
+    | undefined
+  >;
+
+  /**
+   * Update a conversation's status. Used by `recover-conversation` to mark
+   * a conversation as `errored` after a failed repair attempt, and by the
+   * `/repair` command to flip back to `active`. The orchestrator early-returns
+   * with `status: "skipped", reason: "errored"` for any inbound while
+   * `errored`, refusing to spend more LLM calls on a known-broken conversation.
+   */
+  setConversationStatus(conversationId: string, status: ConversationStatus): Promise<void>;
 
   /** Insert a message (user or assistant). Returns the new message ID. `profileId` + `model` stamp the turn snapshot (see design/transport/overview.md → Profile and Model Stamping). */
   insertMessage(params: {
@@ -136,8 +155,37 @@ export interface AgentStore {
     conversationId: string,
   ): Promise<{ id: string; lastInboundMessageId: string } | undefined>;
 
-  /** Load full message history for a conversation, ordered by id. */
+  /**
+   * Load message history for a conversation, ordered by id, hiding rows
+   * superseded by heal-on-persist. The agent loop sees a clean view —
+   * orphan tool_use rows that have been repaired never reach the LLM.
+   */
   getHistory(conversationId: string): Promise<ReadonlyArray<Message>>;
+
+  /**
+   * Same as `getHistory` but returns `{ id, message }` so callers (the
+   * heal step, the recovery function) can compute a heal plan that maps
+   * back to specific row ids when superseding.
+   */
+  getHistoryWithIds(
+    conversationId: string,
+  ): Promise<ReadonlyArray<{ id: string; message: Message }>>;
+
+  /**
+   * Apply a heal plan transactionally: insert replacement rows and mark
+   * `supersededIds` as superseded by the first inserted row. Insertions are
+   * stamped with the current turn's snapshot (`profileId`, `model`,
+   * `lastInboundMessageId`). Returns the new ids in insertion order. No-ops
+   * when both arrays are empty.
+   */
+  applyHeal(params: {
+    conversationId: string;
+    supersededIds: ReadonlyArray<string>;
+    insertions: ReadonlyArray<Message>;
+    profileId: string;
+    model: string;
+    lastInboundMessageId: string;
+  }): Promise<{ insertedIds: ReadonlyArray<string> }>;
 
   /** Load a profile by ID (returns the full `Profile` including `userId` and `name`). */
   getProfile(profileId: string): Promise<Profile | undefined>;
@@ -395,9 +443,16 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getConversation(
-    conversationId: string,
-  ): Promise<{ id: string; userId: string; profileId: string; isPrivate: boolean } | undefined> {
+  async getConversation(conversationId: string): Promise<
+    | {
+        id: string;
+        userId: string;
+        profileId: string;
+        isPrivate: boolean;
+        status: ConversationStatus;
+      }
+    | undefined
+  > {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -405,11 +460,18 @@ export class DrizzleAgentStore implements AgentStore {
           userId: conversations.userId,
           profileId: conversations.profileId,
           isPrivate: conversations.isPrivate,
+          status: conversations.status,
         })
         .from(conversations)
         .where(eq(conversations.id, conversationId))
         .limit(1);
       return rows[0];
+    });
+  }
+
+  async setConversationStatus(conversationId: string, status: ConversationStatus): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      await tx.update(conversations).set({ status }).where(eq(conversations.id, conversationId));
     });
   }
 
@@ -503,9 +565,75 @@ export class DrizzleAgentStore implements AgentStore {
       const rows = await tx
         .select({ role: messages.role, content: messages.content })
         .from(messages)
-        .where(eq(messages.conversationId, conversationId))
+        .where(and(eq(messages.conversationId, conversationId), isNull(messages.supersededAt)))
         .orderBy(asc(messages.id));
       return rows as ReadonlyArray<Message>;
+    });
+  }
+
+  async getHistoryWithIds(
+    conversationId: string,
+  ): Promise<ReadonlyArray<{ id: string; message: Message }>> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ id: messages.id, role: messages.role, content: messages.content })
+        .from(messages)
+        .where(and(eq(messages.conversationId, conversationId), isNull(messages.supersededAt)))
+        .orderBy(asc(messages.id));
+      return rows.map((r) => ({
+        id: r.id,
+        message: { role: r.role, content: r.content } as Message,
+      }));
+    });
+  }
+
+  async applyHeal(params: {
+    conversationId: string;
+    supersededIds: ReadonlyArray<string>;
+    insertions: ReadonlyArray<Message>;
+    profileId: string;
+    model: string;
+    lastInboundMessageId: string;
+  }): Promise<{ insertedIds: ReadonlyArray<string> }> {
+    if (params.supersededIds.length === 0 && params.insertions.length === 0) {
+      return { insertedIds: [] };
+    }
+    return this.#db.transaction(async (tx) => {
+      let insertedIds: string[] = [];
+      if (params.insertions.length > 0) {
+        const values = R.map(params.insertions, (msg) => ({
+          conversationId: params.conversationId,
+          role: msg.role,
+          content: msg.content,
+          profileId: params.profileId,
+          model: params.model,
+          lastInboundMessageId: params.lastInboundMessageId,
+          // Heal rows never come from an LLM call — sentinel keeps the fast
+          // path honest if one ever lands as the most-recent assistant.
+          outputTokens: UNKNOWN_OUTPUT_TOKENS,
+        }));
+        const rows = await tx.insert(messages).values(values).returning({ id: messages.id });
+        insertedIds = rows.map((r) => r.id);
+      }
+      if (params.supersededIds.length > 0) {
+        // `supersededAt` is the visibility flag — `WHERE supersededAt IS NULL`
+        // hides the row from `getHistory`. `supersededBy` is audit-only and
+        // points at the first new row when one exists; null when the repair
+        // dropped this row without a replacement. Both columns set in the
+        // same statement so the visibility flip is atomic with the audit
+        // link.
+        const pivot = insertedIds[0] ?? null;
+        await tx
+          .update(messages)
+          .set({ supersededAt: new Date(), supersededBy: pivot })
+          .where(
+            and(
+              eq(messages.conversationId, params.conversationId),
+              inArray(messages.id, [...params.supersededIds]),
+            ),
+          );
+      }
+      return { insertedIds };
     });
   }
 

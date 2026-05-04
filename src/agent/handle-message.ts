@@ -18,6 +18,8 @@ import type { CodingService } from "./coding/service.js";
 import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedImages } from "./extract-images.js";
+import { computeHealPlan, isNoOp } from "./heal-plan.js";
+import { validateHistory } from "./history-invariants.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
 import { shouldSkipRecall } from "./recall-gate.js";
@@ -139,6 +141,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       });
       if (!conv) throw new Error(`Conversation not found: ${conversationId}`);
 
+      // Status guard — `recover-conversation` marks a conversation `errored`
+      // after exhausting its repair attempts. We refuse to spend more LLM
+      // calls on a known-broken conversation until a human (or `/repair`)
+      // resets the status. The OTel span is intentionally cheap so this
+      // shows up in dashboards as a distinct skip reason.
+      if (conv.status === "errored") {
+        return { status: "skipped", reason: "errored" };
+      }
+
       const { userId, profileId } = conv;
 
       const lastAssistant = await step.run("last-assistant", async () => {
@@ -204,9 +215,46 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         });
       });
 
-      const history = await step.run("load-history", async () => {
-        return agentStore.getHistory(conversationId);
+      const historyWithIds = await step.run("load-history", async () => {
+        return agentStore.getHistoryWithIds(conversationId);
       });
+
+      // Heal-on-persist — run the history invariant validator on the loaded
+      // rows; if any orphan tool_use / stray tool_result / empty-content
+      // violation slipped into the DB (a historical bug, a crash mid-write,
+      // or a bug we haven't seen yet), persist the repair durably so this
+      // and every future turn load clean state. The validator is the same
+      // pure function the agent loop runs as defence-in-depth — running it
+      // here too lets us know which DB rows to supersede.
+      const historyMessagesRaw = historyWithIds.map((r) => r.message);
+      const validation = validateHistory(historyMessagesRaw);
+      if (validation.repairs.length > 0) {
+        await step.run("heal-history", async () => {
+          const plan = computeHealPlan(historyWithIds, validation.messages);
+          if (isNoOp(plan)) return;
+          await agentStore.applyHeal({
+            conversationId,
+            supersededIds: plan.supersededIds,
+            insertions: plan.insertions,
+            profileId: snapshot.profileId,
+            model: snapshot.model,
+            lastInboundMessageId: maxInboundId,
+          });
+          logger.warn(
+            {
+              conversationId,
+              repairCount: validation.repairs.length,
+              repairs: validation.repairs,
+              supersededCount: plan.supersededIds.length,
+              insertedCount: plan.insertions.length,
+            },
+            "heal-on-persist applied",
+          );
+        });
+      }
+      // Downstream uses the validated tail directly — already clean, the
+      // loop's defensive `sanitizeHistory` will be a no-op on this input.
+      const history = validation.messages;
 
       const channelTypes = await step.run("resolve-channel-types", async () => {
         return transportStore.getActiveChannelTypes(conversationId);

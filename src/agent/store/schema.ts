@@ -18,6 +18,17 @@ import { secrets } from "../../secrets/store/schema.js";
 
 export const autoRecallMode = pgEnum("auto_recall_mode", ["off", "always", "heuristic", "llm"]);
 
+/**
+ * Lifecycle status of a conversation.
+ *
+ * `active` — normal; `handle-message` processes inbound. Default for new rows.
+ * `errored` — `recover-conversation` exhausted its repair attempts on this
+ *   conversation and won't burn more LLM calls until a human (or `/repair`)
+ *   resets it. `handle-message` early-returns with `status: "skipped",
+ *   reason: "errored"` for any inbound while in this state.
+ */
+export const conversationStatus = pgEnum("conversation_status", ["active", "errored"]);
+
 // --- JSONB shapes ---
 
 /**
@@ -108,6 +119,13 @@ export const conversations = pgTable(
       .notNull()
       .references(() => profiles.id),
     isPrivate: boolean("is_private").notNull(),
+    /**
+     * `active` (default) — normal processing; `errored` — `recover-conversation`
+     * gave up after a failed repair attempt; orchestrator refuses to spend more
+     * LLM calls until a human (or `/repair`) flips it back. See `conversationStatus`
+     * enum and `recover-conversation` Inngest function.
+     */
+    status: conversationStatus("status").notNull().default("active"),
     createdAt: ts(),
   },
   (t) => [index("idx_conversations_profile_id").on(t.profileId)],
@@ -133,6 +151,21 @@ export const messages = pgTable(
     // and used as a sentinel on non-assistant rows where output is N/A; the
     // fast path (`shouldSkipCounting`) treats -1 as "unknown → force count".
     outputTokens: integer("output_tokens").notNull(),
+    /**
+     * Set by heal-on-persist when this row is hidden from history. `getHistory`
+     * filters `WHERE superseded_at IS NULL`. Two columns rather than one
+     * because some repairs supersede without a replacement (e.g. dropping a
+     * trailing empty-content row), so a "links to replacement" UUID can't
+     * encode "yes hidden" on its own.
+     */
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
+    /**
+     * Optional pointer to the heal row this one was replaced by — null when
+     * this row was dropped without a replacement. Audit trail for the heal
+     * step; not enforced as a FK because the pivot is just one of N possible
+     * heal rows (the first inserted in the same `applyHeal` call).
+     */
+    supersededBy: uuid("superseded_by"),
     createdAt: ts(),
   },
   (t) => [

@@ -134,6 +134,13 @@
       "when": 1777914252896,
       "tag": "0018_skinny_master_mold",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1777934026194,
+      "tag": "0019_heal_supersede",
+      "breakpoints": true
     }
   ]
 }
