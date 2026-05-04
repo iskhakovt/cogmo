@@ -484,10 +484,10 @@ describe("createTransport", () => {
       const agentStore = mockAgentStore({
         listDistinctUserSelectableModels: vi
           .fn()
-          .mockResolvedValue(["claude-sonnet-4-20250514", "gpt-4o"]),
+          .mockResolvedValue(["claude-sonnet-4-6", "gpt-4o"]),
       });
       const { transport } = setup({ agentStore });
-      expect(await transport.models.list()).toEqual(["claude-sonnet-4-20250514", "gpt-4o"]);
+      expect(await transport.models.list()).toEqual(["claude-sonnet-4-6", "gpt-4o"]);
     });
   });
 

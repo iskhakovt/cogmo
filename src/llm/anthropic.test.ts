@@ -40,19 +40,19 @@ describe("AnthropicProvider", () => {
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: "Hello!", citations: null }],
       stop_reason: "end_turn",
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       usage: { input_tokens: 15, output_tokens: 8 },
     });
 
     const result = await provider.chat({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       system: "Be helpful",
       messages: [{ role: "user", content: "Hi" }],
     });
 
     expect(result.content).toEqual([{ type: "text", text: "Hello!" }]);
     expect(result.stopReason).toBe("end_turn");
-    expect(result.model).toBe("claude-sonnet-4-20250514");
+    expect(result.model).toBe("claude-sonnet-4-6");
     expect(result.usage).toEqual({ inputTokens: 15, outputTokens: 8 });
   });
 
@@ -63,12 +63,12 @@ describe("AnthropicProvider", () => {
         { type: "tool_use", id: "tu_123", name: "get_time", input: {}, caller: { type: "direct" } },
       ],
       stop_reason: "tool_use",
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       usage: { input_tokens: 20, output_tokens: 12 },
     });
 
     const result = await provider.chat({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       system: "sys",
       messages: [{ role: "user", content: "what time?" }],
     });
@@ -87,12 +87,12 @@ describe("AnthropicProvider", () => {
         { type: "text", text: "answer", citations: null },
       ],
       stop_reason: "end_turn",
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       usage: { input_tokens: 10, output_tokens: 5 },
     });
 
     const result = await provider.chat({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       system: "sys",
       messages: [{ role: "user", content: "think" }],
     });
@@ -111,12 +111,12 @@ describe("AnthropicProvider", () => {
         { type: "text", text: "answer", citations: null },
       ],
       stop_reason: "end_turn",
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       usage: { input_tokens: 10, output_tokens: 5 },
     });
 
     const result = await provider.chat({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       system: "sys",
       messages: [{ role: "user", content: "think" }],
     });
@@ -129,12 +129,12 @@ describe("AnthropicProvider", () => {
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: "ok", citations: null }],
       stop_reason: "end_turn",
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       usage: { input_tokens: 10, output_tokens: 5 },
     });
 
     await provider.chat({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       system: "sys",
       messages: [{ role: "user", content: "hi" }],
       tools: [
@@ -158,12 +158,12 @@ describe("AnthropicProvider", () => {
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: "done", citations: null }],
       stop_reason: "end_turn",
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       usage: { input_tokens: 10, output_tokens: 5 },
     });
 
     await provider.chat({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       system: "sys",
       messages: [
         { role: "user", content: "use tool" },
@@ -191,12 +191,12 @@ describe("AnthropicProvider", () => {
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: "ok", citations: null }],
       stop_reason: "end_turn",
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       usage: { input_tokens: 10, output_tokens: 5 },
     });
 
     await provider.chat({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       system: "sys",
       messages: [
         {
@@ -217,12 +217,12 @@ describe("AnthropicProvider", () => {
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: "ok", citations: null }],
       stop_reason: "end_turn",
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       usage: { input_tokens: 10, output_tokens: 5 },
     });
 
     await provider.chat({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       system: "sys",
       messages: [
         {
@@ -241,12 +241,12 @@ describe("AnthropicProvider", () => {
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: "ok", citations: null }],
       stop_reason: "end_turn",
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       usage: { input_tokens: 10, output_tokens: 5 },
     });
 
     await provider.chat({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       system: "sys",
       messages: [{ role: "user", content: "hi" }],
     });
@@ -260,12 +260,12 @@ describe("AnthropicProvider", () => {
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: "truncat", citations: null }],
       stop_reason: "max_tokens",
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       usage: { input_tokens: 10, output_tokens: 100 },
     });
 
     const result = await provider.chat({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       system: "sys",
       messages: [{ role: "user", content: "write a novel" }],
     });
@@ -275,7 +275,7 @@ describe("AnthropicProvider", () => {
 
   describe("chatStream", () => {
     const defaultParams = {
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       system: "sys",
       messages: [{ role: "user" as const, content: "hi" }],
     };
@@ -287,7 +287,7 @@ describe("AnthropicProvider", () => {
           {
             type: "message_start",
             message: {
-              model: "claude-sonnet-4-20250514",
+              model: "claude-sonnet-4-6",
               usage: { input_tokens: 10, output_tokens: 0 },
             },
           },
@@ -317,7 +317,7 @@ describe("AnthropicProvider", () => {
 
       const meta = await response;
       expect(meta.stopReason).toBe("end_turn");
-      expect(meta.model).toBe("claude-sonnet-4-20250514");
+      expect(meta.model).toBe("claude-sonnet-4-6");
       expect(meta.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
     });
 
@@ -328,7 +328,7 @@ describe("AnthropicProvider", () => {
           {
             type: "message_start",
             message: {
-              model: "claude-sonnet-4-20250514",
+              model: "claude-sonnet-4-6",
               usage: { input_tokens: 10, output_tokens: 0 },
             },
           },
@@ -378,7 +378,7 @@ describe("AnthropicProvider", () => {
           {
             type: "message_start",
             message: {
-              model: "claude-sonnet-4-20250514",
+              model: "claude-sonnet-4-6",
               usage: { input_tokens: 10, output_tokens: 0 },
             },
           },
@@ -425,7 +425,7 @@ describe("AnthropicProvider", () => {
           {
             type: "message_start",
             message: {
-              model: "claude-sonnet-4-20250514",
+              model: "claude-sonnet-4-6",
               usage: { input_tokens: 5, output_tokens: 0 },
             },
           },
@@ -455,12 +455,12 @@ describe("AnthropicProvider", () => {
       mockCreate.mockResolvedValueOnce({
         content: [{ type: "text", text: "ok", citations: null }],
         stop_reason: "end_turn",
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         usage: { input_tokens: 10, output_tokens: 5 },
       });
 
       await provider.chat({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         system: "Be helpful",
         messages: [{ role: "user", content: "hi" }],
       });
@@ -476,12 +476,12 @@ describe("AnthropicProvider", () => {
       mockCreate.mockResolvedValueOnce({
         content: [{ type: "text", text: "ok", citations: null }],
         stop_reason: "end_turn",
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         usage: { input_tokens: 10, output_tokens: 5 },
       });
 
       await provider.chat({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         system: "sys",
         messages: [{ role: "user", content: "hi" }],
         tools: [
@@ -500,7 +500,7 @@ describe("AnthropicProvider", () => {
       mockCreate.mockResolvedValueOnce({
         content: [{ type: "text", text: "ok", citations: null }],
         stop_reason: "end_turn",
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         usage: {
           input_tokens: 50,
           output_tokens: 10,
@@ -510,7 +510,7 @@ describe("AnthropicProvider", () => {
       });
 
       const result = await provider.chat({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         system: "sys",
         messages: [{ role: "user", content: "hi" }],
       });
@@ -526,7 +526,7 @@ describe("AnthropicProvider", () => {
       mockCountTokens.mockResolvedValueOnce({ input_tokens: 1234 });
 
       const count = await provider.countTokens({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         system: "You are helpful.",
         messages: [{ role: "user", content: "hello" }],
       });
@@ -534,7 +534,7 @@ describe("AnthropicProvider", () => {
       expect(count).toBe(1234);
       expect(mockCountTokens).toHaveBeenCalledWith(
         expect.objectContaining({
-          model: "claude-sonnet-4-20250514",
+          model: "claude-sonnet-4-6",
           messages: [{ role: "user", content: "hello" }],
         }),
       );
@@ -545,7 +545,7 @@ describe("AnthropicProvider", () => {
       mockCountTokens.mockResolvedValueOnce({ input_tokens: 500 });
 
       await provider.countTokens({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         system: "sys",
         messages: [{ role: "user", content: "hi" }],
         tools: [{ name: "search", description: "Search the web", parameters: { type: "object" } }],
@@ -563,7 +563,7 @@ describe("AnthropicProvider", () => {
       mockCountTokens.mockResolvedValueOnce({ input_tokens: 100 });
 
       await provider.countTokens({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         system: "sys",
         messages: [{ role: "user", content: "hi" }],
       });
@@ -582,12 +582,12 @@ describe("AnthropicProvider", () => {
           { type: "text", text: "answer", citations: null },
         ],
         stop_reason: "end_turn",
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         usage: { input_tokens: 50, output_tokens: 30 },
       });
 
       await provider.chat({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         system: "sys",
         messages: [{ role: "user", content: "think hard" }],
         thinking: { budgetTokens: 10000 },
@@ -604,12 +604,12 @@ describe("AnthropicProvider", () => {
       mockCreate.mockResolvedValueOnce({
         content: [{ type: "text", text: "ok", citations: null }],
         stop_reason: "end_turn",
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         usage: { input_tokens: 10, output_tokens: 5 },
       });
 
       await provider.chat({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         system: "sys",
         messages: [
           {
@@ -639,7 +639,7 @@ describe("AnthropicProvider", () => {
           {
             type: "message_start",
             message: {
-              model: "claude-sonnet-4-20250514",
+              model: "claude-sonnet-4-6",
               usage: { input_tokens: 10, output_tokens: 0 },
             },
           },
@@ -679,7 +679,7 @@ describe("AnthropicProvider", () => {
       );
 
       const { events, response } = provider.chatStream({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         system: "sys",
         messages: [{ role: "user", content: "think" }],
         thinking: { budgetTokens: 5000 },
@@ -711,12 +711,12 @@ describe("AnthropicProvider", () => {
           },
         ],
         stop_reason: "tool_use",
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         usage: { input_tokens: 50, output_tokens: 20 },
       });
 
       const result = await provider.chat({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         system: "Extract structured data",
         messages: [{ role: "user", content: "Alice is 30" }],
         responseFormat: {
@@ -746,7 +746,7 @@ describe("AnthropicProvider", () => {
 
       await expect(
         provider.chat({
-          model: "claude-sonnet-4-20250514",
+          model: "claude-sonnet-4-6",
           system: "sys",
           messages: [{ role: "user", content: "hi" }],
           responseFormat: {

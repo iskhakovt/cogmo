@@ -367,7 +367,7 @@ describe("handleModel", () => {
         setAlias: vi.fn().mockResolvedValue(ok(undefined)),
         setProfile: vi.fn().mockResolvedValue(ok(undefined)),
       },
-      models: { list: vi.fn().mockResolvedValue(["gpt-4o", "claude-sonnet-4-20250514"]) },
+      models: { list: vi.fn().mockResolvedValue(["gpt-4o", "claude-sonnet-4-6"]) },
     });
     const ctx = mkCtx();
     await handleModel(transport, ctx);
