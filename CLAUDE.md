@@ -45,7 +45,8 @@ Read `design/` for the full picture. Key docs:
 | [crash-recovery.md](design/crash-recovery.md) | Durability map of `handle-message`, what re-executes on retry, test contract |
 | [context-management.md](design/context-management.md) | Token counting, compaction pipeline, model registry |
 | [transport/](design/transport/) | Messaging architecture — adapters, sessions, debounce, routing, identity |
-| [integrations.md](design/integrations.md) | MCP, Telegram adapter, skill library |
+| [integrations.md](design/integrations.md) | Channel adapters, skill library, permission tiers, plugin extensibility |
+| [integrations/mcp.md](design/integrations/mcp.md) | MCP client — server config, lifecycle, sandboxing, schema pinning, profile filtering |
 | [providers.md](design/providers.md) | Multi-provider LLM routing, `llm_providers` table, profile FK, provider dispatch |
 | [image-generation.md](design/image-generation.md) | Image gen via Vercel AI SDK, fal.ai provider, outbound delivery, why AI SDK for images but not text LLMs |
 | [sandbox.md](design/sandbox.md) | Container sandbox — sysbox-default runtime, Docker API proxy, lineage tracking, reaper |
