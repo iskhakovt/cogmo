@@ -152,6 +152,10 @@ export class McpRegistryImpl implements McpRegistry {
     if (!server) throw new Error(`MCP server not found: ${id}`);
 
     // Operator action — clear any prior unhealthy state so connect retries.
+    // `reset` is narrow by design: it only clears `unhealthy` entries, so
+    // a live connection here is reused by the subsequent `getConnection`
+    // (no orphaned subprocess) and a closed entry already self-recovers
+    // via the pool's reconnect-once policy.
     this.#pool.reset(id);
 
     const conn = await this.#pool.getConnection(id);

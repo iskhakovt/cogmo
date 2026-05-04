@@ -39,11 +39,15 @@ export class SdkMcpConnection implements McpConnection {
 
   async connect(): Promise<void> {
     // Wire transport-close before connect — connect() can fail and close in
-    // the same tick; we want the callback registered first.
+    // the same tick; we want the callback registered first. The handler is
+    // the SINGLE place that flips `#closed` and notifies listeners — both
+    // remote-initiated drops and our own `close()` flow through this path,
+    // so subscribers get notified exactly once regardless of who closed.
     this.#transport.onclose = () => {
-      if (this.#closed) return;
+      if (this.#closed) return; // idempotency only — already fired
       this.#closed = true;
       for (const cb of this.#closeListeners) cb();
+      this.#closeListeners.clear();
     };
     await this.#client.connect(this.#transport);
 
@@ -101,7 +105,18 @@ export class SdkMcpConnection implements McpConnection {
 
   async close(): Promise<void> {
     if (this.#closed) return;
-    this.#closed = true;
+    // Don't pre-set #closed — let `client.close()` propagate to the
+    // transport, whose `onclose` handler flips state and notifies listeners.
+    // This keeps remote-initiated and explicit close paths symmetric.
     await this.#client.close();
+    // Safety net: if the SDK transport didn't fire `onclose` for some reason
+    // (different transport impl, edge condition), notify here. Idempotency
+    // is guaranteed by the `if (this.#closed) return` guard inside the
+    // handler — if the transport already fired, this is a no-op.
+    if (!this.#closed) {
+      this.#closed = true;
+      for (const cb of this.#closeListeners) cb();
+      this.#closeListeners.clear();
+    }
   }
 }

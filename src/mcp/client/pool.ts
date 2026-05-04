@@ -106,6 +106,15 @@ export class McpConnectionPool {
 
     try {
       const connection = await this.#runner.spawn(server, this.#secrets);
+
+      // The pool may have been closed *during* this spawn. If so, tear down
+      // the just-spawned connection rather than stuffing it into the now-empty
+      // entry map (where nothing would ever close it).
+      if (this.#closed) {
+        await connection.close().catch(() => {});
+        throw new McpPoolError("pool_closed");
+      }
+
       // Wire transport-close to flip our state — but only if THIS connection is
       // still the one the entry references (don't downgrade a fresh reconnect).
       connection.onClose(() => {
@@ -115,9 +124,22 @@ export class McpConnectionPool {
         }
       });
       this.#entries.set(serverId, { kind: "live", connection, lastUsedAt: this.#now() });
-      await this.#store.recordLastConnected(serverId, new Date());
+      // Persistence failure here must not abandon the connection: it's already
+      // live in the map, will be returned to the caller, and is recoverable.
+      // Log and move on instead of rejecting (which would leak the entry).
+      try {
+        await this.#store.recordLastConnected(serverId, new Date());
+      } catch (err) {
+        logger.warn(
+          { err, serverId },
+          "MCP pool: recordLastConnected failed; connection still live",
+        );
+      }
       return connection;
     } catch (err) {
+      // Pool was closed during spawn — propagate the failure without
+      // repopulating the entry map (the close already cleared it).
+      if (this.#closed) throw err;
       const message = err instanceof Error ? err.message : String(err);
       await this.#store.recordLastError(serverId, message);
       const attempts = prev?.kind === "closed" ? prev.reconnectAttempts + 1 : 1;
@@ -143,9 +165,19 @@ export class McpConnectionPool {
     }
   }
 
-  /** Clear an unhealthy entry so the next `getConnection` retries from scratch. */
+  /**
+   * Clear an `unhealthy` entry so the next `getConnection` retries from
+   * scratch. Live entries are deliberately left alone — dropping the map
+   * reference without `close()`-ing would orphan the running subprocess.
+   * Closed entries are also left alone; the next `getConnection` already
+   * retries them via the reconnect-once policy. Use `evict(id)` to
+   * forcefully tear down a live connection.
+   */
   reset(serverId: string): void {
-    this.#entries.delete(serverId);
+    const state = this.#entries.get(serverId);
+    if (state?.kind === "unhealthy") {
+      this.#entries.delete(serverId);
+    }
   }
 
   async close(): Promise<void> {

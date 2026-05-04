@@ -230,6 +230,97 @@ describe("McpConnectionPool.getConnection", () => {
     await pool.close();
   });
 
+  it("does not abandon a live connection when recordLastConnected fails", async () => {
+    const conn = fakeConnection();
+    // Store throws on the persistence call but the connection itself is healthy.
+    const store = {
+      getServerById: vi.fn(async () => makeServer("s1")),
+      recordLastConnected: vi.fn(async () => {
+        throw new Error("db down");
+      }),
+      recordLastError: vi.fn(async () => {}),
+    } as unknown as McpStore;
+    const pool = new McpConnectionPool({
+      store,
+      secrets: dummySecrets,
+      runner: { spawn: vi.fn(async () => conn) },
+      idleEvictionMs: 60_000,
+      evictionIntervalMs: 0,
+      now: () => now,
+    });
+    const c = await pool.getConnection("s1");
+    expect(c).toBe(conn);
+    expect(pool.__getEntryState("s1")?.kind).toBe("live");
+    await pool.close();
+  });
+
+  it("closes the spawned connection if the pool was closed during spawn", async () => {
+    let resolveSpawn!: (c: McpConnection) => void;
+    const spawnPromise = new Promise<McpConnection>((r) => {
+      resolveSpawn = r;
+    });
+    const conn = fakeConnection();
+    const closeSpy = vi.spyOn(conn, "close");
+    const pool = new McpConnectionPool({
+      store: makeStore([makeServer("s1")]),
+      secrets: dummySecrets,
+      runner: { spawn: vi.fn(() => spawnPromise) },
+      idleEvictionMs: 60_000,
+      evictionIntervalMs: 0,
+      now: () => now,
+    });
+
+    const pending = pool.getConnection("s1");
+    // Close the pool while the spawn is in flight.
+    const closing = pool.close();
+    resolveSpawn(conn);
+    await closing;
+    await expect(pending).rejects.toMatchObject({ code: "pool_closed" });
+    // The just-spawned connection was torn down rather than orphaned.
+    expect(closeSpy).toHaveBeenCalled();
+    expect(pool.__getEntryState("s1")).toBeUndefined();
+  });
+
+  it("reset is a no-op on a live entry — does not orphan the connection", async () => {
+    const conn = fakeConnection();
+    const closeSpy = vi.spyOn(conn, "close");
+    const pool = new McpConnectionPool({
+      store: makeStore([makeServer("s1")]),
+      secrets: dummySecrets,
+      runner: { spawn: vi.fn(async () => conn) },
+      idleEvictionMs: 60_000,
+      evictionIntervalMs: 0,
+      now: () => now,
+    });
+    await pool.getConnection("s1");
+    pool.reset("s1");
+    // Live entry preserved; subprocess not orphaned.
+    expect(pool.__getEntryState("s1")?.kind).toBe("live");
+    expect(closeSpy).not.toHaveBeenCalled();
+    await pool.close();
+  });
+
+  it("reset clears an unhealthy entry only", async () => {
+    const spawn = vi
+      .fn<Runner["spawn"]>()
+      .mockRejectedValueOnce(new Error("boom-1"))
+      .mockRejectedValueOnce(new Error("boom-2"));
+    const pool = new McpConnectionPool({
+      store: makeStore([makeServer("s1")]),
+      secrets: dummySecrets,
+      runner: { spawn },
+      idleEvictionMs: 60_000,
+      evictionIntervalMs: 0,
+      now: () => now,
+    });
+    await expect(pool.getConnection("s1")).rejects.toThrow();
+    await expect(pool.getConnection("s1")).rejects.toThrow();
+    expect(pool.__getEntryState("s1")?.kind).toBe("unhealthy");
+    pool.reset("s1");
+    expect(pool.__getEntryState("s1")).toBeUndefined();
+    await pool.close();
+  });
+
   it("records last_connected_at on success and last_error on failure", async () => {
     const conn = fakeConnection();
     const store = makeStore([makeServer("s1")]);
