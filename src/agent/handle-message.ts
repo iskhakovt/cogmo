@@ -192,11 +192,24 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // that one turn = one (profileId, model) stamp even if profile.model changes mid-turn.
       const profile = await agentStore.getProfile(profileId);
 
-      // Auto-recall: search memory for context relevant to this message
+      // Auto-recall: search memory for context relevant to this message.
+      // Best-effort — a Hindsight failure (server down, malformed query, 4xx
+      // from a server-side change we haven't caught up with) must not abort
+      // the turn or trigger Inngest re-enqueue. Degrade to "no memories" and
+      // let the conversation proceed; the LLM-driven `memory_recall` tool
+      // path still surfaces hard failures to the model.
       const autoRecallMode = profile?.autoRecall ?? "heuristic";
       const recallResult = shouldSkipRecall(autoRecallMode, userContentText)
         ? { memories: [] }
-        : await memory.recall(userId, userContentText, { maxTokens: 2000 });
+        : await memory
+            .recall(userId, userContentText, { maxTokens: 2000 })
+            .catch((err: unknown) => {
+              logger.warn(
+                { err: err instanceof Error ? err.message : String(err), conversationId },
+                "auto-recall failed, proceeding without recalled context",
+              );
+              return { memories: [] };
+            });
       const recalledContext =
         recallResult.memories.length > 0
           ? recallResult.memories.map((m) => m.content).join("\n")

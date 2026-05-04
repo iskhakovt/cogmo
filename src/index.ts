@@ -325,7 +325,9 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       return blocks.map((b) => `## ${b.key}\n${b.content}`).join("\n\n");
     },
   });
-  const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL);
+  const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL, {
+    maxQueryTokens: env.HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
+  });
 
   // Skills runtime — Tier 1 ready in P3.1; register / classifier ship in P3.3.
   // The runner is exposed so the `cogmo skills` CLI subcommand can drive it

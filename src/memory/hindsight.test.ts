@@ -11,21 +11,37 @@ const mockRetainBatch = vi
 const mockRecall = vi.fn();
 const mockReflect = vi.fn();
 
-vi.mock("@vectorize-io/hindsight-client", () => ({
-  HindsightClient: class {
-    retain = mockRetain;
-    retainBatch = mockRetainBatch;
-    recall = mockRecall;
-    reflect = mockReflect;
-  },
-}));
+vi.mock("@vectorize-io/hindsight-client", () => {
+  class HindsightError extends Error {
+    statusCode: number;
+    details: string;
+    constructor(message: string, statusCode: number, details: string) {
+      super(message);
+      this.name = "HindsightError";
+      this.statusCode = statusCode;
+      this.details = details;
+    }
+  }
+  return {
+    HindsightClient: class {
+      retain = mockRetain;
+      retainBatch = mockRetainBatch;
+      recall = mockRecall;
+      reflect = mockReflect;
+    },
+    HindsightError,
+  };
+});
 
-function createProvider(): HindsightMemoryProvider {
+// Imported after vi.mock so the test class matches the one the provider sees
+const { HindsightError: MockHindsightError } = await import("@vectorize-io/hindsight-client");
+
+function createProvider(opts?: { maxQueryTokens?: number }): HindsightMemoryProvider {
   mockRetain.mockClear();
   mockRetainBatch.mockClear();
   mockRecall.mockClear();
   mockReflect.mockClear();
-  return new HindsightMemoryProvider("http://localhost:8888");
+  return new HindsightMemoryProvider("http://localhost:8888", opts);
 }
 
 describe("HindsightMemoryProvider", () => {
@@ -183,5 +199,49 @@ describe("HindsightMemoryProvider", () => {
     await provider.reflect("bank-1", "query");
 
     expect(mockReflect).toHaveBeenCalledWith("bank-1", "query", {});
+  });
+
+  it("recall truncates queries that exceed maxQueryTokens", async () => {
+    const provider = createProvider({ maxQueryTokens: 10 });
+    mockRecall.mockResolvedValueOnce({ results: [] });
+
+    // ~80 cl100k_base tokens — well past the 10-token cap
+    const longQuery = "the quick brown fox jumps over the lazy dog ".repeat(20);
+    await provider.recall("bank-1", longQuery);
+
+    expect(mockRecall).toHaveBeenCalledTimes(1);
+    const sentQuery = mockRecall.mock.calls[0]?.[1] as string;
+    expect(sentQuery.length).toBeLessThan(longQuery.length);
+    expect(longQuery.startsWith(sentQuery)).toBe(true);
+  });
+
+  it("recall passes short queries through unchanged", async () => {
+    const provider = createProvider({ maxQueryTokens: 500 });
+    mockRecall.mockResolvedValueOnce({ results: [] });
+
+    await provider.recall("bank-1", "what does the user like?");
+
+    expect(mockRecall).toHaveBeenCalledWith("bank-1", "what does the user like?", {});
+  });
+
+  it("recall does not retry on 4xx HindsightError", async () => {
+    const provider = createProvider();
+    mockRecall.mockRejectedValue(new MockHindsightError("bad request", 400, "Query too long"));
+
+    await expect(provider.recall("bank-1", "q")).rejects.toThrow("bad request");
+    // Single attempt — withRetry's AbortError opt-out kicked in
+    expect(mockRecall).toHaveBeenCalledTimes(1);
+  });
+
+  it("recall retries on 5xx HindsightError", async () => {
+    const provider = createProvider();
+    mockRecall
+      .mockRejectedValueOnce(new MockHindsightError("server error", 503, "upstream down"))
+      .mockResolvedValueOnce({ results: [] });
+
+    const result = await provider.recall("bank-1", "q");
+
+    expect(result.memories).toEqual([]);
+    expect(mockRecall).toHaveBeenCalledTimes(2);
   });
 });
