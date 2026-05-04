@@ -179,14 +179,14 @@ describe("handle-message — crash recovery / step replay", () => {
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 150_000, outputTokens: 2_000 }),
         getHistoryWithIds: vi.fn().mockResolvedValue([
-          { id: "m1", message: { role: "user", content: "m1" } },
-          { id: "m2", message: { role: "assistant", content: "r1" } },
-          { id: "m3", message: { role: "user", content: "m2" } },
-          { id: "m4", message: { role: "assistant", content: "r2" } },
-          { id: "m5", message: { role: "user", content: "m3" } },
-          { id: "m6", message: { role: "assistant", content: "r3" } },
-          { id: "m7", message: { role: "user", content: "m4" } },
-          { id: "m8", message: { role: "assistant", content: "r4" } },
+          { id: "m1", message: { role: "user", content: "m1" }, lastInboundMessageId: "inb" },
+          { id: "m2", message: { role: "assistant", content: "r1" }, lastInboundMessageId: "inb" },
+          { id: "m3", message: { role: "user", content: "m2" }, lastInboundMessageId: "inb" },
+          { id: "m4", message: { role: "assistant", content: "r2" }, lastInboundMessageId: "inb" },
+          { id: "m5", message: { role: "user", content: "m3" }, lastInboundMessageId: "inb" },
+          { id: "m6", message: { role: "assistant", content: "r3" }, lastInboundMessageId: "inb" },
+          { id: "m7", message: { role: "user", content: "m4" }, lastInboundMessageId: "inb" },
+          { id: "m8", message: { role: "assistant", content: "r4" }, lastInboundMessageId: "inb" },
         ]),
       }),
     });

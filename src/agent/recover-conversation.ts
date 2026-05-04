@@ -83,17 +83,35 @@ export function createRecoverConversation(deps: RecoverConversationDeps) {
       // so handle-message gets another shot against clean history. Heal rows
       // are stamped with the conversation's current profile model — same
       // shape `handle-message` would use for the retry's snapshot, so the
-      // audit trail stays consistent. `lastInboundMessageId` falls back to
-      // the failure event's `triggerInboundId` (preserved verbatim through
-      // the failure pipeline), or to the empty string when even that is
-      // unavailable (flush-style trigger).
+      // audit trail stays consistent. `lastInboundMessageId` inherits from
+      // the last existing visible row's cursor: heal insertions don't
+      // represent a new response, so they must not advance the cursor.
+      // `historyWithIds` is non-empty here (validator only finds repairs
+      // when there's something to validate); the `triggerInboundId`
+      // fallback covers the impossible-but-typed case where the inherit
+      // path returned undefined. Empty string is intentionally NOT a
+      // fallback — `messages.last_inbound_message_id` is `uuid NOT NULL`
+      // and PG rejects empty strings as invalid UUIDs.
       const profile = await step.run("load-profile", async () => {
         return agentStore.getProfile(conv.profileId);
       });
       if (!profile) {
         throw new Error(`Profile not found: ${conv.profileId}`);
       }
-      const lastInboundFallback = triggerInboundId ?? "";
+      const inheritedCursor = historyWithIds.at(-1)?.lastInboundMessageId;
+      const healCursor = inheritedCursor ?? triggerInboundId;
+      if (!healCursor) {
+        // History was empty AND the failure event carried no triggerInboundId.
+        // Validator should have returned no repairs in that case (nothing to
+        // validate); reaching here means a logic error. Bail out to errored
+        // rather than fabricate an invalid cursor.
+        logger.error(
+          { conversationId, errorClass, causeClass },
+          "recover-conversation: no cursor available for heal, marking errored",
+        );
+        await agentStore.setConversationStatus(conversationId, "errored");
+        return { status: "marked_errored", reason: "no_cursor_for_heal" };
+      }
 
       await step.run("apply-heal", async () => {
         await agentStore.applyHeal({
@@ -102,7 +120,7 @@ export function createRecoverConversation(deps: RecoverConversationDeps) {
           insertions: plan.insertions,
           profileId: conv.profileId,
           model: profile.model,
-          lastInboundMessageId: lastInboundFallback,
+          lastInboundMessageId: healCursor,
         });
       });
 

@@ -163,13 +163,16 @@ export interface AgentStore {
   getHistory(conversationId: string): Promise<ReadonlyArray<Message>>;
 
   /**
-   * Same as `getHistory` but returns `{ id, message }` so callers (the
-   * heal step, the recovery function) can compute a heal plan that maps
-   * back to specific row ids when superseding.
+   * Same as `getHistory` but returns each visible row's `id` and the
+   * stamped `lastInboundMessageId` alongside the `Message`. Callers (the
+   * heal step, the recovery function) need both: `id` for supersede, and
+   * `lastInboundMessageId` so heal insertions inherit the existing
+   * conversation cursor — heal rows must NOT advance the cursor, since
+   * they're repairs of past state, not a new assistant turn's response.
    */
   getHistoryWithIds(
     conversationId: string,
-  ): Promise<ReadonlyArray<{ id: string; message: Message }>>;
+  ): Promise<ReadonlyArray<{ id: string; message: Message; lastInboundMessageId: string }>>;
 
   /**
    * Apply a heal plan transactionally: insert replacement rows and mark
@@ -573,16 +576,22 @@ export class DrizzleAgentStore implements AgentStore {
 
   async getHistoryWithIds(
     conversationId: string,
-  ): Promise<ReadonlyArray<{ id: string; message: Message }>> {
+  ): Promise<ReadonlyArray<{ id: string; message: Message; lastInboundMessageId: string }>> {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
-        .select({ id: messages.id, role: messages.role, content: messages.content })
+        .select({
+          id: messages.id,
+          role: messages.role,
+          content: messages.content,
+          lastInboundMessageId: messages.lastInboundMessageId,
+        })
         .from(messages)
         .where(and(eq(messages.conversationId, conversationId), isNull(messages.supersededAt)))
         .orderBy(asc(messages.id));
       return rows.map((r) => ({
         id: r.id,
         message: { role: r.role, content: r.content } as Message,
+        lastInboundMessageId: r.lastInboundMessageId,
       }));
     });
   }

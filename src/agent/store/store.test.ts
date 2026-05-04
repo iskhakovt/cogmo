@@ -285,7 +285,7 @@ describe("DrizzleAgentStore", () => {
       expect(await store.getMessage("019d0000-0000-7000-8000-000000000000")).toBeUndefined();
     });
 
-    it("getHistoryWithIds returns rows with ids attached", async () => {
+    it("getHistoryWithIds returns rows with id, message, and lastInboundMessageId", async () => {
       const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
@@ -299,7 +299,11 @@ describe("DrizzleAgentStore", () => {
 
       const rows = await store.getHistoryWithIds(conversationId);
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toEqual({ id: m1, message: { role: "user", content: "hi" } });
+      expect(rows[0]).toEqual({
+        id: m1,
+        message: { role: "user", content: "hi" },
+        lastInboundMessageId: inboundId,
+      });
     });
 
     it("applyHeal supersedes rows and inserts replacements transactionally", async () => {

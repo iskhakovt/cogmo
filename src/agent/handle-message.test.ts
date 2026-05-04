@@ -487,15 +487,20 @@ describe("createHandleMessage", () => {
     // doesn't exercise the new-row injection (the heal targets the orphan
     // pair already in history).
     const orphanHistory = [
-      { id: "m1", message: { role: "user", content: "hi" } },
+      { id: "m1", message: { role: "user", content: "hi" }, lastInboundMessageId: "inb-1" },
       {
         id: "m2",
         message: {
           role: "assistant",
           content: [{ type: "tool_use", id: "t1", name: "echo", input: {} }],
         },
+        lastInboundMessageId: "inb-1",
       },
-      { id: "m3", message: { role: "user", content: "are you there?" } },
+      {
+        id: "m3",
+        message: { role: "user", content: "are you there?" },
+        lastInboundMessageId: "inb-2",
+      },
     ];
     const applyHeal = vi.fn().mockResolvedValue({ insertedIds: ["heal-1"] });
     const deps = mockDeps({
@@ -515,12 +520,21 @@ describe("createHandleMessage", () => {
     expect(call.supersededIds).toEqual(["m3"]);
     expect(call.insertions).toHaveLength(1);
     expect(call.profileId).toBe("profile-1");
+    // Heal cursor inherits from the last existing row (m3 = inb-2), NOT
+    // the current turn's `maxInboundId`. Heal rows are repairs of past
+    // state — advancing the cursor here would let a mid-turn crash hide
+    // the unprocessed inbound from the next retry's staleness guard.
+    expect(call.lastInboundMessageId).toBe("inb-2");
   });
 
   it("skips heal-history step when loaded history is clean", async () => {
     const cleanHistory = [
-      { id: "m1", message: { role: "user", content: "hi" } },
-      { id: "m2", message: { role: "assistant", content: [{ type: "text", text: "hello" }] } },
+      { id: "m1", message: { role: "user", content: "hi" }, lastInboundMessageId: "inb-1" },
+      {
+        id: "m2",
+        message: { role: "assistant", content: [{ type: "text", text: "hello" }] },
+        lastInboundMessageId: "inb-1",
+      },
     ];
     const applyHeal = vi.fn().mockResolvedValue({ insertedIds: [] });
     const deps = mockDeps({

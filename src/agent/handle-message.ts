@@ -232,13 +232,25 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         await step.run("heal-history", async () => {
           const plan = computeHealPlan(historyWithIds, validation.messages);
           if (isNoOp(plan)) return;
+          // Heal rows inherit the cursor from the last existing visible
+          // row, NOT `maxInboundId`. Heal insertions are repairs of past
+          // state — they must not advance "we responded up to" because
+          // no actual response is sent until the agent loop completes
+          // (and `persist-new-messages` stamps the real cursor on the
+          // final assistant row). If heal advanced the cursor and the
+          // loop then crashed before persisting, the next retry's
+          // staleness guard would skip the inbound as "already done".
+          // historyWithIds is non-empty here — we just inserted a user
+          // row in `create-user-message`, so `at(-1)` is safe; the
+          // fallback only runs if that row got superseded by the heal.
+          const healCursor = historyWithIds.at(-1)?.lastInboundMessageId ?? maxInboundId;
           await agentStore.applyHeal({
             conversationId,
             supersededIds: plan.supersededIds,
             insertions: plan.insertions,
             profileId: snapshot.profileId,
             model: snapshot.model,
-            lastInboundMessageId: maxInboundId,
+            lastInboundMessageId: healCursor,
           });
           logger.warn(
             {
@@ -247,6 +259,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               repairs: validation.repairs,
               supersededCount: plan.supersededIds.length,
               insertedCount: plan.insertions.length,
+              healCursor,
             },
             "heal-on-persist applied",
           );
