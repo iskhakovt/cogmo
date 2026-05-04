@@ -15,8 +15,13 @@ Used when `idleTimeoutMs >= 1000` (Inngest's minimum debounce period) and `maxWa
 ```typescript
 {
   debounce: {
-    period: `${idleTimeoutMs / 1000}s`,        // resets on each event for same key
-    timeout: `${maxWaitMs / 1000}s`,           // optional hard ceiling
+    // Floor to whole seconds (Inngest's period/timeout types accept the
+    // `${number}s` template only). Floor under-shoots the configured idle
+    // by up to 999 ms, which is safer than over-shooting.
+    period: `${Math.max(1, Math.floor(idleTimeoutMs / 1000))}s`,
+    // `timeout` is omitted entirely when maxWaitMs === 0 — Inngest treats
+    // a missing timeout as "no ceiling," matching the legacy "idle-only" mode.
+    ...(maxWaitMs > 0 && { timeout: `${Math.max(1, Math.floor(maxWaitMs / 1000))}s` }),
     key: "event.data.conversationId",
   }
 }
