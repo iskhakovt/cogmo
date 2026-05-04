@@ -84,20 +84,18 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       retries: 2,
       concurrency: { limit: 1, key: "event.data.conversationId" },
       // Last-chance handler: retries are exhausted (or the run failed
-      // non-retriably). Notify the user so they don't sit in silence, and
-      // emit `conversation/errored` for downstream consumers (recovery,
-      // evolution reflector). The original turn's `delivery` handle is gone
-      // (closure scope of a different run), so we re-resolve sessions and
-      // push a one-shot text via `notifyConversation`.
+      // non-retriably). Two responsibilities, ordered durable-first:
+      //  1. Emit `conversation/errored` — the durable signal downstream
+      //     consumers (recovery, evolution reflector) depend on. Must run
+      //     even if user notification fails.
+      //  2. Notify the user — best-effort courtesy. Wrapped so a failure
+      //     in `notifyConversation` (DB outage on session lookup, etc.)
+      //     can't propagate up and prevent step (1) from being recorded.
+      // The original turn's `delivery` handle is gone (closure scope of a
+      // different run), so we re-resolve sessions via `notifyConversation`.
       onFailure: async ({ event, error, step }) => {
         const { conversationId } = event.data.event.data;
         const runId = event.data.run_id;
-        await step.run("notify-user", async () => {
-          await deliveryRouter.notifyConversation(
-            conversationId,
-            "I hit an error processing your last message and won't keep retrying. Please try again.",
-          );
-        });
         await step.sendEvent(
           "emit-conversation-errored",
           conversationErrored.create({
@@ -107,6 +105,19 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             errorMessage: error.message,
           }),
         );
+        await step.run("notify-user", async () => {
+          try {
+            await deliveryRouter.notifyConversation(
+              conversationId,
+              "I hit an error processing your last message and won't keep retrying. Please try again.",
+            );
+          } catch (notifyErr) {
+            logger.error(
+              { err: notifyErr, conversationId, runId },
+              "onFailure: notifyConversation failed, conversation/errored already emitted",
+            );
+          }
+        });
       },
     },
     async ({ event, step, runId }) => {

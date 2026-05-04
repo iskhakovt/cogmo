@@ -342,7 +342,19 @@ describe("createHandleMessage", () => {
     const error = new Error("boom");
     error.name = "BadRequestError";
 
+    // Track call order — emission must precede notification so the durable
+    // signal is recorded before the best-effort user-facing courtesy.
+    const callOrder: string[] = [];
+    sendEvent.mockImplementation(async (_id: string) => {
+      callOrder.push("sendEvent");
+    });
+    notifyConversation.mockImplementation(async () => {
+      callOrder.push("notifyConversation");
+    });
+
     await onFailure({ event: failureEvent, error, step: stepCtx });
+
+    expect(callOrder).toEqual(["sendEvent", "notifyConversation"]);
 
     expect(notifyConversation).toHaveBeenCalledTimes(1);
     expect(notifyConversation.mock.calls[0]![0]).toBe("conv-1");
@@ -360,6 +372,41 @@ describe("createHandleMessage", () => {
         errorMessage: "boom",
       },
     });
+  });
+
+  // Notification is best-effort. If `notifyConversation` throws (e.g. DB
+  // outage on session lookup), the handler must NOT propagate the error —
+  // `conversation/errored` has already been emitted (the durable signal is
+  // safe), and onFailure throwing would just produce a useless retry storm.
+  it("onFailure swallows notifyConversation failures so the durable event sticks", async () => {
+    const notifyConversation = vi.fn().mockRejectedValue(new Error("db offline"));
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ notifyConversation }),
+    });
+    const fn = createHandleMessage(deps) as any;
+    const onFailure = fn.opts.onFailure;
+
+    const sendEvent = vi.fn().mockResolvedValue(undefined);
+    const stepRun = vi
+      .fn()
+      .mockImplementation(async (_id: string, body: () => Promise<unknown>) => body());
+    const stepCtx = { run: stepRun, sendEvent };
+    const failureEvent = {
+      data: {
+        run_id: "run-failed-2",
+        event: { data: { conversationId: "conv-2", triggerInboundId: "inbound-2" } },
+      },
+    };
+    const error = new Error("boom");
+
+    // Must NOT throw, even though notifyConversation rejects.
+    await expect(onFailure({ event: failureEvent, error, step: stepCtx })).resolves.toBeUndefined();
+
+    // Durable signal still emitted — the whole point.
+    expect(sendEvent).toHaveBeenCalledTimes(1);
+    expect(sendEvent.mock.calls[0]![0]).toBe("emit-conversation-errored");
+    // Notify was attempted.
+    expect(notifyConversation).toHaveBeenCalledTimes(1);
   });
 
   it("rethrows retriable provider errors as-is so Inngest retries them", async () => {
