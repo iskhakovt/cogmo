@@ -53,9 +53,16 @@ export interface DeliveryHandle {
  *
  * prepare() resolves source routing targets, partitions by adapter type,
  * opens stream handles for StreamingAdapters, and returns a DeliveryHandle.
+ *
+ * notifyConversation() is the off-path notification surface — used by the
+ * orchestrator's `onFailure` handler (and future recovery paths) to send a
+ * one-shot text to every active session on a conversation. Bypasses source
+ * routing entirely because there's no in-flight turn whose inbound cursor
+ * we could anchor against; we just need to reach the user.
  */
 export interface DeliveryRouter {
   prepare(ctx: RoutingContext): Promise<DeliveryHandle>;
+  notifyConversation(conversationId: string, text: string): Promise<void>;
 }
 
 export interface AdapterEntry {
@@ -123,6 +130,9 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
         }
       }
 
+      // (notifyConversation is defined below at the router level — it doesn't
+      // share session state with prepare(), since failure notification can
+      // arrive long after the turn that triggered it.)
       return {
         async push(event: StreamEvent): Promise<void> {
           for (const handle of streamHandles) {
@@ -157,5 +167,39 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
         },
       };
     },
+
+    async notifyConversation(conversationId: string, text: string): Promise<void> {
+      const sessions = await transportStore.getActiveSessionsForConversation(conversationId);
+      if (sessions.length === 0) {
+        logger.warn({ conversationId }, "notifyConversation: no active sessions");
+        return;
+      }
+      for (const session of sessions) {
+        const entry = adapters.get(session.channelId);
+        if (!entry) continue;
+        const adapter = entry.adapter;
+        if (!hasDeliver(adapter)) {
+          // Pure StreamingAdapter — would need an open stream to push a status,
+          // but no turn is in flight here. Skip. (Telegram implements both
+          // Adapter and StreamingAdapter so the production hot path is fine.)
+          continue;
+        }
+        const rendered: RenderedMessage | string = entry.renderOutput
+          ? entry.renderOutput(text)
+          : text;
+        try {
+          await adapter.deliver(session.platformAddress, rendered);
+        } catch (err) {
+          logger.error(
+            { err, conversationId, channelId: session.channelId },
+            "notifyConversation: deliver failed",
+          );
+        }
+      }
+    },
   };
+}
+
+function hasDeliver(adapter: AdapterEntry["adapter"]): adapter is Adapter {
+  return "deliver" in adapter;
 }

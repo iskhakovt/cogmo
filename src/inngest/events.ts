@@ -37,6 +37,27 @@ export const conversationIdle = eventType("conversation/idle", {
   }),
 });
 
+/**
+ * Fired by `handle-message`'s `onFailure` handler after Inngest retries
+ * exhaust. Distinct from `response/ready` so the Hindsight Observer never
+ * sees errored turns (no user-facing assistant content was produced — feeding
+ * the memory pipeline would dilute it with operational noise).
+ *
+ * Consumers (future): the recovery function in PR2 attempts a sanitize-and-
+ * retry; the evolution reflector builds a failure-pattern corpus for
+ * steering-rule auto-correction. PR1 only emits the event — no consumers
+ * yet, intentionally.
+ */
+export const conversationErrored = eventType("conversation/errored", {
+  schema: z.object({
+    conversationId: z.string(),
+    runId: z.string(),
+    /** Error class name, e.g. `BadRequestError` / `NonRetriableError`. */
+    errorClass: z.string(),
+    errorMessage: z.string(),
+  }),
+});
+
 // --- Debounce events ---
 
 export const debounceIdle = eventType("debounce/idle", {

@@ -285,6 +285,106 @@ describe("createHandleMessage", () => {
     expect(handle.finish).not.toHaveBeenCalled();
   });
 
+  // Provider-error → Inngest retry policy translation. A 400 (or any 4xx
+  // except 408/425/429) is deterministic — same request, same failure.
+  // Wrapping in NonRetriableError stops Inngest from burning retries.
+  it("wraps non-retriable provider errors in NonRetriableError", async () => {
+    const handle = mockDeliveryHandle();
+    const apiError = Object.assign(new Error("Bad Request"), { status: 400 });
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn().mockRejectedValue(apiError),
+    });
+
+    let caught: unknown;
+    try {
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).constructor.name).toBe("NonRetriableError");
+    expect((caught as Error).message).toBe("Bad Request");
+    expect((caught as Error & { cause?: unknown }).cause).toBe(apiError);
+    expect(handle.abort).toHaveBeenCalledWith("Bad Request");
+  });
+
+  // Inngest invokes `onFailure` after retries exhaust (or immediately on a
+  // NonRetriableError). Without this handler the run dies silently — no user
+  // notification, no downstream signal. The handler reaches the user via
+  // `notifyConversation` (no in-flight stream to push status into) and emits
+  // `conversation/errored` so future recovery / evolution paths can react.
+  it("onFailure notifies user and emits conversation/errored", async () => {
+    const notifyConversation = vi.fn().mockResolvedValue(undefined);
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ notifyConversation }),
+    });
+    const fn = createHandleMessage(deps) as any;
+    const onFailure = fn.opts.onFailure;
+    expect(onFailure).toBeDefined();
+
+    const sendEvent = vi.fn().mockResolvedValue(undefined);
+    const stepRun = vi
+      .fn()
+      .mockImplementation(async (_id: string, body: () => Promise<unknown>) => body());
+    const stepCtx = { run: stepRun, sendEvent };
+    const failureEvent = {
+      data: {
+        run_id: "run-failed-1",
+        event: { data: { conversationId: "conv-1", triggerInboundId: "inbound-1" } },
+      },
+    };
+    const error = new Error("boom");
+    error.name = "BadRequestError";
+
+    await onFailure({ event: failureEvent, error, step: stepCtx });
+
+    expect(notifyConversation).toHaveBeenCalledTimes(1);
+    expect(notifyConversation.mock.calls[0]![0]).toBe("conv-1");
+    expect(notifyConversation.mock.calls[0]![1]).toMatch(/error/i);
+
+    expect(sendEvent).toHaveBeenCalledTimes(1);
+    const [stepId, payload] = sendEvent.mock.calls[0]!;
+    expect(stepId).toBe("emit-conversation-errored");
+    expect(payload).toMatchObject({
+      name: "conversation/errored",
+      data: {
+        conversationId: "conv-1",
+        runId: "run-failed-1",
+        errorClass: "BadRequestError",
+        errorMessage: "boom",
+      },
+    });
+  });
+
+  it("rethrows retriable provider errors as-is so Inngest retries them", async () => {
+    const handle = mockDeliveryHandle();
+    const transientError = Object.assign(new Error("rate limited"), { status: 429 });
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn().mockRejectedValue(transientError),
+    });
+
+    let caught: unknown;
+    try {
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBe(transientError);
+    expect((caught as Error).constructor.name).not.toBe("NonRetriableError");
+  });
+
   it("calls delivery.deliverBatch after persist when there are batch targets", async () => {
     const handle = mockDeliveryHandle({
       hasBatchTargets: vi.fn().mockReturnValue(true),
