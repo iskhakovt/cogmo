@@ -32,7 +32,7 @@ export async function ensureDefaultProfile(agentStore: AgentStore): Promise<stri
     userId: null,
     name: "assistant",
     basePrompt: DEFAULT_BASE_PROMPT,
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-4-6",
     toolSet: DEFAULT_TOOL_SET,
   });
   logger.info({ profileId: id }, "created default org profile");

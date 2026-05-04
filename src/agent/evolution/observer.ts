@@ -20,7 +20,7 @@ import { consolidateRules } from "./consolidate-rules.js";
 import { extractCorrections } from "./extract-corrections.js";
 import { extractMemories } from "./extract-memories.js";
 
-const DEFAULT_EXTRACTION_MODEL = "claude-sonnet-4-20250514";
+const DEFAULT_EXTRACTION_MODEL = "claude-sonnet-4-6";
 const MIN_MESSAGES_FOR_EXTRACTION = 4; // 2 turns minimum
 
 export interface ObserverDeps {

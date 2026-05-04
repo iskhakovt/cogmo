@@ -16,7 +16,7 @@ function mkProfile(overrides: Partial<Profile> & { id: string; name: string }): 
   return {
     userId: null,
     basePrompt: "",
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-4-6",
     summarizationModel: null,
     extractionModel: null,
     autoRecall: "heuristic",
@@ -83,8 +83,8 @@ describe("renderProfileList", () => {
       mkProfile({ id: "p2", name: "coder", userId: "u1" }),
     ];
     const rendered = renderProfileList(profiles, { currentProfileId: "p2" });
-    expect(rendered.text).toContain("• assistant (org, claude-sonnet-4-20250514)");
-    expect(rendered.text).toContain("• coder (you, claude-sonnet-4-20250514) ← current");
+    expect(rendered.text).toContain("• assistant (org, claude-sonnet-4-6)");
+    expect(rendered.text).toContain("• coder (you, claude-sonnet-4-6) ← current");
   });
 
   it("handles empty list", () => {
@@ -94,10 +94,10 @@ describe("renderProfileList", () => {
 
 describe("renderModelList", () => {
   it("marks current model", () => {
-    const text = renderModelList(["claude-sonnet-4-20250514", "gpt-4o"], {
+    const text = renderModelList(["claude-sonnet-4-6", "gpt-4o"], {
       currentModel: "gpt-4o",
     });
-    expect(text).toContain("• claude-sonnet-4-20250514");
+    expect(text).toContain("• claude-sonnet-4-6");
     expect(text).toContain("• gpt-4o ← current");
   });
 
