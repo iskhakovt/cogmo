@@ -18,18 +18,18 @@
 
 import type { ContentBlock, Message, ToolResultBlock, ToolUseBlock } from "../llm/types.js";
 
-export type RepairKind =
-  | "synthesized_tool_result"
-  | "dropped_stray_tool_result"
-  | "dropped_empty_message";
+/**
+ * Discriminated union — `toolUseId` is required exactly when the kind is
+ * one of the tool-pair repairs, absent for empty-message drops. Lifts the
+ * "this id is meaningful here" invariant from a runtime convention into a
+ * compile-time check.
+ */
+export type Repair =
+  | { kind: "synthesized_tool_result"; index: number; toolUseId: string }
+  | { kind: "dropped_stray_tool_result"; index: number; toolUseId: string }
+  | { kind: "dropped_empty_message"; index: number };
 
-export interface Repair {
-  kind: RepairKind;
-  /** index in the input messages array where the violation was found */
-  index: number;
-  /** for tool_use / tool_result repairs, the affected tool_use_id */
-  toolUseId?: string;
-}
+export type RepairKind = Repair["kind"];
 
 export interface ValidationResult {
   messages: Message[];
@@ -44,7 +44,6 @@ const SYNTHESIZED_TOOL_RESULT_CONTENT = "tool execution did not complete (recove
  * during repair (currently only stray tool_results, handled separately).
  */
 function isEmptyContent(content: Message["content"]): boolean {
-  if (typeof content === "string") return content.length === 0;
   return content.length === 0;
 }
 
@@ -132,9 +131,9 @@ export function validateHistory(messages: ReadonlyArray<Message>): ValidationRes
     out.push(msg);
 
     if (msg.role === "assistant" && Array.isArray(msg.content)) {
-      for (const id of toolUseIdsIn(msg.content)) seenToolUseIds.add(id);
-
       const openIds = toolUseIdsIn(msg.content);
+      for (const id of openIds) seenToolUseIds.add(id);
+
       if (openIds.length > 0) {
         const nextMsg = messages[i + 1];
         const nextIsUser = nextMsg !== undefined && nextMsg.role === "user";

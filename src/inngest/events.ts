@@ -52,8 +52,26 @@ export const conversationErrored = eventType("conversation/errored", {
   schema: z.object({
     conversationId: z.string(),
     runId: z.string(),
-    /** Error class name, e.g. `BadRequestError` / `NonRetriableError`. */
+    /**
+     * The triggering inbound message id from the failing run, when known.
+     * Forwarded so PR2's recovery function (and any future consumer) can
+     * mark just the failing inbound rather than guessing scope. Null when
+     * the originating event was a flush (no specific inbound).
+     */
+    triggerInboundId: z.string().nullable(),
+    /**
+     * Class of the error Inngest saw — typically `NonRetriableError`
+     * because handle-message rewraps non-retriable provider errors before
+     * throwing. Preserved for parity with the run's actual exit shape.
+     */
     errorClass: z.string(),
+    /**
+     * Class of the underlying cause when present (e.g. `BadRequestError`,
+     * `RateLimitError`). When `errorClass === "NonRetriableError"` this is
+     * the upstream provider error class — the bucket the evolution
+     * failure-reflector actually wants. Null when there's no `cause`.
+     */
+    causeClass: z.string().nullable(),
     errorMessage: z.string(),
   }),
 });

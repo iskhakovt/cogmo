@@ -339,8 +339,15 @@ describe("createHandleMessage", () => {
         event: { data: { conversationId: "conv-1", triggerInboundId: "inbound-1" } },
       },
     };
-    const error = new Error("boom");
-    error.name = "BadRequestError";
+    // Reflect the production shape: handle-message rewraps non-retriable
+    // provider errors as NonRetriableError, so `error` Inngest passes to
+    // onFailure has name=NonRetriableError and `cause` carries the original
+    // (e.g. BadRequestError). Asserting against the unwrapped class would
+    // false-pass; we want both surfaced.
+    const upstream = new Error("Bad Request");
+    upstream.name = "BadRequestError";
+    const error = new Error("Bad Request", { cause: upstream });
+    error.name = "NonRetriableError";
 
     // Track call order — emission must precede notification so the durable
     // signal is recorded before the best-effort user-facing courtesy.
@@ -368,8 +375,42 @@ describe("createHandleMessage", () => {
       data: {
         conversationId: "conv-1",
         runId: "run-failed-1",
-        errorClass: "BadRequestError",
-        errorMessage: "boom",
+        triggerInboundId: "inbound-1",
+        errorClass: "NonRetriableError",
+        causeClass: "BadRequestError",
+        errorMessage: "Bad Request",
+      },
+    });
+  });
+
+  // When the run failed without an upstream cause (e.g. our own programmer
+  // error rather than a wrapped provider error), causeClass is null —
+  // distinguishable from "we didn't capture it" so downstream consumers
+  // know there's nothing to unwrap.
+  it("onFailure emits causeClass: null when error has no cause", async () => {
+    const deps = mockDeps();
+    const fn = createHandleMessage(deps) as any;
+    const onFailure = fn.opts.onFailure;
+    const sendEvent = vi.fn().mockResolvedValue(undefined);
+    const stepRun = vi
+      .fn()
+      .mockImplementation(async (_id: string, body: () => Promise<unknown>) => body());
+    const stepCtx = { run: stepRun, sendEvent };
+    const failureEvent = {
+      data: {
+        run_id: "run-failed-3",
+        event: { data: { conversationId: "conv-3", triggerInboundId: null } },
+      },
+    };
+    const error = new Error("internal");
+
+    await onFailure({ event: failureEvent, error, step: stepCtx });
+
+    expect(sendEvent).toHaveBeenCalledTimes(1);
+    expect(sendEvent.mock.calls[0]![1]).toMatchObject({
+      data: {
+        triggerInboundId: null,
+        causeClass: null,
       },
     });
   });

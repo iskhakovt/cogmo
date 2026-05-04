@@ -194,7 +194,7 @@ describe("validateHistory", () => {
     expect(Array.isArray(messages[2]!.content)).toBe(true);
     const synthesized = messages[2]!.content as Array<{ toolUseId: string }>;
     expect(synthesized.map((b) => b.toolUseId)).toEqual(["t1", "t2", "t3"]);
-    expect(repairs.map((r) => r.toolUseId)).toEqual(["t1", "t2", "t3"]);
+    expect(repairs.map((r) => ("toolUseId" in r ? r.toolUseId : null))).toEqual(["t1", "t2", "t3"]);
   });
 
   it("does not flag a tool_result whose tool_use lives in the same loop earlier", () => {

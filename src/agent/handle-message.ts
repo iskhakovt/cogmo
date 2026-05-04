@@ -94,14 +94,23 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // The original turn's `delivery` handle is gone (closure scope of a
       // different run), so we re-resolve sessions via `notifyConversation`.
       onFailure: async ({ event, error, step }) => {
-        const { conversationId } = event.data.event.data;
+        const { conversationId, triggerInboundId } = event.data.event.data;
         const runId = event.data.run_id;
+        // `error` is what Inngest saw — typically NonRetriableError, since
+        // we rewrap non-retriable provider errors above. The original
+        // class (BadRequestError, RateLimitError, etc.) is on `cause`.
+        // Surface both so the evolution failure-reflector can bucket by
+        // upstream class rather than every error coalescing to one bucket.
+        const cause = error.cause;
+        const causeClass = cause instanceof Error ? cause.name : null;
         await step.sendEvent(
           "emit-conversation-errored",
           conversationErrored.create({
             conversationId,
             runId,
+            triggerInboundId,
             errorClass: error.name,
+            causeClass,
             errorMessage: error.message,
           }),
         );

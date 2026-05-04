@@ -622,6 +622,45 @@ describe("runStreamingAgentLoop", () => {
     expect(provider.chatStream).toHaveBeenCalledTimes(2);
   });
 
+  // Regression: streamed tool_use accompanied by stop_reason: max_tokens.
+  // Mirror of the end_turn case below — both must execute the tool, since
+  // production saw end_turn but max_tokens is a structurally identical
+  // failure mode (model truncated mid-thought after emitting a tool_use).
+  it("executes tool_use even when stream reports stop_reason: max_tokens", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: {} }],
+        stopReason: "max_tokens",
+      },
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({}),
+        handler: async () => "ok",
+      }),
+    );
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "echo" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.iterations).toBe(2);
+    expect(result.newMessages[1]).toEqual({
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "t1", content: "ok" }],
+    });
+  });
+
   // Regression: streamed tool_use accompanied by stop_reason: end_turn.
   // Same orphan-persistence bug as runAgentLoop, but in the production hot
   // path (handle-message uses runStreamingAgentLoop). Before the fix the loop
