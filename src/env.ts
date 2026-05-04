@@ -24,6 +24,14 @@ export const env = createEnv({
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
     DATABASE_URL: z.string().default("postgresql://cogmo@localhost/cogmo"),
     HINDSIGHT_URL: z.string().url(),
+    /**
+     * Truncation budget for recall queries, in tokens. Must match the Hindsight
+     * server's `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` (server default: 500).
+     * Bump on both sides simultaneously when long multi-turn context needs to
+     * flow into the recall query — semantic search quality degrades past
+     * ~1500 tokens regardless of the cap.
+     */
+    HINDSIGHT_RECALL_MAX_QUERY_TOKENS: z.coerce.number().int().positive().default(500),
     INNGEST_MODE: z.enum(["connect", "serve"]).default("connect"),
     INNGEST_SERVE_PORT: z.coerce.number().default(3000),
     // `z.coerce.boolean()` is JS-truthy on any non-empty string —

@@ -72,6 +72,7 @@
 - [ ] `p2` Skills P3.5 telemetry & cost — `skill_runs` tracking, `skill_context_calls` audit, cost accounting via `ctx.llm` token metering + declared `cost_per_call_usd` + dispatcher budget enforcement (PROGRESS.md P3.5)
 - [ ] `p3` Skills P3.6 deferred — egress-proxy secret substitution, `ctx.skills.invoke` composition, agent-led repair loop, search_skills retrieval layer. Move to Next individually when the trigger fires (trust boundary widens, skill count crosses ~50, tool-selection accuracy drops).
 - [ ] `p3` Prompt optimization — evaluation rubrics, bootstrapped few-shot (Phase 4)
+- [ ] `p3` HyDE for auto-recall — generate a short hypothetical answer with a small/fast LLM, embed that instead of the raw user message. Improves recall quality on long/multi-turn turns where a mean-pooled embedding of raw chatter dilutes intent. Adds an LLM call on the hot path, so gate behind a profile setting and only consider after bumping `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` + truncation (issue #120) is in place and measured insufficient.
 
 ## Blocked
 
