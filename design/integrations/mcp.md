@@ -326,6 +326,7 @@ Phase A only needs server-level approval. Per-call is deferred until a concrete 
 | Native HTTP client for Hindsight, not MCP | Hot path; typed contract; Cogmo-specific semantics. |
 | Extend `profiles.toolSet` with globs in place | Symmetry with native tools. Backwards compatible. |
 | Budget cap (25) | LLM tool-selection accuracy degrades > ~30 (Cursor data). |
+| Use the official `@modelcontextprotocol/sdk` | ~17 transitive deps including unused server-side HTTP frameworks (express, hono, ajv, jose, pkce-challenge, eventsource — the SDK ships client + server in one package, no split available as of 2026-05). Accepted because runtime cost is zero (server-side TS, no browser bundle) and tracking spec changes upstream is more valuable than dep minimalism. Alternatives evaluated: `mcp-use` (smaller, but lags spec), hand-rolled JSON-RPC client (~300-500 LOC, no help when OAuth lands in Phase D). Re-evaluate if a CVE in the unused server path forces it. |
 
 ## Open questions
 
