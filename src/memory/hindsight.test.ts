@@ -244,4 +244,16 @@ describe("HindsightMemoryProvider", () => {
     expect(result.memories).toEqual([]);
     expect(mockRecall).toHaveBeenCalledTimes(2);
   });
+
+  it("recall retries on 429 HindsightError (rate limiting is transient)", async () => {
+    const provider = createProvider();
+    mockRecall
+      .mockRejectedValueOnce(new MockHindsightError("rate limited", 429, "Too Many Requests"))
+      .mockResolvedValueOnce({ results: [] });
+
+    const result = await provider.recall("bank-1", "q");
+
+    expect(result.memories).toEqual([]);
+    expect(mockRecall).toHaveBeenCalledTimes(2);
+  });
 });

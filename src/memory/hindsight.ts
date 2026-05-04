@@ -46,7 +46,9 @@ function truncateQuery(query: string, maxTokens: number): { query: string; trunc
 }
 
 function isClientError(statusCode: number | undefined): boolean {
-  return statusCode !== undefined && statusCode >= 400 && statusCode < 500;
+  // 429 is transient (rate limiting) — let withRetry's backoff handle it
+  // rather than treating it as a deterministic 4xx that aborts immediately.
+  return statusCode !== undefined && statusCode >= 400 && statusCode < 500 && statusCode !== 429;
 }
 
 export interface HindsightMemoryProviderOptions {

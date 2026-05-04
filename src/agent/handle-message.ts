@@ -205,7 +205,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             .recall(userId, userContentText, { maxTokens: 2000 })
             .catch((err: unknown) => {
               logger.warn(
-                { err: err instanceof Error ? err.message : String(err), conversationId },
+                { err, conversationId },
                 "auto-recall failed, proceeding without recalled context",
               );
               return { memories: [] };
