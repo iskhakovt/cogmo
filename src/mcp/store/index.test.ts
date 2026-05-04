@@ -313,4 +313,108 @@ describe("DrizzleMcpStore", () => {
       void b;
     });
   });
+
+  describe("syncServerApproval", () => {
+    it("upserts new pins as pending and flips the server to approved in one tx", async () => {
+      const server = await seedServer();
+      await store.syncServerApproval({
+        serverId: server.id,
+        snapshots: [
+          {
+            toolName: "create_pr",
+            schemaHash: "h1",
+            schemaSnapshot: { description: "d", inputSchema: {} },
+          },
+          {
+            toolName: "list_issues",
+            schemaHash: "h2",
+            schemaSnapshot: { description: "d", inputSchema: {} },
+          },
+        ],
+      });
+      const refreshed = await store.getServerById(server.id);
+      expect(refreshed?.approvalStatus).toBe("approved");
+      const pins = await store.getToolPins(server.id);
+      expect(pins.map((p) => p.toolName).sort()).toEqual(["create_pr", "list_issues"]);
+      expect(pins.every((p) => p.approvalStatus === "pending")).toBe(true);
+    });
+
+    it("preserves the prior approval status when the schema hash is unchanged", async () => {
+      const server = await seedServer();
+      await store.upsertToolPin({
+        serverId: server.id,
+        toolName: "create_pr",
+        schemaHash: "h1",
+        schemaSnapshot: { description: "d", inputSchema: {} },
+        approvalStatus: "approved",
+      });
+      await store.syncServerApproval({
+        serverId: server.id,
+        snapshots: [
+          {
+            toolName: "create_pr",
+            schemaHash: "h1",
+            schemaSnapshot: { description: "d", inputSchema: {} },
+          },
+        ],
+      });
+      const pins = await store.getToolPins(server.id);
+      expect(pins[0]?.approvalStatus).toBe("approved");
+    });
+
+    it("downgrades to pending when the schema hash changes", async () => {
+      const server = await seedServer();
+      await store.upsertToolPin({
+        serverId: server.id,
+        toolName: "create_pr",
+        schemaHash: "old",
+        schemaSnapshot: { description: "d", inputSchema: {} },
+        approvalStatus: "approved",
+      });
+      await store.syncServerApproval({
+        serverId: server.id,
+        snapshots: [
+          {
+            toolName: "create_pr",
+            schemaHash: "new",
+            schemaSnapshot: { description: "d", inputSchema: {} },
+          },
+        ],
+      });
+      const pins = await store.getToolPins(server.id);
+      expect(pins[0]?.approvalStatus).toBe("pending");
+      expect(pins[0]?.schemaHash).toBe("new");
+    });
+
+    it("deletes pins for tools that vanished from the snapshot list", async () => {
+      const server = await seedServer();
+      await store.upsertToolPin({
+        serverId: server.id,
+        toolName: "old_tool",
+        schemaHash: "h",
+        schemaSnapshot: { description: "d", inputSchema: {} },
+        approvalStatus: "approved",
+      });
+      await store.syncServerApproval({
+        serverId: server.id,
+        snapshots: [
+          {
+            toolName: "new_tool",
+            schemaHash: "h",
+            schemaSnapshot: { description: "d", inputSchema: {} },
+          },
+        ],
+      });
+      const pins = await store.getToolPins(server.id);
+      expect(pins.map((p) => p.toolName)).toEqual(["new_tool"]);
+    });
+
+    it("flips the server to approved even when the snapshot list is empty (server with no tools)", async () => {
+      const server = await seedServer();
+      await store.syncServerApproval({ serverId: server.id, snapshots: [] });
+      const refreshed = await store.getServerById(server.id);
+      expect(refreshed?.approvalStatus).toBe("approved");
+      expect(await store.getToolPins(server.id)).toHaveLength(0);
+    });
+  });
 });
