@@ -6,6 +6,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import * as codingSchema from "../agent/coding/store/schema.js";
 import * as agentSchema from "../agent/store/schema.js";
 import type { Database } from "../db/index.js";
+import * as mcpSchema from "../mcp/store/schema.js";
 import * as sandboxSchema from "../sandbox/store/schema.js";
 import * as secretsSchema from "../secrets/store/schema.js";
 import * as skillsSchema from "../skills/store/schema.js";
@@ -18,6 +19,7 @@ const schema = {
   ...sandboxSchema,
   ...codingSchema,
   ...skillsSchema,
+  ...mcpSchema,
 };
 
 /**

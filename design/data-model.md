@@ -43,6 +43,8 @@ Design sketches — added via Drizzle migrations when their phase begins.
 | `agent_traces` | 2 | LLM execution log (tool calls, reasoning). FK → messages. |
 | `reflections` | 2 | Tracks Observer runs (conversation_id, covered_up_to message). |
 | `signals` | 2 | Conversation signals for evolution pipeline (re-ask, correction, etc.). |
+| `mcp_servers` | 2 | MCP server configs (transport, config blob, enabled, approval). See [integrations/mcp.md](integrations/mcp.md). |
+| `mcp_server_tools` | 2 | Per-tool schema hash + approval state. Cascades from `mcp_servers`. |
 | `skills` | 3 | Skill library metadata. Code on filesystem, descriptions for retrieval. |
 
 ## Hindsight Tables (Managed Externally) `[confirmed]`

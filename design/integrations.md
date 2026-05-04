@@ -10,11 +10,12 @@ Each adapter implements the `AdapterModule` contract (`channelType` + `setup()`)
 
 ## MCP Integrations `[proposed]`
 
-MCP (Model Context Protocol) for tool/data integrations. 17,000+ servers in ecosystem (March 2026).
+See [integrations/mcp.md](integrations/mcp.md) for the full client design (server config, lifecycle, sandboxing, secrets, schema pinning, profile filtering, phasing).
+
+Target third-party servers (priority order):
 
 | Integration | MCP Server | Priority |
 |-|-|-|
-| Hindsight (memory) | Native MCP server | Day 1 |
 | Gmail | Community | High |
 | Google Calendar | Community | High |
 | GitHub | Official | Medium |
@@ -23,26 +24,7 @@ MCP (Model Context Protocol) for tool/data integrations. 17,000+ servers in ecos
 | Linear | Official | Low (team use) |
 | Slack | Official | Low (team use) |
 
-### MCP Client Pattern `[proposed]`
-
-```typescript
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-
-// Start MCP server as subprocess
-const transport = new StdioClientTransport({
-  command: "npx",
-  args: ["hindsight-mcp-server"],
-});
-const client = new Client({ name: "cogmo", version: "1.0.0" });
-await client.connect(transport);
-
-// List available tools
-const tools = await client.listTools();
-
-// Call a tool
-const result = await client.callTool({ name: "retain", arguments: { fact: "...", network: "bank" } });
-```
+Hindsight stays on the native HTTP client (`MemoryProvider`) — see [integrations/mcp.md → Hindsight](integrations/mcp.md#hindsight-native-client-not-mcp).
 
 ### Dynamic Tool Registration (MCP Spec) `[research]`
 
