@@ -86,7 +86,7 @@ describe("createHandleMessage", () => {
     });
 
     expect(deps.runStreamingAgentLoop).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "claude-sonnet-4-20250514" }),
+      expect.objectContaining({ model: "claude-sonnet-4-6" }),
     );
   });
 
@@ -121,7 +121,7 @@ describe("createHandleMessage", () => {
         userId: null,
         name: "assistant",
         basePrompt: "a",
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         summarizationModel: null,
         extractionModel: null,
         autoRecall: "heuristic" as const,
@@ -153,10 +153,10 @@ describe("createHandleMessage", () => {
 
     // Both inserts stamped with the first (snapshot) profile+model, not the later change
     expect(deps.agentStore.insertMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ profileId: "profile-1", model: "claude-sonnet-4-20250514" }),
+      expect.objectContaining({ profileId: "profile-1", model: "claude-sonnet-4-6" }),
     );
     expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
-      expect.objectContaining({ profileId: "profile-1", model: "claude-sonnet-4-20250514" }),
+      expect.objectContaining({ profileId: "profile-1", model: "claude-sonnet-4-6" }),
     );
   });
 
@@ -175,7 +175,7 @@ describe("createHandleMessage", () => {
         role: "user",
         lastInboundMessageId: "inbound-1",
         profileId: "profile-1",
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
       }),
     );
     // Assistant + tool turns via insertMessages (atomic batch) — same snapshot
@@ -185,7 +185,7 @@ describe("createHandleMessage", () => {
         conversationId: "conv-1",
         lastInboundMessageId: "inbound-1",
         profileId: "profile-1",
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
       }),
     );
   });
@@ -452,9 +452,9 @@ describe("createHandleMessage", () => {
   });
 
   it("runs compaction when countTokens reports over threshold", async () => {
-    // countTokens returns over 60% of budget (173_616 * 0.6 ≈ 104_170)
+    // countTokens returns over 60% of budget (926_000 * 0.6 ≈ 555_600)
     // First call: over threshold. Second call (after clearing): under.
-    const countTokens = vi.fn().mockResolvedValueOnce(120_000).mockResolvedValueOnce(50_000);
+    const countTokens = vi.fn().mockResolvedValueOnce(600_000).mockResolvedValueOnce(50_000);
     const deps = mockDeps({
       provider: mockProvider({ countTokens }),
       agentStore: mockAgentStore({
@@ -476,11 +476,11 @@ describe("createHandleMessage", () => {
   });
 
   it("pushes status event through delivery when summarization runs", async () => {
-    // Over 80% of budget → triggers summarization
+    // Over 80% of budget (926_000 * 0.8 ≈ 740_800) → triggers summarization
     const countTokens = vi
       .fn()
-      .mockResolvedValueOnce(150_000) // initial: over 80%
-      .mockResolvedValueOnce(150_000) // after tool clearing (nothing to clear): still over
+      .mockResolvedValueOnce(800_000) // initial: over 80%
+      .mockResolvedValueOnce(800_000) // after tool clearing (nothing to clear): still over
       .mockResolvedValueOnce(50_000); // after summarization: under
     const handle = mockDeliveryHandle();
     const deps = mockDeps({

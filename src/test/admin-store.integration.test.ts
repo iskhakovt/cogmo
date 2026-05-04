@@ -21,7 +21,7 @@ import * as schema from "../db/schemas.js";
 
 const SUITE = randomBytes(4).toString("hex"); // unique per test run — no collision with seed data
 const name = (tag: string) => `it-${SUITE}-${tag}`;
-const TEST_MODEL = "claude-sonnet-4-20250514";
+const TEST_MODEL = "claude-sonnet-4-6";
 
 let sql: ReturnType<typeof postgres>;
 let store: DrizzleAgentStore;

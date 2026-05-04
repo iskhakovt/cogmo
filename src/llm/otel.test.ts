@@ -18,11 +18,11 @@ describe("llm/otel", () => {
   });
 
   it("emits a chat span with gen_ai.* attributes", () => {
-    const span = startChatSpan("anthropic", "claude-sonnet-4-20250514");
+    const span = startChatSpan("anthropic", "claude-sonnet-4-6");
     recordChatUsage(
       span,
       "anthropic",
-      "claude-sonnet-4-20250514",
+      "claude-sonnet-4-6",
       { inputTokens: 100, outputTokens: 50 },
       "end_turn",
     );
@@ -33,19 +33,19 @@ describe("llm/otel", () => {
     const attrs = spans[0]?.attributes ?? {};
     expect(attrs["gen_ai.operation.name"]).toBe("chat");
     expect(attrs["gen_ai.provider.name"]).toBe("anthropic");
-    expect(attrs["gen_ai.request.model"]).toBe("claude-sonnet-4-20250514");
-    expect(attrs["gen_ai.response.model"]).toBe("claude-sonnet-4-20250514");
+    expect(attrs["gen_ai.request.model"]).toBe("claude-sonnet-4-6");
+    expect(attrs["gen_ai.response.model"]).toBe("claude-sonnet-4-6");
     expect(attrs["gen_ai.response.finish_reasons"]).toEqual(["end_turn"]);
     expect(attrs["gen_ai.usage.input_tokens"]).toBe(100);
     expect(attrs["gen_ai.usage.output_tokens"]).toBe(50);
   });
 
   it("includes cache token attrs when present", () => {
-    const span = startChatSpan("anthropic", "claude-sonnet-4-20250514");
+    const span = startChatSpan("anthropic", "claude-sonnet-4-6");
     recordChatUsage(
       span,
       "anthropic",
-      "claude-sonnet-4-20250514",
+      "claude-sonnet-4-6",
       {
         inputTokens: 100,
         outputTokens: 50,
@@ -99,7 +99,7 @@ describe("llm/otel", () => {
   });
 
   it("marks the span as ERROR when failChatSpan is called", () => {
-    const span = startChatSpan("anthropic", "claude-sonnet-4-20250514");
+    const span = startChatSpan("anthropic", "claude-sonnet-4-6");
     failChatSpan(span, new Error("rate limited"));
     span.end();
 

@@ -3,8 +3,8 @@ import { computeBudget, getModelLimits } from "./models.js";
 
 describe("model registry", () => {
   it("returns limits for a known Anthropic model", () => {
-    const limits = getModelLimits("claude-sonnet-4-20250514");
-    expect(limits).toEqual({ contextWindow: 200_000, maxOutputTokens: 16_384 });
+    const limits = getModelLimits("claude-sonnet-4-6");
+    expect(limits).toEqual({ contextWindow: 1_000_000, maxOutputTokens: 64_000 });
   });
 
   it("returns limits for a known OpenAI model", () => {
@@ -21,13 +21,13 @@ describe("model registry", () => {
 
 describe("computeBudget", () => {
   it("returns contextWindow - maxOutputTokens - safetyBuffer", () => {
-    // claude-sonnet-4: 200_000 - 16_384 - 10_000 = 173_616
-    expect(computeBudget("claude-sonnet-4-20250514")).toBe(173_616);
+    // claude-sonnet-4-6: 1_000_000 - 64_000 - 10_000 = 926_000
+    expect(computeBudget("claude-sonnet-4-6")).toBe(926_000);
   });
 
   it("accepts custom safety buffer", () => {
-    // 200_000 - 16_384 - 5_000 = 178_616
-    expect(computeBudget("claude-sonnet-4-20250514", 5_000)).toBe(178_616);
+    // 1_000_000 - 64_000 - 5_000 = 931_000
+    expect(computeBudget("claude-sonnet-4-6", 5_000)).toBe(931_000);
   });
 
   it("throws on unknown model", () => {

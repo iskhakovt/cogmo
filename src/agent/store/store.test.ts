@@ -33,7 +33,7 @@ async function seedUser(): Promise<string> {
   return (await store.createUser()).id;
 }
 
-const TEST_MODEL = "claude-sonnet-4-20250514";
+const TEST_MODEL = "claude-sonnet-4-6";
 
 async function seedProfile(): Promise<string> {
   return (
