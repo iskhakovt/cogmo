@@ -60,6 +60,11 @@ const DEFAULT_SAFETY_BUFFER = 10_000;
 /**
  * Get context window and output limits for a model.
  * Throws on unknown models — misconfiguration should be caught early.
+ *
+ * INVARIANT: only ever called with the current turn's model resolved from
+ * `profiles.model` (via `snapshot.model` in `handle-message.ts`). Historical
+ * `messages.model` rows are write-only and may reference retired/deprecated
+ * ids that are no longer in the registry — never route those through here.
  */
 export function getModelLimits(model: string): ModelLimits {
   const limits = MODEL_REGISTRY.get(model);

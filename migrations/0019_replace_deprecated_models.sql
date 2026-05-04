@@ -34,8 +34,8 @@ SET "position" = sub."next_pos"
 FROM (
   SELECT
     mp."id",
-    COALESCE(MAX(other."position"), -1) + 1
-      + ROW_NUMBER() OVER (PARTITION BY mp."model" ORDER BY mp."position") - 1
+    COALESCE(MAX(other."position"), -1)
+      + ROW_NUMBER() OVER (PARTITION BY mp."model" ORDER BY mp."position")
       AS "next_pos"
   FROM "model_providers" mp
   LEFT JOIN "model_providers" other
