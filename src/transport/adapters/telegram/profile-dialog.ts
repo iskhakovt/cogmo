@@ -295,12 +295,15 @@ export class ProfileDialogs {
 }
 
 /**
- * Default toolSet for new user profiles — v0 uses a minimal safe set. A future `/profile edit
- * <tools>` sub-flow can expose tool selection. Takes `state` so we can extend later
- * (e.g. inherit from a current profile in edit mode) without changing the call site.
+ * Default toolSet for new user profiles — every tool, matched via the `"*"`
+ * glob. Profiles are filtered against `compileToolMatchers(toolSet)` at
+ * turn-build time (see `composeTurnTools`); a future `/profile edit <tools>`
+ * sub-flow can expose explicit tool / glob selection. Takes `state` so we can
+ * extend later (e.g. inherit from a current profile in edit mode) without
+ * changing the call site.
  */
 function defaultToolSetFor(_state: DialogState): string[] {
-  return ["get_current_time", "memory_recall", "memory_retain"];
+  return ["*"];
 }
 
 function ellipsize(s: string, n: number): string {

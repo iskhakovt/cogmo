@@ -107,6 +107,24 @@ export const env = createEnv({
      * hook). See `design/skills.md` → Skill storage.
      */
     COGMO_SKILLS_PATH: z.string().default("/var/lib/cogmo/skills"),
+    /**
+     * Maximum MCP tools surfaced to the LLM per turn after profile-glob
+     * filtering. Cap exists because LLM tool-selection accuracy degrades
+     * past ~30 tools (Cursor empirical data) and prompt-token cost is
+     * ~250-400 tokens per tool definition. Native + skill tools are not
+     * counted against this budget.
+     */
+    MCP_TOOL_BUDGET: z.coerce.number().int().positive().default(25),
+    /** Per-call timeout for MCP tool dispatch (ms). */
+    MCP_CALL_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+    /** MCP connection pool: idle threshold after which a live connection is closed. */
+    MCP_IDLE_EVICTION_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(10 * 60_000),
+    /** MCP connection pool: how often the idle sweep runs. Set 0 to disable. */
+    MCP_EVICTION_INTERVAL_MS: z.coerce.number().int().nonnegative().default(60_000),
   },
   runtimeEnv: resolved,
   emptyStringAsUndefined: true,

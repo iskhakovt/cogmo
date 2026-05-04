@@ -7,13 +7,16 @@ export const DEFAULT_BASE_PROMPT = `You are a personal AI assistant. You are hel
 You have access to tools — use them when they help answer the user's question.
 If you don't know something and don't have a tool for it, say so honestly.`;
 
-const DEFAULT_TOOL_SET = [
-  "get_current_time",
-  "memory_recall",
-  "memory_retain",
-  "memory_reflect",
-  "generate_image",
-];
+/**
+ * Default org profile sees every registered tool. `toolSet` is interpreted as
+ * a list of picomatch globs against the merged tool registry (built-ins +
+ * skills + MCP); `["*"]` matches every tool name. Empty array = chat-only.
+ *
+ * Operators who want a curated tool set per profile use `/profile new` /
+ * `/profile edit` to set explicit names or per-server globs (e.g.
+ * `["memory_*", "mcp__github__*"]`).
+ */
+const DEFAULT_TOOL_SET = ["*"];
 
 /** Create the default user if none exists. Returns the user ID. */
 export async function ensureDefaultUser(agentStore: AgentStore): Promise<string> {

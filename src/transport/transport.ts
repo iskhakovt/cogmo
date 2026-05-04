@@ -8,6 +8,13 @@ import type { AgentStore, ConversationSummary, Profile } from "../agent/store/in
 import type { ToolSet } from "../agent/store/schema.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
+import {
+  type McpServer,
+  McpServerConfigSchema,
+  type McpServerSpec,
+  type McpServerStatus,
+} from "../mcp/config.js";
+import type { McpRegistry } from "../mcp/registry.js";
 import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
 import {
   DEFAULT_GITHUB_IDENTITY_NAME,
@@ -109,7 +116,13 @@ export type TransportError =
   | { code: "skills_disabled" }
   | { code: "skill_deploy_not_found"; pendingId: string }
   | { code: "skill_deploy_not_pending"; pendingId: string; status: string }
-  | { code: "skill_deploy_register_failed"; pendingId: string; reason: string };
+  | { code: "skill_deploy_register_failed"; pendingId: string; reason: string }
+  | { code: "mcp_disabled" }
+  | { code: "mcp_server_not_found"; serverId: string }
+  | { code: "mcp_server_name_taken"; name: string }
+  | { code: "mcp_invalid_config"; reason: string }
+  | { code: "mcp_tool_not_found"; serverId: string; toolName: string }
+  | { code: "mcp_connection_failed"; serverId: string; reason: string };
 
 /**
  * Transport — the adapter-facing contract for session management and inbound emission.
@@ -276,6 +289,46 @@ export interface Transport {
       reason?: string,
     ): Promise<Result<{ pendingId: string }, TransportError>>;
   };
+
+  /**
+   * MCP server admin surface. Identity-checked: every method takes a
+   * `platformUserHandle` resolved against `user_identities`; unknown
+   * handles get `identity_rejected`. Returns `mcp_disabled` when bootstrap
+   * didn't wire an `McpRegistry` (no MCP servers configured).
+   *
+   * `addServer` validates the config via `McpServerConfigSchema` (returns
+   * `mcp_invalid_config` on parse failure) and creates the row in
+   * `pending` state. `approveServer` connects, snapshots tools, and flips
+   * the server to `approved` in one transaction. `approveTool` /
+   * `rejectTool` flip individual pin status.
+   */
+  mcp: {
+    addServer(
+      platformUserHandle: string,
+      spec: McpServerSpec,
+    ): Promise<Result<McpServer, TransportError>>;
+    removeServer(
+      platformUserHandle: string,
+      serverId: string,
+    ): Promise<Result<void, TransportError>>;
+    listServers(
+      platformUserHandle: string,
+    ): Promise<Result<ReadonlyArray<McpServerStatus>, TransportError>>;
+    approveServer(
+      platformUserHandle: string,
+      serverId: string,
+    ): Promise<Result<void, TransportError>>;
+    approveTool(
+      platformUserHandle: string,
+      serverId: string,
+      toolName: string,
+    ): Promise<Result<void, TransportError>>;
+    rejectTool(
+      platformUserHandle: string,
+      serverId: string,
+      toolName: string,
+    ): Promise<Result<void, TransportError>>;
+  };
 }
 
 /**
@@ -316,6 +369,14 @@ export function createTransport(deps: {
    * Telegram callback identity check. Optional — see `skillRunner`.
    */
   skillStore?: SkillStore;
+  /**
+   * MCP client registry. Optional — when undefined, `mcp.*` returns
+   * `mcp_disabled`. Bootstrap supplies it whenever any MCP-related env vars
+   * are set; the registry itself owns no state of its own (lazy-connect),
+   * so always-supplying it would be safe but `mcp_disabled` keeps the
+   * surface area honest in deployments that haven't opted in.
+   */
+  mcpRegistry?: McpRegistry;
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
@@ -331,6 +392,7 @@ export function createTransport(deps: {
     reposDir,
     skillRunner,
     skillStore,
+    mcpRegistry,
     inngest,
     inboundArrived,
     attachments,
@@ -921,6 +983,89 @@ export function createTransport(deps: {
           ...(reason !== undefined && { reason }),
         });
         return ok({ pendingId });
+      },
+    },
+
+    mcp: {
+      async addServer(platformUserHandle, spec) {
+        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        // Validate the config blob before any DB write so a malformed paste
+        // surfaces a structured `mcp_invalid_config` instead of a Zod throw.
+        const parsed = McpServerConfigSchema.safeParse(spec.config);
+        if (!parsed.success) {
+          return err({
+            code: "mcp_invalid_config" as const,
+            reason: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+          });
+        }
+        try {
+          const server = await mcpRegistry.addServer({
+            name: spec.name,
+            config: parsed.data,
+            enabled: spec.enabled,
+          });
+          return ok(server);
+        } catch (e) {
+          if (e instanceof UniqueViolationError)
+            return err({ code: "mcp_server_name_taken" as const, name: spec.name });
+          if (e instanceof Error && /Invalid MCP server name/.test(e.message))
+            return err({ code: "mcp_invalid_config" as const, reason: e.message });
+          throw e;
+        }
+      },
+
+      async removeServer(platformUserHandle, serverId) {
+        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        await mcpRegistry.removeServer(serverId);
+        return ok(undefined);
+      },
+
+      async listServers(platformUserHandle) {
+        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        const servers = await mcpRegistry.listServers();
+        return ok(servers);
+      },
+
+      async approveServer(platformUserHandle, serverId) {
+        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        try {
+          await mcpRegistry.approveServer(serverId);
+          return ok(undefined);
+        } catch (e) {
+          if (e instanceof Error && /MCP server not found/.test(e.message))
+            return err({ code: "mcp_server_not_found" as const, serverId });
+          // Connect / listTools failure surfaces as a Result error so the
+          // Telegram callback can render a precise toast.
+          return err({
+            code: "mcp_connection_failed" as const,
+            serverId,
+            reason: e instanceof Error ? e.message : String(e),
+          });
+        }
+      },
+
+      async approveTool(platformUserHandle, serverId, toolName) {
+        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        await mcpRegistry.approveTool(serverId, toolName);
+        return ok(undefined);
+      },
+
+      async rejectTool(platformUserHandle, serverId, toolName) {
+        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        await mcpRegistry.rejectTool(serverId, toolName);
+        return ok(undefined);
       },
     },
   };

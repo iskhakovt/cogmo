@@ -1,5 +1,6 @@
 import { ToolRegistry, type ToolSpec } from "../agent/tools.js";
 import { logger } from "../logger.js";
+import { compileToolMatchers } from "../mcp/config.js";
 import type { SkillRunner, SkillToolDef } from "./runner.js";
 
 const log = logger.child({ component: "skills.tool-builder" });
@@ -91,6 +92,50 @@ export function mergeBuiltInsAndSkillTools(
       log.warn(
         { skillName: spec.name },
         "skipping skill — name collides with a built-in tool; built-in wins",
+      );
+      continue;
+    }
+    merged.register(spec);
+  }
+  return merged;
+}
+
+/**
+ * Compose the per-turn `ToolRegistry` from all three tool sources (built-ins,
+ * skills, MCP) gated by the active profile's `toolSet` globs.
+ *
+ * Filtering: each source is filtered through `compileToolMatchers(toolSetGlobs)`
+ * before composition. An empty `toolSetGlobs` means **no tools** for the turn
+ * (matches the schema's "empty array = chat-only profile" semantic). The
+ * default seeded org profile uses `["*"]` to opt every tool back in — that
+ * preserves the historical "all tools surface" behaviour for users who haven't
+ * customised their profile.
+ *
+ * Collision rule: built-ins win over skills (rug-pull defense — an evolved
+ * skill must not silently shadow a trusted built-in). MCP tools carry the
+ * `mcp__<server>__<tool>` prefix and structurally cannot collide with either,
+ * but the check is in place as defense in depth.
+ *
+ * Returns a fresh registry — source arrays are never mutated.
+ */
+export function composeTurnTools(opts: {
+  builtIns: ReadonlyArray<ToolSpec>;
+  skillTools: ReadonlyArray<ToolSpec>;
+  mcpTools: ReadonlyArray<ToolSpec>;
+  toolSetGlobs: readonly string[];
+}): ToolRegistry {
+  const matcher = compileToolMatchers(opts.toolSetGlobs);
+
+  const filteredBuiltIns = opts.builtIns.filter((t) => matcher(t.name));
+  const filteredSkills = opts.skillTools.filter((t) => matcher(t.name));
+  const filteredMcp = opts.mcpTools.filter((t) => matcher(t.name));
+
+  const merged = mergeBuiltInsAndSkillTools(filteredBuiltIns, filteredSkills);
+  for (const spec of filteredMcp) {
+    if (merged.get(spec.name)) {
+      log.warn(
+        { mcpToolName: spec.name },
+        "skipping MCP tool — name collides with built-in or skill",
       );
       continue;
     }

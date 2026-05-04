@@ -11,6 +11,7 @@ import {
 } from "../test/factories.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
+import { ToolRegistry } from "./tools.js";
 
 function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
   return {
@@ -521,5 +522,137 @@ describe("createHandleMessage", () => {
     const statusCalls = handle.push.mock.calls.filter(([event]: any) => event.type === "status");
     expect(statusCalls).toHaveLength(1);
     expect(statusCalls[0][0].message).toBe("Summarizing conversation...");
+  });
+
+  it("calls mcpRegistry.resolveTools with the profile's toolSet globs", async () => {
+    const resolveTools = vi.fn().mockResolvedValue([]);
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({
+          id: "profile-1",
+          userId: null,
+          name: "assistant",
+          basePrompt: "test",
+          model: "claude-sonnet-4-20250514",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "heuristic",
+          toolSet: ["mcp__github__*", "memory_*"],
+        }),
+      }),
+      mcpRegistry: {
+        start: vi.fn(),
+        stop: vi.fn(),
+        resolveTools,
+        addServer: vi.fn(),
+        removeServer: vi.fn(),
+        listServers: vi.fn(),
+        approveServer: vi.fn(),
+        approveTool: vi.fn(),
+        rejectTool: vi.fn(),
+      },
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(resolveTools).toHaveBeenCalledWith({
+      toolGlobs: ["mcp__github__*", "memory_*"],
+    });
+  });
+
+  it("merges MCP tools into the per-turn registry alongside built-ins", async () => {
+    const mcpToolSpec = {
+      name: "mcp__github__create_pr",
+      description: "Open a PR",
+      inputSchema: { type: "object" as const, properties: {} },
+      durable: true,
+      handler: vi.fn().mockResolvedValue("ok"),
+    };
+    // Real ToolRegistry — mockToolRegistry doesn't populate snapshot()
+    // because register/snapshot are vi.fn stubs.
+    const builtIns = new ToolRegistry();
+    builtIns.register({
+      name: "memory_recall",
+      description: "recall",
+      inputSchema: { type: "object", properties: {} },
+      handler: async () => "ok",
+    });
+    const deps = mockDeps({
+      tools: builtIns,
+      agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({
+          id: "profile-1",
+          userId: null,
+          name: "assistant",
+          basePrompt: "test",
+          model: "claude-sonnet-4-20250514",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "heuristic",
+          toolSet: ["*"],
+        }),
+      }),
+      mcpRegistry: {
+        start: vi.fn(),
+        stop: vi.fn(),
+        resolveTools: vi.fn().mockResolvedValue([mcpToolSpec]),
+        addServer: vi.fn(),
+        removeServer: vi.fn(),
+        listServers: vi.fn(),
+        approveServer: vi.fn(),
+        approveTool: vi.fn(),
+        rejectTool: vi.fn(),
+      },
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    // The merged ToolRegistry passed into runStreamingAgentLoop must contain both.
+    const passedTools = (deps.runStreamingAgentLoop as any).mock.calls[0][0].tools;
+    expect(passedTools.get("memory_recall")).toBeDefined();
+    expect(passedTools.get("mcp__github__create_pr")).toBeDefined();
+  });
+
+  it("returns no tools for an empty profile.toolSet (chat-only profile)", async () => {
+    const builtIns = new ToolRegistry();
+    builtIns.register({
+      name: "memory_recall",
+      description: "recall",
+      inputSchema: { type: "object", properties: {} },
+      handler: async () => "ok",
+    });
+    const deps = mockDeps({
+      tools: builtIns,
+      agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({
+          id: "profile-1",
+          userId: null,
+          name: "assistant",
+          basePrompt: "test",
+          model: "claude-sonnet-4-20250514",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "heuristic",
+          toolSet: [],
+        }),
+      }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    const passedTools = (deps.runStreamingAgentLoop as any).mock.calls[0][0].tools;
+    expect(passedTools.snapshot()).toHaveLength(0);
   });
 });

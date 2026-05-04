@@ -31,6 +31,7 @@ import type { InboundContent } from "../../content.js";
 import type { Adapter, StreamHandle, StreamingAdapter } from "../../types.js";
 import {
   handleEnd,
+  handleMcp,
   handleModel,
   handleName,
   handleNew,
@@ -315,6 +316,9 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         "",
         "Coding delegation:",
         "  /repo [list|add <name> <local_path> <remote_url>|remove <name>]",
+        "",
+        "MCP integrations:",
+        "  /mcp [list|pending|add <name> <config-json>|remove <name>|approve <name> [<tool>]|reject <name> <tool>]",
       ].join("\n"),
     );
   });
@@ -330,6 +334,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("profile", (ctx) => handleProfile(transport, toCmdCtx(ctx), profileDialogs));
   bot.command("model", (ctx) => handleModel(transport, toCmdCtx(ctx)));
   bot.command("repo", (ctx) => handleRepo(transport, toCmdCtx(ctx), repoDialogs));
+  bot.command("mcp", (ctx) => handleMcp(transport, toCmdCtx(ctx)));
 
   // Mid-dialog abort for /profile new|edit and /repo add flows. Evaluate
   // both branches (no `||` short-circuit) so a hypothetical "both dialogs
