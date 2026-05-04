@@ -1,3 +1,4 @@
+import { createInterface } from "node:readline";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -56,12 +57,14 @@ export class SdkMcpConnection implements McpConnection {
     });
 
     // Stdio transports expose `stderr` only when constructed with stderr: "pipe"
-    // (which createTransport does). Forward whatever the server writes.
+    // (which createTransport does). Forward whatever the server writes —
+    // line-buffered via readline so multi-line tracebacks (common from Python
+    // MCP servers) aren't fragmented across log entries by chunk boundaries.
     const stderr = (this.#transport as { stderr?: NodeJS.ReadableStream }).stderr;
     if (stderr) {
-      stderr.on("data", (chunk: Buffer) => {
-        const text = chunk.toString("utf8").trim();
-        if (text.length > 0) logger.warn({ mcpStderr: text }, "MCP server stderr");
+      const rl = createInterface({ input: stderr, crlfDelay: Infinity });
+      rl.on("line", (line) => {
+        if (line.length > 0) logger.warn({ mcpStderr: line }, "MCP server stderr");
       });
     }
   }

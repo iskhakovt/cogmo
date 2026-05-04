@@ -39,6 +39,12 @@ function descriptorToJsonSchema(descriptor: McpToolDescriptor): JsonSchema {
   // (properties, required, additionalProperties, etc.) — we just enforce
   // the type discriminator.
   const schema = descriptor.inputSchema;
+  // The cast is structurally safe: `JsonSchema` is `{ type: "object";
+  // [k: string]: unknown }`, the spread provides the index signature, and
+  // the explicit `type: "object"` after the spread guarantees the literal
+  // discriminator (TypeScript can't narrow the spread's index-signature
+  // value back to the literal). Refactoring to a type guard would buy
+  // nothing — the runtime invariant is the same.
   return { ...schema, type: "object" } as JsonSchema;
 }
 
@@ -70,6 +76,12 @@ function serializeCallToolResult(result: unknown): string {
 
   if (textParts.length > 0) return textParts.join("\n");
   if (r.structuredContent !== undefined) return JSON.stringify(r.structuredContent);
+  // TODO(phase-e): when MCP resources / image / audio content support lands,
+  // route non-text content blocks through the LLM provider's native typed
+  // ContentBlock instead of JSON-stringifying them here. This fallback is
+  // intentionally lossy — the LLM gets the raw block array as JSON, which
+  // is deterministic + safe but not useful for vision-style content.
+  // Phase A unblocks dispatch; Phase E surfaces the rich types properly.
   if (r.content && r.content.length > 0) return JSON.stringify(r.content);
   return "";
 }

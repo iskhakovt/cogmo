@@ -142,6 +142,14 @@ export class McpConnectionPool {
       if (this.#closed) throw err;
       const message = err instanceof Error ? err.message : String(err);
       await this.#store.recordLastError(serverId, message);
+      // Reconnect counter invariant: only the failed-spawn path increments
+      // `reconnectAttempts`. A successful spawn writes `live` (no counter),
+      // and the transport-close handler writes `closed` with attempts=0 —
+      // so a healthy reconnect after a transport drop sees prev.kind ===
+      // "closed" with attempts=0 and starts at 1, while a second-attempt
+      // failure sees attempts=1 and goes unhealthy. Live → closed → live
+      // implicitly resets the counter because the success-path overwrites
+      // the entry without reading the prior value.
       const attempts = prev?.kind === "closed" ? prev.reconnectAttempts + 1 : 1;
       if (attempts >= 2) {
         this.#entries.set(serverId, { kind: "unhealthy", lastError: message });

@@ -11,7 +11,6 @@ import {
   type McpServer,
   type McpServerSpec,
   type McpServerStatus,
-  type McpToolApprovalStatus,
 } from "./config.js";
 import type { McpStore } from "./store/index.js";
 
@@ -160,35 +159,24 @@ export class McpRegistryImpl implements McpRegistry {
 
     const conn = await this.#pool.getConnection(id);
     const tools = await conn.listTools();
-    const existingPins = await this.#store.getToolPins(server.id);
-    const existingByName = new Map(existingPins.map((p) => [p.toolName, p]));
-    const incomingNames = new Set(tools.map((t) => t.name));
 
-    for (const tool of tools) {
-      const snapshot = { description: tool.description, inputSchema: tool.inputSchema };
-      const hash = hashToolSchema(snapshot);
-      const existing = existingByName.get(tool.name);
-      // Schema-pinning rule: unchanged → preserve prior status; new or mutated
-      // → pending (operator must re-approve). We never silently approve a
-      // changed schema.
-      const status: McpToolApprovalStatus =
-        existing && existing.schemaHash === hash ? existing.approvalStatus : "pending";
-      await this.#store.upsertToolPin({
-        serverId: server.id,
+    const snapshots = tools.map((tool) => {
+      const schemaSnapshot = {
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+      };
+      return {
         toolName: tool.name,
-        schemaHash: hash,
-        schemaSnapshot: snapshot,
-        approvalStatus: status,
-      });
-    }
+        schemaHash: hashToolSchema(schemaSnapshot),
+        schemaSnapshot,
+      };
+    });
 
-    for (const pin of existingPins) {
-      if (!incomingNames.has(pin.toolName)) {
-        await this.#store.deleteToolPin(server.id, pin.toolName);
-      }
-    }
-
-    await this.#store.setServerApprovalStatus(server.id, "approved");
+    // One transaction: upsert all pins (preserving approved status when the
+    // hash matches), delete pins for vanished tools, flip server status to
+    // approved. Crash mid-sync can't leave the server `pending` with
+    // partially-applied pins.
+    await this.#store.syncServerApproval({ serverId: server.id, snapshots });
   }
 
   async approveTool(serverId: string, toolName: string): Promise<void> {
