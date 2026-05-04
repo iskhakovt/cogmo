@@ -122,15 +122,20 @@ Pinning the hash defends against schema rug-pull (CyberArk-documented attack: Da
 Reuse `secrets` ([infrastructure.md](../infrastructure.md)) verbatim. `McpServerConfigSchema` references secrets by name through a typed `SecretRef`:
 
 ```ts
-type SecretRef = { kind: "secret"; name: string };
+// `env` and `headers` are Record<string, McpValueSource>, where:
+type McpValueSource =
+  | { kind: "literal"; value: string }
+  | { kind: "secret"; name: string };
 
 // example stdio config
 {
+  transport: "stdio",
   command: "npx",
   args: ["@modelcontextprotocol/server-github"],
-  env: [
-    { key: "GITHUB_PERSONAL_ACCESS_TOKEN", value: { kind: "secret", name: "mcp:github:token" } },
-  ],
+  env: {
+    GITHUB_PERSONAL_ACCESS_TOKEN: { kind: "secret", name: "mcp:github:token" },
+    NODE_ENV: { kind: "literal", value: "production" },
+  },
 }
 ```
 

@@ -113,11 +113,22 @@ describe("ToolSchemaSnapshotSchema", () => {
 });
 
 describe("assertValidServerName", () => {
-  it.each(["github", "google_calendar", "linear", "x", "g0"])("accepts %s", (name) => {
+  it.each(["github", "google_calendar", "linear", "x", "g0", "a_b_c"])("accepts %s", (name) => {
     expect(() => assertValidServerName(name)).not.toThrow();
   });
 
-  it.each(["GitHub", "1github", "git-hub", "git hub", "", "GitHub__"])("rejects %s", (name) => {
+  it.each([
+    "GitHub",
+    "1github",
+    "git-hub",
+    "git hub",
+    "",
+    "GitHub__",
+    "foo__bar", // disallowed — would make mcp__foo__bar__tool ambiguous with mcp__foo__bar_tool
+    "_github", // leading underscore
+    "github_", // trailing underscore
+    "foo___bar", // triple underscore
+  ])("rejects %s", (name) => {
     expect(() => assertValidServerName(name)).toThrow(/Invalid MCP server name/);
   });
 });

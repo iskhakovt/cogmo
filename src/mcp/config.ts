@@ -118,19 +118,21 @@ export interface McpToolPin {
 
 export const MCP_TOOL_NAME_PREFIX = "mcp__";
 
-const SERVER_NAME_RE = /^[a-z][a-z0-9_]*$/;
+const SERVER_NAME_RE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 
 /**
- * Server names must match /^[a-z][a-z0-9_]*$/. The name appears in
- * `mcp__<server>__<tool>` agent-facing tool identifiers; restricting the
- * charset keeps the naming convention unambiguous (no double-underscore
- * collisions with the prefix separator) and avoids having to escape it
- * in any rendering surface.
+ * Server names must match /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/. The name appears
+ * inside `mcp__<server>__<tool>` agent-facing identifiers; the separator
+ * between server and tool is the literal `__`, so a server name containing
+ * `__` would make the composed identifier ambiguous (e.g. `foo__bar` plus
+ * tool `baz` is indistinguishable from server `foo` plus tool `bar__baz`).
+ * Allowing single underscores between alphanumerics covers `google_calendar`
+ * while disallowing leading, trailing, or consecutive underscores.
  */
 export function assertValidServerName(name: string): void {
   if (!SERVER_NAME_RE.test(name)) {
     throw new Error(
-      `Invalid MCP server name: ${JSON.stringify(name)} — must match /^[a-z][a-z0-9_]*$/`,
+      `Invalid MCP server name: ${JSON.stringify(name)} — must match /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/`,
     );
   }
 }

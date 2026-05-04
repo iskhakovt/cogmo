@@ -271,10 +271,10 @@ describe("DrizzleMcpStore", () => {
       });
       await store.removeServer(server.id);
       expect(await store.getServerById(server.id)).toBeUndefined();
-      // Re-add a server with a fresh id and confirm prior pins did not survive.
-      const newServer = await seedServer();
-      const pins = await store.getToolPins(newServer.id);
-      expect(pins).toHaveLength(0);
+      // Query pins for the deleted server's id directly — if the FK cascade
+      // weakened (e.g. ON DELETE SET NULL), orphaned rows would still match.
+      const orphanPins = await store.getToolPins(server.id);
+      expect(orphanPins).toHaveLength(0);
     });
 
     it("is a no-op when the id does not exist", async () => {
