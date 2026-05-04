@@ -264,6 +264,90 @@ describe("runAgentLoop", () => {
     expect(provider.chat).toHaveBeenCalledTimes(2);
   });
 
+  // Regression: model emits a tool_use block but reports stop_reason: end_turn
+  // (or max_tokens, or anything other than tool_use). Before the fix the loop
+  // returned at iteration 1 with the orphan persisted; tools were never run
+  // and the next turn poisoned the message array on the API side. Drive flow
+  // off content presence, not stop_reason.
+  it("executes tool_use even when stop_reason is end_turn", async () => {
+    const provider = mockProvider([
+      {
+        content: [{ type: "tool_use", id: "t1", name: "echo", input: { text: "hi" } }],
+        stopReason: "end_turn",
+        model: "mock-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      textResponse("done"),
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => `pong from ${input.text}`,
+      }),
+    );
+
+    const result = await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "echo" }],
+      tools,
+      service: stubService(),
+    });
+
+    expect(result.iterations).toBe(2);
+    // Pair-closing tool_result must follow the tool_use; no orphan tool_use
+    // should be in newMessages without a matching tool_result.
+    expect(result.newMessages).toHaveLength(3);
+    expect(result.newMessages[0]).toEqual({
+      role: "assistant",
+      content: [{ type: "tool_use", id: "t1", name: "echo", input: { text: "hi" } }],
+    });
+    expect(result.newMessages[1]).toEqual({
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "t1", content: "pong from hi" }],
+    });
+  });
+
+  it("executes tool_use even when stop_reason is max_tokens", async () => {
+    const provider = mockProvider([
+      {
+        content: [{ type: "tool_use", id: "t1", name: "echo", input: {} }],
+        stopReason: "max_tokens",
+        model: "mock-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      textResponse("done"),
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({}),
+        handler: async () => "ok",
+      }),
+    );
+
+    const result = await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "echo" }],
+      tools,
+      service: stubService(),
+    });
+
+    expect(result.iterations).toBe(2);
+    expect(result.newMessages[1]).toEqual({
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "t1", content: "ok" }],
+    });
+  });
+
   it("does not send tools param when registry is empty", async () => {
     const provider = mockProvider([textResponse("No tools here")]);
     const tools = new ToolRegistry();
@@ -536,6 +620,92 @@ describe("runStreamingAgentLoop", () => {
 
     expect(result.iterations).toBe(2);
     expect(provider.chatStream).toHaveBeenCalledTimes(2);
+  });
+
+  // Regression: streamed tool_use accompanied by stop_reason: max_tokens.
+  // Mirror of the end_turn case below — both must execute the tool, since
+  // production saw end_turn but max_tokens is a structurally identical
+  // failure mode (model truncated mid-thought after emitting a tool_use).
+  it("executes tool_use even when stream reports stop_reason: max_tokens", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: {} }],
+        stopReason: "max_tokens",
+      },
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({}),
+        handler: async () => "ok",
+      }),
+    );
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "echo" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.iterations).toBe(2);
+    expect(result.newMessages[1]).toEqual({
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "t1", content: "ok" }],
+    });
+  });
+
+  // Regression: streamed tool_use accompanied by stop_reason: end_turn.
+  // Same orphan-persistence bug as runAgentLoop, but in the production hot
+  // path (handle-message uses runStreamingAgentLoop). Before the fix the loop
+  // appended an assistant message containing only tool_use and returned;
+  // handle-message then persisted that orphan to the messages table.
+  it("executes tool_use even when stream reports stop_reason: end_turn", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: { text: "hi" } }],
+        stopReason: "end_turn",
+      },
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => `pong from ${input.text}`,
+      }),
+    );
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "echo" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.iterations).toBe(2);
+    // Assistant tool_use must be paired with the user tool_result before the
+    // final assistant text — no orphan can land in newMessages.
+    expect(result.newMessages).toHaveLength(3);
+    expect(result.newMessages[0]).toEqual({
+      role: "assistant",
+      content: [{ type: "tool_use", id: "t1", name: "echo", input: { text: "hi" } }],
+    });
+    expect(result.newMessages[1]).toEqual({
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "t1", content: "pong from hi" }],
+    });
   });
 
   it("captures thinking_delta into content blocks but does not forward to onEvent", async () => {

@@ -1,5 +1,7 @@
+import { NonRetriableError } from "inngest";
 import { inngest } from "../inngest/client.js";
-import { inboundReady, responseReady } from "../inngest/events.js";
+import { conversationErrored, inboundReady, responseReady } from "../inngest/events.js";
+import { isRetriableProviderError } from "../llm/fallback.js";
 import { computeBudget } from "../llm/models.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, Message, StreamEvent } from "../llm/types.js";
@@ -81,6 +83,51 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       triggers: [inboundReady],
       retries: 2,
       concurrency: { limit: 1, key: "event.data.conversationId" },
+      // Last-chance handler: retries are exhausted (or the run failed
+      // non-retriably). Two responsibilities, ordered durable-first:
+      //  1. Emit `conversation/errored` — the durable signal downstream
+      //     consumers (recovery, evolution reflector) depend on. Must run
+      //     even if user notification fails.
+      //  2. Notify the user — best-effort courtesy. Wrapped so a failure
+      //     in `notifyConversation` (DB outage on session lookup, etc.)
+      //     can't propagate up and prevent step (1) from being recorded.
+      // The original turn's `delivery` handle is gone (closure scope of a
+      // different run), so we re-resolve sessions via `notifyConversation`.
+      onFailure: async ({ event, error, step }) => {
+        const { conversationId, triggerInboundId } = event.data.event.data;
+        const runId = event.data.run_id;
+        // `error` is what Inngest saw — typically NonRetriableError, since
+        // we rewrap non-retriable provider errors above. The original
+        // class (BadRequestError, RateLimitError, etc.) is on `cause`.
+        // Surface both so the evolution failure-reflector can bucket by
+        // upstream class rather than every error coalescing to one bucket.
+        const cause = error.cause;
+        const causeClass = cause instanceof Error ? cause.name : null;
+        await step.sendEvent(
+          "emit-conversation-errored",
+          conversationErrored.create({
+            conversationId,
+            runId,
+            triggerInboundId,
+            errorClass: error.name,
+            causeClass,
+            errorMessage: error.message,
+          }),
+        );
+        await step.run("notify-user", async () => {
+          try {
+            await deliveryRouter.notifyConversation(
+              conversationId,
+              "I hit an error processing your last message and won't keep retrying. Please try again.",
+            );
+          } catch (notifyErr) {
+            logger.error(
+              { err: notifyErr, conversationId, runId },
+              "onFailure: notifyConversation failed, conversation/errored already emitted",
+            );
+          }
+        });
+      },
     },
     async ({ event, step, runId }) => {
       const { conversationId, triggerInboundId } = event.data;
@@ -349,6 +396,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         await delivery.finish();
       } catch (err) {
         await delivery.abort(err instanceof Error ? err.message : "Unknown error");
+        // Translate provider classification into Inngest's retry decision.
+        // 4xx that aren't 408/425/429 are deterministic client errors — the
+        // same payload will fail every retry. Wrap in NonRetriableError so
+        // Inngest fails the run on the first attempt instead of burning
+        // ~6 minutes on retries before the onFailure handler can notify the
+        // user. See design/crash-recovery.md.
+        if (!isRetriableProviderError(err)) {
+          const message = err instanceof Error ? err.message : String(err);
+          throw new NonRetriableError(message, { cause: err });
+        }
         throw err;
       }
 

@@ -312,6 +312,7 @@ export function mockDeliveryHandle(overrides?: Partial<DeliveryHandle>): Deliver
 export function mockDeliveryRouter(overrides?: Partial<DeliveryRouter>): DeliveryRouter {
   return {
     prepare: vi.fn().mockResolvedValue(mockDeliveryHandle()),
+    notifyConversation: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }

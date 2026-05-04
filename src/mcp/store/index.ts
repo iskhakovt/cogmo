@@ -67,6 +67,28 @@ export interface McpStore {
 
   /** Remove a single pin (when a tool disappears from the server's listTools). */
   deleteToolPin(serverId: string, toolName: string): Promise<void>;
+
+  /**
+   * Atomic counterpart to the per-row `upsertToolPin` / `deleteToolPin` /
+   * `setServerApprovalStatus` triplet. In a single transaction:
+   *   1. read existing pins for `serverId`,
+   *   2. for each incoming snapshot — upsert with `approvalStatus = "pending"`
+   *      unless the existing pin's `schemaHash` matches (in which case the
+   *      prior approval status is preserved verbatim),
+   *   3. delete pins for tool names that aren't in the incoming set,
+   *   4. flip `mcp_servers.approval_status` to `"approved"`.
+   *
+   * Used by `approveServer` so a crash partway through can't leave the
+   * server `pending` while pins are partially synced (or vice versa).
+   */
+  syncServerApproval(params: {
+    serverId: string;
+    snapshots: readonly {
+      toolName: string;
+      schemaHash: string;
+      schemaSnapshot: ToolSchemaSnapshot;
+    }[];
+  }): Promise<void>;
 }
 
 // --- Implementation ---
@@ -257,6 +279,69 @@ export class DrizzleMcpStore implements McpStore {
       await tx
         .delete(mcpServerTools)
         .where(and(eq(mcpServerTools.serverId, serverId), eq(mcpServerTools.toolName, toolName)));
+    });
+  }
+
+  async syncServerApproval(params: {
+    serverId: string;
+    snapshots: readonly {
+      toolName: string;
+      schemaHash: string;
+      schemaSnapshot: ToolSchemaSnapshot;
+    }[];
+  }): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      const existing = await tx
+        .select()
+        .from(mcpServerTools)
+        .where(eq(mcpServerTools.serverId, params.serverId));
+      const existingByName = new Map(existing.map((p) => [p.toolName, p]));
+      const incomingNames = new Set(params.snapshots.map((s) => s.toolName));
+
+      for (const snap of params.snapshots) {
+        const prev = existingByName.get(snap.toolName);
+        // Pinning rule: identical hash → preserve prior approval status; new
+        // or mutated → pending. The operator must explicitly re-approve a
+        // changed tool — we never silently transition pending → approved on
+        // schema drift.
+        const status: McpToolApprovalStatus =
+          prev && prev.schemaHash === snap.schemaHash ? prev.approvalStatus : "pending";
+        await tx
+          .insert(mcpServerTools)
+          .values({
+            serverId: params.serverId,
+            toolName: snap.toolName,
+            schemaHash: snap.schemaHash,
+            schemaSnapshot: snap.schemaSnapshot,
+            approvalStatus: status,
+          })
+          .onConflictDoUpdate({
+            target: [mcpServerTools.serverId, mcpServerTools.toolName],
+            set: {
+              schemaHash: snap.schemaHash,
+              schemaSnapshot: snap.schemaSnapshot,
+              approvalStatus: status,
+            },
+          });
+      }
+
+      for (const pin of existing) {
+        if (!incomingNames.has(pin.toolName)) {
+          await tx
+            .delete(mcpServerTools)
+            .where(
+              and(
+                eq(mcpServerTools.serverId, params.serverId),
+                eq(mcpServerTools.toolName, pin.toolName),
+              ),
+            );
+        }
+      }
+
+      await tx
+        .update(mcpServers)
+        .set({ approvalStatus: "approved" })
+        .where(eq(mcpServers.id, params.serverId));
     });
   }
 }
