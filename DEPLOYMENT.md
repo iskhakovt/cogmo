@@ -101,6 +101,7 @@ All configuration is via environment variables. The schema is in [`src/env.ts`](
 | `LOG_LEVEL` | `info` | `fatal` / `error` / `warn` / `info` / `debug` / `trace`. |
 | `USER_TIMEZONE` | `UTC` | Used for `get_current_time` and scheduling. |
 | `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION` | — / `cogmo-files` / — / — / `us-east-1` | Object storage for the file tools and image attachments. MinIO works. |
+| `HINDSIGHT_RECALL_MAX_QUERY_TOKENS` | `500` | Truncation budget for recall queries, in tokens. Must match Hindsight's `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS`. Bump on both sides if long multi-turn context needs to flow into the recall query — but past ~1500 tokens semantic-search quality degrades regardless of the cap. |
 
 LLM provider keys, Telegram bot tokens, Tavily/fal.ai keys, and similar credentials are **not** env vars — they live encrypted in the DB after `cogmo setup`. Putting secrets in env files is explicitly discouraged; use host secret management ([sops-nix](https://github.com/Mic92/sops-nix), [Vault](https://www.vaultproject.io/), systemd `LoadCredential`, Docker secrets via `_FILE`, etc.) for `COGMO_MASTER_KEY` and `DATABASE_URL`.
 
