@@ -18,7 +18,7 @@ import type { CodingService } from "./coding/service.js";
 import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedImages } from "./extract-images.js";
-import { computeHealPlan, isNoOp } from "./heal-plan.js";
+import { computeHealPlan, isNoOp, unknownPersistableKinds } from "./heal-plan.js";
 import { validateHistory } from "./history-invariants.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
@@ -230,6 +230,20 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const validation = validateHistory(historyMessagesRaw);
       if (validation.repairs.length > 0) {
         await step.run("heal-history", async () => {
+          // Gate on the persistable-kinds allowlist. Detection is exhaustive
+          // against the API contract; persistence is narrower because the
+          // structural `computeHealPlan` doesn't read repair kinds. Skipping
+          // here is safe — `validation.messages` (the in-memory repair) still
+          // flows to the LLM, the turn proceeds; only the durable supersede
+          // is held back until heal logic explicitly accepts the new kind.
+          const unknown = unknownPersistableKinds(validation.repairs);
+          if (unknown.length > 0) {
+            logger.error(
+              { conversationId, unknownKinds: unknown, repairs: validation.repairs },
+              "heal-history: validator emitted unknown repair kinds, skipping persistence",
+            );
+            return;
+          }
           const plan = computeHealPlan(historyWithIds, validation.messages);
           if (isNoOp(plan)) return;
           // Heal rows inherit the cursor from the last existing visible

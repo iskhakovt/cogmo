@@ -20,6 +20,7 @@
 
 import * as R from "remeda";
 import type { Message } from "../llm/types.js";
+import type { Repair, RepairKind } from "./history-invariants.js";
 
 export interface HealPlan {
   /** ids of existing rows to mark superseded */
@@ -28,6 +29,33 @@ export interface HealPlan {
   insertions: Message[];
   /** index in `originals` where the two streams first differ; equal to `originals.length` when only insertions are needed */
   divergenceIndex: number;
+}
+
+/**
+ * Repair kinds we've explicitly evaluated as safe to persist (heal-on-persist).
+ * Detection (`validateHistory`) stays exhaustive against the API contract;
+ * persistence is gated narrower so a future `RepairKind` can't ride through
+ * heal silently — the contributor adding the new kind must explicitly decide
+ * whether it's safe to commit to the DB or only safe to apply in-memory for
+ * the current LLM call.
+ *
+ * Adding to this list is a deliberate decision: the heal's structural
+ * `computeHealPlan` will supersede + insert based on the validated tail
+ * regardless of which kind drove the change, so we want a forcing function
+ * to think about whether the new kind's behavior is safe to commit.
+ */
+export const HEAL_PERSISTABLE_KINDS = new Set<RepairKind>([
+  "synthesized_tool_result",
+  "dropped_stray_tool_result",
+  "dropped_empty_message",
+]);
+
+/**
+ * Returns the list of repair kinds the validator emitted that are NOT in
+ * `HEAL_PERSISTABLE_KINDS`. Empty array means heal-on-persist may proceed.
+ */
+export function unknownPersistableKinds(repairs: ReadonlyArray<Repair>): RepairKind[] {
+  return repairs.filter((r) => !HEAL_PERSISTABLE_KINDS.has(r.kind)).map((r) => r.kind);
 }
 
 /**

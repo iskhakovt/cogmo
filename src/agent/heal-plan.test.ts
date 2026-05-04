@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Message } from "../llm/types.js";
-import { computeHealPlan, isNoOp } from "./heal-plan.js";
+import {
+  computeHealPlan,
+  HEAL_PERSISTABLE_KINDS,
+  isNoOp,
+  unknownPersistableKinds,
+} from "./heal-plan.js";
+import type { Repair } from "./history-invariants.js";
 
 function row(id: string, message: Message): { id: string; message: Message } {
   return { id, message };
@@ -203,6 +209,43 @@ describe("computeHealPlan", () => {
     computeHealPlan(originals, validated);
     expect(originals).toEqual(beforeOrig);
     expect(validated).toEqual(beforeVal);
+  });
+});
+
+describe("unknownPersistableKinds", () => {
+  it("returns empty when all repairs are in the persistable allowlist", () => {
+    const repairs: Repair[] = [
+      { kind: "synthesized_tool_result", index: 1, toolUseId: "t1" },
+      { kind: "dropped_stray_tool_result", index: 2, toolUseId: "ghost" },
+      { kind: "dropped_empty_message", index: 3 },
+    ];
+    expect(unknownPersistableKinds(repairs)).toEqual([]);
+  });
+
+  it("returns the kinds not in the allowlist", () => {
+    // Cast — simulates a future RepairKind that hasn't been added to the
+    // heal allowlist yet. The forcing-function this gate enables: a
+    // contributor who adds "rewrote_tool_use_id" to the validator must
+    // also add it to HEAL_PERSISTABLE_KINDS, or else heal silently skips.
+    const repairs: Repair[] = [
+      { kind: "synthesized_tool_result", index: 1, toolUseId: "t1" },
+      { kind: "rewrote_tool_use_id" as never, index: 2 } as never,
+    ];
+    expect(unknownPersistableKinds(repairs)).toEqual(["rewrote_tool_use_id"]);
+  });
+
+  it("returns empty for an empty repair list", () => {
+    expect(unknownPersistableKinds([])).toEqual([]);
+  });
+
+  // Pin the current allowlist so any deliberate change to the set fails this
+  // test — forces a docs / decision conversation rather than a silent edit.
+  it("HEAL_PERSISTABLE_KINDS contains exactly the three reviewed kinds", () => {
+    expect([...HEAL_PERSISTABLE_KINDS].sort()).toEqual([
+      "dropped_empty_message",
+      "dropped_stray_tool_result",
+      "synthesized_tool_result",
+    ]);
   });
 });
 

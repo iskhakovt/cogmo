@@ -21,7 +21,7 @@
 import { inngest } from "../inngest/client.js";
 import { conversationErrored, inboundReady } from "../inngest/events.js";
 import { logger } from "../logger.js";
-import { computeHealPlan, isNoOp } from "./heal-plan.js";
+import { computeHealPlan, isNoOp, unknownPersistableKinds } from "./heal-plan.js";
 import { validateHistory } from "./history-invariants.js";
 import type { AgentStore } from "./store/index.js";
 
@@ -63,6 +63,30 @@ export function createRecoverConversation(deps: RecoverConversationDeps) {
       });
 
       const validation = validateHistory(historyWithIds.map((r) => r.message));
+
+      // Persistable-kinds gate. If the validator emitted any repair kind we
+      // haven't explicitly evaluated as safe to commit, treat it as
+      // "no repair possible" and mark errored — we can't safely retry here
+      // because heal would skip persistence and the next turn's validator
+      // would re-run the same in-memory repair, never converging.
+      const unknown = unknownPersistableKinds(validation.repairs);
+      if (unknown.length > 0) {
+        logger.error(
+          {
+            conversationId,
+            errorClass,
+            causeClass,
+            unknownKinds: unknown,
+            repairs: validation.repairs,
+          },
+          "recover-conversation: validator emitted unknown repair kinds, marking errored",
+        );
+        await step.run("mark-errored", async () => {
+          await agentStore.setConversationStatus(conversationId, "errored");
+        });
+        return { status: "marked_errored", reason: "unknown_repair_kind" };
+      }
+
       const plan = computeHealPlan(historyWithIds, validation.messages);
 
       if (isNoOp(plan)) {
