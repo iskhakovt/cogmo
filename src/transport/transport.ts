@@ -1056,7 +1056,8 @@ export function createTransport(deps: {
         if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const identity = await transportStore.resolveUser(channelId, platformUserHandle);
         if (!identity) return err({ code: "identity_rejected" as const });
-        await mcpRegistry.approveTool(serverId, toolName);
+        const updated = await mcpRegistry.approveTool(serverId, toolName);
+        if (!updated) return err({ code: "mcp_tool_not_found" as const, serverId, toolName });
         return ok(undefined);
       },
 
@@ -1064,7 +1065,8 @@ export function createTransport(deps: {
         if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const identity = await transportStore.resolveUser(channelId, platformUserHandle);
         if (!identity) return err({ code: "identity_rejected" as const });
-        await mcpRegistry.rejectTool(serverId, toolName);
+        const updated = await mcpRegistry.rejectTool(serverId, toolName);
+        if (!updated) return err({ code: "mcp_tool_not_found" as const, serverId, toolName });
         return ok(undefined);
       },
     },

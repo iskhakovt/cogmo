@@ -223,7 +223,7 @@ describe("DrizzleMcpStore", () => {
   });
 
   describe("setToolApproval / deleteToolPin", () => {
-    it("transitions tool approval state", async () => {
+    it("transitions tool approval state and returns true", async () => {
       const server = await seedServer();
       await store.upsertToolPin({
         serverId: server.id,
@@ -232,9 +232,25 @@ describe("DrizzleMcpStore", () => {
         schemaSnapshot: { description: "d", inputSchema: {} },
         approvalStatus: "pending",
       });
-      await store.setToolApproval(server.id, "create_pr", "approved");
+      const updated = await store.setToolApproval(server.id, "create_pr", "approved");
+      expect(updated).toBe(true);
       const pins = await store.getApprovedToolPins(server.id);
       expect(pins.map((p) => p.toolName)).toEqual(["create_pr"]);
+    });
+
+    it("returns false when no pin exists for the tool name", async () => {
+      const server = await seedServer();
+      const updated = await store.setToolApproval(server.id, "no_such_tool", "approved");
+      expect(updated).toBe(false);
+    });
+
+    it("returns false when the server id is unknown", async () => {
+      const updated = await store.setToolApproval(
+        "00000000-0000-0000-0000-000000000000",
+        "create_pr",
+        "approved",
+      );
+      expect(updated).toBe(false);
     });
 
     it("deletes a single pin without affecting siblings", async () => {

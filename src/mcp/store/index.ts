@@ -63,7 +63,18 @@ export interface McpStore {
   /** All approved pins for a server, ordered by tool name. Hot path. */
   getApprovedToolPins(serverId: string): Promise<readonly McpToolPin[]>;
 
-  setToolApproval(serverId: string, toolName: string, status: McpToolApprovalStatus): Promise<void>;
+  /**
+   * Update a single pin's approval status. Returns `true` if the row existed
+   * and was updated, `false` if no pin exists for `(serverId, toolName)`.
+   * Lets the caller distinguish "approved" from "silently no-oped" — Postgres
+   * reports a zero-row UPDATE as success, so the void variant would let
+   * `/mcp approve <name> <typo>` confirm to the operator with nothing changed.
+   */
+  setToolApproval(
+    serverId: string,
+    toolName: string,
+    status: McpToolApprovalStatus,
+  ): Promise<boolean>;
 
   /** Remove a single pin (when a tool disappears from the server's listTools). */
   deleteToolPin(serverId: string, toolName: string): Promise<void>;
@@ -265,12 +276,14 @@ export class DrizzleMcpStore implements McpStore {
     serverId: string,
     toolName: string,
     status: McpToolApprovalStatus,
-  ): Promise<void> {
-    await this.#db.transaction(async (tx) => {
-      await tx
+  ): Promise<boolean> {
+    return this.#db.transaction(async (tx) => {
+      const updated = await tx
         .update(mcpServerTools)
         .set({ approvalStatus: status })
-        .where(and(eq(mcpServerTools.serverId, serverId), eq(mcpServerTools.toolName, toolName)));
+        .where(and(eq(mcpServerTools.serverId, serverId), eq(mcpServerTools.toolName, toolName)))
+        .returning({ id: mcpServerTools.id });
+      return updated.length > 0;
     });
   }
 

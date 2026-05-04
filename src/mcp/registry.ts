@@ -46,8 +46,16 @@ export interface McpRegistry {
    * intent to retry.
    */
   approveServer(id: string): Promise<void>;
-  approveTool(serverId: string, toolName: string): Promise<void>;
-  rejectTool(serverId: string, toolName: string): Promise<void>;
+  /**
+   * Flip a single tool to `approved`. Returns `true` if the pin existed and
+   * was updated, `false` if no pin exists for `(serverId, toolName)`. The
+   * boolean lets the operator-facing layer distinguish "approved" from
+   * "the tool name was a typo" — without it, Postgres reports a zero-row
+   * UPDATE as success and the operator gets a false-positive confirmation.
+   */
+  approveTool(serverId: string, toolName: string): Promise<boolean>;
+  /** Same not-found semantics as `approveTool`. */
+  rejectTool(serverId: string, toolName: string): Promise<boolean>;
 }
 
 export interface McpRegistryOptions {
@@ -179,11 +187,11 @@ export class McpRegistryImpl implements McpRegistry {
     await this.#store.syncServerApproval({ serverId: server.id, snapshots });
   }
 
-  async approveTool(serverId: string, toolName: string): Promise<void> {
-    await this.#store.setToolApproval(serverId, toolName, "approved");
+  async approveTool(serverId: string, toolName: string): Promise<boolean> {
+    return this.#store.setToolApproval(serverId, toolName, "approved");
   }
 
-  async rejectTool(serverId: string, toolName: string): Promise<void> {
-    await this.#store.setToolApproval(serverId, toolName, "rejected");
+  async rejectTool(serverId: string, toolName: string): Promise<boolean> {
+    return this.#store.setToolApproval(serverId, toolName, "rejected");
   }
 }

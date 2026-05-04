@@ -826,6 +826,30 @@ describe("handleMcp", () => {
     );
   });
 
+  it("approve <name> <typo> surfaces mcp_tool_not_found instead of false-positive success", async () => {
+    const approveTool = vi
+      .fn()
+      .mockResolvedValue(
+        err({ code: "mcp_tool_not_found" as const, serverId: "id-github", toolName: "typo" }),
+      );
+    const transport = transportWith({
+      mcp: {
+        addServer: vi.fn(),
+        removeServer: vi.fn(),
+        listServers: vi.fn().mockResolvedValue(ok([mcpServerStatus({ name: "github" })])),
+        approveServer: vi.fn(),
+        approveTool,
+        rejectTool: vi.fn(),
+      },
+    });
+    const ctx = mkCtx("approve github typo");
+    await handleMcp(transport, ctx);
+    expect(approveTool).toHaveBeenCalledWith("1", "id-github", "typo");
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringMatching(/Tool "typo" not found on server/),
+    );
+  });
+
   it("reject requires both name and tool", async () => {
     const ctx = mkCtx("reject github");
     await handleMcp(transportWith(), ctx);
