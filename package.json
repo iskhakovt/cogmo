@@ -84,6 +84,7 @@
     "@copilotkit/aimock": "^1.15.1",
     "@electric-sql/pglite": "^0.4.5",
     "@inngest/test": "^1.0.0",
+    "@modelcontextprotocol/server-everything": "^2026.1.26",
     "@noble/curves": "^2.2.0",
     "@total-typescript/ts-reset": "^0.6.1",
     "@types/dockerode": "4.0.1",
