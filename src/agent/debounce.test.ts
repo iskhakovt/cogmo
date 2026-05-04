@@ -141,6 +141,31 @@ describe("native router — handler behavior", () => {
       }),
     );
   });
+
+  it("records a debounceWaitMs sample with kind=native when event.ts is present", async () => {
+    const { debounceWaitMs } = await import("../metrics.js");
+    const recordSpy = vi.spyOn(debounceWaitMs, "record");
+
+    const [router] = createDebounceFunctions({
+      idleTimeoutMs: 3000,
+      maxWaitMs: 30000,
+      resumePolicy: "debounce",
+    });
+    const step = mockStep();
+    const eventWithTs = {
+      ...baseEvent,
+      ts: Date.now() - 2500, // pretend the trigger event was created 2.5s ago
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: reaching into Inngest's internal handler
+    await (router as any).fn({ event: eventWithTs, step });
+
+    expect(recordSpy).toHaveBeenCalledWith(expect.any(Number), { kind: "native" });
+    const recordedMs = recordSpy.mock.calls[0]?.[0] as number;
+    // Sampled wall-clock gap should be at least the synthetic 2.5s offset.
+    expect(recordedMs).toBeGreaterThanOrEqual(2500);
+
+    recordSpy.mockRestore();
+  });
 });
 
 describe("legacy router — handler behavior", () => {

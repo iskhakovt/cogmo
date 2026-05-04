@@ -77,6 +77,16 @@ function createNativeRouter(config: DebounceConfig) {
       // via the idle timer's reset). The orchestrator loads all unbatched
       // inbound rows from the DB, so receiving only the last id is sufficient.
       const { conversationId, inboundMessageId } = event.data;
+      // Approximate the legacy `kind: "idle" | "maxwait"` histogram by
+      // recording the wall-clock gap between the trigger event's creation
+      // and this handler running. This isn't the exact debounce sleep —
+      // it's last-event-to-fire — but for an idle-dominated burst it's
+      // close, and it preserves observability of "how long did debounce
+      // hold this turn?" Native debounce doesn't expose internal timing,
+      // so this proxy is the best we can do without instrumenting Inngest.
+      if (typeof event.ts === "number") {
+        debounceWaitMs.record(Math.max(0, Date.now() - event.ts), { kind: "native" });
+      }
       await step.sendEvent(
         "ready",
         inboundReady.create({ conversationId, triggerInboundId: inboundMessageId }),
