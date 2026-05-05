@@ -1,0 +1,1 @@
+Integration tests (in-process) — `bootstrap()` extracted from `src/index.ts`, called directly in test workers. Env injection via `process.env` in globalSetup (propagates to Vitest workers). Pipeline + memory tests moved from e2e. E2e slimmed to boot smoke test.

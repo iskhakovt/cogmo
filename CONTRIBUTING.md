@@ -10,7 +10,7 @@ This is a private personal project, but the conventions below apply to anyone (h
 | Architecture, code style, module boundaries | [CLAUDE.md](CLAUDE.md) |
 | Design intent for a subsystem | [`design/`](design/) |
 | What's queued / in progress | [todo.md](todo.md), [PROGRESS.md](PROGRESS.md) |
-| What changed and when | [CHANGELOG.md](CHANGELOG.md) |
+| What changed and when | [`changelog.d/`](changelog.d/) (one Markdown fragment per PR) |
 | Running in production | [DEPLOYMENT.md](DEPLOYMENT.md) |
 
 ## Local workflow
@@ -35,7 +35,8 @@ CI is strict — unmatched LLM requests fail the build.
 - Branch from `main`. One logical change per branch.
 - Open a PR against `main`. CI must be green before merge.
 - Keep PRs reviewable — split mechanical refactors from behavioural changes when practical.
-- The PR title is what ends up in the changelog (semantic-release reads it), so it must follow Conventional Commits — see below.
+- The PR title is what ends up in the auto-generated GitHub release notes (semantic-release reads it), so it must follow Conventional Commits — see below.
+- For non-trivial PRs, drop a longer-form fragment under [`changelog.d/`](changelog.d/) — file `YYYY-MM-DD-short-slug.md` (slug specific enough to disambiguate from parallel same-day PRs), plain Markdown body, rich rationale/side-effects/test counts welcome. One fragment per PR; never edit existing fragments.
 
 ## Conventional Commits
 

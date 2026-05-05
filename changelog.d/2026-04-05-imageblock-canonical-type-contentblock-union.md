@@ -1,0 +1,1 @@
+ImageBlock — canonical type in ContentBlock union. Both Anthropic (base64/URL source) and OpenAI (image_url/data URI) adapters. Telegram `message:photo` handler downloads, stores in S3, orchestrator resolves before LLM. `contentToBlocks()` parser with ImageRef pattern.

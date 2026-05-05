@@ -1,0 +1,1 @@
+llmock `requestTransform` — strips timestamps/UUIDs for deterministic fixture matching. Exact match (`===`) when transform set. Shared setup in `test/llmock-setup.ts`. Record mode via `LLMOCK_RECORD=1` + `pnpm test:record`.

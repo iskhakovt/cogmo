@@ -1,0 +1,1 @@
+Debounce wiring — `debounce-router`, `debounce-idle`, `debounce-maxwait` Inngest functions. Entry guards (staleness, await_input). Resume policy (flush/debounce/await_input). Per-conversation concurrency lock.

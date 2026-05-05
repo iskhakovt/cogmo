@@ -1,0 +1,1 @@
+Design: tool architecture (capability interface, typed dispatch, plugin-ready), bank strategy (per-user + tags), memory ACL via tags (compartments + trust tiers), plugin trust tiers, Hindsight operations clarification (reflect ≠ consolidation)

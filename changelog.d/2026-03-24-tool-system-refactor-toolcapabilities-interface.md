@@ -1,0 +1,1 @@
+Tool system refactor — ToolCapabilities interface (ACL boundary), Zod input validation via defineTool(), memory_recall + memory_retain tools, Hindsight wired into orchestrator. 66 tests across 11 files.

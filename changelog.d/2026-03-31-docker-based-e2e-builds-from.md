@@ -1,0 +1,1 @@
+Docker-based e2e — builds from Dockerfile, runs app as container (tests real production artifact). Pre-built image in CI via `docker/build-push-action` with GHA cache. `E2E_IMAGE` env var for pre-built images.

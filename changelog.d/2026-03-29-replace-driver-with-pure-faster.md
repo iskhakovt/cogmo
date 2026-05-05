@@ -1,0 +1,1 @@
+Replace `pg` driver with `postgres.js` — pure JS, faster, modern. Swap `drizzle-orm/node-postgres` → `drizzle-orm/postgres-js` across 5 files. Zero API changes needed — Drizzle's connection pattern and `$client.end()` work identically.

@@ -1,0 +1,1 @@
+Hindsight retain/recall integration test passing — Ollama qwen2.5:3b via @testcontainers/ollama. Migrated from DockerComposeEnvironment to individual testcontainers. Fixed PG18 volume path, Ollama healthcheck, Hindsight /health endpoint, Ollama base URL /v1 suffix.

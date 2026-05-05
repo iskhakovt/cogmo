@@ -1,0 +1,1 @@
+Design doc cleanup — fixed stale refs across 8+ docs, added platform_ts to inbound_messages, updated infrastructure (testcontainers, no Docker Compose), fixed Drizzle example (UUIDv7), removed TELEGRAM_BOT_TOKEN from secrets (channels.credentials).
