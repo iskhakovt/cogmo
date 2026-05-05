@@ -69,7 +69,7 @@
     "marked": "^18.0.3",
     "micro-key-producer": "^0.8.6",
     "neverthrow": "^8.2.0",
-    "openai": "^6.34.0",
+    "openai": "^6.36.0",
     "p-retry": "^8.0.0",
     "picomatch": "^4.0.4",
     "pino": "^10.3.1",

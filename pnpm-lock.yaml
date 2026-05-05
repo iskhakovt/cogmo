@@ -115,8 +115,8 @@ importers:
         specifier: ^8.2.0
         version: 8.2.0
       openai:
-        specifier: ^6.34.0
-        version: 6.34.0(ws@8.20.0)(zod@4.4.3)
+        specifier: ^6.36.0
+        version: 6.36.0(ws@8.20.0)(zod@4.4.3)
       p-retry:
         specifier: ^8.0.0
         version: 8.0.0
@@ -3528,8 +3528,8 @@ packages:
   once@1.4.0:
     resolution: {integrity: sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==}
 
-  openai@6.34.0:
-    resolution: {integrity: sha512-yEr2jdGf4tVFYG6ohmr3pF6VJuveP0EA/sS8TBx+4Eq5NT10alu5zg2dmxMXMgqpihRDQlFGpRt2XwsGj+Fyxw==}
+  openai@6.36.0:
+    resolution: {integrity: sha512-Has2YbIusMq9wQEierFsgf9c783dy1y9arX459LmphNacEkkM5yxi2RIyXP0LmkOroQyW19iTwALHL8Yf26UKA==}
     hasBin: true
     peerDependencies:
       ws: ^8.18.0
@@ -8040,7 +8040,7 @@ snapshots:
     dependencies:
       wrappy: 1.0.2
 
-  openai@6.34.0(ws@8.20.0)(zod@4.4.3):
+  openai@6.36.0(ws@8.20.0)(zod@4.4.3):
     optionalDependencies:
       ws: 8.20.0
       zod: 4.4.3
