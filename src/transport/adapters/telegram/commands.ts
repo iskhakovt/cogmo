@@ -8,6 +8,8 @@
 
 import { actionToDecision } from "../../../agent/coding/permission-keyboard.js";
 import type { Profile } from "../../../agent/store/index.js";
+import { SERVER_NAME_RE } from "../../../mcp/config.js";
+import { truncate } from "../../../util/string.js";
 import { isUuid } from "../../../util/uuid.js";
 import type { Transport, TransportError } from "../../transport.js";
 import type { ProfileDialogs } from "./profile-dialog.js";
@@ -46,6 +48,12 @@ const USAGE = {
     "Usage: /repo [list|add [<name> <local_path> <remote_url>]|remove <name>]\n" +
     "  /repo add (no args)            → guided dialog: clones via the bot PAT\n" +
     "  /repo add <name> <path> <url>  → register an already-cloned repo (scripting)",
+  mcp:
+    "Usage: /mcp [list|add <name> <config-json>|remove <name>|approve <name> [<tool>]|reject <name> <tool>|pending]\n" +
+    '  /mcp add github {"transport":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-github"],"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":{"kind":"secret","name":"mcp:github:token"}}}\n' +
+    "  /mcp approve <name>            → connect, snapshot tools (pending), mark server approved\n" +
+    "  /mcp approve <name> <tool>     → flip a single tool to approved (visible to the agent)\n" +
+    "  /mcp reject <name> <tool>      → mark tool rejected (hidden from the agent)",
   repair: "Usage: /repair  (or /repair <alias|uuid>  to target a specific conversation)",
 };
 
@@ -681,6 +689,217 @@ export async function handleRepo(
   await ctx.reply(USAGE.repo);
 }
 
+// ── /mcp ──────────────────────────────────────────────────────────────
+
+export async function handleMcp(transport: Transport, ctx: TelegramCommandContext): Promise<void> {
+  const handle = String(ctx.from.id);
+  const raw = (ctx.match ?? "").trim();
+  if (!raw) {
+    await ctx.reply(USAGE.mcp);
+    return;
+  }
+
+  // Parse the leading subcommand off; preserve the rest verbatim because
+  // /mcp add carries trailing JSON which must not be re-tokenised.
+  const firstSpace = raw.indexOf(" ");
+  const subcommand = (firstSpace === -1 ? raw : raw.slice(0, firstSpace)).toLowerCase();
+  const rest = firstSpace === -1 ? "" : raw.slice(firstSpace + 1).trim();
+
+  switch (subcommand) {
+    case "list": {
+      const res = await transport.mcp.listServers(handle);
+      if (res.isErr()) {
+        await ctx.reply(errorMessage(res.error));
+        return;
+      }
+      if (res.value.length === 0) {
+        await ctx.reply("No MCP servers configured. Add one with `/mcp add <name> <config-json>`.");
+        return;
+      }
+      const lines = res.value.map((s) => {
+        const transportKind = s.config.transport;
+        const enabledMark = s.enabled ? "" : " (disabled)";
+        const counts = `${s.approvedToolCount}/${s.toolCount} tool${s.toolCount === 1 ? "" : "s"} approved`;
+        const tail = s.lastError ? ` — last error: ${truncate(s.lastError, 80)}` : "";
+        return `${s.name} [${transportKind}] — ${s.approvalStatus}, ${counts}${enabledMark}${tail}`;
+      });
+      // Budget warning: when the total approved-tool count across all enabled
+      // servers exceeds the configured cap, `resolveTools` drops the tail
+      // alphabetically every turn. Surface a notice on `/mcp list` so the
+      // operator sees this without having to read logs.
+      const approvedTotal = res.value
+        .filter((s) => s.enabled && s.approvalStatus === "approved")
+        .reduce((sum, s) => sum + s.approvedToolCount, 0);
+      const budget = transport.mcp.toolBudget();
+      const budgetNote =
+        budget > 0 && approvedTotal > budget
+          ? `\n\n⚠ ${approvedTotal} approved tools exceed budget ${budget} — ${approvedTotal - budget} will be dropped per turn alphabetically. Tighten profile.toolSet globs to pick which tools the agent sees.`
+          : "";
+      await ctx.reply(`MCP servers:\n${lines.join("\n")}${budgetNote}`);
+      return;
+    }
+
+    case "pending": {
+      const res = await transport.mcp.listServers(handle);
+      if (res.isErr()) {
+        await ctx.reply(errorMessage(res.error));
+        return;
+      }
+      const pending = res.value.filter(
+        (s) => s.approvalStatus !== "approved" || s.toolCount > s.approvedToolCount,
+      );
+      if (pending.length === 0) {
+        await ctx.reply("Nothing pending — every server and tool is approved.");
+        return;
+      }
+      const lines = pending.map((s) => {
+        const tail =
+          s.toolCount > s.approvedToolCount
+            ? ` (${s.toolCount - s.approvedToolCount} tool${s.toolCount - s.approvedToolCount === 1 ? "" : "s"} pending)`
+            : "";
+        return `${s.name} — server status: ${s.approvalStatus}${tail}`;
+      });
+      await ctx.reply(`Pending approvals:\n${lines.join("\n")}`);
+      return;
+    }
+
+    case "add": {
+      // Pre-check the name shape against the same regex the store enforces,
+      // so a typo'd name surfaces a precise error instead of round-tripping
+      // through the schema layer as a generic mcp_invalid_config.
+      const nameMatch = rest.match(/^(\S+)\s+(\{.*\})$/s);
+      if (!nameMatch) {
+        await ctx.reply(USAGE.mcp);
+        return;
+      }
+      const name = nameMatch[1]!;
+      const json = nameMatch[2]!;
+      if (!SERVER_NAME_RE.test(name)) {
+        await ctx.reply(
+          `Invalid MCP server name: ${JSON.stringify(name)} — must match ${SERVER_NAME_RE.source} (lowercase, alphanumerics, single underscores between segments).`,
+        );
+        return;
+      }
+      let config: unknown;
+      try {
+        config = JSON.parse(json);
+      } catch (e) {
+        await ctx.reply(
+          `Invalid JSON: ${e instanceof Error ? e.message : String(e)}\n\n${USAGE.mcp}`,
+        );
+        return;
+      }
+      const res = await transport.mcp.addServer(handle, {
+        name,
+        // Validation runs server-side via McpServerConfigSchema; pass through.
+        config: config as never,
+        enabled: true,
+      });
+      if (res.isErr()) {
+        await ctx.reply(errorMessage(res.error));
+        return;
+      }
+      await ctx.reply(
+        `MCP server "${res.value.name}" added (status: ${res.value.approvalStatus}).\nRun /mcp approve ${res.value.name} to connect, snapshot tools, and enable approval.`,
+      );
+      return;
+    }
+
+    case "remove":
+    case "rm": {
+      const name = rest.split(/\s+/)[0];
+      if (!name) {
+        await ctx.reply(USAGE.mcp);
+        return;
+      }
+      const lookup = await transport.mcp.listServers(handle);
+      if (lookup.isErr()) {
+        await ctx.reply(errorMessage(lookup.error));
+        return;
+      }
+      const server = lookup.value.find((s) => s.name === name);
+      if (!server) {
+        await ctx.reply(`No MCP server named "${name}".`);
+        return;
+      }
+      const res = await transport.mcp.removeServer(handle, server.id);
+      if (res.isErr()) {
+        await ctx.reply(errorMessage(res.error));
+        return;
+      }
+      await ctx.reply(`MCP server "${name}" removed.`);
+      return;
+    }
+
+    case "approve": {
+      const args = rest.split(/\s+/).filter(Boolean);
+      const [name, toolName] = args;
+      if (!name) {
+        await ctx.reply(USAGE.mcp);
+        return;
+      }
+      const lookup = await transport.mcp.listServers(handle);
+      if (lookup.isErr()) {
+        await ctx.reply(errorMessage(lookup.error));
+        return;
+      }
+      const server = lookup.value.find((s) => s.name === name);
+      if (!server) {
+        await ctx.reply(`No MCP server named "${name}".`);
+        return;
+      }
+
+      if (toolName) {
+        const res = await transport.mcp.approveTool(handle, server.id, toolName);
+        if (res.isErr()) {
+          await ctx.reply(errorMessage(res.error));
+          return;
+        }
+        await ctx.reply(`Tool "${name}.${toolName}" approved.`);
+        return;
+      }
+
+      const res = await transport.mcp.approveServer(handle, server.id);
+      if (res.isErr()) {
+        await ctx.reply(errorMessage(res.error));
+        return;
+      }
+      await ctx.reply(
+        `MCP server "${name}" approved.\nTools snapshotted as pending — run /mcp approve ${name} <tool> per tool to surface them to the agent.`,
+      );
+      return;
+    }
+
+    case "reject": {
+      const [name, toolName] = rest.split(/\s+/).filter(Boolean);
+      if (!name || !toolName) {
+        await ctx.reply(USAGE.mcp);
+        return;
+      }
+      const lookup = await transport.mcp.listServers(handle);
+      if (lookup.isErr()) {
+        await ctx.reply(errorMessage(lookup.error));
+        return;
+      }
+      const server = lookup.value.find((s) => s.name === name);
+      if (!server) {
+        await ctx.reply(`No MCP server named "${name}".`);
+        return;
+      }
+      const res = await transport.mcp.rejectTool(handle, server.id, toolName);
+      if (res.isErr()) {
+        await ctx.reply(errorMessage(res.error));
+        return;
+      }
+      await ctx.reply(`Tool "${name}.${toolName}" rejected.`);
+      return;
+    }
+
+    default:
+      await ctx.reply(USAGE.mcp);
+  }
+}
+
 function errorMessage(err: TransportError): string {
   switch (err.code) {
     case "identity_rejected":
@@ -735,6 +954,18 @@ function errorMessage(err: TransportError): string {
       return `This deploy can't be acted on (status: ${err.status}).`;
     case "skill_deploy_register_failed":
       return `Approve failed: ${err.reason}`;
+    case "mcp_disabled":
+      return "MCP integrations are unavailable in this deployment.";
+    case "mcp_server_not_found":
+      return `MCP server ${shortenId(err.serverId)} not found.`;
+    case "mcp_server_name_taken":
+      return `An MCP server named "${err.name}" already exists.`;
+    case "mcp_invalid_config":
+      return `Invalid MCP server config: ${err.reason}`;
+    case "mcp_tool_not_found":
+      return `Tool "${err.toolName}" not found on server ${shortenId(err.serverId)}.`;
+    case "mcp_connection_failed":
+      return `MCP connection failed: ${err.reason}`;
   }
 }
 

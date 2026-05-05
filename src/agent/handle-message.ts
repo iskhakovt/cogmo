@@ -6,9 +6,10 @@ import { computeBudget } from "../llm/models.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, Message, StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
+import type { McpRegistry } from "../mcp/registry.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SkillRunner } from "../skills/runner.js";
-import { buildSkillTools, mergeBuiltInsAndSkillTools } from "../skills/skill-tool-builder.js";
+import { buildSkillTools, composeTurnTools } from "../skills/skill-tool-builder.js";
 import { createSkillsService } from "../skills/skills-service.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { contentToBlocks, contentToText } from "../transport/content.js";
@@ -52,6 +53,13 @@ export interface HandleMessageDeps {
    * skip skills wiring entirely; production wiring always populates it.
    */
   skillRunner?: SkillRunner;
+  /**
+   * MCP client registry. Resolves the per-turn MCP tool list against the
+   * profile's `toolSet` globs and the configured `toolBudget`. Optional —
+   * absent when no MCP servers are configured (or in unit tests that don't
+   * exercise MCP). When undefined, no MCP tools are surfaced.
+   */
+  mcpRegistry?: McpRegistry;
   summarizationModel?: string;
 }
 
@@ -337,14 +345,23 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const budget = computeBudget(model);
 
       // Per-turn tool registry — built-ins from bootstrap + one dynamic tool
-      // per live skill. Rebuilt every turn so skills registered between turns
-      // appear immediately and rolled-back / disabled skills disappear. The
-      // skill-tool builder is fault-tolerant: a single skill with unreadable
-      // git source is logged and dropped, the rest of the list still loads.
-      // Name-collision rule (built-ins win) lives in
-      // mergeBuiltInsAndSkillTools — see its docstring.
+      // per live skill + MCP tools resolved against the profile's globs.
+      // Rebuilt every turn so registered skills + newly-approved MCP tools
+      // appear immediately, and rolled-back / disabled / un-approved ones
+      // disappear. The skill-tool builder is fault-tolerant: a single skill
+      // with unreadable git source is logged and dropped, the rest of the
+      // list still loads. Composition policy (built-ins win on collision;
+      // profile.toolSet globs filter every source) lives in `composeTurnTools`.
       const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
-      const turnTools = mergeBuiltInsAndSkillTools(tools.snapshot(), skillTools);
+      const mcpTools = deps.mcpRegistry
+        ? await deps.mcpRegistry.resolveTools({ toolGlobs: profile?.toolSet ?? [] })
+        : [];
+      const turnTools = composeTurnTools({
+        builtIns: tools.snapshot(),
+        skillTools,
+        mcpTools,
+        toolSetGlobs: profile?.toolSet ?? [],
+      });
       const toolDefs = turnTools.definitions();
 
       const lastTokens = await agentStore.getLastTokens(conversationId);

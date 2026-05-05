@@ -5,6 +5,7 @@ import type { CodingStreamingRegistry } from "../agent/coding/streaming-registry
 import type { AgentStore } from "../agent/store/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
+import type { McpRegistry } from "../mcp/registry.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { SkillRunner } from "../skills/runner.js";
 import type { SkillStore } from "../skills/store/index.js";
@@ -40,6 +41,15 @@ export interface RegistryDeps {
   skillRunner?: SkillRunner;
   /** Skills store — paired with `skillRunner` for the Transport identity check. */
   skillStore?: SkillStore;
+  /**
+   * MCP registry — wired into `transport.mcp.{addServer,approveServer,…}` so
+   * the `/mcp` admin commands drive the same singleton handle-message uses
+   * for `resolveTools`. Production bootstrap always supplies it; the
+   * optionality exists to keep test setups from having to wire a real
+   * registry when they don't exercise the `transport.mcp.*` surface. When
+   * absent, every `transport.mcp.*` method returns `mcp_disabled`.
+   */
+  mcpRegistry?: McpRegistry;
 }
 
 export interface RegistryResult {
@@ -85,6 +95,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       ...(deps.reposDir && { reposDir: deps.reposDir }),
       ...(deps.skillRunner && { skillRunner: deps.skillRunner }),
       ...(deps.skillStore && { skillStore: deps.skillStore }),
+      ...(deps.mcpRegistry && { mcpRegistry: deps.mcpRegistry }),
       inngest: deps.inngest,
       inboundArrived: deps.inboundArrived,
       attachments: deps.attachments,

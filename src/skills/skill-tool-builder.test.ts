@@ -5,6 +5,7 @@ import type { SkillRunner, SkillToolDef } from "./runner.js";
 import {
   buildSkillToolSpec,
   buildSkillTools,
+  composeTurnTools,
   mergeBuiltInsAndSkillTools,
 } from "./skill-tool-builder.js";
 
@@ -170,5 +171,110 @@ describe("mergeBuiltInsAndSkillTools", () => {
     mergeBuiltInsAndSkillTools(builtIns, skills);
     expect(builtIns).toHaveLength(1);
     expect(skills).toHaveLength(1);
+  });
+});
+
+describe("composeTurnTools", () => {
+  function stubSpec(name: string): ToolSpec {
+    return {
+      name,
+      description: `desc for ${name}`,
+      inputSchema: { type: "object", properties: {} },
+      handler: async () => `handled ${name}`,
+    };
+  }
+
+  it("returns no tools for an empty toolSetGlobs (chat-only profile)", () => {
+    const reg = composeTurnTools({
+      builtIns: [stubSpec("get_current_time"), stubSpec("memory_recall")],
+      skillTools: [],
+      mcpTools: [],
+      toolSetGlobs: [],
+    });
+    expect(reg.snapshot()).toHaveLength(0);
+  });
+
+  it('"*" surfaces every tool from all three sources', () => {
+    const reg = composeTurnTools({
+      builtIns: [stubSpec("get_current_time")],
+      skillTools: [stubSpec("summarize_email")],
+      mcpTools: [stubSpec("mcp__github__create_pr")],
+      toolSetGlobs: ["*"],
+    });
+    expect(
+      reg
+        .snapshot()
+        .map((s) => s.name)
+        .sort(),
+    ).toEqual(["get_current_time", "mcp__github__create_pr", "summarize_email"]);
+  });
+
+  it("exact name still works for backward compatibility", () => {
+    const reg = composeTurnTools({
+      builtIns: [stubSpec("get_current_time"), stubSpec("memory_recall")],
+      skillTools: [],
+      mcpTools: [],
+      toolSetGlobs: ["memory_recall"],
+    });
+    expect(reg.snapshot().map((s) => s.name)).toEqual(["memory_recall"]);
+  });
+
+  it("globs filter MCP tools by server", () => {
+    const reg = composeTurnTools({
+      builtIns: [stubSpec("get_current_time")],
+      skillTools: [],
+      mcpTools: [
+        stubSpec("mcp__github__create_pr"),
+        stubSpec("mcp__github__list_issues"),
+        stubSpec("mcp__linear__create_issue"),
+      ],
+      toolSetGlobs: ["mcp__github__*"],
+    });
+    expect(
+      reg
+        .snapshot()
+        .map((s) => s.name)
+        .sort(),
+    ).toEqual(["mcp__github__create_pr", "mcp__github__list_issues"]);
+  });
+
+  it("mixes exact names + globs across native and MCP", () => {
+    const reg = composeTurnTools({
+      builtIns: [
+        stubSpec("memory_recall"),
+        stubSpec("memory_retain"),
+        stubSpec("get_current_time"),
+      ],
+      skillTools: [stubSpec("summarize_email")],
+      mcpTools: [stubSpec("mcp__github__create_pr"), stubSpec("mcp__linear__list_issues")],
+      toolSetGlobs: ["memory_*", "mcp__github__*"],
+    });
+    expect(
+      reg
+        .snapshot()
+        .map((s) => s.name)
+        .sort(),
+    ).toEqual(["mcp__github__create_pr", "memory_recall", "memory_retain"]);
+  });
+
+  it("preserves the built-ins-win collision rule across the merged list", async () => {
+    const reg = composeTurnTools({
+      builtIns: [stubSpec("web_search")],
+      skillTools: [{ ...stubSpec("web_search"), handler: async () => "shadowed" }],
+      mcpTools: [],
+      toolSetGlobs: ["*"],
+    });
+    expect(reg.snapshot()).toHaveLength(1);
+    expect(await reg.get("web_search")?.handler({}, {} as never)).toBe("handled web_search");
+  });
+
+  it("does not mutate input arrays", () => {
+    const builtIns = [stubSpec("a")];
+    const skills = [stubSpec("b")];
+    const mcp = [stubSpec("mcp__c__d")];
+    composeTurnTools({ builtIns, skillTools: skills, mcpTools: mcp, toolSetGlobs: ["*"] });
+    expect(builtIns).toHaveLength(1);
+    expect(skills).toHaveLength(1);
+    expect(mcp).toHaveLength(1);
   });
 });

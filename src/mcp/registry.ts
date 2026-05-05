@@ -1,3 +1,4 @@
+import { compileToolMatchers } from "../agent/tool-matchers.js";
 import type { ToolSpec } from "../agent/tools.js";
 import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -6,12 +7,12 @@ import { hashToolSchema } from "./approval.js";
 import { McpConnectionPool } from "./client/pool.js";
 import type { Runner } from "./client/runner.js";
 import {
-  compileToolMatchers,
   composeMcpToolName,
   type McpServer,
   type McpServerSpec,
   type McpServerStatus,
 } from "./config.js";
+import { McpServerNotFoundError } from "./errors.js";
 import type { McpStore } from "./store/index.js";
 
 export interface ResolveToolsParams {
@@ -37,6 +38,12 @@ export interface McpRegistry {
   removeServer(id: string): Promise<void>;
   listServers(): Promise<readonly McpServerStatus[]>;
   /**
+   * Configured tool budget — the alphabetical drop cap applied per
+   * `resolveTools` call. Exposed so admin commands can warn operators
+   * when the merged approved-tool count exceeds it.
+   */
+  toolBudget(): number;
+  /**
    * Connect, refresh the tool pin set against the server's current `listTools`
    * (added → pending; mutated → pending; removed → deleted; unchanged → keep
    * existing approval status), and flip the server's own approval to
@@ -46,8 +53,16 @@ export interface McpRegistry {
    * intent to retry.
    */
   approveServer(id: string): Promise<void>;
-  approveTool(serverId: string, toolName: string): Promise<void>;
-  rejectTool(serverId: string, toolName: string): Promise<void>;
+  /**
+   * Flip a single tool to `approved`. Returns `true` if the pin existed and
+   * was updated, `false` if no pin exists for `(serverId, toolName)`. The
+   * boolean lets the operator-facing layer distinguish "approved" from
+   * "the tool name was a typo" — without it, Postgres reports a zero-row
+   * UPDATE as success and the operator gets a false-positive confirmation.
+   */
+  approveTool(serverId: string, toolName: string): Promise<boolean>;
+  /** Same not-found semantics as `approveTool`. */
+  rejectTool(serverId: string, toolName: string): Promise<boolean>;
 }
 
 export interface McpRegistryOptions {
@@ -81,6 +96,10 @@ export class McpRegistryImpl implements McpRegistry {
       idleEvictionMs: opts.idleEvictionMs,
       evictionIntervalMs: opts.evictionIntervalMs,
     });
+  }
+
+  toolBudget(): number {
+    return this.#toolBudget;
   }
 
   async start(): Promise<void> {
@@ -148,7 +167,7 @@ export class McpRegistryImpl implements McpRegistry {
 
   async approveServer(id: string): Promise<void> {
     const server = await this.#store.getServerById(id);
-    if (!server) throw new Error(`MCP server not found: ${id}`);
+    if (!server) throw new McpServerNotFoundError(id);
 
     // Operator action — clear any prior unhealthy state so connect retries.
     // `reset` is narrow by design: it only clears `unhealthy` entries, so
@@ -179,11 +198,11 @@ export class McpRegistryImpl implements McpRegistry {
     await this.#store.syncServerApproval({ serverId: server.id, snapshots });
   }
 
-  async approveTool(serverId: string, toolName: string): Promise<void> {
-    await this.#store.setToolApproval(serverId, toolName, "approved");
+  async approveTool(serverId: string, toolName: string): Promise<boolean> {
+    return this.#store.setToolApproval(serverId, toolName, "approved");
   }
 
-  async rejectTool(serverId: string, toolName: string): Promise<void> {
-    await this.#store.setToolApproval(serverId, toolName, "rejected");
+  async rejectTool(serverId: string, toolName: string): Promise<boolean> {
+    return this.#store.setToolApproval(serverId, toolName, "rejected");
   }
 }

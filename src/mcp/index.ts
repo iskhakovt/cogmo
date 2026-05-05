@@ -12,7 +12,6 @@ export {
 export { HostRunner, type Runner } from "./client/runner.js";
 export {
   assertValidServerName,
-  compileToolMatchers,
   composeMcpToolName,
   MCP_TOOL_NAME_PREFIX,
   type McpServer,

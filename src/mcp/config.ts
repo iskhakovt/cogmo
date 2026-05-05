@@ -1,5 +1,5 @@
-import picomatch from "picomatch";
 import { z } from "zod";
+import { McpInvalidServerNameError } from "./errors.js";
 
 // --- Value sources (literal or secret reference) ---
 
@@ -118,20 +118,26 @@ export interface McpToolPin {
 
 export const MCP_TOOL_NAME_PREFIX = "mcp__";
 
-const SERVER_NAME_RE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
+/**
+ * Regex enforcing the server-name shape — exported so command parsers can
+ * pre-check at the boundary instead of relying on the schema's reject-with-
+ * generic-error path.
+ */
+export const SERVER_NAME_RE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 
 /**
- * Server names must match /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/. The name appears
- * inside `mcp__<server>__<tool>` agent-facing identifiers; the separator
- * between server and tool is the literal `__`, so a server name containing
- * `__` would make the composed identifier ambiguous (e.g. `foo__bar` plus
- * tool `baz` is indistinguishable from server `foo` plus tool `bar__baz`).
+ * Server names must match {@link SERVER_NAME_RE}. The name appears inside
+ * `mcp__<server>__<tool>` agent-facing identifiers; the separator between
+ * server and tool is the literal `__`, so a server name containing `__`
+ * would make the composed identifier ambiguous (e.g. `foo__bar` plus tool
+ * `baz` is indistinguishable from server `foo` plus tool `bar__baz`).
  * Allowing single underscores between alphanumerics covers `google_calendar`
  * while disallowing leading, trailing, or consecutive underscores.
  */
 export function assertValidServerName(name: string): void {
   if (!SERVER_NAME_RE.test(name)) {
-    throw new Error(
+    throw new McpInvalidServerNameError(
+      name,
       `Invalid MCP server name: ${JSON.stringify(name)} — must match /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/`,
     );
   }
@@ -140,19 +146,4 @@ export function assertValidServerName(name: string): void {
 /** Compose the agent-facing tool name: `mcp__<server>__<tool>`. */
 export function composeMcpToolName(server: string, tool: string): string {
   return `${MCP_TOOL_NAME_PREFIX}${server}__${tool}`;
-}
-
-// --- Glob matching ---
-
-/**
- * Compile a list of `profile.toolSet` entries into a single matcher predicate.
- * Each entry is either an exact tool name or a picomatch-compatible glob
- * (e.g. `mcp__github__*`, `mcp__{github,linear}__*`). picomatch is invoked
- * with `dot: false`, `nocase: false`. Compiles each pattern once per call;
- * safe to invoke once per resolveTools.
- */
-export function compileToolMatchers(patterns: readonly string[]): (name: string) => boolean {
-  if (patterns.length === 0) return () => false;
-  const matchers = patterns.map((p) => picomatch(p, { dot: false, nocase: false }));
-  return (name) => matchers.some((m) => m(name));
 }
