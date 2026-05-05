@@ -1,0 +1,1 @@
+Three-tier test structure — unit (PGlite, mocks), integration (Docker + in-process), e2e (Docker + subprocess). Renamed `*.integration.test.ts` → `*.e2e.test.ts`. Moved `test/containers.ts` → `dev/containers.ts`.

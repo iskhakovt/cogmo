@@ -1,0 +1,1 @@
+Direct channel adapter — replaces old CLI adapter. Event-driven via Inngest (`adapter/direct/inbound`, `adapter/direct/outbound`). Console script (`scripts/console.ts`) for dev interaction. No in-process stdin/stdout.

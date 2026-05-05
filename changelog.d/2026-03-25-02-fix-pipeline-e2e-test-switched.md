@@ -1,0 +1,1 @@
+Fix pipeline e2e test — switched from serve mode (HTTP) to connect mode (WebSocket). Connect mode eliminates function discovery timing issues: app initiates outbound connection to Inngest dev server, `connect()` blocks until handshake succeeds. Also fixed test userId (was string, needed UUID from default user). All 3 integration tests passing.

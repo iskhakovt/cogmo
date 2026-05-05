@@ -9,4 +9,4 @@ Then ask me which one I want to work on (or if I want to see more options / do s
 When a task is completed:
 1. Mark `[x]` and move to Done
 2. Update PROGRESS.md — check off the corresponding phase item if one exists
-3. Add a dated entry to CHANGELOG.md (newest first)
+3. Drop a fragment in `changelog.d/` — file `YYYY-MM-DD-NN-short-slug.md` (`NN` = next two-digit sequence within the day), Markdown body, rich prose. Never edit existing fragments.

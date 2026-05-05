@@ -1,0 +1,1 @@
+Channel registry — table-driven adapter discovery. `AdapterModule` contract (`channelType` + `setup()`) with `satisfies` barrel enforcement. Registry reads `channels` table, starts matching adapters, creates generic respond functions. No per-adapter respond files.

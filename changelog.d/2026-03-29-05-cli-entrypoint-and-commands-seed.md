@@ -1,0 +1,1 @@
+CLI entrypoint (`src/cli.ts`) — `serve` and `seed` commands. Seed script (`src/seed.ts`) extracted from app startup, runs independently with only `DATABASE_URL`. Dockerfile uses `ENTRYPOINT ["node", "dist/cli.js"]`. App fails fast if seed hasn't run.

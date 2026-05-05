@@ -1,0 +1,1 @@
+Store unit tests with PGlite — `@electric-sql/pglite` 0.4.2 (PG17 in WASM). `pushSchema` from `drizzle-kit/api` applies schema without migration files. `pg_uuidv7` extension + `uuidv7()` alias. 31 tests across 2 store files. Driver-agnostic `Database` type (`PgDatabase<PgQueryResultHKT>`) eliminates `as any` casts.
