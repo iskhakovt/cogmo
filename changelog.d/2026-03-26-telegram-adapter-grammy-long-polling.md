@@ -1,0 +1,1 @@
+Telegram adapter — grammY long polling, auth allowlist (TELEGRAM_ALLOWED_USERS), control commands (/start, /new) via CommandService, typing indicator. Opt-in via TELEGRAM_BOT_TOKEN. 74 tests across 14 files.

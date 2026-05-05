@@ -1,0 +1,1 @@
+Auto-recall — before each agent turn, embed user message via Hindsight recall, inject top results as `# Recalled Context` in system prompt. Agent still has explicit `memory_recall` for deeper searches.
