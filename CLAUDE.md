@@ -76,7 +76,7 @@ Read `design/` for the full picture. Key docs:
 
 - **Priorities:** `p1` (do soon — core, unblocks work), `p2` (do eventually), `p3` (do if bored — polish, cleanup). Format: `` `p1` `` tag before the task text.
 - Mark tasks `[x]` and move to Done when completed.
-- When completing a task, also check off the corresponding item in PROGRESS.md and drop a fragment in [`changelog.d/`](changelog.d/). Filename: `YYYY-MM-DD-NN-short-slug.md` where `NN` is `01`, `02`, ... within the day (look at existing fragments for the same date and pick the next number). Body is plain Markdown — the rich prose entry, no leading date or table syntax. Never edit existing fragments. One fragment per PR avoids merge conflicts on parallel PRs.
+- When completing a task, also check off the corresponding item in PROGRESS.md and drop a fragment in [`changelog.d/`](changelog.d/). Filename: `YYYY-MM-DD-short-slug.md` — pick a slug specific enough that two parallel PRs the same day won't collide (use words from the actual change, not generic ones). Body is plain Markdown — the rich prose entry, no leading date or table syntax. Never edit existing fragments. One fragment per PR avoids merge conflicts on parallel PRs.
 
 Other tracking docs:
 

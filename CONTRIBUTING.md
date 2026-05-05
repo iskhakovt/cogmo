@@ -36,7 +36,7 @@ CI is strict — unmatched LLM requests fail the build.
 - Open a PR against `main`. CI must be green before merge.
 - Keep PRs reviewable — split mechanical refactors from behavioural changes when practical.
 - The PR title is what ends up in the auto-generated GitHub release notes (semantic-release reads it), so it must follow Conventional Commits — see below.
-- For non-trivial PRs, drop a longer-form fragment under [`changelog.d/`](changelog.d/) — file `YYYY-MM-DD-NN-short-slug.md`, plain Markdown body, rich rationale/side-effects/test counts welcome. One fragment per PR; never edit existing fragments.
+- For non-trivial PRs, drop a longer-form fragment under [`changelog.d/`](changelog.d/) — file `YYYY-MM-DD-short-slug.md` (slug specific enough to disambiguate from parallel same-day PRs), plain Markdown body, rich rationale/side-effects/test counts welcome. One fragment per PR; never edit existing fragments.
 
 ## Conventional Commits
 
