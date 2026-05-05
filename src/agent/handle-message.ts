@@ -139,6 +139,18 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       });
       if (!conv) throw new Error(`Conversation not found: ${conversationId}`);
 
+      // Status guard — `recover-conversation` marks a conversation `errored`
+      // after retries on this function exhausted (or it failed
+      // non-retriably). We refuse to spend more LLM calls on a known-broken
+      // conversation until status flips back to `active` (manual psql for
+      // now; future `/repair` command). Catches any unrecoverable failure
+      // class — model deprecated, credentials revoked, content-moderation
+      // block, persistent provider outage, malformed tool schema — that
+      // would otherwise produce a retry-storm with every new inbound.
+      if (conv.status === "errored") {
+        return { status: "skipped", reason: "errored" };
+      }
+
       const { userId, profileId } = conv;
 
       const lastAssistant = await step.run("last-assistant", async () => {
