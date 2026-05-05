@@ -44,7 +44,7 @@ export interface HealPlan {
  * regardless of which kind drove the change, so we want a forcing function
  * to think about whether the new kind's behavior is safe to commit.
  */
-export const HEAL_PERSISTABLE_KINDS = new Set<RepairKind>([
+export const HEAL_PERSISTABLE_KINDS: ReadonlySet<RepairKind> = new Set<RepairKind>([
   "synthesized_tool_result",
   "dropped_stray_tool_result",
   "dropped_empty_message",
