@@ -77,7 +77,7 @@
     "pyodide": "^0.29.3",
     "remeda": "^2.33.7",
     "yaml": "^2.8.4",
-    "zod": "^4.3.6"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.14",
