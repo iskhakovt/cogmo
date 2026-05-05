@@ -167,7 +167,7 @@ describe("handle-message — crash recovery / step replay", () => {
     //     a prefix to summarize
     // Then we cache `summarize-prefix` and assert provider.chat is never
     // called for the summarization round trip.
-    const countTokens = vi.fn().mockResolvedValue(150_000); // always over 80% of any sane budget
+    const countTokens = vi.fn().mockResolvedValue(800_000); // claude-sonnet-4-6 budget is 926_000; 800_000 > 80%
     const chat = vi.fn().mockResolvedValue({
       content: [{ type: "text", text: "fresh summary" }],
       stopReason: "end_turn",
@@ -177,7 +177,7 @@ describe("handle-message — crash recovery / step replay", () => {
     const deps = mockDeps({
       provider: mockProvider({ countTokens, chat }),
       agentStore: mockAgentStore({
-        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 150_000, outputTokens: 2_000 }),
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
         getHistory: vi.fn().mockResolvedValue([
           { role: "user", content: "m1" },
           { role: "assistant", content: "r1" },

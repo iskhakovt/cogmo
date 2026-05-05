@@ -87,7 +87,7 @@ describe("createHandleMessage", () => {
     });
 
     expect(deps.runStreamingAgentLoop).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "claude-sonnet-4-20250514" }),
+      expect.objectContaining({ model: "claude-sonnet-4-6" }),
     );
   });
 
@@ -122,7 +122,7 @@ describe("createHandleMessage", () => {
         userId: null,
         name: "assistant",
         basePrompt: "a",
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         summarizationModel: null,
         extractionModel: null,
         autoRecall: "heuristic" as const,
@@ -154,10 +154,10 @@ describe("createHandleMessage", () => {
 
     // Both inserts stamped with the first (snapshot) profile+model, not the later change
     expect(deps.agentStore.insertMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ profileId: "profile-1", model: "claude-sonnet-4-20250514" }),
+      expect.objectContaining({ profileId: "profile-1", model: "claude-sonnet-4-6" }),
     );
     expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
-      expect.objectContaining({ profileId: "profile-1", model: "claude-sonnet-4-20250514" }),
+      expect.objectContaining({ profileId: "profile-1", model: "claude-sonnet-4-6" }),
     );
   });
 
@@ -176,7 +176,7 @@ describe("createHandleMessage", () => {
         role: "user",
         lastInboundMessageId: "inbound-1",
         profileId: "profile-1",
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
       }),
     );
     // Assistant + tool turns via insertMessages (atomic batch) — same snapshot
@@ -186,7 +186,7 @@ describe("createHandleMessage", () => {
         conversationId: "conv-1",
         lastInboundMessageId: "inbound-1",
         profileId: "profile-1",
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
       }),
     );
   });
@@ -286,6 +286,194 @@ describe("createHandleMessage", () => {
     expect(handle.finish).not.toHaveBeenCalled();
   });
 
+  // Provider-error → Inngest retry policy translation. A 400 (or any 4xx
+  // except 408/425/429) is deterministic — same request, same failure.
+  // Wrapping in NonRetriableError stops Inngest from burning retries.
+  it("wraps non-retriable provider errors in NonRetriableError", async () => {
+    const handle = mockDeliveryHandle();
+    const apiError = Object.assign(new Error("Bad Request"), { status: 400 });
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn().mockRejectedValue(apiError),
+    });
+
+    let caught: unknown;
+    try {
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).constructor.name).toBe("NonRetriableError");
+    expect((caught as Error).message).toBe("Bad Request");
+    expect((caught as Error & { cause?: unknown }).cause).toBe(apiError);
+    expect(handle.abort).toHaveBeenCalledWith("Bad Request");
+  });
+
+  // Inngest invokes `onFailure` after retries exhaust (or immediately on a
+  // NonRetriableError). Without this handler the run dies silently — no user
+  // notification, no downstream signal. The handler reaches the user via
+  // `notifyConversation` (no in-flight stream to push status into) and emits
+  // `conversation/errored` so future recovery / evolution paths can react.
+  it("onFailure notifies user and emits conversation/errored", async () => {
+    const notifyConversation = vi.fn().mockResolvedValue(undefined);
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ notifyConversation }),
+    });
+    const fn = createHandleMessage(deps) as any;
+    const onFailure = fn.opts.onFailure;
+    expect(onFailure).toBeDefined();
+
+    const sendEvent = vi.fn().mockResolvedValue(undefined);
+    const stepRun = vi
+      .fn()
+      .mockImplementation(async (_id: string, body: () => Promise<unknown>) => body());
+    const stepCtx = { run: stepRun, sendEvent };
+    const failureEvent = {
+      data: {
+        run_id: "run-failed-1",
+        event: { data: { conversationId: "conv-1", triggerInboundId: "inbound-1" } },
+      },
+    };
+    // Reflect the production shape: handle-message rewraps non-retriable
+    // provider errors as NonRetriableError, so `error` Inngest passes to
+    // onFailure has name=NonRetriableError and `cause` carries the original
+    // (e.g. BadRequestError). Asserting against the unwrapped class would
+    // false-pass; we want both surfaced.
+    const upstream = new Error("Bad Request");
+    upstream.name = "BadRequestError";
+    const error = new Error("Bad Request", { cause: upstream });
+    error.name = "NonRetriableError";
+
+    // Track call order — emission must precede notification so the durable
+    // signal is recorded before the best-effort user-facing courtesy.
+    const callOrder: string[] = [];
+    sendEvent.mockImplementation(async (_id: string) => {
+      callOrder.push("sendEvent");
+    });
+    notifyConversation.mockImplementation(async () => {
+      callOrder.push("notifyConversation");
+    });
+
+    await onFailure({ event: failureEvent, error, step: stepCtx });
+
+    expect(callOrder).toEqual(["sendEvent", "notifyConversation"]);
+
+    expect(notifyConversation).toHaveBeenCalledTimes(1);
+    expect(notifyConversation.mock.calls[0]![0]).toBe("conv-1");
+    expect(notifyConversation.mock.calls[0]![1]).toMatch(/error/i);
+
+    expect(sendEvent).toHaveBeenCalledTimes(1);
+    const [stepId, payload] = sendEvent.mock.calls[0]!;
+    expect(stepId).toBe("emit-conversation-errored");
+    expect(payload).toMatchObject({
+      name: "conversation/errored",
+      data: {
+        conversationId: "conv-1",
+        runId: "run-failed-1",
+        triggerInboundId: "inbound-1",
+        errorClass: "NonRetriableError",
+        causeClass: "BadRequestError",
+        errorMessage: "Bad Request",
+      },
+    });
+  });
+
+  // When the run failed without an upstream cause (e.g. our own programmer
+  // error rather than a wrapped provider error), causeClass is null —
+  // distinguishable from "we didn't capture it" so downstream consumers
+  // know there's nothing to unwrap.
+  it("onFailure emits causeClass: null when error has no cause", async () => {
+    const deps = mockDeps();
+    const fn = createHandleMessage(deps) as any;
+    const onFailure = fn.opts.onFailure;
+    const sendEvent = vi.fn().mockResolvedValue(undefined);
+    const stepRun = vi
+      .fn()
+      .mockImplementation(async (_id: string, body: () => Promise<unknown>) => body());
+    const stepCtx = { run: stepRun, sendEvent };
+    const failureEvent = {
+      data: {
+        run_id: "run-failed-3",
+        event: { data: { conversationId: "conv-3", triggerInboundId: null } },
+      },
+    };
+    const error = new Error("internal");
+
+    await onFailure({ event: failureEvent, error, step: stepCtx });
+
+    expect(sendEvent).toHaveBeenCalledTimes(1);
+    expect(sendEvent.mock.calls[0]![1]).toMatchObject({
+      data: {
+        triggerInboundId: null,
+        causeClass: null,
+      },
+    });
+  });
+
+  // Notification is best-effort. If `notifyConversation` throws (e.g. DB
+  // outage on session lookup), the handler must NOT propagate the error —
+  // `conversation/errored` has already been emitted (the durable signal is
+  // safe), and onFailure throwing would just produce a useless retry storm.
+  it("onFailure swallows notifyConversation failures so the durable event sticks", async () => {
+    const notifyConversation = vi.fn().mockRejectedValue(new Error("db offline"));
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ notifyConversation }),
+    });
+    const fn = createHandleMessage(deps) as any;
+    const onFailure = fn.opts.onFailure;
+
+    const sendEvent = vi.fn().mockResolvedValue(undefined);
+    const stepRun = vi
+      .fn()
+      .mockImplementation(async (_id: string, body: () => Promise<unknown>) => body());
+    const stepCtx = { run: stepRun, sendEvent };
+    const failureEvent = {
+      data: {
+        run_id: "run-failed-2",
+        event: { data: { conversationId: "conv-2", triggerInboundId: "inbound-2" } },
+      },
+    };
+    const error = new Error("boom");
+
+    // Must NOT throw, even though notifyConversation rejects.
+    await expect(onFailure({ event: failureEvent, error, step: stepCtx })).resolves.toBeUndefined();
+
+    // Durable signal still emitted — the whole point.
+    expect(sendEvent).toHaveBeenCalledTimes(1);
+    expect(sendEvent.mock.calls[0]![0]).toBe("emit-conversation-errored");
+    // Notify was attempted.
+    expect(notifyConversation).toHaveBeenCalledTimes(1);
+  });
+
+  it("rethrows retriable provider errors as-is so Inngest retries them", async () => {
+    const handle = mockDeliveryHandle();
+    const transientError = Object.assign(new Error("rate limited"), { status: 429 });
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn().mockRejectedValue(transientError),
+    });
+
+    let caught: unknown;
+    try {
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBe(transientError);
+    expect((caught as Error).constructor.name).not.toBe("NonRetriableError");
+  });
+
   it("calls delivery.deliverBatch after persist when there are batch targets", async () => {
     const handle = mockDeliveryHandle({
       hasBatchTargets: vi.fn().mockReturnValue(true),
@@ -319,6 +507,35 @@ describe("createHandleMessage", () => {
 
     // No batch targets → no S3 downloads, no deliverBatch call.
     expect(handle.deliverBatch).not.toHaveBeenCalled();
+  });
+
+  // Status guard — `recover-conversation` flips a conversation to `errored`
+  // after retries on this function exhausted (or it failed non-retriably).
+  // handle-message must refuse to spend more LLM calls until status flips
+  // back to `active` — covers any unrecoverable failure class (auth
+  // revoked, model deprecated, content moderation, malformed tool schema,
+  // programmer bug) that would otherwise produce a retry-storm with every
+  // new inbound.
+  it("early-returns with reason: errored when conversations.status is 'errored'", async () => {
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "conv-1",
+          userId: "user-1",
+          profileId: "profile-1",
+          isPrivate: true,
+          status: "errored",
+        }),
+      }),
+    });
+    const result = await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+    expect(result).toEqual({ status: "skipped", reason: "errored" });
+    expect(deps.runStreamingAgentLoop).not.toHaveBeenCalled();
+    expect(deps.agentStore.insertMessage).not.toHaveBeenCalled();
   });
 
   it("skips processing when triggerInboundId is stale", async () => {
@@ -453,9 +670,9 @@ describe("createHandleMessage", () => {
   });
 
   it("runs compaction when countTokens reports over threshold", async () => {
-    // countTokens returns over 60% of budget (173_616 * 0.6 ≈ 104_170)
+    // countTokens returns over 60% of budget (926_000 * 0.6 ≈ 555_600)
     // First call: over threshold. Second call (after clearing): under.
-    const countTokens = vi.fn().mockResolvedValueOnce(120_000).mockResolvedValueOnce(50_000);
+    const countTokens = vi.fn().mockResolvedValueOnce(600_000).mockResolvedValueOnce(50_000);
     const deps = mockDeps({
       provider: mockProvider({ countTokens }),
       agentStore: mockAgentStore({
@@ -477,11 +694,11 @@ describe("createHandleMessage", () => {
   });
 
   it("pushes status event through delivery when summarization runs", async () => {
-    // Over 80% of budget → triggers summarization
+    // Over 80% of budget (926_000 * 0.8 ≈ 740_800) → triggers summarization
     const countTokens = vi
       .fn()
-      .mockResolvedValueOnce(150_000) // initial: over 80%
-      .mockResolvedValueOnce(150_000) // after tool clearing (nothing to clear): still over
+      .mockResolvedValueOnce(800_000) // initial: over 80%
+      .mockResolvedValueOnce(800_000) // after tool clearing (nothing to clear): still over
       .mockResolvedValueOnce(50_000); // after summarization: under
     const handle = mockDeliveryHandle();
     const deps = mockDeps({
@@ -533,7 +750,7 @@ describe("createHandleMessage", () => {
           userId: null,
           name: "assistant",
           basePrompt: "test",
-          model: "claude-sonnet-4-20250514",
+          model: "claude-sonnet-4-6",
           summarizationModel: null,
           extractionModel: null,
           autoRecall: "heuristic",
@@ -590,7 +807,7 @@ describe("createHandleMessage", () => {
           userId: null,
           name: "assistant",
           basePrompt: "test",
-          model: "claude-sonnet-4-20250514",
+          model: "claude-sonnet-4-6",
           summarizationModel: null,
           extractionModel: null,
           autoRecall: "heuristic",
@@ -639,7 +856,7 @@ describe("createHandleMessage", () => {
           userId: null,
           name: "assistant",
           basePrompt: "test",
-          model: "claude-sonnet-4-20250514",
+          model: "claude-sonnet-4-6",
           summarizationModel: null,
           extractionModel: null,
           autoRecall: "heuristic",

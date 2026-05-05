@@ -9,6 +9,7 @@ import {
   handleName,
   handlePlanCallback,
   handleProfile,
+  handleRepair,
   handleResume,
   handleResumeCallback,
   handleSessions,
@@ -368,7 +369,7 @@ describe("handleModel", () => {
         setAlias: vi.fn().mockResolvedValue(ok(undefined)),
         setProfile: vi.fn().mockResolvedValue(ok(undefined)),
       },
-      models: { list: vi.fn().mockResolvedValue(["gpt-4o", "claude-sonnet-4-20250514"]) },
+      models: { list: vi.fn().mockResolvedValue(["gpt-4o", "claude-sonnet-4-6"]) },
     });
     const ctx = mkCtx();
     await handleModel(transport, ctx);
@@ -933,5 +934,151 @@ describe("handleMcp", () => {
     expect(ctx.reply).toHaveBeenCalledWith(
       expect.stringMatching(/MCP integrations are unavailable/),
     );
+  });
+});
+
+describe("handleRepair", () => {
+  // Bare `/repair` (no arg) acts on the current session. Mirrors `/name`'s
+  // pattern of calling resolveSession to find the active conversation id.
+  it("uses the active session when called with no arg", async () => {
+    const repair = vi.fn().mockResolvedValue(ok({ wasErrored: true }));
+    const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue({
+        id: "s1",
+        channelId: "ch",
+        platformAddress: "42",
+        conversationId: "c1",
+        status: "active",
+        receive: "routed",
+      }),
+      conversations: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        getCurrent: vi.fn().mockResolvedValue(ok(null)),
+        setAlias: vi.fn().mockResolvedValue(ok(undefined)),
+        setProfile: vi.fn().mockResolvedValue(ok(undefined)),
+        repair,
+      },
+    });
+    const ctx = mkCtx();
+    await handleRepair(transport, ctx);
+    expect(repair).toHaveBeenCalledWith("1", "c1");
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringMatching(/Repaired/));
+  });
+
+  it("replies 'already active' when wasErrored: false", async () => {
+    const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue({
+        id: "s1",
+        channelId: "ch",
+        platformAddress: "42",
+        conversationId: "c1",
+        status: "active",
+        receive: "routed",
+      }),
+      conversations: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        getCurrent: vi.fn().mockResolvedValue(ok(null)),
+        setAlias: vi.fn().mockResolvedValue(ok(undefined)),
+        setProfile: vi.fn().mockResolvedValue(ok(undefined)),
+        repair: vi.fn().mockResolvedValue(ok({ wasErrored: false })),
+      },
+    });
+    const ctx = mkCtx();
+    await handleRepair(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringMatching(/already active/));
+  });
+
+  it("tells the user when there's no active session and no arg", async () => {
+    const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue(undefined),
+    });
+    const ctx = mkCtx();
+    await handleRepair(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringMatching(/No active conversation/));
+  });
+
+  // UUID arg path — bypasses the alias lookup.
+  it("uses the UUID directly when given a UUID arg", async () => {
+    const repair = vi.fn().mockResolvedValue(ok({ wasErrored: true }));
+    const transport = transportWith({
+      conversations: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        getCurrent: vi.fn().mockResolvedValue(ok(null)),
+        setAlias: vi.fn().mockResolvedValue(ok(undefined)),
+        setProfile: vi.fn().mockResolvedValue(ok(undefined)),
+        repair,
+      },
+    });
+    const ctx = mkCtx("019d0000-0000-7000-8000-000000000001");
+    await handleRepair(transport, ctx);
+    expect(repair).toHaveBeenCalledWith("1", "019d0000-0000-7000-8000-000000000001");
+  });
+
+  // Alias arg path — looks up the conversation in `list`, then calls repair
+  // with the resolved id.
+  it("resolves alias args via conversations.list", async () => {
+    const repair = vi.fn().mockResolvedValue(ok({ wasErrored: true }));
+    const transport = transportWith({
+      conversations: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            {
+              id: "c-resolved",
+              profileName: "p",
+              alias: "stuck",
+              lastMessagePreview: "hi",
+              lastMessageAt: new Date(),
+            },
+          ]),
+        ),
+        getCurrent: vi.fn().mockResolvedValue(ok(null)),
+        setAlias: vi.fn().mockResolvedValue(ok(undefined)),
+        setProfile: vi.fn().mockResolvedValue(ok(undefined)),
+        repair,
+      },
+    });
+    const ctx = mkCtx("stuck");
+    await handleRepair(transport, ctx);
+    expect(repair).toHaveBeenCalledWith("1", "c-resolved");
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("stuck"));
+  });
+
+  it("reports a friendly error when alias has no match", async () => {
+    const transport = transportWith({
+      conversations: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        getCurrent: vi.fn().mockResolvedValue(ok(null)),
+        setAlias: vi.fn().mockResolvedValue(ok(undefined)),
+        setProfile: vi.fn().mockResolvedValue(ok(undefined)),
+        repair: vi.fn().mockResolvedValue(ok({ wasErrored: false })),
+      },
+    });
+    const ctx = mkCtx("ghost");
+    await handleRepair(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringMatching(/No conversation with alias/));
+  });
+
+  // Transport errors pass through to the user-facing error formatter.
+  it("surfaces transport errors via errorMessage", async () => {
+    const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue({
+        id: "s1",
+        channelId: "ch",
+        platformAddress: "42",
+        conversationId: "c1",
+        status: "active",
+        receive: "routed",
+      }),
+      conversations: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        getCurrent: vi.fn().mockResolvedValue(ok(null)),
+        setAlias: vi.fn().mockResolvedValue(ok(undefined)),
+        setProfile: vi.fn().mockResolvedValue(ok(undefined)),
+        repair: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
+      },
+    });
+    const ctx = mkCtx();
+    await handleRepair(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("not authorized"));
   });
 });

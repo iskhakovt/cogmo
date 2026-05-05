@@ -26,6 +26,7 @@ import { createImageTools } from "./agent/image-tools.js";
 import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
+import { createRecoverConversation } from "./agent/recover-conversation.js";
 import { CORE_MEMORY_PROMPT_GUIDANCE, MEMORY_PROMPT_GUIDANCE } from "./agent/service.js";
 import type { AgentStore } from "./agent/store/index.js";
 import { DrizzleAgentStore } from "./agent/store/index.js";
@@ -427,11 +428,14 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     ...(profile.extractionModel && { extractionModel: profile.extractionModel }),
   });
 
+  const recoverConversation = createRecoverConversation({ agentStore });
+
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [
     handleMessage,
     idleTimer,
     observer,
+    recoverConversation,
     ...debounceFunctions,
     ...channelFunctions,
     ...codingFunctions,

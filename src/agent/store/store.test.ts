@@ -33,7 +33,7 @@ async function seedUser(): Promise<string> {
   return (await store.createUser()).id;
 }
 
-const TEST_MODEL = "claude-sonnet-4-20250514";
+const TEST_MODEL = "claude-sonnet-4-6";
 
 async function seedProfile(): Promise<string> {
   return (
@@ -186,11 +186,28 @@ describe("DrizzleAgentStore", () => {
   });
 
   describe("conversations", () => {
-    it("creates and retrieves a conversation", async () => {
+    it("creates and retrieves a conversation with default 'active' status", async () => {
       const { userId, profileId, conversationId } = await seedConversation();
 
       const conv = await store.getConversation(conversationId);
-      expect(conv).toEqual({ id: conversationId, userId, profileId, isPrivate: true });
+      expect(conv).toEqual({
+        id: conversationId,
+        userId,
+        profileId,
+        isPrivate: true,
+        status: "active",
+      });
+    });
+
+    it("setConversationStatus flips status and getConversation reflects it", async () => {
+      const { conversationId } = await seedConversation();
+      await store.setConversationStatus(conversationId, "errored");
+      const conv = await store.getConversation(conversationId);
+      expect(conv?.status).toBe("errored");
+      // Reversibility — future `/repair` (or manual psql) flips back
+      await store.setConversationStatus(conversationId, "active");
+      const conv2 = await store.getConversation(conversationId);
+      expect(conv2?.status).toBe("active");
     });
 
     it("returns null for unknown conversation", async () => {

@@ -22,7 +22,7 @@ function mkProfile(overrides: Partial<Profile> & { id: string; name: string }): 
   return {
     userId: "u1",
     basePrompt: "old prompt",
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-4-6",
     summarizationModel: null,
     extractionModel: null,
     autoRecall: "heuristic",
@@ -45,7 +45,7 @@ describe("ProfileDialogs - /profile new happy path", () => {
         update: vi.fn().mockResolvedValue(ok({} as never)),
         delete: vi.fn().mockResolvedValue(ok(undefined)),
       },
-      models: { list: vi.fn().mockResolvedValue(["claude-sonnet-4-20250514"]) },
+      models: { list: vi.fn().mockResolvedValue(["claude-sonnet-4-6"]) },
     });
     const dialogs = new ProfileDialogs();
     const ctx = mkCtx();
@@ -57,14 +57,14 @@ describe("ProfileDialogs - /profile new happy path", () => {
     await dialogs.handleMessage(transport, mkCtx("You are a coding assistant."));
     expect(ctx.reply).toHaveBeenCalledTimes(1); // second call hits the new ctx
 
-    await dialogs.handleMessage(transport, mkCtx("claude-sonnet-4-20250514"));
+    await dialogs.handleMessage(transport, mkCtx("claude-sonnet-4-6"));
     const confirmCtx = mkCtx("save");
     await dialogs.handleMessage(transport, confirmCtx);
 
     expect(create).toHaveBeenCalledWith("1", {
       name: "coder",
       basePrompt: "You are a coding assistant.",
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       toolSet: expect.any(Array),
     });
     expect(dialogs.has(42)).toBe(false);

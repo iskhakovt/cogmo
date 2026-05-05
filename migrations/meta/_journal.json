@@ -134,6 +134,20 @@
       "when": 1777914252896,
       "tag": "0018_skinny_master_mold",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1777930483524,
+      "tag": "0019_replace_deprecated_models",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1778006604546,
+      "tag": "0020_conversation_status",
+      "breakpoints": true
     }
   ]
 }

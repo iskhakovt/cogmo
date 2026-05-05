@@ -38,6 +38,7 @@ import {
   handlePermissionCallback,
   handlePlanCallback,
   handleProfile,
+  handleRepair,
   handleRepo,
   handleResume,
   handleResumeCallback,
@@ -319,6 +320,9 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         "",
         "MCP integrations:",
         "  /mcp [list|pending|add <name> <config-json>|remove <name>|approve <name> [<tool>]|reject <name> <tool>]",
+        "",
+        "Repair:",
+        "  /repair  (or /repair <alias|uuid>)  — clear `errored` status on a conversation",
       ].join("\n"),
     );
   });
@@ -335,6 +339,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("model", (ctx) => handleModel(transport, toCmdCtx(ctx)));
   bot.command("repo", (ctx) => handleRepo(transport, toCmdCtx(ctx), repoDialogs));
   bot.command("mcp", (ctx) => handleMcp(transport, toCmdCtx(ctx)));
+  bot.command("repair", (ctx) => handleRepair(transport, toCmdCtx(ctx)));
 
   // Mid-dialog abort for /profile new|edit and /repo add flows. Evaluate
   // both branches (no `||` short-circuit) so a hypothetical "both dialogs

@@ -363,6 +363,88 @@ describe("createDeliveryRouter", () => {
     expect(batch.deliver).toHaveBeenCalledWith("addr-s1", "plain text");
   });
 
+  // notifyConversation — used by handle-message's onFailure handler. Reaches
+  // every active session on the conversation regardless of source-routing,
+  // since failure notification has no inbound cursor to anchor against.
+  describe("notifyConversation", () => {
+    it("delivers to every active session on the conversation", async () => {
+      const batch1 = mockAdapter();
+      const batch2 = mockAdapter();
+      const adapters = new Map<string, any>([
+        ["ch-1", { adapter: batch1 }],
+        ["ch-2", { adapter: batch2 }],
+      ]);
+      const transportStore = mockTransportStore({
+        getActiveSessionsForConversation: vi
+          .fn()
+          .mockResolvedValue([session("s1", "ch-1"), session("s2", "ch-2")]),
+      });
+
+      const router = createDeliveryRouter({ adapters, transportStore });
+      await router.notifyConversation("conv-1", "we hit an error");
+
+      expect(batch1.deliver).toHaveBeenCalledWith("addr-s1", "we hit an error");
+      expect(batch2.deliver).toHaveBeenCalledWith("addr-s2", "we hit an error");
+    });
+
+    it("passes the text through renderOutput when present", async () => {
+      const batch = mockAdapter();
+      const renderOutput = vi.fn().mockReturnValue({ text: "<b>err</b>", parseMode: "HTML" });
+      const adapters = new Map([["ch-1", { adapter: batch, renderOutput }]]);
+      const transportStore = mockTransportStore({
+        getActiveSessionsForConversation: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+      });
+
+      const router = createDeliveryRouter({ adapters, transportStore });
+      await router.notifyConversation("conv-1", "**err**");
+
+      expect(renderOutput).toHaveBeenCalledWith("**err**");
+      expect(batch.deliver).toHaveBeenCalledWith("addr-s1", {
+        text: "<b>err</b>",
+        parseMode: "HTML",
+      });
+    });
+
+    it("skips pure StreamingAdapter sessions (no deliver method, no live stream)", async () => {
+      const streamingOnly = mockStreamingAdapter();
+      const adapters = new Map([["ch-1", { adapter: streamingOnly }]]);
+      const transportStore = mockTransportStore({
+        getActiveSessionsForConversation: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+      });
+
+      const router = createDeliveryRouter({ adapters, transportStore });
+      // Should not throw — streaming-only adapters are skipped.
+      await router.notifyConversation("conv-1", "we hit an error");
+    });
+
+    it("swallows per-adapter deliver errors so one bad session doesn't block the rest", async () => {
+      const failing = mockAdapter({ deliver: vi.fn().mockRejectedValue(new Error("offline")) });
+      const ok = mockAdapter();
+      const adapters = new Map<string, any>([
+        ["ch-fail", { adapter: failing }],
+        ["ch-ok", { adapter: ok }],
+      ]);
+      const transportStore = mockTransportStore({
+        getActiveSessionsForConversation: vi
+          .fn()
+          .mockResolvedValue([session("s1", "ch-fail"), session("s2", "ch-ok")]),
+      });
+
+      const router = createDeliveryRouter({ adapters, transportStore });
+      await router.notifyConversation("conv-1", "we hit an error");
+
+      expect(ok.deliver).toHaveBeenCalledWith("addr-s2", "we hit an error");
+    });
+
+    it("is a no-op when there are no active sessions", async () => {
+      const transportStore = mockTransportStore({
+        getActiveSessionsForConversation: vi.fn().mockResolvedValue([]),
+      });
+      const router = createDeliveryRouter({ adapters: new Map(), transportStore });
+      await router.notifyConversation("conv-1", "we hit an error");
+    });
+  });
+
   it("renders per-adapter independently in multi-channel delivery", async () => {
     const telegramAdapter = mockAdapter();
     const directAdapter = mockAdapter();

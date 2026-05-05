@@ -3,6 +3,7 @@ import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, Message, StreamEvent, TextBlock, ToolUseBlock } from "../llm/types.js";
 import { logger } from "../logger.js";
 import { agentIterations } from "../metrics.js";
+import { validateHistory } from "./history-invariants.js";
 import type { Service } from "./service.js";
 import type { ToolRegistry } from "./tools.js";
 
@@ -59,6 +60,24 @@ export interface AgentLoopResult {
 const DEFAULT_MAX_ITERATIONS = 20;
 
 /**
+ * Run the history invariant validator and log any repairs.
+ *
+ * Defensive pre-flight: even with the loop's content-driven flow control
+ * (no orphan tool_use is produced this turn), historical bugs could have
+ * left orphans in the DB that any future turn would re-load. The validator
+ * synthesizes error tool_results / drops strays so the request always
+ * satisfies the API contract; repairs are logged so we can see whether
+ * stale state is still showing up.
+ */
+function sanitizeHistory(messages: ReadonlyArray<Message>): Message[] {
+  const { messages: repaired, repairs } = validateHistory(messages);
+  if (repairs.length > 0) {
+    logger.warn({ repairCount: repairs.length, repairs }, "agent loop history invariants repaired");
+  }
+  return repaired;
+}
+
+/**
  * Clear thinking content from all assistant messages except the most recent.
  *
  * Anthropic requires thinking blocks in history but the content is only useful
@@ -105,7 +124,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     stepRun,
     maxIterations = DEFAULT_MAX_ITERATIONS,
   } = params;
-  const messages = clearOldThinking(params.messages);
+  const messages = clearOldThinking(sanitizeHistory(params.messages));
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };
@@ -132,8 +151,14 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     // Append assistant response
     messages.push({ role: "assistant", content: response.content });
 
-    // If not a tool_use stop, we're done
-    if (response.stopReason !== "tool_use") {
+    // Drive flow on content, not `stop_reason`. Models occasionally return a
+    // tool_use block alongside `stop_reason: "end_turn"` / `"max_tokens"`; if
+    // we keyed off `stopReason` we'd return without executing the tool and
+    // persist an orphan tool_use that breaks every subsequent turn. The
+    // Anthropic contract is "every tool_use must be answered by a
+    // tool_result" — content presence is the only safe gate.
+    const hasToolUse = response.content.some((b) => b.type === "tool_use");
+    if (!hasToolUse) {
       return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
     }
 
@@ -271,7 +296,7 @@ export async function runStreamingAgentLoop(
     stepRun,
     maxIterations = DEFAULT_MAX_ITERATIONS,
   } = params;
-  const messages = clearOldThinking(params.messages);
+  const messages = clearOldThinking(sanitizeHistory(params.messages));
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };
@@ -344,8 +369,9 @@ export async function runStreamingAgentLoop(
     // Append assistant response to messages
     messages.push({ role: "assistant", content: contentBlocks });
 
-    // If not a tool_use stop, we're done
-    if (meta.stopReason !== "tool_use") {
+    // Drive flow on content, not `stop_reason` — see runAgentLoop above.
+    const hasToolUse = contentBlocks.some((b) => b.type === "tool_use");
+    if (!hasToolUse) {
       return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
     }
 

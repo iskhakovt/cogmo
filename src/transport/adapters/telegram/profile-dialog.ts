@@ -184,7 +184,7 @@ export class ProfileDialogs {
       [
         "Step 2/3 — model.",
         state.mode === "edit" ? `Current: ${state.current?.model}` : "",
-        "Reply with a model name (e.g. claude-sonnet-4-20250514).",
+        "Reply with a model name (e.g. claude-sonnet-4-6).",
         state.mode === "edit" ? "'skip' to keep current, or /cancel." : "Or /cancel.",
       ]
         .filter(Boolean)

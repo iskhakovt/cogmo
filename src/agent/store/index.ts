@@ -30,6 +30,9 @@ import {
  */
 export const UNKNOWN_OUTPUT_TOKENS = -1;
 
+/** Mirrors the `conversation_status` PG enum. */
+export type ConversationStatus = "active" | "errored";
+
 export interface Profile {
   id: string;
   userId: string | null; // null = org profile (read-only via Transport)
@@ -93,9 +96,26 @@ export interface AgentStore {
   }): Promise<{ id: string }>;
 
   /** Load a conversation by ID. */
-  getConversation(
-    conversationId: string,
-  ): Promise<{ id: string; userId: string; profileId: string; isPrivate: boolean } | undefined>;
+  getConversation(conversationId: string): Promise<
+    | {
+        id: string;
+        userId: string;
+        profileId: string;
+        isPrivate: boolean;
+        status: ConversationStatus;
+      }
+    | undefined
+  >;
+
+  /**
+   * Update a conversation's status. Used by `recover-conversation` to mark
+   * a conversation as `errored` after retries on `handle-message` exhausted,
+   * and by future `/repair` to flip back to `active`. The orchestrator
+   * early-returns with `{ status: "skipped", reason: "errored" }` for any
+   * inbound while `errored`, refusing to spend more LLM calls on a
+   * known-broken conversation.
+   */
+  setConversationStatus(conversationId: string, status: ConversationStatus): Promise<void>;
 
   /** Insert a message (user or assistant). Returns the new message ID. `profileId` + `model` stamp the turn snapshot (see design/transport/overview.md → Profile and Model Stamping). */
   insertMessage(params: {
@@ -392,9 +412,16 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getConversation(
-    conversationId: string,
-  ): Promise<{ id: string; userId: string; profileId: string; isPrivate: boolean } | undefined> {
+  async getConversation(conversationId: string): Promise<
+    | {
+        id: string;
+        userId: string;
+        profileId: string;
+        isPrivate: boolean;
+        status: ConversationStatus;
+      }
+    | undefined
+  > {
     return this.#db.transaction(async (tx) => {
       const rows = await tx
         .select({
@@ -402,11 +429,18 @@ export class DrizzleAgentStore implements AgentStore {
           userId: conversations.userId,
           profileId: conversations.profileId,
           isPrivate: conversations.isPrivate,
+          status: conversations.status,
         })
         .from(conversations)
         .where(eq(conversations.id, conversationId))
         .limit(1);
       return rows[0];
+    });
+  }
+
+  async setConversationStatus(conversationId: string, status: ConversationStatus): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      await tx.update(conversations).set({ status }).where(eq(conversations.id, conversationId));
     });
   }
 

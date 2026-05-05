@@ -176,6 +176,22 @@ export interface Transport {
       conversationId: string,
       profileId: string,
     ): Promise<Result<void, TransportError>>;
+    /**
+     * Flip a conversation's `status` from `errored` back to `active`. Used
+     * by the `/repair` control command — the user-facing escape hatch over
+     * the `recover-conversation` automated path. Idempotent: a `/repair`
+     * on an already-active conversation returns `wasErrored: false` and
+     * succeeds without writing.
+     *
+     * Identity + ownership checked like `setAlias` / `setProfile` —
+     * `identity_rejected` for non-resolved handles, `conversation_not_found`
+     * when the row doesn't exist, `access_denied` when the caller doesn't
+     * own the conversation.
+     */
+    repair(
+      platformUserHandle: string,
+      conversationId: string,
+    ): Promise<Result<{ wasErrored: boolean }, TransportError>>;
   };
 
   /** Profile admin. Org profiles (user_id IS NULL) always reject mutations with `access_denied`. */
@@ -596,6 +612,26 @@ export function createTransport(deps: {
         }
         await agentStore.setConversationProfile(conversationId, profileId);
         return ok(undefined);
+      },
+
+      async repair(platformUserHandle, conversationId) {
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        const conv = await agentStore.getConversation(conversationId);
+        if (!conv) return err({ code: "conversation_not_found" as const });
+        if (conv.userId !== identity.userId) {
+          return err({
+            code: "access_denied" as const,
+            reason: "conversation not owned by caller",
+          });
+        }
+        const wasErrored = conv.status === "errored";
+        // Idempotent: skip the write when already active. Saves a row update
+        // and lets the command surface "already active" cleanly.
+        if (wasErrored) {
+          await agentStore.setConversationStatus(conversationId, "active");
+        }
+        return ok({ wasErrored });
       },
     },
 
