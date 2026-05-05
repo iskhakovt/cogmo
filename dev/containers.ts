@@ -25,7 +25,7 @@ export function postgres(network: StartedNetwork) {
 }
 
 export function redis(network: StartedNetwork) {
-  return new GenericContainer("redis:7-alpine")
+  return new GenericContainer("public.ecr.aws/docker/library/redis:7-alpine")
     .withNetwork(network)
     .withNetworkAliases("redis")
     .withExposedPorts(6379)
@@ -38,7 +38,7 @@ export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
   if (opts?.appUrl) {
     cmd.push("-u", opts.appUrl);
   }
-  return new GenericContainer("inngest/inngest")
+  return new GenericContainer("inngest/inngest:v1.9.1")
     .withNetwork(network)
     .withNetworkAliases("inngest")
     .withExposedPorts(8288, 8289)
@@ -49,7 +49,7 @@ export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
 }
 
 export function minio(network: StartedNetwork) {
-  return new GenericContainer("minio/minio:latest")
+  return new GenericContainer("cgr.dev/chainguard/minio:latest")
     .withNetwork(network)
     .withNetworkAliases("minio")
     .withExposedPorts(9000)

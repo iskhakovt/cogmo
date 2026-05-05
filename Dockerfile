@@ -1,4 +1,4 @@
-FROM node:24-slim AS base
+FROM public.ecr.aws/docker/library/node:24-slim AS base
 RUN corepack enable
 
 FROM base AS build
