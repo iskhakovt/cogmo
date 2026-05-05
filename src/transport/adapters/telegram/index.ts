@@ -37,6 +37,7 @@ import {
   handlePermissionCallback,
   handlePlanCallback,
   handleProfile,
+  handleRepair,
   handleRepo,
   handleResume,
   handleResumeCallback,
@@ -330,6 +331,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("profile", (ctx) => handleProfile(transport, toCmdCtx(ctx), profileDialogs));
   bot.command("model", (ctx) => handleModel(transport, toCmdCtx(ctx)));
   bot.command("repo", (ctx) => handleRepo(transport, toCmdCtx(ctx), repoDialogs));
+  bot.command("repair", (ctx) => handleRepair(transport, toCmdCtx(ctx)));
 
   // Mid-dialog abort for /profile new|edit and /repo add flows. Evaluate
   // both branches (no `||` short-circuit) so a hypothetical "both dialogs
