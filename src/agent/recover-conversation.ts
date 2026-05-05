@@ -18,6 +18,17 @@
  * `retries: 0` — one shot per failure event. If this function itself
  * fails mid-run, Inngest's standard alerting catches it; we don't want
  * a recovery cascade.
+ *
+ * Race window between `conversation/errored` emission and the status
+ * write: a new inbound arriving in that gap will pass `handle-message`'s
+ * status guard (status is still `active`), run the agent loop, fail the
+ * same way, and trip `onFailure` again — which re-emits
+ * `conversation/errored` and re-runs this function. The cycle converges:
+ * each failed retry costs one LLM call, but eventually a `recover-conversation`
+ * run lands its `setConversationStatus` write before the next inbound
+ * passes the guard, and the guard starts skipping. Self-healing without
+ * an explicit retry policy. Worth knowing this isn't a bug if you're
+ * tracing duplicate `conversation/errored` events in telemetry.
  */
 
 import { inngest } from "../inngest/client.js";

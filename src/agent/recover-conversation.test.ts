@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { logger } from "../logger.js";
 import { mockAgentStore, mockStep } from "../test/factories.js";
 import { createRecoverConversation } from "./recover-conversation.js";
 
@@ -46,5 +47,26 @@ describe("createRecoverConversation", () => {
     const result = await fn.fn({ event: baseEvent, step: mockStep() });
     expect(result).toEqual({ status: "marked_errored" });
     expect(agentStore.setConversationStatus).toHaveBeenCalledWith("conv-1", "errored");
+  });
+
+  // Pin the log-payload contract that the future evolution
+  // failure-reflector (`p2` in todo.md) buckets on. errorClass and
+  // causeClass come straight off the `conversation/errored` event;
+  // dropping either would break the reflector's class taxonomy.
+  it("logs errorClass, causeClass, and errorMessage on the marker write", async () => {
+    const warnSpy = vi.spyOn(logger, "warn");
+    const agentStore = mockAgentStore();
+    const fn = createRecoverConversation({ agentStore }) as any;
+    await fn.fn({ event: baseEvent, step: mockStep() });
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conv-1",
+        errorClass: "NonRetriableError",
+        causeClass: "BadRequestError",
+        errorMessage: "tool_use ids were found without tool_result blocks",
+      }),
+      "recover-conversation: conversation marked errored",
+    );
+    warnSpy.mockRestore();
   });
 });
