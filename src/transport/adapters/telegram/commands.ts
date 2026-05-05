@@ -46,6 +46,7 @@ const USAGE = {
     "Usage: /repo [list|add [<name> <local_path> <remote_url>]|remove <name>]\n" +
     "  /repo add (no args)            → guided dialog: clones via the bot PAT\n" +
     "  /repo add <name> <path> <url>  → register an already-cloned repo (scripting)",
+  repair: "Usage: /repair  (or /repair <alias|uuid>  to target a specific conversation)",
 };
 
 // ---- Public handlers ----
@@ -403,6 +404,66 @@ async function resolveProfileByName(
   const [firstOwned] = owned;
   if (owned.length === 1 && firstOwned) return { kind: "ok", profile: firstOwned };
   return { kind: "ambiguous", matches };
+}
+
+/**
+ * `/repair` — flip a conversation's status from `errored` back to `active`.
+ *
+ * `/repair`              → acts on the current session's conversation.
+ * `/repair <alias|uuid>` → acts on the named conversation.
+ *
+ * The user-facing escape hatch over `recover-conversation`'s automated
+ * `mark-errored` write. Idempotent — repairing an already-active
+ * conversation succeeds with a "no-op" reply rather than erroring.
+ */
+export async function handleRepair(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const handle = String(ctx.from.id);
+  const addr = String(ctx.chat.id);
+  const arg = ctx.match?.trim();
+
+  let conversationId: string | undefined;
+  let label: string;
+  if (arg) {
+    if (looksLikeUuid(arg)) {
+      conversationId = arg;
+      label = arg;
+    } else {
+      const list = await transport.conversations.list(handle);
+      if (list.isErr()) {
+        await ctx.reply(errorMessage(list.error));
+        return;
+      }
+      const match = list.value.find((c) => c.alias === arg);
+      if (!match) {
+        await ctx.reply(`No conversation with alias "${arg}". Use /sessions to list.`);
+        return;
+      }
+      conversationId = match.id;
+      label = arg;
+    }
+  } else {
+    const session = await transport.resolveSession(addr);
+    if (!session) {
+      await ctx.reply("No active conversation. Use /sessions and /resume <alias> first.");
+      return;
+    }
+    conversationId = session.conversationId;
+    label = "current conversation";
+  }
+
+  const res = await transport.conversations.repair(handle, conversationId);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  if (res.value.wasErrored) {
+    await ctx.reply(`Repaired ${label}. Send a message to retry.`);
+  } else {
+    await ctx.reply(`${label} is already active — nothing to repair.`);
+  }
 }
 
 export async function handleNew(transport: Transport, ctx: TelegramCommandContext): Promise<void> {
