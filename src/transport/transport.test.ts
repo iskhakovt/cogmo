@@ -388,6 +388,80 @@ describe("createTransport", () => {
     });
   });
 
+  describe("conversations.repair", () => {
+    it("returns identity_rejected when handle does not resolve", async () => {
+      const transportStore = mockTransportStore({
+        resolveUser: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ transportStore });
+      const res = await transport.conversations.repair("ghost", "c1");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    });
+
+    it("returns conversation_not_found when conversation missing", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.repair("handle", "c1");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "conversation_not_found" });
+    });
+
+    it("returns access_denied when caller does not own the conversation", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-other",
+          profileId: "p1",
+          isPrivate: true,
+          status: "errored",
+        }),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.repair("handle", "c1");
+      expect(res._unsafeUnwrapErr()).toMatchObject({
+        code: "access_denied",
+        reason: expect.stringContaining("not owned"),
+      });
+    });
+
+    it("flips status to active and reports wasErrored: true", async () => {
+      const setConversationStatus = vi.fn();
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p1",
+          isPrivate: true,
+          status: "errored",
+        }),
+        setConversationStatus,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.repair("handle", "c1");
+      expect(res._unsafeUnwrap()).toEqual({ wasErrored: true });
+      expect(setConversationStatus).toHaveBeenCalledWith("c1", "active");
+    });
+
+    it("is idempotent on already-active conversations and skips the write", async () => {
+      const setConversationStatus = vi.fn();
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p1",
+          isPrivate: true,
+          status: "active",
+        }),
+        setConversationStatus,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.repair("handle", "c1");
+      expect(res._unsafeUnwrap()).toEqual({ wasErrored: false });
+      expect(setConversationStatus).not.toHaveBeenCalled();
+    });
+  });
+
   describe("profiles.update", () => {
     it("rejects org-profile mutation with access_denied", async () => {
       const agentStore = mockAgentStore({

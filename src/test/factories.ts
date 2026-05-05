@@ -158,6 +158,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       getCurrent: vi.fn().mockResolvedValue(ok(null)),
       setAlias: vi.fn().mockResolvedValue(ok(undefined)),
       setProfile: vi.fn().mockResolvedValue(ok(undefined)),
+      repair: vi.fn().mockResolvedValue(ok({ wasErrored: false })),
     },
     profiles: {
       list: vi.fn().mockResolvedValue(ok([])),
