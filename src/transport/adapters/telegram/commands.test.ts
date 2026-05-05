@@ -706,6 +706,7 @@ describe("handleMcp", () => {
   it("list with no servers prompts to add one", async () => {
     const transport = transportWith({
       mcp: {
+        toolBudget: vi.fn().mockReturnValue(25),
         addServer: vi.fn(),
         removeServer: vi.fn(),
         listServers: vi.fn().mockResolvedValue(ok([])),
@@ -722,6 +723,7 @@ describe("handleMcp", () => {
   it("list renders status, transport, and approved/total counts", async () => {
     const transport = transportWith({
       mcp: {
+        toolBudget: vi.fn().mockReturnValue(25),
         addServer: vi.fn(),
         removeServer: vi.fn(),
         listServers: vi.fn().mockResolvedValue(
@@ -763,6 +765,7 @@ describe("handleMcp", () => {
     );
     const transport = transportWith({
       mcp: {
+        toolBudget: vi.fn().mockReturnValue(25),
         addServer,
         removeServer: vi.fn(),
         listServers: vi.fn(),
@@ -793,6 +796,7 @@ describe("handleMcp", () => {
     const approveServer = vi.fn().mockResolvedValue(ok(undefined));
     const transport = transportWith({
       mcp: {
+        toolBudget: vi.fn().mockReturnValue(25),
         addServer: vi.fn(),
         removeServer: vi.fn(),
         listServers: vi.fn().mockResolvedValue(ok([mcpServerStatus({ name: "github" })])),
@@ -810,6 +814,7 @@ describe("handleMcp", () => {
     const approveTool = vi.fn().mockResolvedValue(ok(undefined));
     const transport = transportWith({
       mcp: {
+        toolBudget: vi.fn().mockReturnValue(25),
         addServer: vi.fn(),
         removeServer: vi.fn(),
         listServers: vi.fn().mockResolvedValue(ok([mcpServerStatus({ name: "github" })])),
@@ -834,6 +839,7 @@ describe("handleMcp", () => {
       );
     const transport = transportWith({
       mcp: {
+        toolBudget: vi.fn().mockReturnValue(25),
         addServer: vi.fn(),
         removeServer: vi.fn(),
         listServers: vi.fn().mockResolvedValue(ok([mcpServerStatus({ name: "github" })])),
@@ -860,6 +866,7 @@ describe("handleMcp", () => {
     const removeServer = vi.fn().mockResolvedValue(ok(undefined));
     const transport = transportWith({
       mcp: {
+        toolBudget: vi.fn().mockReturnValue(25),
         addServer: vi.fn(),
         removeServer,
         listServers: vi.fn().mockResolvedValue(ok([mcpServerStatus({ name: "github" })])),
@@ -876,6 +883,7 @@ describe("handleMcp", () => {
   it("pending lists only servers with unapproved state", async () => {
     const transport = transportWith({
       mcp: {
+        toolBudget: vi.fn().mockReturnValue(25),
         addServer: vi.fn(),
         removeServer: vi.fn(),
         listServers: vi.fn().mockResolvedValue(
@@ -911,6 +919,7 @@ describe("handleMcp", () => {
   it("maps mcp_disabled to a friendly message", async () => {
     const transport = transportWith({
       mcp: {
+        toolBudget: vi.fn().mockReturnValue(25),
         addServer: vi.fn(),
         removeServer: vi.fn(),
         listServers: vi.fn().mockResolvedValue(err({ code: "mcp_disabled" as const })),

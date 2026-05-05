@@ -3,6 +3,7 @@ import * as R from "remeda";
 import { single } from "../../db/helpers.js";
 import type { Database } from "../../db/index.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
+import { truncate } from "../../util/string.js";
 import type { AutoRecallMode } from "../recall-gate.js";
 import { ProfileInUseError, translateUniqueViolation } from "./errors.js";
 import {
@@ -78,10 +79,6 @@ function previewFromContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
   const block = R.find(content, isTextBlock);
   return block ? truncate(block.text, PREVIEW_MAX_CHARS) : "";
-}
-
-function truncate(s: string, max: number): string {
-  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
 export interface AgentStore {

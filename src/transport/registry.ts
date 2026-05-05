@@ -44,7 +44,10 @@ export interface RegistryDeps {
   /**
    * MCP registry — wired into `transport.mcp.{addServer,approveServer,…}` so
    * the `/mcp` admin commands drive the same singleton handle-message uses
-   * for `resolveTools`. Optional only because some test setups skip MCP wiring.
+   * for `resolveTools`. Production bootstrap always supplies it; the
+   * optionality exists to keep test setups from having to wire a real
+   * registry when they don't exercise the `transport.mcp.*` surface. When
+   * absent, every `transport.mcp.*` method returns `mcp_disabled`.
    */
   mcpRegistry?: McpRegistry;
 }

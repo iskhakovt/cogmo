@@ -1,3 +1,4 @@
+import { compileToolMatchers } from "../agent/tool-matchers.js";
 import type { ToolSpec } from "../agent/tools.js";
 import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -6,12 +7,12 @@ import { hashToolSchema } from "./approval.js";
 import { McpConnectionPool } from "./client/pool.js";
 import type { Runner } from "./client/runner.js";
 import {
-  compileToolMatchers,
   composeMcpToolName,
   type McpServer,
   type McpServerSpec,
   type McpServerStatus,
 } from "./config.js";
+import { McpServerNotFoundError } from "./errors.js";
 import type { McpStore } from "./store/index.js";
 
 export interface ResolveToolsParams {
@@ -36,6 +37,12 @@ export interface McpRegistry {
   addServer(spec: McpServerSpec): Promise<McpServer>;
   removeServer(id: string): Promise<void>;
   listServers(): Promise<readonly McpServerStatus[]>;
+  /**
+   * Configured tool budget — the alphabetical drop cap applied per
+   * `resolveTools` call. Exposed so admin commands can warn operators
+   * when the merged approved-tool count exceeds it.
+   */
+  toolBudget(): number;
   /**
    * Connect, refresh the tool pin set against the server's current `listTools`
    * (added → pending; mutated → pending; removed → deleted; unchanged → keep
@@ -89,6 +96,10 @@ export class McpRegistryImpl implements McpRegistry {
       idleEvictionMs: opts.idleEvictionMs,
       evictionIntervalMs: opts.evictionIntervalMs,
     });
+  }
+
+  toolBudget(): number {
+    return this.#toolBudget;
   }
 
   async start(): Promise<void> {
@@ -156,7 +167,7 @@ export class McpRegistryImpl implements McpRegistry {
 
   async approveServer(id: string): Promise<void> {
     const server = await this.#store.getServerById(id);
-    if (!server) throw new Error(`MCP server not found: ${id}`);
+    if (!server) throw new McpServerNotFoundError(id);
 
     // Operator action — clear any prior unhealthy state so connect retries.
     // `reset` is narrow by design: it only clears `unhealthy` entries, so

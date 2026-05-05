@@ -8,6 +8,8 @@
 
 import { actionToDecision } from "../../../agent/coding/permission-keyboard.js";
 import type { Profile } from "../../../agent/store/index.js";
+import { SERVER_NAME_RE } from "../../../mcp/config.js";
+import { truncate } from "../../../util/string.js";
 import { isUuid } from "../../../util/uuid.js";
 import type { Transport, TransportError } from "../../transport.js";
 import type { ProfileDialogs } from "./profile-dialog.js";
@@ -654,13 +656,25 @@ export async function handleMcp(transport: Transport, ctx: TelegramCommandContex
         return;
       }
       const lines = res.value.map((s) => {
-        const transport = s.config.transport;
+        const transportKind = s.config.transport;
         const enabledMark = s.enabled ? "" : " (disabled)";
         const counts = `${s.approvedToolCount}/${s.toolCount} tool${s.toolCount === 1 ? "" : "s"} approved`;
         const tail = s.lastError ? ` — last error: ${truncate(s.lastError, 80)}` : "";
-        return `${s.name} [${transport}] — ${s.approvalStatus}, ${counts}${enabledMark}${tail}`;
+        return `${s.name} [${transportKind}] — ${s.approvalStatus}, ${counts}${enabledMark}${tail}`;
       });
-      await ctx.reply(`MCP servers:\n${lines.join("\n")}`);
+      // Budget warning: when the total approved-tool count across all enabled
+      // servers exceeds the configured cap, `resolveTools` drops the tail
+      // alphabetically every turn. Surface a notice on `/mcp list` so the
+      // operator sees this without having to read logs.
+      const approvedTotal = res.value
+        .filter((s) => s.enabled && s.approvalStatus === "approved")
+        .reduce((sum, s) => sum + s.approvedToolCount, 0);
+      const budget = transport.mcp.toolBudget();
+      const budgetNote =
+        budget > 0 && approvedTotal > budget
+          ? `\n\n⚠ ${approvedTotal} approved tools exceed budget ${budget} — ${approvedTotal - budget} will be dropped per turn alphabetically. Tighten profile.toolSet globs to pick which tools the agent sees.`
+          : "";
+      await ctx.reply(`MCP servers:\n${lines.join("\n")}${budgetNote}`);
       return;
     }
 
@@ -689,6 +703,9 @@ export async function handleMcp(transport: Transport, ctx: TelegramCommandContex
     }
 
     case "add": {
+      // Pre-check the name shape against the same regex the store enforces,
+      // so a typo'd name surfaces a precise error instead of round-tripping
+      // through the schema layer as a generic mcp_invalid_config.
       const nameMatch = rest.match(/^(\S+)\s+(\{.*\})$/s);
       if (!nameMatch) {
         await ctx.reply(USAGE.mcp);
@@ -696,6 +713,12 @@ export async function handleMcp(transport: Transport, ctx: TelegramCommandContex
       }
       const name = nameMatch[1]!;
       const json = nameMatch[2]!;
+      if (!SERVER_NAME_RE.test(name)) {
+        await ctx.reply(
+          `Invalid MCP server name: ${JSON.stringify(name)} — must match ${SERVER_NAME_RE.source} (lowercase, alphanumerics, single underscores between segments).`,
+        );
+        return;
+      }
       let config: unknown;
       try {
         config = JSON.parse(json);
@@ -814,10 +837,6 @@ export async function handleMcp(transport: Transport, ctx: TelegramCommandContex
     default:
       await ctx.reply(USAGE.mcp);
   }
-}
-
-function truncate(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
 function errorMessage(err: TransportError): string {

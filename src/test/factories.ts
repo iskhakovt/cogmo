@@ -226,6 +226,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       denyDeploy: vi.fn().mockResolvedValue(ok({ pendingId: "p-1" })),
     },
     mcp: {
+      toolBudget: vi.fn().mockReturnValue(25),
       addServer: vi.fn().mockResolvedValue(ok({ id: "mcp-1", name: "github" })),
       removeServer: vi.fn().mockResolvedValue(ok(undefined)),
       listServers: vi.fn().mockResolvedValue(ok([])),

@@ -1,6 +1,6 @@
+import { compileToolMatchers } from "../agent/tool-matchers.js";
 import { ToolRegistry, type ToolSpec } from "../agent/tools.js";
 import { logger } from "../logger.js";
-import { compileToolMatchers } from "../mcp/config.js";
 import type { SkillRunner, SkillToolDef } from "./runner.js";
 
 const log = logger.child({ component: "skills.tool-builder" });

@@ -14,6 +14,7 @@ import {
   type McpServerSpec,
   type McpServerStatus,
 } from "../mcp/config.js";
+import { McpInvalidServerNameError, McpServerNotFoundError } from "../mcp/errors.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
 import {
@@ -303,6 +304,12 @@ export interface Transport {
    * `rejectTool` flip individual pin status.
    */
   mcp: {
+    /**
+     * Configured tool budget — the alphabetical drop cap applied per
+     * `resolveTools` call. Surfaced sync (no Result wrapping, no ACL)
+     * because it's static config the operator can already see in env vars.
+     */
+    toolBudget(): number;
     addServer(
       platformUserHandle: string,
       spec: McpServerSpec,
@@ -370,11 +377,11 @@ export function createTransport(deps: {
    */
   skillStore?: SkillStore;
   /**
-   * MCP client registry. Optional — when undefined, `mcp.*` returns
-   * `mcp_disabled`. Bootstrap supplies it whenever any MCP-related env vars
-   * are set; the registry itself owns no state of its own (lazy-connect),
-   * so always-supplying it would be safe but `mcp_disabled` keeps the
-   * surface area honest in deployments that haven't opted in.
+   * MCP client registry. Production bootstrap always supplies it (the
+   * registry is lazy-connect, so it carries zero cost when unused).
+   * Optional only so tests don't have to wire a real registry when they
+   * don't exercise `transport.mcp.*` — when absent, every method on the
+   * namespace returns `mcp_disabled`.
    */
   mcpRegistry?: McpRegistry;
   inngest: Inngest;
@@ -986,11 +993,18 @@ export function createTransport(deps: {
       },
     },
 
+    // Identity check runs FIRST in every method below (before the
+    // `mcp_disabled` short-circuit) so an unauthenticated handle can't
+    // probe whether MCP is wired in this deployment. `toolBudget` is the
+    // exception — static config, no auth gate.
     mcp: {
+      toolBudget() {
+        return mcpRegistry?.toolBudget() ?? 0;
+      },
       async addServer(platformUserHandle, spec) {
-        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const identity = await transportStore.resolveUser(channelId, platformUserHandle);
         if (!identity) return err({ code: "identity_rejected" as const });
+        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         // Validate the config blob before any DB write so a malformed paste
         // surfaces a structured `mcp_invalid_config` instead of a Zod throw.
         const parsed = McpServerConfigSchema.safeParse(spec.config);
@@ -1010,38 +1024,38 @@ export function createTransport(deps: {
         } catch (e) {
           if (e instanceof UniqueViolationError)
             return err({ code: "mcp_server_name_taken" as const, name: spec.name });
-          if (e instanceof Error && /Invalid MCP server name/.test(e.message))
+          if (e instanceof McpInvalidServerNameError)
             return err({ code: "mcp_invalid_config" as const, reason: e.message });
           throw e;
         }
       },
 
       async removeServer(platformUserHandle, serverId) {
-        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const identity = await transportStore.resolveUser(channelId, platformUserHandle);
         if (!identity) return err({ code: "identity_rejected" as const });
+        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         await mcpRegistry.removeServer(serverId);
         return ok(undefined);
       },
 
       async listServers(platformUserHandle) {
-        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const identity = await transportStore.resolveUser(channelId, platformUserHandle);
         if (!identity) return err({ code: "identity_rejected" as const });
+        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const servers = await mcpRegistry.listServers();
         return ok(servers);
       },
 
       async approveServer(platformUserHandle, serverId) {
-        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const identity = await transportStore.resolveUser(channelId, platformUserHandle);
         if (!identity) return err({ code: "identity_rejected" as const });
+        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         try {
           await mcpRegistry.approveServer(serverId);
           return ok(undefined);
         } catch (e) {
-          if (e instanceof Error && /MCP server not found/.test(e.message))
-            return err({ code: "mcp_server_not_found" as const, serverId });
+          if (e instanceof McpServerNotFoundError)
+            return err({ code: "mcp_server_not_found" as const, serverId: e.serverId });
           // Connect / listTools failure surfaces as a Result error so the
           // Telegram callback can render a precise toast.
           return err({
@@ -1053,18 +1067,18 @@ export function createTransport(deps: {
       },
 
       async approveTool(platformUserHandle, serverId, toolName) {
-        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const identity = await transportStore.resolveUser(channelId, platformUserHandle);
         if (!identity) return err({ code: "identity_rejected" as const });
+        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const updated = await mcpRegistry.approveTool(serverId, toolName);
         if (!updated) return err({ code: "mcp_tool_not_found" as const, serverId, toolName });
         return ok(undefined);
       },
 
       async rejectTool(platformUserHandle, serverId, toolName) {
-        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const identity = await transportStore.resolveUser(channelId, platformUserHandle);
         if (!identity) return err({ code: "identity_rejected" as const });
+        if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const updated = await mcpRegistry.rejectTool(serverId, toolName);
         if (!updated) return err({ code: "mcp_tool_not_found" as const, serverId, toolName });
         return ok(undefined);
