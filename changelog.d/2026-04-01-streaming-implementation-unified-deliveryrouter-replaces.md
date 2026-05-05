@@ -1,0 +1,1 @@
+Streaming implementation — unified DeliveryRouter replaces per-channel respond functions. `chatStream()` on LlmProvider with ChatStreamResult. `runStreamingAgentLoop()` with onEvent callback. TelegramStreamHandle with 500ms throttled edits. LLM call outside step.run() for real-time streaming. `response/ready` demoted to notification.

@@ -20,7 +20,7 @@ Closer in spirit to [Letta](https://github.com/letta-ai/letta) and [OpenHands](h
 
 ## Status
 
-MVP conversation + memory is shipping. Stage 1 self-evolution (post-conversation observer that extracts behavioural corrections into steering rules) is live. Scheduling, ingestion (Gmail/Calendar via MCP), and the full evolutionary loop are next. See [`PROGRESS.md`](PROGRESS.md) for the phased plan and [`CHANGELOG.md`](CHANGELOG.md) for what's landed.
+MVP conversation + memory is shipping. Stage 1 self-evolution (post-conversation observer that extracts behavioural corrections into steering rules) is live. Scheduling, ingestion (Gmail/Calendar via MCP), and the full evolutionary loop are next. See [`PROGRESS.md`](PROGRESS.md) for the phased plan and [`changelog.d/`](changelog.d/) for what's landed.
 
 ## Deploy
 

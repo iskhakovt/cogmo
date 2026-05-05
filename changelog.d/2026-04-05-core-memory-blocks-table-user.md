@@ -1,0 +1,1 @@
+Core memory blocks — `core_memory_blocks` DB table (user_id + key, upsert). `core_memory_update`/`core_memory_read` tools via Service.coreMemory. `getUserContext` callback reads blocks into system prompt. Conditional onboarding (shown only when empty).

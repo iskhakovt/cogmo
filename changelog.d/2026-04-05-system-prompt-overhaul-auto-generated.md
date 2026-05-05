@@ -1,0 +1,1 @@
+System prompt overhaul — auto-generated Tools section from tool registry (adding a tool updates the prompt). Service guidance per namespace (MEMORY, FILES, CORE_MEMORY). Conditional onboarding. Identity prompt inspired by OpenClaw SOUL.md.

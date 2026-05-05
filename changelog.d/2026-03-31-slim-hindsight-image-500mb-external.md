@@ -1,0 +1,1 @@
+Slim Hindsight image (`latest-slim`, ~500MB) — external LLM + embeddings via llmock, RRF reranker. No PyTorch, no model downloads. `hindsightSlim()` container factory with zerank support (patched config for base URL).

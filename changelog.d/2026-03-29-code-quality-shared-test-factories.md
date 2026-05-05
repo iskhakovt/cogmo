@@ -1,0 +1,1 @@
+Code quality — shared test factories (`src/test/factories.ts`), `createRespond()` shared factory, `contentToText()` helper, neverthrow `Result<T, TransportError>` at Transport boundary, `#private` fields on all classes, `private constructor` + `static async create()`. 84 unit tests, 3 integration tests.

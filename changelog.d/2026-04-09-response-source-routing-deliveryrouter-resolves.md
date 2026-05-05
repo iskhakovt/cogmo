@@ -1,0 +1,1 @@
+Response source routing — DeliveryRouter resolves targets via inbound message cursor chain instead of broadcasting to all sessions. `getSourceSessions()` + `getReceiveAllSessions()` on TransportStore. Private conversations merge receive-all observers; non-private forced to source only. Design doc upgraded to `[confirmed]`.

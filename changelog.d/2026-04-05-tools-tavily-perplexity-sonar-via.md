@@ -1,0 +1,1 @@
+V0 tools — `web_search` (Tavily), `web_answer` (Perplexity Sonar via OpenRouter), `fetch_url` (@mozilla/readability + SSRF protection), `read_file`/`write_file`/`list_files` (S3/MinIO). Enhanced `get_current_time` (structured JSON, timezone, day of week).

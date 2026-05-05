@@ -1,0 +1,1 @@
+llmock replaces mock-anthropic + Ollama — `@copilotkit/llmock` 1.6.0 serves Anthropic API + OpenAI-compatible endpoints from fixtures. Single in-process instance backs both our app and Hindsight. Deleted `test/mock-anthropic/`. E2e drops from ~5min to ~1min.
