@@ -508,6 +508,35 @@ describe("createHandleMessage", () => {
     expect(handle.deliverBatch).not.toHaveBeenCalled();
   });
 
+  // Status guard — `recover-conversation` flips a conversation to `errored`
+  // after retries on this function exhausted (or it failed non-retriably).
+  // handle-message must refuse to spend more LLM calls until status flips
+  // back to `active` — covers any unrecoverable failure class (auth
+  // revoked, model deprecated, content moderation, malformed tool schema,
+  // programmer bug) that would otherwise produce a retry-storm with every
+  // new inbound.
+  it("early-returns with reason: errored when conversations.status is 'errored'", async () => {
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "conv-1",
+          userId: "user-1",
+          profileId: "profile-1",
+          isPrivate: true,
+          status: "errored",
+        }),
+      }),
+    });
+    const result = await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+    expect(result).toEqual({ status: "skipped", reason: "errored" });
+    expect(deps.runStreamingAgentLoop).not.toHaveBeenCalled();
+    expect(deps.agentStore.insertMessage).not.toHaveBeenCalled();
+  });
+
   it("skips processing when triggerInboundId is stale", async () => {
     const deps = mockDeps({
       agentStore: mockAgentStore({

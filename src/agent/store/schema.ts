@@ -18,6 +18,20 @@ import { secrets } from "../../secrets/store/schema.js";
 
 export const autoRecallMode = pgEnum("auto_recall_mode", ["off", "always", "heuristic", "llm"]);
 
+/**
+ * Lifecycle status of a conversation.
+ *
+ * `active` — normal; `handle-message` processes inbound. Default for new rows.
+ * `errored` — `recover-conversation` marked the conversation irrecoverable
+ *   after retries on `handle-message` exhausted (or it failed
+ *   non-retriably). `handle-message` early-returns with
+ *   `{ status: "skipped", reason: "errored" }` for any inbound while in
+ *   this state, refusing to spend more LLM calls on a known-broken
+ *   conversation. Cleared back to `active` by future `/repair` (P3) or
+ *   manually via psql.
+ */
+export const conversationStatus = pgEnum("conversation_status", ["active", "errored"]);
+
 // --- JSONB shapes ---
 
 /**
@@ -108,6 +122,14 @@ export const conversations = pgTable(
       .notNull()
       .references(() => profiles.id),
     isPrivate: boolean("is_private").notNull(),
+    /**
+     * `active` (default) — normal processing; `errored` — `recover-conversation`
+     * marked the conversation as irrecoverable after `handle-message` exhausted
+     * retries (or failed non-retriably). The orchestrator refuses to spend
+     * more LLM calls until status flips back to `active`. See
+     * `conversationStatus` enum and `recover-conversation`.
+     */
+    status: conversationStatus("status").notNull().default("active"),
     createdAt: ts(),
   },
   (t) => [index("idx_conversations_profile_id").on(t.profileId)],
