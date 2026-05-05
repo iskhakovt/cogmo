@@ -6,6 +6,7 @@
  */
 
 import type { ConversationSummary, Profile } from "../../../agent/store/index.js";
+import { truncate } from "../../../util/string.js";
 
 /** Telegram's inline-keyboard button density is workable up to ~10 rows before scrolling feels bad. */
 export const KEYBOARD_THRESHOLD = 10;
@@ -81,9 +82,4 @@ function labelFor(s: ConversationSummary, current: boolean): string {
   const head = s.alias ?? truncate(s.lastMessagePreview, 40) ?? "(untitled)";
   const suffix = current ? " ← current" : "";
   return `${head}${suffix}`;
-}
-
-function truncate(s: string, max: number): string {
-  if (!s) return "";
-  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }

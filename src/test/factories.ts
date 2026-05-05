@@ -228,6 +228,15 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
         .mockResolvedValue(ok({ pendingId: "p-1", skillName: "echo", gitSha: "abc1234" })),
       denyDeploy: vi.fn().mockResolvedValue(ok({ pendingId: "p-1" })),
     },
+    mcp: {
+      toolBudget: vi.fn().mockReturnValue(25),
+      addServer: vi.fn().mockResolvedValue(ok({ id: "mcp-1", name: "github" })),
+      removeServer: vi.fn().mockResolvedValue(ok(undefined)),
+      listServers: vi.fn().mockResolvedValue(ok([])),
+      approveServer: vi.fn().mockResolvedValue(ok(undefined)),
+      approveTool: vi.fn().mockResolvedValue(ok(undefined)),
+      rejectTool: vi.fn().mockResolvedValue(ok(undefined)),
+    },
     ...overrides,
   };
 }

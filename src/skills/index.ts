@@ -17,6 +17,7 @@ export {
 export {
   buildSkillToolSpec,
   buildSkillTools,
+  composeTurnTools,
   mergeBuiltInsAndSkillTools,
 } from "./skill-tool-builder.js";
 export { createSkillsService, type SkillsService } from "./skills-service.js";

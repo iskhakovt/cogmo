@@ -1,4 +1,6 @@
-# MCP Integration `[proposed]`
+# MCP Integration
+
+Phase A `[confirmed]`. Phases B / C `[proposed]`; D / E `[research]`. See [Status](#status) for the per-phase marker map.
 
 Model Context Protocol client layer. Lets users add third-party MCP servers (GitHub, Gmail, Calendar, Linear, Slack, etc.) declaratively, exposes their tools through the existing `ToolRegistry` contract, scopes them per-profile, survives server crashes, and treats every server as untrusted by default.
 
@@ -8,7 +10,7 @@ Replaces the prior inline `[proposed]` MCP section in [integrations.md](../integ
 
 | Phase | Scope | Marker |
 |-|-|-|
-| A — core | stdio transport, host runner, schema pinning, profile globs, budget, secrets injection, `/mcp` admin commands | `[proposed]` |
+| A — core | stdio transport, host runner, schema pinning, profile globs, budget, secrets injection, `/mcp` admin commands | `[confirmed]` |
 | B — security | sysbox runner for `untrusted`, egress allowlist | `[proposed]` |
 | C — remote | HTTP transport, manual-token auth | `[proposed]` |
 | D — auth | OAuth 2.1 + DCR + refresh persistence | `[research]` |
