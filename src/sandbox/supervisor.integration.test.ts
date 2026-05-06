@@ -13,7 +13,8 @@ import { LABEL_INSTANCE, LABEL_MANAGED, LABEL_ROOT_TASK } from "./supervisor.js"
 import type { ResourceLimits } from "./types.js";
 
 // Tiny image with /bin/sleep + sh + echo. Pulled once, cached on the host.
-const TEST_IMAGE = "alpine:latest";
+const TEST_IMAGE =
+  "mirror.gcr.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
 
 // Slice 1 integration runs against runc (no sysbox required on dev machines).
 // Sysbox-specific path is exercised in slice 1.0h on GHA ubuntu-24.04.
