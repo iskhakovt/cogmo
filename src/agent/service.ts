@@ -43,11 +43,30 @@ export interface CoreMemoryBlock {
   content: string;
 }
 
+/** Options for staging a live retain. Only `context` for now; future tag overrides land here. */
+export interface StageRetainOptions {
+  context?: string;
+}
+
+/**
+ * Stage a memory write to the agent store's pending_memories table.
+ *
+ * Pre-bound to a user — `createService` injects a closure that captures
+ * userId so the tool surface stays user-agnostic.
+ */
+export type StageRetainFn = (content: string, opts?: StageRetainOptions) => Promise<void>;
+
 export interface Service {
   memory: {
     recall(query: string, opts?: RecallOptions): Promise<RecallResult>;
     retain(content: string, opts?: RetainOptions): Promise<void>;
     reflect(query: string, opts?: ReflectOptions): Promise<ReflectResult>;
+    /**
+     * Stage a fact for Observer classification + retention to Hindsight.
+     * Returns once the row is durable in pending_memories; the fact becomes
+     * searchable in Hindsight on the next conversation/idle drain.
+     */
+    stageRetain: StageRetainFn;
   };
   files: {
     read(path: string): Promise<string>;
@@ -85,6 +104,7 @@ export function createService(
   profileTags: readonly string[],
   files: Service["files"],
   coreMemory: Service["coreMemory"],
+  stageRetain: StageRetainFn,
   coding?: CodingService,
   skills?: SkillsService,
 ): Service {
@@ -100,6 +120,7 @@ export function createService(
       recall: (query, opts) => memory.recall(bankId, query, attachProfileTags(opts)),
       retain: (content, opts) => memory.retain(bankId, content, attachProfileTags(opts)),
       reflect: (query, opts) => memory.reflect(bankId, query, attachProfileTags(opts)),
+      stageRetain,
     },
     files,
     coreMemory,

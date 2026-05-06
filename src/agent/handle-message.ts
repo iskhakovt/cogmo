@@ -313,6 +313,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         [],
         fileService,
         coreMemoryService,
+        async (content, opts) => {
+          await agentStore.stagePendingMemory({
+            userId,
+            content,
+            ...(opts?.context !== undefined && { context: opts.context }),
+            source: "live_retain",
+          });
+        },
         codingService,
         skillsService,
       );
