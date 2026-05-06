@@ -530,6 +530,26 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     logger.error({ err: err.error, ctx: err.ctx?.update }, "telegram bot error");
   });
 
+  // Populate the client-side command menu (the "/" / Menu button in Telegram).
+  // Idempotent: Telegram replaces the list on each call. Failure here is
+  // non-fatal — log and proceed so the bot still starts.
+  await bot.api
+    .setMyCommands([
+      { command: "new", description: "Start a new conversation" },
+      { command: "sessions", description: "List conversations" },
+      { command: "resume", description: "Switch to a named conversation" },
+      { command: "name", description: "Name the current conversation" },
+      { command: "end", description: "Close the current conversation" },
+      { command: "profile", description: "Manage profiles" },
+      { command: "model", description: "Show or set the model" },
+      { command: "repo", description: "Manage repos for coding delegation" },
+      { command: "mcp", description: "Manage MCP integrations" },
+      { command: "repair", description: "Clear errored status on a conversation" },
+      { command: "cancel", description: "Abort the current interactive dialog" },
+      { command: "start", description: "Show help" },
+    ])
+    .catch((err) => logger.warn({ err }, "failed to register telegram bot commands"));
+
   bot.start({
     onStart: () => logger.info("telegram adapter started"),
   });
