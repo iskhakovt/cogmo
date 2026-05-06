@@ -587,14 +587,25 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       const caption = ctx.message.caption ?? "";
       const name = doc.file_name;
 
+      // Telegram's "Send as file" path delivers images (PNG, full-res JPEG,
+      // etc.) as documents. Route image/* MIME types to the image block so
+      // they hit the LLM's vision pipeline instead of the document pipeline
+      // — Anthropic's `document` content block doesn't accept image media
+      // types and would 400-fail.
+      const isImage = mediaType.startsWith("image/");
+
       const content: InboundContent = [];
       if (caption) content.push({ type: "text", text: caption });
-      content.push({
-        type: "document",
-        path,
-        mediaType,
-        ...(name && { name }),
-      });
+      if (isImage) {
+        content.push({ type: "image", path, mediaType });
+      } else {
+        content.push({
+          type: "document",
+          path,
+          mediaType,
+          ...(name && { name }),
+        });
+      }
 
       const emitResult = await transport.emit(session.id, content, platformTs);
       if (emitResult.isErr()) {
