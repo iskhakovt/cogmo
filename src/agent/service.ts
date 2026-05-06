@@ -6,6 +6,7 @@ import type {
   ReflectResult,
   RetainOptions,
   TagGroup,
+  TagsMatch,
 } from "../memory/provider.js";
 import type { SkillsService } from "../skills/skills-service.js";
 import type { CodingService } from "./coding/service.js";
@@ -114,28 +115,11 @@ export function createService(
   coding?: CodingService,
   skills?: SkillsService,
 ): Service {
-  function attachScopeFilter<
-    T extends { tags?: string[]; tagsMatch?: TagGroupMatch; tagGroups?: TagGroup[] },
-  >(opts: T | undefined): T {
-    if (memoryScope === null) {
-      return (opts ?? ({} as T)) as T;
-    }
-    const andChildren: TagGroup[] = buildScopeLeaves(memoryScope);
-    if (opts?.tags !== undefined && opts.tags.length > 0) {
-      andChildren.push({ tags: opts.tags, match: opts.tagsMatch ?? "any" });
-    }
-    if (opts?.tagGroups !== undefined) {
-      andChildren.push(...opts.tagGroups);
-    }
-    const { tags: _t, tagsMatch: _m, tagGroups: _g, ...rest } = opts ?? ({} as T);
-    return { ...rest, tagGroups: [{ and: andChildren }] } as unknown as T;
-  }
-
   return {
     memory: {
-      recall: (query, opts) => memory.recall(bankId, query, attachScopeFilter(opts)),
+      recall: (query, opts) => memory.recall(bankId, query, applyScope(memoryScope, opts)),
       retain: (content, opts) => memory.retain(bankId, content, opts),
-      reflect: (query, opts) => memory.reflect(bankId, query, attachScopeFilter(opts)),
+      reflect: (query, opts) => memory.reflect(bankId, query, applyScope(memoryScope, opts)),
       stageRetain,
     },
     files,
@@ -145,7 +129,49 @@ export function createService(
   };
 }
 
-type TagGroupMatch = "any" | "all" | "any_strict" | "all_strict";
+interface ScopableOptions {
+  tags?: string[];
+  tagsMatch?: TagsMatch;
+  tagGroups?: TagGroup[];
+}
+
+/**
+ * Fold the profile's scope into recall/reflect options.
+ *
+ * Null scope → caller's options pass through unchanged. Set scope →
+ * caller's tag fields (`tags`, `tagsMatch`, `tagGroups`) are absorbed
+ * into a single `tagGroups: [{ and: [...] }]` clause that ANDs the
+ * scope leaves with any caller-supplied filter; non-tag options
+ * (maxTokens, context, budget) ride through untouched.
+ *
+ * Note: a caller passing `tagsMatch` without `tags` has no leaf to
+ * attach the match mode to, so it's silently dropped — meaningless
+ * on its own.
+ */
+function applyScope<T extends ScopableOptions>(
+  memoryScope: ProfileMemoryScope | null,
+  opts: T | undefined,
+): T {
+  if (memoryScope === null) {
+    // Empty-object default mirrors how callers treat undefined opts; the
+    // cast is safe because every field on T is optional for the no-scope
+    // path (caller-supplied opts pass through verbatim otherwise).
+    return (opts ?? {}) as T;
+  }
+  const andChildren: TagGroup[] = buildScopeLeaves(memoryScope);
+  if (opts?.tags !== undefined && opts.tags.length > 0) {
+    andChildren.push({ tags: opts.tags, match: opts.tagsMatch ?? "any" });
+  }
+  if (opts?.tagGroups !== undefined) {
+    andChildren.push(...opts.tagGroups);
+  }
+  const { tags: _t, tagsMatch: _m, tagGroups: _g, ...rest } = opts ?? {};
+  // TS can't track that destructuring-rest then re-spreading preserves
+  // T's structural constraint, even though every removed field is
+  // optional on T. Widen via unknown rather than threading a generic
+  // helper that obscures the runtime shape.
+  return { ...rest, tagGroups: [{ and: andChildren }] } as unknown as T;
+}
 
 /**
  * Build the leaves of the scope filter — one leaf per dimension.
