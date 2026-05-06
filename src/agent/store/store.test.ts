@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "../../db/index.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
@@ -236,6 +236,22 @@ describe("DrizzleAgentStore", () => {
           isPrivate: true,
         }),
       ).rejects.toThrow();
+    });
+
+    it("setConversationVoiceMode persists the override", async () => {
+      const { conversationId } = await seedConversation();
+      await store.setConversationVoiceMode(conversationId, "always");
+      expect((await store.getConversation(conversationId))?.voiceMode).toBe("always");
+
+      await store.setConversationVoiceMode(conversationId, "never");
+      expect((await store.getConversation(conversationId))?.voiceMode).toBe("never");
+    });
+
+    it("setConversationVoiceMode(null) clears the override (NULL = follow profile)", async () => {
+      const { conversationId } = await seedConversation();
+      await store.setConversationVoiceMode(conversationId, "always");
+      await store.setConversationVoiceMode(conversationId, null);
+      expect((await store.getConversation(conversationId))?.voiceMode).toBeNull();
     });
   });
 
@@ -1497,6 +1513,48 @@ describe("DrizzleAgentStore", () => {
 
       const rules = await store.getActiveRules(profileId, []);
       expect(rules).toEqual([{ rule: "New consolidated rule" }]);
+    });
+  });
+
+  describe("voice config", () => {
+    it("returns undefined when no row is present", async () => {
+      expect(await store.getVoiceConfig()).toBeUndefined();
+    });
+
+    it("returns the singleton row when present", async () => {
+      // Bootstrap path: voice_config has FKs to `secrets`. The wizard would
+      // insert these via `secretsStore.putSecret` then a row via raw SQL —
+      // mirror that here. Same secret id can serve both TTS and STT
+      // (when the operator opts to reuse the OpenAI LLM provider's key).
+      const { id: secretId } = await secretsStore.putSecret({
+        name: "voice_openai_key",
+        plaintext: "sk-test-voice",
+      });
+      await db.execute(sql`
+        INSERT INTO voice_config (
+          tts_secret_id, stt_secret_id,
+          tts_provider, tts_model, tts_voice, tts_base_url,
+          stt_provider, stt_model, stt_base_url
+        ) VALUES (
+          ${secretId}, ${secretId},
+          'openai', 'gpt-4o-mini-tts', 'alloy', NULL,
+          'openai', 'gpt-4o-mini-transcribe', NULL
+        )
+      `);
+
+      const cfg = await store.getVoiceConfig();
+      expect(cfg).toBeDefined();
+      expect(cfg).toMatchObject({
+        ttsSecretId: secretId,
+        sttSecretId: secretId,
+        ttsProvider: "openai",
+        ttsModel: "gpt-4o-mini-tts",
+        ttsVoice: "alloy",
+        ttsBaseUrl: null,
+        sttProvider: "openai",
+        sttModel: "gpt-4o-mini-transcribe",
+        sttBaseUrl: null,
+      });
     });
   });
 });

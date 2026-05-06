@@ -688,6 +688,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               { conversationId, length: result.text.length, cap: effectiveCap },
               "voice reply skipped — over cap",
             );
+            // The streamed text reply already landed; tell the user voice
+            // was skipped so they know why their voice request didn't
+            // produce a clip. Notify reaches every active session — in
+            // mixed-channel setups a non-voice session also sees the
+            // note, which is harmless and matches Option B (text always
+            // wins).
+            await deliveryRouter.notifyConversation(
+              conversationId,
+              "(text reply too long for voice — see above)",
+            );
             return { skipped: "over_cap", length: result.text.length };
           }
           // ttsProvider + voiceConfig narrowed by the outer guard; redo

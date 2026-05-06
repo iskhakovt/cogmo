@@ -483,6 +483,38 @@ describe("createDeliveryRouter", () => {
       // c has no sendVoice — nothing called for it
     });
 
+    it("StreamingAdapter that also implements sendVoice gets BOTH stream and voice fan-out", async () => {
+      // Production-shaped: Telegram is a StreamingAdapter that also
+      // implements sendVoice. The router's partition loop must put it in
+      // streamHandles (for text edits) AND voiceTargets (for TTS clips)
+      // — this is the realistic single-channel voice flow.
+      const handle = mockStreamHandle();
+      const sendVoice = vi.fn().mockResolvedValue(undefined);
+      const streamingWithVoice = mockStreamingAdapter({
+        openStream: vi.fn().mockResolvedValue(handle),
+        sendVoice,
+      });
+      const adapters = new Map([["ch-tg", { adapter: streamingWithVoice }]]);
+      const transportStore = mockTransportStore({
+        getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-tg")]),
+      });
+
+      const router = createDeliveryRouter({ adapters, transportStore });
+      const delivery = await router.prepare(ctx());
+
+      // Streaming side gets text events.
+      await delivery.push(textDelta);
+      await delivery.finish();
+      expect(handle.push).toHaveBeenCalledWith(textDelta);
+      expect(handle.finish).toHaveBeenCalled();
+
+      // Voice side picks up the same session.
+      expect(delivery.canDeliverVoice()).toBe(true);
+      const audio = { audio: Buffer.from([1, 2, 3]), mediaType: "audio/ogg" };
+      await delivery.deliverVoice(audio);
+      expect(sendVoice).toHaveBeenCalledWith("addr-s1", audio);
+    });
+
     it("deliverVoice() swallows per-session errors so one failure doesn't block others", async () => {
       const failing = mockAdapter({
         sendVoice: vi.fn().mockRejectedValue(new Error("rate-limited")),

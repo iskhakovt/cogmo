@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../../agent/store/index.js";
 import type { Database } from "../../db/index.js";
@@ -536,6 +537,51 @@ describe("DrizzleTransportStore", () => {
     it("returns null when no identity matches", async () => {
       const channelId = await seedChannel();
       expect(await store.resolveUser(channelId, "unknown")).toBeUndefined();
+    });
+  });
+
+  describe("getVoiceMaxReplyChars", () => {
+    it("returns null when the conversation has no active sessions", async () => {
+      const { conversationId } = await seedConversation();
+      expect(await store.getVoiceMaxReplyChars(conversationId)).toBeNull();
+    });
+
+    it("returns the default cap (700) for a single fresh channel", async () => {
+      const channelId = await seedChannel("telegram");
+      const { conversationId } = await seedConversation();
+      await seedSession(channelId, conversationId);
+
+      expect(await store.getVoiceMaxReplyChars(conversationId)).toBe(700);
+    });
+
+    it("takes the MIN cap across multiple active sessions on different channels", async () => {
+      // Two channels with different caps — the min wins so the
+      // most-restrictive cost ceiling is honoured.
+      const ch1 = await seedChannel("telegram");
+      const ch2 = await seedChannel("slack");
+      await db.execute(sql`UPDATE channels SET voice_max_reply_chars = 1500 WHERE id = ${ch1}`);
+      await db.execute(sql`UPDATE channels SET voice_max_reply_chars = 300 WHERE id = ${ch2}`);
+      const { conversationId } = await seedConversation();
+      await seedSession(ch1, conversationId, "addr-1");
+      await seedSession(ch2, conversationId, "addr-2");
+
+      expect(await store.getVoiceMaxReplyChars(conversationId)).toBe(300);
+    });
+
+    it("ignores closed sessions when computing the cap", async () => {
+      const ch1 = await seedChannel("telegram");
+      const ch2 = await seedChannel("slack");
+      await db.execute(sql`UPDATE channels SET voice_max_reply_chars = 1500 WHERE id = ${ch1}`);
+      await db.execute(sql`UPDATE channels SET voice_max_reply_chars = 100 WHERE id = ${ch2}`);
+      const { conversationId } = await seedConversation();
+      const activeSessionId = await seedSession(ch1, conversationId, "addr-1");
+      const closedSessionId = await seedSession(ch2, conversationId, "addr-2");
+      await store.closeSession(closedSessionId);
+      // Active session id retained for clarity — only its channel's cap should drive the result.
+      expect(activeSessionId).toBeDefined();
+
+      // Only ch1 (1500) is active; ch2's tiny 100 is closed and excluded.
+      expect(await store.getVoiceMaxReplyChars(conversationId)).toBe(1500);
     });
   });
 });

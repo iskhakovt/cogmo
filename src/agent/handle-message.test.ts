@@ -1223,12 +1223,13 @@ describe("createHandleMessage", () => {
       });
     });
 
-    it("skips TTS when text exceeds the per-channel cap", async () => {
+    it("skips TTS when text exceeds the per-channel cap and posts a note", async () => {
       const ttsProvider = { name: "openai", tts: vi.fn() };
       const handle = mockDeliveryHandle({
         canDeliverVoice: vi.fn().mockReturnValue(true),
         hasBatchTargets: vi.fn().mockReturnValue(false),
       });
+      const notifyConversation = vi.fn().mockResolvedValue(undefined);
       const deps = mockDeps({
         ttsProvider,
         voiceConfig: voiceConfigStub(),
@@ -1246,7 +1247,10 @@ describe("createHandleMessage", () => {
             toolSet: [],
           }),
         }),
-        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        deliveryRouter: mockDeliveryRouter({
+          prepare: vi.fn().mockResolvedValue(handle),
+          notifyConversation,
+        }),
         transportStore: mockTransportStore({
           // Tiny cap that the canned reply ("Hello from assistant" = 20 chars) exceeds.
           getVoiceMaxReplyChars: vi.fn().mockResolvedValue(5),
@@ -1261,6 +1265,90 @@ describe("createHandleMessage", () => {
 
       expect(ttsProvider.tts).not.toHaveBeenCalled();
       expect(handle.deliverVoice).not.toHaveBeenCalled();
+      // The user gets a brief note that voice was skipped — text already
+      // streamed via the normal path.
+      expect(notifyConversation).toHaveBeenCalledWith(
+        "conv-1",
+        expect.stringContaining("too long for voice"),
+      );
+    });
+
+    it("auto + voice inbound mirrors → TTS fires (the UX-default path)", async () => {
+      // The actual user flow: profile is "auto" (default), no conversation
+      // override, last inbound was voice → reply should be voiced. Combines
+      // STT + voice mode resolution + TTS in one happy path.
+      const ttsAudio = Buffer.from([0x4f, 0x67, 0x67, 0x53]);
+      const ttsProvider = {
+        name: "openai",
+        tts: vi.fn().mockResolvedValue({ audio: ttsAudio, mediaType: "audio/ogg" }),
+      };
+      const sttProvider = {
+        name: "openai",
+        stt: vi.fn().mockResolvedValue({ text: "what's the weather" }),
+      };
+      const handle = mockDeliveryHandle({
+        canDeliverVoice: vi.fn().mockReturnValue(true),
+        hasBatchTargets: vi.fn().mockReturnValue(false),
+      });
+      const deps = mockDeps({
+        ttsProvider,
+        sttProvider,
+        voiceConfig: voiceConfigStub(),
+        // Profile defaults to auto — mirror inbound
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "x",
+            basePrompt: "x",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "auto",
+            toolSet: [],
+          }),
+          getHistory: vi.fn().mockResolvedValue([{ role: "user", content: "what's the weather" }]),
+        }),
+        attachments: {
+          upload: vi.fn().mockResolvedValue("inbound/x"),
+          download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+        },
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        transportStore: mockTransportStore({
+          // Voice inbound — last inbound was voice, so auto mirrors true.
+          getUnbatchedInbound: vi.fn().mockResolvedValue([
+            {
+              id: "inbound-1",
+              content: [{ type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg" }],
+            },
+          ]),
+          getVoiceMaxReplyChars: vi.fn().mockResolvedValue(700),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // STT happened (transcription before persist).
+      expect(sttProvider.stt).toHaveBeenCalledWith({
+        audio: expect.any(Buffer),
+        mediaType: "audio/ogg",
+      });
+      // TTS happened — the "auto + voice in → voice out" reflex.
+      expect(ttsProvider.tts).toHaveBeenCalledWith({
+        text: "Hello from assistant",
+        voice: "alloy",
+        model: "gpt-4o-mini-tts",
+        format: "ogg",
+      });
+      expect(handle.deliverVoice).toHaveBeenCalledWith({
+        audio: ttsAudio,
+        mediaType: "audio/ogg",
+      });
     });
 
     it("does not run TTS when voice mode resolves to false (auto + text inbound)", async () => {
