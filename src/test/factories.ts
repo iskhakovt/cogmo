@@ -76,6 +76,10 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
     countActiveRules: vi.fn().mockResolvedValue(0),
     replaceRules: vi.fn().mockResolvedValue({ id: "rule-1" }),
+    stagePendingMemory: vi.fn().mockResolvedValue({ id: "pending-1" }),
+    bulkStagePendingMemories: vi.fn().mockResolvedValue(undefined),
+    getPendingMemories: vi.fn().mockResolvedValue([]),
+    deletePendingMemories: vi.fn().mockResolvedValue(undefined),
     // --- Admin (Chunk 3) ---
     listProfiles: vi.fn().mockResolvedValue([]),
     getProfileOwner: vi.fn().mockResolvedValue(null),

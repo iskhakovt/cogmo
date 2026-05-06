@@ -33,10 +33,11 @@ export const memoryRetain = defineTool({
     context: z.string().optional().describe("Optional context about when/why this was learned"),
   }),
   handler: async (input, service) => {
-    await service.memory.retain(input.content, {
-      ...(input.context !== undefined && { context: input.context }),
-      tags: ["network:world"],
-    });
+    if (input.context !== undefined) {
+      await service.memory.stageRetain(input.content, { context: input.context });
+    } else {
+      await service.memory.stageRetain(input.content);
+    }
     return "Remembered.";
   },
 });

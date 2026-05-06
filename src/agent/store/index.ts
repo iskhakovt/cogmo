@@ -14,6 +14,7 @@ import {
   messages,
   modelProviders,
   type ProviderAttrs,
+  pendingMemories,
   profiles,
   steeringRules,
   type ToolSet,
@@ -32,6 +33,18 @@ export const UNKNOWN_OUTPUT_TOKENS = -1;
 
 /** Mirrors the `conversation_status` PG enum. */
 export type ConversationStatus = "active" | "errored";
+
+/** Mirrors the `pending_memory_source` PG enum. */
+export type PendingMemorySource = "live_retain" | "migration";
+
+/** A memory write awaiting Observer classification before retention to Hindsight. */
+export interface PendingMemory {
+  id: string;
+  content: string;
+  context: string | null;
+  source: PendingMemorySource;
+  createdAt: Date;
+}
 
 export interface Profile {
   id: string;
@@ -386,6 +399,32 @@ export interface AgentStore {
       observationCount: number;
     };
   }): Promise<{ id: string }>;
+
+  // --- Pending memories (staging for Observer classification) ---
+
+  /** Insert a single row into the staging table. Returns the new row id. */
+  stagePendingMemory(params: {
+    userId: string;
+    content: string;
+    context?: string;
+    source: PendingMemorySource;
+  }): Promise<{ id: string }>;
+
+  /** Bulk insert via a single statement. Used by the migration script to stage thousands of rows in one round-trip. */
+  bulkStagePendingMemories(
+    rows: ReadonlyArray<{
+      userId: string;
+      content: string;
+      context?: string;
+      source: PendingMemorySource;
+    }>,
+  ): Promise<void>;
+
+  /** Read all pending rows for a user, oldest first (FIFO drain order). */
+  getPendingMemories(userId: string): Promise<ReadonlyArray<PendingMemory>>;
+
+  /** Delete pending rows by id. Used by the Observer drain step after successful retain. */
+  deletePendingMemories(ids: ReadonlyArray<string>): Promise<void>;
 }
 
 export class DrizzleAgentStore implements AgentStore {
@@ -1227,6 +1266,72 @@ export class DrizzleAgentStore implements AgentStore {
           })
           .returning({ id: steeringRules.id }),
       );
+    });
+  }
+
+  async stagePendingMemory(params: {
+    userId: string;
+    content: string;
+    context?: string;
+    source: PendingMemorySource;
+  }): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      return single(
+        await tx
+          .insert(pendingMemories)
+          .values({
+            userId: params.userId,
+            content: params.content,
+            context: params.context ?? null,
+            source: params.source,
+          })
+          .returning({ id: pendingMemories.id }),
+      );
+    });
+  }
+
+  async bulkStagePendingMemories(
+    rows: ReadonlyArray<{
+      userId: string;
+      content: string;
+      context?: string;
+      source: PendingMemorySource;
+    }>,
+  ): Promise<void> {
+    if (rows.length === 0) return;
+    await this.#db.transaction(async (tx) => {
+      await tx.insert(pendingMemories).values(
+        rows.map((r) => ({
+          userId: r.userId,
+          content: r.content,
+          context: r.context ?? null,
+          source: r.source,
+        })),
+      );
+    });
+  }
+
+  async getPendingMemories(userId: string): Promise<ReadonlyArray<PendingMemory>> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: pendingMemories.id,
+          content: pendingMemories.content,
+          context: pendingMemories.context,
+          source: pendingMemories.source,
+          createdAt: pendingMemories.createdAt,
+        })
+        .from(pendingMemories)
+        .where(eq(pendingMemories.userId, userId))
+        .orderBy(asc(pendingMemories.createdAt));
+      return rows;
+    });
+  }
+
+  async deletePendingMemories(ids: ReadonlyArray<string>): Promise<void> {
+    if (ids.length === 0) return;
+    await this.#db.transaction(async (tx) => {
+      await tx.delete(pendingMemories).where(inArray(pendingMemories.id, [...ids]));
     });
   }
 }

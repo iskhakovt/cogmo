@@ -1,13 +1,16 @@
 /**
- * Observer — post-conversation correction extraction.
+ * Observer — post-conversation extraction. Inngest function triggered by
+ * `conversation/idle`. Sequence per fire:
  *
- * Inngest function triggered by conversation/idle. Loads the transcript,
- * extracts behavioral corrections via chatTyped(), persists them as
- * steering rules, and optionally consolidates when the rule count
- * exceeds the threshold.
+ *   1. extract corrections from the transcript → steering rules (with
+ *      optional consolidation when active rule count crosses threshold)
+ *   2. extract facts from the transcript → Hindsight (with full
+ *      network + compartment + trust tags)
+ *   3. drain pending memories for the user → classify each → Hindsight
  *
- * This is the first consumer of the conversation/idle event.
- * Future phases will add memory extraction (Hindsight) as additional steps.
+ * Observer is the sole writer to Hindsight. The live `memory_retain`
+ * tool stages into `pending_memories`; step 3 catches those rows up
+ * during the same idle pass.
  */
 
 import { inngest } from "../../inngest/client.js";
@@ -17,6 +20,7 @@ import { logger } from "../../logger.js";
 import type { MemoryProvider } from "../../memory/provider.js";
 import type { AgentStore } from "../store/index.js";
 import { consolidateRules } from "./consolidate-rules.js";
+import { drainPendingMemories } from "./drain-pending-memories.js";
 import { extractCorrections } from "./extract-corrections.js";
 import { extractMemories } from "./extract-memories.js";
 
@@ -80,12 +84,23 @@ export function createObserver(deps: ObserverDeps) {
           )
         : null;
 
-      // Phase 2: extract facts into long-term memory
+      // Phase 2: extract facts from the transcript into long-term memory
       const memoryResult = await step.run("extract-memories", async () => {
         return extractMemories(history, conv.userId, {
           provider,
           model,
           memory: deps.memory,
+        });
+      });
+
+      // Phase 3: drain pending_memories — staged live retains and any
+      // migration backfill — through the same classifier prompt.
+      const drainResult = await step.run("drain-pending-memories", async () => {
+        return drainPendingMemories(conv.userId, {
+          provider,
+          model,
+          memory: deps.memory,
+          store: agentStore,
         });
       });
 
@@ -95,6 +110,7 @@ export function createObserver(deps: ObserverDeps) {
         corrections: result,
         consolidation,
         memories: memoryResult,
+        drained: drainResult,
       };
     },
   );

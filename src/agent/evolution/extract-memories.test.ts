@@ -51,11 +51,21 @@ describe("extractMemories", () => {
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 
-  it("extracts and retains memories with correct tags", async () => {
+  it("extracts and retains memories with network, compartment, and trust tags", async () => {
     const deps = mockExtractionDeps({
       memories: [
-        { fact: "homelab IP is 10.0.10.10", network: "world" },
-        { fact: "prefers dark mode", network: "bank" },
+        {
+          fact: "homelab IP is 10.0.10.10",
+          network: "world",
+          compartment: "technical",
+          trust: "first-party",
+        },
+        {
+          fact: "prefers dark mode",
+          network: "bank",
+          compartment: "personal",
+          trust: "any",
+        },
       ],
     });
 
@@ -66,13 +76,13 @@ describe("extractMemories", () => {
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       {
         content: "homelab IP is 10.0.10.10",
-        tags: ["network:world"],
+        tags: ["network:world", "compartment:technical", "trust:first-party"],
         metadata: { source: "conversation" },
         observationScopes: "per_tag",
       },
       {
         content: "prefers dark mode",
-        tags: ["network:bank"],
+        tags: ["network:bank", "compartment:personal", "trust:any"],
         metadata: { source: "conversation" },
         observationScopes: "per_tag",
       },
@@ -85,6 +95,8 @@ describe("extractMemories", () => {
         {
           fact: "wife's birthday is March 15",
           network: "bank",
+          compartment: "personal",
+          trust: "first-party",
           context: "mentioned while planning a gift",
         },
       ],
@@ -97,7 +109,7 @@ describe("extractMemories", () => {
       {
         content: "wife's birthday is March 15",
         context: "mentioned while planning a gift",
-        tags: ["network:bank"],
+        tags: ["network:bank", "compartment:personal", "trust:first-party"],
         metadata: { source: "conversation" },
         observationScopes: "per_tag",
       },
@@ -107,10 +119,10 @@ describe("extractMemories", () => {
   it("counts by network correctly", async () => {
     const deps = mockExtractionDeps({
       memories: [
-        { fact: "fact 1", network: "world" },
-        { fact: "fact 2", network: "world" },
-        { fact: "fact 3", network: "observation" },
-        { fact: "fact 4", network: "opinion" },
+        { fact: "fact 1", network: "world", compartment: "technical", trust: "first-party" },
+        { fact: "fact 2", network: "world", compartment: "technical", trust: "first-party" },
+        { fact: "fact 3", network: "observation", compartment: "personal", trust: "first-party" },
+        { fact: "fact 4", network: "opinion", compartment: "personal", trust: "first-party" },
       ],
     });
 
@@ -122,7 +134,9 @@ describe("extractMemories", () => {
 
   it("uses bankId as the Hindsight bank", async () => {
     const deps = mockExtractionDeps({
-      memories: [{ fact: "a fact", network: "world" }],
+      memories: [
+        { fact: "a fact", network: "world", compartment: "technical", trust: "first-party" },
+      ],
     });
 
     await extractMemories(sampleHistory, "ti", deps);

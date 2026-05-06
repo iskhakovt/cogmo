@@ -8,6 +8,7 @@ function mockService(overrides?: Partial<Service["memory"]>): Service {
       recall: vi.fn().mockResolvedValue({ memories: [] }),
       retain: vi.fn().mockResolvedValue(undefined),
       reflect: vi.fn().mockResolvedValue({ answer: "" }),
+      stageRetain: vi.fn().mockResolvedValue(undefined),
       ...overrides,
     },
     files: {
@@ -65,26 +66,30 @@ describe("memory_recall", () => {
 });
 
 describe("memory_retain", () => {
-  it("calls service.memory.retain with content", async () => {
+  it("stages the fact via service.memory.stageRetain", async () => {
     const caps = mockService();
     await memoryRetain.handler({ content: "Alice likes coffee" }, caps);
 
-    expect(caps.memory.retain).toHaveBeenCalledWith("Alice likes coffee", {
-      tags: ["network:world"],
-    });
+    expect(caps.memory.stageRetain).toHaveBeenCalledWith("Alice likes coffee");
   });
 
-  it("passes context when provided", async () => {
+  it("forwards context when provided", async () => {
     const caps = mockService();
     await memoryRetain.handler(
       { content: "Alice likes coffee", context: "mentioned during lunch chat" },
       caps,
     );
 
-    expect(caps.memory.retain).toHaveBeenCalledWith("Alice likes coffee", {
+    expect(caps.memory.stageRetain).toHaveBeenCalledWith("Alice likes coffee", {
       context: "mentioned during lunch chat",
-      tags: ["network:world"],
     });
+  });
+
+  it("does not write directly to MemoryProvider — staging only", async () => {
+    const caps = mockService();
+    await memoryRetain.handler({ content: "Alice likes coffee" }, caps);
+
+    expect(caps.memory.retain).not.toHaveBeenCalled();
   });
 
   it("returns confirmation", async () => {

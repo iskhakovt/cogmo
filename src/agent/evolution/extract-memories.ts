@@ -70,7 +70,7 @@ export async function extractMemories(
   const items: RetainBatchItem[] = data.memories.map((mem) => ({
     content: mem.fact,
     ...(mem.context !== undefined && { context: mem.context }),
-    tags: [`network:${mem.network}`],
+    tags: [`network:${mem.network}`, `compartment:${mem.compartment}`, `trust:${mem.trust}`],
     metadata: { source: "conversation" },
     observationScopes: "per_tag" as const,
   }));

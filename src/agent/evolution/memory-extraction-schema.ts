@@ -16,6 +16,18 @@ export const MemoryNetworkSchema = z
     "Memory network: world (external facts), bank (personal facts/preferences), opinion (agent's assessments), observation (behavioral patterns)",
   );
 
+export const MemoryCompartmentSchema = z
+  .enum(["personal", "work", "health", "financial", "technical"])
+  .describe(
+    "Domain compartment: personal (general life), work (employment/projects), health (medical/fitness), financial (money/accounts), technical (code/systems/infrastructure)",
+  );
+
+export const MemoryTrustSchema = z
+  .enum(["first-party", "any"])
+  .describe(
+    "Access tier: first-party (only profiles the user controls can access), any (safe for third-party plugins)",
+  );
+
 export const ExtractedMemorySchema = z.object({
   fact: z
     .string()
@@ -23,6 +35,8 @@ export const ExtractedMemorySchema = z.object({
     .min(1)
     .describe("The fact or information to remember — clear, standalone, context-free"),
   network: MemoryNetworkSchema,
+  compartment: MemoryCompartmentSchema,
+  trust: MemoryTrustSchema,
   context: z
     .string()
     .trim()
@@ -35,14 +49,29 @@ export const MemoryExtractionSchema = z.object({
   memories: z.array(ExtractedMemorySchema),
 });
 
+/**
+ * Schema for classifying a single pre-existing fact (e.g. a row in
+ * `pending_memories` drained by Observer). The fact text is supplied as
+ * input; the LLM returns only the three classification axes.
+ */
+export const ClassifiedMemorySchema = z.object({
+  network: MemoryNetworkSchema,
+  compartment: MemoryCompartmentSchema,
+  trust: MemoryTrustSchema,
+});
+
+export type MemoryNetwork = z.infer<typeof MemoryNetworkSchema>;
+export type MemoryCompartment = z.infer<typeof MemoryCompartmentSchema>;
+export type MemoryTrust = z.infer<typeof MemoryTrustSchema>;
 export type ExtractedMemory = z.infer<typeof ExtractedMemorySchema>;
 export type MemoryExtraction = z.infer<typeof MemoryExtractionSchema>;
+export type ClassifiedMemory = z.infer<typeof ClassifiedMemorySchema>;
 
 // --- Extraction prompt ---
 
-export const MEMORY_EXTRACTION_PROMPT = `You are a memory extraction engine. Your job is to analyze a conversation transcript between a user and an AI assistant, and extract facts worth storing in long-term memory.
+export const MEMORY_EXTRACTION_PROMPT = `You are a memory extraction engine. Your job is to analyze a conversation transcript between a user and an AI assistant, and extract facts worth storing in long-term memory. For each fact, assign three independent classifications: network, compartment, and trust tier.
 
-## Memory Networks
+## Memory Networks (what kind of knowledge)
 
 Classify each fact into exactly one network:
 
@@ -58,15 +87,66 @@ Classify each fact into exactly one network:
 - **observation**: Behavioral patterns the agent has noticed — recurring behaviors, timing patterns, contextual preferences.
   Examples: "usually asks about homelab on weekends", "prefers short responses in the morning"
 
+## Compartments (what domain)
+
+Classify each fact into exactly one compartment. Compartments isolate domains so a profile scoped to "work" never sees a personal-life fact.
+
+- **personal**: general life — relationships, habits, hobbies, daily preferences, household, family. Default for facts that don't clearly belong elsewhere.
+  Examples: "wife's birthday is March 15", "prefers tea over coffee", "lives in Berlin"
+
+- **work**: employment, projects, colleagues, clients, professional commitments — anything tied to the user's job or paid work.
+  Examples: "Q3 deadline at Acme is Sept 30", "manager is Alice", "currently leading the migration project"
+
+- **health**: medical, fitness, mental health, dietary restrictions, medications, physiological measurements.
+  Examples: "allergic to peanuts", "HbA1c is 6.2", "runs 5km every morning", "takes metformin"
+
+- **financial**: money, accounts, transactions, investments, taxes, billing — anything where leakage to a wrong context is a privacy risk.
+  Examples: "Wise account number ends 4711", "files taxes in Germany", "has a Vanguard ISA"
+
+- **technical**: code, infrastructure, tools, systems, APIs, configs — the user's technical stack and personal/work projects' implementation details.
+  Examples: "homelab IP is 10.0.10.10", "uses pnpm not npm", "Postgres password rotated last week"
+
+## Trust Tier (who can access)
+
+Classify each fact into exactly one tier:
+
+- **first-party**: only profiles the user directly controls can access this. The default for anything the user told us in conversation. Health, financial, and most personal facts should be first-party.
+- **any**: safe for third-party plugins or untrusted automation to read. Use sparingly — only for facts that are obviously public or non-sensitive (e.g. "homelab uses Tailscale", "prefers Markdown over RST"). When in doubt, choose first-party.
+
 ## Rules for Extraction
 
 - **Source reliability**: Only extract facts explicitly stated by the user, confirmed by the user, or grounded in tool output. Do not extract unsupported assistant guesses, suggestions, or summaries — the assistant may be wrong.
 - **Extract standalone facts**: Each fact should be understandable without the conversation context. "Project X deadline is March 15" not "the deadline is in two weeks".
 - **Skip trivial content**: Don't extract greetings, small talk, acknowledgments, or transient discussion.
-- **Skip tool-retained facts**: If the assistant explicitly used a memory_retain tool during the conversation, don't re-extract those facts — they're already stored.
 - **No conversation references**: Don't mention "the user said" or "in this conversation" — extract the fact itself.
 - **Admission criteria**: Only extract facts with future utility, factual confidence, and semantic novelty. Ask: "would knowing this help in a future conversation?"
 - **One fact per item**: Don't combine multiple independent facts into one entry.
 - **Return empty array if nothing qualifies**: Most short conversations have nothing worth extracting.
 
 Analyze the transcript below and extract facts worth remembering.`;
+
+export const PENDING_CLASSIFICATION_PROMPT = `You are classifying a single fact for storage in long-term memory. The fact has already been chosen for retention — do not decide whether to keep it. Assign three independent classifications: network, compartment, and trust tier.
+
+## Memory Networks (what kind of knowledge)
+
+- **world**: External facts about the world, systems, tools, infrastructure, people, places, events.
+- **bank**: Personal facts about the user — preferences, habits, biographical details, relationships, commitments.
+- **opinion**: The agent's learned assessments about what works well or poorly.
+- **observation**: Behavioral patterns the agent has noticed.
+
+## Compartments (what domain)
+
+- **personal**: general life — relationships, habits, hobbies, daily preferences, household, family.
+- **work**: employment, projects, colleagues, clients, professional commitments.
+- **health**: medical, fitness, mental health, dietary restrictions, medications, physiological measurements.
+- **financial**: money, accounts, transactions, investments, taxes, billing.
+- **technical**: code, infrastructure, tools, systems, APIs, configs.
+
+## Trust Tier (who can access)
+
+- **first-party**: only profiles the user directly controls can access. Default for anything sensitive.
+- **any**: safe for third-party plugins or untrusted automation. Use sparingly — only obviously public, non-sensitive facts.
+
+When in doubt on trust, choose first-party. When in doubt on compartment, choose personal.
+
+Output only the JSON classification.`;
