@@ -98,6 +98,7 @@ describe("DrizzleAgentStore", () => {
         summarizationModel: null,
         extractionModel: null,
         autoRecall: "heuristic",
+        voiceMode: "auto",
         toolSet: ["memory_recall"],
       });
     });
@@ -196,6 +197,7 @@ describe("DrizzleAgentStore", () => {
         profileId,
         isPrivate: true,
         status: "active",
+        voiceMode: null,
       });
     });
 

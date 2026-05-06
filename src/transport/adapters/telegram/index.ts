@@ -20,6 +20,7 @@ import {
   parseSkillsApprovalCallback,
   SKILLS_APPROVAL_CALLBACK_REGEX,
 } from "../../../skills/skills-keyboard.js";
+import type { OutboundVoice } from "../../adapter-module.js";
 import {
   type AdapterDeps,
   type AdapterModule,
@@ -45,6 +46,7 @@ import {
   handleResumeCallback,
   handleSessions,
   handleSkillsApprovalCallback,
+  handleVoice,
   type TelegramCommandContext,
 } from "./commands.js";
 import { ProfileDialogs } from "./profile-dialog.js";
@@ -112,6 +114,26 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
     );
     this.#activeStreams.set(runId, handle);
     return handle;
+  }
+
+  /**
+   * Voice delivery — Telegram's `sendVoice` renders the OGG/Opus audio as a
+   * voice-bubble UI. Other formats fall back to `sendAudio` (regular audio
+   * file). Called by the delivery router AFTER the streamed text message
+   * has already been delivered (Option B in design/voice.md), so a TTS
+   * failure can never strand the user.
+   */
+  async sendVoice(platformAddress: string, audio: OutboundVoice): Promise<void> {
+    const chatId = Number(platformAddress);
+    const ext = mediaTypeToExt(audio.mediaType);
+    const file = new InputFile(audio.audio, `voice.${ext}`);
+    if (audio.mediaType === "audio/ogg" || audio.mediaType === "audio/opus") {
+      await this.#bot.api.sendVoice(chatId, file);
+    } else {
+      // Non-Opus → degrade to sendAudio (still playable, just not the
+      // voice-bubble UI). Slice 1 doesn't bundle ffmpeg.
+      await this.#bot.api.sendAudio(chatId, file);
+    }
   }
 
   async stop(): Promise<void> {
@@ -399,6 +421,9 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         "",
         "Repair:",
         "  /repair  (or /repair <alias|uuid>)  — clear `errored` status on a conversation",
+        "",
+        "Voice:",
+        "  /voice [auto|always|off|clear] — set per-conversation voice mode",
       ].join("\n"),
     );
   });
@@ -416,6 +441,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("repo", (ctx) => handleRepo(transport, toCmdCtx(ctx), repoDialogs));
   bot.command("mcp", (ctx) => handleMcp(transport, toCmdCtx(ctx)));
   bot.command("repair", (ctx) => handleRepair(transport, toCmdCtx(ctx)));
+  bot.command("voice", (ctx) => handleVoice(transport, toCmdCtx(ctx)));
 
   // Mid-dialog abort for /profile new|edit and /repo add flows. Evaluate
   // both branches (no `||` short-circuit) so a hypothetical "both dialogs
@@ -650,6 +676,89 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     }
   });
 
+  // Voice messages — Telegram's first-class voice clip type. Always OGG/Opus.
+  // The handler stops at upload + emit; transcription happens in the
+  // orchestrator's durable `transcribe-voice` step (so retries replay from
+  // cache rather than re-charging STT). See design/voice.md.
+  bot.on("message:voice", async (ctx) => {
+    await ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => {});
+
+    const addr = String(ctx.chat.id);
+    const handle = String(ctx.from.id);
+    const platformTs = new Date(ctx.message.date * 1000);
+
+    const session = await resolveOrCreateSession(addr, handle);
+    if (!session) return;
+
+    try {
+      const voice = ctx.message.voice;
+      // Telegram voice clips are always OGG/Opus per the Bot API spec; the
+      // mime_type field is informational. Hardcode rather than relying on it.
+      const mediaType = "audio/ogg";
+
+      const buffer = await downloadTelegramFile(ctx, voice.file_id, creds.token);
+      const path = await transport.uploadAttachment(buffer, mediaType);
+      const caption = ctx.message.caption ?? "";
+      const durationMs = voice.duration ? voice.duration * 1000 : undefined;
+
+      const content: InboundContent = [];
+      if (caption) content.push({ type: "text", text: caption });
+      content.push({
+        type: "voice",
+        path,
+        mediaType,
+        ...(durationMs !== undefined && { durationMs }),
+      });
+
+      const emitResult = await transport.emit(session.id, content, platformTs);
+      if (emitResult.isErr()) {
+        logger.error({ error: emitResult.error }, "failed to emit voice message");
+      }
+    } catch (err) {
+      logger.error({ err }, "failed to process voice message");
+    }
+  });
+
+  // Audio messages — Telegram's "Audio" message type (longer audio files
+  // attached as music/podcast clips, not voice notes). Same pipeline as voice;
+  // mediaType comes from the audio's mime_type with a sensible default.
+  bot.on("message:audio", async (ctx) => {
+    await ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => {});
+
+    const addr = String(ctx.chat.id);
+    const handle = String(ctx.from.id);
+    const platformTs = new Date(ctx.message.date * 1000);
+
+    const session = await resolveOrCreateSession(addr, handle);
+    if (!session) return;
+
+    try {
+      const audio = ctx.message.audio;
+      const mediaType = audio.mime_type ?? "audio/mpeg";
+
+      const buffer = await downloadTelegramFile(ctx, audio.file_id, creds.token);
+      const path = await transport.uploadAttachment(buffer, mediaType);
+      const caption = ctx.message.caption ?? "";
+      const durationMs = audio.duration ? audio.duration * 1000 : undefined;
+
+      const content: InboundContent = [];
+      if (caption) content.push({ type: "text", text: caption });
+      content.push({
+        type: "voice",
+        path,
+        mediaType,
+        ...(durationMs !== undefined && { durationMs }),
+      });
+
+      const emitResult = await transport.emit(session.id, content, platformTs);
+      if (emitResult.isErr()) {
+        logger.error({ error: emitResult.error }, "failed to emit audio message");
+      }
+    } catch (err) {
+      logger.error({ err }, "failed to process audio message");
+    }
+  });
+
   bot.catch((err) => {
     logger.error({ err: err.error, ctx: err.ctx?.update }, "telegram bot error");
   });
@@ -669,6 +778,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       { command: "repo", description: "Manage repos for coding delegation" },
       { command: "mcp", description: "Manage MCP integrations" },
       { command: "repair", description: "Clear errored status on a conversation" },
+      { command: "voice", description: "Set voice mode (auto / always / off)" },
       { command: "cancel", description: "Abort the current interactive dialog" },
       { command: "start", description: "Show help" },
     ])

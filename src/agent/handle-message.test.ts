@@ -75,6 +75,7 @@ describe("createHandleMessage", () => {
     expect(deps.promptSource.assemble).toHaveBeenCalledWith(deps.agentStore, {
       profileId: "profile-1",
       channelTypes: [],
+      voiceMode: false,
     });
   });
 
@@ -1092,5 +1093,236 @@ describe("createHandleMessage", () => {
 
     const passedTools = (deps.runStreamingAgentLoop as any).mock.calls[0][0].tools;
     expect(passedTools.snapshot()).toHaveLength(0);
+  });
+
+  describe("voice", () => {
+    function voiceConfigStub() {
+      return { ttsVoice: "alloy", ttsModel: "gpt-4o-mini-tts" };
+    }
+
+    it("transcribes inbound voice blocks via stt provider before persisting the user message", async () => {
+      const stt = vi.fn().mockResolvedValue({ text: "hello there" });
+      const sttProvider = { name: "openai", stt };
+      const insertMessage = vi.fn().mockResolvedValue({ id: "msg-1" });
+      const deps = mockDeps({
+        sttProvider,
+        agentStore: mockAgentStore({
+          insertMessage,
+          getHistory: vi.fn().mockResolvedValue([{ role: "user", content: "hello there" }]),
+        }),
+        attachments: {
+          upload: vi.fn().mockResolvedValue("inbound/x"),
+          download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+        },
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([
+            {
+              id: "inbound-1",
+              content: [{ type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg" }],
+            },
+          ]),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(stt).toHaveBeenCalledWith({ audio: expect.any(Buffer), mediaType: "audio/ogg" });
+      // Persisted user message contains the transcript text, not the voice
+      // block JSON literal — so subsequent turns load it cleanly.
+      expect(insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ role: "user", content: "hello there" }),
+      );
+    });
+
+    it("transcribed text reaches the agent loop as a text block", async () => {
+      const sttProvider = { name: "openai", stt: vi.fn().mockResolvedValue({ text: "speak" }) };
+      const deps = mockDeps({
+        sttProvider,
+        agentStore: mockAgentStore({
+          getHistory: vi.fn().mockResolvedValue([{ role: "user", content: "speak" }]),
+        }),
+        attachments: {
+          upload: vi.fn().mockResolvedValue("inbound/x"),
+          download: vi.fn().mockResolvedValue(Buffer.from("bytes")),
+        },
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([
+            {
+              id: "inbound-1",
+              content: [{ type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg" }],
+            },
+          ]),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      const callArgs = (deps.runStreamingAgentLoop as any).mock.calls[0][0];
+      // History was rewritten with the resolved trailing user message
+      // because `hasAttachments` is false for voice — but the transcript
+      // already lives in the persisted text via getHistory's mock.
+      expect(callArgs.messages.at(-1)).toEqual({ role: "user", content: "speak" });
+    });
+
+    it("delivers TTS voice via deliverVoice when voice mode is on and within the cap", async () => {
+      const ttsAudio = Buffer.from([0x4f, 0x67, 0x67, 0x53]);
+      const ttsProvider = {
+        name: "openai",
+        tts: vi.fn().mockResolvedValue({ audio: ttsAudio, mediaType: "audio/ogg" }),
+      };
+      const handle = mockDeliveryHandle({
+        canDeliverVoice: vi.fn().mockReturnValue(true),
+        hasBatchTargets: vi.fn().mockReturnValue(false),
+      });
+      const deps = mockDeps({
+        ttsProvider,
+        voiceConfig: voiceConfigStub(),
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "assistant",
+            basePrompt: "p",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "always",
+            toolSet: [],
+          }),
+        }),
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        transportStore: mockTransportStore({
+          getVoiceMaxReplyChars: vi.fn().mockResolvedValue(700),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(ttsProvider.tts).toHaveBeenCalledWith({
+        text: "Hello from assistant",
+        voice: "alloy",
+        model: "gpt-4o-mini-tts",
+        format: "ogg",
+      });
+      expect(handle.deliverVoice).toHaveBeenCalledWith({
+        audio: ttsAudio,
+        mediaType: "audio/ogg",
+      });
+    });
+
+    it("skips TTS when text exceeds the per-channel cap", async () => {
+      const ttsProvider = { name: "openai", tts: vi.fn() };
+      const handle = mockDeliveryHandle({
+        canDeliverVoice: vi.fn().mockReturnValue(true),
+        hasBatchTargets: vi.fn().mockReturnValue(false),
+      });
+      const deps = mockDeps({
+        ttsProvider,
+        voiceConfig: voiceConfigStub(),
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "x",
+            basePrompt: "x",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "always",
+            toolSet: [],
+          }),
+        }),
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        transportStore: mockTransportStore({
+          // Tiny cap that the canned reply ("Hello from assistant" = 20 chars) exceeds.
+          getVoiceMaxReplyChars: vi.fn().mockResolvedValue(5),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(ttsProvider.tts).not.toHaveBeenCalled();
+      expect(handle.deliverVoice).not.toHaveBeenCalled();
+    });
+
+    it("does not run TTS when voice mode resolves to false (auto + text inbound)", async () => {
+      const ttsProvider = { name: "openai", tts: vi.fn() };
+      const handle = mockDeliveryHandle({
+        canDeliverVoice: vi.fn().mockReturnValue(true),
+        hasBatchTargets: vi.fn().mockReturnValue(false),
+      });
+      const deps = mockDeps({
+        ttsProvider,
+        voiceConfig: voiceConfigStub(),
+        // Profile defaults to "auto"; no voice inbound; conversation override null.
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(ttsProvider.tts).not.toHaveBeenCalled();
+      expect(handle.deliverVoice).not.toHaveBeenCalled();
+    });
+
+    it("passes voiceMode: true into prompt assembly when voice is on", async () => {
+      const handle = mockDeliveryHandle({
+        canDeliverVoice: vi.fn().mockReturnValue(true),
+      });
+      const deps = mockDeps({
+        ttsProvider: {
+          name: "openai",
+          tts: vi.fn().mockResolvedValue({ audio: Buffer.from([]), mediaType: "audio/ogg" }),
+        },
+        voiceConfig: voiceConfigStub(),
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "x",
+            basePrompt: "x",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "always",
+            toolSet: [],
+          }),
+        }),
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(deps.promptSource.assemble).toHaveBeenCalledWith(
+        deps.agentStore,
+        expect.objectContaining({ voiceMode: true }),
+      );
+    });
   });
 });

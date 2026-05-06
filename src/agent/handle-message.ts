@@ -15,6 +15,8 @@ import type { AttachmentStore } from "../transport/attachment-store.js";
 import { contentToBlocks, contentToText } from "../transport/content.js";
 import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
+import { resolveVoiceMode } from "../voice/mode.js";
+import type { SttProvider, TtsProvider } from "../voice/types.js";
 import type { CodingService } from "./coding/service.js";
 import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
 import type { DebounceConfig } from "./debounce.js";
@@ -61,6 +63,24 @@ export interface HandleMessageDeps {
    */
   mcpRegistry?: McpRegistry;
   summarizationModel?: string;
+  /**
+   * Speech-to-text provider for transcribing inbound voice blocks. Optional
+   * — absent when no `voice_config` row is present (the wizard hasn't been
+   * run, or voice is intentionally disabled). When undefined, voice blocks
+   * surface as a tool-style placeholder text rather than crashing the turn.
+   */
+  sttProvider?: SttProvider;
+  /**
+   * Text-to-speech provider for outbound voice replies. Optional — absent
+   * when no `voice_config` row is present. Without it, `voice_mode = 'always'`
+   * silently degrades to text-only rather than erroring.
+   */
+  ttsProvider?: TtsProvider;
+  /**
+   * Resolved voice config — pre-loaded from `voice_config` at bootstrap
+   * (voice id + model). Only consumed when ttsProvider is also present.
+   */
+  voiceConfig?: { ttsVoice: string; ttsModel: string };
 }
 
 /**
@@ -209,9 +229,60 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       }
 
       const inboundBlocks = inboundMessages.flatMap((m) => contentToBlocks(m.content));
-      const userContentText = inboundMessages.map((m) => contentToText(m.content)).join("\n");
       // Safe — guarded by length check above
       const maxInboundId = inboundMessages.at(-1)?.id ?? "";
+
+      // Voice transcription runs in a durable `step.run` boundary — STT is
+      // a billable LLM-adjacent call, so Inngest retries replay from the
+      // step cache (exactly-once on second attempt) instead of re-charging
+      // the provider. Cached value is just an array of transcripts in the
+      // same order as voice_ref blocks; OGG bytes never enter step state.
+      // Runs BEFORE create-user-message so the persisted message contains
+      // the actual transcript text rather than a path-only JSON literal.
+      const voiceRefs = inboundBlocks.filter((b) => b.type === "voice_ref");
+      const transcripts =
+        voiceRefs.length > 0
+          ? await step.run("transcribe-voice", async () => {
+              const stt = deps.sttProvider;
+              if (!stt) {
+                throw new Error(
+                  "voice block received but no sttProvider configured — run the setup wizard or set VOICE_STT_API_KEY",
+                );
+              }
+              const out: string[] = [];
+              for (const ref of voiceRefs) {
+                const bytes = await attachments.download(ref.path);
+                const result = await stt.stt({ audio: bytes, mediaType: ref.mediaType });
+                out.push(result.text);
+              }
+              return out;
+            })
+          : [];
+
+      // Substitute voice refs with their transcribed text in the per-message
+      // text representation that lands in `messages.content`. Walk each
+      // inbound row's content; for blocks that are voice, swap in the
+      // matching transcript; otherwise fall back to the original
+      // `contentToText` shape (string-content rows pass through, mixed
+      // arrays still serialize as JSON for image/document compatibility).
+      let voiceIdx = 0;
+      const userContentText = inboundMessages
+        .map((m) => {
+          if (typeof m.content === "string") return m.content;
+          const hasVoice = m.content.some((b) => b.type === "voice");
+          if (!hasVoice) return contentToText(m.content);
+          // Build a transcribed view of this row — voice blocks become text,
+          // others stay as-is — then serialize with the same rule
+          // (text-only → join, otherwise JSON).
+          const transcribed = m.content.map((b) =>
+            b.type === "voice" ? { type: "text" as const, text: transcripts[voiceIdx++] ?? "" } : b,
+          );
+          const allText = transcribed.every((b) => b.type === "text");
+          return allText
+            ? transcribed.map((b) => (b as { text: string }).text).join("\n")
+            : JSON.stringify(transcribed);
+        })
+        .join("\n");
 
       await step.run("create-user-message", async () => {
         await agentStore.insertMessage({
@@ -232,14 +303,48 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return transportStore.getActiveChannelTypes(conversationId);
       });
 
+      // Open delivery handles early — needed to resolve voice mode
+      // (`canDeliverVoice` reflects which active sessions implement
+      // `sendVoice`). Side effect is benign: the streaming adapter just
+      // tracks an open run id; no Telegram message is posted until first
+      // `push`.
+      const delivery = await deliveryRouter.prepare({
+        conversationId,
+        runId,
+        isPrivate: conv.isPrivate,
+        maxInboundId,
+        prevCursor: lastAssistant?.lastInboundMessageId ?? null,
+      });
+
+      // Resolve per-turn voice mode BEFORE prompt assembly so the
+      // voice-style hint can be injected when TTS is in play. Decision
+      // gates: adapter capability, TTS provider configured, conversation
+      // override (NULL = follow profile default), profile mode, modality of
+      // the most recent inbound. See design/voice.md.
+      const profileForVoice = await agentStore.getProfile(profileId);
+      const voiceModeForTurn = resolveVoiceMode({
+        adapterSupportsVoice: delivery.canDeliverVoice(),
+        voiceConfigPresent: deps.ttsProvider !== undefined && deps.voiceConfig !== undefined,
+        conversationMode: conv.voiceMode,
+        profileMode: profileForVoice?.voiceMode ?? "auto",
+        lastInboundWasVoice: voiceRefs.length > 0,
+      });
+
       const systemPrompt = await step.run("assemble-prompt", async () => {
-        return promptSource.assemble(agentStore, { profileId, channelTypes });
+        return promptSource.assemble(agentStore, {
+          profileId,
+          channelTypes,
+          voiceMode: voiceModeForTurn,
+        });
       });
 
       // ──── NON-DURABLE: resolve images + auto-recall + stream ────
 
-      // Resolve ImageRefs / DocumentRefs from S3 into actual ImageBlocks /
-      // DocumentBlocks (read bytes, base64-encode).
+      // Resolve image/document refs (S3 → base64). Voice refs already mapped
+      // to text via the transcribe-voice step above; we re-walk transcripts
+      // here in inboundBlocks order to substitute them into resolvedBlocks
+      // for the LLM call.
+      let voiceIdx2 = 0;
       const resolvedBlocks: ContentBlock[] = await Promise.all(
         inboundBlocks.map(async (block): Promise<ContentBlock> => {
           if (block.type === "image_ref") {
@@ -260,6 +365,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               mediaType: block.mediaType,
               ...(block.name && { name: block.name }),
             };
+          }
+          if (block.type === "voice_ref") {
+            const text = transcripts[voiceIdx2++] ?? "";
+            return { type: "text", text };
           }
           return block;
         }),
@@ -316,13 +425,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         codingService,
         skillsService,
       );
-      const delivery = await deliveryRouter.prepare({
-        conversationId,
-        runId,
-        isPrivate: conv.isPrivate,
-        maxInboundId,
-        prevCursor: lastAssistant?.lastInboundMessageId ?? null,
-      });
 
       // Append recalled context to system prompt
       const fullPrompt = recalledContext
@@ -558,6 +660,53 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             documentsDelivered: fulfilledDocs.length,
             documentsFailed: docSettled.length - fulfilledDocs.length,
           };
+        });
+      }
+
+      // ──── DURABLE: voice delivery (Option B — voice + transcript) ────
+      //
+      // TTS happens AFTER persist + batch delivery so the streamed text
+      // already landed before we touch the voice provider — a TTS failure
+      // never strands the user (text is in front of them, voice is a
+      // bonus). Wrapped in step.run so retries replay from the cached
+      // result rather than re-charging the TTS provider; cached value is
+      // just the audio length so step state stays small. Long replies
+      // (above the per-channel cap) skip TTS entirely — the cap is a
+      // fail-safe; the prompt hint should keep replies short already.
+      if (
+        voiceModeForTurn &&
+        delivery.canDeliverVoice() &&
+        deps.ttsProvider &&
+        deps.voiceConfig &&
+        result.text.length > 0
+      ) {
+        await step.run("voice-delivery", async () => {
+          const cap = await transportStore.getVoiceMaxReplyChars(conversationId);
+          const effectiveCap = cap ?? 700;
+          if (result.text.length > effectiveCap) {
+            logger.info(
+              { conversationId, length: result.text.length, cap: effectiveCap },
+              "voice reply skipped — over cap",
+            );
+            return { skipped: "over_cap", length: result.text.length };
+          }
+          // ttsProvider + voiceConfig narrowed by the outer guard; redo
+          // the check inside the closure since TS doesn't track narrowings
+          // across the `await` boundary into the step.run body.
+          const tts = deps.ttsProvider;
+          const cfg = deps.voiceConfig;
+          if (!tts || !cfg) {
+            // Unreachable — outer guard ensures both are defined.
+            return { skipped: "no_provider" };
+          }
+          const { audio, mediaType } = await tts.tts({
+            text: result.text,
+            voice: cfg.ttsVoice,
+            model: cfg.ttsModel,
+            format: "ogg",
+          });
+          await delivery.deliverVoice({ audio, mediaType });
+          return { delivered: audio.byteLength, mediaType };
         });
       }
 

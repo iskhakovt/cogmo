@@ -148,6 +148,13 @@
       "when": 1778006604546,
       "tag": "0020_conversation_status",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1778102876619,
+      "tag": "0021_narrow_catseye",
+      "breakpoints": true
     }
   ]
 }

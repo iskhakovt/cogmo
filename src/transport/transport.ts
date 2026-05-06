@@ -4,7 +4,7 @@ import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import { ProfileInUseError, UniqueViolationError } from "../agent/store/errors.js";
-import type { AgentStore, ConversationSummary, Profile } from "../agent/store/index.js";
+import type { AgentStore, ConversationSummary, Profile, VoiceMode } from "../agent/store/index.js";
 import type { ToolSet } from "../agent/store/schema.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
@@ -89,6 +89,10 @@ export interface CurrentConversation {
   profileId: string;
   profileName: string;
   model: string;
+  /** Per-conversation voice mode override; null = follow profile default. */
+  voiceMode: VoiceMode | null;
+  /** Profile-level voice mode default — used as the fallback when override is null. */
+  profileVoiceMode: VoiceMode;
 }
 
 export type TransportError =
@@ -192,6 +196,17 @@ export interface Transport {
       platformUserHandle: string,
       conversationId: string,
     ): Promise<Result<{ wasErrored: boolean }, TransportError>>;
+    /**
+     * Set or clear the per-conversation voice mode override. `null` clears
+     * the override (the conversation falls back to the profile default).
+     * Identity + ownership checked like `setAlias` / `setProfile`. Adapters
+     * call this in response to user `/voice` commands. See design/voice.md.
+     */
+    setVoiceMode(
+      platformUserHandle: string,
+      conversationId: string,
+      mode: VoiceMode | null,
+    ): Promise<Result<void, TransportError>>;
   };
 
   /** Profile admin. Org profiles (user_id IS NULL) always reject mutations with `access_denied`. */
@@ -561,6 +576,8 @@ export function createTransport(deps: {
           profileId: conv.profileId,
           profileName: profile.name,
           model: profile.model,
+          voiceMode: conv.voiceMode,
+          profileVoiceMode: profile.voiceMode,
         });
       },
 
@@ -632,6 +649,21 @@ export function createTransport(deps: {
           await agentStore.setConversationStatus(conversationId, "active");
         }
         return ok({ wasErrored });
+      },
+
+      async setVoiceMode(platformUserHandle, conversationId, mode) {
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        const conv = await agentStore.getConversation(conversationId);
+        if (!conv) return err({ code: "conversation_not_found" as const });
+        if (conv.userId !== identity.userId) {
+          return err({
+            code: "access_denied" as const,
+            reason: "conversation not owned by caller",
+          });
+        }
+        await agentStore.setConversationVoiceMode(conversationId, mode);
+        return ok(undefined);
       },
     },
 

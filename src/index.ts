@@ -406,6 +406,41 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const idleTimer = createIdleTimer({ idleTimeoutMs, transportStore });
   const debounceFunctions = createDebounceFunctions(debounceConfig);
 
+  // Voice — bootstrap a single OpenAIVoiceProvider when voice_config is
+  // present (or when the env-fallback escape hatch is set). The handler
+  // is decoupled from delivery via interfaces so swapping to ElevenLabs/
+  // Deepgram later is a constructor change, not a wiring change. See
+  // design/voice.md.
+  const voiceCfgRow = await agentStore.getVoiceConfig();
+  let ttsProvider: import("./voice/types.js").TtsProvider | undefined;
+  let sttProvider: import("./voice/types.js").SttProvider | undefined;
+  let voiceCfgForTurn: { ttsVoice: string; ttsModel: string } | undefined;
+  if (voiceCfgRow) {
+    const ttsKey = await secretsStore.getSecretById(voiceCfgRow.ttsSecretId);
+    const sttKey = await secretsStore.getSecretById(voiceCfgRow.sttSecretId);
+    if (ttsKey && sttKey && voiceCfgRow.ttsProvider === "openai") {
+      const { OpenAIVoiceProvider } = await import("./voice/openai.js");
+      const tts = new OpenAIVoiceProvider({
+        apiKey: ttsKey,
+        ...(voiceCfgRow.ttsBaseUrl && { baseURL: voiceCfgRow.ttsBaseUrl }),
+      });
+      ttsProvider = tts;
+      // Same provider serves STT in slice 1 — we currently only support
+      // OpenAI on both sides. Swap independently when ElevenLabs/Deepgram
+      // arrive.
+      sttProvider =
+        ttsKey === sttKey && voiceCfgRow.sttProvider === "openai"
+          ? tts
+          : voiceCfgRow.sttProvider === "openai"
+            ? new OpenAIVoiceProvider({
+                apiKey: sttKey,
+                ...(voiceCfgRow.sttBaseUrl && { baseURL: voiceCfgRow.sttBaseUrl }),
+              })
+            : undefined;
+      voiceCfgForTurn = { ttsVoice: voiceCfgRow.ttsVoice, ttsModel: voiceCfgRow.ttsModel };
+    }
+  }
+
   const handleMessage = createHandleMessage({
     agentStore,
     transportStore,
@@ -422,6 +457,9 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     skillRunner,
     mcpRegistry,
     ...(profile.summarizationModel && { summarizationModel: profile.summarizationModel }),
+    ...(ttsProvider && { ttsProvider }),
+    ...(sttProvider && { sttProvider }),
+    ...(voiceCfgForTurn && { voiceConfig: voiceCfgForTurn }),
   });
 
   const observer = createObserver({

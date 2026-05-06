@@ -1,0 +1,20 @@
+CREATE TYPE "public"."voice_mode" AS ENUM('auto', 'always', 'never');--> statement-breakpoint
+CREATE TABLE "voice_config" (
+	"id" uuid PRIMARY KEY DEFAULT uuidv7() NOT NULL,
+	"tts_secret_id" uuid NOT NULL,
+	"stt_secret_id" uuid NOT NULL,
+	"tts_provider" text NOT NULL,
+	"tts_model" text NOT NULL,
+	"tts_voice" text NOT NULL,
+	"tts_base_url" text,
+	"stt_provider" text NOT NULL,
+	"stt_model" text NOT NULL,
+	"stt_base_url" text,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+ALTER TABLE "conversations" ADD COLUMN "voice_mode" "voice_mode";--> statement-breakpoint
+ALTER TABLE "profiles" ADD COLUMN "voice_mode" "voice_mode" DEFAULT 'auto' NOT NULL;--> statement-breakpoint
+ALTER TABLE "channels" ADD COLUMN "voice_max_reply_chars" integer DEFAULT 700 NOT NULL;--> statement-breakpoint
+ALTER TABLE "voice_config" ADD CONSTRAINT "voice_config_tts_secret_id_secrets_id_fk" FOREIGN KEY ("tts_secret_id") REFERENCES "public"."secrets"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "voice_config" ADD CONSTRAINT "voice_config_stt_secret_id_secrets_id_fk" FOREIGN KEY ("stt_secret_id") REFERENCES "public"."secrets"("id") ON DELETE no action ON UPDATE no action;

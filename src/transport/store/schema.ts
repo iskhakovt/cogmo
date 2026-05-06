@@ -3,6 +3,7 @@ import {
   boolean,
   check,
   index,
+  integer,
   jsonb,
   pgTable,
   text,
@@ -24,6 +25,13 @@ export const channels = pgTable("channels", {
   // payloads).
   credentials: jsonb("credentials").notNull(),
   identityMode: text("identity_mode").notNull(), // 'fixed' | 'mapped' | 'create'
+  /**
+   * Per-channel cap on TTS reply length. Above the cap, the orchestrator
+   * skips TTS and sends a "(too long for voice)" follow-up note instead;
+   * the streamed text reply is unaffected. Default 700 chars ≈ 60s of
+   * speech at conversational pace. See design/voice.md.
+   */
+  voiceMaxReplyChars: integer("voice_max_reply_chars").notNull().default(700),
   createdAt: ts(),
 });
 
