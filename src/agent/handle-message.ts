@@ -12,7 +12,7 @@ import type { SkillRunner } from "../skills/runner.js";
 import { buildSkillTools, composeTurnTools } from "../skills/skill-tool-builder.js";
 import { createSkillsService } from "../skills/skills-service.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
-import { contentToBlocks, contentToText } from "../transport/content.js";
+import { contentToBlocks, type InboundContent } from "../transport/content.js";
 import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import { resolveVoiceMode } from "../voice/mode.js";
@@ -246,7 +246,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               const stt = deps.sttProvider;
               if (!stt) {
                 throw new Error(
-                  "voice block received but no sttProvider configured — run the setup wizard or set VOICE_STT_API_KEY",
+                  "voice block received but no sttProvider configured — insert a `voice_config` row pointing at a valid `secrets` entry",
                 );
               }
               const out: string[] = [];
@@ -259,28 +259,40 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             })
           : [];
 
-      // Substitute voice refs with their transcribed text in the per-message
-      // text representation that lands in `messages.content`. Walk each
-      // inbound row's content; for blocks that are voice, swap in the
-      // matching transcript; otherwise fall back to the original
-      // `contentToText` shape (string-content rows pass through, mixed
-      // arrays still serialize as JSON for image/document compatibility).
-      let voiceIdx = 0;
-      const userContentText = inboundMessages
-        .map((m) => {
-          if (typeof m.content === "string") return m.content;
-          const hasVoice = m.content.some((b) => b.type === "voice");
-          if (!hasVoice) return contentToText(m.content);
-          // Build a transcribed view of this row — voice blocks become text,
-          // others stay as-is — then serialize with the same rule
-          // (text-only → join, otherwise JSON).
-          const transcribed = m.content.map((b) =>
-            b.type === "voice" ? { type: "text" as const, text: transcripts[voiceIdx++] ?? "" } : b,
+      // Single source of truth for "what does each inbound row look like
+      // after voice transcription?". Both consumers below (userContentText
+      // for persistence; resolvedBlocks for the LLM call) derive from this
+      // — eliminates the parallel-cursor pattern that was fragile under
+      // walk-order changes. Cursor advances across rows in the same order
+      // `transcripts` was produced (inboundMessages.flatMap order, voice
+      // refs only).
+      const substitutedMessages = ((): ReadonlyArray<{ content: InboundContent }> => {
+        let cursor = 0;
+        return inboundMessages.map((m) => {
+          if (typeof m.content === "string") return { content: m.content };
+          const blocks = m.content.map((b) =>
+            b.type === "voice" ? ({ type: "text", text: transcripts[cursor++] ?? "" } as const) : b,
           );
-          const allText = transcribed.every((b) => b.type === "text");
-          return allText
-            ? transcribed.map((b) => (b as { text: string }).text).join("\n")
-            : JSON.stringify(transcribed);
+          return { content: blocks };
+        });
+      })();
+
+      // Per-row text serialization for `messages.content`. After voice→text
+      // substitution above, a text-only row joins on newline (clean
+      // round-trip for next-turn history loads); rows that still carry
+      // image/document blocks JSON-stringify (matches today's behavior for
+      // those attachment types — image-aware history isn't a slice 1
+      // concern). The type-guarded filter narrows without an `as` cast.
+      const userContentText = substitutedMessages
+        .map(({ content }) => {
+          if (typeof content === "string") return content;
+          if (content.every((b) => b.type === "text")) {
+            return content
+              .filter((b): b is { type: "text"; text: string } => b.type === "text")
+              .map((b) => b.text)
+              .join("\n");
+          }
+          return JSON.stringify(content);
         })
         .join("\n");
 
@@ -348,13 +360,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       // ──── NON-DURABLE: resolve images + auto-recall + stream ────
 
-      // Resolve image/document refs (S3 → base64). Voice refs already mapped
-      // to text via the transcribe-voice step above; we re-walk transcripts
-      // here in inboundBlocks order to substitute them into resolvedBlocks
-      // for the LLM call.
-      let voiceIdx2 = 0;
+      // Resolve image/document refs (S3 → base64). Voice substitution
+      // already happened in `substitutedMessages` above, so re-flattening
+      // through `contentToBlocks` produces a block stream with text in
+      // place of voice — no voice_ref branch needed here.
+      const substitutedInboundBlocks = substitutedMessages.flatMap(({ content }) =>
+        contentToBlocks(content),
+      );
       const resolvedBlocks: ContentBlock[] = await Promise.all(
-        inboundBlocks.map(async (block): Promise<ContentBlock> => {
+        substitutedInboundBlocks.map(async (block): Promise<ContentBlock> => {
           if (block.type === "image_ref") {
             const bytes = await attachments.download(block.path);
             return {
@@ -374,18 +388,22 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               ...(block.name && { name: block.name }),
             };
           }
-          if (block.type === "voice_ref") {
-            const text = transcripts[voiceIdx2++] ?? "";
-            return { type: "text", text };
-          }
+          // voice_ref is substituted to text upstream in substitutedMessages
+          // — this branch is unreachable in practice. Keep an explicit
+          // mapping rather than a cast so a future code path that bypasses
+          // the substitution still produces a sane block instead of
+          // crashing the loop's return-type inference.
+          if (block.type === "voice_ref") return { type: "text", text: "" };
           return block;
         }),
       );
 
-      // Profile reload — needed for auto-recall gating and other per-profile settings.
-      // `model` comes from the turn snapshot, not this read, to preserve the invariant
-      // that one turn = one (profileId, model) stamp even if profile.model changes mid-turn.
-      const profile = await agentStore.getProfile(profileId);
+      // Reuse the profile loaded earlier for voice-mode resolution — saves
+      // one DB roundtrip per turn. `model` still comes from the turn
+      // snapshot, not this read, to preserve the invariant that one turn
+      // = one (profileId, model) stamp even if profile.model changes
+      // mid-turn.
+      const profile = profileForVoice;
 
       // Auto-recall: search memory for context relevant to this message.
       // Best-effort — a Hindsight failure (server down, malformed query, 4xx

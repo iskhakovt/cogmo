@@ -10,7 +10,10 @@ CREATE TABLE "voice_config" (
 	"stt_provider" text NOT NULL,
 	"stt_model" text NOT NULL,
 	"stt_base_url" text,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"singleton" boolean DEFAULT true NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "uq_voice_config_singleton" UNIQUE("singleton"),
+	CONSTRAINT "chk_voice_config_singleton" CHECK (singleton = true)
 );
 --> statement-breakpoint
 ALTER TABLE "conversations" ADD COLUMN "voice_mode" "voice_mode";--> statement-breakpoint

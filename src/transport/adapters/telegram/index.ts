@@ -719,45 +719,13 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     }
   });
 
-  // Audio messages — Telegram's "Audio" message type (longer audio files
-  // attached as music/podcast clips, not voice notes). Same pipeline as voice;
-  // mediaType comes from the audio's mime_type with a sensible default.
-  bot.on("message:audio", async (ctx) => {
-    await ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => {});
-
-    const addr = String(ctx.chat.id);
-    const handle = String(ctx.from.id);
-    const platformTs = new Date(ctx.message.date * 1000);
-
-    const session = await resolveOrCreateSession(addr, handle);
-    if (!session) return;
-
-    try {
-      const audio = ctx.message.audio;
-      const mediaType = audio.mime_type ?? "audio/mpeg";
-
-      const buffer = await downloadTelegramFile(ctx, audio.file_id, creds.token);
-      const path = await transport.uploadAttachment(buffer, mediaType);
-      const caption = ctx.message.caption ?? "";
-      const durationMs = audio.duration ? audio.duration * 1000 : undefined;
-
-      const content: InboundContent = [];
-      if (caption) content.push({ type: "text", text: caption });
-      content.push({
-        type: "voice",
-        path,
-        mediaType,
-        ...(durationMs !== undefined && { durationMs }),
-      });
-
-      const emitResult = await transport.emit(session.id, content, platformTs);
-      if (emitResult.isErr()) {
-        logger.error({ error: emitResult.error }, "failed to emit audio message");
-      }
-    } catch (err) {
-      logger.error({ err }, "failed to process audio message");
-    }
-  });
+  // Note: `message:audio` (music/podcast attachments) is intentionally NOT
+  // handled. Routing music files through STT would burn tokens on songs
+  // and would also flip auto voice mode to "voice out" because
+  // `lastInboundWasVoice` would become true. Voice notes
+  // (`message:voice`) are the well-defined PTT shape; explicit
+  // transcription of attached audio files is a future opt-in feature
+  // (with a duration cap and a separate block type). See PR #149 review.
 
   bot.catch((err) => {
     logger.error({ err: err.error, ctx: err.ctx?.update }, "telegram bot error");

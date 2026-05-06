@@ -1,5 +1,5 @@
 {
-  "id": "e256fdf7-3b54-4895-bcbe-c3ccbb3b8023",
+  "id": "ab200dba-84b9-4382-a40e-661a7280921c",
   "prevId": "aa9519a6-b0df-4019-b151-a44b0516b2f7",
   "version": "7",
   "dialect": "postgresql",
@@ -1134,6 +1134,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "singleton": {
+          "name": "singleton",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -1164,9 +1171,20 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "uq_voice_config_singleton": {
+          "name": "uq_voice_config_singleton",
+          "nullsNotDistinct": false,
+          "columns": ["singleton"]
+        }
+      },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_voice_config_singleton": {
+          "name": "chk_voice_config_singleton",
+          "value": "singleton = true"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.mcp_server_tools": {

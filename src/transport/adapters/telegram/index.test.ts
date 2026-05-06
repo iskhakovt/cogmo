@@ -95,32 +95,6 @@ function makeVoiceCtx(
   };
 }
 
-function makeAudioCtx(
-  fromId: number,
-  audio: { file_id?: string; duration?: number; mime_type?: string; file_name?: string } = {},
-  caption?: string,
-  chatId = 42,
-) {
-  return {
-    from: { id: fromId },
-    chat: { id: chatId },
-    message: {
-      date: 1700000000,
-      caption,
-      audio: {
-        file_id: audio.file_id ?? "audio_id",
-        duration: audio.duration ?? 30,
-        ...(audio.mime_type !== undefined && { mime_type: audio.mime_type }),
-        ...(audio.file_name !== undefined && { file_name: audio.file_name }),
-      },
-    },
-    api: {
-      sendChatAction: vi.fn().mockResolvedValue(true),
-      getFile: vi.fn().mockResolvedValue({ file_path: "audio/file_1.mp3" }),
-    },
-  };
-}
-
 function makeDocumentCtx(
   fromId: number,
   doc: {
@@ -466,32 +440,12 @@ describe("telegram adapter", () => {
       expect(transport.emit).not.toHaveBeenCalled();
     });
 
-    it("audio messages route to a voice block with the audio's mime_type", async () => {
-      const { transport } = await createAdapter();
-      const ctx = makeAudioCtx(111, { mime_type: "audio/mpeg", duration: 60 });
-      await handlers.get("on:message:audio")!(ctx);
-
-      expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "audio/mpeg");
-      expect(transport.emit).toHaveBeenCalledWith(
-        "session-1",
-        [
-          {
-            type: "voice",
-            path: "inbound/test.jpg",
-            mediaType: "audio/mpeg",
-            durationMs: 60000,
-          },
-        ],
-        expect.any(Date),
-      );
-    });
-
-    it("audio falls back to audio/mpeg when mime_type missing", async () => {
-      const { transport } = await createAdapter();
-      const ctx = makeAudioCtx(111);
-      await handlers.get("on:message:audio")!(ctx);
-
-      expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "audio/mpeg");
+    it("does NOT register a message:audio handler (music files would burn STT tokens)", async () => {
+      // Slice 1 deliberately omits the audio handler — see the comment in
+      // src/transport/adapters/telegram/index.ts above bot.on("message:voice").
+      // Voice notes only.
+      await createAdapter();
+      expect(handlers.has("on:message:audio")).toBe(false);
     });
   });
 
