@@ -1,6 +1,6 @@
 import type { StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
-import type { OutboundImage, RenderedMessage } from "./adapter-module.js";
+import type { OutboundDocument, OutboundImage, RenderedMessage } from "./adapter-module.js";
 import type { TransportStore } from "./store/index.js";
 import {
   type Adapter,
@@ -45,7 +45,11 @@ export interface DeliveryHandle {
    * No-op for sessions handled by streaming adapters — those receive content
    * via `push` events during the loop.
    */
-  deliverBatch(content: string, images?: readonly OutboundImage[]): Promise<void>;
+  deliverBatch(
+    content: string,
+    images?: readonly OutboundImage[],
+    documents?: readonly OutboundDocument[],
+  ): Promise<void>;
 }
 
 /**
@@ -152,15 +156,26 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
         hasBatchTargets(): boolean {
           return batchTargets.length > 0;
         },
-        async deliverBatch(content, images): Promise<void> {
+        async deliverBatch(content, images, documents): Promise<void> {
           for (const { platformAddress, adapter, renderOutput } of batchTargets) {
-            // When images are present, always produce a RenderedMessage so
-            // adapters can find them on `.images` — even if the channel has no
-            // renderOutput and would otherwise receive raw markdown.
+            // When attachments are present, always produce a RenderedMessage
+            // so adapters can find them on `.images` / `.documents` — even if
+            // the channel has no renderOutput and would otherwise receive raw
+            // markdown.
+            const hasAttachments =
+              (images && images.length > 0) || (documents && documents.length > 0);
             const rendered: RenderedMessage | string = renderOutput
-              ? { ...renderOutput(content), ...(images && { images }) }
-              : images
-                ? { text: content, images }
+              ? {
+                  ...renderOutput(content),
+                  ...(images && { images }),
+                  ...(documents && { documents }),
+                }
+              : hasAttachments
+                ? {
+                    text: content,
+                    ...(images && { images }),
+                    ...(documents && { documents }),
+                  }
                 : content;
             await adapter.deliver(platformAddress, rendered);
           }

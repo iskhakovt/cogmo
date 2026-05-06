@@ -488,7 +488,7 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    expect(handle.deliverBatch).toHaveBeenCalledWith("Hello from assistant", undefined);
+    expect(handle.deliverBatch).toHaveBeenCalledWith("Hello from assistant", undefined, undefined);
   });
 
   it("skips deliverBatch when there are no batch targets (streaming-only setup)", async () => {
@@ -507,6 +507,225 @@ describe("createHandleMessage", () => {
 
     // No batch targets → no S3 downloads, no deliverBatch call.
     expect(handle.deliverBatch).not.toHaveBeenCalled();
+  });
+
+  it("resolves inbound document_ref into a base64 DocumentBlock for the agent loop", async () => {
+    const docBytes = Buffer.from("PDF body bytes");
+    const deps = mockDeps({
+      // History must contain at least one user message — handle-message
+      // overrides the trailing user message with resolved blocks.
+      agentStore: mockAgentStore({
+        getHistory: vi
+          .fn()
+          .mockResolvedValue([{ role: "user", content: "summarize this document" }]),
+      }),
+      transportStore: mockTransportStore({
+        getUnbatchedInbound: vi.fn().mockResolvedValue([
+          {
+            id: "inbound-1",
+            content: [
+              { type: "text", text: "summarize" },
+              {
+                type: "document",
+                path: "inbound/abc.pdf",
+                mediaType: "application/pdf",
+                name: "report.pdf",
+              },
+            ],
+          },
+        ]),
+      }),
+      attachments: {
+        upload: vi.fn().mockResolvedValue("inbound/x"),
+        download: vi.fn().mockResolvedValue(docBytes),
+      },
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.attachments.download).toHaveBeenCalledWith("inbound/abc.pdf");
+
+    // The last user message handed to the agent loop must contain the resolved
+    // DocumentBlock with base64-encoded bytes and the original filename.
+    const callArgs = (deps.runStreamingAgentLoop as any).mock.calls[0][0];
+    const lastMsg = callArgs.messages.at(-1);
+    expect(lastMsg.role).toBe("user");
+    expect(lastMsg.content).toContainEqual({
+      type: "document",
+      source: "base64",
+      data: docBytes.toString("base64"),
+      mediaType: "application/pdf",
+      name: "report.pdf",
+    });
+  });
+
+  it("omits name on resolved DocumentBlock when inbound block had no name", async () => {
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getHistory: vi.fn().mockResolvedValue([{ role: "user", content: "see attached" }]),
+      }),
+      transportStore: mockTransportStore({
+        getUnbatchedInbound: vi.fn().mockResolvedValue([
+          {
+            id: "inbound-1",
+            content: [
+              {
+                type: "document",
+                path: "inbound/abc.pdf",
+                mediaType: "application/pdf",
+              },
+            ],
+          },
+        ]),
+      }),
+      attachments: {
+        upload: vi.fn().mockResolvedValue("inbound/x"),
+        download: vi.fn().mockResolvedValue(Buffer.from("x")),
+      },
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    const callArgs = (deps.runStreamingAgentLoop as any).mock.calls[0][0];
+    const lastMsg = callArgs.messages.at(-1);
+    const docBlock = (lastMsg.content as any[]).find((b) => b.type === "document");
+    expect(docBlock).not.toHaveProperty("name");
+  });
+
+  it("delivers generated documents via batch path when send_document tool ran", async () => {
+    const docBytes = Buffer.from("# Hello");
+    const handle = mockDeliveryHandle({
+      hasBatchTargets: vi.fn().mockReturnValue(true),
+    });
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      attachments: {
+        upload: vi.fn().mockResolvedValue("inbound/x"),
+        download: vi.fn().mockResolvedValue(docBytes),
+      },
+      runStreamingAgentLoop: vi.fn().mockResolvedValue({
+        text: "here you go",
+        messages: [],
+        newMessages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "tu_1",
+                name: "send_document",
+                input: { filename: "report.md", content: "# Hello" },
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                toolUseId: "tu_1",
+                content: JSON.stringify({
+                  path: "generated/abc.md",
+                  mediaType: "text/markdown",
+                  name: "report.md",
+                }),
+              },
+            ],
+          },
+          { role: "assistant", content: [{ type: "text", text: "here you go" }] },
+        ],
+        usage: { inputTokens: 10, outputTokens: 5 },
+        model: "mock-model",
+        iterations: 1,
+      }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.attachments.download).toHaveBeenCalledWith("generated/abc.md");
+    expect(handle.deliverBatch).toHaveBeenCalledWith("here you go", undefined, [
+      { data: docBytes, mediaType: "text/markdown", name: "report.md" },
+    ]);
+  });
+
+  it("survives a partial document download failure (one ok, one rejected)", async () => {
+    const okBytes = Buffer.from("ok");
+    const handle = mockDeliveryHandle({
+      hasBatchTargets: vi.fn().mockReturnValue(true),
+    });
+    const download = vi
+      .fn()
+      // first download succeeds
+      .mockResolvedValueOnce(okBytes)
+      // second rejects
+      .mockRejectedValueOnce(new Error("S3 boom"));
+
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      attachments: { upload: vi.fn().mockResolvedValue("inbound/x"), download },
+      runStreamingAgentLoop: vi.fn().mockResolvedValue({
+        text: "here",
+        messages: [],
+        newMessages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "tu_a", name: "send_document", input: {} },
+              { type: "tool_use", id: "tu_b", name: "send_document", input: {} },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                toolUseId: "tu_a",
+                content: JSON.stringify({
+                  path: "generated/a.md",
+                  mediaType: "text/markdown",
+                  name: "a.md",
+                }),
+              },
+              {
+                type: "tool_result",
+                toolUseId: "tu_b",
+                content: JSON.stringify({
+                  path: "generated/b.md",
+                  mediaType: "text/markdown",
+                  name: "b.md",
+                }),
+              },
+            ],
+          },
+        ],
+        usage: { inputTokens: 1, outputTokens: 1 },
+        model: "mock-model",
+        iterations: 1,
+      }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    // Only the fulfilled document is delivered; the failed one is logged-and-skipped.
+    expect(handle.deliverBatch).toHaveBeenCalledWith("here", undefined, [
+      { data: okBytes, mediaType: "text/markdown", name: "a.md" },
+    ]);
   });
 
   // Status guard — `recover-conversation` flips a conversation to `errored`

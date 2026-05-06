@@ -68,6 +68,35 @@ function makePhotoCtx(fromId: number, caption?: string, chatId = 42) {
   };
 }
 
+function makeDocumentCtx(
+  fromId: number,
+  doc: {
+    file_id?: string;
+    file_name?: string;
+    mime_type?: string;
+  } = {},
+  caption?: string,
+  chatId = 42,
+) {
+  return {
+    from: { id: fromId },
+    chat: { id: chatId },
+    message: {
+      date: 1700000000,
+      caption,
+      document: {
+        file_id: doc.file_id ?? "doc_id",
+        ...(doc.file_name !== undefined && { file_name: doc.file_name }),
+        ...(doc.mime_type !== undefined && { mime_type: doc.mime_type }),
+      },
+    },
+    api: {
+      sendChatAction: vi.fn().mockResolvedValue(true),
+      getFile: vi.fn().mockResolvedValue({ file_path: "documents/file_1" }),
+    },
+  };
+}
+
 describe("telegram adapter", () => {
   beforeEach(() => {
     handlers.clear();
@@ -232,6 +261,9 @@ describe("telegram adapter", () => {
 
     beforeEach(() => {
       mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: "OK",
         arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
       });
       vi.stubGlobal("fetch", mockFetch);
@@ -269,6 +301,223 @@ describe("telegram adapter", () => {
         ],
         expect.any(Date),
       );
+    });
+
+    it("does not upload or emit when getFile returns no file_path", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makePhotoCtx(111);
+      ctx.api.getFile = vi.fn().mockResolvedValue({ file_path: undefined });
+
+      await handlers.get("on:message:photo")!(ctx);
+
+      expect(transport.uploadAttachment).not.toHaveBeenCalled();
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
+
+    it("does not upload or emit on a non-OK fetch response", async () => {
+      const { transport } = await createAdapter();
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        arrayBuffer: async () => new Uint8Array().buffer,
+      });
+      const ctx = makePhotoCtx(111);
+
+      await handlers.get("on:message:photo")!(ctx);
+
+      expect(transport.uploadAttachment).not.toHaveBeenCalled();
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("documents", () => {
+    const mockFetch = vi.fn();
+
+    beforeEach(() => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+      });
+      vi.stubGlobal("fetch", mockFetch);
+    });
+
+    it("uploads a PDF document and emits a document inbound block", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, {
+        file_id: "pdf_id",
+        file_name: "report.pdf",
+        mime_type: "application/pdf",
+      });
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(ctx.api.getFile).toHaveBeenCalledWith("pdf_id");
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(
+        expect.any(Buffer),
+        "application/pdf",
+      );
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          {
+            type: "document",
+            path: "inbound/test.jpg",
+            mediaType: "application/pdf",
+            name: "report.pdf",
+          },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("includes caption as text block when present", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(
+        111,
+        { file_name: "x.txt", mime_type: "text/plain" },
+        "see attached",
+      );
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "see attached" },
+          {
+            type: "document",
+            path: "inbound/test.jpg",
+            mediaType: "text/plain",
+            name: "x.txt",
+          },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("falls back to application/octet-stream when mime_type is missing", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, { file_name: "blob.bin" });
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(
+        expect.any(Buffer),
+        "application/octet-stream",
+      );
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          {
+            type: "document",
+            path: "inbound/test.jpg",
+            mediaType: "application/octet-stream",
+            name: "blob.bin",
+          },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("omits name field when document has no filename", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, { mime_type: "application/pdf" });
+      await handlers.get("on:message:document")!(ctx);
+
+      const emitArgs = (transport.emit as any).mock.calls[0][1];
+      const docBlock = emitArgs.find((b: { type: string }) => b.type === "document");
+      expect(docBlock).not.toHaveProperty("name");
+    });
+
+    // Telegram's "Send as file" path delivers images (PNG, full-res JPEG,
+    // WEBP, etc.) through message:document instead of message:photo. The
+    // adapter must route image/* MIME types to the image inbound block so
+    // the LLM's vision pipeline picks them up — Anthropic's `document`
+    // block doesn't accept image media types and would 400-fail.
+    it("routes image/png 'send as file' uploads to an image inbound block", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, {
+        file_id: "png_id",
+        file_name: "photo.png",
+        mime_type: "image/png",
+      });
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "image/png");
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "image", path: "inbound/test.jpg", mediaType: "image/png" }],
+        expect.any(Date),
+      );
+    });
+
+    it("routes image/jpeg 'send as file' uploads to an image inbound block", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, {
+        file_id: "jpg_id",
+        file_name: "photo.jpg",
+        mime_type: "image/jpeg",
+      });
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "image", path: "inbound/test.jpg", mediaType: "image/jpeg" }],
+        expect.any(Date),
+      );
+    });
+
+    it("preserves caption alongside an image-as-file upload", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(
+        111,
+        { mime_type: "image/webp", file_name: "x.webp" },
+        "what's this?",
+      );
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "what's this?" },
+          { type: "image", path: "inbound/test.jpg", mediaType: "image/webp" },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    // The Telegram Bot API can return file_path: undefined for files >20MB
+    // and for some media types. Without a guard the URL becomes
+    // `.../bot<token>/undefined`, fetch returns a 404 HTML page, and we'd
+    // upload that HTML as the user's "document".
+    it("does not upload or emit when getFile returns no file_path", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, { mime_type: "application/pdf", file_name: "huge.pdf" });
+      ctx.api.getFile = vi.fn().mockResolvedValue({ file_path: undefined });
+
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.uploadAttachment).not.toHaveBeenCalled();
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
+
+    // Telegram's CDN can return 4xx/5xx (rate-limit, expired file_id,
+    // outage). arrayBuffer() succeeds anyway and would otherwise let us
+    // upload the error body as if it were the user's file.
+    it("does not upload or emit on a non-OK fetch response", async () => {
+      const { transport } = await createAdapter();
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        arrayBuffer: async () => new Uint8Array().buffer,
+      });
+      const ctx = makeDocumentCtx(111, { mime_type: "application/pdf", file_name: "x.pdf" });
+
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.uploadAttachment).not.toHaveBeenCalled();
+      expect(transport.emit).not.toHaveBeenCalled();
     });
   });
 

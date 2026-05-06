@@ -501,4 +501,209 @@ describe("OpenAICompatibleProvider", () => {
       expect(JSON.stringify(assistantMsg)).not.toContain("internal reasoning");
     });
   });
+
+  describe("document blocks in messages", () => {
+    function setup() {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "m",
+        usage: { prompt_tokens: 10, completion_tokens: 1 },
+      });
+      return provider;
+    }
+
+    it("inlines a text/* base64 document into a text part", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "summarize this:" },
+              {
+                type: "document",
+                source: "base64",
+                // base64 of "hello world"
+                data: "aGVsbG8gd29ybGQ=",
+                mediaType: "text/plain",
+                name: "notes.txt",
+              },
+            ],
+          },
+        ],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      const userMsg = args.messages[1];
+      expect(userMsg.role).toBe("user");
+      // No images → flattened to a single text string concatenating both parts.
+      expect(typeof userMsg.content).toBe("string");
+      expect(userMsg.content).toBe("summarize this:[document: notes.txt]\nhello world");
+    });
+
+    it("inlines text/* document with mediaType label when name is missing", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: "aGVsbG8=",
+                mediaType: "text/markdown",
+              },
+            ],
+          },
+        ],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      const userMsg = args.messages[1];
+      expect(userMsg.content).toBe("[document: text/markdown]\nhello");
+    });
+
+    it("stubs binary documents (e.g. PDF) with a placeholder text", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: "JVBERi0=",
+                mediaType: "application/pdf",
+                name: "report.pdf",
+              },
+            ],
+          },
+        ],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      const userMsg = args.messages[1];
+      expect(userMsg.content).toBe(
+        "[document: report.pdf — binary content not supported on this provider]",
+      );
+      // The base64 PDF bytes must NOT leak into the text payload.
+      expect(JSON.stringify(userMsg)).not.toContain("JVBERi0");
+    });
+
+    it("truncates oversized text/* documents and appends an elision marker", async () => {
+      const provider = setup();
+      // 250k chars decoded — well past the 100k cap. Pad to the boundary so
+      // the truncation decision is unambiguous (small variations from the
+      // base64 alignment shouldn't matter for the assertion).
+      const longText = "a".repeat(250_000);
+      const base64 = Buffer.from(longText, "utf-8").toString("base64");
+
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: base64,
+                mediaType: "text/plain",
+                name: "huge.txt",
+              },
+            ],
+          },
+        ],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      const userMsg = args.messages[1];
+      expect(typeof userMsg.content).toBe("string");
+      const text = userMsg.content as string;
+
+      // Header preserved, elision marker appended.
+      expect(text.startsWith("[document: huge.txt]\n")).toBe(true);
+      expect(text).toContain("[Content truncated at 100000 characters]");
+
+      // Total inlined length capped: 100k chars + the header + the marker.
+      // Pin the bound generously to avoid coupling to exact lengths.
+      expect(text.length).toBeLessThan(110_000);
+
+      // Crucially: the full 250k payload did NOT make it through.
+      expect(text.length).toBeLessThan(longText.length);
+    });
+
+    it("does NOT truncate or annotate small text/* documents", async () => {
+      const provider = setup();
+      const small = "hello world";
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: Buffer.from(small, "utf-8").toString("base64"),
+                mediaType: "text/plain",
+                name: "small.txt",
+              },
+            ],
+          },
+        ],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      const userMsg = args.messages[1];
+      expect(userMsg.content).toBe("[document: small.txt]\nhello world");
+      // No spurious elision marker on a payload that didn't need truncating.
+      expect(userMsg.content).not.toContain("truncated");
+    });
+
+    it("combines documents with images into multipart parts", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "see attached" },
+              {
+                type: "document",
+                source: "base64",
+                data: "aGk=",
+                mediaType: "text/plain",
+                name: "n.txt",
+              },
+              { type: "image", source: "base64", data: "aW1n", mediaType: "image/png" },
+            ],
+          },
+        ],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      const userMsg = args.messages[1];
+      expect(Array.isArray(userMsg.content)).toBe(true);
+      const parts = userMsg.content as Array<{ type: string; text?: string; image_url?: unknown }>;
+      // 2 text parts (caption + inlined document) + 1 image part
+      expect(parts).toHaveLength(3);
+      expect(parts[0]).toEqual({ type: "text", text: "see attached" });
+      expect(parts[1]).toEqual({ type: "text", text: "[document: n.txt]\nhi" });
+      expect(parts[2]).toMatchObject({ type: "image_url" });
+    });
+  });
 });

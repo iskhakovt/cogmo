@@ -18,7 +18,7 @@ import type { TransportStore } from "../transport/store/index.js";
 import type { CodingService } from "./coding/service.js";
 import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
 import type { DebounceConfig } from "./debounce.js";
-import { extractGeneratedImages } from "./extract-images.js";
+import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
 import { shouldSkipRecall } from "./recall-gate.js";
@@ -238,7 +238,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       // ──── NON-DURABLE: resolve images + auto-recall + stream ────
 
-      // Resolve ImageRefs from S3 into actual ImageBlocks (read bytes, base64-encode)
+      // Resolve ImageRefs / DocumentRefs from S3 into actual ImageBlocks /
+      // DocumentBlocks (read bytes, base64-encode).
       const resolvedBlocks: ContentBlock[] = await Promise.all(
         inboundBlocks.map(async (block): Promise<ContentBlock> => {
           if (block.type === "image_ref") {
@@ -248,6 +249,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               source: "base64",
               data: bytes.toString("base64"),
               mediaType: block.mediaType,
+            };
+          }
+          if (block.type === "document_ref") {
+            const bytes = await attachments.download(block.path);
+            return {
+              type: "document",
+              source: "base64",
+              data: bytes.toString("base64"),
+              mediaType: block.mediaType,
+              ...(block.name && { name: block.name }),
             };
           }
           return block;
@@ -322,8 +333,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // Safe because: getHistory runs after create-user-message (durable step ordering),
       // and concurrency lock on conversationId prevents concurrent writes.
       let historyMessages: Message[] = [...history];
-      const hasImages = resolvedBlocks.some((b) => b.type === "image");
-      if (hasImages && historyMessages.length > 0) {
+      const hasAttachments = resolvedBlocks.some(
+        (b) => b.type === "image" || b.type === "document",
+      );
+      if (hasAttachments && historyMessages.length > 0) {
         const lastIdx = historyMessages.length - 1;
         if (historyMessages[lastIdx]?.role === "user") {
           historyMessages[lastIdx] = { role: "user", content: resolvedBlocks };
@@ -476,25 +489,26 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       if (delivery.hasBatchTargets()) {
         await step.run("batch-delivery", async () => {
           const imageRefs = extractGeneratedImages(result.newMessages);
+          const documentRefs = extractGeneratedDocuments(result.newMessages);
 
-          // Per-image resilience via allSettled — one S3 miss or
+          // Per-attachment resilience via allSettled — one S3 miss or
           // corrupted attachment shouldn't block delivery of the others
           // (matches the stream handle's swallow-and-log pattern).
-          const settled = await Promise.allSettled(
+          const imageSettled = await Promise.allSettled(
             imageRefs.map(async (ref) => ({
               data: await attachments.download(ref.path),
               mediaType: ref.mediaType,
             })),
           );
 
-          const fulfilled = settled
+          const fulfilledImages = imageSettled
             .filter(
               (r): r is PromiseFulfilledResult<{ data: Buffer; mediaType: string }> =>
                 r.status === "fulfilled",
             )
             .map((r) => r.value);
 
-          for (const [i, r] of settled.entries()) {
+          for (const [i, r] of imageSettled.entries()) {
             if (r.status === "rejected") {
               logger.error(
                 { err: r.reason, path: imageRefs[i]?.path },
@@ -503,11 +517,46 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             }
           }
 
-          await delivery.deliverBatch(result.text, fulfilled.length > 0 ? fulfilled : undefined);
+          const docSettled = await Promise.allSettled(
+            documentRefs.map(async (ref) => ({
+              data: await attachments.download(ref.path),
+              mediaType: ref.mediaType,
+              name: ref.name,
+            })),
+          );
+
+          const fulfilledDocs = docSettled
+            .filter(
+              (
+                r,
+              ): r is PromiseFulfilledResult<{
+                data: Buffer;
+                mediaType: string;
+                name: string;
+              }> => r.status === "fulfilled",
+            )
+            .map((r) => r.value);
+
+          for (const [i, r] of docSettled.entries()) {
+            if (r.status === "rejected") {
+              logger.error(
+                { err: r.reason, path: documentRefs[i]?.path },
+                "outbound document download failed, skipping",
+              );
+            }
+          }
+
+          await delivery.deliverBatch(
+            result.text,
+            fulfilledImages.length > 0 ? fulfilledImages : undefined,
+            fulfilledDocs.length > 0 ? fulfilledDocs : undefined,
+          );
 
           return {
-            delivered: fulfilled.length,
-            failed: settled.length - fulfilled.length,
+            imagesDelivered: fulfilledImages.length,
+            imagesFailed: imageSettled.length - fulfilledImages.length,
+            documentsDelivered: fulfilledDocs.length,
+            documentsFailed: docSettled.length - fulfilledDocs.length,
           };
         });
       }

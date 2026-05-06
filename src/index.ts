@@ -17,6 +17,7 @@ import { DELEGATE_CODING_GUIDANCE, delegateCodingTool } from "./agent/coding/too
 import { createCodingVerifyOrchestrator } from "./agent/coding/verify-orchestrator.js";
 import { coreMemoryTools } from "./agent/core-memory-tools.js";
 import { createDebounceFunctions, type DebounceConfig } from "./agent/debounce.js";
+import { createDocumentTools } from "./agent/document-tools.js";
 import { createObserver } from "./agent/evolution/index.js";
 import { fileTools } from "./agent/file-tools.js";
 import { createFileService, FILES_PROMPT_GUIDANCE } from "./agent/files.js";
@@ -183,6 +184,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     ? createFal({ apiKey: falKey, ...(opts.falFetchOverride && { fetch: opts.falFetchOverride }) })
     : undefined;
   const imageTools = createImageTools(falProvider, attachmentStore);
+  const documentTools = createDocumentTools(attachmentStore);
 
   // Coding store + service factory + durable orchestrator. The
   // `delegate_coding` tool is registered unconditionally so the LLM sees
@@ -308,6 +310,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       ...fileTools,
       ...coreMemoryTools,
       ...imageTools,
+      ...documentTools,
       delegateCodingTool,
       registerSkillTool,
     ],
