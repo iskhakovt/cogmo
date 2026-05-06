@@ -1300,14 +1300,19 @@ export class DrizzleAgentStore implements AgentStore {
   ): Promise<void> {
     if (rows.length === 0) return;
     await this.#db.transaction(async (tx) => {
-      await tx.insert(pendingMemories).values(
-        rows.map((r) => ({
-          userId: r.userId,
-          content: r.content,
-          context: r.context ?? null,
-          source: r.source,
-        })),
-      );
+      // Postgres caps a single statement at 65,535 placeholders. Each row
+      // here binds 4 columns; chunking at 5,000 stays well under the cap
+      // (and atomicity is preserved by the surrounding transaction).
+      for (const chunk of R.chunk([...rows], 5000)) {
+        await tx.insert(pendingMemories).values(
+          chunk.map((r) => ({
+            userId: r.userId,
+            content: r.content,
+            context: r.context ?? null,
+            source: r.source,
+          })),
+        );
+      }
     });
   }
 
@@ -1323,7 +1328,10 @@ export class DrizzleAgentStore implements AgentStore {
         })
         .from(pendingMemories)
         .where(eq(pendingMemories.userId, userId))
-        .orderBy(asc(pendingMemories.createdAt));
+        // Secondary sort by id breaks createdAt ties — bulk inserts share a
+        // timestamp, but UUIDv7 ids are time-ordered, so the tiebreak preserves
+        // insertion order for callers that care (drain FIFO, tests).
+        .orderBy(asc(pendingMemories.createdAt), asc(pendingMemories.id));
       return rows;
     });
   }

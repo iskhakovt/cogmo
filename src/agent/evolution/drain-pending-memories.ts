@@ -25,6 +25,13 @@ import {
   PENDING_CLASSIFICATION_PROMPT,
 } from "./memory-extraction-schema.js";
 
+/**
+ * Max in-flight classifier calls per chunk. Bounds parallelism so a
+ * post-migration drain of hundreds of rows doesn't dispatch every
+ * request at once and trip provider rate limits.
+ */
+const CLASSIFIER_CONCURRENCY = 8;
+
 export interface DrainPendingDeps {
   provider: LlmProvider;
   model: string;
@@ -52,7 +59,11 @@ export async function drainPendingMemories(
     return { drained: 0, byNetwork: {} };
   }
 
-  const classified = await Promise.all(pending.map((p) => classifyOne(p, deps)));
+  const classified: Array<ClassifiedPending | null> = [];
+  for (const chunk of R.chunk(pending, CLASSIFIER_CONCURRENCY)) {
+    const results = await Promise.all(chunk.map((p) => classifyOne(p, deps)));
+    classified.push(...results);
+  }
   const successful = R.filter(classified, (c): c is ClassifiedPending => c !== null);
 
   if (successful.length === 0) {

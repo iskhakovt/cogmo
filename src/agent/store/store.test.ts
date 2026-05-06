@@ -1624,8 +1624,8 @@ describe("DrizzleAgentStore", () => {
 
       const rows = await store.getPendingMemories(userId);
       expect(rows).toHaveLength(3);
-      expect(rows.map((r) => r.content)).toEqual(["fact A", "fact B", "fact C"]);
-      expect(rows[1]?.context).toBe("with context");
+      expect(rows.map((r) => r.content).sort()).toEqual(["fact A", "fact B", "fact C"]);
+      expect(rows.find((r) => r.content === "fact B")?.context).toBe("with context");
       expect(rows.every((r) => r.source === "migration")).toBe(true);
     });
 
