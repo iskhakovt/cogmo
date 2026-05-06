@@ -25,7 +25,7 @@ export function postgres(network: StartedNetwork) {
 }
 
 export function redis(network: StartedNetwork) {
-  return new GenericContainer("public.ecr.aws/docker/library/redis:7-alpine")
+  return new GenericContainer("public.ecr.aws/docker/library/redis:8-alpine")
     .withNetwork(network)
     .withNetworkAliases("redis")
     .withExposedPorts(6379)
