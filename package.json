@@ -81,7 +81,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.14",
-    "@copilotkit/aimock": "^1.15.1",
+    "@copilotkit/aimock": "^1.18.0",
     "@electric-sql/pglite": "^0.4.5",
     "@inngest/test": "^1.0.0",
     "@modelcontextprotocol/server-everything": "^2026.1.26",
