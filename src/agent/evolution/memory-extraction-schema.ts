@@ -67,15 +67,14 @@ export type ExtractedMemory = z.infer<typeof ExtractedMemorySchema>;
 export type MemoryExtraction = z.infer<typeof MemoryExtractionSchema>;
 export type ClassifiedMemory = z.infer<typeof ClassifiedMemorySchema>;
 
-// --- Extraction prompt ---
+// --- Shared taxonomy definitions ---
+//
+// The three classification axes are described once and templated into
+// every prompt that needs them. Tweaks to a definition (e.g. what
+// counts as `health` vs `personal`) land in one place — no risk of
+// extraction and pending-classification drifting against each other.
 
-export const MEMORY_EXTRACTION_PROMPT = `You are a memory extraction engine. Your job is to analyze a conversation transcript between a user and an AI assistant, and extract facts worth storing in long-term memory. For each fact, assign three independent classifications: network, compartment, and trust tier.
-
-## Memory Networks (what kind of knowledge)
-
-Classify each fact into exactly one network:
-
-- **world**: External facts about the world, systems, tools, infrastructure, people, places, events. Things that exist independently of the user's preferences.
+const NETWORK_DEFINITIONS = `- **world**: External facts about the world, systems, tools, infrastructure, people, places, events. Things that exist independently of the user's preferences.
   Examples: "homelab IP is 10.0.10.10", "Alice works at Acme Corp", "project deadline is March 15"
 
 - **bank**: Personal facts about the user — preferences, habits, biographical details, relationships, commitments.
@@ -85,13 +84,9 @@ Classify each fact into exactly one network:
   Examples: "user gets frustrated with verbose explanations", "email extraction v3 works better than v2"
 
 - **observation**: Behavioral patterns the agent has noticed — recurring behaviors, timing patterns, contextual preferences.
-  Examples: "usually asks about homelab on weekends", "prefers short responses in the morning"
+  Examples: "usually asks about homelab on weekends", "prefers short responses in the morning"`;
 
-## Compartments (what domain)
-
-Classify each fact into exactly one compartment. Compartments isolate domains so a profile scoped to "work" never sees a personal-life fact.
-
-- **personal**: general life — relationships, habits, hobbies, daily preferences, household, family. Default for facts that don't clearly belong elsewhere.
+const COMPARTMENT_DEFINITIONS = `- **personal**: general life — relationships, habits, hobbies, daily preferences, household, family. Default for facts that don't clearly belong elsewhere.
   Examples: "wife's birthday is March 15", "prefers tea over coffee", "lives in Berlin"
 
 - **work**: employment, projects, colleagues, clients, professional commitments — anything tied to the user's job or paid work.
@@ -104,14 +99,32 @@ Classify each fact into exactly one compartment. Compartments isolate domains so
   Examples: "Wise account number ends 4711", "files taxes in Germany", "has a Vanguard ISA"
 
 - **technical**: code, infrastructure, tools, systems, APIs, configs — the user's technical stack and personal/work projects' implementation details.
-  Examples: "homelab IP is 10.0.10.10", "uses pnpm not npm", "Postgres password rotated last week"
+  Examples: "homelab IP is 10.0.10.10", "uses pnpm not npm", "Postgres password rotated last week"`;
+
+const TRUST_DEFINITIONS = `- **first-party**: only profiles the user directly controls can access this. The default for anything the user told us in conversation. Health, financial, and most personal facts should be first-party.
+- **any**: safe for third-party plugins or untrusted automation to read. Use sparingly — only for facts that are obviously public or non-sensitive (e.g. "homelab uses Tailscale", "prefers Markdown over RST"). When in doubt, choose first-party.`;
+
+// --- Prompts ---
+
+export const MEMORY_EXTRACTION_PROMPT = `You are a memory extraction engine. Your job is to analyze a conversation transcript between a user and an AI assistant, and extract facts worth storing in long-term memory. For each fact, assign three independent classifications: network, compartment, and trust tier.
+
+## Memory Networks (what kind of knowledge)
+
+Classify each fact into exactly one network:
+
+${NETWORK_DEFINITIONS}
+
+## Compartments (what domain)
+
+Classify each fact into exactly one compartment. Compartments isolate domains so a profile scoped to "work" never sees a personal-life fact.
+
+${COMPARTMENT_DEFINITIONS}
 
 ## Trust Tier (who can access)
 
 Classify each fact into exactly one tier:
 
-- **first-party**: only profiles the user directly controls can access this. The default for anything the user told us in conversation. Health, financial, and most personal facts should be first-party.
-- **any**: safe for third-party plugins or untrusted automation to read. Use sparingly — only for facts that are obviously public or non-sensitive (e.g. "homelab uses Tailscale", "prefers Markdown over RST"). When in doubt, choose first-party.
+${TRUST_DEFINITIONS}
 
 ## Rules for Extraction
 
@@ -129,23 +142,15 @@ export const PENDING_CLASSIFICATION_PROMPT = `You are classifying a single fact 
 
 ## Memory Networks (what kind of knowledge)
 
-- **world**: External facts about the world, systems, tools, infrastructure, people, places, events.
-- **bank**: Personal facts about the user — preferences, habits, biographical details, relationships, commitments.
-- **opinion**: The agent's learned assessments about what works well or poorly.
-- **observation**: Behavioral patterns the agent has noticed.
+${NETWORK_DEFINITIONS}
 
 ## Compartments (what domain)
 
-- **personal**: general life — relationships, habits, hobbies, daily preferences, household, family.
-- **work**: employment, projects, colleagues, clients, professional commitments.
-- **health**: medical, fitness, mental health, dietary restrictions, medications, physiological measurements.
-- **financial**: money, accounts, transactions, investments, taxes, billing.
-- **technical**: code, infrastructure, tools, systems, APIs, configs.
+${COMPARTMENT_DEFINITIONS}
 
 ## Trust Tier (who can access)
 
-- **first-party**: only profiles the user directly controls can access. Default for anything sensitive.
-- **any**: safe for third-party plugins or untrusted automation. Use sparingly — only obviously public, non-sensitive facts.
+${TRUST_DEFINITIONS}
 
 When in doubt on trust, choose first-party. When in doubt on compartment, choose personal.
 

@@ -20,7 +20,7 @@ import { logger } from "../../logger.js";
 import type { MemoryProvider } from "../../memory/provider.js";
 import type { AgentStore } from "../store/index.js";
 import { consolidateRules } from "./consolidate-rules.js";
-import { drainPendingMemories } from "./drain-pending-memories.js";
+import { buildRetainItems, classifyPendingMemories } from "./drain-pending-memories.js";
 import { extractCorrections } from "./extract-corrections.js";
 import { extractMemories } from "./extract-memories.js";
 
@@ -94,15 +94,38 @@ export function createObserver(deps: ObserverDeps) {
       });
 
       // Phase 3: drain pending_memories — staged live retains and any
-      // migration backfill — through the same classifier prompt.
-      const drainResult = await step.run("drain-pending-memories", async () => {
-        return drainPendingMemories(conv.userId, {
-          provider,
-          model,
-          memory: deps.memory,
-          store: agentStore,
-        });
+      // migration backfill — through the same classifier prompt. Split
+      // across multiple step.runs so Inngest memoizes each: a delete
+      // failure after a successful retain re-runs only the delete on
+      // retry, not the LLM classifier or the retainBatch write.
+      const pending = await step.run("load-pending-memories", async () => {
+        return agentStore.getPendingMemories(conv.userId);
       });
+
+      let drainResult: { drained: number; byNetwork: Record<string, number> } = {
+        drained: 0,
+        byNetwork: {},
+      };
+
+      if (pending.length > 0) {
+        const classified = await step.run("classify-pending-memories", async () => {
+          return classifyPendingMemories(pending, { provider, model });
+        });
+
+        if (classified.successful.length > 0) {
+          const items = buildRetainItems(classified.successful);
+          await step.run("retain-pending-memories", async () => {
+            await deps.memory.retainBatch(conv.userId, items);
+          });
+          await step.run("delete-pending-memories", async () => {
+            await agentStore.deletePendingMemories(classified.successful.map((c) => c.id));
+          });
+          drainResult = {
+            drained: classified.successful.length,
+            byNetwork: classified.byNetwork,
+          };
+        }
+      }
 
       return {
         status: "processed",

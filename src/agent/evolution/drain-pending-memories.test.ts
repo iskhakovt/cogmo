@@ -59,7 +59,7 @@ describe("drainPendingMemories", () => {
     expect(deps.provider.chat).not.toHaveBeenCalled();
   });
 
-  it("classifies pending rows and retains with full tag set", async () => {
+  it("classifies live retains and stamps source:live_retain in metadata", async () => {
     const rows = [pending({ id: "pm-1", content: "homelab IP is 10.0.10.10" })];
     const deps = mockDeps(rows, [
       { network: "world", compartment: "technical", trust: "first-party" },
@@ -73,7 +73,7 @@ describe("drainPendingMemories", () => {
       {
         content: "homelab IP is 10.0.10.10",
         tags: ["network:world", "compartment:technical", "trust:first-party"],
-        metadata: { source: "conversation" },
+        metadata: { source: "live_retain" },
         observationScopes: "per_tag",
       },
     ]);
@@ -95,13 +95,13 @@ describe("drainPendingMemories", () => {
         content: "wife's birthday March 15",
         context: "while planning",
         tags: ["network:bank", "compartment:personal", "trust:first-party"],
-        metadata: { source: "conversation" },
+        metadata: { source: "live_retain" },
         observationScopes: "per_tag",
       },
     ]);
   });
 
-  it("tags migration-sourced rows with source:migration in metadata", async () => {
+  it("stamps source:migration in metadata for migration-sourced rows", async () => {
     const rows = [pending({ id: "pm-1", source: "migration" })];
     const deps = mockDeps(rows, [
       { network: "world", compartment: "technical", trust: "first-party" },
@@ -112,6 +112,19 @@ describe("drainPendingMemories", () => {
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       expect.objectContaining({ metadata: { source: "migration" } }),
     ]);
+  });
+
+  it("leaves rows in the store when retainBatch fails — no delete attempt", async () => {
+    const rows = [pending({ id: "pm-1" })];
+    const deps = mockDeps(rows, [
+      { network: "world", compartment: "technical", trust: "first-party" },
+    ]);
+    (deps.memory.retainBatch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("Hindsight unreachable"),
+    );
+
+    await expect(drainPendingMemories("user-1", deps)).rejects.toThrow("Hindsight unreachable");
+    expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
   });
 
   it("skips rows whose classification fails — keeps them in the table for retry", async () => {

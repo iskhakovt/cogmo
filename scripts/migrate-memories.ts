@@ -14,12 +14,25 @@
  *   Backup JSON written to .dev/memory-backups/<bankId>-<iso>.json before
  *   any destructive operation. Keep it until you've verified the
  *   re-classified memories look right after the next conversation idle.
+ *
+ * Partial-failure recovery:
+ *   Sequence is stage → clear, in that order. If `clearBankMemories`
+ *   throws after staging succeeds, the bank still has the originals AND
+ *   `pending_memories` carries duplicates of the same content. The next
+ *   Observer drain produces tagged copies on top of the untagged
+ *   originals — duplicate, not lost. Recovery: rerun the script (it'll
+ *   stage another set, but the backup file shows the canonical
+ *   pre-migration state) or fix the bank manually using the JSON backup
+ *   as the source of truth. The reverse ordering (clear before stage)
+ *   would leak data on partial failure — the backup file would be the
+ *   only substrate.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createClient, createConfig, HindsightClient, sdk } from "@vectorize-io/hindsight-client";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
+import { z } from "zod";
 import {
   migrateUntaggedMemories,
   type RawBankMemory,
@@ -78,6 +91,8 @@ async function main() {
   await db.$client.end();
 }
 
+const SchemaProbeRow = z.object({ present: z.boolean() });
+
 async function ensureSchemaReady(db: ReturnType<typeof drizzle>): Promise<void> {
   const result = await db.execute(sql`
     SELECT EXISTS (
@@ -85,8 +100,8 @@ async function ensureSchemaReady(db: ReturnType<typeof drizzle>): Promise<void> 
       WHERE table_schema = 'public' AND table_name = 'pending_memories'
     ) AS present
   `);
-  const present = (result as ReadonlyArray<{ present: boolean }>)[0]?.present === true;
-  if (!present) {
+  const parsed = z.array(SchemaProbeRow).parse(result);
+  if (parsed[0]?.present !== true) {
     console.error(
       "Error: pending_memories table not found. Run `pnpm db:migrate` before this script.",
     );
