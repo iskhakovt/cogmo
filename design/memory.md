@@ -29,7 +29,7 @@ Usage: `bankId = userId` (e.g. `"ti"`), retain with `tags: ["network:world"]`, r
 
 **Interface:** `MemoryProvider` exposes `tags` and `tagsMatch` on `RecallOptions` and `ReflectOptions`. `tag_groups` (compound boolean filters) deferred until compartment/trust ACL is implemented — simple `tags` + `tagsMatch` is sufficient for network filtering.
 
-## Memory Access Control via Tags `[proposed]`
+## Memory Access Control via Tags `[confirmed]`
 
 Memory access control uses the same Hindsight tag mechanism as network classification — no separate ACL system needed.
 
@@ -40,10 +40,10 @@ Memory access control uses the same Hindsight tag mechanism as network classific
 | **Compartment** (lateral) | Domain isolation — different areas of life | `compartment:personal`, `compartment:work`, `compartment:health`, `compartment:financial`, `compartment:technical` |
 | **Trust tier** (vertical) | Plugin trust boundary — who can access | `trust:first-party` (only profiles you control), `trust:any` (safe for third-party plugins) |
 
-Profiles declare which compartments and trust levels they can access. The orchestrator constructs compound tag filters via Hindsight's `tag_groups` at recall time, enforced through the `Service` interface (see `agents.md` → Tool Architecture):
+Profiles declare which compartments and trust tiers they can access via the `profiles.memory_scope` JSONB column (`{ compartments: NonEmpty<string>, trust: NonEmpty<string> } | null`, validated by `ProfileMemoryScopeSchema`). The `Service` constructor folds the scope into a `tag_groups` filter applied to every recall and reflect — retain is intentionally not scoped, since writes go to Hindsight as-is and tagging happens at extraction time. The filter is AND across dimensions, OR within (`any_strict` mode, which excludes untagged memories so legacy un-compartmented rows don't leak):
 
 ```
-// "coder" profile recall filter:
+// "coder" profile recall filter (memoryScope = {compartments: ["work","technical"], trust: ["first-party"]}):
 {
   and: [
     { tags: ["compartment:work", "compartment:technical"], match: "any_strict" },
@@ -52,16 +52,18 @@ Profiles declare which compartments and trust levels they can access. The orches
 }
 ```
 
-A memory about a date tagged `compartment:personal` is invisible to the coder profile. A memory tagged `trust:first-party` is invisible to third-party plugin profiles. Same bank, same entity graph — just filtered at the capability boundary.
+A memory about a date tagged `compartment:personal` is invisible to the coder profile. A memory tagged `trust:first-party` is invisible to third-party plugin profiles. Same bank, same entity graph — just filtered at the capability boundary. `memoryScope = null` means "no restriction" (every memory visible) — the default for profiles that don't declare a scope.
+
+Caller-supplied `tags` / `tagsMatch` and `tagGroups` are folded into the same AND group as additional leaves, so a profile-scoped recall composes cleanly with tool-level filters.
 
 **Tagging strategy:**
-- **Observer assigns** compartment and trust tags during post-conversation extraction (same as network classification)
-- **Default:** untagged memories get `trust:first-party` (safe default — restrict rather than expose)
-- **User override:** user can explicitly tag sensitive info ("this is private")
+- **Observer assigns** compartment and trust tags during post-conversation extraction (same path as network classification — see `extract-memories.ts` and `drain-pending-memories.ts`).
+- **Default:** untagged memories are excluded from scoped recalls (`any_strict` semantics). Profiles with `memoryScope: null` see them.
+- **Migration backfill** through `scripts/migrate-memories.ts` ensures every pre-existing memory is reclassified through the same Observer prompt.
 
 **Relationship to networks:** Networks classify *what kind of knowledge* (world/bank/opinion/observation). Compartments classify *what domain*. Trust classifies *who can access*. All three are just tags — independent, combinable, filtered by the same mechanism. A memory can be `network:world` + `compartment:work` + `trust:any` (a public work fact any plugin can see).
 
-**For MVP:** Document the mechanism, implement the tag filtering in `Service`, but start with no compartment restrictions. Add compartment/trust tagging when profiles with different access needs exist. The infrastructure (tags + capability scoping) is ready from day 1.
+**UX for declaring scope** (Telegram `/profile` command surface) is deferred — for now profiles get a scope via psql or a quick admin script. The plumbing is in place; the picker is next.
 
 ### Live Retains via Staging `[confirmed]`
 

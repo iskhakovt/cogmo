@@ -13,6 +13,10 @@ import { z } from "zod";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { MessageContentSchema } from "../../llm/types.js";
 import { secrets } from "../../secrets/store/schema.js";
+import {
+  MemoryCompartmentSchema,
+  MemoryTrustSchema,
+} from "../evolution/memory-extraction-schema.js";
 
 // --- Enums ---
 
@@ -57,6 +61,22 @@ export type ProviderAttrs = z.infer<typeof ProviderAttrsSchema>;
  */
 export const ToolSetSchema = z.array(z.string());
 export type ToolSet = z.infer<typeof ToolSetSchema>;
+
+/**
+ * `profiles.memory_scope` — declares which compartment + trust tag combinations
+ * a profile is allowed to recall from Hindsight. Null = no restriction (legacy
+ * default; all memories visible). When set, both arrays must be non-empty —
+ * a profile that allows zero compartments or zero trust tiers can recall
+ * nothing, which is almost certainly a configuration mistake. The orchestrator
+ * folds these into a `tag_groups` filter at recall/reflect time so that
+ * only memories matching `compartment ∈ allowed AND trust ∈ allowed` are
+ * returned.
+ */
+export const ProfileMemoryScopeSchema = z.object({
+  compartments: z.array(MemoryCompartmentSchema).min(1),
+  trust: z.array(MemoryTrustSchema).min(1),
+});
+export type ProfileMemoryScope = z.infer<typeof ProfileMemoryScopeSchema>;
 
 // --- Tables ---
 
@@ -108,6 +128,7 @@ export const profiles = pgTable(
     extractionModel: text("extraction_model"), // null = use main model
     autoRecall: autoRecallMode("auto_recall").notNull().default("heuristic"),
     toolSet: jsonbZod("tool_set", ToolSetSchema).notNull(),
+    memoryScope: jsonbZod("memory_scope", ProfileMemoryScopeSchema), // null = no restriction
     createdAt: ts(),
   },
   (t) => [unique("uq_profiles_user_name").on(t.userId, t.name).nullsNotDistinct()],

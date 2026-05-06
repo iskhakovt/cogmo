@@ -1,8 +1,11 @@
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import {
+  type Client,
+  createClient,
+  createConfig,
   HindsightClient,
-  HindsightError,
   type MemoryItemInput,
+  sdk,
 } from "@vectorize-io/hindsight-client";
 import { getEncoding, type Tiktoken } from "js-tiktoken";
 import { logger } from "../logger.js";
@@ -16,6 +19,7 @@ import type {
   ReflectResult,
   RetainBatchItem,
   RetainOptions,
+  TagGroup,
 } from "./provider.js";
 
 const tracer = trace.getTracer("cogmo.memory");
@@ -74,10 +78,15 @@ export interface HindsightMemoryProviderOptions {
 export class HindsightMemoryProvider implements MemoryProvider {
   readonly name = "hindsight";
   #client: HindsightClient;
+  // sdk client mirrors the HindsightClient connection. Used directly for
+  // recall + reflect because the class wrapper's option object doesn't
+  // expose `tag_groups` (only the raw RecallRequest body does).
+  #sdkClient: Client;
   #maxQueryTokens: number;
 
   constructor(baseUrl: string, options?: HindsightMemoryProviderOptions) {
     this.#client = new HindsightClient({ baseUrl });
+    this.#sdkClient = createClient(createConfig({ baseUrl }));
     this.#maxQueryTokens = options?.maxQueryTokens ?? DEFAULT_MAX_QUERY_TOKENS;
   }
 
@@ -126,11 +135,6 @@ export class HindsightMemoryProvider implements MemoryProvider {
   }
 
   async recall(bankId: string, query: string, options?: RecallOptions): Promise<RecallResult> {
-    const opts: Parameters<HindsightClient["recall"]>[2] = {};
-    if (options?.maxTokens !== undefined) opts.maxTokens = options.maxTokens;
-    if (options?.tags !== undefined) opts.tags = options.tags;
-    if (options?.tagsMatch !== undefined) opts.tagsMatch = options.tagsMatch;
-
     const { query: bounded, truncated } = truncateQuery(query, this.#maxQueryTokens);
     if (truncated) {
       logger.warn(
@@ -146,19 +150,25 @@ export class HindsightMemoryProvider implements MemoryProvider {
         try {
           const response = await withRetry(
             async () => {
-              try {
-                return await this.#client.recall(bankId, bounded, opts);
-              } catch (err) {
+              const res = await sdk.recallMemories({
+                client: this.#sdkClient,
+                path: { bank_id: bankId },
+                body: buildRecallBody(bounded, options),
+              });
+              if (res.error !== undefined) {
+                const status = res.response?.status;
+                const detail = JSON.stringify(res.error);
                 // Hindsight 4xx is deterministic — bad request, malformed bank,
                 // etc. Retrying just burns latency before failing the same way.
                 // Surface as AbortError so withRetry stops, and let the caller
                 // decide whether to fail-soft (auto-recall) or propagate (LLM
                 // tool, skill).
-                if (err instanceof HindsightError && isClientError(err.statusCode)) {
-                  throw new AbortError(err.message);
+                if (isClientError(status)) {
+                  throw new AbortError(`recall ${status}: ${detail}`);
                 }
-                throw err;
+                throw new Error(`recall ${status ?? "?"}: ${detail}`);
               }
+              return res.data;
             },
             {
               retries: 2,
@@ -167,7 +177,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
             },
           );
 
-          const memories: Memory[] = (response.results ?? []).map((r) => {
+          const memories: Memory[] = (response?.results ?? []).map((r) => {
             const memory: Memory = { content: r.text, type: r.type ?? "unknown" };
             if (r.metadata) memory.metadata = r.metadata;
             return memory;
@@ -191,17 +201,51 @@ export class HindsightMemoryProvider implements MemoryProvider {
   }
 
   async reflect(bankId: string, query: string, options?: ReflectOptions): Promise<ReflectResult> {
-    const opts: Parameters<HindsightClient["reflect"]>[2] = {};
-    if (options?.context !== undefined) opts.context = options.context;
-    if (options?.tags !== undefined) opts.tags = options.tags;
-    if (options?.tagsMatch !== undefined) opts.tagsMatch = options.tagsMatch;
-    if (options?.budget !== undefined) opts.budget = options.budget;
-
-    const response = await withRetry(() => this.#client.reflect(bankId, query, opts), {
-      retries: 2,
-      maxRetryTimeMs: 5000,
-      context: `hindsight.reflect[${bankId}]`,
-    });
-    return { answer: response.text };
+    const response = await withRetry(
+      async () => {
+        const res = await sdk.reflect({
+          client: this.#sdkClient,
+          path: { bank_id: bankId },
+          body: buildReflectBody(query, options),
+        });
+        if (res.error !== undefined) {
+          const status = res.response?.status;
+          const detail = JSON.stringify(res.error);
+          if (isClientError(status)) {
+            throw new AbortError(`reflect ${status}: ${detail}`);
+          }
+          throw new Error(`reflect ${status ?? "?"}: ${detail}`);
+        }
+        return res.data;
+      },
+      {
+        retries: 2,
+        maxRetryTimeMs: 5000,
+        context: `hindsight.reflect[${bankId}]`,
+      },
+    );
+    return { answer: response?.text ?? "" };
   }
+}
+
+type RecallBody = Parameters<typeof sdk.recallMemories>[0]["body"];
+type ReflectBody = Parameters<typeof sdk.reflect>[0]["body"];
+
+function buildRecallBody(query: string, options?: RecallOptions): RecallBody {
+  const body: RecallBody = { query };
+  if (options?.maxTokens !== undefined) body.max_tokens = options.maxTokens;
+  if (options?.tags !== undefined) body.tags = options.tags;
+  if (options?.tagsMatch !== undefined) body.tags_match = options.tagsMatch;
+  if (options?.tagGroups !== undefined) body.tag_groups = options.tagGroups as TagGroup[];
+  return body;
+}
+
+function buildReflectBody(query: string, options?: ReflectOptions): ReflectBody {
+  const body: ReflectBody = { query };
+  if (options?.context !== undefined) body.context = options.context;
+  if (options?.tags !== undefined) body.tags = options.tags;
+  if (options?.tagsMatch !== undefined) body.tags_match = options.tagsMatch;
+  if (options?.tagGroups !== undefined) body.tag_groups = options.tagGroups as TagGroup[];
+  if (options?.budget !== undefined) body.budget = options.budget;
+  return body;
 }

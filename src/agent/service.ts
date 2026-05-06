@@ -5,9 +5,11 @@ import type {
   ReflectOptions,
   ReflectResult,
   RetainOptions,
+  TagGroup,
 } from "../memory/provider.js";
 import type { SkillsService } from "../skills/skills-service.js";
 import type { CodingService } from "./coding/service.js";
+import type { ProfileMemoryScope } from "./store/schema.js";
 
 /**
  * Service interface — the ACL boundary between tools and external systems.
@@ -95,31 +97,45 @@ export interface Service {
  * Create a scoped Service for a conversation turn.
  *
  * Wraps a MemoryProvider, scoping all operations to the given bank
- * and merging profileTags into every call. Tools that use this
- * service cannot access other users' data or bypass tag filters.
+ * and folding the profile's `memoryScope` (if any) into every recall
+ * and reflect as a `tag_groups` ACL filter. Tools that use this
+ * service cannot access other users' data or bypass the scope.
+ *
+ * Retain is intentionally not scoped — writes go to Hindsight as-is,
+ * and tagging happens at extraction time via the Observer drain.
  */
 export function createService(
   memory: MemoryProvider,
   bankId: string,
-  profileTags: readonly string[],
+  memoryScope: ProfileMemoryScope | null,
   files: Service["files"],
   coreMemory: Service["coreMemory"],
   stageRetain: StageRetainFn,
   coding?: CodingService,
   skills?: SkillsService,
 ): Service {
-  function attachProfileTags(opts: { tags?: string[] } | undefined) {
-    return {
-      ...opts,
-      tags: [...profileTags, ...(opts?.tags ?? [])],
-    };
+  function attachScopeFilter<
+    T extends { tags?: string[]; tagsMatch?: TagGroupMatch; tagGroups?: TagGroup[] },
+  >(opts: T | undefined): T {
+    if (memoryScope === null) {
+      return (opts ?? ({} as T)) as T;
+    }
+    const andChildren: TagGroup[] = buildScopeLeaves(memoryScope);
+    if (opts?.tags !== undefined && opts.tags.length > 0) {
+      andChildren.push({ tags: opts.tags, match: opts.tagsMatch ?? "any" });
+    }
+    if (opts?.tagGroups !== undefined) {
+      andChildren.push(...opts.tagGroups);
+    }
+    const { tags: _t, tagsMatch: _m, tagGroups: _g, ...rest } = opts ?? ({} as T);
+    return { ...rest, tagGroups: [{ and: andChildren }] } as unknown as T;
   }
 
   return {
     memory: {
-      recall: (query, opts) => memory.recall(bankId, query, attachProfileTags(opts)),
-      retain: (content, opts) => memory.retain(bankId, content, attachProfileTags(opts)),
-      reflect: (query, opts) => memory.reflect(bankId, query, attachProfileTags(opts)),
+      recall: (query, opts) => memory.recall(bankId, query, attachScopeFilter(opts)),
+      retain: (content, opts) => memory.retain(bankId, content, opts),
+      reflect: (query, opts) => memory.reflect(bankId, query, attachScopeFilter(opts)),
       stageRetain,
     },
     files,
@@ -127,4 +143,25 @@ export function createService(
     ...(coding !== undefined && { coding }),
     ...(skills !== undefined && { skills }),
   };
+}
+
+type TagGroupMatch = "any" | "all" | "any_strict" | "all_strict";
+
+/**
+ * Build the leaves of the scope filter — one leaf per dimension.
+ * `any_strict` excludes untagged memories (so legacy un-compartmented
+ * rows aren't accidentally exposed) and ORs within the dimension.
+ * The caller wraps these in an AND group.
+ */
+function buildScopeLeaves(scope: ProfileMemoryScope): TagGroup[] {
+  return [
+    {
+      tags: scope.compartments.map((c) => `compartment:${c}`),
+      match: "any_strict",
+    },
+    {
+      tags: scope.trust.map((t) => `trust:${t}`),
+      match: "any_strict",
+    },
+  ];
 }
