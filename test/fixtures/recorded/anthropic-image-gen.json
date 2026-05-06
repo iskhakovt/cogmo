@@ -3,7 +3,7 @@
     {
       "match": {
         "userMessage": "draw me a cat in a hat",
-        "sequenceIndex": 0
+        "turnIndex": 0
       },
       "response": {
         "toolCalls": [
@@ -17,8 +17,8 @@
     },
     {
       "match": {
-        "userMessage": "draw me a cat in a hat",
-        "sequenceIndex": 1
+        "turnIndex": 1,
+        "hasToolResult": true
       },
       "response": {
         "content": "Here's your cat in a hat!"

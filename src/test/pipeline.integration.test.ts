@@ -182,14 +182,7 @@ describe("message pipeline", () => {
     expect(userMsg).toBeDefined();
   });
 
-  // TODO(p1): unskip once aimock multi-turn matching lands. The agent loop's
-  // turn 2 sends [user, assistant=tool_use, user=tool_result] and aimock's
-  // userMessage matcher only inspects the last user message — which is a
-  // tool_result with text=null, so every fixture is rejected and strict mode
-  // 503s. With LLMOCK_RECORD=1 the proxy then hits real Anthropic 20× and
-  // hits maxIterations (each cached response replays the same toolu_id,
-  // tripping `Duplicate step ID`). See todo.md for the upstream fix path.
-  it.skip("generates and delivers image end-to-end", async () => {
+  it("generates and delivers image end-to-end", async () => {
     const defaultUserId = inject("defaultUserId");
 
     const [profile] = await db.select({ id: profiles.id }).from(profiles).limit(1);
