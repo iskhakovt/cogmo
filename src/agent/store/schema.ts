@@ -18,6 +18,8 @@ import { secrets } from "../../secrets/store/schema.js";
 
 export const autoRecallMode = pgEnum("auto_recall_mode", ["off", "always", "heuristic", "llm"]);
 
+export const pendingMemorySource = pgEnum("pending_memory_source", ["live_retain", "migration"]);
+
 /**
  * Lifecycle status of a conversation.
  *
@@ -193,6 +195,26 @@ export const coreMemoryBlocks = pgTable(
     createdAt: ts(),
   },
   (t) => [unique("uq_core_memory_user_key").on(t.userId, t.key)],
+);
+
+/**
+ * Memory writes awaiting Observer classification before retention to
+ * Hindsight. User-scoped (not conversation-scoped) so /reset doesn't
+ * destroy pending rows; drain on any subsequent conversation/idle.
+ */
+export const pendingMemories = pgTable(
+  "pending_memories",
+  {
+    id: pk(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    content: text("content").notNull(),
+    context: text("context"),
+    source: pendingMemorySource("source").notNull(),
+    createdAt: ts(),
+  },
+  (t) => [index("idx_pending_memories_user").on(t.userId, t.createdAt)],
 );
 
 export const steeringRules = pgTable("steering_rules", {

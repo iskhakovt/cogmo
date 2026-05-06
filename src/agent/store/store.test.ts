@@ -1497,4 +1497,178 @@ describe("DrizzleAgentStore", () => {
       expect(rules).toEqual([{ rule: "New consolidated rule" }]);
     });
   });
+
+  describe("pending_memories", () => {
+    it("stages a row with content + source and returns its id", async () => {
+      const userId = await seedUser();
+
+      const { id } = await store.stagePendingMemory({
+        userId,
+        content: "homelab IP is 10.0.10.10",
+        source: "live_retain",
+      });
+
+      expect(id).toMatch(/^[0-9a-f-]{36}$/);
+
+      const rows = await store.getPendingMemories(userId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        id,
+        content: "homelab IP is 10.0.10.10",
+        context: null,
+        source: "live_retain",
+      });
+      expect(rows[0]!.createdAt).toBeInstanceOf(Date);
+    });
+
+    it("preserves optional context", async () => {
+      const userId = await seedUser();
+
+      await store.stagePendingMemory({
+        userId,
+        content: "wife's birthday is March 15",
+        context: "while planning a gift",
+        source: "live_retain",
+      });
+
+      const rows = await store.getPendingMemories(userId);
+      expect(rows[0]?.context).toBe("while planning a gift");
+    });
+
+    it("returns rows ordered oldest-first (FIFO)", async () => {
+      const userId = await seedUser();
+
+      const { id: first } = await store.stagePendingMemory({
+        userId,
+        content: "first",
+        source: "live_retain",
+      });
+      // Brief delay so created_at differs measurably under PGlite.
+      await new Promise((r) => setTimeout(r, 5));
+      const { id: second } = await store.stagePendingMemory({
+        userId,
+        content: "second",
+        source: "migration",
+      });
+
+      const rows = await store.getPendingMemories(userId);
+      expect(rows.map((r) => r.id)).toEqual([first, second]);
+    });
+
+    it("respects the limit parameter and returns the oldest rows first", async () => {
+      const userId = await seedUser();
+
+      for (let i = 0; i < 5; i++) {
+        await store.stagePendingMemory({
+          userId,
+          content: `fact ${i}`,
+          source: "live_retain",
+        });
+        await new Promise((r) => setTimeout(r, 2));
+      }
+
+      const limited = await store.getPendingMemories(userId, 2);
+      expect(limited).toHaveLength(2);
+      expect(limited.map((r) => r.content)).toEqual(["fact 0", "fact 1"]);
+
+      const unbounded = await store.getPendingMemories(userId);
+      expect(unbounded).toHaveLength(5);
+    });
+
+    it("scopes rows by userId — never returns another user's pending rows", async () => {
+      const userA = await seedUser();
+      const userB = await seedUser();
+
+      await store.stagePendingMemory({
+        userId: userA,
+        content: "A's fact",
+        source: "live_retain",
+      });
+      await store.stagePendingMemory({
+        userId: userB,
+        content: "B's fact",
+        source: "live_retain",
+      });
+
+      const rowsA = await store.getPendingMemories(userA);
+      const rowsB = await store.getPendingMemories(userB);
+      expect(rowsA).toHaveLength(1);
+      expect(rowsA[0]?.content).toBe("A's fact");
+      expect(rowsB).toHaveLength(1);
+      expect(rowsB[0]?.content).toBe("B's fact");
+    });
+
+    it("deletes specified rows by id", async () => {
+      const userId = await seedUser();
+
+      const a = await store.stagePendingMemory({
+        userId,
+        content: "fact A",
+        source: "live_retain",
+      });
+      const b = await store.stagePendingMemory({
+        userId,
+        content: "fact B",
+        source: "live_retain",
+      });
+
+      await store.deletePendingMemories([a.id]);
+
+      const remaining = await store.getPendingMemories(userId);
+      expect(remaining.map((r) => r.id)).toEqual([b.id]);
+    });
+
+    it("deletePendingMemories with empty list is a no-op", async () => {
+      const userId = await seedUser();
+
+      await store.stagePendingMemory({
+        userId,
+        content: "fact",
+        source: "live_retain",
+      });
+
+      await store.deletePendingMemories([]);
+
+      const rows = await store.getPendingMemories(userId);
+      expect(rows).toHaveLength(1);
+    });
+
+    it("bulk-stages multiple rows in one statement", async () => {
+      const userId = await seedUser();
+
+      await store.bulkStagePendingMemories([
+        { userId, content: "fact A", source: "migration" },
+        { userId, content: "fact B", context: "with context", source: "migration" },
+        { userId, content: "fact C", source: "migration" },
+      ]);
+
+      const rows = await store.getPendingMemories(userId);
+      expect(rows).toHaveLength(3);
+      expect(rows.map((r) => r.content).sort()).toEqual(["fact A", "fact B", "fact C"]);
+      expect(rows.find((r) => r.content === "fact B")?.context).toBe("with context");
+      expect(rows.every((r) => r.source === "migration")).toBe(true);
+    });
+
+    it("bulkStagePendingMemories with empty array is a no-op", async () => {
+      const userId = await seedUser();
+
+      await store.bulkStagePendingMemories([]);
+
+      const rows = await store.getPendingMemories(userId);
+      expect(rows).toEqual([]);
+    });
+
+    it("rejects unknown source values", async () => {
+      const userId = await seedUser();
+
+      await expect(
+        store.stagePendingMemory({
+          userId,
+          content: "fact",
+          // biome-ignore lint/suspicious/noExplicitAny: testing invalid input
+          source: "bogus" as any,
+        }),
+      ).rejects.toThrow();
+    });
+  });
 });

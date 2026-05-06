@@ -63,6 +63,25 @@ A memory about a date tagged `compartment:personal` is invisible to the coder pr
 
 **For MVP:** Document the mechanism, implement the tag filtering in `Service`, but start with no compartment restrictions. Add compartment/trust tagging when profiles with different access needs exist. The infrastructure (tags + capability scoping) is ready from day 1.
 
+### Live Retains via Staging `[confirmed]`
+
+`memory_retain` does not write directly to Hindsight. The tool inserts into a `pending_memories` table; Observer drains pending rows during post-conversation extraction, classifies each (network + compartment + trust) via `chatTyped()`, retains to Hindsight, and deletes the staging row. This guarantees a single classification path — every memory in Hindsight is tagged by the Observer prompt, and live writes cannot bypass policy.
+
+`pending_memories` is user-scoped (FK to `users`, no `conversation_id`): pending rows survive `/reset` and are drained on any subsequent `conversation/idle` for that user. The trade-off is freshness — a live retain isn't searchable in a *different* conversation until the source conversation goes idle. Acceptable because conversations are typically idle within seconds of the last user turn, and within the source conversation the fact is already in the LLM context.
+
+```
+pending_memories (
+  id            UUIDv7 PK,
+  user_id       UUID NOT NULL REFERENCES users(id),
+  content       TEXT NOT NULL,
+  context       TEXT,                   -- nullable: optional caller-supplied context
+  source        pending_memory_source NOT NULL,  -- enum: 'live_retain' | 'migration'
+  created_at    TIMESTAMPTZ NOT NULL,
+)
+```
+
+The `source` enum distinguishes live tool calls from one-off ingestion paths (e.g. backfilling untagged Hindsight memories through the same classifier). Both flow through the same Observer drain step; the discriminator is informational.
+
 ## Four Memory Networks `[confirmed]`
 
 | Network | Tag | Contents | Examples |
@@ -74,14 +93,14 @@ A memory about a date tagged `compartment:personal` is invisible to the coder pr
 
 ### Classification Strategy `[confirmed]`
 
-Networks are classified **at extraction time, not retain time**. No production memory system asks the agent to pick a category during conversation — classification is a post-processing concern.
+Tags are assigned **at extraction time, not retain time**. No production memory system asks the agent to pick a category during conversation — classification is a post-processing concern. Observer is the sole writer to Hindsight; both extraction paths flow through the same classifier prompt.
 
-| Path | Who classifies | Tag |
+| Path | Source | When classified |
 |-|-|-|
-| **Observer extraction** (post-conversation) | Extraction prompt classifies each fact via `chatTyped()` structured output | `network:<type>` assigned per fact |
-| **`memory_retain` tool** (hot path) | No classification — agent stores what it's told | `network:world` default (explicit facts from user are world knowledge) |
+| **Transcript extraction** | Observer reads the conversation history, extracts facts via `chatTyped()` | At `conversation/idle` |
+| **Live retain via staging** | `memory_retain` tool inserts into `pending_memories`; Observer drains pending rows for the user | At `conversation/idle` |
 
-**Why not agent-chosen networks:** Adding a `network` enum parameter to `memory_retain` forces the agent to reason about taxonomy on every retain call — extra tokens, extra failure mode, no benefit since the Observer classifies the same conversation later with full context and the same accuracy. Letta, Mem0, and LangMem all treat classification as extraction-time, not retain-time.
+**Why not agent-chosen tags at retain time:** Adding `network` / `compartment` / `trust` parameters to `memory_retain` forces the agent to reason about taxonomy on every retain call — extra tokens, extra failure mode, no benefit since Observer classifies with full conversation context and a single prompt. Letta, Mem0, and LangMem all treat classification as extraction-time, not retain-time. We extend that principle to compartment and trust as well.
 
 ### Retrieval Strategy `[confirmed]`
 
