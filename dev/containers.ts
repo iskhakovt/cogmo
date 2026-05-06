@@ -152,7 +152,7 @@ export function hindsightSlim(
  * `/data/gitea/` keep this single-container — no second DB instance.
  */
 export function gitea(network: StartedNetwork) {
-  return new GenericContainer("gitea/gitea:1.22")
+  return new GenericContainer("docker.gitea.com/gitea/gitea:1.22")
     .withNetwork(network)
     .withNetworkAliases("gitea")
     .withExposedPorts(3000)
