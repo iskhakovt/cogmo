@@ -1,5 +1,7 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   index,
   integer,
   pgEnum,
@@ -222,23 +224,40 @@ export const coreMemoryBlocks = pgTable(
  * and `stt_provider = 'openai'`; ElevenLabs / Deepgram pluggable later.
  * See design/voice.md.
  */
-export const voiceConfig = pgTable("voice_config", {
-  id: pk(),
-  ttsSecretId: uuid("tts_secret_id")
-    .notNull()
-    .references(() => secrets.id),
-  sttSecretId: uuid("stt_secret_id")
-    .notNull()
-    .references(() => secrets.id),
-  ttsProvider: text("tts_provider").notNull(),
-  ttsModel: text("tts_model").notNull(),
-  ttsVoice: text("tts_voice").notNull(),
-  ttsBaseUrl: text("tts_base_url"), // NULL = SDK default
-  sttProvider: text("stt_provider").notNull(),
-  sttModel: text("stt_model").notNull(),
-  sttBaseUrl: text("stt_base_url"), // NULL = SDK default
-  createdAt: ts(),
-});
+export const voiceConfig = pgTable(
+  "voice_config",
+  {
+    id: pk(),
+    ttsSecretId: uuid("tts_secret_id")
+      .notNull()
+      .references(() => secrets.id),
+    sttSecretId: uuid("stt_secret_id")
+      .notNull()
+      .references(() => secrets.id),
+    ttsProvider: text("tts_provider").notNull(),
+    ttsModel: text("tts_model").notNull(),
+    ttsVoice: text("tts_voice").notNull(),
+    ttsBaseUrl: text("tts_base_url"), // NULL = SDK default
+    sttProvider: text("stt_provider").notNull(),
+    sttModel: text("stt_model").notNull(),
+    sttBaseUrl: text("stt_base_url"), // NULL = SDK default
+    /**
+     * Singleton enforcement — `singleton` is always TRUE (the CHECK
+     * constraint pins the value); UNIQUE on a single-valued column means
+     * at most one row can exist. Inserting a second row violates the
+     * UNIQUE constraint at the DB level rather than relying on
+     * convention. `getVoiceConfig` also `ORDER BY created_at DESC` as
+     * defense-in-depth in case the constraint is somehow bypassed
+     * (manual psql, broken migration).
+     */
+    singleton: boolean("singleton").notNull().default(true),
+    createdAt: ts(),
+  },
+  (t) => [
+    unique("uq_voice_config_singleton").on(t.singleton),
+    check("chk_voice_config_singleton", sql`singleton = true`),
+  ],
+);
 
 export const steeringRules = pgTable("steering_rules", {
   id: pk(),

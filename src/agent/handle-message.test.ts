@@ -1223,6 +1223,56 @@ describe("createHandleMessage", () => {
       });
     });
 
+    it("over-cap notify failure is swallowed — turn still succeeds", async () => {
+      // The streamed text reply already landed, so a notify failure on
+      // the over-cap branch (Telegram rate limit, network blip) must
+      // not fail the whole turn. Without the try/catch, Inngest would
+      // retry an already-successful turn.
+      const ttsProvider = { name: "openai", tts: vi.fn() };
+      const handle = mockDeliveryHandle({
+        canDeliverVoice: vi.fn().mockReturnValue(true),
+        hasBatchTargets: vi.fn().mockReturnValue(false),
+      });
+      const notifyConversation = vi.fn().mockRejectedValue(new Error("rate limited"));
+      const deps = mockDeps({
+        ttsProvider,
+        voiceConfig: voiceConfigStub(),
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "x",
+            basePrompt: "x",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "always",
+            toolSet: [],
+          }),
+        }),
+        deliveryRouter: mockDeliveryRouter({
+          prepare: vi.fn().mockResolvedValue(handle),
+          notifyConversation,
+        }),
+        transportStore: mockTransportStore({
+          getVoiceMaxReplyChars: vi.fn().mockResolvedValue(5),
+        }),
+      });
+
+      // Turn must complete without rethrowing the notify failure.
+      await expect(
+        (createHandleMessage(deps) as any).fn({
+          event: testEvent,
+          step: mockStep(),
+          runId: testRunId,
+        }),
+      ).resolves.toMatchObject({ status: "processed" });
+
+      expect(notifyConversation).toHaveBeenCalled();
+      expect(ttsProvider.tts).not.toHaveBeenCalled();
+    });
+
     it("skips TTS when text exceeds the per-channel cap and posts a note", async () => {
       const ttsProvider = { name: "openai", tts: vi.fn() };
       const handle = mockDeliveryHandle({
@@ -1406,6 +1456,134 @@ describe("createHandleMessage", () => {
         model: "gpt-4o-mini-tts",
         format: "ogg",
       });
+      expect(handle.deliverVoice).toHaveBeenCalledWith({
+        audio: ttsAudio,
+        mediaType: "audio/ogg",
+      });
+    });
+
+    it("auto + batch [voice, text] → no TTS (user typed last)", async () => {
+      // Debounced batch where the user dictated, then typed a follow-up.
+      // Their most recent intent is text — shouldn't get a voice reply
+      // just because the batch started with voice. Pins the
+      // last-inbound-only resolution rule.
+      const ttsProvider = { name: "openai", tts: vi.fn() };
+      const sttProvider = {
+        name: "openai",
+        stt: vi.fn().mockResolvedValue({ text: "first message" }),
+      };
+      const handle = mockDeliveryHandle({
+        canDeliverVoice: vi.fn().mockReturnValue(true),
+        hasBatchTargets: vi.fn().mockReturnValue(false),
+      });
+      const deps = mockDeps({
+        ttsProvider,
+        sttProvider,
+        voiceConfig: voiceConfigStub(),
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "x",
+            basePrompt: "x",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "auto",
+            toolSet: [],
+          }),
+        }),
+        attachments: {
+          upload: vi.fn().mockResolvedValue("inbound/x"),
+          download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+        },
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([
+            {
+              id: "inbound-1",
+              content: [{ type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg" }],
+            },
+            {
+              id: "inbound-2",
+              content: "actually wait, type response please",
+            },
+          ]),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // STT still runs — earlier voice message in the batch needs transcription.
+      expect(sttProvider.stt).toHaveBeenCalled();
+      // But TTS does NOT — last inbound was text.
+      expect(ttsProvider.tts).not.toHaveBeenCalled();
+      expect(handle.deliverVoice).not.toHaveBeenCalled();
+    });
+
+    it("auto + batch [text, voice] → TTS (user dictated last)", async () => {
+      // Mirror of the previous test: user typed first, then sent a voice
+      // follow-up. Last intent is voice → reply voiced.
+      const ttsAudio = Buffer.from([0x4f, 0x67, 0x67, 0x53]);
+      const ttsProvider = {
+        name: "openai",
+        tts: vi.fn().mockResolvedValue({ audio: ttsAudio, mediaType: "audio/ogg" }),
+      };
+      const sttProvider = {
+        name: "openai",
+        stt: vi.fn().mockResolvedValue({ text: "follow-up by voice" }),
+      };
+      const handle = mockDeliveryHandle({
+        canDeliverVoice: vi.fn().mockReturnValue(true),
+        hasBatchTargets: vi.fn().mockReturnValue(false),
+      });
+      const deps = mockDeps({
+        ttsProvider,
+        sttProvider,
+        voiceConfig: voiceConfigStub(),
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "x",
+            basePrompt: "x",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "auto",
+            toolSet: [],
+          }),
+        }),
+        attachments: {
+          upload: vi.fn().mockResolvedValue("inbound/x"),
+          download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+        },
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([
+            { id: "inbound-1", content: "let me think out loud" },
+            {
+              id: "inbound-2",
+              content: [{ type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg" }],
+            },
+          ]),
+          getVoiceMaxReplyChars: vi.fn().mockResolvedValue(700),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(ttsProvider.tts).toHaveBeenCalled();
       expect(handle.deliverVoice).toHaveBeenCalledWith({
         audio: ttsAudio,
         mediaType: "audio/ogg",

@@ -327,7 +327,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         voiceConfigPresent: deps.ttsProvider !== undefined && deps.voiceConfig !== undefined,
         conversationMode: conv.voiceMode,
         profileMode: profileForVoice?.voiceMode ?? "auto",
-        lastInboundWasVoice: voiceRefs.length > 0,
+        // Inspect ONLY the most recent inbound message in the debounced
+        // batch — the user's latest intent. If the batch is [voice, text]
+        // (user dictated, then typed a follow-up), they're at the keyboard
+        // now and shouldn't get a voice reply just because the batch
+        // started with voice. Symmetrically, [text, voice] correctly
+        // mirrors voice.
+        lastInboundWasVoice: contentToBlocks(inboundMessages.at(-1)?.content ?? "").some(
+          (b) => b.type === "voice_ref",
+        ),
       });
 
       const systemPrompt = await step.run("assemble-prompt", async () => {
@@ -693,11 +701,21 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // produce a clip. Notify reaches every active session — in
             // mixed-channel setups a non-voice session also sees the
             // note, which is harmless and matches Option B (text always
-            // wins).
-            await deliveryRouter.notifyConversation(
-              conversationId,
-              "(text reply too long for voice — see above)",
-            );
+            // wins). Wrapped in try/catch so a transient notify failure
+            // (Telegram rate limit, network blip) can't fail the whole
+            // turn — the text reply has already succeeded; the note is a
+            // best-effort UX nicety.
+            try {
+              await deliveryRouter.notifyConversation(
+                conversationId,
+                "(text reply too long for voice — see above)",
+              );
+            } catch (notifyErr) {
+              logger.warn(
+                { err: notifyErr, conversationId },
+                "voice over-cap notification failed; turn already succeeded",
+              );
+            }
             return { skipped: "over_cap", length: result.text.length };
           }
           // ttsProvider + voiceConfig narrowed by the outer guard; redo

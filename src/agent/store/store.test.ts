@@ -951,6 +951,24 @@ describe("DrizzleAgentStore", () => {
       });
     });
 
+    it("createProfile + updateProfile return rows with voiceMode populated", async () => {
+      // Regression guard: a `.returning()` block missing `voiceMode` would
+      // cast to `Profile` but leak `undefined` at runtime, silently
+      // bypassing resolveVoiceMode's profile-default fallback.
+      const u = await seedUser();
+      const created = await store.createProfile({
+        userId: u,
+        name: "voice-test",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      expect(created.voiceMode).toBe("auto");
+
+      const updated = await store.updateProfile(created.id, { voiceMode: "always" });
+      expect(updated.voiceMode).toBe("always");
+    });
+
     it("updateProfile translates unique-name collision to UniqueViolationError", async () => {
       const u = await seedUser();
       await store.createProfile({
@@ -1555,6 +1573,30 @@ describe("DrizzleAgentStore", () => {
         sttModel: "gpt-4o-mini-transcribe",
         sttBaseUrl: null,
       });
+    });
+
+    it("enforces singleton at the DB level — second insert violates UNIQUE", async () => {
+      // The singleton column + UNIQUE/CHECK make a second row impossible.
+      // Without the constraint, getVoiceConfig().limit(1) would pick
+      // arbitrarily; the constraint blocks the misconfiguration at write time.
+      const { id: secretId } = await secretsStore.putSecret({
+        name: "voice_openai_key",
+        plaintext: "sk-test-voice",
+      });
+      const insertSql = sql`
+        INSERT INTO voice_config (
+          tts_secret_id, stt_secret_id,
+          tts_provider, tts_model, tts_voice,
+          stt_provider, stt_model
+        ) VALUES (
+          ${secretId}, ${secretId},
+          'openai', 'gpt-4o-mini-tts', 'alloy',
+          'openai', 'gpt-4o-mini-transcribe'
+        )
+      `;
+      await db.execute(insertSql);
+      // Second insert with default singleton=TRUE collides on the UNIQUE.
+      await expect(db.execute(insertSql)).rejects.toThrow();
     });
   });
 });

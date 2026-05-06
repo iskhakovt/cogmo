@@ -496,7 +496,14 @@ export class DrizzleAgentStore implements AgentStore {
 
   async getVoiceConfig() {
     return this.#db.transaction(async (tx) => {
-      const rows = await tx.select().from(voiceConfig).limit(1);
+      // ORDER BY created_at DESC defends against the singleton constraint
+      // somehow being bypassed (manual psql, broken migration) — return
+      // the most recent config rather than picking arbitrarily.
+      const rows = await tx
+        .select()
+        .from(voiceConfig)
+        .orderBy(desc(voiceConfig.createdAt))
+        .limit(1);
       return rows[0];
     });
   }
@@ -652,6 +659,7 @@ export class DrizzleAgentStore implements AgentStore {
             summarizationModel: profiles.summarizationModel,
             extractionModel: profiles.extractionModel,
             autoRecall: profiles.autoRecall,
+            voiceMode: profiles.voiceMode,
             toolSet: profiles.toolSet,
           }),
         );
@@ -709,6 +717,7 @@ export class DrizzleAgentStore implements AgentStore {
             summarizationModel: profiles.summarizationModel,
             extractionModel: profiles.extractionModel,
             autoRecall: profiles.autoRecall,
+            voiceMode: profiles.voiceMode,
             toolSet: profiles.toolSet,
           });
         return single(rows) as Profile;

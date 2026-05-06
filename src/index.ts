@@ -425,18 +425,23 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
         ...(voiceCfgRow.ttsBaseUrl && { baseURL: voiceCfgRow.ttsBaseUrl }),
       });
       ttsProvider = tts;
-      // Same provider serves STT in slice 1 — we currently only support
-      // OpenAI on both sides. Swap independently when ElevenLabs/Deepgram
-      // arrive.
-      sttProvider =
-        ttsKey === sttKey && voiceCfgRow.sttProvider === "openai"
-          ? tts
-          : voiceCfgRow.sttProvider === "openai"
-            ? new OpenAIVoiceProvider({
-                apiKey: sttKey,
-                ...(voiceCfgRow.sttBaseUrl && { baseURL: voiceCfgRow.sttBaseUrl }),
-              })
-            : undefined;
+      // Reuse the TTS provider for STT only when both keys AND base URLs
+      // match — `tts` was constructed with `voiceCfgRow.ttsBaseUrl`, so
+      // routing STT to it when sttBaseUrl differs would silently send STT
+      // requests to the wrong endpoint. Swap independently when
+      // ElevenLabs/Deepgram arrive.
+      const canReuse =
+        ttsKey === sttKey &&
+        voiceCfgRow.sttProvider === "openai" &&
+        voiceCfgRow.ttsBaseUrl === voiceCfgRow.sttBaseUrl;
+      sttProvider = canReuse
+        ? tts
+        : voiceCfgRow.sttProvider === "openai"
+          ? new OpenAIVoiceProvider({
+              apiKey: sttKey,
+              ...(voiceCfgRow.sttBaseUrl && { baseURL: voiceCfgRow.sttBaseUrl }),
+            })
+          : undefined;
       voiceCfgForTurn = { ttsVoice: voiceCfgRow.ttsVoice, ttsModel: voiceCfgRow.ttsModel };
     }
   }
