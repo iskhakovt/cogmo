@@ -1,4 +1,4 @@
-FROM mirror.gcr.io/library/node:24-slim AS base
+FROM node:24-slim AS base
 RUN corepack enable
 
 FROM base AS build

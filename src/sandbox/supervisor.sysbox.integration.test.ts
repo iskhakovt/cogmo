@@ -25,7 +25,7 @@ import type { ResourceLimits } from "./types.js";
  */
 
 const SHOULD_RUN = process.env.SANDBOX_RUNTIME === "sysbox";
-const TEST_IMAGE = "mirror.gcr.io/library/alpine:3.20";
+const TEST_IMAGE = "alpine:3.20";
 const RESOURCE_LIMITS: ResourceLimits = {
   cpus: 0.5,
   memory_bytes: 256 * 1024 * 1024,
