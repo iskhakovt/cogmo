@@ -1273,6 +1273,67 @@ describe("createHandleMessage", () => {
       );
     });
 
+    it("mixed inbound (caption + voice) joins both into the persisted user text", async () => {
+      // Realistic Telegram shape: a voice clip with an attached caption.
+      // The transcribe-substitute step rewrites the voice block to a text
+      // block; since both blocks are now text the orchestrator joins them
+      // with "\n" rather than serialising as JSON. Regression guard for
+      // the `allText` branch in userContentText: deleting the check would
+      // silently produce a JSON literal in messages.content for any
+      // text+voice combo.
+      const sttProvider = {
+        name: "openai",
+        stt: vi.fn().mockResolvedValue({ text: "the meeting was rescheduled" }),
+      };
+      const insertMessage = vi.fn().mockResolvedValue({ id: "msg-1" });
+      const deps = mockDeps({
+        sttProvider,
+        agentStore: mockAgentStore({
+          insertMessage,
+          getHistory: vi
+            .fn()
+            .mockResolvedValue([
+              { role: "user", content: "check this out\nthe meeting was rescheduled" },
+            ]),
+        }),
+        attachments: {
+          upload: vi.fn().mockResolvedValue("inbound/x"),
+          download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+        },
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([
+            {
+              id: "inbound-1",
+              content: [
+                { type: "text", text: "check this out" },
+                { type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg" },
+              ],
+            },
+          ]),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // Persisted user message is the joined caption + transcript, NOT a
+      // JSON-stringified block array — even though the inbound row had
+      // two blocks, both became text after STT substitution.
+      expect(insertMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: "user",
+          content: "check this out\nthe meeting was rescheduled",
+        }),
+      );
+      // Defensive: assert the persisted content is NOT JSON. A regression
+      // (e.g. someone removes the `allText` check) would land "[{...}]".
+      const call = insertMessage.mock.calls[0]![0];
+      expect(call.content).not.toMatch(/^\[/);
+    });
+
     it("auto + voice inbound mirrors → TTS fires (the UX-default path)", async () => {
       // The actual user flow: profile is "auto" (default), no conversation
       // override, last inbound was voice → reply should be voiced. Combines
