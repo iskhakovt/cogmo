@@ -7,6 +7,7 @@ import {
 } from "../../../agent/coding/permission-keyboard.js";
 import { PLAN_CALLBACK_REGEX, parsePlanCallback } from "../../../agent/coding/plan-keyboard.js";
 import { CodingProgressSubscriber } from "../../../agent/coding/progress-subscriber.js";
+import { parseGeneratedDocumentPayload } from "../../../agent/document-tools.js";
 import { parseGeneratedImagePayload } from "../../../agent/image-tools.js";
 import {
   codingTaskPermissionRequested,
@@ -86,6 +87,10 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
           new InputFile(img.data, `image.${mediaTypeToExt(img.mediaType)}`),
         );
       }
+      // Send any attached documents as separate file messages after photos.
+      for (const doc of content.documents ?? []) {
+        await this.#bot.api.sendDocument(chatId, new InputFile(doc.data, doc.name));
+      }
     } else {
       const text = typeof content === "string" ? content : JSON.stringify(content);
       await this.#bot.api.sendMessage(chatId, text);
@@ -132,6 +137,7 @@ class TelegramStreamHandle implements StreamHandle {
   #lastEditTime = 0;
   #editInterval = 500; // ms between edits
   #sentImages = new Set<string>();
+  #sentDocuments = new Set<string>();
   #onDone: () => void;
   #pending: Promise<void> = Promise.resolve();
 
@@ -158,6 +164,9 @@ class TelegramStreamHandle implements StreamHandle {
       this.#accumulated += `\n⏳ ${event.message}\n`;
     } else if (event.type === "tool_result" && event.name === "generate_image" && !event.isError) {
       await this.#sendGeneratedImage(event.output);
+      return;
+    } else if (event.type === "tool_result" && event.name === "send_document" && !event.isError) {
+      await this.#sendGeneratedDocument(event.output);
       return;
     }
     // other tool_results: skip — LLM will summarize
@@ -197,6 +206,33 @@ class TelegramStreamHandle implements StreamHandle {
       // Don't crash the stream on a single image failure — user still gets the text.
       // dedupKey is intentionally NOT added so the next Inngest retry can try again.
       logger.error({ err, path, runId: this.#runId }, "telegram: failed to send generated image");
+    }
+  }
+
+  async #sendGeneratedDocument(output: string): Promise<void> {
+    const payload = parseGeneratedDocumentPayload(output);
+    if (!payload) {
+      logger.warn(
+        { runId: this.#runId },
+        "telegram: send_document tool_result didn't match expected payload shape",
+      );
+      return;
+    }
+    const { path, name } = payload;
+
+    const dedupKey = `${this.#runId}:${path}`;
+    if (this.#sentDocuments.has(dedupKey)) return;
+
+    try {
+      const bytes = await this.#attachments.download(path);
+      await this.#bot.api.sendDocument(this.#chatId, new InputFile(bytes, name));
+      this.#sentDocuments.add(dedupKey);
+      this.#accumulated = this.#accumulated.replace(/\n?🔍 send_document\.\.\.\n?/g, "");
+    } catch (err) {
+      logger.error(
+        { err, path, runId: this.#runId },
+        "telegram: failed to send generated document",
+      );
     }
   }
 
@@ -256,6 +292,46 @@ class TelegramStreamHandle implements StreamHandle {
     });
     await this.#pending;
   }
+}
+
+/**
+ * Download a Telegram-hosted file (photo / document / voice / etc.) by file_id.
+ *
+ * Two failure modes the inline `getFile + fetch + arrayBuffer` chain
+ * silently absorbed:
+ *
+ *   1. `getFile()` returns `file_path: undefined` for files >20MB and for
+ *      certain media types. The URL would become `.../bot<token>/undefined`
+ *      and Telegram's CDN responds with a 404 HTML page; without an
+ *      explicit guard we'd upload that HTML as the user's "document".
+ *   2. The CDN can return 4xx/5xx (rate limit, expired file_id, transient
+ *      outage). `arrayBuffer()` succeeds anyway, returning the error body —
+ *      same garbage-upload outcome.
+ *
+ * Throws on either, so the caller's existing try/catch logs and skips
+ * instead of persisting a bogus attachment.
+ */
+interface FileDownloadCtx {
+  api: { getFile: (fileId: string) => Promise<{ file_path?: string }> };
+}
+
+async function downloadTelegramFile(
+  ctx: FileDownloadCtx,
+  fileId: string,
+  botToken: string,
+): Promise<Buffer> {
+  const file = await ctx.api.getFile(fileId);
+  if (!file.file_path) {
+    throw new Error(`telegram getFile returned no file_path (file_id=${fileId})`);
+  }
+  const url = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(
+      `telegram file download failed: ${response.status} ${response.statusText} (file_id=${fileId})`,
+    );
+  }
+  return Buffer.from(await response.arrayBuffer());
 }
 
 /**
@@ -505,10 +581,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       const photo = ctx.message.photo.at(-1);
       if (!photo) return;
 
-      const file = await ctx.api.getFile(photo.file_id);
-      const url = `https://api.telegram.org/file/bot${creds.token}/${file.file_path}`;
-      const response = await fetch(url);
-      const buffer = Buffer.from(await response.arrayBuffer());
+      const buffer = await downloadTelegramFile(ctx, photo.file_id, creds.token);
 
       const path = await transport.uploadAttachment(buffer, "image/jpeg");
       const caption = ctx.message.caption ?? "";
@@ -523,6 +596,57 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       }
     } catch (err) {
       logger.error({ err }, "failed to process photo");
+    }
+  });
+
+  bot.on("message:document", async (ctx) => {
+    await ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => {});
+
+    const addr = String(ctx.chat.id);
+    const handle = String(ctx.from.id);
+    const platformTs = new Date(ctx.message.date * 1000);
+
+    const session = await resolveOrCreateSession(addr, handle);
+    if (!session) return;
+
+    try {
+      const doc = ctx.message.document;
+      // Telegram's mime_type is best-effort — fall back to octet-stream so
+      // the LLM call doesn't reject a missing media_type at validation.
+      const mediaType = doc.mime_type ?? "application/octet-stream";
+
+      const buffer = await downloadTelegramFile(ctx, doc.file_id, creds.token);
+
+      const path = await transport.uploadAttachment(buffer, mediaType);
+      const caption = ctx.message.caption ?? "";
+      const name = doc.file_name;
+
+      // Telegram's "Send as file" path delivers images (PNG, full-res JPEG,
+      // etc.) as documents. Route image/* MIME types to the image block so
+      // they hit the LLM's vision pipeline instead of the document pipeline
+      // — Anthropic's `document` content block doesn't accept image media
+      // types and would 400-fail.
+      const isImage = mediaType.startsWith("image/");
+
+      const content: InboundContent = [];
+      if (caption) content.push({ type: "text", text: caption });
+      if (isImage) {
+        content.push({ type: "image", path, mediaType });
+      } else {
+        content.push({
+          type: "document",
+          path,
+          mediaType,
+          ...(name && { name }),
+        });
+      }
+
+      const emitResult = await transport.emit(session.id, content, platformTs);
+      if (emitResult.isErr()) {
+        logger.error({ error: emitResult.error }, "failed to emit document message");
+      }
+    } catch (err) {
+      logger.error({ err }, "failed to process document");
     }
   });
 

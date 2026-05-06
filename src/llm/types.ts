@@ -39,6 +39,16 @@ const ImageBlockSchema = z.object({
   mediaType: z.string(),
 });
 
+const DocumentBlockSchema = z.object({
+  type: z.literal("document"),
+  source: z.enum(["base64", "url"]),
+  /** Base64 bytes (source=base64) or URL string (source=url). */
+  data: z.string(),
+  mediaType: z.string(),
+  /** Original filename — surfaced to the model and used by adapters for outbound display. */
+  name: z.string().optional(),
+});
+
 const ThinkingBlockSchema = z.object({
   type: z.literal("thinking"),
   thinking: z.string(),
@@ -51,6 +61,7 @@ export const ContentBlockSchema = z.discriminatedUnion("type", [
   ToolUseBlockSchema,
   ToolResultBlockSchema,
   ImageBlockSchema,
+  DocumentBlockSchema,
   ThinkingBlockSchema,
 ]);
 
@@ -58,6 +69,7 @@ export type TextBlock = z.infer<typeof TextBlockSchema>;
 export type ToolUseBlock = z.infer<typeof ToolUseBlockSchema>;
 export type ToolResultBlock = z.infer<typeof ToolResultBlockSchema>;
 export type ImageBlock = z.infer<typeof ImageBlockSchema>;
+export type DocumentBlock = z.infer<typeof DocumentBlockSchema>;
 export type ThinkingBlock = z.infer<typeof ThinkingBlockSchema>;
 export type ContentBlock = z.infer<typeof ContentBlockSchema>;
 

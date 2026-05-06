@@ -166,6 +166,8 @@ function formatBlock(block: ContentBlock): string {
       return block.isError ? `→ [Error] ${block.content}` : `→ ${block.content}`;
     case "image":
       return "[Image]";
+    case "document":
+      return `[Document: ${block.name ?? block.mediaType}]`;
     case "thinking":
       return ""; // strip thinking blocks
   }

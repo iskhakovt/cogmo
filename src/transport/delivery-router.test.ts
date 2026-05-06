@@ -363,6 +363,73 @@ describe("createDeliveryRouter", () => {
     expect(batch.deliver).toHaveBeenCalledWith("addr-s1", "plain text");
   });
 
+  it("forwards documents alongside renderOutput", async () => {
+    const batch = mockAdapter();
+    const renderOutput = vi.fn().mockReturnValue({ text: "<b>text</b>", parseMode: "HTML" });
+    const adapters = new Map([["ch-1", { adapter: batch, renderOutput }]]);
+    const transportStore = mockTransportStore({
+      getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+    });
+
+    const router = createDeliveryRouter({ adapters, transportStore });
+    const delivery = await router.prepare(ctx());
+
+    const documents = [
+      { data: Buffer.from("body"), mediaType: "text/markdown", name: "report.md" },
+    ];
+    await delivery.deliverBatch("text", undefined, documents);
+
+    expect(batch.deliver).toHaveBeenCalledWith("addr-s1", {
+      text: "<b>text</b>",
+      parseMode: "HTML",
+      documents,
+    });
+  });
+
+  it("wraps content in RenderedMessage when documents present but no renderOutput", async () => {
+    const batch = mockAdapter();
+    const adapters = new Map([["ch-1", { adapter: batch }]]);
+    const transportStore = mockTransportStore({
+      getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+    });
+
+    const router = createDeliveryRouter({ adapters, transportStore });
+    const delivery = await router.prepare(ctx());
+
+    const documents = [
+      { data: Buffer.from("body"), mediaType: "text/markdown", name: "report.md" },
+    ];
+    await delivery.deliverBatch("plain text", undefined, documents);
+
+    expect(batch.deliver).toHaveBeenCalledWith("addr-s1", {
+      text: "plain text",
+      documents,
+    });
+  });
+
+  it("forwards images and documents together when both present", async () => {
+    const batch = mockAdapter();
+    const adapters = new Map([["ch-1", { adapter: batch }]]);
+    const transportStore = mockTransportStore({
+      getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+    });
+
+    const router = createDeliveryRouter({ adapters, transportStore });
+    const delivery = await router.prepare(ctx());
+
+    const images = [{ data: Buffer.from([1, 2]), mediaType: "image/png" }];
+    const documents = [
+      { data: Buffer.from("body"), mediaType: "text/markdown", name: "report.md" },
+    ];
+    await delivery.deliverBatch("plain text", images, documents);
+
+    expect(batch.deliver).toHaveBeenCalledWith("addr-s1", {
+      text: "plain text",
+      images,
+      documents,
+    });
+  });
+
   // notifyConversation — used by handle-message's onFailure handler. Reaches
   // every active session on the conversation regardless of source-routing,
   // since failure notification has no inbound cursor to anchor against.

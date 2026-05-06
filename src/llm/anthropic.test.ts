@@ -759,4 +759,220 @@ describe("AnthropicProvider", () => {
       ).rejects.toThrow("mutually exclusive");
     });
   });
+
+  describe("document blocks", () => {
+    function setup() {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-4-6",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+      return provider;
+    }
+
+    it("translates a base64 PDF document", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "claude-sonnet-4-6",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: "JVBERi0xLjQ=",
+                mediaType: "application/pdf",
+                name: "report.pdf",
+              },
+            ],
+          },
+        ],
+      });
+
+      const block = mockCreate.mock.calls[0]![0].messages[0].content[0];
+      expect(block).toEqual({
+        type: "document",
+        source: { type: "base64", media_type: "application/pdf", data: "JVBERi0xLjQ=" },
+        title: "report.pdf",
+      });
+    });
+
+    it("translates a text/plain document via the text source variant", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "claude-sonnet-4-6",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                // base64 of "hello world"
+                data: "aGVsbG8gd29ybGQ=",
+                mediaType: "text/plain",
+                name: "notes.txt",
+              },
+            ],
+          },
+        ],
+      });
+
+      const block = mockCreate.mock.calls[0]![0].messages[0].content[0];
+      expect(block).toEqual({
+        type: "document",
+        source: { type: "text", media_type: "text/plain", data: "hello world" },
+        title: "notes.txt",
+      });
+    });
+
+    // Text-like family: structured text MIME types are transcoded through
+    // the text-source path (Anthropic only labels the wire `text/plain`,
+    // but the original filename rides on `title` so the model knows
+    // it's markdown/csv/json/etc.).
+    it.each([
+      ["text/markdown", "report.md", "# Hello"],
+      ["text/csv", "data.csv", "a,b\n1,2"],
+      ["text/html", "page.html", "<html></html>"],
+      ["application/json", "data.json", '{"k":"v"}'],
+      ["application/xml", "data.xml", "<r/>"],
+      ["application/yaml", "config.yaml", "k: v"],
+      ["application/x-yaml", "config.yml", "k: v"],
+    ])("transcodes %s as text source with original filename in title", async (mediaType, name, plain) => {
+      const provider = setup();
+      await provider.chat({
+        model: "claude-sonnet-4-6",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: Buffer.from(plain, "utf-8").toString("base64"),
+                mediaType,
+                name,
+              },
+            ],
+          },
+        ],
+      });
+
+      const block = mockCreate.mock.calls[0]![0].messages[0].content[0];
+      expect(block).toEqual({
+        type: "document",
+        source: { type: "text", media_type: "text/plain", data: plain },
+        title: name,
+      });
+    });
+
+    it("throws a clear error pre-flight on unsupported binary mediaType", async () => {
+      const provider = setup();
+      // application/zip is a real Telegram doc upload type Anthropic can't
+      // ingest. Fail fast rather than burning a 400 round-trip.
+      await expect(
+        provider.chat({
+          model: "claude-sonnet-4-6",
+          system: "sys",
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "document",
+                  source: "base64",
+                  data: "UEsDBA==",
+                  mediaType: "application/zip",
+                  name: "archive.zip",
+                },
+              ],
+            },
+          ],
+        }),
+      ).rejects.toThrow(/unsupported mediaType "application\/zip"/);
+      // Must not even attempt the API call.
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it("throws on application/octet-stream (Telegram fallback for unknown types)", async () => {
+      const provider = setup();
+      await expect(
+        provider.chat({
+          model: "claude-sonnet-4-6",
+          system: "sys",
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "document",
+                  source: "base64",
+                  data: "AAA=",
+                  mediaType: "application/octet-stream",
+                },
+              ],
+            },
+          ],
+        }),
+      ).rejects.toThrow(/unsupported mediaType/);
+    });
+
+    it("translates a url-source document", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "claude-sonnet-4-6",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "url",
+                data: "https://example.com/x.pdf",
+                mediaType: "application/pdf",
+              },
+            ],
+          },
+        ],
+      });
+
+      const block = mockCreate.mock.calls[0]![0].messages[0].content[0];
+      expect(block).toEqual({
+        type: "document",
+        source: { type: "url", url: "https://example.com/x.pdf" },
+      });
+      expect(block).not.toHaveProperty("title");
+    });
+
+    it("omits the title field when name is undefined", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "claude-sonnet-4-6",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: "JVBERi0=",
+                mediaType: "application/pdf",
+              },
+            ],
+          },
+        ],
+      });
+
+      const block = mockCreate.mock.calls[0]![0].messages[0].content[0];
+      expect(block).not.toHaveProperty("title");
+    });
+  });
 });

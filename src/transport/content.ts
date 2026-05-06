@@ -29,7 +29,24 @@ const InboundImageBlockSchema = z
     message: "image block requires either path or data",
   });
 
-const InboundBlockSchema = z.union([InboundTextBlockSchema, InboundImageBlockSchema]);
+const InboundDocumentBlockSchema = z
+  .object({
+    type: z.literal("document"),
+    path: z.string().optional(),
+    data: z.string().optional(),
+    mediaType: z.string(),
+    source: z.enum(["base64", "url"]).optional(),
+    name: z.string().optional(),
+  })
+  .refine((v) => v.path != null || v.data != null, {
+    message: "document block requires either path or data",
+  });
+
+const InboundBlockSchema = z.union([
+  InboundTextBlockSchema,
+  InboundImageBlockSchema,
+  InboundDocumentBlockSchema,
+]);
 
 /**
  * Inbound message content as persisted in `inbound_messages.content`.
@@ -50,14 +67,22 @@ export interface ImageRef {
   mediaType: string;
 }
 
-export type InboundBlock = ContentBlock | ImageRef;
+/** Inbound document reference — S3 path, needs resolution before sending to LLM. */
+export interface DocumentRef {
+  type: "document_ref";
+  path: string;
+  mediaType: string;
+  name?: string;
+}
+
+export type InboundBlock = ContentBlock | ImageRef | DocumentRef;
 
 /**
  * Convert inbound message content to blocks.
  *
- * Returns a mix of ContentBlock (ready for LLM) and ImageRef (needs S3
- * resolution). The orchestrator resolves ImageRefs before passing to the
- * agent loop.
+ * Returns a mix of ContentBlock (ready for LLM), ImageRef and DocumentRef
+ * (need S3 resolution). The orchestrator resolves *Refs before passing to
+ * the agent loop.
  */
 export function contentToBlocks(content: InboundContent): InboundBlock[] {
   if (typeof content === "string") {
@@ -68,16 +93,41 @@ export function contentToBlocks(content: InboundContent): InboundBlock[] {
     if (block.type === "text") {
       return [{ type: "text", text: block.text }];
     }
+    if (block.type === "image") {
+      if (block.path != null) {
+        return [{ type: "image_ref", path: block.path, mediaType: block.mediaType }];
+      }
+      if (block.data != null) {
+        return [
+          {
+            type: "image",
+            source: block.source ?? "base64",
+            data: block.data,
+            mediaType: block.mediaType,
+          },
+        ];
+      }
+      return [];
+    }
+    // document
     if (block.path != null) {
-      return [{ type: "image_ref", path: block.path, mediaType: block.mediaType }];
+      return [
+        {
+          type: "document_ref",
+          path: block.path,
+          mediaType: block.mediaType,
+          ...(block.name && { name: block.name }),
+        },
+      ];
     }
     if (block.data != null) {
       return [
         {
-          type: "image",
+          type: "document",
           source: block.source ?? "base64",
           data: block.data,
           mediaType: block.mediaType,
+          ...(block.name && { name: block.name }),
         },
       ];
     }

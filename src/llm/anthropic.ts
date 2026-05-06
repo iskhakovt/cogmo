@@ -324,6 +324,51 @@ function toAnthropicBlock(
               }
             : { type: "url", url: block.data },
       };
+    case "document": {
+      // Anthropic's document block accepts: PDF (base64/url/files), text/plain
+      // (text source / files / url), and url-source for any URL.
+      // We expand the supported text family by transcoding text-like inputs
+      // (text/*, application/json|xml|yaml) into the `text` source variant —
+      // Anthropic's API only labels them `text/plain` but Claude reads them
+      // as code/markdown/CSV/etc. just fine; the original filename rides on
+      // `title` so the model still knows what it was.
+      const mt = block.mediaType;
+      if (block.source === "url") {
+        return {
+          type: "document",
+          source: { type: "url", url: block.data },
+          ...(block.name && { title: block.name }),
+        };
+      }
+      if (isTextLikeDocumentMediaType(mt)) {
+        // base64 → utf-8 is lossy when an upload mislabels its mediaType
+        // (binary tagged as text/* gets U+FFFD replacement chars). Soft-fail
+        // path — model receives mangled text rather than crashing.
+        return {
+          type: "document",
+          source: {
+            type: "text",
+            media_type: "text/plain",
+            data: Buffer.from(block.data, "base64").toString("utf-8"),
+          },
+          ...(block.name && { title: block.name }),
+        };
+      }
+      // Pre-flight narrow: Anthropic's base64 document source only accepts
+      // application/pdf. Throw with a clear message rather than burning a
+      // 400 round-trip on application/zip, application/octet-stream, etc.
+      // Control flow narrows `mt` to the literal "application/pdf" below.
+      if (mt !== "application/pdf") {
+        throw new Error(
+          `Anthropic document block: unsupported mediaType "${mt}". Expected application/pdf or a text-like type (text/*, application/json|xml|yaml).`,
+        );
+      }
+      return {
+        type: "document",
+        source: { type: "base64", media_type: mt, data: block.data },
+        ...(block.name && { title: block.name }),
+      };
+    }
     case "tool_use":
       return { type: "tool_use", id: block.id, name: block.name, input: block.input };
     case "tool_result": {
@@ -371,6 +416,24 @@ function fromAnthropicBlock(block: Anthropic.ContentBlock): ContentBlock[] {
       // Skip block types we don't handle (server_tool_use, etc.)
       return [];
   }
+}
+
+/**
+ * Document mediaTypes we route through Anthropic's `text` source variant.
+ *
+ * Anthropic only labels the wire type `text/plain` (per API contract), but
+ * Claude reads structured text (markdown, csv, json, xml, yaml) just fine —
+ * the original filename is surfaced via `title` so the model still knows
+ * what kind of text it was.
+ */
+function isTextLikeDocumentMediaType(mt: string): boolean {
+  if (mt.startsWith("text/")) return true;
+  return (
+    mt === "application/json" ||
+    mt === "application/xml" ||
+    mt === "application/yaml" ||
+    mt === "application/x-yaml"
+  );
 }
 
 function fromAnthropicStopReason(reason: string | null): StopReason {
