@@ -12,6 +12,7 @@ const mockBotApi = {
   editMessageText: vi.fn().mockResolvedValue({}),
   sendPhoto: vi.fn().mockResolvedValue({ message_id: 101 }),
   getFile: vi.fn().mockResolvedValue({ file_path: "photos/file_1.jpg" }),
+  setMyCommands: vi.fn().mockResolvedValue(true),
 };
 
 vi.mock("grammy", () => {
@@ -108,6 +109,36 @@ describe("telegram adapter", () => {
 
     return { adapter: result.adapter, transport, attachments };
   }
+
+  it("registers the bot command menu on setup", async () => {
+    await createAdapter();
+
+    expect(mockBotApi.setMyCommands).toHaveBeenCalledOnce();
+    const [commands] = mockBotApi.setMyCommands.mock.calls[0];
+    const names = (commands as Array<{ command: string; description: string }>).map(
+      (c) => c.command,
+    );
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "new",
+        "sessions",
+        "resume",
+        "name",
+        "end",
+        "profile",
+        "model",
+        "repo",
+        "mcp",
+        "repair",
+        "cancel",
+        "start",
+      ]),
+    );
+    for (const c of commands as Array<{ command: string; description: string }>) {
+      expect(c.command).toMatch(/^[a-z0-9_]{1,32}$/);
+      expect(c.description.length).toBeGreaterThan(0);
+    }
+  });
 
   it("emits via transport on text message", async () => {
     const { transport } = await createAdapter();
