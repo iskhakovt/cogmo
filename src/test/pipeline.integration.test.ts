@@ -182,12 +182,13 @@ describe("message pipeline", () => {
     expect(userMsg).toBeDefined();
   });
 
-  // TODO(p1): re-record llmock fixtures — the agent loop now emits a third
-  // Anthropic call that isn't covered by `anthropic-image-gen.json`, likely
-  // a side effect of the SDK bump in #134 (0.91.1 → 0.94.0) or the MCP
-  // orchestrator wiring (#128). Fix is `pnpm test:record` against real
-  // Anthropic + OpenAI APIs (needs credentials this branch can't carry).
-  // Tracked in todo.md.
+  // TODO(p1): unskip once aimock multi-turn matching lands. The agent loop's
+  // turn 2 sends [user, assistant=tool_use, user=tool_result] and aimock's
+  // userMessage matcher only inspects the last user message — which is a
+  // tool_result with text=null, so every fixture is rejected and strict mode
+  // 503s. With LLMOCK_RECORD=1 the proxy then hits real Anthropic 20× and
+  // hits maxIterations (each cached response replays the same toolu_id,
+  // tripping `Duplicate step ID`). See todo.md for the upstream fix path.
   it.skip("generates and delivers image end-to-end", async () => {
     const defaultUserId = inject("defaultUserId");
 
@@ -255,8 +256,7 @@ describe("message pipeline", () => {
     expect(bytes.length).toBeGreaterThan(0);
   });
 
-  // TODO(p1): re-record llmock fixtures — see skip above.
-  it.skip("emits gen_ai chat spans + token metrics through the live pipeline", async () => {
+  it("emits gen_ai chat spans + token metrics through the live pipeline", async () => {
     const defaultUserId = inject("defaultUserId");
 
     const [profile] = await db.select({ id: profiles.id }).from(profiles).limit(1);
