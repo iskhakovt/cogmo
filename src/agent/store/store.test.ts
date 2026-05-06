@@ -1555,6 +1555,26 @@ describe("DrizzleAgentStore", () => {
       expect(rows.map((r) => r.id)).toEqual([first, second]);
     });
 
+    it("respects the limit parameter and returns the oldest rows first", async () => {
+      const userId = await seedUser();
+
+      for (let i = 0; i < 5; i++) {
+        await store.stagePendingMemory({
+          userId,
+          content: `fact ${i}`,
+          source: "live_retain",
+        });
+        await new Promise((r) => setTimeout(r, 2));
+      }
+
+      const limited = await store.getPendingMemories(userId, 2);
+      expect(limited).toHaveLength(2);
+      expect(limited.map((r) => r.content)).toEqual(["fact 0", "fact 1"]);
+
+      const unbounded = await store.getPendingMemories(userId);
+      expect(unbounded).toHaveLength(5);
+    });
+
     it("scopes rows by userId — never returns another user's pending rows", async () => {
       const userA = await seedUser();
       const userB = await seedUser();

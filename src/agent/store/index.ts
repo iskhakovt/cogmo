@@ -420,8 +420,14 @@ export interface AgentStore {
     }>,
   ): Promise<void>;
 
-  /** Read all pending rows for a user, oldest first (FIFO drain order). */
-  getPendingMemories(userId: string): Promise<ReadonlyArray<PendingMemory>>;
+  /**
+   * Read pending rows for a user, oldest first (FIFO drain order).
+   *
+   * `limit` caps the result size — callers running inside an Inngest step
+   * pass a bounded value so the row payload never exceeds the run-state
+   * size limit. Omit to read every pending row (tests, ad-hoc tooling).
+   */
+  getPendingMemories(userId: string, limit?: number): Promise<ReadonlyArray<PendingMemory>>;
 
   /** Delete pending rows by id. Used by the Observer drain step after successful retain. */
   deletePendingMemories(ids: ReadonlyArray<string>): Promise<void>;
@@ -1316,9 +1322,9 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getPendingMemories(userId: string): Promise<ReadonlyArray<PendingMemory>> {
+  async getPendingMemories(userId: string, limit?: number): Promise<ReadonlyArray<PendingMemory>> {
     return this.#db.transaction(async (tx) => {
-      const rows = await tx
+      const base = tx
         .select({
           id: pendingMemories.id,
           content: pendingMemories.content,
@@ -1332,7 +1338,7 @@ export class DrizzleAgentStore implements AgentStore {
         // timestamp, but UUIDv7 ids are time-ordered, so the tiebreak preserves
         // insertion order for callers that care (drain FIFO, tests).
         .orderBy(asc(pendingMemories.createdAt), asc(pendingMemories.id));
-      return rows;
+      return limit !== undefined ? await base.limit(limit) : await base;
     });
   }
 

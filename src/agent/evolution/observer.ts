@@ -27,6 +27,14 @@ import { extractMemories } from "./extract-memories.js";
 const DEFAULT_EXTRACTION_MODEL = "claude-sonnet-4-6";
 const MIN_MESSAGES_FOR_EXTRACTION = 4; // 2 turns minimum
 
+/**
+ * Max pending rows drained per Observer run. Caps the `step.run` output
+ * payload so a post-migration backlog of thousands doesn't exceed
+ * Inngest's run-state size limit. Remaining rows wait for the next
+ * `conversation/idle` to drain.
+ */
+const PENDING_DRAIN_BATCH_SIZE = 100;
+
 export interface ObserverDeps {
   agentStore: AgentStore;
   provider: LlmProvider;
@@ -99,7 +107,7 @@ export function createObserver(deps: ObserverDeps) {
       // failure after a successful retain re-runs only the delete on
       // retry, not the LLM classifier or the retainBatch write.
       const pending = await step.run("load-pending-memories", async () => {
-        return agentStore.getPendingMemories(conv.userId);
+        return agentStore.getPendingMemories(conv.userId, PENDING_DRAIN_BATCH_SIZE);
       });
 
       let drainResult: { drained: number; byNetwork: Record<string, number> } = {
