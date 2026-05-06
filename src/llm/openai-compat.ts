@@ -22,6 +22,14 @@ import type {
 
 const DEFAULT_MAX_TOKENS = 8192;
 
+/**
+ * Upper bound on inlined text-document content per document, in characters.
+ * Matches `MAX_READ_LENGTH` in file-tools.ts. Telegram's Bot API delivers
+ * files up to 20MB, which would blow past most context windows when
+ * inlined verbatim — cap at the same threshold the read_file tool uses.
+ */
+const MAX_INLINED_DOC_CHARS = 100_000;
+
 // Lazy-init singleton — cl100k_base covers GPT-4, GPT-4o, GPT-3.5-turbo
 let encoder: Tiktoken | null = null;
 function getEncoder(): Tiktoken {
@@ -351,7 +359,22 @@ function buildMessages(
       // its own adapter.
       const documentTextBlocks: TextBlock[] = documentBlocks.flatMap((d) => {
         if (d.mediaType.startsWith("text/") && d.source === "base64") {
-          const decoded = Buffer.from(d.data, "base64").toString("utf-8");
+          // Pre-decode slice: cap base64 input before allocating its UTF-8
+          // expansion so a 20MB Telegram upload doesn't materialize 30MB of
+          // string memory just to be truncated. base64 ratio is 4 chars per
+          // 3 bytes; round to a multiple of 4 to keep the trailing block
+          // intact (an unaligned slice can produce U+FFFD garbage at the
+          // tail, which ruins the elision marker).
+          const maxBase64 = Math.ceil((MAX_INLINED_DOC_CHARS * 4) / 3 / 4) * 4;
+          const truncated = d.data.length > maxBase64;
+          const slice = truncated ? d.data.slice(0, maxBase64) : d.data;
+          let decoded = Buffer.from(slice, "base64").toString("utf-8");
+          if (decoded.length > MAX_INLINED_DOC_CHARS) {
+            decoded = decoded.slice(0, MAX_INLINED_DOC_CHARS);
+          }
+          if (truncated) {
+            decoded += `\n\n[Content truncated at ${MAX_INLINED_DOC_CHARS} characters]`;
+          }
           const label = d.name ?? d.mediaType;
           return [{ type: "text", text: `[document: ${label}]\n${decoded}` }];
         }

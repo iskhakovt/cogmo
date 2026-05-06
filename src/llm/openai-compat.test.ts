@@ -599,6 +599,79 @@ describe("OpenAICompatibleProvider", () => {
       expect(JSON.stringify(userMsg)).not.toContain("JVBERi0");
     });
 
+    it("truncates oversized text/* documents and appends an elision marker", async () => {
+      const provider = setup();
+      // 250k chars decoded — well past the 100k cap. Pad to the boundary so
+      // the truncation decision is unambiguous (small variations from the
+      // base64 alignment shouldn't matter for the assertion).
+      const longText = "a".repeat(250_000);
+      const base64 = Buffer.from(longText, "utf-8").toString("base64");
+
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: base64,
+                mediaType: "text/plain",
+                name: "huge.txt",
+              },
+            ],
+          },
+        ],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      const userMsg = args.messages[1];
+      expect(typeof userMsg.content).toBe("string");
+      const text = userMsg.content as string;
+
+      // Header preserved, elision marker appended.
+      expect(text.startsWith("[document: huge.txt]\n")).toBe(true);
+      expect(text).toContain("[Content truncated at 100000 characters]");
+
+      // Total inlined length capped: 100k chars + the header + the marker.
+      // Pin the bound generously to avoid coupling to exact lengths.
+      expect(text.length).toBeLessThan(110_000);
+
+      // Crucially: the full 250k payload did NOT make it through.
+      expect(text.length).toBeLessThan(longText.length);
+    });
+
+    it("does NOT truncate or annotate small text/* documents", async () => {
+      const provider = setup();
+      const small = "hello world";
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: Buffer.from(small, "utf-8").toString("base64"),
+                mediaType: "text/plain",
+                name: "small.txt",
+              },
+            ],
+          },
+        ],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      const userMsg = args.messages[1];
+      expect(userMsg.content).toBe("[document: small.txt]\nhello world");
+      // No spurious elision marker on a payload that didn't need truncating.
+      expect(userMsg.content).not.toContain("truncated");
+    });
+
     it("combines documents with images into multipart parts", async () => {
       const provider = setup();
       await provider.chat({

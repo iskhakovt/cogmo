@@ -230,6 +230,9 @@ describe("telegram adapter", () => {
 
     beforeEach(() => {
       mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: "OK",
         arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
       });
       vi.stubGlobal("fetch", mockFetch);
@@ -268,6 +271,33 @@ describe("telegram adapter", () => {
         expect.any(Date),
       );
     });
+
+    it("does not upload or emit when getFile returns no file_path", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makePhotoCtx(111);
+      ctx.api.getFile = vi.fn().mockResolvedValue({ file_path: undefined });
+
+      await handlers.get("on:message:photo")!(ctx);
+
+      expect(transport.uploadAttachment).not.toHaveBeenCalled();
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
+
+    it("does not upload or emit on a non-OK fetch response", async () => {
+      const { transport } = await createAdapter();
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        arrayBuffer: async () => new Uint8Array().buffer,
+      });
+      const ctx = makePhotoCtx(111);
+
+      await handlers.get("on:message:photo")!(ctx);
+
+      expect(transport.uploadAttachment).not.toHaveBeenCalled();
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
   });
 
   describe("documents", () => {
@@ -275,6 +305,9 @@ describe("telegram adapter", () => {
 
     beforeEach(() => {
       mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: "OK",
         arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
       });
       vi.stubGlobal("fetch", mockFetch);
@@ -420,6 +453,40 @@ describe("telegram adapter", () => {
         ],
         expect.any(Date),
       );
+    });
+
+    // The Telegram Bot API can return file_path: undefined for files >20MB
+    // and for some media types. Without a guard the URL becomes
+    // `.../bot<token>/undefined`, fetch returns a 404 HTML page, and we'd
+    // upload that HTML as the user's "document".
+    it("does not upload or emit when getFile returns no file_path", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, { mime_type: "application/pdf", file_name: "huge.pdf" });
+      ctx.api.getFile = vi.fn().mockResolvedValue({ file_path: undefined });
+
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.uploadAttachment).not.toHaveBeenCalled();
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
+
+    // Telegram's CDN can return 4xx/5xx (rate-limit, expired file_id,
+    // outage). arrayBuffer() succeeds anyway and would otherwise let us
+    // upload the error body as if it were the user's file.
+    it("does not upload or emit on a non-OK fetch response", async () => {
+      const { transport } = await createAdapter();
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        arrayBuffer: async () => new Uint8Array().buffer,
+      });
+      const ctx = makeDocumentCtx(111, { mime_type: "application/pdf", file_name: "x.pdf" });
+
+      await handlers.get("on:message:document")!(ctx);
+
+      expect(transport.uploadAttachment).not.toHaveBeenCalled();
+      expect(transport.emit).not.toHaveBeenCalled();
     });
   });
 

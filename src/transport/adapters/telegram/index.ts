@@ -295,6 +295,46 @@ class TelegramStreamHandle implements StreamHandle {
 }
 
 /**
+ * Download a Telegram-hosted file (photo / document / voice / etc.) by file_id.
+ *
+ * Two failure modes the inline `getFile + fetch + arrayBuffer` chain
+ * silently absorbed:
+ *
+ *   1. `getFile()` returns `file_path: undefined` for files >20MB and for
+ *      certain media types. The URL would become `.../bot<token>/undefined`
+ *      and Telegram's CDN responds with a 404 HTML page; without an
+ *      explicit guard we'd upload that HTML as the user's "document".
+ *   2. The CDN can return 4xx/5xx (rate limit, expired file_id, transient
+ *      outage). `arrayBuffer()` succeeds anyway, returning the error body —
+ *      same garbage-upload outcome.
+ *
+ * Throws on either, so the caller's existing try/catch logs and skips
+ * instead of persisting a bogus attachment.
+ */
+interface FileDownloadCtx {
+  api: { getFile: (fileId: string) => Promise<{ file_path?: string }> };
+}
+
+async function downloadTelegramFile(
+  ctx: FileDownloadCtx,
+  fileId: string,
+  botToken: string,
+): Promise<Buffer> {
+  const file = await ctx.api.getFile(fileId);
+  if (!file.file_path) {
+    throw new Error(`telegram getFile returned no file_path (file_id=${fileId})`);
+  }
+  const url = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(
+      `telegram file download failed: ${response.status} ${response.statusText} (file_id=${fileId})`,
+    );
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
+
+/**
  * Telegram adapter — long-polling bot, delivers via Bot API.
  */
 /**
@@ -541,10 +581,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       const photo = ctx.message.photo.at(-1);
       if (!photo) return;
 
-      const file = await ctx.api.getFile(photo.file_id);
-      const url = `https://api.telegram.org/file/bot${creds.token}/${file.file_path}`;
-      const response = await fetch(url);
-      const buffer = Buffer.from(await response.arrayBuffer());
+      const buffer = await downloadTelegramFile(ctx, photo.file_id, creds.token);
 
       const path = await transport.uploadAttachment(buffer, "image/jpeg");
       const caption = ctx.message.caption ?? "";
@@ -578,10 +615,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       // the LLM call doesn't reject a missing media_type at validation.
       const mediaType = doc.mime_type ?? "application/octet-stream";
 
-      const file = await ctx.api.getFile(doc.file_id);
-      const url = `https://api.telegram.org/file/bot${creds.token}/${file.file_path}`;
-      const response = await fetch(url);
-      const buffer = Buffer.from(await response.arrayBuffer());
+      const buffer = await downloadTelegramFile(ctx, doc.file_id, creds.token);
 
       const path = await transport.uploadAttachment(buffer, mediaType);
       const caption = ctx.message.caption ?? "";
