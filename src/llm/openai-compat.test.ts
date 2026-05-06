@@ -501,4 +501,136 @@ describe("OpenAICompatibleProvider", () => {
       expect(JSON.stringify(assistantMsg)).not.toContain("internal reasoning");
     });
   });
+
+  describe("document blocks in messages", () => {
+    function setup() {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "m",
+        usage: { prompt_tokens: 10, completion_tokens: 1 },
+      });
+      return provider;
+    }
+
+    it("inlines a text/* base64 document into a text part", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "summarize this:" },
+              {
+                type: "document",
+                source: "base64",
+                // base64 of "hello world"
+                data: "aGVsbG8gd29ybGQ=",
+                mediaType: "text/plain",
+                name: "notes.txt",
+              },
+            ],
+          },
+        ],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      const userMsg = args.messages[1];
+      expect(userMsg.role).toBe("user");
+      // No images → flattened to a single text string concatenating both parts.
+      expect(typeof userMsg.content).toBe("string");
+      expect(userMsg.content).toBe("summarize this:[document: notes.txt]\nhello world");
+    });
+
+    it("inlines text/* document with mediaType label when name is missing", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: "aGVsbG8=",
+                mediaType: "text/markdown",
+              },
+            ],
+          },
+        ],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      const userMsg = args.messages[1];
+      expect(userMsg.content).toBe("[document: text/markdown]\nhello");
+    });
+
+    it("stubs binary documents (e.g. PDF) with a placeholder text", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: "base64",
+                data: "JVBERi0=",
+                mediaType: "application/pdf",
+                name: "report.pdf",
+              },
+            ],
+          },
+        ],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      const userMsg = args.messages[1];
+      expect(userMsg.content).toBe(
+        "[document: report.pdf — binary content not supported on this provider]",
+      );
+      // The base64 PDF bytes must NOT leak into the text payload.
+      expect(JSON.stringify(userMsg)).not.toContain("JVBERi0");
+    });
+
+    it("combines documents with images into multipart parts", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "see attached" },
+              {
+                type: "document",
+                source: "base64",
+                data: "aGk=",
+                mediaType: "text/plain",
+                name: "n.txt",
+              },
+              { type: "image", source: "base64", data: "aW1n", mediaType: "image/png" },
+            ],
+          },
+        ],
+      });
+
+      const args = mockCreate.mock.calls[0][0];
+      const userMsg = args.messages[1];
+      expect(Array.isArray(userMsg.content)).toBe(true);
+      const parts = userMsg.content as Array<{ type: string; text?: string; image_url?: unknown }>;
+      // 2 text parts (caption + inlined document) + 1 image part
+      expect(parts).toHaveLength(3);
+      expect(parts[0]).toEqual({ type: "text", text: "see attached" });
+      expect(parts[1]).toEqual({ type: "text", text: "[document: n.txt]\nhi" });
+      expect(parts[2]).toMatchObject({ type: "image_url" });
+    });
+  });
 });

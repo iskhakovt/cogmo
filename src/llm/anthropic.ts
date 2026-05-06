@@ -324,6 +324,43 @@ function toAnthropicBlock(
               }
             : { type: "url", url: block.data },
       };
+    case "document": {
+      // Anthropic supports application/pdf (base64 + url) and text/plain
+      // (text source). For text/plain we ship via the `text` source variant
+      // so cache_control + citation behavior matches the docs; PDFs and
+      // other media types ride the base64/url variants. Other binary types
+      // are sent as `application/pdf` MIME at the API level only when the
+      // caller actually uploaded a PDF — we forward `mediaType` verbatim
+      // and let Anthropic reject unsupported types rather than guess.
+      const mt = block.mediaType;
+      if (block.source === "url") {
+        return {
+          type: "document",
+          source: { type: "url", url: block.data },
+          ...(block.name && { title: block.name }),
+        };
+      }
+      if (mt === "text/plain") {
+        return {
+          type: "document",
+          source: {
+            type: "text",
+            media_type: "text/plain",
+            data: Buffer.from(block.data, "base64").toString("utf-8"),
+          },
+          ...(block.name && { title: block.name }),
+        };
+      }
+      return {
+        type: "document",
+        source: {
+          type: "base64",
+          media_type: mt as "application/pdf",
+          data: block.data,
+        },
+        ...(block.name && { title: block.name }),
+      };
+    }
     case "tool_use":
       return { type: "tool_use", id: block.id, name: block.name, input: block.input };
     case "tool_result": {

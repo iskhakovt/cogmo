@@ -7,6 +7,7 @@ import type {
   ChatStreamResult,
   ContentBlock,
   CountTokensParams,
+  DocumentBlock,
   ImageBlock,
   LlmResponse,
   Message,
@@ -328,10 +329,11 @@ function buildMessages(
         ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
       });
     } else {
-      // User message — may contain tool_result, text, and image blocks
+      // User message — may contain tool_result, text, image, and document blocks
       const toolResults = msg.content.filter((b): b is ToolResultBlock => b.type === "tool_result");
       const textBlocks = msg.content.filter((b): b is TextBlock => b.type === "text");
       const imageBlocks = msg.content.filter((b): b is ImageBlock => b.type === "image");
+      const documentBlocks = msg.content.filter((b): b is DocumentBlock => b.type === "document");
 
       // Tool results become separate "tool" role messages
       for (const tr of toolResults) {
@@ -342,10 +344,30 @@ function buildMessages(
         });
       }
 
+      // Documents: most OpenAI-compatible Chat Completions endpoints don't
+      // accept document content parts. Inline text/* documents into a text
+      // block so the model still sees them; binary documents (PDFs etc.)
+      // get a stub note. Only Anthropic gets the rich `document` block via
+      // its own adapter.
+      const documentTextBlocks: TextBlock[] = documentBlocks.flatMap((d) => {
+        if (d.mediaType.startsWith("text/") && d.source === "base64") {
+          const decoded = Buffer.from(d.data, "base64").toString("utf-8");
+          const label = d.name ?? d.mediaType;
+          return [{ type: "text", text: `[document: ${label}]\n${decoded}` }];
+        }
+        return [
+          {
+            type: "text",
+            text: `[document: ${d.name ?? d.mediaType} — binary content not supported on this provider]`,
+          },
+        ];
+      });
+      const allTextBlocks = [...textBlocks, ...documentTextBlocks];
+
       // Text + images → multipart content array
-      if (textBlocks.length > 0 || imageBlocks.length > 0) {
+      if (allTextBlocks.length > 0 || imageBlocks.length > 0) {
         const parts: OpenAI.ChatCompletionContentPart[] = [];
-        for (const tb of textBlocks) {
+        for (const tb of allTextBlocks) {
           parts.push({ type: "text", text: tb.text });
         }
         for (const ib of imageBlocks) {
@@ -354,7 +376,7 @@ function buildMessages(
         }
         result.push({
           role: "user",
-          content: imageBlocks.length > 0 ? parts : textBlocks.map((b) => b.text).join(""),
+          content: imageBlocks.length > 0 ? parts : allTextBlocks.map((b) => b.text).join(""),
         });
       }
     }

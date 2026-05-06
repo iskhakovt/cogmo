@@ -1,4 +1,5 @@
 import type { Message } from "../llm/types.js";
+import { parseGeneratedDocumentPayload } from "./document-tools.js";
 import { parseGeneratedImagePayload } from "./image-tools.js";
 
 /**
@@ -10,6 +11,16 @@ import { parseGeneratedImagePayload } from "./image-tools.js";
 export interface OutboundImageRef {
   path: string;
   mediaType: string;
+}
+
+/**
+ * Reference to a document attachment uploaded via the `send_document` tool.
+ * Resolved to bytes before delivery.
+ */
+export interface OutboundDocumentRef {
+  path: string;
+  mediaType: string;
+  name: string;
 }
 
 /**
@@ -47,4 +58,35 @@ export function extractGeneratedImages(messages: readonly Message[]): readonly O
     }
   }
   return images;
+}
+
+/**
+ * Extract `send_document` tool results from agent loop output.
+ * Mirrors `extractGeneratedImages` — same two-pass scoping by tool name.
+ */
+export function extractGeneratedDocuments(
+  messages: readonly Message[],
+): readonly OutboundDocumentRef[] {
+  const toolNames = new Map<string, string>();
+  for (const msg of messages) {
+    if (typeof msg.content === "string") continue;
+    for (const block of msg.content) {
+      if (block.type === "tool_use") toolNames.set(block.id, block.name);
+    }
+  }
+
+  const docs: OutboundDocumentRef[] = [];
+  for (const msg of messages) {
+    if (typeof msg.content === "string") continue;
+    for (const block of msg.content) {
+      if (block.type !== "tool_result") continue;
+      if (toolNames.get(block.toolUseId) !== "send_document") continue;
+      if (block.isError) continue;
+      const payload = parseGeneratedDocumentPayload(block.content);
+      if (payload) {
+        docs.push({ path: payload.path, mediaType: payload.mediaType, name: payload.name });
+      }
+    }
+  }
+  return docs;
 }

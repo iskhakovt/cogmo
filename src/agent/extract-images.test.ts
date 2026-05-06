@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Message } from "../llm/types.js";
-import { extractGeneratedImages } from "./extract-images.js";
+import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
 
 describe("extractGeneratedImages", () => {
   it("returns empty array for empty messages", () => {
@@ -204,6 +204,172 @@ describe("extractGeneratedImages", () => {
     ];
     expect(extractGeneratedImages(messages)).toEqual([
       { path: "generated/z.jpg", mediaType: "image/jpeg" },
+    ]);
+  });
+});
+
+describe("extractGeneratedDocuments", () => {
+  it("returns empty array for empty messages", () => {
+    expect(extractGeneratedDocuments([])).toEqual([]);
+  });
+
+  it("extracts send_document tool results", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_1",
+            name: "send_document",
+            input: { filename: "report.md", content: "x" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "toolu_1",
+            content: JSON.stringify({
+              path: "generated/abc.md",
+              mediaType: "text/markdown",
+              name: "report.md",
+            }),
+          },
+        ],
+      },
+    ];
+    expect(extractGeneratedDocuments(messages)).toEqual([
+      { path: "generated/abc.md", mediaType: "text/markdown", name: "report.md" },
+    ]);
+  });
+
+  it("ignores tool_results from other tools with same JSON shape", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_1", name: "some_other_tool", input: {} }],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "toolu_1",
+            content: JSON.stringify({
+              path: "other/x.md",
+              mediaType: "text/markdown",
+              name: "x.md",
+            }),
+          },
+        ],
+      },
+    ];
+    expect(extractGeneratedDocuments(messages)).toEqual([]);
+  });
+
+  it("skips tool_results with isError=true", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_1", name: "send_document", input: {} }],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "toolu_1",
+            content: JSON.stringify({
+              path: "generated/x.md",
+              mediaType: "text/markdown",
+              name: "x.md",
+            }),
+            isError: true,
+          },
+        ],
+      },
+    ];
+    expect(extractGeneratedDocuments(messages)).toEqual([]);
+  });
+
+  it("skips tool_results with malformed payload", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_1", name: "send_document", input: {} }],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "toolu_1",
+            content: "not json",
+          },
+        ],
+      },
+    ];
+    expect(extractGeneratedDocuments(messages)).toEqual([]);
+  });
+
+  it("skips JSON missing required fields", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_1", name: "send_document", input: {} }],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "toolu_1",
+            // Missing `name`
+            content: JSON.stringify({ path: "x", mediaType: "text/markdown" }),
+          },
+        ],
+      },
+    ];
+    expect(extractGeneratedDocuments(messages)).toEqual([]);
+  });
+
+  it("extracts multiple documents from separate turns", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_1", name: "send_document", input: {} }],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "toolu_1",
+            content: JSON.stringify({ path: "g/a.md", mediaType: "text/markdown", name: "a.md" }),
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "toolu_2", name: "send_document", input: {} }],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "toolu_2",
+            content: JSON.stringify({ path: "g/b.csv", mediaType: "text/csv", name: "b.csv" }),
+          },
+        ],
+      },
+    ];
+    expect(extractGeneratedDocuments(messages)).toEqual([
+      { path: "g/a.md", mediaType: "text/markdown", name: "a.md" },
+      { path: "g/b.csv", mediaType: "text/csv", name: "b.csv" },
     ]);
   });
 });

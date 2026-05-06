@@ -47,4 +47,84 @@ describe("contentToBlocks", () => {
       { type: "image_ref", path: "inbound/abc.jpg", mediaType: "image/jpeg" },
     ]);
   });
+
+  it("converts document-ref array element to DocumentRef", () => {
+    expect(
+      contentToBlocks([
+        {
+          type: "document",
+          path: "inbound/abc.pdf",
+          mediaType: "application/pdf",
+          name: "report.pdf",
+        },
+      ]),
+    ).toEqual([
+      {
+        type: "document_ref",
+        path: "inbound/abc.pdf",
+        mediaType: "application/pdf",
+        name: "report.pdf",
+      },
+    ]);
+  });
+
+  it("omits name field on DocumentRef when caller omitted it", () => {
+    expect(
+      contentToBlocks([
+        { type: "document", path: "inbound/abc.pdf", mediaType: "application/pdf" },
+      ]),
+    ).toEqual([{ type: "document_ref", path: "inbound/abc.pdf", mediaType: "application/pdf" }]);
+  });
+
+  it("converts inline-document array element to DocumentBlock", () => {
+    expect(
+      contentToBlocks([
+        {
+          type: "document",
+          source: "base64",
+          data: "ZmlsZQ==",
+          mediaType: "text/plain",
+          name: "notes.txt",
+        },
+      ]),
+    ).toEqual([
+      {
+        type: "document",
+        source: "base64",
+        data: "ZmlsZQ==",
+        mediaType: "text/plain",
+        name: "notes.txt",
+      },
+    ]);
+  });
+
+  it("defaults inline-document source to 'base64' when omitted", () => {
+    expect(
+      contentToBlocks([{ type: "document", data: "ZmlsZQ==", mediaType: "application/pdf" }]),
+    ).toEqual([
+      { type: "document", source: "base64", data: "ZmlsZQ==", mediaType: "application/pdf" },
+    ]);
+  });
+
+  it("converts mixed array (text + document ref)", () => {
+    expect(
+      contentToBlocks([
+        { type: "text", text: "see attached" },
+        {
+          type: "document",
+          path: "inbound/abc.pdf",
+          mediaType: "application/pdf",
+          name: "x.pdf",
+        },
+      ]),
+    ).toEqual([
+      { type: "text", text: "see attached" },
+      {
+        type: "document_ref",
+        path: "inbound/abc.pdf",
+        mediaType: "application/pdf",
+        name: "x.pdf",
+      },
+    ]);
+  });
 });

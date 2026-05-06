@@ -74,6 +74,18 @@ export interface OutboundImage {
 }
 
 /**
+ * Outbound document — bytes ready for platform delivery as a file attachment.
+ *
+ * Same resolve-then-deliver pattern as `OutboundImage`. `name` becomes the
+ * filename the user sees in the channel UI.
+ */
+export interface OutboundDocument {
+  data: Buffer;
+  mediaType: string;
+  name: string;
+}
+
+/**
  * Channel-rendered message — the result of converting canonical markdown
  * to a channel-specific wire format.
  */
@@ -82,6 +94,8 @@ export interface RenderedMessage {
   parseMode?: "HTML" | "MarkdownV2";
   /** Images to deliver alongside the text. Adapter decides native representation. */
   images?: readonly OutboundImage[];
+  /** Documents to deliver alongside the text. Adapter decides native representation. */
+  documents?: readonly OutboundDocument[];
 }
 
 /**
