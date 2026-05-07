@@ -17,6 +17,7 @@ export const SKILL_EFFECTS = [
   "posts_public",
   "deletes_external",
   "financial",
+  "reads_filesystem",
   "writes_filesystem",
   "spawns_subprocess",
 ] as const;
