@@ -20,11 +20,17 @@ import type { Transport, TransportError } from "../../transport.js";
 import type { ProfileDialogs } from "./profile-dialog.js";
 import type { RepoDialogs } from "./repo-dialog.js";
 import {
+  formatScope,
   type InlineButton,
   renderModelList,
   renderProfileList,
   renderSessionsList,
 } from "./sessions-ux.js";
+
+// Re-exported so tests that pin formatScope's contract via commands.ts
+// keep working. The canonical implementation lives in sessions-ux.ts
+// (render helper, used by both show-reply and list-line rendering).
+export { formatScope };
 
 /**
  * Minimal Telegram context shape used by the commands. Modelled after grammY's `Context` but
@@ -745,12 +751,6 @@ export function parseScopeSpec(tokens: ReadonlyArray<string>): ScopeSpec {
     };
   }
   return { kind: "set", scope: parsed.data };
-}
-
-/** Render a profile's scope in human form for the show / confirm replies. */
-export function formatScope(scope: ProfileMemoryScope | null): string {
-  if (scope === null) return "unrestricted (recalls all memories)";
-  return `compartments: ${scope.compartments.join(", ")} / trust: ${scope.trust.join(", ")}`;
 }
 
 async function replyProfileScope(

@@ -102,8 +102,10 @@ describe("renderProfileList", () => {
     // No annotation when scope is null.
     expect(rendered.text).not.toMatch(/open .*\[scope:/);
     // Inline annotation when scope is set.
+    // Reuses the canonical `formatScope` so the list view never drifts
+    // from the show-reply view.
     expect(rendered.text).toContain(
-      "• work (you, claude-sonnet-4-6) [scope: work,technical / first-party]",
+      "• work (you, claude-sonnet-4-6) [compartments: work, technical / trust: first-party]",
     );
   });
 

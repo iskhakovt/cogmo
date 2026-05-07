@@ -6,6 +6,7 @@
  */
 
 import type { ConversationSummary, Profile } from "../../../agent/store/index.js";
+import type { ProfileMemoryScope } from "../../../agent/store/schema.js";
 import { truncate } from "../../../util/string.js";
 
 /** Telegram's inline-keyboard button density is workable up to ~10 rows before scrolling feels bad. */
@@ -61,13 +62,22 @@ export function renderProfileList(
     const owner = p.userId === null ? "org" : "you";
     const current = p.id === opts.currentProfileId ? " ← current" : "";
     // Memory scope is null for most profiles (unrestricted) — only annotate
-    // when set, so the common case stays compact.
-    const scope = p.memoryScope
-      ? ` [scope: ${p.memoryScope.compartments.join(",")} / ${p.memoryScope.trust.join(",")}]`
-      : "";
+    // when set, so the common case stays compact. Wraps the canonical
+    // `formatScope` form so list and show views never drift in sync.
+    const scope = p.memoryScope ? ` [${formatScope(p.memoryScope)}]` : "";
     return `• ${p.name} (${owner}, ${p.model})${scope}${current}`;
   });
   return { text: lines.join("\n") };
+}
+
+/**
+ * Canonical render for a profile's memory scope. Used both by the
+ * `/profile scope` show-reply (commands.ts) and the `/profile list`
+ * annotation above. Single source of truth so the two views can't drift.
+ */
+export function formatScope(scope: ProfileMemoryScope | null): string {
+  if (scope === null) return "unrestricted (recalls all memories)";
+  return `compartments: ${scope.compartments.join(", ")} / trust: ${scope.trust.join(", ")}`;
 }
 
 export function renderModelList(

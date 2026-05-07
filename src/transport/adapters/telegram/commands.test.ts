@@ -446,6 +446,31 @@ describe("handleProfile", () => {
       );
     });
 
+    it("surfaces ambiguity (org + user share a name) without calling update", async () => {
+      // resolveProfileByName returns kind:"ambiguous" when an org profile
+      // and a user profile share a name AND multiple user-owned matches
+      // exist (the single-owned-match path picks the user one). Synthesise
+      // that by listing two user-owned profiles with the same name.
+      const update = vi.fn();
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              { ...makeProfile(null), id: "p1", userId: "u-a", name: "shared" },
+              { ...makeProfile(null), id: "p2", userId: "u-b", name: "shared" },
+            ]),
+          ),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope shared compartments=work trust=any");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("ambiguous"));
+    });
+
     it("rejects unknown profile — does not call update", async () => {
       const update = vi.fn();
       const transport = transportWith({
