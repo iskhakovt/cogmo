@@ -110,24 +110,27 @@ describe("createNdjsonTransport", () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
-  it("emits a fatal frame and closes when buffer exceeds 4 MB without a newline", async () => {
+  it("fires onError and closes when buffer exceeds 4 MB without a newline", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
-    const fatalSeen = new Promise<unknown>((resolve) => {
-      t.onMessage((msg) => resolve(msg));
+    const messageHandler = vi.fn();
+    t.onMessage(messageHandler);
+    const errorSeen = new Promise<Error>((resolve) => {
+      t.onError?.((err) => resolve(err));
     });
 
     // 5 MB of content, no newline — simulates a worker flooding stdout.
     stdout.write("x".repeat(5 * 1024 * 1024));
 
-    // split2's `error` lands on the next tick, so await the synthetic frame.
-    const fatal = await fatalSeen;
-    expect(fatal).toEqual(
-      expect.objectContaining({
-        type: "fatal",
-        error: expect.stringMatching(/transport:/),
-      }),
-    );
+    // split2's `error` lands on the next tick, so await the typed callback.
+    const err = await errorSeen;
+    expect(err.message).toMatch(/transport:/);
+    // Crucially: NO message was forwarded. The previous rev surfaced a
+    // synthetic `{ type: "fatal" }` frame on `onMessage`, but that's not a
+    // valid worker protocol type — the dispatcher's WorkerMessageSchema
+    // dropped it silently and the pending task hung until wall-clock fired.
+    // `onError` is the right channel; the dispatcher rejects directly.
+    expect(messageHandler).not.toHaveBeenCalled();
     // Transport closed itself; subsequent stdout is dropped.
     expect(stdin.writableEnded).toBe(true);
   });

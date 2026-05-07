@@ -11,7 +11,8 @@ import type { RpcTransport } from "../dispatcher.js";
  * leaking binary data into stdout instead of stderr) so the host doesn't
  * grow memory unbounded waiting for a `\n` that may never arrive. Enforced
  * by `split2`'s `maxLength` (it throws once the per-line buffer crosses
- * this; we catch the stream `error` and surface a typed fatal frame).
+ * this; we surface that via `onError` so the dispatcher rejects the
+ * pending task immediately instead of sitting on the wall-clock timer).
  */
 const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 
@@ -27,11 +28,12 @@ const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
  * deps, the line splitter pino is built on). We hand it a raw splitter
  * (no JSON.parse mapper) so we can swallow malformed lines silently — a
  * stray `print()` from skill code shouldn't fatally crash the protocol.
- * Buffer overflow does crash, by design: it's the only condition where a
- * misbehaving worker can otherwise bleed memory.
+ * Buffer overflow does fail the task, by design: it's the only condition
+ * where a misbehaving worker can otherwise bleed memory.
  */
 export function createNdjsonTransport(stdin: Writable, stdout: Readable): RpcTransport {
-  let handler: ((message: unknown) => void) | null = null;
+  let messageHandler: ((message: unknown) => void) | null = null;
+  let errorHandler: ((err: Error) => void) | null = null;
   let closed = false;
 
   function close(): void {
@@ -42,18 +44,18 @@ export function createNdjsonTransport(stdin: Writable, stdout: Readable): RpcTra
   }
 
   // split2 with no mapper emits one decoded string per line. We do JSON
-  // parsing ourselves so a single bad line is a no-op rather than an
-  // `error` event that races teardown.
+  // parsing ourselves so a single bad line is a no-op rather than a
+  // splitter `error` event that races teardown.
   const splitter = stdout.pipe(split2({ maxLength: MAX_BUFFER_BYTES }));
   splitter.on("data", (line: string) => {
     // After close(), drop any remaining stdout. The dispatcher has already
     // torn down its pending task; routing a late `task_result` /
     // `ctx_call` past it could either fire a no-op or — worse — invoke
     // the handler against a service the host has already cleaned up.
-    if (closed || !handler) return;
+    if (closed || !messageHandler) return;
     if (line.length === 0) return;
     try {
-      handler(JSON.parse(line));
+      messageHandler(JSON.parse(line));
     } catch {
       // Non-JSON line (stray print(), stderr crossing pipes from a
       // misbehaving wheel, etc.) — drop silently. Schema validation in
@@ -62,14 +64,12 @@ export function createNdjsonTransport(stdin: Writable, stdout: Readable): RpcTra
   });
   splitter.on("error", (err: Error) => {
     if (closed) return;
-    // Surface as a synthetic structurally-recognizable frame so the
-    // dispatcher's schema validator drops it cleanly (the pending task
-    // continues until its own timeout fires). Then close — once the
-    // splitter has errored on overflow, downstream chunks won't surface.
-    handler?.({
-      type: "fatal",
-      error: `transport: ${err.message}`,
-    });
+    // Notify the dispatcher via the typed error channel so it rejects the
+    // pending task immediately. Earlier rev of this code emitted a
+    // synthetic `{ type: "fatal" }` frame — but `fatal` isn't a valid
+    // worker protocol message, so the dispatcher's `WorkerMessageSchema`
+    // dropped it and the task hung until the host wall-clock fired.
+    errorHandler?.(new Error(`transport: ${err.message}`));
     close();
   });
 
@@ -79,7 +79,10 @@ export function createNdjsonTransport(stdin: Writable, stdout: Readable): RpcTra
       stdin.write(`${JSON.stringify(message)}\n`);
     },
     onMessage(h: (message: unknown) => void): void {
-      handler = h;
+      messageHandler = h;
+    },
+    onError(h: (err: Error) => void): void {
+      errorHandler = h;
     },
     close,
   };
