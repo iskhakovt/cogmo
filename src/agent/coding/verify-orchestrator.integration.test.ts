@@ -276,6 +276,7 @@ function fakeSandbox(opts: { worktreePath: string }): {
     sandbox: {
       healthCheck: async () => ({ ok: true, runtime: "runc" }),
       reconcileCrashedInstances: async () => ({ orphansReaped: 0 }),
+      ensureImagePresent: vi.fn(async () => {}),
       createTaskContainer: vi.fn(async (spec) => {
         createCalls.push(spec);
         lastSpec = spec;

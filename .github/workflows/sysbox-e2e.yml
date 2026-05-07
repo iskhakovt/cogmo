@@ -11,6 +11,7 @@ on:
     paths:
       - "src/sandbox/**"
       - "src/agent/coding/**"
+      - "src/skills/**"
       - ".github/workflows/sysbox-e2e.yml"
       - "package.json"
       - "pnpm-lock.yaml"
@@ -18,6 +19,7 @@ on:
     paths:
       - "src/sandbox/**"
       - "src/agent/coding/**"
+      - "src/skills/**"
       - ".github/workflows/sysbox-e2e.yml"
       - "package.json"
       - "pnpm-lock.yaml"
@@ -90,11 +92,14 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Run sysbox-flavoured supervisor tests
+      - name: Run sysbox-flavoured supervisor + skills tests
         env:
           SANDBOX_RUNTIME: sysbox
           TESTCONTAINERS_RYUK_DISABLED: "true"
-        run: pnpm test:integration src/sandbox/supervisor.sysbox.integration.test.ts
+        run: |
+          pnpm test:integration \
+            src/sandbox/supervisor.sysbox.integration.test.ts \
+            src/skills/runner.sysbox.integration.test.ts
 
       - uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
         if: always()
