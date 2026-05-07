@@ -1,6 +1,6 @@
 {
-  "id": "93bb8ef1-b427-4b09-9203-abe7442c96c4",
-  "prevId": "aa9519a6-b0df-4019-b151-a44b0516b2f7",
+  "id": "58e0bd50-4ab2-4317-982c-e3f930096922",
+  "prevId": "93bb8ef1-b427-4b09-9203-abe7442c96c4",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -993,6 +993,12 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true
+        },
+        "memory_scope": {
+          "name": "memory_scope",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",

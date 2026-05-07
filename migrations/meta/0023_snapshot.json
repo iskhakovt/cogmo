@@ -1,6 +1,6 @@
 {
-  "id": "93bb8ef1-b427-4b09-9203-abe7442c96c4",
-  "prevId": "aa9519a6-b0df-4019-b151-a44b0516b2f7",
+  "id": "22c2a2c5-a623-481f-8b32-226d8c8b1688",
+  "prevId": "58e0bd50-4ab2-4317-982c-e3f930096922",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -453,6 +453,13 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'active'"
+        },
+        "voice_mode": {
+          "name": "voice_mode",
+          "type": "voice_mode",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -988,11 +995,25 @@
           "notNull": true,
           "default": "'heuristic'"
         },
+        "voice_mode": {
+          "name": "voice_mode",
+          "type": "voice_mode",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'auto'"
+        },
         "tool_set": {
           "name": "tool_set",
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true
+        },
+        "memory_scope": {
+          "name": "memory_scope",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -1136,6 +1157,124 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.voice_config": {
+      "name": "voice_config",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "uuidv7()"
+        },
+        "tts_secret_id": {
+          "name": "tts_secret_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "stt_secret_id": {
+          "name": "stt_secret_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tts_provider": {
+          "name": "tts_provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tts_model": {
+          "name": "tts_model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tts_voice": {
+          "name": "tts_voice",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tts_base_url": {
+          "name": "tts_base_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "stt_provider": {
+          "name": "stt_provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "stt_model": {
+          "name": "stt_model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "stt_base_url": {
+          "name": "stt_base_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "singleton": {
+          "name": "singleton",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "voice_config_tts_secret_id_secrets_id_fk": {
+          "name": "voice_config_tts_secret_id_secrets_id_fk",
+          "tableFrom": "voice_config",
+          "tableTo": "secrets",
+          "columnsFrom": ["tts_secret_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "voice_config_stt_secret_id_secrets_id_fk": {
+          "name": "voice_config_stt_secret_id_secrets_id_fk",
+          "tableFrom": "voice_config",
+          "tableTo": "secrets",
+          "columnsFrom": ["stt_secret_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_voice_config_singleton": {
+          "name": "uq_voice_config_singleton",
+          "nullsNotDistinct": false,
+          "columns": ["singleton"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "chk_voice_config_singleton": {
+          "name": "chk_voice_config_singleton",
+          "value": "singleton = true"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.mcp_server_tools": {
@@ -2423,6 +2562,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "voice_max_reply_chars": {
+          "name": "voice_max_reply_chars",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 700
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -2648,6 +2794,11 @@
       "name": "pending_memory_source",
       "schema": "public",
       "values": ["live_retain", "migration"]
+    },
+    "public.voice_mode": {
+      "name": "voice_mode",
+      "schema": "public",
+      "values": ["auto", "always", "never"]
     },
     "public.mcp_server_approval_status": {
       "name": "mcp_server_approval_status",
