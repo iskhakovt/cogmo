@@ -26,7 +26,7 @@ A unified policy plane across both backend families is a non-goal. Policy lives 
 `SandboxClient` is the factory — owns provider config, mints sessions, performs lifecycle operations. `SandboxSession` is the handle — owns one running task environment, exposes exec / file / git operations. The split mirrors the [OpenAI Agents SDK](https://github.com/openai/openai-agents-js/tree/main/packages/agents-core/src/sandbox) shape, which uses the same pattern to plug Daytona, E2B, Modal, Cloudflare Containers, etc. behind one abstraction.
 
 ```ts
-interface SandboxClient<TOptions, TState> {
+interface SandboxClient<TState> {
   readonly backendId: string;
   readonly capabilities: SandboxCapabilities;
 
@@ -51,7 +51,8 @@ interface SessionSpec {
   /** Container image. The backend assumes `ensureImagePresent` has succeeded. */
   image: string;
   resourceLimits: ResourceLimits;
-  ttl: { expiresAt: Date };
+  /** When the session should be reaped if not torn down sooner. */
+  expiresAt: Date;
   /**
    * Working-tree material to materialize at session start. Optional —
    * coding-delegation supplies it, skills tier-2 omits it because skill
@@ -84,15 +85,32 @@ interface SandboxSession {
   cleanup(): Promise<void>;
 }
 
+/**
+ * Buffered exec result. `stdout` / `stderr` are read fully into memory —
+ * intended for short, bounded commands. Backends cap buffered output at
+ * `SANDBOX_EXEC_BUFFER_LIMIT` (default 1 MiB per stream); when a command
+ * exceeds the cap, `truncated` is set and the stream contents are clipped
+ * to the cap. Consumers expecting larger output use `execStreaming`.
+ */
 type ExecResult = {
   stdout: string;
   stderr: string;
   exitCode: number;
   wallTimeSeconds: number;
+  truncated: boolean;
 };
 
+/**
+ * Streaming exec handle. Yields lines as the command produces them; await
+ * `wait()` for the exit code once the stream completes. Call `dispose()`
+ * to kill a runaway exec — it sends SIGTERM (then SIGKILL after a short
+ * grace period), closes the stream, and resolves once the backend has
+ * confirmed teardown. Idempotent. Implicit on session `cleanup()`, but
+ * the orchestrator may call it earlier (timeout, user cancel).
+ */
 type ExecStreamingHandle = AsyncIterable<{ stream: "stdout" | "stderr"; line: string }> & {
   wait(): Promise<{ exitCode: number }>;
+  dispose(): Promise<void>;
 };
 ```
 
@@ -108,7 +126,7 @@ interface SandboxCapabilities {
   hostBindMount: boolean;
   customImage: boolean;
   volumes: "docker" | "managed" | "none";
-  workingTreeTransport: "bind-mount" | "git-remote" | "file-upload";
+  workingTreeTransport: "bind-mount" | "git-remote";
 }
 ```
 
@@ -415,9 +433,13 @@ tRPC's HTTP client accepts a custom `fetch`, so the Unix-socket case is wired vi
 
 The Daytona backend runs task sandboxes on Daytona's managed cloud (default) or self-hosted Daytona instance. Daytona owns sandbox isolation and lifecycle. Cogmo drives via the [Daytona TypeScript SDK](https://www.daytona.io/docs/typescript-sdk/daytona/).
 
+**Status:** Designed against the SDK docs; **not yet exercised at Cogmo's expected concurrency or log volume.** The streaming-exec WebSocket path in particular (`getSessionCommandLogs`) is the load-bearing piece that needs real-traffic validation before this section moves to `[confirmed]`. Specific unknowns: WS keepalive behaviour over multi-minute idle stretches, log-buffer behaviour during transient disconnect, and whether `executeSessionCommand({ runAsync: true })` honours per-command timeouts the way buffered `executeCommand` does.
+
 ### Authentication & deployment
 
-API-key auth via `DAYTONA_API_KEY` (with `_FILE` variant per the secrets convention). Daytona Cloud is default; self-hosted via `DAYTONA_API_URL` env override. The choice is deployment-time; Cogmo doesn't switch between cloud and self-hosted at runtime.
+API-key auth. The key is stored as `daytona_api_key` in the encrypted `secrets` table per [infrastructure.md](infrastructure.md) → Secrets — the same path LLM provider keys, channel tokens, and the GitHub PAT take. The setup wizard prompts for it on first run; non-interactive bootstrap accepts a `COGMO_DAYTONA_API_KEY` (with `_FILE` variant) which is migrated into the secrets table on first boot and not consulted thereafter.
+
+Base URL is configuration, not credential — `DaytonaSandboxClientOptions.apiUrl` carries the value (`undefined` = Daytona Cloud), populated at startup. The choice is deployment-time; Cogmo doesn't switch between cloud and self-hosted at runtime.
 
 ### Working-tree transport — git as transport
 
@@ -435,6 +457,10 @@ Per-task lifecycle (worktree-bearing sessions):
 6. Cleanup: temp branch deleted on task teardown (success or failure).
 
 Why git: native delta compression on push/fetch (matters for repos > 100MB), no inbound network requirement (managed sandboxes don't accept inbound ssh — rules out rsync), no bespoke tar/upload code, and slice 4 already pushes a result branch — the Daytona path adds the start-state push, nothing else.
+
+#### Orphan branch cleanup
+
+An orchestrator crash between step 1 (push) and step 6 (delete) leaves an orphan `cogmo/run/<task-id>` branch on the remote. Acceptable failure mode for personal scale, but it accumulates if nothing prunes. Reconcile pattern: weekly cron iterates `cogmo/run/*` refs and deletes any whose corresponding `coding_tasks` row is terminal (`pr_open`, `failed`, `cancelled`) and older than 7 days. Mirrors the `refs/cogmo-wip/<task-id>` retention pattern in [coding-delegation.md](coding-delegation.md) → Worktree persistence — same ref namespace discipline, same cron job. Per-PR webhook for minute-level cleanup is a P3 follow-up.
 
 ### Streaming exec
 
@@ -462,7 +488,7 @@ The Daytona backend does not run the Cogmo Docker socket proxy, the systemd cgro
 
 `SandboxSessionState` for the Daytona backend stores `{ type: "daytona", sandboxId, sessionId }`. On orchestrator restart mid-task, `client.resume(state)` re-attaches to the existing sandbox via the Daytona API. If the sandbox was reaped (TTL exceeded, manual delete, provider-side eviction), `resume()` fails fast and the orchestrator marks the task failed.
 
-## Module Structure `[confirmed]`
+## Module Structure `[proposed]`
 
 ```text
 src/sandbox/
@@ -494,16 +520,16 @@ src/sandbox/
 
 The Daytona backend in-tree alongside Local-Docker. If the provider list grows, individual backends extract to separate packages — the abstraction is designed for it (matches the OpenAI Agents SDK's in-tree-Docker + out-of-tree-everything-else pattern).
 
-## Reference Implementations `[confirmed]`
+## Reference Implementations
 
-### Abstraction
+### Abstraction `[proposed]`
 
 | Project | Read for |
 |-|-|
 | [openai/openai-agents-python](https://github.com/openai/openai-agents-python/tree/main/src/agents/sandbox) | Canonical `BaseSandboxClient` / `BaseSandboxSession` shape, discriminated options + state, `resume()` contract, in-tree Docker + UnixLocal reference impls. |
 | [openai/openai-agents-js](https://github.com/openai/openai-agents-js/tree/main/packages/agents-core/src/sandbox) | TypeScript projection of the same shape — closest match for our types. |
 
-### Local-Docker Backend
+### Local-Docker Backend `[confirmed]`
 
 | Project | Read for |
 |-|-|
@@ -513,7 +539,7 @@ The Daytona backend in-tree alongside Local-Docker. If the provider list grows, 
 | [wollomatic/socket-proxy](https://github.com/wollomatic/socket-proxy) | Regex-based policy config as user-facing surface. |
 | [nestybox/sysbox](https://github.com/nestybox/sysbox) | Runtime itself — installation, limitations, compatibility notes. |
 
-### Daytona Backend
+### Daytona Backend `[proposed]`
 
 | Project | Read for |
 |-|-|
