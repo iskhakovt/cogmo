@@ -385,8 +385,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // → Provider dispatch.
       const provider = await resolveProvider(model);
       const summarizationModel = deps.summarizationModel ?? model;
-      const summarizationProvider =
-        summarizationModel === model ? provider : await resolveProvider(summarizationModel);
 
       // Per-turn tool registry — built-ins from bootstrap + one dynamic tool
       // per live skill + MCP tools resolved against the profile's globs.
@@ -421,6 +419,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           countTokens: (params) => provider.countTokens({ ...params, model }),
           budget,
           summarize: async (system, msgs) => {
+            // Resolve the summarization provider lazily — only when
+            // compaction actually picks the SUMMARIZE strategy. Resolving
+            // eagerly at turn start would surface a misconfigured
+            // `summarizationModel` (missing routing row, missing secret)
+            // as a per-turn failure, even on small messages that never
+            // trigger summarization. The memoized resolver makes this
+            // a `Map` lookup after the first hit per process. Stays
+            // outside the `step.run` below because the provider instance
+            // isn't JSON-serializable.
+            const summarizationProvider =
+              summarizationModel === model ? provider : await resolveProvider(summarizationModel);
             // Step ID is hardcoded — relies on `compactMessages` calling
             // `summarize` at most once per invocation (contract on
             // ContextManagerDeps.summarize). If that ever changes, switch to

@@ -1243,6 +1243,48 @@ describe("createHandleMessage", () => {
       expect(turnProvider.chat).not.toHaveBeenCalled();
     });
 
+    it("does not resolve summarization_model when summarization is skipped", async () => {
+      // Regression guard for an earlier draft of this PR which resolved
+      // the summarization provider eagerly at turn start. That meant a
+      // misconfigured `summarization_model` (missing routing row, missing
+      // secret) failed every turn — even tiny messages whose token count
+      // never approaches the summarization threshold. The fix is lazy
+      // resolution inside the `summarize` callback; this test pins it.
+
+      // Token count well under the 80%-of-budget summarization threshold —
+      // compaction's strategy never enters the SUMMARIZE branch.
+      const countTokens = vi.fn().mockResolvedValue(1_000);
+      const turnProvider = mockProvider({ countTokens });
+
+      const resolveProvider = vi.fn().mockImplementation(async (model: string) => {
+        if (model === "claude-sonnet-4-6") return turnProvider;
+        // A misconfigured summarization model would throw here. The whole
+        // point of the test is that we never get this far.
+        throw new Error(`summarization model "${model}" not configured`);
+      });
+
+      const deps = mockDeps({
+        resolveProvider,
+        summarizationModel: "claude-haiku-4-5-20251001",
+        agentStore: mockAgentStore({
+          // Force the slow path so countTokens actually runs (the fast
+          // path skip would also happen to mask this bug).
+          getLastTokens: vi.fn().mockResolvedValue(null),
+        }),
+      });
+
+      // Turn must complete without ever resolving the summarization model.
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(resolveProvider).toHaveBeenCalledTimes(1);
+      expect(resolveProvider).toHaveBeenCalledWith("claude-sonnet-4-6");
+      expect(resolveProvider).not.toHaveBeenCalledWith("claude-haiku-4-5-20251001");
+    });
+
     it("propagates resolver errors instead of swallowing them", async () => {
       const resolveProvider = vi
         .fn()
