@@ -30,11 +30,16 @@ import { DrizzleSecretsStore } from "../secrets/store/index.js";
 const SUITE = randomBytes(4).toString("hex");
 const tag = (s: string) => `it-${SUITE}-${s}`;
 
-// Distinct from real registry entries to avoid ambiguity if seeds change.
-// Both happen to exist in MODEL_REGISTRY but the resolver doesn't validate
-// against it — only the routing table.
-const MODEL_ANTHROPIC = "claude-sonnet-4-6";
-const MODEL_XAI = "x-ai/grok-4.20";
+// Suite-tagged so this test stays isolated from any other writer to
+// `model_providers` in the shared integration DB. The resolver only
+// looks up the literal string in the routing table — it doesn't
+// validate against `MODEL_REGISTRY` — so any string works. The
+// `(model, position)` UNIQUE constraint on `model_providers` would
+// otherwise collide with parallel runs of this file (vitest worker
+// retries, suite re-entry) or any future test seeding the same model
+// at position 0.
+const MODEL_ANTHROPIC = tag("anthropic-test-model");
+const MODEL_XAI = tag("openai-test-model");
 
 let sql: ReturnType<typeof postgres>;
 let agentStore: DrizzleAgentStore;
