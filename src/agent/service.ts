@@ -5,9 +5,12 @@ import type {
   ReflectOptions,
   ReflectResult,
   RetainOptions,
+  TagGroup,
+  TagsMatch,
 } from "../memory/provider.js";
 import type { SkillsService } from "../skills/skills-service.js";
 import type { CodingService } from "./coding/service.js";
+import type { ProfileMemoryScope } from "./store/schema.js";
 
 /**
  * Service interface — the ACL boundary between tools and external systems.
@@ -95,31 +98,29 @@ export interface Service {
  * Create a scoped Service for a conversation turn.
  *
  * Wraps a MemoryProvider, scoping all operations to the given bank
- * and merging profileTags into every call. Tools that use this
- * service cannot access other users' data or bypass tag filters.
+ * and folding the profile's `memoryScope` (if any) into every recall
+ * and reflect as a `tag_groups` ACL filter. Tools that use this
+ * service cannot access other users' data or bypass the scope.
+ *
+ * Retain is intentionally not scoped — writes go to Hindsight as-is,
+ * and tagging happens at extraction time via the Observer drain.
  */
 export function createService(
   memory: MemoryProvider,
   bankId: string,
-  profileTags: readonly string[],
+  memoryScope: ProfileMemoryScope | null,
   files: Service["files"],
   coreMemory: Service["coreMemory"],
   stageRetain: StageRetainFn,
   coding?: CodingService,
   skills?: SkillsService,
 ): Service {
-  function attachProfileTags(opts: { tags?: string[] } | undefined) {
-    return {
-      ...opts,
-      tags: [...profileTags, ...(opts?.tags ?? [])],
-    };
-  }
-
   return {
     memory: {
-      recall: (query, opts) => memory.recall(bankId, query, attachProfileTags(opts)),
-      retain: (content, opts) => memory.retain(bankId, content, attachProfileTags(opts)),
-      reflect: (query, opts) => memory.reflect(bankId, query, attachProfileTags(opts)),
+      recall: (query, opts) => memory.recall(bankId, query, applyScopeToRecall(memoryScope, opts)),
+      retain: (content, opts) => memory.retain(bankId, content, opts),
+      reflect: (query, opts) =>
+        memory.reflect(bankId, query, applyScopeToReflect(memoryScope, opts)),
       stageRetain,
     },
     files,
@@ -127,4 +128,77 @@ export function createService(
     ...(coding !== undefined && { coding }),
     ...(skills !== undefined && { skills }),
   };
+}
+
+/**
+ * Fold the profile's scope into a `tag_groups` filter combining the
+ * scope leaves and any caller-supplied tag filter (tags, tagsMatch,
+ * tagGroups). Returns `null` when the profile has no scope — the
+ * caller passes opts through verbatim in that case.
+ *
+ * A caller passing `tagsMatch` without `tags` has no leaf to attach
+ * the match mode to, so it's silently dropped — meaningless on its own.
+ *
+ * Caller leaves use `caller.tagsMatch ?? "any"` (the API default), not
+ * `any_strict` like the scope leaves. The asymmetry is deliberate: the
+ * scope leaves must exclude untagged memories on the compartment/trust
+ * dimensions (legacy rows with no tags would otherwise leak across
+ * compartments). The caller's leaf is an additional filter on a third
+ * dimension — within the same AND group, the scope leaves already
+ * exclude untagged on their dimensions, so the caller leaf only widens
+ * on the caller's tag dimension.
+ */
+function buildScopedTagGroups(
+  memoryScope: ProfileMemoryScope,
+  caller: { tags?: string[]; tagsMatch?: TagsMatch; tagGroups?: TagGroup[] } | undefined,
+): TagGroup[] {
+  const andChildren: TagGroup[] = buildScopeLeaves(memoryScope);
+  if (caller?.tags !== undefined && caller.tags.length > 0) {
+    andChildren.push({ tags: caller.tags, match: caller.tagsMatch ?? "any" });
+  }
+  if (caller?.tagGroups !== undefined) {
+    andChildren.push(...caller.tagGroups);
+  }
+  return [{ and: andChildren }];
+}
+
+// Strip the simple-tag-filter fields the scope path folds into tagGroups.
+// Spreading `rest` carries forward any future RecallOptions/ReflectOptions
+// fields automatically — adding a new option won't silently drop on the
+// scoped path while passing through unchanged on the no-scope path.
+function applyScopeToRecall(
+  memoryScope: ProfileMemoryScope | null,
+  opts: RecallOptions | undefined,
+): RecallOptions {
+  if (memoryScope === null) return opts ?? {};
+  const { tags: _tags, tagsMatch: _tagsMatch, tagGroups: _tagGroups, ...rest } = opts ?? {};
+  return { ...rest, tagGroups: buildScopedTagGroups(memoryScope, opts) };
+}
+
+function applyScopeToReflect(
+  memoryScope: ProfileMemoryScope | null,
+  opts: ReflectOptions | undefined,
+): ReflectOptions {
+  if (memoryScope === null) return opts ?? {};
+  const { tags: _tags, tagsMatch: _tagsMatch, tagGroups: _tagGroups, ...rest } = opts ?? {};
+  return { ...rest, tagGroups: buildScopedTagGroups(memoryScope, opts) };
+}
+
+/**
+ * Build the leaves of the scope filter — one leaf per dimension.
+ * `any_strict` excludes untagged memories (so legacy un-compartmented
+ * rows aren't accidentally exposed) and ORs within the dimension.
+ * The caller wraps these in an AND group.
+ */
+function buildScopeLeaves(scope: ProfileMemoryScope): TagGroup[] {
+  return [
+    {
+      tags: scope.compartments.map((c) => `compartment:${c}`),
+      match: "any_strict",
+    },
+    {
+      tags: scope.trust.map((t) => `trust:${t}`),
+      match: "any_strict",
+    },
+  ];
 }

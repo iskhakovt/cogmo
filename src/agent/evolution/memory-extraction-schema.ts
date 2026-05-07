@@ -131,6 +131,20 @@ ${TRUST_DEFINITIONS}
 - **Source reliability**: Only extract facts explicitly stated by the user, confirmed by the user, or grounded in tool output. Do not extract unsupported assistant guesses, suggestions, or summaries — the assistant may be wrong.
 - **Extract standalone facts**: Each fact should be understandable without the conversation context. "Project X deadline is March 15" not "the deadline is in two weeks".
 - **Skip trivial content**: Don't extract greetings, small talk, acknowledgments, or transient discussion.
+- **Skip Cogmo platform state**: Don't extract bugs, missing features, "X doesn't work yet", todos, or current limitations of Cogmo (the agent system itself). Cogmo is under active development; today's limitations are stale within weeks.
+  Examples of what NOT to extract:
+  - "TTS isn't available yet" / "Cogmo can't do voice output"
+  - "Recraft image model isn't supported" / "Cogmo only has fal-ai right now"
+  - "The /profile compartment picker isn't built" / "Cogmo has no UI for setting memory scope"
+  - "Hindsight retainBatch has a bug with multi-item async retains" / "Cogmo's memory writes are slow because of the workaround"
+  - "Auto-recall doesn't fire on the first message of a conversation" (any current behavioural quirk)
+
+  Architecture facts that are durable are fine to extract:
+  - "Cogmo stores long-term memory in Hindsight"
+  - "Cogmo uses the Anthropic API for the main agent loop"
+  - "Cogmo's profiles each have their own model and tool set"
+
+  Rule of thumb: if the fact would be wrong after a code change you'd expect to see this quarter, it's state — skip it. If the fact would still be true after several releases, it's architecture — extract it. The user's own technical environment ("user's homelab is offline", "user's NAS uses ZFS") is always durable user-fact and should be extracted regardless — this rule is specifically about Cogmo-the-agent's internals.
 - **No conversation references**: Don't mention "the user said" or "in this conversation" — extract the fact itself.
 - **Admission criteria**: Only extract facts with future utility, factual confidence, and semantic novelty. Ask: "would knowing this help in a future conversation?"
 - **One fact per item**: Don't combine multiple independent facts into one entry.

@@ -13,6 +13,7 @@ import {
   llmProviders,
   messages,
   modelProviders,
+  type ProfileMemoryScope,
   type ProviderAttrs,
   pendingMemories,
   profiles,
@@ -56,6 +57,7 @@ export interface Profile {
   extractionModel: string | null;
   autoRecall: AutoRecallMode;
   toolSet: ToolSet;
+  memoryScope: ProfileMemoryScope | null; // null = no compartment/trust restriction
 }
 
 export interface ProfileUpdates {
@@ -66,6 +68,7 @@ export interface ProfileUpdates {
   extractionModel?: string | null;
   autoRecall?: AutoRecallMode;
   toolSet?: ToolSet;
+  memoryScope?: ProfileMemoryScope | null;
 }
 
 export interface ConversationSummary {
@@ -185,6 +188,7 @@ export interface AgentStore {
     basePrompt: string;
     model: string;
     toolSet: ToolSet;
+    memoryScope?: ProfileMemoryScope | null;
   }): Promise<Profile>;
 
   /** List profiles visible to `userId`: org profiles (user_id IS NULL) + the user's own profiles. */
@@ -598,6 +602,7 @@ export class DrizzleAgentStore implements AgentStore {
           extractionModel: profiles.extractionModel,
           autoRecall: profiles.autoRecall,
           toolSet: profiles.toolSet,
+          memoryScope: profiles.memoryScope,
         })
         .from(profiles)
         .where(eq(profiles.id, profileId))
@@ -626,6 +631,7 @@ export class DrizzleAgentStore implements AgentStore {
     basePrompt: string;
     model: string;
     toolSet: ToolSet;
+    memoryScope?: ProfileMemoryScope | null;
   }): Promise<Profile> {
     return translateUniqueViolation(() =>
       this.#db.transaction(async (tx) => {
@@ -640,6 +646,7 @@ export class DrizzleAgentStore implements AgentStore {
             extractionModel: profiles.extractionModel,
             autoRecall: profiles.autoRecall,
             toolSet: profiles.toolSet,
+            memoryScope: profiles.memoryScope,
           }),
         );
         return row as Profile;
@@ -660,6 +667,7 @@ export class DrizzleAgentStore implements AgentStore {
           extractionModel: profiles.extractionModel,
           autoRecall: profiles.autoRecall,
           toolSet: profiles.toolSet,
+          memoryScope: profiles.memoryScope,
         })
         .from(profiles)
         .where(or(isNull(profiles.userId), eq(profiles.userId, userId)))
@@ -696,6 +704,7 @@ export class DrizzleAgentStore implements AgentStore {
             extractionModel: profiles.extractionModel,
             autoRecall: profiles.autoRecall,
             toolSet: profiles.toolSet,
+            memoryScope: profiles.memoryScope,
           });
         return single(rows) as Profile;
       }),

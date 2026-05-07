@@ -1,0 +1,1 @@
+ALTER TABLE "profiles" ADD COLUMN "memory_scope" jsonb;
