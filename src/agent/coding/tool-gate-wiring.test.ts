@@ -136,6 +136,7 @@ function fakeSandbox(): { sandbox: Sandbox; stopCalls: string[] } {
   const sandbox: Sandbox = {
     healthCheck: async () => ({ ok: true, runtime: "runc" }),
     reconcileCrashedInstances: async () => ({ orphansReaped: 0 }),
+    ensureImagePresent: vi.fn(async () => {}),
     createTaskContainer: vi.fn(),
     getTaskContainer: vi.fn(async (id) => ({
       containerRowId: "row-x",

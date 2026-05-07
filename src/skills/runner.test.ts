@@ -5,7 +5,7 @@ import type { Database, Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { InputValidationError, SkillRunnerImpl } from "./runner.js";
+import { InputValidationError, mapManifestResourceLimits, SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
 
 function makeMockFiles(): Service["files"] {
@@ -298,7 +298,9 @@ async def run(inputs, ctx):
     ).rejects.toThrow(/manifest.name/);
   });
 
-  it("rejects tier:container in P3.1 (Tier 2 lands in P3.2)", async () => {
+  it("rejects tier:container when no sandbox is configured", async () => {
+    // Runner constructed without `sandbox` — tier-2 invocation must fail
+    // fast with a clear error rather than silently no-op or hang.
     const runner = await makeRunner();
     const containerManifest = `---
 name: container-skill
@@ -315,7 +317,7 @@ inputs:
       body: ECHO_BODY,
     });
     await expect(runner.invoke({ name: "container-skill", inputs: {} })).rejects.toThrow(
-      /not supported in P3\.1/,
+      /no sandbox is configured/,
     );
   });
 
@@ -407,5 +409,60 @@ inputs:
       [1, 2, 3, 4, 5].map((x) => runner.invoke({ name: "echo", inputs: { x } })),
     );
     expect(results.every((r) => r.status === "success")).toBe(true);
+  });
+});
+
+describe("UTF-8 / non-ASCII body — locks the JSON-as-Python-literal contract", () => {
+  it("a skill body containing emoji and non-BMP chars round-trips through Pyodide", async () => {
+    const runner = await makeRunner();
+    // Body intentionally contains: emoji (non-BMP — surrogate pair),
+    // accented Latin, CJK, an embedded backslash, and a newline literal.
+    // If the body-inlining encoder ever drifts (e.g. someone swaps the JSON
+    // encoder for one that emits `\/` or trims surrogate pairs), this test
+    // catches it before the bug reaches a real skill.
+    const body = `
+async def run(inputs, ctx):
+    return {"emoji": "\\U0001F600", "accented": "café", "cjk": "日本語", "back": "a\\\\b"}
+`;
+    await runner.__registerForTests({
+      name: "unicode",
+      manifestSource: ECHO_MANIFEST.replace("name: echo", "name: unicode"),
+      body,
+    });
+    const r = await runner.invoke({ name: "unicode", inputs: { x: 1 } });
+    expect(r.status).toBe("success");
+    expect(r.output).toEqual({
+      emoji: "😀",
+      accented: "café",
+      cjk: "日本語",
+      back: "a\\b",
+    });
+  });
+});
+
+describe("mapManifestResourceLimits", () => {
+  it("maps memory_mb to bytes and cpu_shares to cpus", () => {
+    expect(mapManifestResourceLimits({ memory_mb: 1024, cpu_shares: 2, wall_clock_s: 30 })).toEqual(
+      { memory_bytes: 1024 * 1024 * 1024, cpus: 2 },
+    );
+  });
+
+  it("maps cpu_shares alone — regression: was silently dropped before", () => {
+    expect(mapManifestResourceLimits({ cpu_shares: 3 })).toEqual({ cpus: 3 });
+  });
+
+  it("maps memory_mb alone", () => {
+    expect(mapManifestResourceLimits({ memory_mb: 512 })).toEqual({
+      memory_bytes: 512 * 1024 * 1024,
+    });
+  });
+
+  it("returns an empty object when the manifest declares no resources", () => {
+    expect(mapManifestResourceLimits(undefined)).toEqual({});
+    expect(mapManifestResourceLimits({})).toEqual({});
+  });
+
+  it("ignores wall_clock_s — that's threaded as a separate runOnSysboxContainer arg", () => {
+    expect(mapManifestResourceLimits({ wall_clock_s: 60 })).toEqual({});
   });
 });
