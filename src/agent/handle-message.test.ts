@@ -1652,4 +1652,84 @@ describe("createHandleMessage", () => {
       );
     });
   });
+
+  it("auto-recall passes the profile's memoryScope through as a tag_groups filter", async () => {
+    const memory = mockMemoryProvider();
+    const deps = mockDeps({
+      memory,
+      agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({
+          id: "profile-1",
+          userId: null,
+          name: "coder",
+          basePrompt: "test",
+          model: "claude-sonnet-4-6",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "always" as const,
+          toolSet: [],
+          memoryScope: {
+            compartments: ["work", "technical"],
+            trust: ["first-party"],
+          },
+        }),
+      }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(memory.recall).toHaveBeenCalled();
+    const recallCall = (memory.recall as any).mock.calls[0];
+    const opts = recallCall[2];
+    expect(opts).toMatchObject({
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:work", "compartment:technical"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+          ],
+        },
+      ],
+      maxTokens: 2000,
+    });
+    // tags / tagsMatch must NOT be on the request — caller didn't pass any
+    // and the scope filter folds everything into tagGroups.
+    expect(opts.tags).toBeUndefined();
+    expect(opts.tagsMatch).toBeUndefined();
+  });
+
+  it("auto-recall passes opts unchanged when profile.memoryScope is null", async () => {
+    const memory = mockMemoryProvider();
+    const deps = mockDeps({
+      memory,
+      agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({
+          id: "profile-1",
+          userId: null,
+          name: "default",
+          basePrompt: "test",
+          model: "claude-sonnet-4-6",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "always" as const,
+          toolSet: [],
+          memoryScope: null,
+        }),
+      }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(memory.recall).toHaveBeenCalledWith("user-1", expect.any(String), {
+      maxTokens: 2000,
+    });
+  });
 });

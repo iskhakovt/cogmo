@@ -15,10 +15,16 @@ import { z } from "zod";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { MessageContentSchema } from "../../llm/types.js";
 import { secrets } from "../../secrets/store/schema.js";
+import {
+  MemoryCompartmentSchema,
+  MemoryTrustSchema,
+} from "../evolution/memory-extraction-schema.js";
 
 // --- Enums ---
 
 export const autoRecallMode = pgEnum("auto_recall_mode", ["off", "always", "heuristic", "llm"]);
+
+export const pendingMemorySource = pgEnum("pending_memory_source", ["live_retain", "migration"]);
 
 /**
  * Voice mode preference. `auto` mirrors inbound modality (voice in → voice out).
@@ -64,6 +70,22 @@ export type ProviderAttrs = z.infer<typeof ProviderAttrsSchema>;
  */
 export const ToolSetSchema = z.array(z.string());
 export type ToolSet = z.infer<typeof ToolSetSchema>;
+
+/**
+ * `profiles.memory_scope` — declares which compartment + trust tag combinations
+ * a profile is allowed to recall from Hindsight. Null = no restriction (legacy
+ * default; all memories visible). When set, both arrays must be non-empty —
+ * a profile that allows zero compartments or zero trust tiers can recall
+ * nothing, which is almost certainly a configuration mistake. The orchestrator
+ * folds these into a `tag_groups` filter at recall/reflect time so that
+ * only memories matching `compartment ∈ allowed AND trust ∈ allowed` are
+ * returned.
+ */
+export const ProfileMemoryScopeSchema = z.object({
+  compartments: z.array(MemoryCompartmentSchema).min(1),
+  trust: z.array(MemoryTrustSchema).min(1),
+});
+export type ProfileMemoryScope = z.infer<typeof ProfileMemoryScopeSchema>;
 
 // --- Tables ---
 
@@ -121,6 +143,7 @@ export const profiles = pgTable(
      */
     voiceMode: voiceMode("voice_mode").notNull().default("auto"),
     toolSet: jsonbZod("tool_set", ToolSetSchema).notNull(),
+    memoryScope: jsonbZod("memory_scope", ProfileMemoryScopeSchema), // null = no restriction
     createdAt: ts(),
   },
   (t) => [unique("uq_profiles_user_name").on(t.userId, t.name).nullsNotDistinct()],
@@ -214,6 +237,26 @@ export const coreMemoryBlocks = pgTable(
     createdAt: ts(),
   },
   (t) => [unique("uq_core_memory_user_key").on(t.userId, t.key)],
+);
+
+/**
+ * Memory writes awaiting Observer classification before retention to
+ * Hindsight. User-scoped (not conversation-scoped) so /reset doesn't
+ * destroy pending rows; drain on any subsequent conversation/idle.
+ */
+export const pendingMemories = pgTable(
+  "pending_memories",
+  {
+    id: pk(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    content: text("content").notNull(),
+    context: text("context"),
+    source: pendingMemorySource("source").notNull(),
+    createdAt: ts(),
+  },
+  (t) => [index("idx_pending_memories_user").on(t.userId, t.createdAt)],
 );
 
 /**

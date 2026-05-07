@@ -1,5 +1,5 @@
 {
-  "id": "ab200dba-84b9-4382-a40e-661a7280921c",
+  "id": "7403c532-df59-4085-bf08-4b3be45710ec",
   "prevId": "aa9519a6-b0df-4019-b151-a44b0516b2f7",
   "version": "7",
   "dialect": "postgresql",
@@ -856,6 +856,90 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.pending_memories": {
+      "name": "pending_memories",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "uuidv7()"
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "content": {
+          "name": "content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "context": {
+          "name": "context",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source": {
+          "name": "source",
+          "type": "pending_memory_source",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_pending_memories_user": {
+          "name": "idx_pending_memories_user",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "pending_memories_user_id_users_id_fk": {
+          "name": "pending_memories_user_id_users_id_fk",
+          "tableFrom": "pending_memories",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.profiles": {
       "name": "profiles",
       "schema": "",
@@ -924,6 +1008,12 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true
+        },
+        "memory_scope": {
+          "name": "memory_scope",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -2699,6 +2789,11 @@
       "name": "conversation_status",
       "schema": "public",
       "values": ["active", "errored"]
+    },
+    "public.pending_memory_source": {
+      "name": "pending_memory_source",
+      "schema": "public",
+      "values": ["live_retain", "migration"]
     },
     "public.voice_mode": {
       "name": "voice_mode",

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import type { MemoryProvider } from "../memory/provider.js";
 import { memoryRecall, memoryReflect, memoryRetain, memoryTools } from "./memory-tools.js";
 import type { Service } from "./service.js";
+import { createService } from "./service.js";
 
 function mockService(overrides?: Partial<Service["memory"]>): Service {
   return {
@@ -8,6 +10,7 @@ function mockService(overrides?: Partial<Service["memory"]>): Service {
       recall: vi.fn().mockResolvedValue({ memories: [] }),
       retain: vi.fn().mockResolvedValue(undefined),
       reflect: vi.fn().mockResolvedValue({ answer: "" }),
+      stageRetain: vi.fn().mockResolvedValue(undefined),
       ...overrides,
     },
     files: {
@@ -65,26 +68,30 @@ describe("memory_recall", () => {
 });
 
 describe("memory_retain", () => {
-  it("calls service.memory.retain with content", async () => {
+  it("stages the fact via service.memory.stageRetain", async () => {
     const caps = mockService();
     await memoryRetain.handler({ content: "Alice likes coffee" }, caps);
 
-    expect(caps.memory.retain).toHaveBeenCalledWith("Alice likes coffee", {
-      tags: ["network:world"],
-    });
+    expect(caps.memory.stageRetain).toHaveBeenCalledWith("Alice likes coffee");
   });
 
-  it("passes context when provided", async () => {
+  it("forwards context when provided", async () => {
     const caps = mockService();
     await memoryRetain.handler(
       { content: "Alice likes coffee", context: "mentioned during lunch chat" },
       caps,
     );
 
-    expect(caps.memory.retain).toHaveBeenCalledWith("Alice likes coffee", {
+    expect(caps.memory.stageRetain).toHaveBeenCalledWith("Alice likes coffee", {
       context: "mentioned during lunch chat",
-      tags: ["network:world"],
     });
+  });
+
+  it("does not write directly to MemoryProvider — staging only", async () => {
+    const caps = mockService();
+    await memoryRetain.handler({ content: "Alice likes coffee" }, caps);
+
+    expect(caps.memory.retain).not.toHaveBeenCalled();
   });
 
   it("returns confirmation", async () => {
@@ -171,5 +178,73 @@ describe("memory_reflect", () => {
 
   it("is registered in memoryTools", () => {
     expect(memoryTools.map((t) => t.name)).toContain("memory_reflect");
+  });
+});
+
+describe("memory tools through a scope-filtered Service", () => {
+  // The scope filter lives on Service.memory.recall / .reflect; tools that
+  // call those methods must inherit the filter without doing anything
+  // tag-aware themselves. These tests pin the join between the tool's
+  // input schema and the Service's tag_groups construction.
+  function buildScopedService(): { svc: Service; provider: MemoryProvider } {
+    const provider: MemoryProvider = {
+      name: "mock",
+      retain: vi.fn().mockResolvedValue(undefined),
+      retainBatch: vi.fn().mockResolvedValue(undefined),
+      recall: vi.fn().mockResolvedValue({ memories: [] }),
+      reflect: vi.fn().mockResolvedValue({ answer: "" }),
+    };
+    const svc = createService(
+      provider,
+      "user-123",
+      { compartments: ["work", "technical"], trust: ["first-party"] },
+      {
+        read: vi.fn().mockResolvedValue(""),
+        write: vi.fn().mockResolvedValue(undefined),
+        list: vi.fn().mockResolvedValue([]),
+      },
+      { get: vi.fn().mockResolvedValue([]), update: vi.fn().mockResolvedValue(undefined) },
+      vi.fn().mockResolvedValue(undefined),
+    );
+    return { svc, provider };
+  }
+
+  it("memory_recall through a scoped service applies the tag_groups filter", async () => {
+    const { svc, provider } = buildScopedService();
+
+    await memoryRecall.handler({ query: "deadlines" }, svc);
+
+    expect(provider.recall).toHaveBeenCalledWith("user-123", "deadlines", {
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:work", "compartment:technical"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("memory_reflect through a scoped service folds caller tags + budget into the filter", async () => {
+    const { svc, provider } = buildScopedService();
+
+    await memoryReflect.handler(
+      { query: "summarise", budget: "mid", tags: ["preference"], tagsMatch: "any" },
+      svc,
+    );
+
+    expect(provider.reflect).toHaveBeenCalledWith("user-123", "summarise", {
+      budget: "mid",
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:work", "compartment:technical"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+            { tags: ["preference"], match: "any" },
+          ],
+        },
+      ],
+    });
   });
 });

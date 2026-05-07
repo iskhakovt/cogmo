@@ -13,7 +13,9 @@ import {
   llmProviders,
   messages,
   modelProviders,
+  type ProfileMemoryScope,
   type ProviderAttrs,
+  pendingMemories,
   profiles,
   steeringRules,
   type ToolSet,
@@ -37,6 +39,18 @@ export type ConversationStatus = "active" | "errored";
 /** Voice mode preference. Mirrors the `voice_mode` pgEnum exactly. */
 export type VoiceMode = "auto" | "always" | "never";
 
+/** Mirrors the `pending_memory_source` PG enum. */
+export type PendingMemorySource = "live_retain" | "migration";
+
+/** A memory write awaiting Observer classification before retention to Hindsight. */
+export interface PendingMemory {
+  id: string;
+  content: string;
+  context: string | null;
+  source: PendingMemorySource;
+  createdAt: Date;
+}
+
 export interface Profile {
   id: string;
   userId: string | null; // null = org profile (read-only via Transport)
@@ -49,6 +63,7 @@ export interface Profile {
   /** Profile-level voice mode default; overridden per-conversation. */
   voiceMode: VoiceMode;
   toolSet: ToolSet;
+  memoryScope: ProfileMemoryScope | null; // null = no compartment/trust restriction
 }
 
 export interface ProfileUpdates {
@@ -60,6 +75,7 @@ export interface ProfileUpdates {
   autoRecall?: AutoRecallMode;
   voiceMode?: VoiceMode;
   toolSet?: ToolSet;
+  memoryScope?: ProfileMemoryScope | null;
 }
 
 export interface ConversationSummary {
@@ -211,6 +227,7 @@ export interface AgentStore {
     basePrompt: string;
     model: string;
     toolSet: ToolSet;
+    memoryScope?: ProfileMemoryScope | null;
   }): Promise<Profile>;
 
   /** List profiles visible to `userId`: org profiles (user_id IS NULL) + the user's own profiles. */
@@ -425,6 +442,38 @@ export interface AgentStore {
       observationCount: number;
     };
   }): Promise<{ id: string }>;
+
+  // --- Pending memories (staging for Observer classification) ---
+
+  /** Insert a single row into the staging table. Returns the new row id. */
+  stagePendingMemory(params: {
+    userId: string;
+    content: string;
+    context?: string;
+    source: PendingMemorySource;
+  }): Promise<{ id: string }>;
+
+  /** Bulk insert via a single statement. Used by the migration script to stage thousands of rows in one round-trip. */
+  bulkStagePendingMemories(
+    rows: ReadonlyArray<{
+      userId: string;
+      content: string;
+      context?: string;
+      source: PendingMemorySource;
+    }>,
+  ): Promise<void>;
+
+  /**
+   * Read pending rows for a user, oldest first (FIFO drain order).
+   *
+   * `limit` caps the result size — callers running inside an Inngest step
+   * pass a bounded value so the row payload never exceeds the run-state
+   * size limit. Omit to read every pending row (tests, ad-hoc tooling).
+   */
+  getPendingMemories(userId: string, limit?: number): Promise<ReadonlyArray<PendingMemory>>;
+
+  /** Delete pending rows by id. Used by the Observer drain step after successful retain. */
+  deletePendingMemories(ids: ReadonlyArray<string>): Promise<void>;
 }
 
 export class DrizzleAgentStore implements AgentStore {
@@ -618,6 +667,7 @@ export class DrizzleAgentStore implements AgentStore {
           autoRecall: profiles.autoRecall,
           voiceMode: profiles.voiceMode,
           toolSet: profiles.toolSet,
+          memoryScope: profiles.memoryScope,
         })
         .from(profiles)
         .where(eq(profiles.id, profileId))
@@ -646,6 +696,7 @@ export class DrizzleAgentStore implements AgentStore {
     basePrompt: string;
     model: string;
     toolSet: ToolSet;
+    memoryScope?: ProfileMemoryScope | null;
   }): Promise<Profile> {
     return translateUniqueViolation(() =>
       this.#db.transaction(async (tx) => {
@@ -661,6 +712,7 @@ export class DrizzleAgentStore implements AgentStore {
             autoRecall: profiles.autoRecall,
             voiceMode: profiles.voiceMode,
             toolSet: profiles.toolSet,
+            memoryScope: profiles.memoryScope,
           }),
         );
         return row as Profile;
@@ -682,6 +734,7 @@ export class DrizzleAgentStore implements AgentStore {
           autoRecall: profiles.autoRecall,
           voiceMode: profiles.voiceMode,
           toolSet: profiles.toolSet,
+          memoryScope: profiles.memoryScope,
         })
         .from(profiles)
         .where(or(isNull(profiles.userId), eq(profiles.userId, userId)))
@@ -719,6 +772,7 @@ export class DrizzleAgentStore implements AgentStore {
             autoRecall: profiles.autoRecall,
             voiceMode: profiles.voiceMode,
             toolSet: profiles.toolSet,
+            memoryScope: profiles.memoryScope,
           });
         return single(rows) as Profile;
       }),
@@ -1295,6 +1349,80 @@ export class DrizzleAgentStore implements AgentStore {
           })
           .returning({ id: steeringRules.id }),
       );
+    });
+  }
+
+  async stagePendingMemory(params: {
+    userId: string;
+    content: string;
+    context?: string;
+    source: PendingMemorySource;
+  }): Promise<{ id: string }> {
+    return this.#db.transaction(async (tx) => {
+      return single(
+        await tx
+          .insert(pendingMemories)
+          .values({
+            userId: params.userId,
+            content: params.content,
+            context: params.context ?? null,
+            source: params.source,
+          })
+          .returning({ id: pendingMemories.id }),
+      );
+    });
+  }
+
+  async bulkStagePendingMemories(
+    rows: ReadonlyArray<{
+      userId: string;
+      content: string;
+      context?: string;
+      source: PendingMemorySource;
+    }>,
+  ): Promise<void> {
+    if (rows.length === 0) return;
+    await this.#db.transaction(async (tx) => {
+      // Postgres caps a single statement at 65,535 placeholders. Each row
+      // here binds 4 columns; chunking at 5,000 stays well under the cap
+      // (and atomicity is preserved by the surrounding transaction).
+      for (const chunk of R.chunk([...rows], 5000)) {
+        await tx.insert(pendingMemories).values(
+          chunk.map((r) => ({
+            userId: r.userId,
+            content: r.content,
+            context: r.context ?? null,
+            source: r.source,
+          })),
+        );
+      }
+    });
+  }
+
+  async getPendingMemories(userId: string, limit?: number): Promise<ReadonlyArray<PendingMemory>> {
+    return this.#db.transaction(async (tx) => {
+      const base = tx
+        .select({
+          id: pendingMemories.id,
+          content: pendingMemories.content,
+          context: pendingMemories.context,
+          source: pendingMemories.source,
+          createdAt: pendingMemories.createdAt,
+        })
+        .from(pendingMemories)
+        .where(eq(pendingMemories.userId, userId))
+        // Secondary sort by id breaks createdAt ties — bulk inserts share a
+        // timestamp, but UUIDv7 ids are time-ordered, so the tiebreak preserves
+        // insertion order for callers that care (drain FIFO, tests).
+        .orderBy(asc(pendingMemories.createdAt), asc(pendingMemories.id));
+      return limit !== undefined ? await base.limit(limit) : await base;
+    });
+  }
+
+  async deletePendingMemories(ids: ReadonlyArray<string>): Promise<void> {
+    if (ids.length === 0) return;
+    await this.#db.transaction(async (tx) => {
+      await tx.delete(pendingMemories).where(inArray(pendingMemories.id, [...ids]));
     });
   }
 }
