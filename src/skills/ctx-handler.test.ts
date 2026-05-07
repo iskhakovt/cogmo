@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { type MockProxy, mock } from "vitest-mock-extended";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { DefaultCtxHandler } from "./ctx-handler.js";
@@ -23,8 +24,8 @@ ${overrides}
 }
 
 interface Deps {
-  secretsStore: SecretsStore;
-  memory: MemoryProvider;
+  secretsStore: MockProxy<SecretsStore>;
+  memory: MockProxy<MemoryProvider>;
   files: {
     read: ReturnType<typeof vi.fn>;
     write: ReturnType<typeof vi.fn>;
@@ -34,24 +35,11 @@ interface Deps {
 }
 
 function deps(overrides?: Partial<Deps>): Deps {
+  const memory = mock<MemoryProvider>();
+  memory.recall.mockResolvedValue({ memories: [] });
   return {
-    secretsStore: {
-      getSecret: vi.fn().mockResolvedValue(undefined),
-      getSecretById: vi.fn(),
-      getSecretMeta: vi.fn(),
-      listSecretNames: vi.fn(),
-      setSecret: vi.fn(),
-      deleteSecret: vi.fn(),
-      // biome-ignore lint/suspicious/noExplicitAny: minimal SecretsStore stub for tests
-    } as any,
-    memory: {
-      name: "mock",
-      retain: vi.fn().mockResolvedValue(undefined),
-      retainBatch: vi.fn().mockResolvedValue(undefined),
-      recall: vi.fn().mockResolvedValue({ memories: [] }),
-      reflect: vi.fn(),
-      // biome-ignore lint/suspicious/noExplicitAny: MemoryProvider stub
-    } as any,
+    secretsStore: mock<SecretsStore>(),
+    memory,
     files: {
       read: vi.fn().mockResolvedValue(""),
       write: vi.fn().mockResolvedValue(undefined),

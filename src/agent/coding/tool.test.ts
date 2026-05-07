@@ -1,26 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { Service } from "../service.js";
 import { delegateCodingTool } from "./tool.js";
 
 function service(coding?: Service["coding"]): Service {
-  return {
-    memory: {
-      recall: vi.fn(),
-      retain: vi.fn(),
-      reflect: vi.fn(),
-    },
-    files: {
-      read: vi.fn(),
-      write: vi.fn(),
-      list: vi.fn(),
-    },
-    coreMemory: {
-      get: vi.fn(),
-      update: vi.fn(),
-    },
-    ...(coding !== undefined && { coding }),
-    // biome-ignore lint/suspicious/noExplicitAny: minimal mock — tests don't exercise the unused fields
-  } as any;
+  const s = mock<Service>();
+  // mock<Service>() auto-mocks every property including the optional `coding`
+  // sub-service; assign explicitly so an absent argument really yields
+  // undefined (the path the "no sandbox" test exercises).
+  s.coding = coding;
+  return s;
 }
 
 describe("delegate_coding tool", () => {
