@@ -1,7 +1,7 @@
 import { and, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { JsonValue } from "type-fest";
 import { single } from "../../db/helpers.js";
-import type { Transactor } from "../../db/index.js";
+import type { Transaction, Transactor } from "../../db/index.js";
 import type { InboundContent } from "../content.js";
 import { channelSessions, channels, inboundMessages, userIdentities } from "./schema.js";
 
@@ -84,7 +84,7 @@ export interface TransportStore {
   getActiveSessionsForConversation(conversationId: string): Promise<ReadonlyArray<Session>>;
 
   /** Get distinct channel types for a conversation's active sessions. */
-  getActiveChannelTypes(conversationId: string): Promise<ReadonlyArray<string>>;
+  getActiveChannelTypes(tx: Transaction, conversationId: string): Promise<ReadonlyArray<string>>;
 
   /**
    * Smallest `voice_max_reply_chars` across active channels for the
@@ -329,21 +329,22 @@ export class DrizzleTransportStore implements TransportStore {
     });
   }
 
-  async getActiveChannelTypes(conversationId: string): Promise<ReadonlyArray<string>> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .selectDistinct({ type: channels.type })
-        .from(channelSessions)
-        .innerJoin(channels, eq(channelSessions.channelId, channels.id))
-        .where(
-          and(
-            eq(channelSessions.conversationId, conversationId),
-            eq(channelSessions.status, "active"),
-            or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
-          ),
-        );
-      return rows.map((r) => r.type);
-    });
+  async getActiveChannelTypes(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<ReadonlyArray<string>> {
+    const rows = await tx
+      .selectDistinct({ type: channels.type })
+      .from(channelSessions)
+      .innerJoin(channels, eq(channelSessions.channelId, channels.id))
+      .where(
+        and(
+          eq(channelSessions.conversationId, conversationId),
+          eq(channelSessions.status, "active"),
+          or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
+        ),
+      );
+    return rows.map((r) => r.type);
   }
 
   async getVoiceMaxReplyChars(conversationId: string): Promise<number | null> {

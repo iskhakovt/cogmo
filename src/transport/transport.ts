@@ -6,6 +6,7 @@ import type { CodingStore } from "../agent/coding/store/index.js";
 import { ProfileInUseError, UniqueViolationError } from "../agent/store/errors.js";
 import type { AgentStore, ConversationSummary, Profile, VoiceMode } from "../agent/store/index.js";
 import type { ProfileMemoryScope, ToolSet } from "../agent/store/schema.js";
+import type { Transactor } from "../db/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import {
@@ -382,6 +383,7 @@ export function createTransport(deps: {
   channelId: string;
   defaultUserId: string;
   defaultProfileId: string;
+  runInTx: Transactor;
   transportStore: TransportStore;
   agentStore: AgentStore;
   /**
@@ -575,7 +577,7 @@ export function createTransport(deps: {
         if (!session) return ok(null);
         const conv = await agentStore.getConversation(session.conversationId);
         if (!conv || conv.userId !== identity.userId) return ok(null);
-        const profile = await agentStore.getProfile(conv.profileId);
+        const profile = await deps.runInTx((tx) => agentStore.getProfile(tx, conv.profileId));
         if (!profile) return err({ code: "profile_not_found" as const });
         return ok({
           conversationId: conv.id,

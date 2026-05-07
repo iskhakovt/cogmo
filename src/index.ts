@@ -165,7 +165,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   if (!user || !defaultProfile) {
     throw new Error("no user or profile found — run `cogmo setup` first");
   }
-  const profile = await agentStore.getProfile(defaultProfile.id);
+  const profile = await tx((tx) => agentStore.getProfile(tx, defaultProfile.id));
   if (!profile) {
     throw new Error("default profile disappeared — database inconsistency");
   }
@@ -408,6 +408,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   } = await startChannels({
     defaultUserId: user.id,
     defaultProfileId: profile.id,
+    runInTx: tx,
     transportStore,
     agentStore,
     codingStore,
@@ -491,6 +492,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   }
 
   const handleMessage = createHandleMessage({
+    runInTx: tx,
     agentStore,
     transportStore,
     resolveProvider,
@@ -511,6 +513,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   });
 
   const observer = createObserver({
+    runInTx: tx,
     agentStore,
     resolveProvider,
     memory,

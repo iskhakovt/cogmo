@@ -1,15 +1,14 @@
 import type { ToolDefinition } from "../llm/types.js";
-import type { AgentStore } from "./store/index.js";
+import type { Profile } from "./store/index.js";
 
 /**
- * Prompt source interface — the plugin contract for system prompt assembly.
- *
- * Implementations can load prompts from files, database, remote config, etc.
- * The orchestrator depends on this interface, never on a concrete source.
+ * Prompt source interface — the plugin contract for system prompt
+ * assembly. Pure formatter: takes pre-loaded data and renders the
+ * prompt. Loading happens upstream, typically via `loadConversationContext`.
  */
 export interface AssembleContext {
-  profileId: string;
-  channelTypes: string[];
+  profile: Profile | undefined;
+  rules: ReadonlyArray<{ rule: string }>;
   /**
    * True when the orchestrator has resolved this turn's reply will be TTS'd
    * to a voice clip. Drives a voice-style hint appended to the system
@@ -21,7 +20,7 @@ export interface AssembleContext {
 }
 
 export interface PromptSource {
-  assemble(store: AgentStore, ctx: AssembleContext): Promise<string>;
+  assemble(ctx: AssembleContext): Promise<string>;
 }
 
 // --- Prompt sections ---
@@ -67,10 +66,8 @@ export class DefaultPromptSource implements PromptSource {
     this.#serviceGuidance = config.serviceGuidance ?? [];
   }
 
-  async assemble(store: AgentStore, ctx: AssembleContext): Promise<string> {
-    const { profileId, channelTypes, voiceMode } = ctx;
-    const profile = await store.getProfile(profileId);
-    const rules = await store.getActiveRules(profileId, channelTypes);
+  async assemble(ctx: AssembleContext): Promise<string> {
+    const { profile, rules, voiceMode } = ctx;
     const userContext = await this.#getUserContext();
 
     const parts: string[] = [];

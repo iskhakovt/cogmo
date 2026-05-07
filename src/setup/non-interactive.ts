@@ -11,6 +11,7 @@
 import { err, ok, type Result } from "neverthrow";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ProviderAttrs } from "../agent/store/schema.js";
+import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import {
   DEFAULT_GITHUB_IDENTITY_NAME,
@@ -52,6 +53,7 @@ export const defaultValidators: Validators = {
 };
 
 export interface PersistDeps {
+  runInTx: Transactor;
   agentStore: AgentStore;
   transportStore: TransportStore;
   secretsStore: SecretsStore;
@@ -323,7 +325,7 @@ async function persistProvider(deps: PersistDeps, answers: NonInteractiveAnswers
 
   const defaultProfile = await deps.agentStore.getDefaultProfile();
   if (!defaultProfile) return;
-  const profile = await deps.agentStore.getProfile(defaultProfile.id);
+  const profile = await deps.runInTx((tx) => deps.agentStore.getProfile(tx, defaultProfile.id));
   if (!profile) return;
   const nextPosition = await deps.agentStore.getNextModelProviderPosition(profile.model);
   await deps.agentStore.addModelProvider({

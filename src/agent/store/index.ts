@@ -1,7 +1,7 @@
 import { and, asc, count, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import * as R from "remeda";
 import { single } from "../../db/helpers.js";
-import type { Transactor } from "../../db/index.js";
+import type { Transaction, Transactor } from "../../db/index.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { truncate } from "../../util/string.js";
 import type { AutoRecallMode } from "../recall-gate.js";
@@ -211,8 +211,8 @@ export interface AgentStore {
   /** Load full message history for a conversation, ordered by id. */
   getHistory(conversationId: string): Promise<ReadonlyArray<Message>>;
 
-  /** Load a profile by ID (returns the full `Profile` including `userId` and `name`). */
-  getProfile(profileId: string): Promise<Profile | undefined>;
+  /** Load a profile by ID. */
+  getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined>;
 
   /** Get the first user (for bootstrapping). */
   getFirstUser(): Promise<{ id: string } | undefined>;
@@ -259,8 +259,9 @@ export interface AgentStore {
 
   /** Load active steering rules for a profile + active channels (ordered by priority). */
   getActiveRules(
+    tx: Transaction,
     profileId: string,
-    channelTypes: string[],
+    channelTypes: ReadonlyArray<string>,
   ): Promise<ReadonlyArray<{ rule: string }>>;
 
   /** Get all core memory blocks for a user, ordered by key. */
@@ -653,27 +654,25 @@ export class DrizzleAgentStore implements AgentStore {
     });
   }
 
-  async getProfile(profileId: string): Promise<Profile | undefined> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({
-          id: profiles.id,
-          userId: profiles.userId,
-          name: profiles.name,
-          basePrompt: profiles.basePrompt,
-          model: profiles.model,
-          summarizationModel: profiles.summarizationModel,
-          extractionModel: profiles.extractionModel,
-          autoRecall: profiles.autoRecall,
-          voiceMode: profiles.voiceMode,
-          toolSet: profiles.toolSet,
-          memoryScope: profiles.memoryScope,
-        })
-        .from(profiles)
-        .where(eq(profiles.id, profileId))
-        .limit(1);
-      return rows[0];
-    });
+  async getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined> {
+    const rows = await tx
+      .select({
+        id: profiles.id,
+        userId: profiles.userId,
+        name: profiles.name,
+        basePrompt: profiles.basePrompt,
+        model: profiles.model,
+        summarizationModel: profiles.summarizationModel,
+        extractionModel: profiles.extractionModel,
+        autoRecall: profiles.autoRecall,
+        voiceMode: profiles.voiceMode,
+        toolSet: profiles.toolSet,
+        memoryScope: profiles.memoryScope,
+      })
+      .from(profiles)
+      .where(eq(profiles.id, profileId))
+      .limit(1);
+    return rows[0];
   }
 
   async getFirstUser(): Promise<{ id: string } | undefined> {
@@ -832,27 +831,24 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async getActiveRules(
+    tx: Transaction,
     profileId: string,
-    channelTypes: string[],
+    channelTypes: ReadonlyArray<string>,
   ): Promise<ReadonlyArray<{ rule: string }>> {
-    return this.#runInTx(async (tx) => {
-      return tx
-        .select({ rule: steeringRules.rule })
-        .from(steeringRules)
-        .where(
-          and(
-            eq(steeringRules.active, true),
-            or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
-            or(
-              isNull(steeringRules.channelType),
-              ...(channelTypes.length > 0
-                ? [inArray(steeringRules.channelType, channelTypes)]
-                : []),
-            ),
+    return tx
+      .select({ rule: steeringRules.rule })
+      .from(steeringRules)
+      .where(
+        and(
+          eq(steeringRules.active, true),
+          or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
+          or(
+            isNull(steeringRules.channelType),
+            ...(channelTypes.length > 0 ? [inArray(steeringRules.channelType, channelTypes)] : []),
           ),
-        )
-        .orderBy(asc(steeringRules.priority));
-    });
+        ),
+      )
+      .orderBy(asc(steeringRules.priority));
   }
 
   async getCoreMemoryBlocks(

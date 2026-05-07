@@ -105,6 +105,7 @@ describe("runNonInteractive", () => {
   it("writes provider + model_providers + secret with only the required vars", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -131,6 +132,7 @@ describe("runNonInteractive", () => {
     const path = tempFile("sk-from-secret-file-xxxxx");
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -149,6 +151,7 @@ describe("runNonInteractive", () => {
   it("writes Telegram channel + identities when bot token + allowed users supplied", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -236,6 +239,7 @@ describe("runNonInteractive", () => {
   it("applies OpenRouter attrs.promptCaching", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -261,6 +265,7 @@ describe("runNonInteractive", () => {
   it("uses custom baseUrl when provider type is custom", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -283,6 +288,7 @@ describe("runNonInteractive", () => {
   it("persists the Tavily key when supplied and validated", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -316,6 +322,7 @@ describe("runNonInteractive", () => {
   it("persists a GitHub identity bundle when COGMO_GITHUB_PAT is supplied", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -342,6 +349,7 @@ describe("runNonInteractive", () => {
   it("does not store a GitHub identity when no PAT is supplied", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -360,6 +368,7 @@ describe("runNonInteractive", () => {
     // it is the friendly behaviour.
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -425,6 +434,7 @@ describe("runNonInteractive", () => {
     });
 
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -434,6 +444,7 @@ describe("runNonInteractive", () => {
     const firstId = (await transportStore.getChannelByType("telegram"))?.id;
 
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,

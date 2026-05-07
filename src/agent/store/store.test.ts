@@ -89,7 +89,7 @@ describe("DrizzleAgentStore", () => {
         toolSet: ["memory_recall"],
       });
 
-      const profile = await store.getProfile(id);
+      const profile = await tx((trx) => store.getProfile(trx, id));
       expect(profile).toEqual({
         id,
         userId: null,
@@ -106,7 +106,9 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("returns null for unknown profile", async () => {
-      expect(await store.getProfile("019d0000-0000-7000-8000-000000000000")).toBeUndefined();
+      expect(
+        await tx((trx) => store.getProfile(trx, "019d0000-0000-7000-8000-000000000000")),
+      ).toBeUndefined();
     });
 
     it("getDefaultProfile returns first profile", async () => {
@@ -572,13 +574,13 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      const rules = await store.getActiveRules(profileId, []);
+      const rules = await tx((trx) => store.getActiveRules(trx, profileId, []));
       expect(rules).toEqual([{ rule: "Global safety rule" }, { rule: "Be concise" }]);
     });
 
     it("returns empty array when no active rules", async () => {
       const profileId = await seedProfile();
-      expect(await store.getActiveRules(profileId, [])).toEqual([]);
+      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([]);
     });
 
     it("returns channel-scoped rules when channel is active", async () => {
@@ -618,20 +620,20 @@ describe("DrizzleAgentStore", () => {
       ]);
 
       // No channels active — only null-scoped rules
-      expect(await store.getActiveRules(profileId, [])).toEqual([{ rule: "Global rule" }]);
+      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
+        { rule: "Global rule" },
+      ]);
 
       // Telegram active — global + telegram
-      expect(await store.getActiveRules(profileId, ["telegram"])).toEqual([
+      expect(await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]))).toEqual([
         { rule: "Global rule" },
         { rule: "Telegram rule" },
       ]);
 
       // Both channels — union
-      expect(await store.getActiveRules(profileId, ["telegram", "slack"])).toEqual([
-        { rule: "Global rule" },
-        { rule: "Telegram rule" },
-        { rule: "Slack rule" },
-      ]);
+      expect(
+        await tx((trx) => store.getActiveRules(trx, profileId, ["telegram", "slack"])),
+      ).toEqual([{ rule: "Global rule" }, { rule: "Telegram rule" }, { rule: "Slack rule" }]);
     });
   });
 
@@ -905,7 +907,7 @@ describe("DrizzleAgentStore", () => {
         compartments: ["work", "technical"],
         trust: ["first-party"],
       });
-      const loaded = await store.getProfile(created.id);
+      const loaded = await tx((trx) => store.getProfile(trx, created.id));
       expect(loaded?.memoryScope).toEqual(created.memoryScope);
     });
 
@@ -1100,7 +1102,7 @@ describe("DrizzleAgentStore", () => {
         toolSet: [],
       });
       await store.deleteProfile(id);
-      expect(await store.getProfile(id)).toBeUndefined();
+      expect(await tx((trx) => store.getProfile(trx, id))).toBeUndefined();
     });
 
     it("deleteProfile throws ProfileInUseError when conversations reference it", async () => {
@@ -1116,7 +1118,7 @@ describe("DrizzleAgentStore", () => {
       const { ProfileInUseError } = await import("./errors.js");
       await expect(store.deleteProfile(profileId)).rejects.toThrow(ProfileInUseError);
       // Profile still exists — delete rolled back.
-      expect(await store.getProfile(profileId)).not.toBeUndefined();
+      expect(await tx((trx) => store.getProfile(trx, profileId))).not.toBeUndefined();
     });
 
     it("deleteProfile throws ProfileInUseError when only message history references it", async () => {
@@ -1598,7 +1600,7 @@ describe("DrizzleAgentStore", () => {
         },
       });
 
-      const rules = await store.getActiveRules(profileId, []);
+      const rules = await tx((trx) => store.getActiveRules(trx, profileId, []));
       expect(rules).toEqual([{ rule: "New consolidated rule" }]);
     });
   });

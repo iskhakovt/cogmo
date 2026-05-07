@@ -14,6 +14,7 @@
  */
 
 import { NonRetriableError } from "inngest";
+import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
 import { conversationIdle } from "../../inngest/events.js";
 import { type LlmProviderResolver, ProviderConfigError } from "../../llm/resolver.js";
@@ -36,6 +37,7 @@ const MIN_MESSAGES_FOR_EXTRACTION = 4; // 2 turns minimum
 const PENDING_DRAIN_BATCH_SIZE = 100;
 
 export interface ObserverDeps {
+  runInTx: Transactor;
   agentStore: AgentStore;
   /**
    * Per-fire provider lookup. The extraction model is read from the
@@ -75,7 +77,7 @@ export function createObserver(deps: ObserverDeps) {
       // extraction on that model too. `extractionModel` overrides the
       // chat model when set; otherwise the chat model is reused.
       const profile = await step.run("load-profile", async () => {
-        return agentStore.getProfile(conv.profileId);
+        return deps.runInTx((tx) => agentStore.getProfile(tx, conv.profileId));
       });
       if (!profile) {
         logger.warn({ conversationId, profileId: conv.profileId }, "observer: profile not found");

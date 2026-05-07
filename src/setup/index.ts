@@ -81,7 +81,7 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
 
     if (validatedNonInteractive) {
       await persistNonInteractive(
-        { agentStore, transportStore, secretsStore },
+        { runInTx: tx, agentStore, transportStore, secretsStore },
         validatedNonInteractive,
       );
       return;

@@ -10,7 +10,7 @@
 import * as p from "@clack/prompts";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ProviderAttrs } from "../agent/store/schema.js";
-import { transactor } from "../db/transactor.js";
+import { type Transactor, transactor } from "../db/transactor.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import {
   DEFAULT_GITHUB_IDENTITY_NAME,
@@ -48,6 +48,7 @@ function cancelGuard<T>(value: T | symbol): T {
 // --- Types ---
 
 interface WizardDeps {
+  runInTx: Transactor;
   agentStore: AgentStore;
   transportStore: TransportStore;
   secretsStore: SecretsStore;
@@ -216,7 +217,7 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
   // Use next available position to avoid UNIQUE(model, position) collision.
   const defaultProfile = await deps.agentStore.getDefaultProfile();
   if (defaultProfile) {
-    const profile = await deps.agentStore.getProfile(defaultProfile.id);
+    const profile = await deps.runInTx((tx) => deps.agentStore.getProfile(tx, defaultProfile.id));
     if (profile) {
       const nextPosition = await deps.agentStore.getNextModelProviderPosition(profile.model);
       await deps.agentStore.addModelProvider({
@@ -607,9 +608,11 @@ export async function runWizard(deps: {
   masterKey: string;
 }): Promise<void> {
   const encryptionKey = deriveMasterKey(parseMasterKey(deps.masterKey), "cogmo/secrets-at-rest/v1");
-  const secretsStore = new DrizzleSecretsStore(transactor(deps.db), encryptionKey);
+  const tx = transactor(deps.db);
+  const secretsStore = new DrizzleSecretsStore(tx, encryptionKey);
 
   const wizardDeps: WizardDeps = {
+    runInTx: tx,
     agentStore: deps.agentStore,
     transportStore: deps.transportStore,
     secretsStore,

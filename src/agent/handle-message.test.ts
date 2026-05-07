@@ -18,6 +18,7 @@ import { ToolRegistry } from "./tools.js";
 
 function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
   return {
+    runInTx: (cb) => cb({} as never),
     agentStore: mockAgentStore(),
     transportStore: mockTransportStore(),
     resolveProvider: mockResolver(),
@@ -67,7 +68,7 @@ describe("createHandleMessage", () => {
     expect(deps.transportStore.getUnbatchedInbound).toHaveBeenCalledWith("conv-1", null);
   });
 
-  it("calls promptSource.assemble with agentStore and profileId", async () => {
+  it("calls promptSource.assemble with the loaded conversation context", async () => {
     const deps = mockDeps();
     await (createHandleMessage(deps) as any).fn({
       event: testEvent,
@@ -75,9 +76,13 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    expect(deps.promptSource.assemble).toHaveBeenCalledWith(deps.agentStore, {
-      profileId: "profile-1",
-      channelTypes: [],
+    // assemble now receives pre-loaded data (profile + rules), not a
+    // store reference. The use case `loadConversationContext` does the
+    // loading inside one transaction; the prompt source is a pure
+    // formatter.
+    expect(deps.promptSource.assemble).toHaveBeenCalledWith({
+      profile: expect.objectContaining({ id: "profile-1" }),
+      rules: [],
       voiceMode: false,
     });
   });
@@ -1937,7 +1942,6 @@ describe("createHandleMessage", () => {
       });
 
       expect(deps.promptSource.assemble).toHaveBeenCalledWith(
-        deps.agentStore,
         expect.objectContaining({ voiceMode: true }),
       );
     });
