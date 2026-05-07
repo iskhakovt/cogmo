@@ -7,7 +7,12 @@
  */
 
 import { actionToDecision } from "../../../agent/coding/permission-keyboard.js";
+import {
+  MemoryCompartmentSchema,
+  MemoryTrustSchema,
+} from "../../../agent/evolution/memory-extraction-schema.js";
 import type { Profile } from "../../../agent/store/index.js";
+import { type ProfileMemoryScope, ProfileMemoryScopeSchema } from "../../../agent/store/schema.js";
 import { SERVER_NAME_RE } from "../../../mcp/config.js";
 import { truncate } from "../../../util/string.js";
 import { isUuid } from "../../../util/uuid.js";
@@ -15,11 +20,17 @@ import type { Transport, TransportError } from "../../transport.js";
 import type { ProfileDialogs } from "./profile-dialog.js";
 import type { RepoDialogs } from "./repo-dialog.js";
 import {
+  formatScope,
   type InlineButton,
   renderModelList,
   renderProfileList,
   renderSessionsList,
 } from "./sessions-ux.js";
+
+// Re-exported so tests that pin formatScope's contract via commands.ts
+// keep working. The canonical implementation lives in sessions-ux.ts
+// (render helper, used by both show-reply and list-line rendering).
+export { formatScope };
 
 /**
  * Minimal Telegram context shape used by the commands. Modelled after grammY's `Context` but
@@ -42,7 +53,14 @@ export interface ReplyOptions {
 const USAGE = {
   resume: "Usage: /resume <alias>",
   name: "Usage: /name <alias>  (or /name -  to clear)",
-  profile: "Usage: /profile [list|switch <name>|new <name>|edit <name>|delete <name>]",
+  profile:
+    "Usage: /profile [list|switch <name>|new <name>|edit <name>|delete <name>|scope <name> [clear|compartments=… trust=…]]\n" +
+    "  /profile scope <name>                                   → show current scope\n" +
+    "  /profile scope <name> clear                             → unrestricted (recall all)\n" +
+    "  /profile scope <name> compartments=work,technical trust=first-party\n" +
+    "                                                          → set (both keys required)\n" +
+    "  Compartments: personal, work, health, financial, technical\n" +
+    "  Trust:        first-party, any",
   model: "Usage: /model [<model>]",
   repo:
     "Usage: /repo [list|add [<name> <local_path> <remote_url>]|remove <name>]\n" +
@@ -174,6 +192,19 @@ export async function handleProfile(
       return dialogs.startNew(transport, ctx, arg);
     case "edit":
       return dialogs.startEdit(transport, ctx, arg);
+    case "scope": {
+      // Profile names can contain spaces (no regex constraint at the schema
+      // level), so the name isn't necessarily a single token. `splitScopeArgs`
+      // walks from the tail collecting tokens that look like scope spec
+      // (`clear` or any `<key>=<value>`); the remaining prefix joins back
+      // into the name. Unknown keys are intentionally still routed to the
+      // parser so the operator sees "Unknown key …" instead of having a
+      // typo absorbed into the profile name.
+      // Caveat: profiles literally named `clear` or with `=` in the name
+      // can't be addressed — rename via `/profile edit`.
+      const { name, scopeTokens } = splitScopeArgs(rest);
+      return replyProfileScope(transport, ctx, handle, name, scopeTokens);
+    }
     default:
       await ctx.reply(USAGE.profile);
   }
@@ -677,6 +708,160 @@ async function replyProfileDelete(
     return;
   }
   await ctx.reply(`Profile "${name}" deleted.`);
+}
+
+// ── /profile scope ────────────────────────────────────────────────────
+
+/**
+ * Tokens that look like a scope-spec atom: the literal `clear` or any
+ * `<key>=<value>` shape. Used by `splitScopeArgs` to find the name/spec
+ * boundary when the profile name contains spaces.
+ *
+ * The shape check is keyword-agnostic on purpose — any `key=value`
+ * routes to `parseScopeSpec`, where unknown keys (typos like
+ * `compartment=` instead of `compartments=`) surface as a precise
+ * "Unknown key …" error. Tying the shape to known keys would silently
+ * drop typos into the name and fail with a confusing "No profile
+ * named …" instead.
+ */
+function isScopeShape(token: string): boolean {
+  return token.toLowerCase() === "clear" || /^[a-z]+=/i.test(token);
+}
+
+/**
+ * Split `rest` into a (multi-token) profile name and the trailing scope
+ * spec. Walks from the end so multi-word names work — e.g.
+ * `["my", "work", "clear"]` → name = "my work", spec = ["clear"].
+ *
+ * Exposed for unit tests; the only caller is the `scope` subcommand
+ * dispatcher in `handleProfile`.
+ */
+export function splitScopeArgs(rest: ReadonlyArray<string>): {
+  name: string;
+  scopeTokens: ReadonlyArray<string>;
+} {
+  let splitAt = rest.length;
+  while (splitAt > 0 && isScopeShape(rest[splitAt - 1] ?? "")) splitAt--;
+  return {
+    name: rest.slice(0, splitAt).join(" "),
+    scopeTokens: rest.slice(splitAt),
+  };
+}
+
+/**
+ * Pure parser for the scope spec — the tokens after `<name>` in
+ * `/profile scope <name> …`. Exposed for unit testing.
+ *
+ * Forms:
+ *   []                                        → show current scope
+ *   ["clear"]                                 → set null (unrestricted)
+ *   ["compartments=…", "trust=…"]             → set (both keys required, any order)
+ */
+export type ScopeSpec =
+  | { kind: "show" }
+  | { kind: "clear" }
+  | { kind: "set"; scope: ProfileMemoryScope }
+  | { kind: "error"; message: string };
+
+export function parseScopeSpec(tokens: ReadonlyArray<string>): ScopeSpec {
+  const trimmed = tokens.map((t) => t.trim()).filter(Boolean);
+  if (trimmed.length === 0) return { kind: "show" };
+  if (trimmed.length === 1 && trimmed[0]?.toLowerCase() === "clear") return { kind: "clear" };
+
+  const collected: { compartments?: string[]; trust?: string[] } = {};
+  for (const token of trimmed) {
+    const eq = token.indexOf("=");
+    if (eq <= 0) {
+      return {
+        kind: "error",
+        message: `Bad token "${token}". Expected compartments=… or trust=… (or "clear" alone).`,
+      };
+    }
+    const key = token.slice(0, eq).toLowerCase();
+    const values = token
+      .slice(eq + 1)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (key === "compartments" || key === "trust") {
+      if (collected[key] !== undefined) {
+        return {
+          kind: "error",
+          message: `Key "${key}" repeated. Combine values into a single comma-separated list.`,
+        };
+      }
+      collected[key] = values;
+    } else {
+      return {
+        kind: "error",
+        message: `Unknown key "${key}". Expected compartments or trust.`,
+      };
+    }
+  }
+  if (!collected.compartments || !collected.trust) {
+    return {
+      kind: "error",
+      message:
+        "Both compartments=… and trust=… are required when setting a scope. Use 'clear' to remove.",
+    };
+  }
+
+  const parsed = ProfileMemoryScopeSchema.safeParse(collected);
+  if (!parsed.success) {
+    return {
+      kind: "error",
+      message:
+        `Invalid scope: ${parsed.error.issues.map((i) => i.message).join("; ")}\n` +
+        `Compartments: ${MemoryCompartmentSchema.options.join(", ")}\n` +
+        `Trust:        ${MemoryTrustSchema.options.join(", ")}`,
+    };
+  }
+  return { kind: "set", scope: parsed.data };
+}
+
+async function replyProfileScope(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+  name: string,
+  scopeTokens: ReadonlyArray<string>,
+): Promise<void> {
+  if (!name) {
+    await ctx.reply(USAGE.profile);
+    return;
+  }
+  const resolved = await resolveProfileByName(transport, handle, name);
+  if (resolved.kind === "error") {
+    await ctx.reply(errorMessage(resolved.error));
+    return;
+  }
+  if (resolved.kind === "none") {
+    await ctx.reply(`No profile named "${name}".`);
+    return;
+  }
+  if (resolved.kind === "ambiguous") {
+    await ctx.reply(ambiguityMessage(name, resolved.matches));
+    return;
+  }
+  const profile = resolved.profile;
+
+  const spec = parseScopeSpec(scopeTokens);
+  if (spec.kind === "show") {
+    await ctx.reply(`Scope for "${profile.name}": ${formatScope(profile.memoryScope)}`);
+    return;
+  }
+  if (spec.kind === "error") {
+    await ctx.reply(spec.message);
+    return;
+  }
+
+  const newScope: ProfileMemoryScope | null = spec.kind === "clear" ? null : spec.scope;
+  const update = await transport.profiles.update(handle, profile.id, { memoryScope: newScope });
+  if (update.isErr()) {
+    await ctx.reply(errorMessage(update.error));
+    return;
+  }
+  await ctx.reply(`Scope for "${profile.name}" updated: ${formatScope(newScope)}`);
 }
 
 // ── /repo ─────────────────────────────────────────────────────────────

@@ -1,8 +1,10 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import type { Profile } from "../../../agent/store/index.js";
 import { mockTransport } from "../../../test/factories.js";
 import type { Transport } from "../../transport.js";
 import {
+  formatScope,
   handleEnd,
   handleMcp,
   handleModel,
@@ -15,6 +17,8 @@ import {
   handleSessions,
   handleSkillsApprovalCallback,
   handleVoice,
+  parseScopeSpec,
+  splitScopeArgs,
   type TelegramCommandContext,
 } from "./commands.js";
 import { ProfileDialogs } from "./profile-dialog.js";
@@ -351,6 +355,386 @@ describe("handleProfile", () => {
     const ctx = mkCtx("edit coder");
     await handleProfile(transport, ctx, dialogs);
     expect(startEdit).toHaveBeenCalledWith(transport, ctx, "coder");
+  });
+
+  describe("scope subcommand", () => {
+    function makeProfile(memoryScope: Profile["memoryScope"] = null): Profile {
+      return {
+        id: "p1",
+        userId: "u",
+        name: "personal",
+        basePrompt: "",
+        model: "claude-sonnet-4-6",
+        summarizationModel: null,
+        extractionModel: null,
+        autoRecall: "heuristic",
+        toolSet: [],
+        memoryScope,
+      };
+    }
+
+    it("shows current scope when called with no spec — null renders as 'unrestricted'", async () => {
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update: vi.fn().mockResolvedValue(ok({} as never)),
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("unrestricted"));
+    });
+
+    it("shows current scope when set", async () => {
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              makeProfile({
+                compartments: ["work", "technical"],
+                trust: ["first-party"],
+              }),
+            ]),
+          ),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update: vi.fn().mockResolvedValue(ok({} as never)),
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(ctx.reply).toHaveBeenCalledWith(
+        expect.stringContaining("compartments: work, technical / trust: first-party"),
+      );
+    });
+
+    it("clear → calls update with memoryScope: null and confirms", async () => {
+      const update = vi.fn().mockResolvedValue(ok(makeProfile(null)));
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal clear");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).toHaveBeenCalledWith("1", "p1", { memoryScope: null });
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("unrestricted"));
+    });
+
+    it("set → calls update with parsed scope", async () => {
+      const set = { compartments: ["work", "technical"] as const, trust: ["first-party"] as const };
+      const update = vi.fn().mockResolvedValue(ok(makeProfile({ ...set })));
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal compartments=work,technical trust=first-party");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).toHaveBeenCalledWith("1", "p1", {
+        memoryScope: { compartments: ["work", "technical"], trust: ["first-party"] },
+      });
+      expect(ctx.reply).toHaveBeenCalledWith(
+        expect.stringContaining("compartments: work, technical / trust: first-party"),
+      );
+    });
+
+    it("surfaces ambiguity (org + user share a name) without calling update", async () => {
+      // resolveProfileByName returns kind:"ambiguous" when an org profile
+      // and a user profile share a name AND multiple user-owned matches
+      // exist (the single-owned-match path picks the user one). Synthesise
+      // that by listing two user-owned profiles with the same name.
+      const update = vi.fn();
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              { ...makeProfile(null), id: "p1", userId: "u-a", name: "shared" },
+              { ...makeProfile(null), id: "p2", userId: "u-b", name: "shared" },
+            ]),
+          ),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope shared compartments=work trust=any");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("ambiguous"));
+    });
+
+    it("rejects unknown profile — does not call update", async () => {
+      const update = vi.fn();
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope ghost compartments=work trust=any");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('No profile named "ghost"'));
+    });
+
+    it("typo'd key (e.g. compartment=…) surfaces 'Unknown key' from parser, not 'No profile named'", async () => {
+      // Regression: a narrow scope-shape regex would absorb the typo into
+      // the name and emit "No profile named 'personal compartment=work'".
+      // The broadened shape check routes it to parseScopeSpec instead.
+      const update = vi.fn();
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal compartment=work trust=first-party");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('Unknown key "compartment"'));
+    });
+
+    it("surfaces parse errors without calling update", async () => {
+      const update = vi.fn();
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal compartments=bogus trust=first-party");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Invalid scope"));
+    });
+
+    it("addresses a profile whose name contains spaces", async () => {
+      const update = vi.fn().mockResolvedValue(
+        ok({
+          ...makeProfile({ compartments: ["work" as const], trust: ["first-party" as const] }),
+          name: "my work profile",
+        }),
+      );
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([{ ...makeProfile(null), name: "my work profile" }])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope my work profile compartments=work trust=first-party");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).toHaveBeenCalledWith("1", "p1", {
+        memoryScope: { compartments: ["work"], trust: ["first-party"] },
+      });
+    });
+
+    it("`/profile scope` with no name → USAGE (no list / update calls)", async () => {
+      const list = vi.fn();
+      const update = vi.fn();
+      const transport = transportWith({
+        profiles: {
+          list,
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(list).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Usage: /profile"));
+    });
+
+    it("surfaces transport access_denied (org profile) without leaking it as success", async () => {
+      const update = vi.fn().mockResolvedValue(
+        err({
+          code: "access_denied" as const,
+          reason: "org profiles are read-only via Transport",
+        }),
+      );
+      const orgProfile: Profile = { ...makeProfile(null), userId: null };
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([orgProfile])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal clear");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Access denied"));
+    });
+  });
+});
+
+describe("parseScopeSpec", () => {
+  it("empty tokens → show", () => {
+    expect(parseScopeSpec([])).toEqual({ kind: "show" });
+  });
+
+  it("['clear'] (any case) → clear", () => {
+    expect(parseScopeSpec(["clear"])).toEqual({ kind: "clear" });
+    expect(parseScopeSpec(["CLEAR"])).toEqual({ kind: "clear" });
+  });
+
+  it("set with both keys, regardless of order", () => {
+    const a = parseScopeSpec(["compartments=work,technical", "trust=first-party"]);
+    const b = parseScopeSpec(["trust=first-party", "compartments=work,technical"]);
+    expect(a).toEqual({
+      kind: "set",
+      scope: { compartments: ["work", "technical"], trust: ["first-party"] },
+    });
+    expect(b).toEqual(a);
+  });
+
+  it("rejects missing key (compartments only)", () => {
+    const r = parseScopeSpec(["compartments=work"]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain("Both compartments=… and trust=…");
+  });
+
+  it("rejects unknown key", () => {
+    const r = parseScopeSpec(["compartments=work", "trust=any", "extra=foo"]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain('Unknown key "extra"');
+  });
+
+  it("rejects token without '='", () => {
+    const r = parseScopeSpec(["bogus"]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain('Bad token "bogus"');
+  });
+
+  it("rejects empty value list (trust=)", () => {
+    // After splitting and filtering empties, trust ends up as []. Zod's .min(1)
+    // catches it — message mentions the validation issue.
+    const r = parseScopeSpec(["compartments=work", "trust="]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain("Invalid scope");
+  });
+
+  it("rejects unknown enum value", () => {
+    const r = parseScopeSpec(["compartments=bogus", "trust=first-party"]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain("Invalid scope");
+  });
+
+  it("accepts whitespace inside the comma-separated list (split-and-trim)", () => {
+    // Telegram tokenises on whitespace before parseScopeSpec sees the input,
+    // so a stray space *between* tokens splits them into separate tokens.
+    // But a space *after a comma* inside a single token (e.g. when the
+    // operator types "work, technical" and the shell preserves it) must be
+    // tolerated — that's why we trim each value.
+    const r = parseScopeSpec(["compartments=work,technical", "trust=first-party,any"]);
+    expect(r).toEqual({
+      kind: "set",
+      scope: { compartments: ["work", "technical"], trust: ["first-party", "any"] },
+    });
+  });
+
+  it("rejects case-mismatched enum values (operators most likely typo)", () => {
+    const r = parseScopeSpec(["compartments=WORK", "trust=first-party"]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain("Invalid scope");
+  });
+
+  it("rejects same key repeated — points operator at a single comma list", () => {
+    const r = parseScopeSpec(["compartments=work", "compartments=technical", "trust=any"]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") {
+      expect(r.message).toContain('Key "compartments" repeated');
+      expect(r.message).toContain("comma-separated");
+    }
+  });
+});
+
+describe("splitScopeArgs", () => {
+  it("single-word name with no spec → name only", () => {
+    expect(splitScopeArgs(["personal"])).toEqual({ name: "personal", scopeTokens: [] });
+  });
+
+  it("multi-word name with no spec → joined name, empty spec (show case)", () => {
+    expect(splitScopeArgs(["my", "work", "profile"])).toEqual({
+      name: "my work profile",
+      scopeTokens: [],
+    });
+  });
+
+  it("multi-word name + clear → joined name, ['clear']", () => {
+    expect(splitScopeArgs(["my", "work", "clear"])).toEqual({
+      name: "my work",
+      scopeTokens: ["clear"],
+    });
+  });
+
+  it("multi-word name + key=value tokens → joined name, full spec preserved", () => {
+    expect(
+      splitScopeArgs(["my", "profile", "compartments=work,technical", "trust=first-party"]),
+    ).toEqual({
+      name: "my profile",
+      scopeTokens: ["compartments=work,technical", "trust=first-party"],
+    });
+  });
+
+  it("case-insensitive scope-shape detection (CLEAR, Compartments=…)", () => {
+    expect(splitScopeArgs(["my", "profile", "CLEAR"])).toEqual({
+      name: "my profile",
+      scopeTokens: ["CLEAR"],
+    });
+    expect(splitScopeArgs(["my", "profile", "Compartments=work", "Trust=any"])).toEqual({
+      name: "my profile",
+      scopeTokens: ["Compartments=work", "Trust=any"],
+    });
+  });
+
+  it("treats any key=value-shape token as scope, not name (catches typos)", () => {
+    // `compartment=` (singular) is a typo — it must route to the parser so
+    // the operator sees "Unknown key 'compartment'" rather than having
+    // the typo silently absorbed into the profile name.
+    expect(splitScopeArgs(["work", "compartment=work", "trust=any"])).toEqual({
+      name: "work",
+      scopeTokens: ["compartment=work", "trust=any"],
+    });
+    // Same principle for any random key=value token.
+    expect(splitScopeArgs(["work", "foo=bar"])).toEqual({
+      name: "work",
+      scopeTokens: ["foo=bar"],
+    });
+  });
+
+  it("empty rest → empty name, empty spec", () => {
+    expect(splitScopeArgs([])).toEqual({ name: "", scopeTokens: [] });
+  });
+});
+
+describe("formatScope", () => {
+  it("null → 'unrestricted (recalls all memories)'", () => {
+    expect(formatScope(null)).toBe("unrestricted (recalls all memories)");
+  });
+
+  it("set scope renders compartments + trust", () => {
+    expect(formatScope({ compartments: ["work", "technical"], trust: ["first-party"] })).toBe(
+      "compartments: work, technical / trust: first-party",
+    );
   });
 });
 
