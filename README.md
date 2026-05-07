@@ -16,8 +16,6 @@ Self-hosted personal agent runtime with persistent memory, a Telegram interface,
 
 A long-running Node.js process that orchestrates an agentic loop (raw Anthropic + OpenAI SDKs, no framework), keeps facts about you in a vector memory server, and routes messages through pluggable channel adapters. Telegram is the primary interface. Architecture, data flow, and the roadmap for self-evolution live in [`design/`](design/) — start with [`design/overview.md`](design/overview.md) and [`design/architecture.md`](design/architecture.md).
 
-Closer in spirit to [Letta](https://github.com/letta-ai/letta) and [OpenHands](https://github.com/All-Hands-AI/OpenHands) than to one-click hosted bots: you bring the infra, Cogmo brings the agent.
-
 ## Status
 
 MVP conversation + memory is shipping. Stage 1 self-evolution (post-conversation observer that extracts behavioural corrections into steering rules) is live. Scheduling, ingestion (Gmail/Calendar via MCP), and the full evolutionary loop are next. See [`PROGRESS.md`](PROGRESS.md) for the phased plan and [`changelog.d/`](changelog.d/) for what's landed.
