@@ -63,7 +63,7 @@ Caller-supplied `tags` / `tagsMatch` and `tagGroups` are folded into the same AN
 
 **Relationship to networks:** Networks classify *what kind of knowledge* (world/bank/opinion/observation). Compartments classify *what domain*. Trust classifies *who can access*. All three are just tags — independent, combinable, filtered by the same mechanism. A memory can be `network:world` + `compartment:work` + `trust:any` (a public work fact any plugin can see).
 
-**UX for declaring scope** (Telegram `/profile` command surface) is deferred — for now profiles get a scope via psql or a quick admin script. The plumbing is in place; the picker is next.
+**UX for declaring scope:** Set via `/profile scope <name>` from Telegram — text-spec, scriptable. `/profile scope <name>` shows; `clear` removes; `compartments=work,technical trust=first-party` sets (both keys required, comma-separated lists, order-independent). Inline-keyboard multi-select picker would be polish but text-spec is enough for personal use; revisit only if multi-user adoption stresses the scriptable form.
 
 ### Live Retains via Staging `[confirmed]`
 

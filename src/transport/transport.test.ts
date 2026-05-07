@@ -584,6 +584,32 @@ describe("createTransport", () => {
       const res = await transport.profiles.update("handle", "p-mine", { name: "taken" });
       expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_name_taken" });
     });
+
+    it("forwards memoryScope=null (clear) to agentStore.updateProfile verbatim", async () => {
+      const updateProfile = vi.fn().mockResolvedValue({});
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        updateProfile,
+      });
+      const { transport } = setup({ agentStore });
+      await transport.profiles.update("handle", "p-mine", { memoryScope: null });
+      expect(updateProfile).toHaveBeenCalledWith("p-mine", { memoryScope: null });
+    });
+
+    it("forwards a non-null memoryScope to agentStore.updateProfile verbatim", async () => {
+      const updateProfile = vi.fn().mockResolvedValue({});
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        updateProfile,
+      });
+      const { transport } = setup({ agentStore });
+      const memoryScope = {
+        compartments: ["work" as const, "technical" as const],
+        trust: ["first-party" as const],
+      };
+      await transport.profiles.update("handle", "p-mine", { memoryScope });
+      expect(updateProfile).toHaveBeenCalledWith("p-mine", { memoryScope });
+    });
   });
 
   describe("profiles.delete", () => {
@@ -627,6 +653,42 @@ describe("createTransport", () => {
         code: "model_unavailable",
         model: "experimental-1",
       });
+    });
+
+    it("forwards memoryScope to agentStore.createProfile when present", async () => {
+      const createProfile = vi.fn().mockResolvedValue({});
+      const agentStore = mockAgentStore({ createProfile });
+      const { transport } = setup({ agentStore });
+      const memoryScope = {
+        compartments: ["work" as const, "technical" as const],
+        trust: ["first-party" as const],
+      };
+      await transport.profiles.create("handle", {
+        name: "coder",
+        basePrompt: "p",
+        model: "claude-sonnet-4-6",
+        toolSet: [],
+        memoryScope,
+      });
+      expect(createProfile).toHaveBeenCalledWith(expect.objectContaining({ memoryScope }));
+    });
+
+    it("omits memoryScope from createProfile params when not supplied (store applies its own default)", async () => {
+      // The store's `memoryScope` column defaults to null at the DB level. The
+      // transport must not coerce undefined → null on the way through, because
+      // future store-level defaults (e.g. inheriting from the org profile)
+      // must not be silently overwritten by an explicit null.
+      const createProfile = vi.fn().mockResolvedValue({});
+      const agentStore = mockAgentStore({ createProfile });
+      const { transport } = setup({ agentStore });
+      await transport.profiles.create("handle", {
+        name: "open",
+        basePrompt: "p",
+        model: "claude-sonnet-4-6",
+        toolSet: [],
+      });
+      const args = createProfile.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect("memoryScope" in args).toBe(false);
     });
   });
 
