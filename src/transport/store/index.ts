@@ -86,6 +86,14 @@ export interface TransportStore {
   /** Get distinct channel types for a conversation's active sessions. */
   getActiveChannelTypes(conversationId: string): Promise<ReadonlyArray<string>>;
 
+  /**
+   * Smallest `voice_max_reply_chars` across active channels for the
+   * conversation, or null when no active channels exist. The orchestrator
+   * uses this as a TTS cap — replies above the cap are skipped (text
+   * already streamed). See design/voice.md → "Edge cases & policies".
+   */
+  getVoiceMaxReplyChars(conversationId: string): Promise<number | null>;
+
   /** Find sessions that contributed inbound messages in the given range (source routing). */
   getSourceSessions(params: {
     conversationId: string;
@@ -335,6 +343,28 @@ export class DrizzleTransportStore implements TransportStore {
           ),
         );
       return rows.map((r) => r.type);
+    });
+  }
+
+  async getVoiceMaxReplyChars(conversationId: string): Promise<number | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ cap: channels.voiceMaxReplyChars })
+        .from(channelSessions)
+        .innerJoin(channels, eq(channelSessions.channelId, channels.id))
+        .where(
+          and(
+            eq(channelSessions.conversationId, conversationId),
+            eq(channelSessions.status, "active"),
+            or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
+          ),
+        );
+      const first = rows[0];
+      if (!first) return null;
+      // Take the smallest cap across active channels — the most-restrictive
+      // wins so a session on a strict-budget channel doesn't get a long
+      // voice clip just because another session permits it.
+      return rows.reduce((min, r) => (r.cap < min ? r.cap : min), first.cap);
     });
   }
 

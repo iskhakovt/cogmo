@@ -1,6 +1,6 @@
 import type { JsonValue } from "type-fest";
 import type { StreamEvent } from "../llm/types.js";
-import type { RenderedMessage } from "./adapter-module.js";
+import type { OutboundVoice, RenderedMessage } from "./adapter-module.js";
 import type { Transport } from "./transport.js";
 
 /**
@@ -10,6 +10,13 @@ import type { Transport } from "./transport.js";
 export interface Adapter {
   stop(): Promise<void>;
   deliver(platformAddress: string, content: RenderedMessage | JsonValue): Promise<void>;
+  /**
+   * Optional voice delivery — adapters that support voice messages
+   * implement this; others omit it and the delivery router skips them
+   * for voice fan-out. Called once per active session per turn after
+   * the orchestrator has TTS'd the assistant text.
+   */
+  sendVoice?(platformAddress: string, audio: OutboundVoice): Promise<void>;
 }
 
 /**
@@ -19,6 +26,8 @@ export interface Adapter {
 export interface StreamingAdapter {
   stop(): Promise<void>;
   openStream(platformAddress: string, runId: string): Promise<StreamHandle>;
+  /** Same shape as Adapter.sendVoice — optional capability flag. */
+  sendVoice?(platformAddress: string, audio: OutboundVoice): Promise<void>;
 }
 
 /**

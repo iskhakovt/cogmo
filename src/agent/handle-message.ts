@@ -12,9 +12,11 @@ import type { SkillRunner } from "../skills/runner.js";
 import { buildSkillTools, composeTurnTools } from "../skills/skill-tool-builder.js";
 import { createSkillsService } from "../skills/skills-service.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
-import { contentToBlocks, contentToText } from "../transport/content.js";
+import { contentToBlocks, type InboundContent } from "../transport/content.js";
 import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
+import { resolveVoiceMode } from "../voice/mode.js";
+import type { SttProvider, TtsProvider } from "../voice/types.js";
 import type { CodingService } from "./coding/service.js";
 import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
 import type { DebounceConfig } from "./debounce.js";
@@ -61,6 +63,24 @@ export interface HandleMessageDeps {
    */
   mcpRegistry?: McpRegistry;
   summarizationModel?: string;
+  /**
+   * Speech-to-text provider for transcribing inbound voice blocks. Optional
+   * — absent when no `voice_config` row is present (the wizard hasn't been
+   * run, or voice is intentionally disabled). When undefined, voice blocks
+   * surface as a tool-style placeholder text rather than crashing the turn.
+   */
+  sttProvider?: SttProvider;
+  /**
+   * Text-to-speech provider for outbound voice replies. Optional — absent
+   * when no `voice_config` row is present. Without it, `voice_mode = 'always'`
+   * silently degrades to text-only rather than erroring.
+   */
+  ttsProvider?: TtsProvider;
+  /**
+   * Resolved voice config — pre-loaded from `voice_config` at bootstrap
+   * (voice id + model). Only consumed when ttsProvider is also present.
+   */
+  voiceConfig?: { ttsVoice: string; ttsModel: string };
 }
 
 /**
@@ -209,9 +229,72 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       }
 
       const inboundBlocks = inboundMessages.flatMap((m) => contentToBlocks(m.content));
-      const userContentText = inboundMessages.map((m) => contentToText(m.content)).join("\n");
       // Safe — guarded by length check above
       const maxInboundId = inboundMessages.at(-1)?.id ?? "";
+
+      // Voice transcription runs in a durable `step.run` boundary — STT is
+      // a billable LLM-adjacent call, so Inngest retries replay from the
+      // step cache (exactly-once on second attempt) instead of re-charging
+      // the provider. Cached value is just an array of transcripts in the
+      // same order as voice_ref blocks; OGG bytes never enter step state.
+      // Runs BEFORE create-user-message so the persisted message contains
+      // the actual transcript text rather than a path-only JSON literal.
+      const voiceRefs = inboundBlocks.filter((b) => b.type === "voice_ref");
+      const transcripts =
+        voiceRefs.length > 0
+          ? await step.run("transcribe-voice", async () => {
+              const stt = deps.sttProvider;
+              if (!stt) {
+                throw new Error(
+                  "voice block received but no sttProvider configured — insert a `voice_config` row pointing at a valid `secrets` entry",
+                );
+              }
+              const out: string[] = [];
+              for (const ref of voiceRefs) {
+                const bytes = await attachments.download(ref.path);
+                const result = await stt.stt({ audio: bytes, mediaType: ref.mediaType });
+                out.push(result.text);
+              }
+              return out;
+            })
+          : [];
+
+      // Single source of truth for "what does each inbound row look like
+      // after voice transcription?". Both consumers below (userContentText
+      // for persistence; resolvedBlocks for the LLM call) derive from this
+      // — eliminates the parallel-cursor pattern that was fragile under
+      // walk-order changes. Cursor advances across rows in the same order
+      // `transcripts` was produced (inboundMessages.flatMap order, voice
+      // refs only).
+      const substitutedMessages = ((): ReadonlyArray<{ content: InboundContent }> => {
+        let cursor = 0;
+        return inboundMessages.map((m) => {
+          if (typeof m.content === "string") return { content: m.content };
+          const blocks = m.content.map((b) =>
+            b.type === "voice" ? ({ type: "text", text: transcripts[cursor++] ?? "" } as const) : b,
+          );
+          return { content: blocks };
+        });
+      })();
+
+      // Per-row text serialization for `messages.content`. After voice→text
+      // substitution above, a text-only row joins on newline (clean
+      // round-trip for next-turn history loads); rows that still carry
+      // image/document blocks JSON-stringify (matches today's behavior for
+      // those attachment types — image-aware history isn't a slice 1
+      // concern). The type-guarded filter narrows without an `as` cast.
+      const userContentText = substitutedMessages
+        .map(({ content }) => {
+          if (typeof content === "string") return content;
+          if (content.every((b) => b.type === "text")) {
+            return content
+              .filter((b): b is { type: "text"; text: string } => b.type === "text")
+              .map((b) => b.text)
+              .join("\n");
+          }
+          return JSON.stringify(content);
+        })
+        .join("\n");
 
       await step.run("create-user-message", async () => {
         await agentStore.insertMessage({
@@ -232,16 +315,60 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return transportStore.getActiveChannelTypes(conversationId);
       });
 
+      // Open delivery handles early — needed to resolve voice mode
+      // (`canDeliverVoice` reflects which active sessions implement
+      // `sendVoice`). Side effect is benign: the streaming adapter just
+      // tracks an open run id; no Telegram message is posted until first
+      // `push`.
+      const delivery = await deliveryRouter.prepare({
+        conversationId,
+        runId,
+        isPrivate: conv.isPrivate,
+        maxInboundId,
+        prevCursor: lastAssistant?.lastInboundMessageId ?? null,
+      });
+
+      // Resolve per-turn voice mode BEFORE prompt assembly so the
+      // voice-style hint can be injected when TTS is in play. Decision
+      // gates: adapter capability, TTS provider configured, conversation
+      // override (NULL = follow profile default), profile mode, modality of
+      // the most recent inbound. See design/voice.md.
+      const profileForVoice = await agentStore.getProfile(profileId);
+      const voiceModeForTurn = resolveVoiceMode({
+        adapterSupportsVoice: delivery.canDeliverVoice(),
+        voiceConfigPresent: deps.ttsProvider !== undefined && deps.voiceConfig !== undefined,
+        conversationMode: conv.voiceMode,
+        profileMode: profileForVoice?.voiceMode ?? "auto",
+        // Inspect ONLY the most recent inbound message in the debounced
+        // batch — the user's latest intent. If the batch is [voice, text]
+        // (user dictated, then typed a follow-up), they're at the keyboard
+        // now and shouldn't get a voice reply just because the batch
+        // started with voice. Symmetrically, [text, voice] correctly
+        // mirrors voice.
+        lastInboundWasVoice: contentToBlocks(inboundMessages.at(-1)?.content ?? "").some(
+          (b) => b.type === "voice_ref",
+        ),
+      });
+
       const systemPrompt = await step.run("assemble-prompt", async () => {
-        return promptSource.assemble(agentStore, { profileId, channelTypes });
+        return promptSource.assemble(agentStore, {
+          profileId,
+          channelTypes,
+          voiceMode: voiceModeForTurn,
+        });
       });
 
       // ──── NON-DURABLE: resolve images + auto-recall + stream ────
 
-      // Resolve ImageRefs / DocumentRefs from S3 into actual ImageBlocks /
-      // DocumentBlocks (read bytes, base64-encode).
+      // Resolve image/document refs (S3 → base64). Voice substitution
+      // already happened in `substitutedMessages` above, so re-flattening
+      // through `contentToBlocks` produces a block stream with text in
+      // place of voice — no voice_ref branch needed here.
+      const substitutedInboundBlocks = substitutedMessages.flatMap(({ content }) =>
+        contentToBlocks(content),
+      );
       const resolvedBlocks: ContentBlock[] = await Promise.all(
-        inboundBlocks.map(async (block): Promise<ContentBlock> => {
+        substitutedInboundBlocks.map(async (block): Promise<ContentBlock> => {
           if (block.type === "image_ref") {
             const bytes = await attachments.download(block.path);
             return {
@@ -261,15 +388,23 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               ...(block.name && { name: block.name }),
             };
           }
+          // voice_ref is substituted to text upstream in substitutedMessages
+          // — this branch is unreachable in practice. Keep an explicit
+          // mapping rather than a cast so a future code path that bypasses
+          // the substitution still produces a sane block instead of
+          // crashing the loop's return-type inference.
+          if (block.type === "voice_ref") return { type: "text", text: "" };
           return block;
         }),
       );
 
-      // Profile reload — needed for auto-recall gating, scope filter, and other
-      // per-profile settings. `model` comes from the turn snapshot, not this read,
-      // to preserve the invariant that one turn = one (profileId, model) stamp
-      // even if profile.model changes mid-turn.
-      const profile = await agentStore.getProfile(profileId);
+      // Reuse the profile loaded earlier for voice-mode resolution — saves
+      // one DB roundtrip per turn. Needed downstream for auto-recall gating,
+      // the `memoryScope` ACL filter, and other per-profile settings. `model`
+      // still comes from the turn snapshot, not this read, to preserve the
+      // invariant that one turn = one (profileId, model) stamp even if
+      // profile.model changes mid-turn.
+      const profile = profileForVoice;
 
       // Build scoped service for this turn — must precede auto-recall so the
       // recall call goes through the same `memoryScope` ACL filter every other
@@ -328,14 +463,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         recallResult.memories.length > 0
           ? recallResult.memories.map((m) => m.content).join("\n")
           : null;
-
-      const delivery = await deliveryRouter.prepare({
-        conversationId,
-        runId,
-        isPrivate: conv.isPrivate,
-        maxInboundId,
-        prevCursor: lastAssistant?.lastInboundMessageId ?? null,
-      });
 
       // Append recalled context to system prompt
       const fullPrompt = recalledContext
@@ -571,6 +698,73 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             documentsDelivered: fulfilledDocs.length,
             documentsFailed: docSettled.length - fulfilledDocs.length,
           };
+        });
+      }
+
+      // ──── DURABLE: voice delivery (Option B — voice + transcript) ────
+      //
+      // TTS happens AFTER persist + batch delivery so the streamed text
+      // already landed before we touch the voice provider — a TTS failure
+      // never strands the user (text is in front of them, voice is a
+      // bonus). Wrapped in step.run so retries replay from the cached
+      // result rather than re-charging the TTS provider; cached value is
+      // just the audio length so step state stays small. Long replies
+      // (above the per-channel cap) skip TTS entirely — the cap is a
+      // fail-safe; the prompt hint should keep replies short already.
+      if (
+        voiceModeForTurn &&
+        delivery.canDeliverVoice() &&
+        deps.ttsProvider &&
+        deps.voiceConfig &&
+        result.text.length > 0
+      ) {
+        await step.run("voice-delivery", async () => {
+          const cap = await transportStore.getVoiceMaxReplyChars(conversationId);
+          const effectiveCap = cap ?? 700;
+          if (result.text.length > effectiveCap) {
+            logger.info(
+              { conversationId, length: result.text.length, cap: effectiveCap },
+              "voice reply skipped — over cap",
+            );
+            // The streamed text reply already landed; tell the user voice
+            // was skipped so they know why their voice request didn't
+            // produce a clip. Notify reaches every active session — in
+            // mixed-channel setups a non-voice session also sees the
+            // note, which is harmless and matches Option B (text always
+            // wins). Wrapped in try/catch so a transient notify failure
+            // (Telegram rate limit, network blip) can't fail the whole
+            // turn — the text reply has already succeeded; the note is a
+            // best-effort UX nicety.
+            try {
+              await deliveryRouter.notifyConversation(
+                conversationId,
+                "(text reply too long for voice — see above)",
+              );
+            } catch (notifyErr) {
+              logger.warn(
+                { err: notifyErr, conversationId },
+                "voice over-cap notification failed; turn already succeeded",
+              );
+            }
+            return { skipped: "over_cap", length: result.text.length };
+          }
+          // ttsProvider + voiceConfig narrowed by the outer guard; redo
+          // the check inside the closure since TS doesn't track narrowings
+          // across the `await` boundary into the step.run body.
+          const tts = deps.ttsProvider;
+          const cfg = deps.voiceConfig;
+          if (!tts || !cfg) {
+            // Unreachable — outer guard ensures both are defined.
+            return { skipped: "no_provider" };
+          }
+          const { audio, mediaType } = await tts.tts({
+            text: result.text,
+            voice: cfg.ttsVoice,
+            model: cfg.ttsModel,
+            format: "ogg",
+          });
+          await delivery.deliverVoice({ audio, mediaType });
+          return { delivered: audio.byteLength, mediaType };
         });
       }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contentToBlocks, contentToText } from "./content.js";
+import { contentToBlocks, contentToText, isVoiceContent } from "./content.js";
 
 describe("contentToText", () => {
   it("passes strings through", () => {
@@ -126,5 +126,70 @@ describe("contentToBlocks", () => {
         name: "x.pdf",
       },
     ]);
+  });
+
+  it("converts voice block to VoiceRef carrying durationMs", () => {
+    expect(
+      contentToBlocks([
+        {
+          type: "voice",
+          path: "inbound/clip.ogg",
+          mediaType: "audio/ogg",
+          durationMs: 4200,
+        },
+      ]),
+    ).toEqual([
+      {
+        type: "voice_ref",
+        path: "inbound/clip.ogg",
+        mediaType: "audio/ogg",
+        durationMs: 4200,
+      },
+    ]);
+  });
+
+  it("converts voice block without durationMs (omits the field)", () => {
+    expect(
+      contentToBlocks([{ type: "voice", path: "inbound/clip.ogg", mediaType: "audio/ogg" }]),
+    ).toEqual([{ type: "voice_ref", path: "inbound/clip.ogg", mediaType: "audio/ogg" }]);
+  });
+
+  it("converts mixed array (text + voice ref)", () => {
+    expect(
+      contentToBlocks([
+        { type: "text", text: "listen" },
+        { type: "voice", path: "inbound/clip.ogg", mediaType: "audio/ogg" },
+      ]),
+    ).toEqual([
+      { type: "text", text: "listen" },
+      { type: "voice_ref", path: "inbound/clip.ogg", mediaType: "audio/ogg" },
+    ]);
+  });
+});
+
+describe("isVoiceContent", () => {
+  it("returns false for string content", () => {
+    expect(isVoiceContent("hello")).toBe(false);
+  });
+
+  it("returns false for text-only block array", () => {
+    expect(isVoiceContent([{ type: "text", text: "hi" }])).toBe(false);
+  });
+
+  it("returns false for image-only block array", () => {
+    expect(isVoiceContent([{ type: "image", path: "p", mediaType: "image/png" }])).toBe(false);
+  });
+
+  it("returns true when any block is voice", () => {
+    expect(isVoiceContent([{ type: "voice", path: "p", mediaType: "audio/ogg" }])).toBe(true);
+  });
+
+  it("returns true when voice is mixed with text", () => {
+    expect(
+      isVoiceContent([
+        { type: "text", text: "listen" },
+        { type: "voice", path: "p", mediaType: "audio/ogg" },
+      ]),
+    ).toBe(true);
   });
 });

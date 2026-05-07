@@ -86,6 +86,16 @@ export interface OutboundDocument {
 }
 
 /**
+ * Outbound voice clip — bytes ready for platform delivery as a voice message.
+ * Telegram requires OGG/Opus for the voice-bubble UI; other formats fall
+ * back to file delivery.
+ */
+export interface OutboundVoice {
+  audio: Buffer;
+  mediaType: string;
+}
+
+/**
  * Channel-rendered message — the result of converting canonical markdown
  * to a channel-specific wire format.
  */
