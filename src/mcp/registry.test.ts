@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { Database } from "../db/index.js";
+import type { Database, Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { McpConnection } from "./client/client.js";
@@ -9,12 +9,13 @@ import { McpRegistryImpl } from "./registry.js";
 import { DrizzleMcpStore } from "./store/index.js";
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleMcpStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleMcpStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleMcpStore(tx);
 });
 
 afterEach(async () => {

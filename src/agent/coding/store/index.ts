@@ -1,6 +1,6 @@
 import { and, asc, count, desc, eq, ne } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
-import type { Database } from "../../../db/index.js";
+import type { Transactor } from "../../../db/index.js";
 import type { DevcontainerSpec, PrMetadata, ResourceUsage, WorktreeAssignment } from "../types.js";
 import { codingRepos, codingTasks, codingToolDecisions } from "./schema.js";
 
@@ -273,9 +273,9 @@ export interface CodingStore {
 }
 
 export class DrizzleCodingStore implements CodingStore {
-  #db: Database;
-  constructor(db: Database) {
-    this.#db = db;
+  #runInTx: Transactor;
+  constructor(runInTx: Transactor) {
+    this.#runInTx = runInTx;
   }
 
   // --- Repos ---
@@ -294,7 +294,7 @@ export class DrizzleCodingStore implements CodingStore {
     identityName?: string;
     verifyTimeoutSeconds?: number;
   }): Promise<CodingRepoRow> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const row = single(
         await tx
           .insert(codingRepos)
@@ -321,27 +321,25 @@ export class DrizzleCodingStore implements CodingStore {
   }
 
   async getRepoByName(name: string): Promise<CodingRepoRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(codingRepos).where(eq(codingRepos.name, name)).limit(1);
       return rows[0];
     });
   }
 
   async getRepoById(id: string): Promise<CodingRepoRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(codingRepos).where(eq(codingRepos.id, id)).limit(1);
       return rows[0];
     });
   }
 
   async listRepos(): Promise<readonly CodingRepoRow[]> {
-    return this.#db.transaction((tx) =>
-      tx.select().from(codingRepos).orderBy(asc(codingRepos.name)),
-    );
+    return this.#runInTx((tx) => tx.select().from(codingRepos).orderBy(asc(codingRepos.name)));
   }
 
   async removeRepo(id: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.delete(codingRepos).where(eq(codingRepos.id, id));
     });
   }
@@ -351,7 +349,7 @@ export class DrizzleCodingStore implements CodingStore {
   ): Promise<
     { kind: "deleted" } | { kind: "not_found" } | { kind: "in_use"; activeTasks: number }
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       // Verify the repo exists inside the transaction so a concurrent
       // `removeRepo` racing with us doesn't leave the caller misreporting.
       const existing = await tx
@@ -383,7 +381,7 @@ export class DrizzleCodingStore implements CodingStore {
     backend: CodingBackend;
     allowPrivilegedRunc: boolean;
   }): Promise<CodingTaskRow> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const row = single(
         await tx
           .insert(codingTasks)
@@ -404,7 +402,7 @@ export class DrizzleCodingStore implements CodingStore {
   }
 
   async setTaskWorktreeAssignment(id: string, assignment: WorktreeAssignment): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx
         .update(codingTasks)
         .set({ worktreeAssignment: assignment })
@@ -413,7 +411,7 @@ export class DrizzleCodingStore implements CodingStore {
   }
 
   async listTasksForConversation(conversationId: string): Promise<readonly CodingTaskRow[]> {
-    return this.#db.transaction((tx) =>
+    return this.#runInTx((tx) =>
       tx
         .select()
         .from(codingTasks)
@@ -423,7 +421,7 @@ export class DrizzleCodingStore implements CodingStore {
   }
 
   async getTask(id: string): Promise<CodingTaskRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(codingTasks).where(eq(codingTasks.id, id)).limit(1);
       return rows[0];
     });
@@ -435,7 +433,7 @@ export class DrizzleCodingStore implements CodingStore {
     failureReason?: string | null;
     planApprovedAt?: Date | null;
   }): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       const set: {
         status: CodingTaskStatus;
         failureReason?: string | null;
@@ -448,37 +446,37 @@ export class DrizzleCodingStore implements CodingStore {
   }
 
   async setTaskSessionId(id: string, sessionId: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(codingTasks).set({ sessionId }).where(eq(codingTasks.id, id));
     });
   }
 
   async setTaskContainerId(id: string, containerId: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(codingTasks).set({ containerId }).where(eq(codingTasks.id, id));
     });
   }
 
   async setTaskPlan(id: string, plan: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(codingTasks).set({ plan }).where(eq(codingTasks.id, id));
     });
   }
 
   async setTaskPrMetadata(id: string, metadata: PrMetadata): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(codingTasks).set({ prMetadata: metadata }).where(eq(codingTasks.id, id));
     });
   }
 
   async setTaskResourceUsage(id: string, usage: ResourceUsage): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(codingTasks).set({ resourceUsage: usage }).where(eq(codingTasks.id, id));
     });
   }
 
   async countActiveTasksForRepo(repoId: string): Promise<number> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       // Active = not in any terminal state. ne(status, 'pr_open') etc. is
       // expressed via two NEs; for three terminal values we just hard-code
       // the negation list — clearer than a sql template.
@@ -498,7 +496,7 @@ export class DrizzleCodingStore implements CodingStore {
   ): Promise<
     { kind: "transitioned" } | { kind: "stale"; status: CodingTaskStatus } | { kind: "not_found" }
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       // Single conditional UPDATE — atomic at the SQL level. If RETURNING
       // comes back empty, either the row doesn't exist or status didn't
       // match `from`; do a follow-up SELECT to disambiguate.
@@ -529,7 +527,7 @@ export class DrizzleCodingStore implements CodingStore {
     | { kind: "not_pending"; status: CodingTaskStatus }
     | { kind: "not_found" }
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       // `.for('update')` row-locks the matched row so a concurrent
       // callback for the same task blocks here until our transaction
       // commits — without it, two simultaneous Telegram callback
@@ -569,7 +567,7 @@ export class DrizzleCodingStore implements CodingStore {
     decision: ToolDecision;
     scope: DecisionScope;
   }): Promise<CodingToolDecisionRow> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const row = single(
         await tx
           .insert(codingToolDecisions)
@@ -587,7 +585,7 @@ export class DrizzleCodingStore implements CodingStore {
   }
 
   async listToolDecisionsForTask(taskId: string): Promise<readonly CodingToolDecisionRow[]> {
-    return this.#db.transaction((tx) =>
+    return this.#runInTx((tx) =>
       tx
         .select()
         .from(codingToolDecisions)
@@ -604,7 +602,7 @@ export class DrizzleCodingStore implements CodingStore {
     | { kind: "already_terminal"; status: CodingTaskStatus }
     | { kind: "not_found" }
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       // Same `.for('update')` reasoning as approvePlanIfPending — a
       // double-tap between approve and cancel (or two concurrent cancels)
       // could otherwise both observe the row as non-terminal and both

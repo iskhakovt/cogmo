@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Database } from "../../db/index.js";
+import type { Database, Transactor } from "../../db/index.js";
 import type { ExecHandle, Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
@@ -30,6 +30,7 @@ const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as Step
 const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleCodingStore;
 let sandboxStore: DrizzleSandboxStore;
@@ -38,9 +39,9 @@ let repoPath: string;
 let instanceId: string;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleCodingStore(db);
-  sandboxStore = new DrizzleSandboxStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleCodingStore(tx);
+  sandboxStore = new DrizzleSandboxStore(tx);
 
   baseDir = mkdtempSync(join(tmpdir(), "cogmo-flow-test-"));
   repoPath = join(baseDir, "repo");

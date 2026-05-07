@@ -12,7 +12,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import { llmProviders, modelProviders } from "../agent/store/schema.js";
-import type { Database } from "../db/index.js";
+import type { Database, Transactor } from "../db/index.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { secrets as secretsTable } from "../secrets/store/schema.js";
@@ -28,17 +28,18 @@ import {
 import type { ValidationResult } from "./validate.js";
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let agentStore: DrizzleAgentStore;
 let transportStore: DrizzleTransportStore;
 let secretsStore: DrizzleSecretsStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  agentStore = new DrizzleAgentStore(db);
-  transportStore = new DrizzleTransportStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  agentStore = new DrizzleAgentStore(tx);
+  transportStore = new DrizzleTransportStore(tx);
   const key = deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/secrets-at-rest/v1");
-  secretsStore = new DrizzleSecretsStore(db, key);
+  secretsStore = new DrizzleSecretsStore(tx, key);
 });
 
 afterEach(async () => {

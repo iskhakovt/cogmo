@@ -9,7 +9,7 @@
 import { PassThrough, type Readable } from "node:stream";
 import type { Octokit } from "@octokit/rest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Database } from "../../db/index.js";
+import type { Database, Transactor } from "../../db/index.js";
 import type { StepRun } from "../../inngest/index.js";
 import type { ExecHandle, ExecOptions, Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
 import {
@@ -103,12 +103,13 @@ function fakeSandbox(handle: TaskContainerHandle): Sandbox {
 }
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleCodingStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleCodingStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleCodingStore(tx);
 });
 
 afterAll(async () => {

@@ -1,18 +1,19 @@
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import type { Database } from "../../db/index.js";
+import type { Database, Transactor } from "../../db/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { ClassifierLog, SkillIo } from "../types.js";
 import { DrizzleSkillStore, type InsertSkillParams, type SkillRow } from "./index.js";
 import { skillDeploys } from "./schema.js";
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleSkillStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleSkillStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleSkillStore(tx);
 });
 
 afterEach(async () => {
