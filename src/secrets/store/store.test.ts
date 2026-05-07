@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import type { Database } from "../../db/index.js";
+import type { Database, Transactor } from "../../db/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../encryption.js";
 import { DrizzleSecretsStore } from "./index.js";
@@ -7,13 +7,14 @@ import { DrizzleSecretsStore } from "./index.js";
 const PURPOSE = "cogmo/secrets-at-rest/v1";
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleSecretsStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
+  ({ db, tx, close } = await createTestDatabase());
   const key = deriveMasterKey(parseMasterKey(generateMasterKey()), PURPOSE);
-  store = new DrizzleSecretsStore(db, key);
+  store = new DrizzleSecretsStore(tx, key);
 });
 
 afterEach(async () => {

@@ -123,6 +123,8 @@ Each domain module owns its DB access in a `store/` subdirectory:
 
 **Interface boundary, not table boundary.** A store implementation can import schemas from any module — JOINs and cross-table transactions are fine. Consumers depend on the store interface and mock it in tests. The schema defines ownership (who creates/migrates the table); the interface defines access (who can read/write what).
 
+**Constructors take a `Transactor`, not a `Database`.** Every Drizzle store implementation accepts `runInTx: Transactor` (`<T>(cb: (tx: Transaction) => Promise<T>) => Promise<T>`, exported from `src/db/index.ts`) and wraps each method body in `this.#runInTx(async (tx) => { ... })`. Wire stores at the bootstrap edge with `transactor(db)`. Stores never hold a `Database` field — that would let a future method slip in a non-transactional read. Tests get `tx` from `createTestDatabase()`'s `{ db, tx, close }` return, so PGlite-backed unit tests pass `tx` straight into store constructors.
+
 ## Commits & PRs
 
 - **Conventional Commits** — all commit messages and PR titles must follow the [Conventional Commits](https://www.conventionalcommits.org/) spec. Format: `type(scope): description`. The description must start with a **lowercase letter** — commitlint's `subject-case` rule rejects sentence-case, even for proper nouns (write `telegram` not `Telegram`). This drives semantic-release — wrong format means no release. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full type→version-bump table, examples, and the CI/release workflow.
@@ -231,7 +233,7 @@ After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 ## Architecture Rules
 
 - No frameworks — raw SDK only.
-- **All DB operations use transactions.** Use `db.transaction(async (tx) => { ... })`.
+- **All DB operations use transactions.** Stores enforce this at the type level — they take a `Transactor` (`runInTx: <T>(cb: (tx: Transaction) => Promise<T>) => Promise<T>`, see `src/db/index.ts`) and wrap each method body in `this.#runInTx(async (tx) => { ... })`. Outside store implementations (e.g. ad-hoc bootstrap code, scripts) the same rule applies: `db.transaction(async (tx) => { ... })`.
 - **Every table gets a UUIDv7 primary key (`id`, DB-generated) and `created_at TIMESTAMPTZ DEFAULT now()`.** No exceptions.
 - **Columns are NOT NULL unless explicitly nullable.** Drizzle defaults to nullable — always add `.notNull()`. Nullable columns must be justified (e.g., `expires_at` = never expires, `steering_rules.profile_id` = null means applies to all profiles, `steering_rules.channel_type` = null means applies to all channels).
 - **Avoid default values** in DB columns and function parameters unless strongly justified (`id`, `created_at` are justified). Explicit values at the call site prevent hidden assumptions.

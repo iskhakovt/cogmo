@@ -1,6 +1,6 @@
 import { and, count, eq, sql } from "drizzle-orm";
 import { single } from "../../db/helpers.js";
-import type { Database } from "../../db/index.js";
+import type { Transactor } from "../../db/index.js";
 import {
   assertValidServerName,
   type McpServer,
@@ -105,15 +105,15 @@ export interface McpStore {
 // --- Implementation ---
 
 export class DrizzleMcpStore implements McpStore {
-  #db: Database;
+  #runInTx: Transactor;
 
-  constructor(db: Database) {
-    this.#db = db;
+  constructor(runInTx: Transactor) {
+    this.#runInTx = runInTx;
   }
 
   async addServer(spec: McpServerSpec): Promise<McpServer> {
     assertValidServerName(spec.name);
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const row = single(
         await tx
           .insert(mcpServers)
@@ -130,13 +130,13 @@ export class DrizzleMcpStore implements McpStore {
   }
 
   async removeServer(id: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.delete(mcpServers).where(eq(mcpServers.id, id));
     });
   }
 
   async getServerById(id: string): Promise<McpServer | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(mcpServers).where(eq(mcpServers.id, id)).limit(1);
       const row = rows[0];
       return row ? rowToServer(row) : undefined;
@@ -144,7 +144,7 @@ export class DrizzleMcpStore implements McpStore {
   }
 
   async getServerByName(name: string): Promise<McpServer | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(mcpServers).where(eq(mcpServers.name, name)).limit(1);
       const row = rows[0];
       return row ? rowToServer(row) : undefined;
@@ -152,14 +152,14 @@ export class DrizzleMcpStore implements McpStore {
   }
 
   async listServers(): Promise<readonly McpServer[]> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(mcpServers).orderBy(mcpServers.name);
       return rows.map(rowToServer);
     });
   }
 
   async listServerStatuses(): Promise<readonly McpServerStatus[]> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           server: mcpServers,
@@ -179,7 +179,7 @@ export class DrizzleMcpStore implements McpStore {
   }
 
   async listEnabledServers(): Promise<readonly McpServer[]> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select()
         .from(mcpServers)
@@ -190,19 +190,19 @@ export class DrizzleMcpStore implements McpStore {
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(mcpServers).set({ enabled }).where(eq(mcpServers.id, id));
     });
   }
 
   async setServerApprovalStatus(id: string, status: McpServerApprovalStatus): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(mcpServers).set({ approvalStatus: status }).where(eq(mcpServers.id, id));
     });
   }
 
   async recordLastConnected(id: string, at: Date): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx
         .update(mcpServers)
         .set({ lastConnectedAt: at, lastError: null })
@@ -211,7 +211,7 @@ export class DrizzleMcpStore implements McpStore {
   }
 
   async recordLastError(id: string, error: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(mcpServers).set({ lastError: error }).where(eq(mcpServers.id, id));
     });
   }
@@ -223,7 +223,7 @@ export class DrizzleMcpStore implements McpStore {
     schemaSnapshot: ToolSchemaSnapshot;
     approvalStatus: McpToolApprovalStatus;
   }): Promise<McpToolPin> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const row = single(
         await tx
           .insert(mcpServerTools)
@@ -249,7 +249,7 @@ export class DrizzleMcpStore implements McpStore {
   }
 
   async getToolPins(serverId: string): Promise<readonly McpToolPin[]> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select()
         .from(mcpServerTools)
@@ -260,7 +260,7 @@ export class DrizzleMcpStore implements McpStore {
   }
 
   async getApprovedToolPins(serverId: string): Promise<readonly McpToolPin[]> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select()
         .from(mcpServerTools)
@@ -277,7 +277,7 @@ export class DrizzleMcpStore implements McpStore {
     toolName: string,
     status: McpToolApprovalStatus,
   ): Promise<boolean> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const updated = await tx
         .update(mcpServerTools)
         .set({ approvalStatus: status })
@@ -288,7 +288,7 @@ export class DrizzleMcpStore implements McpStore {
   }
 
   async deleteToolPin(serverId: string, toolName: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx
         .delete(mcpServerTools)
         .where(and(eq(mcpServerTools.serverId, serverId), eq(mcpServerTools.toolName, toolName)));
@@ -303,7 +303,7 @@ export class DrizzleMcpStore implements McpStore {
       schemaSnapshot: ToolSchemaSnapshot;
     }[];
   }): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       const existing = await tx
         .select()
         .from(mcpServerTools)

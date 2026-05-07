@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Service } from "../agent/service.js";
-import type { Database } from "../db/index.js";
+import type { Database, Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
@@ -17,12 +17,13 @@ function makeMockFiles(): Service["files"] {
 }
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleSkillStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleSkillStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleSkillStore(tx);
 });
 
 afterEach(async () => {
