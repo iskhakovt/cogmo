@@ -138,6 +138,15 @@ export function createService(
  *
  * A caller passing `tagsMatch` without `tags` has no leaf to attach
  * the match mode to, so it's silently dropped — meaningless on its own.
+ *
+ * Caller leaves use `caller.tagsMatch ?? "any"` (the API default), not
+ * `any_strict` like the scope leaves. The asymmetry is deliberate: the
+ * scope leaves must exclude untagged memories on the compartment/trust
+ * dimensions (legacy rows with no tags would otherwise leak across
+ * compartments). The caller's leaf is an additional filter on a third
+ * dimension — within the same AND group, the scope leaves already
+ * exclude untagged on their dimensions, so the caller leaf only widens
+ * on the caller's tag dimension.
  */
 function buildScopedTagGroups(
   memoryScope: ProfileMemoryScope,
@@ -153,16 +162,17 @@ function buildScopedTagGroups(
   return [{ and: andChildren }];
 }
 
+// Strip the simple-tag-filter fields the scope path folds into tagGroups.
+// Spreading `rest` carries forward any future RecallOptions/ReflectOptions
+// fields automatically — adding a new option won't silently drop on the
+// scoped path while passing through unchanged on the no-scope path.
 function applyScopeToRecall(
   memoryScope: ProfileMemoryScope | null,
   opts: RecallOptions | undefined,
 ): RecallOptions {
   if (memoryScope === null) return opts ?? {};
-  const tagGroups = buildScopedTagGroups(memoryScope, opts);
-  return {
-    ...(opts?.maxTokens !== undefined && { maxTokens: opts.maxTokens }),
-    tagGroups,
-  };
+  const { tags: _tags, tagsMatch: _tagsMatch, tagGroups: _tagGroups, ...rest } = opts ?? {};
+  return { ...rest, tagGroups: buildScopedTagGroups(memoryScope, opts) };
 }
 
 function applyScopeToReflect(
@@ -170,12 +180,8 @@ function applyScopeToReflect(
   opts: ReflectOptions | undefined,
 ): ReflectOptions {
   if (memoryScope === null) return opts ?? {};
-  const tagGroups = buildScopedTagGroups(memoryScope, opts);
-  return {
-    ...(opts?.context !== undefined && { context: opts.context }),
-    ...(opts?.budget !== undefined && { budget: opts.budget }),
-    tagGroups,
-  };
+  const { tags: _tags, tagsMatch: _tagsMatch, tagGroups: _tagGroups, ...rest } = opts ?? {};
+  return { ...rest, tagGroups: buildScopedTagGroups(memoryScope, opts) };
 }
 
 /**

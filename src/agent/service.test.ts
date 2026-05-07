@@ -35,13 +35,16 @@ function workScope(): ProfileMemoryScope {
 }
 
 describe("createService — no scope (memoryScope: null)", () => {
-  it("delegates recall to the MemoryProvider with the right bankId, no filter applied", async () => {
+  it("delegates recall to the MemoryProvider with the right bankId, no filter applied, and returns its result", async () => {
     const memory = mockMemory();
+    const expected = { memories: [{ content: "hi", type: "world" }] };
+    memory.recall = vi.fn().mockResolvedValue(expected);
     const svc = createService(memory, "user-123", null, stubFiles, stubCoreMemory, stubStage);
 
-    await svc.memory.recall("query");
+    const result = await svc.memory.recall("query");
 
     expect(memory.recall).toHaveBeenCalledWith("user-123", "query", {});
+    expect(result).toBe(expected);
   });
 
   it("preserves caller-supplied tags / tagsMatch when no scope is set", async () => {
@@ -204,8 +207,10 @@ describe("createService — scope filter (memoryScope set)", () => {
     expect(memory.retain).toHaveBeenCalledWith("user-123", "a fact", { tags: ["custom"] });
   });
 
-  it("reflect builds tagGroups and preserves budget", async () => {
+  it("reflect builds tagGroups, preserves budget, and returns the provider's result", async () => {
     const memory = mockMemory();
+    const expected = { answer: "synthesized answer" };
+    memory.reflect = vi.fn().mockResolvedValue(expected);
     const svc = createService(
       memory,
       "user-123",
@@ -215,7 +220,7 @@ describe("createService — scope filter (memoryScope set)", () => {
       stubStage,
     );
 
-    await svc.memory.reflect("query", { budget: "mid" });
+    const result = await svc.memory.reflect("query", { budget: "mid" });
 
     expect(memory.reflect).toHaveBeenCalledWith("user-123", "query", {
       budget: "mid",
@@ -228,6 +233,7 @@ describe("createService — scope filter (memoryScope set)", () => {
         },
       ],
     });
+    expect(result).toBe(expected);
   });
 });
 

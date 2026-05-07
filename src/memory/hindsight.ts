@@ -20,7 +20,6 @@ import type {
   ReflectResult,
   RetainBatchItem,
   RetainOptions,
-  TagGroup,
 } from "./provider.js";
 
 /**
@@ -262,10 +261,7 @@ function buildRecallBody(query: string, options?: RecallOptions): RecallBody {
   if (options?.maxTokens !== undefined) body.max_tokens = options.maxTokens;
   if (options?.tags !== undefined) body.tags = options.tags;
   if (options?.tagsMatch !== undefined) body.tags_match = options.tagsMatch;
-  // Our `TagGroup` and the SDK's `TagGroupLeaf | TagGroupAndInput | ...`
-  // are structurally identical recursive unions but nominally distinct,
-  // and TS won't unify recursive types across module boundaries.
-  if (options?.tagGroups !== undefined) body.tag_groups = options.tagGroups as TagGroup[];
+  if (options?.tagGroups !== undefined) body.tag_groups = options.tagGroups;
   return body;
 }
 
@@ -274,8 +270,7 @@ function buildReflectBody(query: string, options?: ReflectOptions): ReflectBody 
   if (options?.context !== undefined) body.context = options.context;
   if (options?.tags !== undefined) body.tags = options.tags;
   if (options?.tagsMatch !== undefined) body.tags_match = options.tagsMatch;
-  // See note in buildRecallBody — structurally identical, nominally distinct.
-  if (options?.tagGroups !== undefined) body.tag_groups = options.tagGroups as TagGroup[];
+  if (options?.tagGroups !== undefined) body.tag_groups = options.tagGroups;
   if (options?.budget !== undefined) body.budget = options.budget;
   return body;
 }
