@@ -1,24 +1,32 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWebTools } from "./web-tools.js";
 
-// Mock withRetry as a passthrough so we can exercise web-tools' error
-// branches (5xx → throw, 4xx → AbortError) without paying the real
-// retry backoff delays. The retry behaviour itself is covered in
-// src/util/with-retry.test.ts.
+// Mock withRetry as a no-delay retry loop that honours AbortError. We
+// reproduce the retry semantics (including AbortError = stop) without
+// paying the real exponential-backoff delays. The retry behaviour
+// itself is covered in src/util/with-retry.test.ts.
 //
-// Limitation: this passthrough does NOT preserve pRetry's AbortError
-// opt-out logic — both regular Errors and AbortErrors propagate
-// identically here. That's fine for current tests (we only need the
-// error branches to fire), but if a future test needs to assert
-// "withRetry stopped retrying because of AbortError", it must use the
-// real withRetry with vi.useFakeTimers() or run against the integration
-// tier where RETRY_DISABLED already flattens retry behaviour.
+// Tests that mock a 5xx (retryable) response must use mockResolvedValue
+// instead of mockResolvedValueOnce — otherwise the second attempt sees
+// `undefined` and throws a TypeError instead of the expected error.
 vi.mock("../util/with-retry.js", async () => {
   const actual =
     await vi.importActual<typeof import("../util/with-retry.js")>("../util/with-retry.js");
   return {
     ...actual,
-    withRetry: <T>(fn: () => Promise<T>) => fn(),
+    withRetry: async <T>(fn: () => Promise<T>, opts?: { retries?: number }): Promise<T> => {
+      const maxAttempts = (opts?.retries ?? 3) + 1;
+      let lastError: unknown;
+      for (let i = 0; i < maxAttempts; i++) {
+        try {
+          return await fn();
+        } catch (e) {
+          lastError = e;
+          if (e instanceof actual.AbortError) throw e;
+        }
+      }
+      throw lastError;
+    },
   };
 });
 
@@ -94,7 +102,7 @@ describe("web_search", () => {
 
   it("throws on server error (5xx)", async () => {
     const [search] = createWebTools("key", undefined);
-    mockFetch.mockResolvedValueOnce({ ok: false, status: 503, text: async () => "down" });
+    mockFetch.mockResolvedValue({ ok: false, status: 503, text: async () => "down" });
 
     await expect(search!.handler({ query: "test" }, stubService())).rejects.toThrow(
       "Tavily API server error: 503",
@@ -160,7 +168,7 @@ describe("web_answer", () => {
   it("throws on server error (5xx)", async () => {
     const tools = createWebTools(undefined, "or-key");
     const answer = tools[1]!;
-    mockFetch.mockResolvedValueOnce({ ok: false, status: 502, text: async () => "bad gateway" });
+    mockFetch.mockResolvedValue({ ok: false, status: 502, text: async () => "bad gateway" });
 
     await expect(answer.handler({ question: "test" }, stubService())).rejects.toThrow(
       "OpenRouter API server error: 502",
@@ -274,7 +282,7 @@ describe("fetch_url", () => {
     const tools = createWebTools(undefined, undefined);
     const fetchUrl = tools[2]!;
 
-    mockFetch.mockResolvedValueOnce({
+    mockFetch.mockResolvedValue({
       ok: false,
       status: 503,
       statusText: "Service Unavailable",
@@ -283,5 +291,208 @@ describe("fetch_url", () => {
     await expect(
       fetchUrl.handler({ url: "https://example.com/down" }, stubService()),
     ).rejects.toThrow("Fetch failed: 503");
+  });
+
+  it("sends Chrome-like browser headers on the first attempt", async () => {
+    const tools = createWebTools(undefined, undefined);
+    const fetchUrl = tools[2]!;
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Map([["content-type", "text/plain"]]),
+      text: async () => "ok",
+    });
+
+    await fetchUrl.handler({ url: "https://example.com/page" }, stubService());
+
+    const headers = mockFetch.mock.calls[0]![1].headers as Record<string, string>;
+    expect(headers["User-Agent"]).toMatch(/Chrome\/\d+/);
+    expect(headers["sec-ch-ua"]).toContain("Chromium");
+    expect(headers["sec-ch-ua-mobile"]).toBe("?0");
+    expect(headers["sec-ch-ua-platform"]).toBe('"Linux"');
+    expect(headers["Sec-Fetch-Site"]).toBe("none");
+    expect(headers["Sec-Fetch-Mode"]).toBe("navigate");
+    expect(headers["Sec-Fetch-Dest"]).toBe("document");
+    expect(headers["Upgrade-Insecure-Requests"]).toBe("1");
+    expect(headers.Accept).toContain("text/html");
+    expect(headers["Accept-Language"]).toBe("en-US,en;q=0.9");
+    // First attempt is a typed-URL navigation — no Referer.
+    expect(headers.Referer).toBeUndefined();
+  });
+
+  it("retries 403 with a Referer and cross-site Sec-Fetch-Site", async () => {
+    const tools = createWebTools(undefined, undefined);
+    const fetchUrl = tools[2]!;
+
+    mockFetch
+      .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Map([["content-type", "text/plain"]]),
+        text: async () => "got through",
+      });
+
+    const result = await fetchUrl.handler({ url: "https://example.com/article" }, stubService());
+    expect(result).toBe("got through");
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const firstHeaders = mockFetch.mock.calls[0]![1].headers as Record<string, string>;
+    const retryHeaders = mockFetch.mock.calls[1]![1].headers as Record<string, string>;
+
+    expect(firstHeaders.Referer).toBeUndefined();
+    expect(firstHeaders["Sec-Fetch-Site"]).toBe("none");
+
+    expect(retryHeaders.Referer).toBe("https://example.com/");
+    expect(retryHeaders["Sec-Fetch-Site"]).toBe("cross-site");
+    // UA must NOT change across retries — UA churn is a bot signal.
+    expect(retryHeaders["User-Agent"]).toBe(firstHeaders["User-Agent"]);
+  });
+
+  it("retries 429 (rate limited)", async () => {
+    const tools = createWebTools(undefined, undefined);
+    const fetchUrl = tools[2]!;
+
+    mockFetch
+      .mockResolvedValueOnce({ ok: false, status: 429, statusText: "Too Many Requests" })
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Map([["content-type", "text/plain"]]),
+        text: async () => "ok",
+      });
+
+    const result = await fetchUrl.handler({ url: "https://example.com/foo" }, stubService());
+    expect(result).toBe("ok");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to Tavily Extract when direct fetch is bot-blocked", async () => {
+    const tools = createWebTools("tavily-key", undefined);
+    const fetchUrl = tools[2]!;
+
+    // 3 direct attempts all return 403 → withRetry exhausts → fallback fires.
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "https://walled.example.com/page") {
+        return { ok: false, status: 403, statusText: "Forbidden" };
+      }
+      if (url === "https://api.tavily.com/extract") {
+        return {
+          ok: true,
+          json: async () => ({
+            results: [
+              {
+                url: "https://walled.example.com/page",
+                raw_content: "# Real content\n\nExtracted via Tavily.",
+              },
+            ],
+            failed_results: [],
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const result = await fetchUrl.handler(
+      { url: "https://walled.example.com/page" },
+      stubService(),
+    );
+    expect(result).toContain("Extracted via Tavily");
+
+    // 3 direct attempts (1 + 2 retries) + 1 Tavily call.
+    const tavilyCall = mockFetch.mock.calls.find((c) => c[0] === "https://api.tavily.com/extract");
+    expect(tavilyCall).toBeDefined();
+    const tavilyBody = JSON.parse(tavilyCall![1].body);
+    expect(tavilyBody.urls).toBe("https://walled.example.com/page");
+    expect(tavilyBody.extract_depth).toBe("basic");
+  });
+
+  it("does NOT fall back to Tavily on a 404", async () => {
+    const tools = createWebTools("tavily-key", undefined);
+    const fetchUrl = tools[2]!;
+
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      statusText: "Not Found",
+    });
+
+    await expect(
+      fetchUrl.handler({ url: "https://example.com/missing" }, stubService()),
+    ).rejects.toThrow("404");
+
+    // Tavily must not have been called — 404 means the page doesn't
+    // exist, not a bot block.
+    expect(mockFetch.mock.calls.some((c) => c[0] === "https://api.tavily.com/extract")).toBe(false);
+  });
+
+  it("does NOT fall back when Tavily key is not configured", async () => {
+    const tools = createWebTools(undefined, undefined);
+    const fetchUrl = tools[2]!;
+
+    mockFetch.mockResolvedValue({ ok: false, status: 403, statusText: "Forbidden" });
+
+    await expect(
+      fetchUrl.handler({ url: "https://walled.example.com/page" }, stubService()),
+    ).rejects.toThrow("403");
+  });
+
+  it("falls back to Tavily Extract on a connection timeout", async () => {
+    // Bot defences sometimes drop the connection rather than return an
+    // HTTP status — fetch throws a DOMException("TimeoutError") in that
+    // case. The fallback must still kick in: a 200/markdown answer from
+    // Tavily, not a re-thrown timeout.
+    const tools = createWebTools("tavily-key", undefined);
+    const fetchUrl = tools[2]!;
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "https://walled.example.com/page") {
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }
+      if (url === "https://api.tavily.com/extract") {
+        return {
+          ok: true,
+          json: async () => ({
+            results: [
+              {
+                url: "https://walled.example.com/page",
+                raw_content: "Got via Tavily despite timeout.",
+              },
+            ],
+            failed_results: [],
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const result = await fetchUrl.handler(
+      { url: "https://walled.example.com/page" },
+      stubService(),
+    );
+    expect(result).toContain("despite timeout");
+    expect(mockFetch.mock.calls.some((c) => c[0] === "https://api.tavily.com/extract")).toBe(true);
+  });
+
+  it("surfaces both errors when direct fetch and Tavily both fail", async () => {
+    const tools = createWebTools("tavily-key", undefined);
+    const fetchUrl = tools[2]!;
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "https://api.tavily.com/extract") {
+        return {
+          ok: true,
+          json: async () => ({
+            results: [],
+            failed_results: [
+              { url: "https://walled.example.com/page", error: "URL is not accessible" },
+            ],
+          }),
+        };
+      }
+      return { ok: false, status: 403, statusText: "Forbidden" };
+    });
+
+    await expect(
+      fetchUrl.handler({ url: "https://walled.example.com/page" }, stubService()),
+    ).rejects.toThrow(/Direct fetch:.*403.*Tavily fallback:.*not accessible/);
   });
 });
