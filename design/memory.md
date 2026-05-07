@@ -190,6 +190,14 @@ Cost: `reflect()` makes its own LLM calls inside Hindsight (configurable budget:
 
 Decision: **implemented** as the `memory_reflect` tool alongside `memory_recall` and `memory_retain`. The tool exposes the Hindsight `budget` knob (default `low`) plus `tags` / `tagsMatch` for scoped synthesis. Prompt guidance in `MEMORY_PROMPT_GUIDANCE` steers the agent toward `memory_recall` for simple lookups and reserves `memory_reflect` for open-ended, synthesis-heavy questions.
 
+### Hindsight Adapter Workarounds `[confirmed]`
+
+Two upstream quirks the `HindsightMemoryProvider` adapter compensates for — both verified empirically while wiring the integration test for tag_groups, both important enough that bypassing the adapter (calling `HindsightClient` directly) loses memories silently.
+
+**`retainBatch` runs synchronously** ([Hindsight #1375](https://github.com/vectorize-io/hindsight/issues/1375)). With `async: true` and a multi-item batch, Hindsight conflates everything into the first item's `document_id` — only the first item's memory units materialize, the rest are silently dropped. Per-item `document_id` doesn't rescue the async multi-item path empirically; only `async: false` preserves every item. Fanning out to N parallel single-item async retains works in production-equivalent record runs but doesn't survive replay-mode tests (the slim test image stalls the async worker chain), so the adapter goes with the simpler well-supported path: one multi-item batch with `async: false` and a per-item UUIDv4 `document_id`. Cost: response latency scales with N (extraction + embedding + consolidation, sequentially), but `retainBatch` only runs inside an Inngest `step.run` on `conversation/idle` — the user doesn't wait. When #1375 closes, the adapter can flip to `async: true` for the same batch shape; the per-item `document_id` is already in place.
+
+**Default `types` filter excludes `observation`**. Hindsight's `recall` endpoint defaults to `types: ["world", "experience"]`. The extraction LLM produces `observation`-type facts routinely — enough that the default filter hides a meaningful slice of stored content. The adapter overrides the default in `buildRecallBody` to `["world", "experience", "observation"]` so callers see every extracted fact unless they explicitly narrow. This is independent of our `network:*` tag taxonomy: Hindsight's `fact_type` is a server-side classification, our `network:*` is a client-side tag, both are stored, both are queryable. No upstream issue filed (the default is a deliberate Hindsight design choice).
+
 ## Hindsight Provider Configuration `[proposed]`
 
 Hindsight uses three external capabilities: LLM (fact extraction), embeddings (vector search), and reranking (result quality). Each is independently configurable.

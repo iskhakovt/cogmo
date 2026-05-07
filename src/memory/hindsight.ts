@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import {
   type Client,
@@ -21,6 +22,15 @@ import type {
   RetainOptions,
   TagGroup,
 } from "./provider.js";
+
+/**
+ * Hindsight fact_type values. The server defaults recall to
+ * `["world", "experience"]`, which silently hides "observation"
+ * memories — and the extraction LLM produces all three types
+ * routinely. We override the default to include all three so
+ * callers see every extracted fact unless they explicitly narrow.
+ */
+const ALL_FACT_TYPES = ["world", "experience", "observation"] as const;
 
 const tracer = trace.getTracer("cogmo.memory");
 
@@ -120,8 +130,19 @@ export class HindsightMemoryProvider implements MemoryProvider {
   }
 
   async retainBatch(bankId: string, items: RetainBatchItem[]): Promise<void> {
+    // Single multi-item batch with async: false. Hindsight #1375
+    // silently drops everything past the first item under async: true
+    // with multi-item batches; per-item document_id doesn't rescue
+    // the async path. Synchronous mode preserves every item.
+    // Per-item document_id keeps each item distinguishable in the
+    // document graph and makes the eventual flip back to async: true
+    // (when #1375 closes) trivial. Cost: response latency scales with
+    // N (extraction + embedding + consolidation, sequentially), but
+    // retainBatch only runs inside an Inngest `step.run` on
+    // `conversation/idle` — the user doesn't wait.
     const mapped: MemoryItemInput[] = items.map((item) => ({
       content: item.content,
+      document_id: randomUUID(),
       ...(item.context !== undefined && { context: item.context }),
       ...(item.metadata !== undefined && { metadata: item.metadata }),
       ...(item.tags !== undefined && { tags: item.tags }),
@@ -129,7 +150,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
         observation_scopes: item.observationScopes,
       }),
     }));
-    await withRetry(() => this.#client.retainBatch(bankId, mapped, { async: true }), {
+    await withRetry(() => this.#client.retainBatch(bankId, mapped, { async: false }), {
       context: `hindsight.retainBatch[${bankId}]`,
     });
   }
@@ -232,7 +253,12 @@ type RecallBody = Parameters<typeof sdk.recallMemories>[0]["body"];
 type ReflectBody = Parameters<typeof sdk.reflect>[0]["body"];
 
 function buildRecallBody(query: string, options?: RecallOptions): RecallBody {
-  const body: RecallBody = { query };
+  const body: RecallBody = {
+    query,
+    // Override Hindsight's default ["world", "experience"] so the
+    // observation-type facts the extraction LLM produces are visible.
+    types: [...ALL_FACT_TYPES],
+  };
   if (options?.maxTokens !== undefined) body.max_tokens = options.maxTokens;
   if (options?.tags !== undefined) body.tags = options.tags;
   if (options?.tagsMatch !== undefined) body.tags_match = options.tagsMatch;

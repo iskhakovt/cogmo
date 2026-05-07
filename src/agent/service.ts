@@ -117,9 +117,10 @@ export function createService(
 ): Service {
   return {
     memory: {
-      recall: (query, opts) => memory.recall(bankId, query, applyScope(memoryScope, opts)),
+      recall: (query, opts) => memory.recall(bankId, query, applyScopeToRecall(memoryScope, opts)),
       retain: (content, opts) => memory.retain(bankId, content, opts),
-      reflect: (query, opts) => memory.reflect(bankId, query, applyScope(memoryScope, opts)),
+      reflect: (query, opts) =>
+        memory.reflect(bankId, query, applyScopeToReflect(memoryScope, opts)),
       stageRetain,
     },
     files,
@@ -129,48 +130,52 @@ export function createService(
   };
 }
 
-interface ScopableOptions {
-  tags?: string[];
-  tagsMatch?: TagsMatch;
-  tagGroups?: TagGroup[];
+/**
+ * Fold the profile's scope into a `tag_groups` filter combining the
+ * scope leaves and any caller-supplied tag filter (tags, tagsMatch,
+ * tagGroups). Returns `null` when the profile has no scope — the
+ * caller passes opts through verbatim in that case.
+ *
+ * A caller passing `tagsMatch` without `tags` has no leaf to attach
+ * the match mode to, so it's silently dropped — meaningless on its own.
+ */
+function buildScopedTagGroups(
+  memoryScope: ProfileMemoryScope,
+  caller: { tags?: string[]; tagsMatch?: TagsMatch; tagGroups?: TagGroup[] } | undefined,
+): TagGroup[] {
+  const andChildren: TagGroup[] = buildScopeLeaves(memoryScope);
+  if (caller?.tags !== undefined && caller.tags.length > 0) {
+    andChildren.push({ tags: caller.tags, match: caller.tagsMatch ?? "any" });
+  }
+  if (caller?.tagGroups !== undefined) {
+    andChildren.push(...caller.tagGroups);
+  }
+  return [{ and: andChildren }];
 }
 
-/**
- * Fold the profile's scope into recall/reflect options.
- *
- * Null scope → caller's options pass through unchanged. Set scope →
- * caller's tag fields (`tags`, `tagsMatch`, `tagGroups`) are absorbed
- * into a single `tagGroups: [{ and: [...] }]` clause that ANDs the
- * scope leaves with any caller-supplied filter; non-tag options
- * (maxTokens, context, budget) ride through untouched.
- *
- * Note: a caller passing `tagsMatch` without `tags` has no leaf to
- * attach the match mode to, so it's silently dropped — meaningless
- * on its own.
- */
-function applyScope<T extends ScopableOptions>(
+function applyScopeToRecall(
   memoryScope: ProfileMemoryScope | null,
-  opts: T | undefined,
-): T {
-  if (memoryScope === null) {
-    // Empty-object default mirrors how callers treat undefined opts; the
-    // cast is safe because every field on T is optional for the no-scope
-    // path (caller-supplied opts pass through verbatim otherwise).
-    return (opts ?? {}) as T;
-  }
-  const andChildren: TagGroup[] = buildScopeLeaves(memoryScope);
-  if (opts?.tags !== undefined && opts.tags.length > 0) {
-    andChildren.push({ tags: opts.tags, match: opts.tagsMatch ?? "any" });
-  }
-  if (opts?.tagGroups !== undefined) {
-    andChildren.push(...opts.tagGroups);
-  }
-  const { tags: _t, tagsMatch: _m, tagGroups: _g, ...rest } = opts ?? {};
-  // TS can't track that destructuring-rest then re-spreading preserves
-  // T's structural constraint, even though every removed field is
-  // optional on T. Widen via unknown rather than threading a generic
-  // helper that obscures the runtime shape.
-  return { ...rest, tagGroups: [{ and: andChildren }] } as unknown as T;
+  opts: RecallOptions | undefined,
+): RecallOptions {
+  if (memoryScope === null) return opts ?? {};
+  const tagGroups = buildScopedTagGroups(memoryScope, opts);
+  return {
+    ...(opts?.maxTokens !== undefined && { maxTokens: opts.maxTokens }),
+    tagGroups,
+  };
+}
+
+function applyScopeToReflect(
+  memoryScope: ProfileMemoryScope | null,
+  opts: ReflectOptions | undefined,
+): ReflectOptions {
+  if (memoryScope === null) return opts ?? {};
+  const tagGroups = buildScopedTagGroups(memoryScope, opts);
+  return {
+    ...(opts?.context !== undefined && { context: opts.context }),
+    ...(opts?.budget !== undefined && { budget: opts.budget }),
+    tagGroups,
+  };
 }
 
 /**

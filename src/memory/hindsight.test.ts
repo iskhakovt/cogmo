@@ -81,23 +81,32 @@ describe("HindsightMemoryProvider", () => {
       },
     ]);
 
+    // Single multi-item batch with async:false — Hindsight #1375
+    // silently drops items past the first when async:true is used
+    // with a multi-item batch. Each item still gets its own
+    // document_id so the document boundary is preserved.
+    expect(mockRetainBatch).toHaveBeenCalledTimes(1);
     expect(mockRetainBatch).toHaveBeenCalledWith(
       "bank-1",
       [
         {
           content: "homelab IP is 10.0.10.10",
+          document_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
           tags: ["network:world"],
           observation_scopes: "per_tag",
         },
         {
           content: "user prefers tables over prose",
+          document_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
           tags: ["network:bank"],
           context: "style preference",
           observation_scopes: "per_tag",
         },
       ],
-      { async: true },
+      { async: false },
     );
+    const items = mockRetainBatch.mock.calls[0]?.[1] as Array<{ document_id: string }>;
+    expect(items[0]?.document_id).not.toBe(items[1]?.document_id);
   });
 
   it("recall maps response to Memory array", async () => {
@@ -148,6 +157,9 @@ describe("HindsightMemoryProvider", () => {
       path: { bank_id: "bank-1" },
       body: {
         query: "query",
+        // Adapter overrides Hindsight's default `["world", "experience"]` so
+        // observation-type facts aren't silently filtered out.
+        types: ["world", "experience", "observation"],
         max_tokens: 1000,
         tags: ["network:world"],
         tags_match: "any_strict",
