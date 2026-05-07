@@ -129,14 +129,23 @@ export function renderConversationStatus(
     `  scope: ${formatScope(summary.profile.memoryScope)}`,
   ];
 
-  // Voice mode line — only render when the override differs from the
-  // profile default OR when the user has explicitly set an override. A
-  // null override on a profile already at `auto` is the unsurprising
-  // default; skipping it keeps /status dense for the common case.
-  if (summary.voiceMode !== null && summary.voiceMode !== summary.profile.voiceMode) {
-    lines.push(
-      `  voice: ${summary.voiceMode} (override; profile default ${summary.profile.voiceMode})`,
-    );
+  // Voice mode line.
+  //   - Explicit override → always surface it (even when it equals the
+  //     profile default — `/voice clear` would still change semantics
+  //     for any future profile-default flip, so the override is real
+  //     state worth knowing about).
+  //   - No override + profile default `auto` → hide; that's the
+  //     unsurprising baseline and surfacing it on every `/status` adds
+  //     noise without information.
+  //   - No override + profile default non-auto → show as profile default.
+  if (summary.voiceMode !== null) {
+    if (summary.voiceMode === summary.profile.voiceMode) {
+      lines.push(`  voice: ${summary.voiceMode} (override matches profile default)`);
+    } else {
+      lines.push(
+        `  voice: ${summary.voiceMode} (override; profile default ${summary.profile.voiceMode})`,
+      );
+    }
   } else if (summary.profile.voiceMode !== "auto") {
     lines.push(`  voice: ${summary.profile.voiceMode} (profile default)`);
   }

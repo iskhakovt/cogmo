@@ -224,6 +224,24 @@ describe("renderConversationStatus", () => {
     expect(text).not.toMatch(/voice:/);
   });
 
+  it("surfaces an explicit override even when it equals the profile default", () => {
+    // Regression: an earlier version hid the override when override === default,
+    // which lost the fact that the user had explicitly pinned the value (and
+    // that `/voice clear` would still change semantics on a future default flip).
+    const text = renderConversationStatus(
+      mkStatus({ voiceMode: "always", profile: { ...mkStatus().profile, voiceMode: "always" } }),
+      NOW,
+    );
+    expect(text).toContain("voice: always (override matches profile default)");
+  });
+
+  it("surfaces an explicit auto override even when the profile default is also auto", () => {
+    // Same regression — profile default `auto` is the case that was hidden
+    // entirely, dropping the "explicitly overridden" signal on the floor.
+    const text = renderConversationStatus(mkStatus({ voiceMode: "auto" }), NOW);
+    expect(text).toContain("voice: auto (override matches profile default)");
+  });
+
   it("annotates a set memory scope via formatScope", () => {
     const text = renderConversationStatus(
       mkStatus({
