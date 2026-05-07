@@ -7,7 +7,12 @@
  */
 
 import { actionToDecision } from "../../../agent/coding/permission-keyboard.js";
+import {
+  MemoryCompartmentSchema,
+  MemoryTrustSchema,
+} from "../../../agent/evolution/memory-extraction-schema.js";
 import type { Profile } from "../../../agent/store/index.js";
+import { type ProfileMemoryScope, ProfileMemoryScopeSchema } from "../../../agent/store/schema.js";
 import { SERVER_NAME_RE } from "../../../mcp/config.js";
 import { truncate } from "../../../util/string.js";
 import { isUuid } from "../../../util/uuid.js";
@@ -42,7 +47,14 @@ export interface ReplyOptions {
 const USAGE = {
   resume: "Usage: /resume <alias>",
   name: "Usage: /name <alias>  (or /name -  to clear)",
-  profile: "Usage: /profile [list|switch <name>|new <name>|edit <name>|delete <name>]",
+  profile:
+    "Usage: /profile [list|switch <name>|new <name>|edit <name>|delete <name>|scope <name> [clear|compartments=… trust=…]]\n" +
+    "  /profile scope <name>                                   → show current scope\n" +
+    "  /profile scope <name> clear                             → unrestricted (recall all)\n" +
+    "  /profile scope <name> compartments=work,technical trust=first-party\n" +
+    "                                                          → set (both keys required)\n" +
+    "  Compartments: personal, work, health, financial, technical\n" +
+    "  Trust:        first-party, any",
   model: "Usage: /model [<model>]",
   repo:
     "Usage: /repo [list|add [<name> <local_path> <remote_url>]|remove <name>]\n" +
@@ -174,6 +186,11 @@ export async function handleProfile(
       return dialogs.startNew(transport, ctx, arg);
     case "edit":
       return dialogs.startEdit(transport, ctx, arg);
+    case "scope": {
+      // First positional is the profile name; the rest is the scope spec.
+      const [name, ...scopeTokens] = rest;
+      return replyProfileScope(transport, ctx, handle, name ?? "", scopeTokens);
+    }
     default:
       await ctx.reply(USAGE.profile);
   }
@@ -611,6 +628,126 @@ async function replyProfileDelete(
     return;
   }
   await ctx.reply(`Profile "${name}" deleted.`);
+}
+
+// ── /profile scope ────────────────────────────────────────────────────
+
+/**
+ * Pure parser for the scope spec — the tokens after `<name>` in
+ * `/profile scope <name> …`. Exposed for unit testing.
+ *
+ * Forms:
+ *   []                                        → show current scope
+ *   ["clear"]                                 → set null (unrestricted)
+ *   ["compartments=…", "trust=…"]             → set (both keys required, any order)
+ */
+export type ScopeSpec =
+  | { kind: "show" }
+  | { kind: "clear" }
+  | { kind: "set"; scope: ProfileMemoryScope }
+  | { kind: "error"; message: string };
+
+export function parseScopeSpec(tokens: ReadonlyArray<string>): ScopeSpec {
+  const trimmed = tokens.map((t) => t.trim()).filter(Boolean);
+  if (trimmed.length === 0) return { kind: "show" };
+  if (trimmed.length === 1 && trimmed[0]?.toLowerCase() === "clear") return { kind: "clear" };
+
+  const collected: { compartments?: string[]; trust?: string[] } = {};
+  for (const token of trimmed) {
+    const eq = token.indexOf("=");
+    if (eq <= 0) {
+      return {
+        kind: "error",
+        message: `Bad token "${token}". Expected compartments=… or trust=… (or "clear" alone).`,
+      };
+    }
+    const key = token.slice(0, eq).toLowerCase();
+    const values = token
+      .slice(eq + 1)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (key === "compartments") {
+      collected.compartments = values;
+    } else if (key === "trust") {
+      collected.trust = values;
+    } else {
+      return {
+        kind: "error",
+        message: `Unknown key "${key}". Expected compartments or trust.`,
+      };
+    }
+  }
+  if (!collected.compartments || !collected.trust) {
+    return {
+      kind: "error",
+      message:
+        "Both compartments=… and trust=… are required when setting a scope. Use 'clear' to remove.",
+    };
+  }
+
+  const parsed = ProfileMemoryScopeSchema.safeParse(collected);
+  if (!parsed.success) {
+    return {
+      kind: "error",
+      message:
+        `Invalid scope: ${parsed.error.issues.map((i) => i.message).join("; ")}\n` +
+        `Compartments: ${MemoryCompartmentSchema.options.join(", ")}\n` +
+        `Trust:        ${MemoryTrustSchema.options.join(", ")}`,
+    };
+  }
+  return { kind: "set", scope: parsed.data };
+}
+
+/** Render a profile's scope in human form for the show / confirm replies. */
+export function formatScope(scope: ProfileMemoryScope | null): string {
+  if (scope === null) return "unrestricted (recalls all memories)";
+  return `compartments: ${scope.compartments.join(", ")} / trust: ${scope.trust.join(", ")}`;
+}
+
+async function replyProfileScope(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+  name: string,
+  scopeTokens: ReadonlyArray<string>,
+): Promise<void> {
+  if (!name) {
+    await ctx.reply(USAGE.profile);
+    return;
+  }
+  const resolved = await resolveProfileByName(transport, handle, name);
+  if (resolved.kind === "error") {
+    await ctx.reply(errorMessage(resolved.error));
+    return;
+  }
+  if (resolved.kind === "none") {
+    await ctx.reply(`No profile named "${name}".`);
+    return;
+  }
+  if (resolved.kind === "ambiguous") {
+    await ctx.reply(ambiguityMessage(name, resolved.matches));
+    return;
+  }
+  const profile = resolved.profile;
+
+  const spec = parseScopeSpec(scopeTokens);
+  if (spec.kind === "show") {
+    await ctx.reply(`Scope for "${profile.name}": ${formatScope(profile.memoryScope)}`);
+    return;
+  }
+  if (spec.kind === "error") {
+    await ctx.reply(spec.message);
+    return;
+  }
+
+  const newScope: ProfileMemoryScope | null = spec.kind === "clear" ? null : spec.scope;
+  const update = await transport.profiles.update(handle, profile.id, { memoryScope: newScope });
+  if (update.isErr()) {
+    await ctx.reply(errorMessage(update.error));
+    return;
+  }
+  await ctx.reply(`Scope for "${profile.name}" updated: ${formatScope(newScope)}`);
 }
 
 // ── /repo ─────────────────────────────────────────────────────────────

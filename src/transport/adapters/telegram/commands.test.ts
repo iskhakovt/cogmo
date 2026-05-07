@@ -1,8 +1,10 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import type { Profile } from "../../../agent/store/index.js";
 import { mockTransport } from "../../../test/factories.js";
 import type { Transport } from "../../transport.js";
 import {
+  formatScope,
   handleEnd,
   handleMcp,
   handleModel,
@@ -14,6 +16,7 @@ import {
   handleResumeCallback,
   handleSessions,
   handleSkillsApprovalCallback,
+  parseScopeSpec,
   type TelegramCommandContext,
 } from "./commands.js";
 import { ProfileDialogs } from "./profile-dialog.js";
@@ -350,6 +353,215 @@ describe("handleProfile", () => {
     const ctx = mkCtx("edit coder");
     await handleProfile(transport, ctx, dialogs);
     expect(startEdit).toHaveBeenCalledWith(transport, ctx, "coder");
+  });
+
+  describe("scope subcommand", () => {
+    function makeProfile(memoryScope: Profile["memoryScope"] = null): Profile {
+      return {
+        id: "p1",
+        userId: "u",
+        name: "personal",
+        basePrompt: "",
+        model: "claude-sonnet-4-6",
+        summarizationModel: null,
+        extractionModel: null,
+        autoRecall: "heuristic",
+        toolSet: [],
+        memoryScope,
+      };
+    }
+
+    it("shows current scope when called with no spec — null renders as 'unrestricted'", async () => {
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update: vi.fn().mockResolvedValue(ok({} as never)),
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("unrestricted"));
+    });
+
+    it("shows current scope when set", async () => {
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              makeProfile({
+                compartments: ["work", "technical"],
+                trust: ["first-party"],
+              }),
+            ]),
+          ),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update: vi.fn().mockResolvedValue(ok({} as never)),
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(ctx.reply).toHaveBeenCalledWith(
+        expect.stringContaining("compartments: work, technical / trust: first-party"),
+      );
+    });
+
+    it("clear → calls update with memoryScope: null and confirms", async () => {
+      const update = vi.fn().mockResolvedValue(ok(makeProfile(null)));
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal clear");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).toHaveBeenCalledWith("1", "p1", { memoryScope: null });
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("unrestricted"));
+    });
+
+    it("set → calls update with parsed scope", async () => {
+      const set = { compartments: ["work", "technical"] as const, trust: ["first-party"] as const };
+      const update = vi.fn().mockResolvedValue(ok(makeProfile({ ...set })));
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal compartments=work,technical trust=first-party");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).toHaveBeenCalledWith("1", "p1", {
+        memoryScope: { compartments: ["work", "technical"], trust: ["first-party"] },
+      });
+      expect(ctx.reply).toHaveBeenCalledWith(
+        expect.stringContaining("compartments: work, technical / trust: first-party"),
+      );
+    });
+
+    it("rejects unknown profile — does not call update", async () => {
+      const update = vi.fn();
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope ghost compartments=work trust=any");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('No profile named "ghost"'));
+    });
+
+    it("surfaces parse errors without calling update", async () => {
+      const update = vi.fn();
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal compartments=bogus trust=first-party");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Invalid scope"));
+    });
+
+    it("surfaces transport access_denied (org profile) without leaking it as success", async () => {
+      const update = vi.fn().mockResolvedValue(
+        err({
+          code: "access_denied" as const,
+          reason: "org profiles are read-only via Transport",
+        }),
+      );
+      const orgProfile: Profile = { ...makeProfile(null), userId: null };
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([orgProfile])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal clear");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Access denied"));
+    });
+  });
+});
+
+describe("parseScopeSpec", () => {
+  it("empty tokens → show", () => {
+    expect(parseScopeSpec([])).toEqual({ kind: "show" });
+  });
+
+  it("['clear'] (any case) → clear", () => {
+    expect(parseScopeSpec(["clear"])).toEqual({ kind: "clear" });
+    expect(parseScopeSpec(["CLEAR"])).toEqual({ kind: "clear" });
+  });
+
+  it("set with both keys, regardless of order", () => {
+    const a = parseScopeSpec(["compartments=work,technical", "trust=first-party"]);
+    const b = parseScopeSpec(["trust=first-party", "compartments=work,technical"]);
+    expect(a).toEqual({
+      kind: "set",
+      scope: { compartments: ["work", "technical"], trust: ["first-party"] },
+    });
+    expect(b).toEqual(a);
+  });
+
+  it("rejects missing key (compartments only)", () => {
+    const r = parseScopeSpec(["compartments=work"]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain("Both compartments=… and trust=…");
+  });
+
+  it("rejects unknown key", () => {
+    const r = parseScopeSpec(["compartments=work", "trust=any", "extra=foo"]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain('Unknown key "extra"');
+  });
+
+  it("rejects token without '='", () => {
+    const r = parseScopeSpec(["bogus"]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain('Bad token "bogus"');
+  });
+
+  it("rejects empty value list (trust=)", () => {
+    // After splitting and filtering empties, trust ends up as []. Zod's .min(1)
+    // catches it — message mentions the validation issue.
+    const r = parseScopeSpec(["compartments=work", "trust="]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain("Invalid scope");
+  });
+
+  it("rejects unknown enum value", () => {
+    const r = parseScopeSpec(["compartments=bogus", "trust=first-party"]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain("Invalid scope");
+  });
+});
+
+describe("formatScope", () => {
+  it("null → 'unrestricted (recalls all memories)'", () => {
+    expect(formatScope(null)).toBe("unrestricted (recalls all memories)");
+  });
+
+  it("set scope renders compartments + trust", () => {
+    expect(formatScope({ compartments: ["work", "technical"], trust: ["first-party"] })).toBe(
+      "compartments: work, technical / trust: first-party",
+    );
   });
 });
 

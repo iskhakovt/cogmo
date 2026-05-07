@@ -87,6 +87,26 @@ describe("renderProfileList", () => {
     expect(rendered.text).toContain("• coder (you, claude-sonnet-4-6) ← current");
   });
 
+  it("annotates profiles with a memoryScope set; unscoped profiles render unchanged", () => {
+    const profiles = [
+      mkProfile({ id: "p1", name: "open", userId: "u1" }),
+      mkProfile({
+        id: "p2",
+        name: "work",
+        userId: "u1",
+        memoryScope: { compartments: ["work", "technical"], trust: ["first-party"] },
+      }),
+    ];
+    const rendered = renderProfileList(profiles);
+    expect(rendered.text).toContain("• open (you, claude-sonnet-4-6)");
+    // No annotation when scope is null.
+    expect(rendered.text).not.toMatch(/open .*\[scope:/);
+    // Inline annotation when scope is set.
+    expect(rendered.text).toContain(
+      "• work (you, claude-sonnet-4-6) [scope: work,technical / first-party]",
+    );
+  });
+
   it("handles empty list", () => {
     expect(renderProfileList([]).text).toContain("No profiles");
   });

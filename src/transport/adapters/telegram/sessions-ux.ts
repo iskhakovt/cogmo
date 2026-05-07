@@ -58,9 +58,14 @@ export function renderProfileList(
     return { text: "No profiles available." };
   }
   const lines = profiles.map((p) => {
-    const scope = p.userId === null ? "org" : "you";
+    const owner = p.userId === null ? "org" : "you";
     const current = p.id === opts.currentProfileId ? " ← current" : "";
-    return `• ${p.name} (${scope}, ${p.model})${current}`;
+    // Memory scope is null for most profiles (unrestricted) — only annotate
+    // when set, so the common case stays compact.
+    const scope = p.memoryScope
+      ? ` [scope: ${p.memoryScope.compartments.join(",")} / ${p.memoryScope.trust.join(",")}]`
+      : "";
+    return `• ${p.name} (${owner}, ${p.model})${scope}${current}`;
   });
   return { text: lines.join("\n") };
 }

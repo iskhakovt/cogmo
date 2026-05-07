@@ -5,7 +5,7 @@ import { err, ok, type Result } from "neverthrow";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import { ProfileInUseError, UniqueViolationError } from "../agent/store/errors.js";
 import type { AgentStore, ConversationSummary, Profile } from "../agent/store/index.js";
-import type { ToolSet } from "../agent/store/schema.js";
+import type { ProfileMemoryScope, ToolSet } from "../agent/store/schema.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import {
@@ -34,6 +34,12 @@ export interface ProfileInput {
   basePrompt: string;
   model: string;
   toolSet: ToolSet;
+  /**
+   * Memory ACL: which compartment + trust tag combinations the profile may
+   * recall from Hindsight. `null` (default) = no restriction. Set via
+   * `/profile scope` after creation; not part of the create dialog.
+   */
+  memoryScope?: ProfileMemoryScope | null;
   // summarizationModel / extractionModel are profile-level fields in the DB but not yet exposed
   // via Transport — /profile edit doesn't cover them. Add back here when the dialog does.
 }
@@ -655,6 +661,7 @@ export function createTransport(deps: {
             basePrompt: input.basePrompt,
             model: input.model,
             toolSet: input.toolSet,
+            ...(input.memoryScope !== undefined && { memoryScope: input.memoryScope }),
           });
           return ok(created);
         } catch (e) {
