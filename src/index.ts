@@ -503,7 +503,6 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     codingServiceFactory,
     skillRunner,
     mcpRegistry,
-    ...(profile.summarizationModel && { summarizationModel: profile.summarizationModel }),
     ...(ttsProvider && { ttsProvider }),
     ...(sttProvider && { sttProvider }),
     ...(voiceCfgForTurn && { voiceConfig: voiceCfgForTurn }),
@@ -513,7 +512,6 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     agentStore,
     resolveProvider,
     memory,
-    ...(profile.extractionModel && { extractionModel: profile.extractionModel }),
   });
 
   const recoverConversation = createRecoverConversation({ agentStore });

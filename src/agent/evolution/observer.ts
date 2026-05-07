@@ -25,7 +25,6 @@ import { buildRetainItems, classifyPendingMemories } from "./drain-pending-memor
 import { extractCorrections } from "./extract-corrections.js";
 import { extractMemories } from "./extract-memories.js";
 
-const DEFAULT_EXTRACTION_MODEL = "claude-sonnet-4-6";
 const MIN_MESSAGES_FOR_EXTRACTION = 4; // 2 turns minimum
 
 /**
@@ -39,21 +38,19 @@ const PENDING_DRAIN_BATCH_SIZE = 100;
 export interface ObserverDeps {
   agentStore: AgentStore;
   /**
-   * Per-fire provider lookup. The Observer's extraction model is fixed at
-   * construction (via `extractionModel` or the default), so we resolve
-   * lazily on the first fire and let the resolver's own cache amortize
-   * subsequent calls. See `src/llm/resolver.ts`.
+   * Per-fire provider lookup. The extraction model is read from the
+   * conversation's active profile inside the function (see `load-profile`
+   * step), then handed to the resolver. The resolver's own per-model cache
+   * amortizes the cost across fires. See `src/llm/resolver.ts`.
    */
   resolveProvider: LlmProviderResolver;
   // TODO: Route through Service.memory once retainBatch is on the Service interface (ACL boundary).
   // Currently called directly on the provider — safe because the Observer is a trusted internal consumer.
   memory: Pick<MemoryProvider, "retainBatch">;
-  extractionModel?: string;
 }
 
 export function createObserver(deps: ObserverDeps) {
   const { agentStore, resolveProvider } = deps;
-  const model = deps.extractionModel ?? DEFAULT_EXTRACTION_MODEL;
 
   return inngest.createFunction(
     {
@@ -72,6 +69,19 @@ export function createObserver(deps: ObserverDeps) {
         logger.warn({ conversationId }, "observer: conversation not found");
         return { status: "skipped", reason: "conversation_not_found" };
       }
+
+      // Resolve evolution model from the conversation's profile at fire
+      // time (not bootstrap) so a profile using a cheaper chat model gets
+      // extraction on that model too. `extractionModel` overrides the
+      // chat model when set; otherwise the chat model is reused.
+      const profile = await step.run("load-profile", async () => {
+        return agentStore.getProfile(conv.profileId);
+      });
+      if (!profile) {
+        logger.warn({ conversationId, profileId: conv.profileId }, "observer: profile not found");
+        return { status: "skipped", reason: "profile_not_found" };
+      }
+      const model = profile.extractionModel ?? profile.model;
 
       const history = await step.run("load-history", async () => {
         return agentStore.getHistory(conversationId);

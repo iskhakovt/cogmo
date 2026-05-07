@@ -1212,8 +1212,22 @@ describe("createHandleMessage", () => {
 
       const deps = mockDeps({
         resolveProvider,
-        summarizationModel: "claude-haiku-4-5-20251001",
         agentStore: mockAgentStore({
+          // Profile carries the summarization-model override now (per-profile
+          // evolution model). Bootstrap-time `summarizationModel` dep is gone.
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "assistant",
+            basePrompt: "test",
+            model: "claude-sonnet-4-6",
+            summarizationModel: "claude-haiku-4-5-20251001",
+            extractionModel: null,
+            autoRecall: "heuristic" as const,
+            voiceMode: "auto" as const,
+            toolSet: [],
+            memoryScope: null,
+          }),
           getLastTokens: vi.fn().mockResolvedValue(null),
           getHistory: vi.fn().mockResolvedValue([
             { role: "user", content: "m1" },
