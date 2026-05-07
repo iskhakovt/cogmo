@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
+import type { SkillStore } from "../../../skills/store/index.js";
 import { mockTransportStore } from "../../../test/factories.js";
 import { postSkillsApprovalKeyboard } from "./skills-approval-poster.js";
 
@@ -12,13 +14,17 @@ interface FakeSkillStoreOpts {
   skill?: { id: string; effects: string[] };
 }
 
-function makeSkillStore(opts: FakeSkillStoreOpts = {}) {
-  return {
-    getDeployById: vi.fn().mockResolvedValue(opts.deploy === undefined ? null : { ...opts.deploy }),
-    getSkillById: vi.fn().mockResolvedValue(opts.skill === undefined ? null : { ...opts.skill }),
-    // Other methods aren't exercised by the poster; cast at the use site.
-    // biome-ignore lint/suspicious/noExplicitAny: minimal SkillStore stub
-  } as any;
+function makeSkillStore(opts: FakeSkillStoreOpts = {}): SkillStore {
+  const store = mock<SkillStore>();
+  store.getDeployById.mockResolvedValue(
+    // biome-ignore lint/suspicious/noExplicitAny: test fixture — the poster only reads {id, skillId}
+    opts.deploy === undefined ? null : ({ ...opts.deploy } as any),
+  );
+  store.getSkillById.mockResolvedValue(
+    // biome-ignore lint/suspicious/noExplicitAny: test fixture — the poster only reads {id, effects}
+    opts.skill === undefined ? null : ({ ...opts.skill } as any),
+  );
+  return store;
 }
 
 describe("postSkillsApprovalKeyboard", () => {

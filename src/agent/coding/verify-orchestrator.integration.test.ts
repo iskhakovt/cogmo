@@ -34,7 +34,7 @@ import { promisify } from "node:util";
 import type { Octokit } from "@octokit/rest";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Database } from "../../db/index.js";
+import type { Database, Transactor } from "../../db/index.js";
 import type { StepRun } from "../../inngest/index.js";
 import type {
   ExecHandle,
@@ -335,12 +335,13 @@ class FakeSecretsStore {
 // --- Test setup ──────────────────────────────────────────────────────
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleCodingStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleCodingStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleCodingStore(tx);
   ({ url: giteaUrl, pat: giteaPat } = await startGitea());
 }, 120_000);
 

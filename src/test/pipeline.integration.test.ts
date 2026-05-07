@@ -6,7 +6,7 @@ import { sql as drizzleSql, eq } from "drizzle-orm";
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from "vitest";
 import { conversations, messages, profiles, voiceConfig } from "../agent/store/schema.js";
-import { db } from "../db/index.js";
+import { db, transactor } from "../db/index.js";
 import { bootstrap } from "../index.js";
 import { directOutbound } from "../inngest/events.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
@@ -123,7 +123,7 @@ async function seedVoiceConfig() {
     parseMasterKey(process.env.COGMO_MASTER_KEY),
     "cogmo/secrets-at-rest/v1",
   );
-  const secrets = new DrizzleSecretsStore(db, masterKey);
+  const secrets = new DrizzleSecretsStore(transactor(db), masterKey);
   const apiKey =
     process.env.RECORD === "1" ? (process.env.OPENAI_API_KEY ?? "") : "test-openai-key";
   if (process.env.RECORD === "1" && !apiKey) {

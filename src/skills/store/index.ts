@@ -1,6 +1,6 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import { single } from "../../db/helpers.js";
-import type { Database } from "../../db/index.js";
+import type { Transactor } from "../../db/index.js";
 import type { ClassifierLog, SkillEffects, SkillInputs, SkillIo } from "../types.js";
 import { skillContextCalls, skillDeploys, skillRuns, skills } from "./schema.js";
 
@@ -243,15 +243,15 @@ export interface SkillStore {
 }
 
 export class DrizzleSkillStore implements SkillStore {
-  #db: Database;
-  constructor(db: Database) {
-    this.#db = db;
+  #runInTx: Transactor;
+  constructor(runInTx: Transactor) {
+    this.#runInTx = runInTx;
   }
 
   // --- skills ---
 
   async insertSkill(params: InsertSkillParams): Promise<SkillRow> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx
           .insert(skills)
@@ -271,39 +271,39 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async getSkillByName(name: string): Promise<SkillRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(skills).where(eq(skills.name, name)).limit(1);
       return rows[0];
     });
   }
 
   async getSkillById(id: string): Promise<SkillRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(skills).where(eq(skills.id, id)).limit(1);
       return rows[0];
     });
   }
 
   async listEnabledSkills(): Promise<readonly SkillRow[]> {
-    return this.#db.transaction((tx) =>
+    return this.#runInTx((tx) =>
       tx.select().from(skills).where(eq(skills.disabled, false)).orderBy(asc(skills.name)),
     );
   }
 
   async updateSkillSha(params: { id: string; gitSha: string }): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(skills).set({ gitSha: params.gitSha }).where(eq(skills.id, params.id));
     });
   }
 
   async setSkillDisabled(params: { id: string; disabled: boolean }): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(skills).set({ disabled: params.disabled }).where(eq(skills.id, params.id));
     });
   }
 
   async executeRegister(params: ExecuteRegisterParams): Promise<ExecuteRegisterResult> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       // Serialize concurrent registers on the same skill name. Released at
       // tx commit/rollback.
       await tx.execute(
@@ -436,7 +436,7 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async executeApprove(params: ExecuteApproveParams): Promise<ExecuteRegisterResult> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const deployRows = await tx
         .select()
         .from(skillDeploys)
@@ -511,7 +511,7 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async denyPendingDeploy(params: { pendingId: string; reason: string | null }): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       const rows = await tx
         .update(skillDeploys)
         .set({ status: "denied", resolvedAt: new Date() })
@@ -533,7 +533,7 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async executeRollback(params: ExecuteRollbackParams): Promise<ExecuteRegisterResult> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       await tx.execute(
         sql`SELECT pg_advisory_xact_lock(hashtext(${`skill_register:${params.name}`})::bigint)`,
       );
@@ -591,7 +591,7 @@ export class DrizzleSkillStore implements SkillStore {
   // --- skill_deploys ---
 
   async insertDeploy(params: InsertDeployParams): Promise<SkillDeployRow> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx
           .insert(skillDeploys)
@@ -609,7 +609,7 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async getPendingDeploy(skillId: string): Promise<SkillDeployRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select()
         .from(skillDeploys)
@@ -620,7 +620,7 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async getDeployById(id: string): Promise<SkillDeployRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(skillDeploys).where(eq(skillDeploys.id, id)).limit(1);
       return rows[0];
     });
@@ -632,7 +632,7 @@ export class DrizzleSkillStore implements SkillStore {
     approvedBy: string | null;
     resolvedAt: Date;
   }): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx
         .update(skillDeploys)
         .set({
@@ -652,7 +652,7 @@ export class DrizzleSkillStore implements SkillStore {
       // an empty object rather than relying on null/undefined coercion.
       throw new Error("insertRun: inputs must not be null/undefined");
     }
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx
           .insert(skillRuns)
@@ -668,7 +668,7 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async updateRunResult(params: UpdateRunResultParams): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx
         .update(skillRuns)
         .set({
@@ -682,7 +682,7 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async getRun(id: string): Promise<SkillRunRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(skillRuns).where(eq(skillRuns.id, id)).limit(1);
       return rows[0];
     });
@@ -691,7 +691,7 @@ export class DrizzleSkillStore implements SkillStore {
   // --- skill_context_calls ---
 
   async recordContextCall(params: RecordContextCallParams): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.insert(skillContextCalls).values({
         runId: params.runId,
         method: params.method,
@@ -703,7 +703,7 @@ export class DrizzleSkillStore implements SkillStore {
   }
 
   async listContextCallsForRun(runId: string): Promise<readonly SkillContextCallRow[]> {
-    return this.#db.transaction((tx) =>
+    return this.#runInTx((tx) =>
       tx
         .select()
         .from(skillContextCalls)

@@ -2,6 +2,8 @@
 
 Execution runtime, storage, and invocation for agent-authored skills — small Python programs the agent writes to accomplish recurring tasks.
 
+> *Sandbox API names below (`Sandbox interface`, "sysbox container spawn (via Sandbox interface)") reflect the current code. The canonical interface contract is [sandbox.md](sandbox.md) → Backend Architecture, where `SandboxClient` / `SandboxSession` is the in-flight refactor target. Tier-2 workers will switch to `SandboxClient.create()` when the refactor lands.*
+
 ## Scope
 
 **In:**

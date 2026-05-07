@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Database } from "../../db/index.js";
+import type { Database, Transactor } from "../../db/index.js";
 import type { ExecHandle, Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
@@ -23,6 +23,7 @@ import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./st
 const execFileP = promisify(execFile);
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleCodingStore;
 let sandboxStore: DrizzleSandboxStore;
@@ -31,9 +32,9 @@ let baseDir: string;
 let repoPath: string;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleCodingStore(db);
-  sandboxStore = new DrizzleSandboxStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleCodingStore(tx);
+  sandboxStore = new DrizzleSandboxStore(tx);
 
   baseDir = mkdtempSync(join(tmpdir(), "cogmo-orch-test-"));
   repoPath = join(baseDir, "repo");

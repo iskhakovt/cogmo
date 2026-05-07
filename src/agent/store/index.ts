@@ -1,7 +1,7 @@
 import { and, asc, count, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import * as R from "remeda";
 import { single } from "../../db/helpers.js";
-import type { Database } from "../../db/index.js";
+import type { Transactor } from "../../db/index.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { truncate } from "../../util/string.js";
 import type { AutoRecallMode } from "../recall-gate.js";
@@ -477,13 +477,13 @@ export interface AgentStore {
 }
 
 export class DrizzleAgentStore implements AgentStore {
-  #db: Database;
-  constructor(db: Database) {
-    this.#db = db;
+  #runInTx: Transactor;
+  constructor(runInTx: Transactor) {
+    this.#runInTx = runInTx;
   }
 
   async createUser(): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(await tx.insert(users).values({}).returning({ id: users.id }));
     });
   }
@@ -493,7 +493,7 @@ export class DrizzleAgentStore implements AgentStore {
     profileId: string;
     isPrivate: boolean;
   }): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx.insert(conversations).values(params).returning({ id: conversations.id }),
       );
@@ -511,7 +511,7 @@ export class DrizzleAgentStore implements AgentStore {
       }
     | undefined
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           id: conversations.id,
@@ -529,13 +529,13 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async setConversationStatus(conversationId: string, status: ConversationStatus): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(conversations).set({ status }).where(eq(conversations.id, conversationId));
     });
   }
 
   async setConversationVoiceMode(conversationId: string, mode: VoiceMode | null): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx
         .update(conversations)
         .set({ voiceMode: mode })
@@ -544,7 +544,7 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async getVoiceConfig() {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       // ORDER BY created_at DESC defends against the singleton constraint
       // somehow being bypassed (manual psql, broken migration) — return
       // the most recent config rather than picking arbitrarily.
@@ -566,7 +566,7 @@ export class DrizzleAgentStore implements AgentStore {
     lastInboundMessageId: string;
     inputTokens?: number;
   }): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx
           .insert(messages)
@@ -601,7 +601,7 @@ export class DrizzleAgentStore implements AgentStore {
     if (params.messages.length === 0) {
       throw new Error("insertMessages requires at least one message");
     }
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const lastIdx = params.messages.length - 1;
       const values = R.map(params.messages, (msg, i) => ({
         conversationId: params.conversationId,
@@ -628,7 +628,7 @@ export class DrizzleAgentStore implements AgentStore {
   async getLastAssistantMessage(
     conversationId: string,
   ): Promise<{ id: string; lastInboundMessageId: string } | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           id: messages.id,
@@ -643,7 +643,7 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async getHistory(conversationId: string): Promise<ReadonlyArray<Message>> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({ role: messages.role, content: messages.content })
         .from(messages)
@@ -654,7 +654,7 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async getProfile(profileId: string): Promise<Profile | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           id: profiles.id,
@@ -677,14 +677,14 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async getFirstUser(): Promise<{ id: string } | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select({ id: users.id }).from(users).limit(1);
       return rows[0];
     });
   }
 
   async getDefaultProfile(): Promise<{ id: string } | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select({ id: profiles.id }).from(profiles).limit(1);
       return rows[0];
     });
@@ -699,7 +699,7 @@ export class DrizzleAgentStore implements AgentStore {
     memoryScope?: ProfileMemoryScope | null;
   }): Promise<Profile> {
     return translateUniqueViolation(() =>
-      this.#db.transaction(async (tx) => {
+      this.#runInTx(async (tx) => {
         const row = single(
           await tx.insert(profiles).values(params).returning({
             id: profiles.id,
@@ -721,7 +721,7 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async listProfiles(userId: string): Promise<ReadonlyArray<Profile>> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           id: profiles.id,
@@ -744,7 +744,7 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async getProfileOwner(profileId: string): Promise<{ userId: string | null } | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({ userId: profiles.userId })
         .from(profiles)
@@ -756,7 +756,7 @@ export class DrizzleAgentStore implements AgentStore {
 
   async updateProfile(profileId: string, changes: ProfileUpdates): Promise<Profile> {
     return translateUniqueViolation(() =>
-      this.#db.transaction(async (tx) => {
+      this.#runInTx(async (tx) => {
         const rows = await tx
           .update(profiles)
           .set(changes)
@@ -782,7 +782,7 @@ export class DrizzleAgentStore implements AgentStore {
   async countProfileReferences(
     profileId: string,
   ): Promise<{ conversations: number; messages: number }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const [convRows, msgRows] = await Promise.all([
         tx
           .select({ value: count() })
@@ -801,7 +801,7 @@ export class DrizzleAgentStore implements AgentStore {
     // Check refs + delete in one transaction so a concurrent conversation create / message insert
     // can't sneak in between count and delete. Without this, callers would see a raw FK error
     // instead of the typed ProfileInUseError.
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       const [convRows, msgRows] = await Promise.all([
         tx
           .select({ value: count() })
@@ -821,7 +821,7 @@ export class DrizzleAgentStore implements AgentStore {
   async getMessage(
     messageId: string,
   ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({ id: messages.id, role: messages.role, content: messages.content })
         .from(messages)
@@ -835,7 +835,7 @@ export class DrizzleAgentStore implements AgentStore {
     profileId: string,
     channelTypes: string[],
   ): Promise<ReadonlyArray<{ rule: string }>> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return tx
         .select({ rule: steeringRules.rule })
         .from(steeringRules)
@@ -858,7 +858,7 @@ export class DrizzleAgentStore implements AgentStore {
   async getCoreMemoryBlocks(
     userId: string,
   ): Promise<ReadonlyArray<{ key: string; content: string }>> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return tx
         .select({ key: coreMemoryBlocks.key, content: coreMemoryBlocks.content })
         .from(coreMemoryBlocks)
@@ -872,7 +872,7 @@ export class DrizzleAgentStore implements AgentStore {
     key: string;
     content: string;
   }): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx
         .insert(coreMemoryBlocks)
         .values(params)
@@ -890,7 +890,7 @@ export class DrizzleAgentStore implements AgentStore {
       }
     | undefined
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           inputTokens: messages.inputTokens,
@@ -905,7 +905,7 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async getLastMessageTime(conversationId: string): Promise<Date | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({ createdAt: messages.createdAt })
         .from(messages)
@@ -922,7 +922,7 @@ export class DrizzleAgentStore implements AgentStore {
     // One round-trip: pull every private conversation for the user with its profile name and
     // (optional) alias. Last-message preview is a correlated subquery — we want the latest row
     // regardless of role so /sessions shows the most recent activity.
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           id: conversations.id,
@@ -968,14 +968,14 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async setConversationProfile(conversationId: string, profileId: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(conversations).set({ profileId }).where(eq(conversations.id, conversationId));
     });
   }
 
   async setAlias(userId: string, conversationId: string, alias: string | null): Promise<void> {
     await translateUniqueViolation(() =>
-      this.#db.transaction(async (tx) => {
+      this.#runInTx(async (tx) => {
         if (alias === null) {
           await tx.delete(aliases).where(eq(aliases.conversationId, conversationId));
           return;
@@ -992,7 +992,7 @@ export class DrizzleAgentStore implements AgentStore {
     userId: string,
     alias: string,
   ): Promise<{ conversationId: string } | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({ conversationId: aliases.conversationId })
         .from(aliases)
@@ -1005,7 +1005,7 @@ export class DrizzleAgentStore implements AgentStore {
   // --- Model discovery ---
 
   async listDistinctUserSelectableModels(): Promise<ReadonlyArray<string>> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .selectDistinct({ model: modelProviders.model })
         .from(modelProviders)
@@ -1016,7 +1016,7 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async isModelUserSelectable(model: string): Promise<boolean> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({ id: modelProviders.id })
         .from(modelProviders)
@@ -1035,7 +1035,7 @@ export class DrizzleAgentStore implements AgentStore {
     secretId: string;
     attrs: ProviderAttrs;
   }): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx
           .insert(llmProviders)
@@ -1062,7 +1062,7 @@ export class DrizzleAgentStore implements AgentStore {
       }
     | undefined
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           id: llmProviders.id,
@@ -1086,7 +1086,7 @@ export class DrizzleAgentStore implements AgentStore {
       type: string;
     }>
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return tx
         .select({
           id: llmProviders.id,
@@ -1098,7 +1098,7 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async deleteProvider(providerId: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       // model_providers cascade-deletes via ON DELETE CASCADE
       await tx.delete(llmProviders).where(eq(llmProviders.id, providerId));
     });
@@ -1112,7 +1112,7 @@ export class DrizzleAgentStore implements AgentStore {
     position: number;
     userSelectable: boolean;
   }): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx.insert(modelProviders).values(params).returning({ id: modelProviders.id }),
       );
@@ -1130,7 +1130,7 @@ export class DrizzleAgentStore implements AgentStore {
       }
     | undefined
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           id: llmProviders.id,
@@ -1159,7 +1159,7 @@ export class DrizzleAgentStore implements AgentStore {
       attrs: ProviderAttrs;
     }>
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           id: llmProviders.id,
@@ -1178,7 +1178,7 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async getNextModelProviderPosition(model: string): Promise<number> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({ position: modelProviders.position })
         .from(modelProviders)
@@ -1190,13 +1190,13 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async removeModelProvidersByProvider(providerId: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.delete(modelProviders).where(eq(modelProviders.providerId, providerId));
     });
   }
 
   async hasChannelRules(channelType: string): Promise<boolean> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({ id: steeringRules.id })
         .from(steeringRules)
@@ -1213,7 +1213,7 @@ export class DrizzleAgentStore implements AgentStore {
     channelType?: string | null;
     priority: number;
   }): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx
           .insert(steeringRules)
@@ -1243,7 +1243,7 @@ export class DrizzleAgentStore implements AgentStore {
       observationCount: number;
     }>
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return tx
         .select({
           id: steeringRules.id,
@@ -1270,7 +1270,7 @@ export class DrizzleAgentStore implements AgentStore {
     channelType?: string | null;
     existingRuleId?: string;
   }): Promise<{ id: string; promoted: boolean }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       if (params.existingRuleId) {
         const rows = await tx
           .update(steeringRules)
@@ -1309,7 +1309,7 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async countActiveRules(profileId: string): Promise<number> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({ value: count() })
         .from(steeringRules)
@@ -1333,7 +1333,7 @@ export class DrizzleAgentStore implements AgentStore {
       observationCount: number;
     };
   }): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       await tx.delete(steeringRules).where(inArray(steeringRules.id, params.oldIds));
       return single(
         await tx
@@ -1358,7 +1358,7 @@ export class DrizzleAgentStore implements AgentStore {
     context?: string;
     source: PendingMemorySource;
   }): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx
           .insert(pendingMemories)
@@ -1382,7 +1382,7 @@ export class DrizzleAgentStore implements AgentStore {
     }>,
   ): Promise<void> {
     if (rows.length === 0) return;
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       // Postgres caps a single statement at 65,535 placeholders. Each row
       // here binds 4 columns; chunking at 5,000 stays well under the cap
       // (and atomicity is preserved by the surrounding transaction).
@@ -1400,7 +1400,7 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async getPendingMemories(userId: string, limit?: number): Promise<ReadonlyArray<PendingMemory>> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const base = tx
         .select({
           id: pendingMemories.id,
@@ -1421,7 +1421,7 @@ export class DrizzleAgentStore implements AgentStore {
 
   async deletePendingMemories(ids: ReadonlyArray<string>): Promise<void> {
     if (ids.length === 0) return;
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.delete(pendingMemories).where(inArray(pendingMemories.id, [...ids]));
     });
   }

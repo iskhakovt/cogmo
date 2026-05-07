@@ -1,19 +1,20 @@
 import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../../agent/store/index.js";
-import type { Database } from "../../db/index.js";
+import type { Database, Transactor } from "../../db/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleTransportStore } from "./index.js";
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleTransportStore;
 let agentStore: DrizzleAgentStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleTransportStore(db);
-  agentStore = new DrizzleAgentStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleTransportStore(tx);
+  agentStore = new DrizzleAgentStore(tx);
 });
 
 afterEach(async () => {

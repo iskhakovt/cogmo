@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { Service } from "../agent/service.js";
-import type { Database } from "../db/index.js";
+import type { Database, Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
@@ -16,12 +17,13 @@ function makeMockFiles(): Service["files"] {
 }
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleSkillStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleSkillStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleSkillStore(tx);
 });
 
 afterEach(async () => {
@@ -33,25 +35,15 @@ afterAll(async () => {
 });
 
 function makeMockMemory(): MemoryProvider {
-  return {
-    name: "mock",
-    retain: vi.fn().mockResolvedValue(undefined),
-    retainBatch: vi.fn().mockResolvedValue(undefined),
-    recall: vi.fn().mockResolvedValue({ memories: [] }),
-    reflect: vi.fn(),
-  };
+  const memory = mock<MemoryProvider>();
+  memory.recall.mockResolvedValue({ memories: [] });
+  return memory;
 }
 
 function makeMockSecrets(map: Record<string, string> = {}): SecretsStore {
-  return {
-    getSecret: vi.fn(async (name: string) => map[name] ?? null),
-    getSecretById: vi.fn(),
-    getSecretMeta: vi.fn(),
-    listSecretNames: vi.fn(),
-    setSecret: vi.fn(),
-    deleteSecret: vi.fn(),
-    // biome-ignore lint/suspicious/noExplicitAny: minimal SecretsStore stub
-  } as any;
+  const secrets = mock<SecretsStore>();
+  secrets.getSecret.mockImplementation(async (name: string) => map[name] ?? null);
+  return secrets;
 }
 
 async function makeRunner(

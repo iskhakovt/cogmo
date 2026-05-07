@@ -1,7 +1,7 @@
 import { and, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { JsonValue } from "type-fest";
 import { single } from "../../db/helpers.js";
-import type { Database } from "../../db/index.js";
+import type { Transactor } from "../../db/index.js";
 import type { InboundContent } from "../content.js";
 import { channelSessions, channels, inboundMessages, userIdentities } from "./schema.js";
 
@@ -125,15 +125,15 @@ export interface TransportStore {
 }
 
 export class DrizzleTransportStore implements TransportStore {
-  #db: Database;
-  constructor(db: Database) {
-    this.#db = db;
+  #runInTx: Transactor;
+  constructor(runInTx: Transactor) {
+    this.#runInTx = runInTx;
   }
 
   async getAllChannels(): Promise<
     ReadonlyArray<{ id: string; type: string; credentials: JsonValue; identityMode: string }>
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return tx
         .select({
           id: channels.id,
@@ -150,7 +150,7 @@ export class DrizzleTransportStore implements TransportStore {
   async getChannelByType(
     type: string,
   ): Promise<{ id: string; identityMode: string; credentials: JsonValue } | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           id: channels.id,
@@ -172,13 +172,13 @@ export class DrizzleTransportStore implements TransportStore {
     credentials: JsonValue;
     identityMode: string;
   }): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(await tx.insert(channels).values(params).returning({ id: channels.id }));
     });
   }
 
   async resolveSession(channelId: string, platformAddress: string): Promise<Session | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           id: channelSessions.id,
@@ -210,7 +210,7 @@ export class DrizzleTransportStore implements TransportStore {
     status: string;
     receive: string;
   }): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx.insert(channelSessions).values(params).returning({ id: channelSessions.id }),
       );
@@ -218,7 +218,7 @@ export class DrizzleTransportStore implements TransportStore {
   }
 
   async closeSession(sessionId: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx
         .update(channelSessions)
         .set({ status: "closed" })
@@ -235,7 +235,7 @@ export class DrizzleTransportStore implements TransportStore {
       receive: string;
     },
   ): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       // Close ALL active sessions on this (channelId, platformAddress) inside the tx.
       // There should be at most one under normal usage, but closing set-wise is race-safe:
       // a concurrent createSession landing between our close and insert would be impossible
@@ -265,7 +265,7 @@ export class DrizzleTransportStore implements TransportStore {
     content: InboundContent;
     platformTs: Date;
   }): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx.insert(inboundMessages).values(params).returning({ id: inboundMessages.id }),
       );
@@ -276,7 +276,7 @@ export class DrizzleTransportStore implements TransportStore {
     conversationId: string,
     afterId: string | null,
   ): Promise<ReadonlyArray<{ id: string; content: InboundContent }>> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const conditions = [eq(inboundMessages.conversationId, conversationId)];
       if (afterId) {
         conditions.push(gt(inboundMessages.id, afterId));
@@ -290,7 +290,7 @@ export class DrizzleTransportStore implements TransportStore {
   }
 
   async getSession(sessionId: string): Promise<Session | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           id: channelSessions.id,
@@ -308,7 +308,7 @@ export class DrizzleTransportStore implements TransportStore {
   }
 
   async getActiveSessionsForConversation(conversationId: string): Promise<ReadonlyArray<Session>> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return tx
         .select({
           id: channelSessions.id,
@@ -330,7 +330,7 @@ export class DrizzleTransportStore implements TransportStore {
   }
 
   async getActiveChannelTypes(conversationId: string): Promise<ReadonlyArray<string>> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .selectDistinct({ type: channels.type })
         .from(channelSessions)
@@ -347,7 +347,7 @@ export class DrizzleTransportStore implements TransportStore {
   }
 
   async getVoiceMaxReplyChars(conversationId: string): Promise<number | null> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({ cap: channels.voiceMaxReplyChars })
         .from(channelSessions)
@@ -373,7 +373,7 @@ export class DrizzleTransportStore implements TransportStore {
     prevCursor: string | null;
     maxInboundId: string;
   }): Promise<ReadonlyArray<Session>> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const conditions = [
         eq(inboundMessages.conversationId, params.conversationId),
         lte(inboundMessages.id, params.maxInboundId),
@@ -400,7 +400,7 @@ export class DrizzleTransportStore implements TransportStore {
   }
 
   async getReceiveAllSessions(conversationId: string): Promise<ReadonlyArray<Session>> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return tx
         .select({
           id: channelSessions.id,
@@ -426,7 +426,7 @@ export class DrizzleTransportStore implements TransportStore {
     channelId: string,
     platformHandle: string,
   ): Promise<{ userId: string } | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       // Check wildcard first
       const wildcard = await tx
         .select({ userId: userIdentities.userId })
@@ -454,7 +454,7 @@ export class DrizzleTransportStore implements TransportStore {
     userId: string;
     channelId: string;
   }): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx
           .insert(userIdentities)
@@ -473,7 +473,7 @@ export class DrizzleTransportStore implements TransportStore {
     channelId: string;
     platformHandle: string;
   }): Promise<{ id: string }> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx
           .insert(userIdentities)
@@ -490,13 +490,13 @@ export class DrizzleTransportStore implements TransportStore {
   }
 
   async updateChannelCredentials(channelId: string, credentials: JsonValue): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(channels).set({ credentials }).where(eq(channels.id, channelId));
     });
   }
 
   async removeChannel(channelId: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       // Delete in FK order: inbound_messages → channel_sessions → identities → channel
       const sessionIds = await tx
         .select({ id: channelSessions.id })
