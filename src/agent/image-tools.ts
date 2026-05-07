@@ -56,10 +56,14 @@ export function parseGeneratedImagePayload(raw: string): GeneratedImagePayload |
  * editing). Promote to DB when operator-level customization matters.
  */
 export const MODEL_CATALOG = [
-  "fal-ai/flux/dev",
   "fal-ai/flux/schnell",
+  "fal-ai/flux/dev",
   "fal-ai/flux-pro/v1.1",
   "fal-ai/flux-pro/v1.1-ultra",
+  "fal-ai/imagen4/preview",
+  "fal-ai/recraft/v3/text-to-image",
+  "fal-ai/ideogram/character",
+  "fal-ai/qwen-image",
   "fal-ai/flux-pro/kontext",
 ] as const;
 
@@ -70,6 +74,10 @@ const TOOL_DESCRIPTION =
   "- `fal-ai/flux/dev` — balanced speed/quality, good default for general use\n" +
   "- `fal-ai/flux-pro/v1.1` — higher quality, detailed scenes and portraits\n" +
   "- `fal-ai/flux-pro/v1.1-ultra` — highest quality, longer wait, slower iteration\n" +
+  "- `fal-ai/imagen4/preview` — Google Imagen 4: photorealism, accurate typography, strong prompt adherence\n" +
+  "- `fal-ai/recraft/v3/text-to-image` — best for images with readable text, logos, vector/illustration styles, brand assets\n" +
+  "- `fal-ai/ideogram/character` — best when the same character must appear consistently across multiple images; also strong at typography\n" +
+  "- `fal-ai/qwen-image` — autoregressive model, strong at complex text rendering and detailed prompt adherence\n" +
   "- `fal-ai/flux-pro/kontext` — image editing (best when the user wants you to modify an existing image)\n\n" +
   "Write a detailed prompt — describe subject, style, composition, colors, and mood. " +
   "The prompt is the main lever for image quality.";

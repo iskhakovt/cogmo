@@ -104,9 +104,14 @@ import type { FalProvider } from "@ai-sdk/fal";
 
 /** Curated model catalog — hardcoded for v0, promote to DB when operators need it. */
 const MODEL_CATALOG = [
+  "fal-ai/flux/schnell",
   "fal-ai/flux/dev",
   "fal-ai/flux-pro/v1.1",
-  "fal-ai/ideogram/v2",
+  "fal-ai/flux-pro/v1.1-ultra",
+  "fal-ai/imagen4/preview",
+  "fal-ai/recraft/v3/text-to-image",
+  "fal-ai/ideogram/character",
+  "fal-ai/qwen-image",
   "fal-ai/flux-pro/kontext",
 ] as const;
 
@@ -120,9 +125,13 @@ function createImageTools(
       description:
         "Generate an image from a text description. Returns the image to the user.\n\n" +
         "Choose the model based on task:\n" +
-        "- `fal-ai/flux/dev` — fast, cheap, general use (default)\n" +
-        "- `fal-ai/flux-pro/v1.1` — high quality, detailed scenes/portraits\n" +
-        "- `fal-ai/ideogram/v2` — best for images containing text, logos, typography\n" +
+        "- `fal-ai/flux/schnell` — fastest, cheapest, drafts\n" +
+        "- `fal-ai/flux/dev` — balanced speed/quality (default)\n" +
+        "- `fal-ai/flux-pro/v1.1` / `-ultra` — high quality scenes and portraits\n" +
+        "- `fal-ai/imagen4/preview` — Google Imagen 4, photorealism + typography\n" +
+        "- `fal-ai/recraft/v3/text-to-image` — readable text, logos, vector/illustration, brand colors\n" +
+        "- `fal-ai/ideogram/character` — character consistency across images, strong typography\n" +
+        "- `fal-ai/qwen-image` — autoregressive, complex text rendering and prompt adherence\n" +
         "- `fal-ai/flux-pro/kontext` — image editing (requires reference image)\n\n" +
         "Be specific and detailed in the prompt — describe style, composition, colors, mood.",
       schema: z.object({
