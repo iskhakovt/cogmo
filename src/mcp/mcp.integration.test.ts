@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { Database, Transactor } from "../db/index.js";
+import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { HostRunner } from "./client/runner.js";
@@ -29,14 +29,13 @@ const dummySecrets = {
   // level when we cast through `unknown`.
 } as unknown as SecretsStore;
 
-let db: Database;
 let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleMcpStore;
 let registry: McpRegistryImpl;
 
 beforeAll(async () => {
-  ({ db, tx, close } = await createTestDatabase());
+  ({ tx, close } = await createTestDatabase());
   store = new DrizzleMcpStore(tx);
   registry = new McpRegistryImpl({
     store,
