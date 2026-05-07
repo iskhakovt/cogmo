@@ -1098,4 +1098,182 @@ describe("createHandleMessage", () => {
     const passedTools = (deps.runStreamingAgentLoop as any).mock.calls[0][0].tools;
     expect(passedTools.snapshot()).toHaveLength(0);
   });
+
+  describe("per-turn provider dispatch", () => {
+    it("resolves the provider for the snapshot's model and threads it into the loop", async () => {
+      const turnProvider = mockProvider();
+      const resolveProvider = vi.fn().mockResolvedValue(turnProvider);
+      const deps = mockDeps({
+        resolveProvider,
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "assistant",
+            basePrompt: "test",
+            model: "x-ai/grok-4.20",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            toolSet: [],
+          }),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // The resolver is called with the snapshot's model — not the default
+      // profile's model, not "claude-sonnet-4-6". This is the regression
+      // guard for the original bug: bootstrap-time resolution would have
+      // pinned the provider to whatever was configured for the default
+      // profile.
+      expect(resolveProvider).toHaveBeenCalledWith("x-ai/grok-4.20");
+      const loopArgs = (deps.runStreamingAgentLoop as any).mock.calls[0][0];
+      expect(loopArgs.provider).toBe(turnProvider);
+      expect(loopArgs.model).toBe("x-ai/grok-4.20");
+    });
+
+    it("reuses the turn provider for summarization when summarization_model matches", async () => {
+      // Threshold: budget * 0.8 ≈ 740_800 for the claude-sonnet-4-6 budget;
+      // 800_000 > 80% triggers summarization.
+      const countTokens = vi
+        .fn()
+        .mockResolvedValueOnce(800_000)
+        .mockResolvedValueOnce(800_000)
+        .mockResolvedValueOnce(50_000);
+      const chat = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "summary" }],
+        stopReason: "end_turn",
+        model: "mock",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      });
+      const provider = mockProvider({ countTokens, chat });
+      const resolveProvider = vi.fn().mockResolvedValue(provider);
+      const deps = mockDeps({
+        resolveProvider,
+        agentStore: mockAgentStore({
+          getLastTokens: vi.fn().mockResolvedValue(null),
+          // Need ≥ keepTurns history to actually trigger summarization
+          getHistory: vi.fn().mockResolvedValue([
+            { role: "user", content: "m1" },
+            { role: "assistant", content: "r1" },
+            { role: "user", content: "m2" },
+            { role: "assistant", content: "r2" },
+            { role: "user", content: "m3" },
+            { role: "assistant", content: "r3" },
+            { role: "user", content: "m4" },
+            { role: "assistant", content: "r4" },
+          ]),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // No `summarizationModel` override → handle-message uses the turn
+      // provider directly. The resolver is called once.
+      expect(resolveProvider).toHaveBeenCalledTimes(1);
+      // And summarization landed on the same provider's `chat` mock.
+      expect(chat).toHaveBeenCalled();
+    });
+
+    it("resolves a separate provider for summarization when summarization_model differs", async () => {
+      const countTokens = vi
+        .fn()
+        .mockResolvedValueOnce(800_000)
+        .mockResolvedValueOnce(800_000)
+        .mockResolvedValueOnce(50_000);
+      const turnProvider = mockProvider({ countTokens });
+      const summaryChat = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "summary" }],
+        stopReason: "end_turn",
+        model: "haiku",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      });
+      const summaryProvider = mockProvider({ chat: summaryChat });
+
+      const resolveProvider = vi.fn().mockImplementation(async (model: string) => {
+        if (model === "claude-sonnet-4-6") return turnProvider;
+        if (model === "claude-haiku-4-5-20251001") return summaryProvider;
+        throw new Error(`unexpected model ${model}`);
+      });
+
+      const deps = mockDeps({
+        resolveProvider,
+        summarizationModel: "claude-haiku-4-5-20251001",
+        agentStore: mockAgentStore({
+          getLastTokens: vi.fn().mockResolvedValue(null),
+          getHistory: vi.fn().mockResolvedValue([
+            { role: "user", content: "m1" },
+            { role: "assistant", content: "r1" },
+            { role: "user", content: "m2" },
+            { role: "assistant", content: "r2" },
+            { role: "user", content: "m3" },
+            { role: "assistant", content: "r3" },
+            { role: "user", content: "m4" },
+            { role: "assistant", content: "r4" },
+          ]),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // Both models were resolved.
+      expect(resolveProvider).toHaveBeenCalledTimes(2);
+      expect(resolveProvider).toHaveBeenCalledWith("claude-sonnet-4-6");
+      expect(resolveProvider).toHaveBeenCalledWith("claude-haiku-4-5-20251001");
+
+      // Summarization went to the SEPARATE provider — this is the
+      // cross-provider summarization scenario the design promises.
+      expect(summaryChat).toHaveBeenCalledWith(
+        expect.objectContaining({ model: "claude-haiku-4-5-20251001" }),
+      );
+      // And the turn provider's chat was NOT used for summarization.
+      expect(turnProvider.chat).not.toHaveBeenCalled();
+    });
+
+    it("propagates resolver errors instead of swallowing them", async () => {
+      const resolveProvider = vi
+        .fn()
+        .mockRejectedValue(new Error('No provider configured for "x-ai/grok-4.20"'));
+      const deps = mockDeps({
+        resolveProvider,
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "assistant",
+            basePrompt: "test",
+            model: "x-ai/grok-4.20",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            toolSet: [],
+          }),
+        }),
+      });
+
+      await expect(
+        (createHandleMessage(deps) as any).fn({
+          event: testEvent,
+          step: mockStep(),
+          runId: testRunId,
+        }),
+      ).rejects.toThrow(/No provider configured/);
+
+      // The agent loop must NOT have been invoked with an undefined provider.
+      expect(deps.runStreamingAgentLoop).not.toHaveBeenCalled();
+    });
+  });
 });

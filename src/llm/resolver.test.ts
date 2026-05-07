@@ -1,0 +1,220 @@
+import { describe, expect, it, vi } from "vitest";
+import type { AgentStore } from "../agent/store/index.js";
+import type { SecretsStore } from "../secrets/store/index.js";
+import { mockProvider } from "../test/factories.js";
+import { AnthropicProvider } from "./anthropic.js";
+import { FallbackLlmProvider } from "./fallback.js";
+import { OpenAICompatibleProvider } from "./openai-compat.js";
+import { constantResolver, createDbProviderResolver } from "./resolver.js";
+
+type ProviderRow = {
+  id: string;
+  name: string;
+  type: string;
+  baseUrl: string | null;
+  secretId: string;
+  attrs: { promptCaching?: boolean; headers?: Record<string, string> };
+};
+
+function row(overrides: Partial<ProviderRow> = {}): ProviderRow {
+  return {
+    id: "prov-1",
+    name: "anthropic-direct",
+    type: "anthropic",
+    baseUrl: null,
+    secretId: "secret-1",
+    attrs: {},
+    ...overrides,
+  };
+}
+
+interface DepsOpts {
+  rows?: ReadonlyArray<ProviderRow>;
+  /** Throw the first N times listProvidersForModel is called. */
+  listFailures?: number;
+  secret?: string | undefined;
+}
+
+function makeDeps(opts: DepsOpts = {}) {
+  const rows = opts.rows ?? [row()];
+  let listCalls = 0;
+
+  const listProvidersForModel = vi.fn().mockImplementation(async () => {
+    listCalls += 1;
+    if (opts.listFailures && listCalls <= opts.listFailures) {
+      throw new Error(`transient db error #${listCalls}`);
+    }
+    return rows;
+  });
+
+  const getSecretById = vi
+    .fn()
+    .mockResolvedValue(opts.secret === undefined ? "test-key" : opts.secret);
+
+  const agentStore = { listProvidersForModel } as unknown as AgentStore;
+  const secretsStore = { getSecretById } as unknown as SecretsStore;
+  return { agentStore, secretsStore, listProvidersForModel, getSecretById };
+}
+
+describe("createDbProviderResolver — happy path", () => {
+  it("returns a FallbackLlmProvider that wraps the configured chain", async () => {
+    const { agentStore, secretsStore } = makeDeps();
+    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const provider = await resolve("claude-sonnet-4-6");
+    expect(provider).toBeInstanceOf(FallbackLlmProvider);
+  });
+
+  // Adapter selection is verified via FallbackLlmProvider's name-delegation
+  // for single-row chains (`fallback.ts:124-127`): the wrapper takes the
+  // sole inner provider's `.name`. AnthropicProvider exposes
+  // `.name = "anthropic"`; OpenAICompatibleProvider takes its name from the
+  // constructor arg (the row's `name`).
+
+  it("builds an Anthropic adapter for type='anthropic' rows", async () => {
+    const { agentStore, secretsStore } = makeDeps({
+      rows: [row({ type: "anthropic", baseUrl: "https://custom.anthropic.test" })],
+    });
+    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const provider = await resolve("m");
+    expect(provider).toBeInstanceOf(FallbackLlmProvider);
+    expect(provider.name).toBe("anthropic");
+  });
+
+  it("builds an OpenAI-compatible adapter for type='openai_compatible' rows", async () => {
+    const { agentStore, secretsStore } = makeDeps({
+      rows: [
+        row({
+          name: "xai-grok",
+          type: "openai_compatible",
+          baseUrl: "https://api.x.ai/v1",
+          attrs: { promptCaching: true, headers: { "x-test": "1" } },
+        }),
+      ],
+    });
+    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const provider = await resolve("grok-4");
+    expect(provider).toBeInstanceOf(FallbackLlmProvider);
+    // Single-row fallback wrapper inherits the inner provider's name; the
+    // OpenAI-compatible adapter copies `name` from its constructor arg,
+    // which we plumb from the DB row.
+    expect(provider.name).toBe("xai-grok");
+  });
+
+  it("multi-row chains expose a composite name", async () => {
+    const { agentStore, secretsStore } = makeDeps({
+      rows: [
+        row({ name: "primary", type: "anthropic" }),
+        row({
+          id: "prov-2",
+          name: "fallback-or",
+          type: "openai_compatible",
+          baseUrl: "https://openrouter.ai/api/v1",
+          secretId: "secret-2",
+        }),
+      ],
+    });
+    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const provider = await resolve("m");
+    // anthropic adapter's inner name is hardcoded to "anthropic"; the second
+    // row uses its DB `name` ("fallback-or"). Composite shape proves both
+    // adapters were constructed in order.
+    expect(provider.name).toBe("fallback(anthropic,fallback-or)");
+  });
+});
+
+describe("createDbProviderResolver — error matrix", () => {
+  it("throws when no provider is configured for the model", async () => {
+    const { agentStore, secretsStore } = makeDeps({ rows: [] });
+    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    await expect(resolve("unknown-model")).rejects.toThrow(/No provider configured/);
+  });
+
+  it("throws when the secret lookup returns undefined", async () => {
+    const { agentStore, secretsStore } = makeDeps({ secret: undefined });
+    // Override the default mock above
+    (secretsStore.getSecretById as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    await expect(resolve("m")).rejects.toThrow(/Secret for provider "anthropic-direct" not found/);
+  });
+
+  it("throws when openai_compatible row has no baseUrl", async () => {
+    const { agentStore, secretsStore } = makeDeps({
+      rows: [row({ type: "openai_compatible", baseUrl: null, name: "broken" })],
+    });
+    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    await expect(resolve("m")).rejects.toThrow(/"broken".*requires a base URL/);
+  });
+
+  it("throws on unknown provider type", async () => {
+    const { agentStore, secretsStore } = makeDeps({
+      rows: [row({ type: "google" })],
+    });
+    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    await expect(resolve("m")).rejects.toThrow(/Unknown provider type: google/);
+  });
+});
+
+describe("createDbProviderResolver — caching", () => {
+  it("memoizes by model — second call doesn't re-decrypt", async () => {
+    const { agentStore, secretsStore, listProvidersForModel, getSecretById } = makeDeps();
+    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const first = await resolve("claude-sonnet-4-6");
+    const second = await resolve("claude-sonnet-4-6");
+    expect(first).toBe(second);
+    expect(listProvidersForModel).toHaveBeenCalledTimes(1);
+    expect(getSecretById).toHaveBeenCalledTimes(1);
+  });
+
+  it("builds independent chains for different models", async () => {
+    const { agentStore, secretsStore, listProvidersForModel } = makeDeps();
+    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const a = await resolve("claude-sonnet-4-6");
+    const b = await resolve("grok-4");
+    expect(a).not.toBe(b);
+    expect(listProvidersForModel).toHaveBeenCalledTimes(2);
+    expect(listProvidersForModel).toHaveBeenNthCalledWith(1, "claude-sonnet-4-6");
+    expect(listProvidersForModel).toHaveBeenNthCalledWith(2, "grok-4");
+  });
+
+  it("does not poison the cache on failure — next call retries", async () => {
+    const { agentStore, secretsStore, listProvidersForModel } = makeDeps({ listFailures: 1 });
+    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+
+    await expect(resolve("flaky")).rejects.toThrow(/transient db error/);
+    // Second call must retry, not return the cached rejection
+    const provider = await resolve("flaky");
+    expect(provider).toBeInstanceOf(FallbackLlmProvider);
+    expect(listProvidersForModel).toHaveBeenCalledTimes(2);
+  });
+
+  it("dedups concurrent first-time resolves for the same model (no thundering herd)", async () => {
+    const { agentStore, secretsStore, listProvidersForModel, getSecretById } = makeDeps();
+    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const [a, b, c] = await Promise.all([resolve("m"), resolve("m"), resolve("m")]);
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+    // Even with three parallel calls, the underlying lookup runs once.
+    expect(listProvidersForModel).toHaveBeenCalledTimes(1);
+    expect(getSecretById).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("constantResolver", () => {
+  it("returns the same provider for every model", async () => {
+    const provider = mockProvider();
+    const resolve = constantResolver(provider);
+    expect(await resolve("anything")).toBe(provider);
+    expect(await resolve("else")).toBe(provider);
+  });
+});
+
+// Anchor — keep the imports referenced so future refactors that delete them
+// here trip the test rather than the production wiring.
+describe("module anchors", () => {
+  it("AnthropicProvider and OpenAICompatibleProvider are constructible from this module", () => {
+    expect(new AnthropicProvider("k")).toBeInstanceOf(AnthropicProvider);
+    expect(
+      new OpenAICompatibleProvider("x", { apiKey: "k", baseURL: "https://x.test" }),
+    ).toBeInstanceOf(OpenAICompatibleProvider);
+  });
+});
