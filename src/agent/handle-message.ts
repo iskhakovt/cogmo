@@ -62,7 +62,6 @@ export interface HandleMessageDeps {
    * exercise MCP). When undefined, no MCP tools are surfaced.
    */
   mcpRegistry?: McpRegistry;
-  summarizationModel?: string;
   /**
    * Speech-to-text provider for transcribing inbound voice blocks. Optional
    * — absent when no `voice_config` row is present (the wizard hasn't been
@@ -189,11 +188,18 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // every message row this turn produces (user batch + intermediate + final
       // assistant). Mid-turn /profile switch updates conversations.profile_id but
       // the running turn keeps its snapshot; next turn picks up the new value.
+      // `summarizationModel` is captured the same way: profile override falls
+      // back to the chat model so a Haiku profile doesn't pay the Sonnet rate
+      // for prefix summarization.
       // See design/transport/overview.md → Profile and Model Stamping.
       const snapshot = await step.run("load-turn-snapshot", async () => {
         const p = await agentStore.getProfile(profileId);
         if (!p) throw new Error(`Profile not found: ${profileId}`);
-        return { profileId, model: p.model };
+        return {
+          profileId,
+          model: p.model,
+          summarizationModel: p.summarizationModel ?? p.model,
+        };
       });
 
       // Guard 1 — Staleness: trigger was already batched into a previous turn.
@@ -536,9 +542,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // a counter-based ID like `summarize-prefix-${i}` to avoid
             // Inngest's duplicate-step-id error.
             return step.run("summarize-prefix", async () => {
-              const sumModel = deps.summarizationModel ?? model;
               const response = await provider.chat({
-                model: sumModel,
+                model: snapshot.summarizationModel,
                 system,
                 messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
                 maxTokens: 4096,
