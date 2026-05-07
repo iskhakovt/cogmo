@@ -2,6 +2,8 @@
 
 Cogmo delegates heavy coding tasks to Claude Code and Codex CLI, leveraging the user's existing Max/Pro/Plus subscriptions as the execution backend. Telegram is the control plane. Cogmo handles planning, gating, progress reporting, and review; the CLIs do the actual work.
 
+> *Sandbox API names below (`Sandbox.createTaskContainer`, `Sandbox.stopTask`, `LocalInProcessSandbox`, etc.) reflect the current code. The canonical interface contract is [sandbox.md](sandbox.md) → Backend Architecture, where `SandboxClient` / `SandboxSession` is the in-flight refactor target. Names in this doc will be updated when the refactor lands.*
+
 ## Purpose `[proposed]`
 
 Enable flows like:
