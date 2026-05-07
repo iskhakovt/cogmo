@@ -462,6 +462,25 @@ describe("handleProfile", () => {
       expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('No profile named "ghost"'));
     });
 
+    it("typo'd key (e.g. compartment=…) surfaces 'Unknown key' from parser, not 'No profile named'", async () => {
+      // Regression: a narrow scope-shape regex would absorb the typo into
+      // the name and emit "No profile named 'personal compartment=work'".
+      // The broadened shape check routes it to parseScopeSpec instead.
+      const update = vi.fn();
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope personal compartment=work trust=first-party");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('Unknown key "compartment"'));
+    });
+
     it("surfaces parse errors without calling update", async () => {
       const update = vi.fn();
       const transport = transportWith({
@@ -658,6 +677,21 @@ describe("splitScopeArgs", () => {
     expect(splitScopeArgs(["my", "profile", "Compartments=work", "Trust=any"])).toEqual({
       name: "my profile",
       scopeTokens: ["Compartments=work", "Trust=any"],
+    });
+  });
+
+  it("treats any key=value-shape token as scope, not name (catches typos)", () => {
+    // `compartment=` (singular) is a typo — it must route to the parser so
+    // the operator sees "Unknown key 'compartment'" rather than having
+    // the typo silently absorbed into the profile name.
+    expect(splitScopeArgs(["work", "compartment=work", "trust=any"])).toEqual({
+      name: "work",
+      scopeTokens: ["compartment=work", "trust=any"],
+    });
+    // Same principle for any random key=value token.
+    expect(splitScopeArgs(["work", "foo=bar"])).toEqual({
+      name: "work",
+      scopeTokens: ["foo=bar"],
     });
   });
 

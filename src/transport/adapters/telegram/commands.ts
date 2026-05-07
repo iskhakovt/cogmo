@@ -188,12 +188,14 @@ export async function handleProfile(
       return dialogs.startEdit(transport, ctx, arg);
     case "scope": {
       // Profile names can contain spaces (no regex constraint at the schema
-      // level), so the name isn't necessarily a single token. Walk from the
-      // tail collecting tokens that look like scope spec (`clear` or
-      // `<key>=<value>`); the remaining prefix joins back into the name.
-      // Caveat: this means a profile literally named `clear` or whose name
-      // contains `=` can't be addressed by `/profile scope` — rename via
-      // `/profile edit` to recover.
+      // level), so the name isn't necessarily a single token. `splitScopeArgs`
+      // walks from the tail collecting tokens that look like scope spec
+      // (`clear` or any `<key>=<value>`); the remaining prefix joins back
+      // into the name. Unknown keys are intentionally still routed to the
+      // parser so the operator sees "Unknown key …" instead of having a
+      // typo absorbed into the profile name.
+      // Caveat: profiles literally named `clear` or with `=` in the name
+      // can't be addressed — rename via `/profile edit`.
       const { name, scopeTokens } = splitScopeArgs(rest);
       return replyProfileScope(transport, ctx, handle, name, scopeTokens);
     }
@@ -639,12 +641,19 @@ async function replyProfileDelete(
 // ── /profile scope ────────────────────────────────────────────────────
 
 /**
- * Tokens that look like a scope-spec atom: the literal `clear` or
- * `<key>=<value>`. Used by `splitScopeArgs` to find the name/spec
+ * Tokens that look like a scope-spec atom: the literal `clear` or any
+ * `<key>=<value>` shape. Used by `splitScopeArgs` to find the name/spec
  * boundary when the profile name contains spaces.
+ *
+ * The shape check is keyword-agnostic on purpose — any `key=value`
+ * routes to `parseScopeSpec`, where unknown keys (typos like
+ * `compartment=` instead of `compartments=`) surface as a precise
+ * "Unknown key …" error. Tying the shape to known keys would silently
+ * drop typos into the name and fail with a confusing "No profile
+ * named …" instead.
  */
 function isScopeShape(token: string): boolean {
-  return token.toLowerCase() === "clear" || /^(compartments|trust)=/i.test(token);
+  return token.toLowerCase() === "clear" || /^[a-z]+=/i.test(token);
 }
 
 /**
