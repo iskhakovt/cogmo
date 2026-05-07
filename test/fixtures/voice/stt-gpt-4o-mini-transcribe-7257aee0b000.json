@@ -1,0 +1,13 @@
+{
+  "text": "Hello, this is the voice integration test.",
+  "usage": {
+    "type": "tokens",
+    "total_tokens": 45,
+    "input_tokens": 34,
+    "input_token_details": {
+      "text_tokens": 0,
+      "audio_tokens": 34
+    },
+    "output_tokens": 11
+  }
+}

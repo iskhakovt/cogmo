@@ -270,5 +270,24 @@ export const directOutbound = eventType("adapter/direct/outbound", {
         }),
       )
       .optional(),
+    /**
+     * Voice payload — present when the orchestrator has TTS'd the reply
+     * and routed it via `DeliveryHandle.deliverVoice`.
+     *
+     * Voice rides on a *separate* `directOutbound` event with `content: ""`
+     * (correlated to the just-delivered text by `platformAddress`). The
+     * asymmetry vs. images — which ride on the same event as the rendered
+     * text — is intentional: the orchestrator emits voice via a separate
+     * `deliverVoice` call after the text has already streamed/finished,
+     * so there is no single-emit point where both can be packed together.
+     * Console clients should treat a content-empty + voice-present event
+     * as "play the audio, don't render an empty bubble."
+     */
+    voice: z
+      .object({
+        data: z.string(), // base64
+        mediaType: z.string(),
+      })
+      .optional(),
   }),
 });
