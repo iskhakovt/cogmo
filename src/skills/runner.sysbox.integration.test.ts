@@ -2,8 +2,9 @@
 
 import { hostname } from "node:os";
 import Docker from "dockerode";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { Database } from "../db/index.js";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mock } from "vitest-mock-extended";
+import type { Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import { CogmoSocketProxy, LocalInProcessSandbox, type Sandbox } from "../sandbox/index.js";
 import { DrizzleSandboxStore } from "../sandbox/store/index.js";
@@ -14,25 +15,11 @@ import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
 
 function stubMemory(): MemoryProvider {
-  return {
-    name: "mock",
-    retain: vi.fn(),
-    retainBatch: vi.fn(),
-    recall: vi.fn(),
-    reflect: vi.fn(),
-  };
+  return mock<MemoryProvider>();
 }
 
 function stubSecrets(): SecretsStore {
-  return {
-    getSecret: vi.fn(),
-    getSecretById: vi.fn(),
-    getSecretMeta: vi.fn(),
-    listSecretNames: vi.fn(),
-    setSecret: vi.fn(),
-    deleteSecret: vi.fn(),
-    // biome-ignore lint/suspicious/noExplicitAny: minimal SecretsStore stub for tests
-  } as any;
+  return mock<SecretsStore>();
 }
 
 const noopFiles = {
@@ -59,7 +46,7 @@ const noopFiles = {
 const SHOULD_RUN = process.env.SANDBOX_RUNTIME === "sysbox";
 const PYTHON_IMAGE = "python:3.14-slim";
 
-let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let agentStore: DrizzleSandboxStore;
 let skillStore: DrizzleSkillStore;
@@ -70,9 +57,9 @@ let instanceId: string;
 
 beforeAll(async () => {
   if (!SHOULD_RUN) return;
-  ({ db, close } = await createTestDatabase());
-  agentStore = new DrizzleSandboxStore(db);
-  skillStore = new DrizzleSkillStore(db);
+  ({ tx, close } = await createTestDatabase());
+  agentStore = new DrizzleSandboxStore(tx);
+  skillStore = new DrizzleSkillStore(tx);
   docker = new Docker();
 
   const stream = await docker.pull(PYTHON_IMAGE);
