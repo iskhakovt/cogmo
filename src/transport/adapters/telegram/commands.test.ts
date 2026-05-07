@@ -17,6 +17,7 @@ import {
   handleSessions,
   handleSkillsApprovalCallback,
   parseScopeSpec,
+  splitScopeArgs,
   type TelegramCommandContext,
 } from "./commands.js";
 import { ProfileDialogs } from "./profile-dialog.js";
@@ -477,6 +478,28 @@ describe("handleProfile", () => {
       expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Invalid scope"));
     });
 
+    it("addresses a profile whose name contains spaces", async () => {
+      const update = vi.fn().mockResolvedValue(
+        ok({
+          ...makeProfile({ compartments: ["work" as const], trust: ["first-party" as const] }),
+          name: "my work profile",
+        }),
+      );
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([{ ...makeProfile(null), name: "my work profile" }])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope my work profile compartments=work trust=first-party");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(update).toHaveBeenCalledWith("1", "p1", {
+        memoryScope: { compartments: ["work"], trust: ["first-party"] },
+      });
+    });
+
     it("`/profile scope` with no name → USAGE (no list / update calls)", async () => {
       const list = vi.fn();
       const update = vi.fn();
@@ -596,6 +619,50 @@ describe("parseScopeSpec", () => {
       expect(r.message).toContain('Key "compartments" repeated');
       expect(r.message).toContain("comma-separated");
     }
+  });
+});
+
+describe("splitScopeArgs", () => {
+  it("single-word name with no spec → name only", () => {
+    expect(splitScopeArgs(["personal"])).toEqual({ name: "personal", scopeTokens: [] });
+  });
+
+  it("multi-word name with no spec → joined name, empty spec (show case)", () => {
+    expect(splitScopeArgs(["my", "work", "profile"])).toEqual({
+      name: "my work profile",
+      scopeTokens: [],
+    });
+  });
+
+  it("multi-word name + clear → joined name, ['clear']", () => {
+    expect(splitScopeArgs(["my", "work", "clear"])).toEqual({
+      name: "my work",
+      scopeTokens: ["clear"],
+    });
+  });
+
+  it("multi-word name + key=value tokens → joined name, full spec preserved", () => {
+    expect(
+      splitScopeArgs(["my", "profile", "compartments=work,technical", "trust=first-party"]),
+    ).toEqual({
+      name: "my profile",
+      scopeTokens: ["compartments=work,technical", "trust=first-party"],
+    });
+  });
+
+  it("case-insensitive scope-shape detection (CLEAR, Compartments=…)", () => {
+    expect(splitScopeArgs(["my", "profile", "CLEAR"])).toEqual({
+      name: "my profile",
+      scopeTokens: ["CLEAR"],
+    });
+    expect(splitScopeArgs(["my", "profile", "Compartments=work", "Trust=any"])).toEqual({
+      name: "my profile",
+      scopeTokens: ["Compartments=work", "Trust=any"],
+    });
+  });
+
+  it("empty rest → empty name, empty spec", () => {
+    expect(splitScopeArgs([])).toEqual({ name: "", scopeTokens: [] });
   });
 });
 

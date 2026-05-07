@@ -187,9 +187,15 @@ export async function handleProfile(
     case "edit":
       return dialogs.startEdit(transport, ctx, arg);
     case "scope": {
-      // First positional is the profile name; the rest is the scope spec.
-      const [name, ...scopeTokens] = rest;
-      return replyProfileScope(transport, ctx, handle, name ?? "", scopeTokens);
+      // Profile names can contain spaces (no regex constraint at the schema
+      // level), so the name isn't necessarily a single token. Walk from the
+      // tail collecting tokens that look like scope spec (`clear` or
+      // `<key>=<value>`); the remaining prefix joins back into the name.
+      // Caveat: this means a profile literally named `clear` or whose name
+      // contains `=` can't be addressed by `/profile scope` — rename via
+      // `/profile edit` to recover.
+      const { name, scopeTokens } = splitScopeArgs(rest);
+      return replyProfileScope(transport, ctx, handle, name, scopeTokens);
     }
     default:
       await ctx.reply(USAGE.profile);
@@ -631,6 +637,35 @@ async function replyProfileDelete(
 }
 
 // ── /profile scope ────────────────────────────────────────────────────
+
+/**
+ * Tokens that look like a scope-spec atom: the literal `clear` or
+ * `<key>=<value>`. Used by `splitScopeArgs` to find the name/spec
+ * boundary when the profile name contains spaces.
+ */
+function isScopeShape(token: string): boolean {
+  return token.toLowerCase() === "clear" || /^(compartments|trust)=/i.test(token);
+}
+
+/**
+ * Split `rest` into a (multi-token) profile name and the trailing scope
+ * spec. Walks from the end so multi-word names work — e.g.
+ * `["my", "work", "clear"]` → name = "my work", spec = ["clear"].
+ *
+ * Exposed for unit tests; the only caller is the `scope` subcommand
+ * dispatcher in `handleProfile`.
+ */
+export function splitScopeArgs(rest: ReadonlyArray<string>): {
+  name: string;
+  scopeTokens: ReadonlyArray<string>;
+} {
+  let splitAt = rest.length;
+  while (splitAt > 0 && isScopeShape(rest[splitAt - 1] ?? "")) splitAt--;
+  return {
+    name: rest.slice(0, splitAt).join(" "),
+    scopeTokens: rest.slice(splitAt),
+  };
+}
 
 /**
  * Pure parser for the scope spec — the tokens after `<name>` in
