@@ -8,6 +8,15 @@
  * pattern as `fal-mock.ts`: a fetch wrapper passed to the OpenAI SDK
  * (`new OpenAI({ fetch })`) that intercepts only the audio endpoints.
  *
+ * **Host assumption.** Slice 2 hardcodes `https://api.openai.com` as the
+ * matched host. `OpenAIVoiceConfig.baseURL` (the production escape hatch
+ * for self-hosted OpenAI-compatible providers like a local TGI / vLLM)
+ * is not honoured by the interceptor: a request to a custom baseURL
+ * would skip the interceptor entirely (record mode) or 503 (replay).
+ * The integration test never sets baseURL, so this is fine in practice;
+ * a future ElevenLabs/Deepgram provider should grow its own interceptor
+ * with the right host rather than try to make this one polymorphic.
+ *
  * Strategy:
  * - Intercept `POST https://api.openai.com/v1/audio/speech` (TTS).
  * - Intercept `POST https://api.openai.com/v1/audio/transcriptions` (STT).
@@ -90,7 +99,11 @@ function mediaTypeForExt(ext: string): string {
   if (ext === "mp3") return "audio/mpeg";
   if (ext === "wav") return "audio/wav";
   if (ext === "flac") return "audio/flac";
-  return "application/octet-stream";
+  // Reachable only if a fixture has an extension outside the allowlist —
+  // i.e. the on-disk corpus is malformed. Fail loud rather than serving
+  // application/octet-stream to the OpenAI SDK and silently confusing
+  // the consumer.
+  throw new Error(`openai-voice-mock: unknown audio extension "${ext}" — corrupt fixture?`);
 }
 
 function inputUrl(input: RequestInfo | URL): string {

@@ -145,7 +145,11 @@ async function seedVoiceConfig() {
 
 /**
  * Read the inbound voice fixture clip. Bootstrapped on first record run by
- * TTS-ing INBOUND_PHRASE; replay requires the file to be committed.
+ * TTS-ing INBOUND_PHRASE directly against OpenAI (no interceptor) so we
+ * don't end up with a duplicate `tts-{model}-{voice}-{sha256(INBOUND_PHRASE)}`
+ * fixture sitting next to `inbound.ogg` with byte-identical content — the
+ * pipeline never TTS's the inbound phrase, only the assistant's reply, so
+ * no replay path needs the inbound-phrase TTS fixture.
  */
 async function loadInboundOgg(): Promise<Buffer> {
   try {
@@ -153,17 +157,15 @@ async function loadInboundOgg(): Promise<Buffer> {
   } catch {
     if (process.env.RECORD !== "1") {
       throw new Error(
-        `Missing fixture ${INBOUND_OGG_PATH}. Run once with RECORD=1 OPENAI_API_KEY=sk-... pnpm test:integration to seed.`,
+        `Missing fixture ${INBOUND_OGG_PATH}. Run once with RECORD=1 LLMOCK_RECORD=1 OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-... pnpm test:integration to seed (voice + LLM fixtures are both required).`,
       );
     }
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) throw new Error("RECORD=1 requires OPENAI_API_KEY");
-    // Bootstrap: TTS the inbound phrase via the same interceptor used by
-    // the pipeline so the resulting fixture audio is reused on replay.
-    const provider = new OpenAIVoiceProvider({
-      apiKey,
-      fetch: createOpenAIVoiceFetch({ mode: "record", fixturePath: VOICE_FIXTURE_DIR }),
-    });
+    // Bypass the interceptor so the bootstrap call doesn't write a
+    // tts-{model}-{voice}-{sha256(INBOUND_PHRASE)}.ogg fixture next to
+    // inbound.ogg with identical bytes. Goes straight to OpenAI.
+    const provider = new OpenAIVoiceProvider({ apiKey });
     const result = await provider.tts({
       text: INBOUND_PHRASE,
       voice: "alloy",
@@ -419,9 +421,12 @@ describe("message pipeline", () => {
     );
 
     expect(outbound.voice).toBeDefined();
-    expect(outbound.voice!.mediaType).toMatch(/^audio\//);
+    expect(outbound.voice!.mediaType).toBe("audio/ogg");
     const audioBytes = Buffer.from(outbound.voice!.data, "base64");
     expect(audioBytes.length).toBeGreaterThan(0);
+    // OGG container magic bytes — confirms the interceptor returned the
+    // recorded audio fixture rather than e.g. a non-empty error body.
+    expect(audioBytes.subarray(0, 4).toString("ascii")).toBe("OggS");
 
     // The stored user message should be the STT transcript text — voice
     // blocks are substituted to text before persist.
