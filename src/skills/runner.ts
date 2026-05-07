@@ -2,6 +2,7 @@ import { Ajv, type ValidateFunction } from "ajv";
 import type { Service } from "../agent/service.js";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
+import type { Sandbox } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
 import { type CtxUser, DefaultCtxHandler } from "./ctx-handler.js";
@@ -25,7 +26,11 @@ import type {
   SkillTier,
 } from "./store/index.js";
 import type { ClassifierLog, SkillInputs, SkillManifest } from "./types.js";
+import { runOnSysboxContainer } from "./worker-sysbox/host.js";
 import { runOnWorker } from "./worker-wasm/host.js";
+
+/** Default tier-2 container image. Pinned to the Python LTS train. */
+const DEFAULT_TIER2_IMAGE = "python:3.14-slim";
 
 const log = logger.child({ component: "skills.runner" });
 
@@ -145,6 +150,18 @@ export interface SkillRunnerOptions {
   skillsRepoPath?: string;
   /** Pyodide package cache directory — speeds up cold starts. Optional. */
   pyodidePackageCacheDir?: string;
+  /**
+   * Sandbox handle for running tier-2 (sysbox container) skills. Optional —
+   * deployments without `SANDBOX_RUNTIME` set leave it undefined; tier-2
+   * skills then fail with a clear `tier_2_unavailable` error at invoke time.
+   * Tier-1 (Pyodide WASM) skills work either way.
+   */
+  sandbox?: Sandbox;
+  /**
+   * Container image for tier-2 skills. Defaults to `python:3.14-slim`.
+   * Override when shipping a Cogmo-baked image with deps pre-installed.
+   */
+  tier2Image?: string;
 }
 
 interface SkillSourceCacheEntry {
@@ -169,6 +186,8 @@ export class SkillRunnerImpl implements SkillRunner {
   #memoryBankId: string;
   #skillsRepoPath: string | undefined;
   #pyodidePackageCacheDir: string | undefined;
+  #sandbox: Sandbox | undefined;
+  #tier2Image: string;
   #ajv: Ajv;
   /**
    * Parsed manifest + compiled validator cache, keyed by `<name>@<sha>`. A new
@@ -187,6 +206,8 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#memoryBankId = opts.memoryBankId;
     this.#skillsRepoPath = opts.skillsRepoPath;
     this.#pyodidePackageCacheDir = opts.pyodidePackageCacheDir;
+    this.#sandbox = opts.sandbox;
+    this.#tier2Image = opts.tier2Image ?? DEFAULT_TIER2_IMAGE;
     this.#ajv = new Ajv({ allErrors: true, strict: false });
   }
 
@@ -615,9 +636,9 @@ export class SkillRunnerImpl implements SkillRunner {
       );
     }
 
-    if (skill.tier !== "wasm") {
+    if (skill.tier === "container" && !this.#sandbox) {
       throw new Error(
-        `tier ${skill.tier} not supported in P3.1 (Tier 2 sysbox worker lands in P3.2)`,
+        `skill '${opts.name}' is tier=container but no sandbox is configured (set SANDBOX_RUNTIME)`,
       );
     }
 
@@ -628,8 +649,8 @@ export class SkillRunnerImpl implements SkillRunner {
     });
 
     log.info(
-      { runId: run.id, skillName: opts.name, trigger: opts.trigger ?? "manual" },
-      "invoking tier-1 skill",
+      { runId: run.id, skillName: opts.name, tier: skill.tier, trigger: opts.trigger ?? "manual" },
+      "invoking skill",
     );
 
     const ctxHandler = new DefaultCtxHandler({
@@ -643,19 +664,34 @@ export class SkillRunnerImpl implements SkillRunner {
       recordContextCall: (call) => this.#store.recordContextCall(call),
     });
 
-    const result = await runOnWorker({
-      taskId: run.id,
-      skillName: skill.name,
-      body: cached.body,
-      inputs: opts.inputs,
-      ...(cached.manifest.resources?.wall_clock_s !== undefined && {
-        wallClockS: cached.manifest.resources.wall_clock_s,
-      }),
-      ...(this.#pyodidePackageCacheDir && {
-        packageCacheDir: this.#pyodidePackageCacheDir,
-      }),
-      ctxHandler,
-    });
+    const wallClockS = cached.manifest.resources?.wall_clock_s;
+    const result =
+      skill.tier === "wasm"
+        ? await runOnWorker({
+            taskId: run.id,
+            skillName: skill.name,
+            body: cached.body,
+            inputs: opts.inputs,
+            ...(wallClockS !== undefined && { wallClockS }),
+            ...(this.#pyodidePackageCacheDir && {
+              packageCacheDir: this.#pyodidePackageCacheDir,
+            }),
+            ctxHandler,
+          })
+        : await runOnSysboxContainer({
+            taskId: run.id,
+            skillName: skill.name,
+            body: cached.body,
+            inputs: opts.inputs,
+            ...(wallClockS !== undefined && { wallClockS }),
+            ...(cached.manifest.resources?.memory_mb !== undefined && {
+              resourceLimits: { memory_bytes: cached.manifest.resources.memory_mb * 1024 * 1024 },
+            }),
+            image: this.#tier2Image,
+            // biome-ignore lint/style/noNonNullAssertion: guarded above by the tier-check throw
+            sandbox: this.#sandbox!,
+            ctxHandler,
+          });
 
     const finishedAt = new Date();
     if (result.ok) {

@@ -156,7 +156,7 @@ stdin/stdout chosen over HTTP / Unix socket for simplicity — one process per w
 
 Between tasks, "state" means Python module-level globals, library internals (connection pools, engine caches), `sys.modules` entries, monkey-patches, open file handles, background threads. Any of this leaking from task 1 into task 2 is a correctness or security bug.
 
-**v1: subinterpreter per task** (Python 3.13+, PEP 684). Fresh interpreter per invocation, shared process. ~50ms per task, full reset. Cheaper than worker recycle (~300ms) and strictly safer than logical reset.
+**v1: subinterpreter per task** (Python 3.14+, PEP 734's `concurrent.interpreters`). Fresh interpreter per invocation, shared process. ~50ms per task, full reset. Cheaper than worker recycle (~300ms) and strictly safer than logical reset. PEP 684 added the C-level per-interpreter GIL in 3.12, but the stable Python-level API for spawning + communicating with subinterpreters only landed in 3.14 — so 3.14 is the floor.
 
 **Per-skill opt-out** — skills whose C-extension dependencies don't support subinterpreters declare `isolation: recycle` in `SKILL.md`. Deploy-time check sniffs known-incompatible wheels and either forces the declaration or rejects. Options per skill:
 
@@ -165,7 +165,7 @@ Between tasks, "state" means Python module-level globals, library internals (con
 | `subinterpreter` (default) | Most skills. Pure Python + well-behaved C extensions. |
 | `recycle` | Skills importing libraries with subinterpreter-hostile C extensions. Worker is killed and respawned after each task (~300ms overhead). |
 
-**System fallback** — if a meaningful fraction of skills need `recycle`, flip the default to `recycle` via one config knob. Revisit as CPython 3.14+ matures subinterpreter ecosystem support.
+**System fallback** — if a meaningful fraction of skills need `recycle`, flip the default to `recycle` via one config knob. Revisit as the CPython 3.14+ subinterpreter ecosystem matures.
 
 **Not used:** logical reset (`importlib.reload` + globals clear). Too leaky — misses library state and monkey-patches. Present in the option space but never the right answer.
 

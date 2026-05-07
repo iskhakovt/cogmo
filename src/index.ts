@@ -367,6 +367,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     secretsStore,
     memory,
     files: fileService,
+    ...(sandbox && { sandbox }),
     user: { id: user.id, timezone: env.USER_TIMEZONE },
     memoryBankId: user.id,
     skillsRepoPath: env.COGMO_SKILLS_PATH,

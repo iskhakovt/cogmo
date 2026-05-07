@@ -1,0 +1,175 @@
+import { logger } from "../../logger.js";
+import type { ResourceLimits, Sandbox } from "../../sandbox/index.js";
+import { type CtxHandler, Dispatcher } from "../dispatcher.js";
+import type { TaskInvoke, TaskResult } from "../protocol.js";
+import { RUNNER_PY } from "./runner.py.js";
+import { createNdjsonTransport } from "./transport.js";
+
+const log = logger.child({ component: "skills.worker.sysbox" });
+
+/** Default wall-clock cap for tier-2 skills (`design/skills.md` Resource budgets). */
+const DEFAULT_WALL_CLOCK_S = 60;
+
+/** Default resource caps for tier-2 skills — overridden by manifest declarations. */
+const DEFAULT_RESOURCE_LIMITS: ResourceLimits = {
+  cpus: 1,
+  memory_bytes: 512 * 1024 * 1024,
+  pids: 256,
+};
+
+/**
+ * Hard bound on the combined runner + skill body source. `python3 -u -c <SRC>`
+ * is one cmdline argument; Linux `ARG_MAX` is typically 128 KB-2 MB on modern
+ * kernels but the safe portable ceiling is much smaller. Reject early with
+ * a clear error rather than letting `docker exec` fail opaquely.
+ */
+const MAX_RUNNER_SOURCE_BYTES = 100_000;
+
+export interface RunOnSysboxContainerParams {
+  taskId: string;
+  /** Skill name — informational only; surfaced in logs and labels. */
+  skillName: string;
+  /** Source of `skill.py`. */
+  body: string;
+  inputs: unknown;
+  /** Wall-clock cap in seconds. Defaults to 60 s. */
+  wallClockS?: number;
+  /** Per-skill memory / cpu / pid overrides. Defaults applied per field. */
+  resourceLimits?: Partial<ResourceLimits>;
+  /** Container image — typically `python:3.14-slim` or a Cogmo-baked equivalent. */
+  image: string;
+  sandbox: Sandbox;
+  ctxHandler: CtxHandler;
+}
+
+export interface RunOnSysboxContainerResult {
+  ok: boolean;
+  output?: unknown;
+  error?: string;
+}
+
+/**
+ * Spawn a one-shot sysbox container, drive a single skill task to completion
+ * over NDJSON-on-stdin/stdout, and tear the container down. Mirrors the
+ * tier-1 `runOnWorker` shape exactly — same dispatcher, same ctx handler,
+ * different transport + runtime.
+ *
+ * Lifecycle:
+ *  1. Ensure the container image is present (lazy pull).
+ *  2. `createTaskContainer` (no worktree, no home volume — skills don't need them).
+ *  3. `exec python3 -u -c <RUNNER>` with stdin attached for RPC.
+ *  4. `Dispatcher.invoke` → host services every `ctx_call` mid-task.
+ *  5. Wall-clock kill via `stopTask` if the timer fires before `task_result`.
+ *  6. `stopTask` on the way out, success or fail.
+ */
+export async function runOnSysboxContainer(
+  params: RunOnSysboxContainerParams,
+): Promise<RunOnSysboxContainerResult> {
+  const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S;
+  const resourceLimits: ResourceLimits = {
+    cpus: params.resourceLimits?.cpus ?? DEFAULT_RESOURCE_LIMITS.cpus,
+    memory_bytes: params.resourceLimits?.memory_bytes ?? DEFAULT_RESOURCE_LIMITS.memory_bytes,
+    pids: params.resourceLimits?.pids ?? DEFAULT_RESOURCE_LIMITS.pids,
+  };
+
+  // Skill body is inlined as a Python literal at the head of the runner. JSON
+  // string literals are a compatible subset of Python double-quoted string
+  // literals (same backslash escapes, same \uXXXX), so JSON.stringify yields
+  // a valid Python expression. Long-term, if real skills push into the
+  // ARG_MAX wall, we extend `task_invoke` with a `body` field and stream it
+  // — the runner already routes on message type.
+  const fullSource = `__skill_body__ = ${JSON.stringify(params.body)}\n${RUNNER_PY}`;
+  if (Buffer.byteLength(fullSource, "utf-8") > MAX_RUNNER_SOURCE_BYTES) {
+    return {
+      ok: false,
+      error: `runner source exceeds ${MAX_RUNNER_SOURCE_BYTES} bytes (skill body too large for tier-2 inline transport)`,
+    };
+  }
+
+  // Reaper TTL is a backstop — host-side timer below kills first. Add a
+  // 30 s buffer so the reaper never beats us during normal operation; if the
+  // host crashes between createTaskContainer and stopTask, the reaper still
+  // collects the orphan within wallClockS + 30 s.
+  const ttl = { expiresAt: new Date(Date.now() + (wallClockS + 30) * 1000) };
+
+  let stoppedByHost = false;
+  const stop = async (): Promise<void> => {
+    if (stoppedByHost) return;
+    stoppedByHost = true;
+    await params.sandbox.stopTask(params.taskId).catch((e: unknown) => {
+      log.warn(
+        { err: e instanceof Error ? e.message : String(e), taskId: params.taskId },
+        "stopTask failed during cleanup",
+      );
+    });
+  };
+
+  try {
+    await params.sandbox.ensureImagePresent(params.image);
+
+    const handle = await params.sandbox.createTaskContainer({
+      rootTaskId: params.taskId,
+      image: params.image,
+      resourceLimits,
+      ttl,
+      allowPrivilegedRunc: false,
+    });
+
+    const exec = await handle.exec(["python3", "-u", "-c", fullSource], {
+      attachStdin: true,
+    });
+    if (!exec.stdin) {
+      // attachStdin: true was set so this is unreachable; satisfy the type
+      // narrow without a non-null assertion.
+      throw new Error("exec returned without stdin despite attachStdin=true");
+    }
+
+    // Drain stderr to the host log — skill prints, traceback, etc. Help
+    // diagnosis; not part of the protocol.
+    exec.stderr.setEncoding("utf-8");
+    exec.stderr.on("data", (chunk: string) => {
+      log.debug({ taskId: params.taskId, skillName: params.skillName }, chunk.trimEnd());
+    });
+
+    const transport = createNdjsonTransport(exec.stdin, exec.stdout);
+    const dispatcher = new Dispatcher({ transport, ctxHandler: params.ctxHandler });
+
+    const invoke: TaskInvoke = {
+      type: "task_invoke",
+      id: params.taskId,
+      skill: params.skillName,
+      inputs: params.inputs,
+    };
+    const taskPromise = dispatcher.invoke(invoke);
+
+    const timeoutPromise = new Promise<"timeout">((resolve) => {
+      setTimeout(() => resolve("timeout"), wallClockS * 1000);
+    });
+
+    const winner = await Promise.race([
+      taskPromise.then((r) => ({ kind: "ok" as const, r })),
+      timeoutPromise,
+    ]);
+
+    if (winner === "timeout") {
+      log.warn(
+        { taskId: params.taskId, skillName: params.skillName, wallClockS },
+        "wall-clock exceeded — stopping container",
+      );
+      dispatcher.close("timeout");
+      await stop();
+      return { ok: false, error: "wall_clock_exceeded" };
+    }
+
+    dispatcher.close();
+    return resultToReturn(winner.r);
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  } finally {
+    await stop();
+  }
+}
+
+function resultToReturn(result: TaskResult): RunOnSysboxContainerResult {
+  return result.ok ? { ok: true, output: result.output } : { ok: false, error: result.error };
+}

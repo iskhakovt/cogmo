@@ -306,7 +306,9 @@ async def run(inputs, ctx):
     ).rejects.toThrow(/manifest.name/);
   });
 
-  it("rejects tier:container in P3.1 (Tier 2 lands in P3.2)", async () => {
+  it("rejects tier:container when no sandbox is configured", async () => {
+    // Runner constructed without `sandbox` — tier-2 invocation must fail
+    // fast with a clear error rather than silently no-op or hang.
     const runner = await makeRunner();
     const containerManifest = `---
 name: container-skill
@@ -323,7 +325,7 @@ inputs:
       body: ECHO_BODY,
     });
     await expect(runner.invoke({ name: "container-skill", inputs: {} })).rejects.toThrow(
-      /not supported in P3\.1/,
+      /no sandbox is configured/,
     );
   });
 
