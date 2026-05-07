@@ -6,7 +6,7 @@
  * and bind-mounts the returned socket path.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { Database } from "../db/index.js";
+import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { LocalInProcessSandbox } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
@@ -21,12 +21,13 @@ const RESOURCE_LIMITS: ResourceLimits = {
 };
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleSandboxStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleSandboxStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleSandboxStore(tx);
 });
 
 afterEach(async () => {

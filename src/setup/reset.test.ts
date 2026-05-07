@@ -5,7 +5,7 @@
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
-import type { Database } from "../db/index.js";
+import type { Database, Transactor } from "../db/index.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
@@ -14,17 +14,18 @@ import { applyReset } from "./reset.js";
 import { ensureDefaultUser, ensureDirectChannel } from "./seed.js";
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let agentStore: DrizzleAgentStore;
 let transportStore: DrizzleTransportStore;
 let secretsStore: DrizzleSecretsStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  agentStore = new DrizzleAgentStore(db);
-  transportStore = new DrizzleTransportStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  agentStore = new DrizzleAgentStore(tx);
+  transportStore = new DrizzleTransportStore(tx);
   const key = deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/secrets-at-rest/v1");
-  secretsStore = new DrizzleSecretsStore(db, key);
+  secretsStore = new DrizzleSecretsStore(tx, key);
 });
 
 afterEach(async () => {

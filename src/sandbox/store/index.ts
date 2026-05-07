@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import { single } from "../../db/helpers.js";
-import type { Database } from "../../db/index.js";
+import type { Transactor } from "../../db/index.js";
 import type { ContainerLabels, ResourceLimits } from "../types.js";
 import { cogmoInstances, containers, networks, volumes } from "./schema.js";
 
@@ -174,15 +174,15 @@ export interface SandboxStore {
 }
 
 export class DrizzleSandboxStore implements SandboxStore {
-  #db: Database;
-  constructor(db: Database) {
-    this.#db = db;
+  #runInTx: Transactor;
+  constructor(runInTx: Transactor) {
+    this.#runInTx = runInTx;
   }
 
   // --- Instances ---
 
   async insertInstance(params: { host: string; pid: number }): Promise<CogmoInstance> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx.insert(cogmoInstances).values({ host: params.host, pid: params.pid }).returning({
           id: cogmoInstances.id,
@@ -196,7 +196,7 @@ export class DrizzleSandboxStore implements SandboxStore {
   }
 
   async closeInstance(id: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx
         .update(cogmoInstances)
         .set({ stoppedAt: new Date() })
@@ -205,7 +205,7 @@ export class DrizzleSandboxStore implements SandboxStore {
   }
 
   async getInstance(id: string): Promise<CogmoInstance | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           id: cogmoInstances.id,
@@ -222,7 +222,7 @@ export class DrizzleSandboxStore implements SandboxStore {
   }
 
   async listLiveInstances(): Promise<readonly CogmoInstance[]> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return tx
         .select({
           id: cogmoInstances.id,
@@ -251,7 +251,7 @@ export class DrizzleSandboxStore implements SandboxStore {
     ttlExpiresAt: Date;
     instanceId: string;
   }): Promise<ContainerRow> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const row = single(
         await tx
           .insert(containers)
@@ -281,7 +281,7 @@ export class DrizzleSandboxStore implements SandboxStore {
     startedAt?: Date | null;
     exitedAt?: Date | null;
   }): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       const set: {
         status: ContainerStatus;
         exitCode?: number | null;
@@ -296,14 +296,14 @@ export class DrizzleSandboxStore implements SandboxStore {
   }
 
   async getContainer(id: string): Promise<ContainerRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(containers).where(eq(containers.id, id)).limit(1);
       return rows[0];
     });
   }
 
   async getContainerByDockerId(dockerId: string): Promise<ContainerRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select()
         .from(containers)
@@ -314,7 +314,7 @@ export class DrizzleSandboxStore implements SandboxStore {
   }
 
   async listContainersForInstance(instanceId: string): Promise<readonly ContainerRow[]> {
-    return this.#db.transaction((tx) =>
+    return this.#runInTx((tx) =>
       tx
         .select()
         .from(containers)
@@ -327,7 +327,7 @@ export class DrizzleSandboxStore implements SandboxStore {
     // depth DESC: callers iterate to tear down children before parents
     // (a parent reaped first leaves orphaned children that the daemon
     // refuses to remove because they reference the parent's namespace).
-    return this.#db.transaction((tx) =>
+    return this.#runInTx((tx) =>
       tx
         .select()
         .from(containers)
@@ -339,7 +339,7 @@ export class DrizzleSandboxStore implements SandboxStore {
   // --- Networks ---
 
   async insertNetwork(params: SandboxObjectInsert): Promise<NetworkRow> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const row = single(
         await tx
           .insert(networks)
@@ -360,20 +360,20 @@ export class DrizzleSandboxStore implements SandboxStore {
   }
 
   async updateNetworkStatus(params: { id: string; status: NetworkStatus }): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(networks).set({ status: params.status }).where(eq(networks.id, params.id));
     });
   }
 
   async getNetwork(id: string): Promise<NetworkRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(networks).where(eq(networks.id, id)).limit(1);
       return rows[0];
     });
   }
 
   async getNetworkByDockerId(dockerId: string): Promise<NetworkRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(networks).where(eq(networks.dockerId, dockerId)).limit(1);
       return rows[0];
     });
@@ -386,7 +386,7 @@ export class DrizzleSandboxStore implements SandboxStore {
     // `depth` are in the schema for it), removing the parent first would
     // orphan the children. Ordering matches listContainersForInstance /
     // listNetworksForTask.
-    return this.#db.transaction((tx) =>
+    return this.#runInTx((tx) =>
       tx
         .select()
         .from(networks)
@@ -396,7 +396,7 @@ export class DrizzleSandboxStore implements SandboxStore {
   }
 
   async listNetworksForTask(rootTaskId: string): Promise<readonly NetworkRow[]> {
-    return this.#db.transaction((tx) =>
+    return this.#runInTx((tx) =>
       tx
         .select()
         .from(networks)
@@ -408,7 +408,7 @@ export class DrizzleSandboxStore implements SandboxStore {
   // --- Volumes ---
 
   async insertVolume(params: SandboxObjectInsert): Promise<VolumeRow> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const row = single(
         await tx
           .insert(volumes)
@@ -429,20 +429,20 @@ export class DrizzleSandboxStore implements SandboxStore {
   }
 
   async updateVolumeStatus(params: { id: string; status: VolumeStatus }): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(volumes).set({ status: params.status }).where(eq(volumes.id, params.id));
     });
   }
 
   async getVolume(id: string): Promise<VolumeRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(volumes).where(eq(volumes.id, id)).limit(1);
       return rows[0];
     });
   }
 
   async getVolumeByDockerId(dockerId: string): Promise<VolumeRow | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx.select().from(volumes).where(eq(volumes.dockerId, dockerId)).limit(1);
       return rows[0];
     });
@@ -453,7 +453,7 @@ export class DrizzleSandboxStore implements SandboxStore {
     // listNetworksForInstance: the reaper reaps the result in order, and
     // a daemon-side parent-child dependency among volumes (none today, but
     // the schema supports it) needs the leaf reaped before the root.
-    return this.#db.transaction((tx) =>
+    return this.#runInTx((tx) =>
       tx
         .select()
         .from(volumes)
@@ -463,7 +463,7 @@ export class DrizzleSandboxStore implements SandboxStore {
   }
 
   async listVolumesForTask(rootTaskId: string): Promise<readonly VolumeRow[]> {
-    return this.#db.transaction((tx) =>
+    return this.#runInTx((tx) =>
       tx
         .select()
         .from(volumes)

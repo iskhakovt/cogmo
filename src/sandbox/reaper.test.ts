@@ -1,6 +1,6 @@
 import type Docker from "dockerode";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Database } from "../db/index.js";
+import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { runReap } from "./reaper.js";
 import { DrizzleSandboxStore } from "./store/index.js";
@@ -13,13 +13,14 @@ const RESOURCE_LIMITS: ResourceLimits = {
 };
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleSandboxStore;
 let instanceId: string;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleSandboxStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleSandboxStore(tx);
 });
 
 beforeEach(async () => {

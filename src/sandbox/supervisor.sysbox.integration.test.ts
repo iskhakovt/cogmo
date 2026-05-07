@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { Database } from "../db/index.js";
+import type { Transactor } from "../db/index.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { LocalInProcessSandbox } from "./index.js";
 import { DrizzleSandboxStore } from "./store/index.js";
@@ -33,7 +33,7 @@ const RESOURCE_LIMITS: ResourceLimits = {
   pids: 64,
 };
 
-let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleSandboxStore;
 let docker: Docker;
@@ -43,8 +43,8 @@ const homeVolumes: string[] = [];
 
 beforeAll(async () => {
   if (!SHOULD_RUN) return;
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleSandboxStore(db);
+  ({ tx, close } = await createTestDatabase());
+  store = new DrizzleSandboxStore(tx);
   docker = new Docker();
   workspaceTmp = mkdtempSync(join(tmpdir(), "cogmo-sysbox-it-"));
 

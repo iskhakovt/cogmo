@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { single } from "../../db/helpers.js";
-import type { Database } from "../../db/index.js";
+import type { Transactor } from "../../db/index.js";
 import { decrypt, encrypt, fromBase64, toBase64 } from "../encryption.js";
 import { secrets } from "./schema.js";
 
@@ -54,11 +54,11 @@ export interface SecretsStore {
 // --- Implementation ---
 
 export class DrizzleSecretsStore implements SecretsStore {
-  #db: Database;
+  #runInTx: Transactor;
   #key: Uint8Array;
 
-  constructor(db: Database, encryptionKey: Uint8Array) {
-    this.#db = db;
+  constructor(runInTx: Transactor, encryptionKey: Uint8Array) {
+    this.#runInTx = runInTx;
     this.#key = encryptionKey;
   }
 
@@ -68,7 +68,7 @@ export class DrizzleSecretsStore implements SecretsStore {
     description?: string;
   }): Promise<{ id: string }> {
     const { ciphertext, nonce } = encrypt(this.#key, params.plaintext);
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return single(
         await tx
           .insert(secrets)
@@ -93,7 +93,7 @@ export class DrizzleSecretsStore implements SecretsStore {
   }
 
   async getSecret(name: string): Promise<string | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({ ciphertext: secrets.ciphertext, nonce: secrets.nonce })
         .from(secrets)
@@ -106,7 +106,7 @@ export class DrizzleSecretsStore implements SecretsStore {
   }
 
   async getSecretById(id: string): Promise<string | undefined> {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({ ciphertext: secrets.ciphertext, nonce: secrets.nonce })
         .from(secrets)
@@ -127,7 +127,7 @@ export class DrizzleSecretsStore implements SecretsStore {
       }
     | undefined
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       const rows = await tx
         .select({
           id: secrets.id,
@@ -150,7 +150,7 @@ export class DrizzleSecretsStore implements SecretsStore {
       validatedAt: Date | null;
     }>
   > {
-    return this.#db.transaction(async (tx) => {
+    return this.#runInTx(async (tx) => {
       return tx
         .select({
           id: secrets.id,
@@ -163,19 +163,19 @@ export class DrizzleSecretsStore implements SecretsStore {
   }
 
   async markValidated(name: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.update(secrets).set({ validatedAt: new Date() }).where(eq(secrets.name, name));
     });
   }
 
   async deleteSecret(name: string): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.delete(secrets).where(eq(secrets.name, name));
     });
   }
 
   async deleteAllSecrets(): Promise<void> {
-    await this.#db.transaction(async (tx) => {
+    await this.#runInTx(async (tx) => {
       await tx.delete(secrets);
     });
   }
