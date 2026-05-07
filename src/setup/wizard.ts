@@ -10,7 +10,7 @@
 import * as p from "@clack/prompts";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ProviderAttrs } from "../agent/store/schema.js";
-import { transactor } from "../db/index.js";
+import { transactor } from "../db/transactor.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import {
   DEFAULT_GITHUB_IDENTITY_NAME,
