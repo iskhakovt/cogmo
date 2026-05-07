@@ -10,6 +10,14 @@ import type { AgentStore } from "./store/index.js";
 export interface AssembleContext {
   profileId: string;
   channelTypes: string[];
+  /**
+   * True when the orchestrator has resolved this turn's reply will be TTS'd
+   * to a voice clip. Drives a voice-style hint appended to the system
+   * prompt so Claude shapes its response for speech (short sentences, no
+   * markdown, no narration of background ops). See design/voice.md →
+   * "Prompt injection".
+   */
+  voiceMode?: boolean;
 }
 
 export interface PromptSource {
@@ -25,6 +33,10 @@ Be direct and genuine. Skip filler ("Great question!", "I'd be happy to help!").
 Be concise when the user wants a quick answer. Be thorough when the topic is complex or the user is exploring. Match their energy.`;
 
 const ONBOARDING = `You don't know your user yet. In your first interaction, introduce yourself briefly and learn about them: their name, what they do, their timezone, and how they prefer to communicate. Store what you learn using memory_retain.`;
+
+const VOICE_MODE_HINT = `# Voice mode
+
+Your response will be spoken aloud. Keep it short and natural — one or two sentences when possible. Skip routine acknowledgments ("saved", "noted", "I'll remember") unless the acknowledgment IS the entire answer. Don't narrate background work (memory saves, file writes, web searches) — the user assumes those happened. Avoid markdown, lists, code fences, and tables — they don't translate to speech.`;
 
 export interface PromptSourceConfig {
   timezone?: string;
@@ -56,7 +68,7 @@ export class DefaultPromptSource implements PromptSource {
   }
 
   async assemble(store: AgentStore, ctx: AssembleContext): Promise<string> {
-    const { profileId, channelTypes } = ctx;
+    const { profileId, channelTypes, voiceMode } = ctx;
     const profile = await store.getProfile(profileId);
     const rules = await store.getActiveRules(profileId, channelTypes);
     const userContext = await this.#getUserContext();
@@ -91,6 +103,13 @@ export class DefaultPromptSource implements PromptSource {
     if (rules.length > 0) {
       const rulesList = rules.map((r) => `- ${r.rule}`).join("\n");
       parts.push(`# Rules\n\n${rulesList}`);
+    }
+
+    // Voice-mode hint — placed near the end so it isn't drowned out by
+    // earlier identity/tools sections. Shapes the LLM's response style for
+    // TTS even though delivery happens out-of-band post-stream.
+    if (voiceMode) {
+      parts.push(VOICE_MODE_HINT);
     }
 
     // Current time

@@ -11,6 +11,8 @@ const mockBotApi = {
   sendChatAction: vi.fn().mockResolvedValue(true),
   editMessageText: vi.fn().mockResolvedValue({}),
   sendPhoto: vi.fn().mockResolvedValue({ message_id: 101 }),
+  sendVoice: vi.fn().mockResolvedValue({ message_id: 102 }),
+  sendAudio: vi.fn().mockResolvedValue({ message_id: 103 }),
   getFile: vi.fn().mockResolvedValue({ file_path: "photos/file_1.jpg" }),
   setMyCommands: vi.fn().mockResolvedValue(true),
 };
@@ -64,6 +66,31 @@ function makePhotoCtx(fromId: number, caption?: string, chatId = 42) {
     api: {
       sendChatAction: vi.fn().mockResolvedValue(true),
       getFile: vi.fn().mockResolvedValue({ file_path: "photos/file_1.jpg" }),
+    },
+  };
+}
+
+function makeVoiceCtx(
+  fromId: number,
+  voice: { file_id?: string; duration?: number; mime_type?: string } = {},
+  caption?: string,
+  chatId = 42,
+) {
+  return {
+    from: { id: fromId },
+    chat: { id: chatId },
+    message: {
+      date: 1700000000,
+      caption,
+      voice: {
+        file_id: voice.file_id ?? "voice_id",
+        duration: voice.duration ?? 5,
+        ...(voice.mime_type !== undefined && { mime_type: voice.mime_type }),
+      },
+    },
+    api: {
+      sendChatAction: vi.fn().mockResolvedValue(true),
+      getFile: vi.fn().mockResolvedValue({ file_path: "voice/file_1.ogg" }),
     },
   };
 }
@@ -328,6 +355,97 @@ describe("telegram adapter", () => {
 
       expect(transport.uploadAttachment).not.toHaveBeenCalled();
       expect(transport.emit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("voice messages", () => {
+    const mockFetch = vi.fn();
+
+    beforeEach(() => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        arrayBuffer: async () => new Uint8Array([0x4f, 0x67, 0x67, 0x53]).buffer,
+      });
+      vi.stubGlobal("fetch", mockFetch);
+    });
+
+    it("uploads OGG and emits a voice inbound block with durationMs", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeVoiceCtx(111, { file_id: "v_id", duration: 5 });
+      await handlers.get("on:message:voice")!(ctx);
+
+      expect(ctx.api.getFile).toHaveBeenCalledWith("v_id");
+      // Telegram voice clips are always OGG/Opus regardless of mime_type field.
+      expect(transport.uploadAttachment).toHaveBeenCalledWith(expect.any(Buffer), "audio/ogg");
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          {
+            type: "voice",
+            path: "inbound/test.jpg",
+            mediaType: "audio/ogg",
+            durationMs: 5000,
+          },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("includes caption alongside the voice block", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeVoiceCtx(111, { duration: 3 }, "listen up");
+      await handlers.get("on:message:voice")!(ctx);
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "listen up" },
+          {
+            type: "voice",
+            path: "inbound/test.jpg",
+            mediaType: "audio/ogg",
+            durationMs: 3000,
+          },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("does not upload or emit on missing file_path (>20MB Telegram cap)", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeVoiceCtx(111);
+      ctx.api.getFile = vi.fn().mockResolvedValue({ file_path: undefined });
+
+      await handlers.get("on:message:voice")!(ctx);
+
+      expect(transport.uploadAttachment).not.toHaveBeenCalled();
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
+
+    it("does not upload or emit on a non-OK fetch", async () => {
+      const { transport } = await createAdapter();
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        arrayBuffer: async () => new Uint8Array().buffer,
+      });
+      const ctx = makeVoiceCtx(111);
+
+      await handlers.get("on:message:voice")!(ctx);
+
+      expect(transport.uploadAttachment).not.toHaveBeenCalled();
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
+
+    it("does NOT register a message:audio handler (music files would burn STT tokens)", async () => {
+      // Slice 1 deliberately omits the audio handler — see the comment in
+      // src/transport/adapters/telegram/index.ts above bot.on("message:voice").
+      // Voice notes only.
+      await createAdapter();
+      expect(handlers.has("on:message:audio")).toBe(false);
     });
   });
 
@@ -807,6 +925,51 @@ describe("telegram adapter", () => {
       const call1 = mockBotApi.sendPhoto.mock.calls[1];
       expect((call0?.[1] as { filename: string }).filename).toBe("image.png");
       expect((call1?.[1] as { filename: string }).filename).toBe("image.jpg");
+    });
+  });
+
+  describe("sendVoice", () => {
+    it("delivers OGG via Telegram's sendVoice (voice-bubble UI)", async () => {
+      const { adapter } = await createAdapter();
+      const adapterAny = adapter as unknown as {
+        sendVoice: (addr: string, audio: { audio: Buffer; mediaType: string }) => Promise<void>;
+      };
+      const audio = { audio: Buffer.from([1, 2, 3]), mediaType: "audio/ogg" };
+
+      await adapterAny.sendVoice("42", audio);
+
+      expect(mockBotApi.sendVoice).toHaveBeenCalledTimes(1);
+      const [chatId, file] = mockBotApi.sendVoice.mock.calls[0]!;
+      expect(chatId).toBe(42);
+      expect((file as { filename: string }).filename).toBe("voice.ogg");
+      expect((file as { data: Buffer }).data).toEqual(audio.audio);
+      expect(mockBotApi.sendAudio).not.toHaveBeenCalled();
+    });
+
+    it("treats audio/opus the same as audio/ogg", async () => {
+      const { adapter } = await createAdapter();
+      const adapterAny = adapter as unknown as {
+        sendVoice: (addr: string, audio: { audio: Buffer; mediaType: string }) => Promise<void>;
+      };
+      await adapterAny.sendVoice("42", {
+        audio: Buffer.from([]),
+        mediaType: "audio/opus",
+      });
+      expect(mockBotApi.sendVoice).toHaveBeenCalledTimes(1);
+      expect(mockBotApi.sendAudio).not.toHaveBeenCalled();
+    });
+
+    it("falls back to sendAudio for non-Opus formats (e.g. MP3)", async () => {
+      const { adapter } = await createAdapter();
+      const adapterAny = adapter as unknown as {
+        sendVoice: (addr: string, audio: { audio: Buffer; mediaType: string }) => Promise<void>;
+      };
+      await adapterAny.sendVoice("42", {
+        audio: Buffer.from([0xff, 0xfb]),
+        mediaType: "audio/mpeg",
+      });
+      expect(mockBotApi.sendAudio).toHaveBeenCalledTimes(1);
+      expect(mockBotApi.sendVoice).not.toHaveBeenCalled();
     });
   });
 });

@@ -1,5 +1,7 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   index,
   integer,
   pgEnum,
@@ -23,6 +25,13 @@ import {
 export const autoRecallMode = pgEnum("auto_recall_mode", ["off", "always", "heuristic", "llm"]);
 
 export const pendingMemorySource = pgEnum("pending_memory_source", ["live_retain", "migration"]);
+
+/**
+ * Voice mode preference. `auto` mirrors inbound modality (voice in → voice out).
+ * Lives on profiles (default) and conversations (override, nullable). See
+ * design/voice.md.
+ */
+export const voiceMode = pgEnum("voice_mode", ["auto", "always", "never"]);
 
 /**
  * Lifecycle status of a conversation.
@@ -127,6 +136,12 @@ export const profiles = pgTable(
     summarizationModel: text("summarization_model"), // null = use main model
     extractionModel: text("extraction_model"), // null = use main model
     autoRecall: autoRecallMode("auto_recall").notNull().default("heuristic"),
+    /**
+     * Profile-level voice mode default. Overridden per-conversation via
+     * `conversations.voice_mode` (nullable). Default `auto` = mirror inbound
+     * modality. See design/voice.md.
+     */
+    voiceMode: voiceMode("voice_mode").notNull().default("auto"),
     toolSet: jsonbZod("tool_set", ToolSetSchema).notNull(),
     memoryScope: jsonbZod("memory_scope", ProfileMemoryScopeSchema), // null = no restriction
     createdAt: ts(),
@@ -153,6 +168,12 @@ export const conversations = pgTable(
      * `conversationStatus` enum and `recover-conversation`.
      */
     status: conversationStatus("status").notNull().default("active"),
+    /**
+     * Per-conversation voice mode override. NULL = follow profile default.
+     * The conversation override is what `/voice` mutates; clearing it
+     * (`/voice clear`) restores profile-level behaviour.
+     */
+    voiceMode: voiceMode("voice_mode"),
     createdAt: ts(),
   },
   (t) => [index("idx_conversations_profile_id").on(t.profileId)],
@@ -236,6 +257,49 @@ export const pendingMemories = pgTable(
     createdAt: ts(),
   },
   (t) => [index("idx_pending_memories_user").on(t.userId, t.createdAt)],
+);
+
+/**
+ * Voice provider configuration — singleton row by convention (zero or one).
+ * Credentials live in the encrypted `secrets` table (no env-only path); the
+ * FKs decouple TTS from STT so swapping providers is a single secret-id
+ * update, not a wholesale rewire. Slice 1 supports `tts_provider = 'openai'`
+ * and `stt_provider = 'openai'`; ElevenLabs / Deepgram pluggable later.
+ * See design/voice.md.
+ */
+export const voiceConfig = pgTable(
+  "voice_config",
+  {
+    id: pk(),
+    ttsSecretId: uuid("tts_secret_id")
+      .notNull()
+      .references(() => secrets.id),
+    sttSecretId: uuid("stt_secret_id")
+      .notNull()
+      .references(() => secrets.id),
+    ttsProvider: text("tts_provider").notNull(),
+    ttsModel: text("tts_model").notNull(),
+    ttsVoice: text("tts_voice").notNull(),
+    ttsBaseUrl: text("tts_base_url"), // NULL = SDK default
+    sttProvider: text("stt_provider").notNull(),
+    sttModel: text("stt_model").notNull(),
+    sttBaseUrl: text("stt_base_url"), // NULL = SDK default
+    /**
+     * Singleton enforcement — `singleton` is always TRUE (the CHECK
+     * constraint pins the value); UNIQUE on a single-valued column means
+     * at most one row can exist. Inserting a second row violates the
+     * UNIQUE constraint at the DB level rather than relying on
+     * convention. `getVoiceConfig` also `ORDER BY created_at DESC` as
+     * defense-in-depth in case the constraint is somehow bypassed
+     * (manual psql, broken migration).
+     */
+    singleton: boolean("singleton").notNull().default(true),
+    createdAt: ts(),
+  },
+  (t) => [
+    unique("uq_voice_config_singleton").on(t.singleton),
+    check("chk_voice_config_singleton", sql`singleton = true`),
+  ],
 );
 
 export const steeringRules = pgTable("steering_rules", {

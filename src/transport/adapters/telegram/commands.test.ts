@@ -16,6 +16,7 @@ import {
   handleResumeCallback,
   handleSessions,
   handleSkillsApprovalCallback,
+  handleVoice,
   parseScopeSpec,
   splitScopeArgs,
   type TelegramCommandContext,
@@ -1463,6 +1464,111 @@ describe("handleRepair", () => {
     });
     const ctx = mkCtx();
     await handleRepair(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("not authorized"));
+  });
+});
+
+describe("handleVoice", () => {
+  function transportForVoice(
+    overrides: {
+      setVoiceMode?: ReturnType<typeof vi.fn>;
+      voiceMode?: "auto" | "always" | "never" | null;
+      profileVoiceMode?: "auto" | "always" | "never";
+      noSession?: boolean;
+    } = {},
+  ) {
+    return mockTransport({
+      resolveSession: overrides.noSession
+        ? vi.fn().mockResolvedValue(null)
+        : vi.fn().mockResolvedValue({
+            id: "s1",
+            channelId: "ch",
+            platformAddress: "42",
+            conversationId: "c1",
+            status: "active",
+            receive: "routed",
+          }),
+      conversations: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        getCurrent: vi.fn().mockResolvedValue(
+          ok({
+            conversationId: "c1",
+            profileId: "p1",
+            profileName: "main",
+            model: "claude",
+            voiceMode: overrides.voiceMode ?? null,
+            profileVoiceMode: overrides.profileVoiceMode ?? "auto",
+          }),
+        ),
+        setAlias: vi.fn().mockResolvedValue(ok(undefined)),
+        setProfile: vi.fn().mockResolvedValue(ok(undefined)),
+        repair: vi.fn().mockResolvedValue(ok({ wasErrored: false })),
+        setVoiceMode: overrides.setVoiceMode ?? vi.fn().mockResolvedValue(ok(undefined)),
+      },
+    });
+  }
+
+  it("rejects when there's no active session", async () => {
+    const transport = transportForVoice({ noSession: true });
+    const ctx = mkCtx("");
+    await handleVoice(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("No active conversation"));
+  });
+
+  it("bare /voice shows current effective mode (override is null → follow profile)", async () => {
+    const transport = transportForVoice({ voiceMode: null });
+    const ctx = mkCtx("");
+    await handleVoice(transport, ctx);
+    const replyText = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    expect(replyText).toMatch(/Voice mode:/);
+    expect(replyText).toContain("follow profile default");
+  });
+
+  it("bare /voice shows the explicit override when set", async () => {
+    const transport = transportForVoice({ voiceMode: "always" });
+    const ctx = mkCtx("");
+    await handleVoice(transport, ctx);
+    const replyText = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    expect(replyText).toContain("Voice mode: always");
+  });
+
+  it.each([
+    ["auto", "auto"],
+    ["always", "always"],
+    ["off", "never"],
+    ["never", "never"],
+  ])("/voice %s persists %s as the override", async (arg, mode) => {
+    const setVoiceMode = vi.fn().mockResolvedValue(ok(undefined));
+    const transport = transportForVoice({ setVoiceMode });
+    const ctx = mkCtx(arg);
+    await handleVoice(transport, ctx);
+    expect(setVoiceMode).toHaveBeenCalledWith("1", "c1", mode);
+    expect(ctx.reply).toHaveBeenCalledWith(`Voice mode: ${mode}`);
+  });
+
+  it("/voice clear passes null to setVoiceMode", async () => {
+    const setVoiceMode = vi.fn().mockResolvedValue(ok(undefined));
+    const transport = transportForVoice({ setVoiceMode });
+    const ctx = mkCtx("clear");
+    await handleVoice(transport, ctx);
+    expect(setVoiceMode).toHaveBeenCalledWith("1", "c1", null);
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringContaining("cleared (following profile default)"),
+    );
+  });
+
+  it("/voice <bogus> shows usage", async () => {
+    const transport = transportForVoice();
+    const ctx = mkCtx("loud");
+    await handleVoice(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Usage: /voice"));
+  });
+
+  it("propagates Transport errors to the user", async () => {
+    const setVoiceMode = vi.fn().mockResolvedValue(err({ code: "identity_rejected" }));
+    const transport = transportForVoice({ setVoiceMode });
+    const ctx = mkCtx("always");
+    await handleVoice(transport, ctx);
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("not authorized"));
   });
 });
