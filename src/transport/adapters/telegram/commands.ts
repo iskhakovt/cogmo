@@ -667,10 +667,14 @@ export function parseScopeSpec(tokens: ReadonlyArray<string>): ScopeSpec {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
-    if (key === "compartments") {
-      collected.compartments = values;
-    } else if (key === "trust") {
-      collected.trust = values;
+    if (key === "compartments" || key === "trust") {
+      if (collected[key] !== undefined) {
+        return {
+          kind: "error",
+          message: `Key "${key}" repeated. Combine values into a single comma-separated list.`,
+        };
+      }
+      collected[key] = values;
     } else {
       return {
         kind: "error",

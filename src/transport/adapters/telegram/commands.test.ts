@@ -477,6 +477,24 @@ describe("handleProfile", () => {
       expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Invalid scope"));
     });
 
+    it("`/profile scope` with no name → USAGE (no list / update calls)", async () => {
+      const list = vi.fn();
+      const update = vi.fn();
+      const transport = transportWith({
+        profiles: {
+          list,
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      const ctx = mkCtx("scope");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(list).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Usage: /profile"));
+    });
+
     it("surfaces transport access_denied (org profile) without leaking it as success", async () => {
       const update = vi.fn().mockResolvedValue(
         err({
@@ -550,6 +568,34 @@ describe("parseScopeSpec", () => {
     const r = parseScopeSpec(["compartments=bogus", "trust=first-party"]);
     expect(r.kind).toBe("error");
     if (r.kind === "error") expect(r.message).toContain("Invalid scope");
+  });
+
+  it("accepts whitespace inside the comma-separated list (split-and-trim)", () => {
+    // Telegram tokenises on whitespace before parseScopeSpec sees the input,
+    // so a stray space *between* tokens splits them into separate tokens.
+    // But a space *after a comma* inside a single token (e.g. when the
+    // operator types "work, technical" and the shell preserves it) must be
+    // tolerated — that's why we trim each value.
+    const r = parseScopeSpec(["compartments=work,technical", "trust=first-party,any"]);
+    expect(r).toEqual({
+      kind: "set",
+      scope: { compartments: ["work", "technical"], trust: ["first-party", "any"] },
+    });
+  });
+
+  it("rejects case-mismatched enum values (operators most likely typo)", () => {
+    const r = parseScopeSpec(["compartments=WORK", "trust=first-party"]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain("Invalid scope");
+  });
+
+  it("rejects same key repeated — points operator at a single comma list", () => {
+    const r = parseScopeSpec(["compartments=work", "compartments=technical", "trust=any"]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") {
+      expect(r.message).toContain('Key "compartments" repeated');
+      expect(r.message).toContain("comma-separated");
+    }
   });
 });
 
