@@ -71,7 +71,6 @@ export interface HandleMessageDeps {
    * exercise MCP). When undefined, no MCP tools are surfaced.
    */
   mcpRegistry?: McpRegistry;
-  summarizationModel?: string;
   /**
    * Speech-to-text provider for transcribing inbound voice blocks. Optional
    * — absent when no `voice_config` row is present (the wizard hasn't been
@@ -219,11 +218,18 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // every message row this turn produces (user batch + intermediate + final
       // assistant). Mid-turn /profile switch updates conversations.profile_id but
       // the running turn keeps its snapshot; next turn picks up the new value.
+      // `summarizationModel` is captured the same way: profile override falls
+      // back to the chat model so a Haiku profile doesn't pay the Sonnet rate
+      // for prefix summarization.
       // See design/transport/overview.md → Profile and Model Stamping.
       const snapshot = await step.run("load-turn-snapshot", async () => {
         const p = await agentStore.getProfile(profileId);
         if (!p) throw new Error(`Profile not found: ${profileId}`);
-        return { profileId, model: p.model };
+        return {
+          profileId,
+          model: p.model,
+          summarizationModel: p.summarizationModel ?? p.model,
+        };
       });
 
       // Guard 1 — Staleness: trigger was already batched into a previous turn.
@@ -540,7 +546,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // — no point burning retries on a misconfiguration. See
       // design/providers.md → Provider dispatch.
       const provider = await resolveOrFail(resolveProvider, model);
-      const summarizationModel = deps.summarizationModel ?? model;
+      const summarizationModel = snapshot.summarizationModel;
 
       // Per-turn tool registry — built-ins from bootstrap + one dynamic tool
       // per live skill + MCP tools resolved against the profile's globs.
