@@ -42,10 +42,25 @@ const InboundDocumentBlockSchema = z
     message: "document block requires either path or data",
   });
 
+/**
+ * Voice clip from a channel that supports voice messages (Telegram). Always
+ * path-based — bytes are uploaded to AttachmentStore by the adapter and the
+ * orchestrator transcribes inside a durable `step.run("transcribe-voice")`.
+ * Storing the OGG persistently allows future re-transcription with a better
+ * model and downstream observability of voice fraction. See design/voice.md.
+ */
+const InboundVoiceBlockSchema = z.object({
+  type: z.literal("voice"),
+  path: z.string(),
+  mediaType: z.string(),
+  durationMs: z.number().int().nonnegative().optional(),
+});
+
 const InboundBlockSchema = z.union([
   InboundTextBlockSchema,
   InboundImageBlockSchema,
   InboundDocumentBlockSchema,
+  InboundVoiceBlockSchema,
 ]);
 
 /**
@@ -75,7 +90,19 @@ export interface DocumentRef {
   name?: string;
 }
 
-export type InboundBlock = ContentBlock | ImageRef | DocumentRef;
+/**
+ * Inbound voice reference — S3 path to OGG/Opus, needs transcription before
+ * sending to LLM. The orchestrator resolves voice refs to text via a durable
+ * step.run("transcribe-voice") boundary.
+ */
+export interface VoiceRef {
+  type: "voice_ref";
+  path: string;
+  mediaType: string;
+  durationMs?: number;
+}
+
+export type InboundBlock = ContentBlock | ImageRef | DocumentRef | VoiceRef;
 
 /**
  * Convert inbound message content to blocks.
@@ -109,6 +136,16 @@ export function contentToBlocks(content: InboundContent): InboundBlock[] {
       }
       return [];
     }
+    if (block.type === "voice") {
+      return [
+        {
+          type: "voice_ref",
+          path: block.path,
+          mediaType: block.mediaType,
+          ...(block.durationMs !== undefined && { durationMs: block.durationMs }),
+        },
+      ];
+    }
     // document
     if (block.path != null) {
       return [
@@ -133,4 +170,14 @@ export function contentToBlocks(content: InboundContent): InboundBlock[] {
     }
     return [];
   });
+}
+
+/**
+ * Was the most recent inbound row a voice message? Used by the orchestrator
+ * to resolve `auto` voice mode (mirror inbound modality). Returns true iff
+ * any block in the content is a voice block.
+ */
+export function isVoiceContent(content: InboundContent): boolean {
+  if (typeof content === "string") return false;
+  return content.some((b) => b.type === "voice");
 }

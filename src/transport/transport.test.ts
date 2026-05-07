@@ -462,6 +462,83 @@ describe("createTransport", () => {
     });
   });
 
+  describe("conversations.setVoiceMode", () => {
+    it("returns identity_rejected when handle does not resolve", async () => {
+      const transportStore = mockTransportStore({
+        resolveUser: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ transportStore });
+      const res = await transport.conversations.setVoiceMode("ghost", "c1", "always");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    });
+
+    it("returns conversation_not_found when conversation missing", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.setVoiceMode("handle", "c1", "always");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "conversation_not_found" });
+    });
+
+    it("returns access_denied when caller does not own the conversation", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-other",
+          profileId: "p1",
+          isPrivate: true,
+          status: "active",
+          voiceMode: null,
+        }),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.setVoiceMode("handle", "c1", "always");
+      expect(res._unsafeUnwrapErr()).toMatchObject({
+        code: "access_denied",
+        reason: expect.stringContaining("not owned"),
+      });
+    });
+
+    it("persists the override on success (always)", async () => {
+      const setConversationVoiceMode = vi.fn();
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p1",
+          isPrivate: true,
+          status: "active",
+          voiceMode: null,
+        }),
+        setConversationVoiceMode,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.setVoiceMode("handle", "c1", "always");
+      expect(res.isOk()).toBe(true);
+      expect(setConversationVoiceMode).toHaveBeenCalledWith("c1", "always");
+    });
+
+    it("clears the override when called with null", async () => {
+      const setConversationVoiceMode = vi.fn();
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p1",
+          isPrivate: true,
+          status: "active",
+          voiceMode: "always",
+        }),
+        setConversationVoiceMode,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.setVoiceMode("handle", "c1", null);
+      expect(res.isOk()).toBe(true);
+      expect(setConversationVoiceMode).toHaveBeenCalledWith("c1", null);
+    });
+  });
+
   describe("profiles.update", () => {
     it("rejects org-profile mutation with access_denied", async () => {
       const agentStore = mockAgentStore({
@@ -570,11 +647,11 @@ describe("createTransport", () => {
       const transportStore = mockTransportStore();
       const agentStore = mockAgentStore();
       const inngestSend = vi.fn().mockResolvedValue(undefined);
-      // biome-ignore lint/suspicious/noExplicitAny: minimal Inngest stub for the test boundary
-      const inngest = { send: inngestSend } as any;
+      const inngest = { send: inngestSend } as unknown as Parameters<
+        typeof createTransport
+      >[0]["inngest"];
       const mockEvent = {
-        // biome-ignore lint/suspicious/noExplicitAny: minimal event-creator stub for the test boundary
-        create: vi.fn((data: any) => ({ name: "inbound/arrived", data })),
+        create: vi.fn((data: unknown) => ({ name: "inbound/arrived", data })),
       } as unknown as typeof inboundArrived;
       const transport = createTransport({
         channelId: "ch-1",
@@ -582,12 +659,12 @@ describe("createTransport", () => {
         defaultProfileId: "profile-1",
         transportStore,
         agentStore,
-        // biome-ignore lint/suspicious/noExplicitAny: minimal CodingStore stub for the test boundary
-        codingStore: codingStore as any,
+        codingStore: codingStore as Parameters<typeof createTransport>[0]["codingStore"],
         inngest,
         inboundArrived: mockEvent,
-        // biome-ignore lint/suspicious/noExplicitAny: AttachmentStore not exercised here
-        attachments: { upload: vi.fn(), download: vi.fn() } as any,
+        attachments: { upload: vi.fn(), download: vi.fn() } as unknown as Parameters<
+          typeof createTransport
+        >[0]["attachments"],
         idleTimeoutMs: 0,
       });
       return transport;
@@ -843,8 +920,9 @@ describe("createTransport", () => {
       inngestSend?: ReturnType<typeof vi.fn>;
     }) {
       const inngestSend = args.inngestSend ?? vi.fn().mockResolvedValue(undefined);
-      // biome-ignore lint/suspicious/noExplicitAny: minimal Inngest stub
-      const inngest = { send: inngestSend } as any;
+      const inngest = { send: inngestSend } as unknown as Parameters<
+        typeof createTransport
+      >[0]["inngest"];
       const transportStore = mockTransportStore({
         resolveUser: vi
           .fn()
@@ -872,8 +950,7 @@ describe("createTransport", () => {
           vi.fn().mockResolvedValue({ kind: "cancelled", conversationId }),
       };
       const mockEvent = {
-        // biome-ignore lint/suspicious/noExplicitAny: minimal event-creator stub
-        create: vi.fn((data: any) => ({ name: "inbound/arrived", data })),
+        create: vi.fn((data: unknown) => ({ name: "inbound/arrived", data })),
       } as unknown as typeof inboundArrived;
       const transport = createTransport({
         channelId: "ch-1",
@@ -881,12 +958,12 @@ describe("createTransport", () => {
         defaultProfileId: "profile-1",
         transportStore,
         agentStore,
-        // biome-ignore lint/suspicious/noExplicitAny: minimal CodingStore stub
-        codingStore: codingStore as any,
+        codingStore: codingStore as Parameters<typeof createTransport>[0]["codingStore"],
         inngest,
         inboundArrived: mockEvent,
-        // biome-ignore lint/suspicious/noExplicitAny: AttachmentStore not exercised here
-        attachments: { upload: vi.fn(), download: vi.fn() } as any,
+        attachments: { upload: vi.fn(), download: vi.fn() } as unknown as Parameters<
+          typeof createTransport
+        >[0]["attachments"],
         idleTimeoutMs: 0,
       });
       return { transport, codingStore, inngestSend };

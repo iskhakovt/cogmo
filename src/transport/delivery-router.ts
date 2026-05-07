@@ -1,6 +1,11 @@
 import type { StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
-import type { OutboundDocument, OutboundImage, RenderedMessage } from "./adapter-module.js";
+import type {
+  OutboundDocument,
+  OutboundImage,
+  OutboundVoice,
+  RenderedMessage,
+} from "./adapter-module.js";
 import type { TransportStore } from "./store/index.js";
 import {
   type Adapter,
@@ -50,6 +55,20 @@ export interface DeliveryHandle {
     images?: readonly OutboundImage[],
     documents?: readonly OutboundDocument[],
   ): Promise<void>;
+  /**
+   * Whether any active routing target supports voice delivery. Lets the
+   * orchestrator skip TTS work entirely when no session can render voice
+   * (e.g., Direct CLI conversations, future text-only adapters).
+   */
+  canDeliverVoice(): boolean;
+  /**
+   * Deliver a TTS clip to every active routing target whose adapter
+   * implements `sendVoice`. No-op for sessions on adapters that don't
+   * support voice. Called by the orchestrator AFTER the streamed text
+   * has been delivered (Option B in design/voice.md — voice plus
+   * transcript), so a TTS failure doesn't strand the user.
+   */
+  deliverVoice(audio: OutboundVoice): Promise<void>;
 }
 
 /**
@@ -117,6 +136,14 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
         adapter: Adapter;
         renderOutput?: ((markdown: string) => RenderedMessage) | undefined;
       }> = [];
+      // Voice fan-out targets — populated for both streaming and batch
+      // adapters that implement `sendVoice`. Decoupled from streamHandles /
+      // batchTargets so a Telegram session contributes once for text
+      // (streamed) and once for voice (separate sendVoice call).
+      const voiceTargets: Array<{
+        platformAddress: string;
+        sendVoice: NonNullable<Adapter["sendVoice"]>;
+      }> = [];
 
       for (const session of sessions) {
         const entry = adapters.get(session.channelId);
@@ -131,6 +158,13 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
             adapter: entry.adapter,
             renderOutput: entry.renderOutput,
           });
+        }
+
+        // Adapters opt into voice fan-out by implementing `sendVoice`.
+        // Bind to the adapter so the call site doesn't need to re-narrow.
+        const send = entry.adapter.sendVoice?.bind(entry.adapter);
+        if (send) {
+          voiceTargets.push({ platformAddress: session.platformAddress, sendVoice: send });
         }
       }
 
@@ -178,6 +212,23 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
                   }
                 : content;
             await adapter.deliver(platformAddress, rendered);
+          }
+        },
+        canDeliverVoice(): boolean {
+          return voiceTargets.length > 0;
+        },
+        async deliverVoice(audio): Promise<void> {
+          // Per-target resilience — one failed sendVoice shouldn't block
+          // others, matching the per-image swallow-and-log pattern in the
+          // batch path. Errors are logged at the router level so the
+          // orchestrator's outcome stays "delivered" even when one
+          // session's voice call fails.
+          for (const { platformAddress, sendVoice } of voiceTargets) {
+            try {
+              await sendVoice(platformAddress, audio);
+            } catch (err) {
+              logger.error({ err, platformAddress }, "deliverVoice: per-session sendVoice failed");
+            }
           }
         },
       };

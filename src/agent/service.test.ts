@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { Service } from "./service.js";
 import { createService } from "./service.js";
+import type { ProfileMemoryScope } from "./store/schema.js";
 
 const stubFiles: Service["files"] = {
   read: async () => "",
@@ -20,139 +21,227 @@ function mockMemory(): MemoryProvider {
   return {
     name: "mock",
     retain: vi.fn().mockResolvedValue(undefined),
+    retainBatch: vi.fn().mockResolvedValue(undefined),
     recall: vi.fn().mockResolvedValue({ memories: [] }),
     reflect: vi.fn().mockResolvedValue({ answer: "" }),
   };
 }
 
-describe("createService", () => {
-  it("delegates recall to MemoryProvider with correct bankId", async () => {
+function workScope(): ProfileMemoryScope {
+  return {
+    compartments: ["work", "technical"],
+    trust: ["first-party"],
+  };
+}
+
+describe("createService — no scope (memoryScope: null)", () => {
+  it("delegates recall to the MemoryProvider with the right bankId, no filter applied, and returns its result", async () => {
     const memory = mockMemory();
-    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory, stubStage);
+    const expected = { memories: [{ content: "hi", type: "world" }] };
+    memory.recall = vi.fn().mockResolvedValue(expected);
+    const svc = createService(memory, "user-123", null, stubFiles, stubCoreMemory, stubStage);
 
-    await svc.memory.recall("some query");
+    const result = await svc.memory.recall("query");
 
-    expect(memory.recall).toHaveBeenCalledWith("user-123", "some query", { tags: [] });
+    expect(memory.recall).toHaveBeenCalledWith("user-123", "query", {});
+    expect(result).toBe(expected);
   });
 
-  it("delegates retain to MemoryProvider with correct bankId", async () => {
+  it("preserves caller-supplied tags / tagsMatch when no scope is set", async () => {
     const memory = mockMemory();
-    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory, stubStage);
+    const svc = createService(memory, "user-123", null, stubFiles, stubCoreMemory, stubStage);
 
-    await svc.memory.retain("a fact");
-
-    expect(memory.retain).toHaveBeenCalledWith("user-123", "a fact", { tags: [] });
-  });
-
-  it("merges profileTags with caller-provided tags on recall", async () => {
-    const memory = mockMemory();
-    const svc = createService(
-      memory,
-      "user-123",
-      ["network:world", "network:opinion"],
-      stubFiles,
-      stubCoreMemory,
-      stubStage,
-    );
-
-    await svc.memory.recall("query", { tags: ["extra"] });
+    await svc.memory.recall("query", { tags: ["preference"], tagsMatch: "all", maxTokens: 500 });
 
     expect(memory.recall).toHaveBeenCalledWith("user-123", "query", {
-      tags: ["network:world", "network:opinion", "extra"],
+      tags: ["preference"],
+      tagsMatch: "all",
+      maxTokens: 500,
     });
   });
 
-  it("merges profileTags with caller-provided tags on retain", async () => {
+  it("delegates retain to MemoryProvider unchanged (writes are never scope-filtered)", async () => {
+    const memory = mockMemory();
+    const svc = createService(memory, "user-123", null, stubFiles, stubCoreMemory, stubStage);
+
+    await svc.memory.retain("a fact", { context: "hi", tags: ["x"] });
+
+    expect(memory.retain).toHaveBeenCalledWith("user-123", "a fact", {
+      context: "hi",
+      tags: ["x"],
+    });
+  });
+
+  it("delegates reflect with budget passthrough", async () => {
+    const memory = mockMemory();
+    const svc = createService(memory, "user-123", null, stubFiles, stubCoreMemory, stubStage);
+
+    await svc.memory.reflect("query", { budget: "high" });
+
+    expect(memory.reflect).toHaveBeenCalledWith("user-123", "query", { budget: "high" });
+  });
+});
+
+describe("createService — scope filter (memoryScope set)", () => {
+  it("recall builds tagGroups from the profile's compartments + trust", async () => {
     const memory = mockMemory();
     const svc = createService(
       memory,
       "user-123",
-      ["network:world"],
+      workScope(),
       stubFiles,
       stubCoreMemory,
       stubStage,
     );
 
-    await svc.memory.retain("fact", { tags: ["custom"] });
+    await svc.memory.recall("query");
 
-    expect(memory.retain).toHaveBeenCalledWith("user-123", "fact", {
-      tags: ["network:world", "custom"],
+    expect(memory.recall).toHaveBeenCalledWith("user-123", "query", {
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:work", "compartment:technical"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+          ],
+        },
+      ],
     });
   });
 
-  it("preserves non-tag options on recall", async () => {
+  it("merges caller-supplied tags into the AND group, stripping plain tags/tagsMatch", async () => {
     const memory = mockMemory();
-    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory, stubStage);
+    const svc = createService(
+      memory,
+      "user-123",
+      workScope(),
+      stubFiles,
+      stubCoreMemory,
+      stubStage,
+    );
 
-    await svc.memory.recall("query", { maxTokens: 500 });
+    await svc.memory.recall("query", {
+      tags: ["preference"],
+      tagsMatch: "all",
+      maxTokens: 500,
+    });
 
     expect(memory.recall).toHaveBeenCalledWith("user-123", "query", {
       maxTokens: 500,
-      tags: [],
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:work", "compartment:technical"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+            { tags: ["preference"], match: "all" },
+          ],
+        },
+      ],
     });
   });
 
-  it("preserves non-tag options on retain", async () => {
-    const memory = mockMemory();
-    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory, stubStage);
-
-    await svc.memory.retain("fact", {
-      context: "from conversation",
-      metadata: { source: "chat" },
-    });
-
-    expect(memory.retain).toHaveBeenCalledWith("user-123", "fact", {
-      context: "from conversation",
-      metadata: { source: "chat" },
-      tags: [],
-    });
-  });
-
-  it("works with no opts provided", async () => {
-    const memory = mockMemory();
-    const svc = createService(memory, "bank-1", ["tag-a"], stubFiles, stubCoreMemory, stubStage);
-
-    await svc.memory.recall("q");
-    await svc.memory.retain("f");
-    await svc.memory.reflect("q");
-
-    expect(memory.recall).toHaveBeenCalledWith("bank-1", "q", { tags: ["tag-a"] });
-    expect(memory.retain).toHaveBeenCalledWith("bank-1", "f", { tags: ["tag-a"] });
-    expect(memory.reflect).toHaveBeenCalledWith("bank-1", "q", { tags: ["tag-a"] });
-  });
-
-  it("delegates reflect to MemoryProvider with correct bankId", async () => {
-    const memory = mockMemory();
-    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory, stubStage);
-
-    await svc.memory.reflect("who is Alice?");
-
-    expect(memory.reflect).toHaveBeenCalledWith("user-123", "who is Alice?", { tags: [] });
-  });
-
-  it("merges profileTags with caller-provided tags on reflect", async () => {
+  it("treats caller-supplied empty tags array as no caller filter (drops it from the AND group)", async () => {
     const memory = mockMemory();
     const svc = createService(
       memory,
       "user-123",
-      ["network:world"],
+      workScope(),
       stubFiles,
       stubCoreMemory,
       stubStage,
     );
 
-    await svc.memory.reflect("query", { tags: ["extra"], budget: "mid" });
+    await svc.memory.recall("query", { tags: [], tagsMatch: "all" });
 
-    expect(memory.reflect).toHaveBeenCalledWith("user-123", "query", {
-      tags: ["network:world", "extra"],
-      budget: "mid",
+    expect(memory.recall).toHaveBeenCalledWith("user-123", "query", {
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:work", "compartment:technical"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+          ],
+        },
+      ],
     });
   });
 
+  it("appends caller-supplied tagGroups into the AND group", async () => {
+    const memory = mockMemory();
+    const svc = createService(
+      memory,
+      "user-123",
+      workScope(),
+      stubFiles,
+      stubCoreMemory,
+      stubStage,
+    );
+
+    const callerGroup = { not: { tags: ["network:opinion"], match: "any" as const } };
+    await svc.memory.recall("query", { tagGroups: [callerGroup] });
+
+    expect(memory.recall).toHaveBeenCalledWith("user-123", "query", {
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:work", "compartment:technical"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+            callerGroup,
+          ],
+        },
+      ],
+    });
+  });
+
+  it("retain is NOT scope-filtered — writes pass through unchanged", async () => {
+    const memory = mockMemory();
+    const svc = createService(
+      memory,
+      "user-123",
+      workScope(),
+      stubFiles,
+      stubCoreMemory,
+      stubStage,
+    );
+
+    await svc.memory.retain("a fact", { tags: ["custom"] });
+
+    expect(memory.retain).toHaveBeenCalledWith("user-123", "a fact", { tags: ["custom"] });
+  });
+
+  it("reflect builds tagGroups, preserves budget, and returns the provider's result", async () => {
+    const memory = mockMemory();
+    const expected = { answer: "synthesized answer" };
+    memory.reflect = vi.fn().mockResolvedValue(expected);
+    const svc = createService(
+      memory,
+      "user-123",
+      workScope(),
+      stubFiles,
+      stubCoreMemory,
+      stubStage,
+    );
+
+    const result = await svc.memory.reflect("query", { budget: "mid" });
+
+    expect(memory.reflect).toHaveBeenCalledWith("user-123", "query", {
+      budget: "mid",
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:work", "compartment:technical"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+          ],
+        },
+      ],
+    });
+    expect(result).toBe(expected);
+  });
+});
+
+describe("createService — stageRetain", () => {
   it("delegates stageRetain to the injected closure with content and context", async () => {
     const memory = mockMemory();
     const stage = vi.fn().mockResolvedValue(undefined);
-    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory, stage);
+    const svc = createService(memory, "user-123", null, stubFiles, stubCoreMemory, stage);
 
     await svc.memory.stageRetain("a fact", { context: "from morning chat" });
 
@@ -162,7 +251,7 @@ describe("createService", () => {
   it("stageRetain works with no opts", async () => {
     const memory = mockMemory();
     const stage = vi.fn().mockResolvedValue(undefined);
-    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory, stage);
+    const svc = createService(memory, "user-123", null, stubFiles, stubCoreMemory, stage);
 
     await svc.memory.stageRetain("a fact");
 
@@ -172,26 +261,10 @@ describe("createService", () => {
   it("stageRetain does not touch MemoryProvider", async () => {
     const memory = mockMemory();
     const stage = vi.fn().mockResolvedValue(undefined);
-    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory, stage);
+    const svc = createService(memory, "user-123", null, stubFiles, stubCoreMemory, stage);
 
     await svc.memory.stageRetain("a fact");
 
     expect(memory.retain).not.toHaveBeenCalled();
-  });
-
-  it("forwards reflect budget and tagsMatch, returns provider answer", async () => {
-    const memory = mockMemory();
-    const reflectMock = vi.fn().mockResolvedValue({ answer: "synthesized" });
-    memory.reflect = reflectMock;
-    const svc = createService(memory, "user-123", [], stubFiles, stubCoreMemory, stubStage);
-
-    const result = await svc.memory.reflect("query", { budget: "high", tagsMatch: "any" });
-
-    expect(reflectMock).toHaveBeenCalledWith("user-123", "query", {
-      tags: [],
-      budget: "high",
-      tagsMatch: "any",
-    });
-    expect(result).toEqual({ answer: "synthesized" });
   });
 });

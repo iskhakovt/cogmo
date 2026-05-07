@@ -13,12 +13,14 @@ import {
   llmProviders,
   messages,
   modelProviders,
+  type ProfileMemoryScope,
   type ProviderAttrs,
   pendingMemories,
   profiles,
   steeringRules,
   type ToolSet,
   users,
+  voiceConfig,
 } from "./schema.js";
 
 /**
@@ -33,6 +35,9 @@ export const UNKNOWN_OUTPUT_TOKENS = -1;
 
 /** Mirrors the `conversation_status` PG enum. */
 export type ConversationStatus = "active" | "errored";
+
+/** Voice mode preference. Mirrors the `voice_mode` pgEnum exactly. */
+export type VoiceMode = "auto" | "always" | "never";
 
 /** Mirrors the `pending_memory_source` PG enum. */
 export type PendingMemorySource = "live_retain" | "migration";
@@ -55,7 +60,10 @@ export interface Profile {
   summarizationModel: string | null;
   extractionModel: string | null;
   autoRecall: AutoRecallMode;
+  /** Profile-level voice mode default; overridden per-conversation. */
+  voiceMode: VoiceMode;
   toolSet: ToolSet;
+  memoryScope: ProfileMemoryScope | null; // null = no compartment/trust restriction
 }
 
 export interface ProfileUpdates {
@@ -65,7 +73,9 @@ export interface ProfileUpdates {
   summarizationModel?: string | null;
   extractionModel?: string | null;
   autoRecall?: AutoRecallMode;
+  voiceMode?: VoiceMode;
   toolSet?: ToolSet;
+  memoryScope?: ProfileMemoryScope | null;
 }
 
 export interface ConversationSummary {
@@ -116,6 +126,8 @@ export interface AgentStore {
         profileId: string;
         isPrivate: boolean;
         status: ConversationStatus;
+        /** Per-conversation voice mode override; null = follow profile default. */
+        voiceMode: VoiceMode | null;
       }
     | undefined
   >;
@@ -129,6 +141,36 @@ export interface AgentStore {
    * known-broken conversation.
    */
   setConversationStatus(conversationId: string, status: ConversationStatus): Promise<void>;
+
+  /**
+   * Set or clear the per-conversation voice mode override. `null` clears
+   * the override (the conversation falls back to the profile default).
+   * Used by `Transport.conversations.setVoiceMode` (`/voice` command).
+   */
+  setConversationVoiceMode(conversationId: string, mode: VoiceMode | null): Promise<void>;
+
+  /**
+   * Load the singleton voice configuration row, if present. Returns
+   * `undefined` when voice is unconfigured (no wizard step run, no
+   * environment fallback). Bootstrap consumers handle this gracefully by
+   * leaving `ttsProvider` / `sttProvider` undefined on `HandleMessageDeps`,
+   * which means voice-mode resolution always returns false.
+   */
+  getVoiceConfig(): Promise<
+    | {
+        id: string;
+        ttsSecretId: string;
+        sttSecretId: string;
+        ttsProvider: string;
+        ttsModel: string;
+        ttsVoice: string;
+        ttsBaseUrl: string | null;
+        sttProvider: string;
+        sttModel: string;
+        sttBaseUrl: string | null;
+      }
+    | undefined
+  >;
 
   /** Insert a message (user or assistant). Returns the new message ID. `profileId` + `model` stamp the turn snapshot (see design/transport/overview.md → Profile and Model Stamping). */
   insertMessage(params: {
@@ -185,6 +227,7 @@ export interface AgentStore {
     basePrompt: string;
     model: string;
     toolSet: ToolSet;
+    memoryScope?: ProfileMemoryScope | null;
   }): Promise<Profile>;
 
   /** List profiles visible to `userId`: org profiles (user_id IS NULL) + the user's own profiles. */
@@ -464,6 +507,7 @@ export class DrizzleAgentStore implements AgentStore {
         profileId: string;
         isPrivate: boolean;
         status: ConversationStatus;
+        voiceMode: VoiceMode | null;
       }
     | undefined
   > {
@@ -475,6 +519,7 @@ export class DrizzleAgentStore implements AgentStore {
           profileId: conversations.profileId,
           isPrivate: conversations.isPrivate,
           status: conversations.status,
+          voiceMode: conversations.voiceMode,
         })
         .from(conversations)
         .where(eq(conversations.id, conversationId))
@@ -486,6 +531,29 @@ export class DrizzleAgentStore implements AgentStore {
   async setConversationStatus(conversationId: string, status: ConversationStatus): Promise<void> {
     await this.#db.transaction(async (tx) => {
       await tx.update(conversations).set({ status }).where(eq(conversations.id, conversationId));
+    });
+  }
+
+  async setConversationVoiceMode(conversationId: string, mode: VoiceMode | null): Promise<void> {
+    await this.#db.transaction(async (tx) => {
+      await tx
+        .update(conversations)
+        .set({ voiceMode: mode })
+        .where(eq(conversations.id, conversationId));
+    });
+  }
+
+  async getVoiceConfig() {
+    return this.#db.transaction(async (tx) => {
+      // ORDER BY created_at DESC defends against the singleton constraint
+      // somehow being bypassed (manual psql, broken migration) — return
+      // the most recent config rather than picking arbitrarily.
+      const rows = await tx
+        .select()
+        .from(voiceConfig)
+        .orderBy(desc(voiceConfig.createdAt))
+        .limit(1);
+      return rows[0];
     });
   }
 
@@ -597,7 +665,9 @@ export class DrizzleAgentStore implements AgentStore {
           summarizationModel: profiles.summarizationModel,
           extractionModel: profiles.extractionModel,
           autoRecall: profiles.autoRecall,
+          voiceMode: profiles.voiceMode,
           toolSet: profiles.toolSet,
+          memoryScope: profiles.memoryScope,
         })
         .from(profiles)
         .where(eq(profiles.id, profileId))
@@ -626,6 +696,7 @@ export class DrizzleAgentStore implements AgentStore {
     basePrompt: string;
     model: string;
     toolSet: ToolSet;
+    memoryScope?: ProfileMemoryScope | null;
   }): Promise<Profile> {
     return translateUniqueViolation(() =>
       this.#db.transaction(async (tx) => {
@@ -639,7 +710,9 @@ export class DrizzleAgentStore implements AgentStore {
             summarizationModel: profiles.summarizationModel,
             extractionModel: profiles.extractionModel,
             autoRecall: profiles.autoRecall,
+            voiceMode: profiles.voiceMode,
             toolSet: profiles.toolSet,
+            memoryScope: profiles.memoryScope,
           }),
         );
         return row as Profile;
@@ -659,7 +732,9 @@ export class DrizzleAgentStore implements AgentStore {
           summarizationModel: profiles.summarizationModel,
           extractionModel: profiles.extractionModel,
           autoRecall: profiles.autoRecall,
+          voiceMode: profiles.voiceMode,
           toolSet: profiles.toolSet,
+          memoryScope: profiles.memoryScope,
         })
         .from(profiles)
         .where(or(isNull(profiles.userId), eq(profiles.userId, userId)))
@@ -695,7 +770,9 @@ export class DrizzleAgentStore implements AgentStore {
             summarizationModel: profiles.summarizationModel,
             extractionModel: profiles.extractionModel,
             autoRecall: profiles.autoRecall,
+            voiceMode: profiles.voiceMode,
             toolSet: profiles.toolSet,
+            memoryScope: profiles.memoryScope,
           });
         return single(rows) as Profile;
       }),

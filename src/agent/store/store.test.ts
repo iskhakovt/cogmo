@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "../../db/index.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
@@ -98,7 +98,9 @@ describe("DrizzleAgentStore", () => {
         summarizationModel: null,
         extractionModel: null,
         autoRecall: "heuristic",
+        voiceMode: "auto",
         toolSet: ["memory_recall"],
+        memoryScope: null,
       });
     });
 
@@ -196,6 +198,7 @@ describe("DrizzleAgentStore", () => {
         profileId,
         isPrivate: true,
         status: "active",
+        voiceMode: null,
       });
     });
 
@@ -234,6 +237,22 @@ describe("DrizzleAgentStore", () => {
           isPrivate: true,
         }),
       ).rejects.toThrow();
+    });
+
+    it("setConversationVoiceMode persists the override", async () => {
+      const { conversationId } = await seedConversation();
+      await store.setConversationVoiceMode(conversationId, "always");
+      expect((await store.getConversation(conversationId))?.voiceMode).toBe("always");
+
+      await store.setConversationVoiceMode(conversationId, "never");
+      expect((await store.getConversation(conversationId))?.voiceMode).toBe("never");
+    });
+
+    it("setConversationVoiceMode(null) clears the override (NULL = follow profile)", async () => {
+      const { conversationId } = await seedConversation();
+      await store.setConversationVoiceMode(conversationId, "always");
+      await store.setConversationVoiceMode(conversationId, null);
+      expect((await store.getConversation(conversationId))?.voiceMode).toBeNull();
     });
   });
 
@@ -856,6 +875,73 @@ describe("DrizzleAgentStore", () => {
   // --- Admin methods: profile CRUD, conversation listing, aliases ---
 
   describe("profile admin", () => {
+    it("createProfile defaults memoryScope to null when not supplied", async () => {
+      const userId = await seedUser();
+      const profile = await store.createProfile({
+        userId,
+        name: "no-scope",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      expect(profile.memoryScope).toBeNull();
+    });
+
+    it("createProfile + getProfile round-trip a memoryScope", async () => {
+      const userId = await seedUser();
+      const created = await store.createProfile({
+        userId,
+        name: "coder",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+        memoryScope: {
+          compartments: ["work", "technical"],
+          trust: ["first-party"],
+        },
+      });
+      expect(created.memoryScope).toEqual({
+        compartments: ["work", "technical"],
+        trust: ["first-party"],
+      });
+      const loaded = await store.getProfile(created.id);
+      expect(loaded?.memoryScope).toEqual(created.memoryScope);
+    });
+
+    it("updateProfile can set and clear memoryScope", async () => {
+      const userId = await seedUser();
+      const { id } = await store.createProfile({
+        userId,
+        name: "p",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+
+      const set = await store.updateProfile(id, {
+        memoryScope: { compartments: ["health"], trust: ["first-party"] },
+      });
+      expect(set.memoryScope).toEqual({ compartments: ["health"], trust: ["first-party"] });
+
+      const cleared = await store.updateProfile(id, { memoryScope: null });
+      expect(cleared.memoryScope).toBeNull();
+    });
+
+    it("createProfile rejects empty compartments or trust arrays at the store boundary", async () => {
+      const userId = await seedUser();
+      await expect(
+        store.createProfile({
+          userId,
+          name: "bad",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+          // biome-ignore lint/suspicious/noExplicitAny: testing invalid input rejection
+          memoryScope: { compartments: [], trust: ["first-party"] } as any,
+        }),
+      ).rejects.toThrow();
+    });
+
     it("listProfiles returns org profiles + caller's own, not other users'", async () => {
       const u1 = await seedUser();
       const u2 = await seedUser();
@@ -931,6 +1017,24 @@ describe("DrizzleAgentStore", () => {
         model: "m2",
         basePrompt: "before-prompt",
       });
+    });
+
+    it("createProfile + updateProfile return rows with voiceMode populated", async () => {
+      // Regression guard: a `.returning()` block missing `voiceMode` would
+      // cast to `Profile` but leak `undefined` at runtime, silently
+      // bypassing resolveVoiceMode's profile-default fallback.
+      const u = await seedUser();
+      const created = await store.createProfile({
+        userId: u,
+        name: "voice-test",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      expect(created.voiceMode).toBe("auto");
+
+      const updated = await store.updateProfile(created.id, { voiceMode: "always" });
+      expect(updated.voiceMode).toBe("always");
     });
 
     it("updateProfile translates unique-name collision to UniqueViolationError", async () => {
@@ -1495,6 +1599,72 @@ describe("DrizzleAgentStore", () => {
 
       const rules = await store.getActiveRules(profileId, []);
       expect(rules).toEqual([{ rule: "New consolidated rule" }]);
+    });
+  });
+
+  describe("voice config", () => {
+    it("returns undefined when no row is present", async () => {
+      expect(await store.getVoiceConfig()).toBeUndefined();
+    });
+
+    it("returns the singleton row when present", async () => {
+      // Bootstrap path: voice_config has FKs to `secrets`. The wizard would
+      // insert these via `secretsStore.putSecret` then a row via raw SQL —
+      // mirror that here. Same secret id can serve both TTS and STT
+      // (when the operator opts to reuse the OpenAI LLM provider's key).
+      const { id: secretId } = await secretsStore.putSecret({
+        name: "voice_openai_key",
+        plaintext: "sk-test-voice",
+      });
+      await db.execute(sql`
+        INSERT INTO voice_config (
+          tts_secret_id, stt_secret_id,
+          tts_provider, tts_model, tts_voice, tts_base_url,
+          stt_provider, stt_model, stt_base_url
+        ) VALUES (
+          ${secretId}, ${secretId},
+          'openai', 'gpt-4o-mini-tts', 'alloy', NULL,
+          'openai', 'gpt-4o-mini-transcribe', NULL
+        )
+      `);
+
+      const cfg = await store.getVoiceConfig();
+      expect(cfg).toBeDefined();
+      expect(cfg).toMatchObject({
+        ttsSecretId: secretId,
+        sttSecretId: secretId,
+        ttsProvider: "openai",
+        ttsModel: "gpt-4o-mini-tts",
+        ttsVoice: "alloy",
+        ttsBaseUrl: null,
+        sttProvider: "openai",
+        sttModel: "gpt-4o-mini-transcribe",
+        sttBaseUrl: null,
+      });
+    });
+
+    it("enforces singleton at the DB level — second insert violates UNIQUE", async () => {
+      // The singleton column + UNIQUE/CHECK make a second row impossible.
+      // Without the constraint, getVoiceConfig().limit(1) would pick
+      // arbitrarily; the constraint blocks the misconfiguration at write time.
+      const { id: secretId } = await secretsStore.putSecret({
+        name: "voice_openai_key",
+        plaintext: "sk-test-voice",
+      });
+      const insertSql = sql`
+        INSERT INTO voice_config (
+          tts_secret_id, stt_secret_id,
+          tts_provider, tts_model, tts_voice,
+          stt_provider, stt_model
+        ) VALUES (
+          ${secretId}, ${secretId},
+          'openai', 'gpt-4o-mini-tts', 'alloy',
+          'openai', 'gpt-4o-mini-transcribe'
+        )
+      `;
+      await db.execute(insertSql);
+      // Second insert with default singleton=TRUE collides on the UNIQUE.
+      await expect(db.execute(insertSql)).rejects.toThrow();
     });
   });
 
