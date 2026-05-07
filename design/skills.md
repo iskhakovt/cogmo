@@ -704,7 +704,7 @@ Paths are logical (`notes/meeting.md`). The host enforces ACL — a skill cannot
 
 **Semantics.** Object-storage-with-paths, not POSIX:
 
-- Eventually consistent — S3 read-after-write is strong, but list-after-write may lag.
+- Strongly consistent reads and lists — a successful write is visible to subsequent `read` and `list` calls immediately on every supported backend (AWS S3 since Dec 2020, MinIO distributed/standalone, Cloudflare R2).
 - No file locking — last writer wins. Skills coordinating on the same file should pass state through return values or `ctx.memory`, not file races.
 - `write` is "create or overwrite" — no append, no partial updates. Read-modify-write is racy and the caller owns the consequences.
 
