@@ -16,6 +16,13 @@ export interface OpenAIVoiceConfig {
   apiKey: string;
   /** Override the default endpoint (e.g. for self-hosted compatible providers). */
   baseURL?: string;
+  /**
+   * Custom fetch — used by integration tests to swap in a record/replay
+   * interceptor (`createOpenAIVoiceFetch`). Production passes nothing and
+   * the SDK's default fetch is used. Scoped to this provider only — does
+   * not affect Anthropic/S3/etc. calls.
+   */
+  fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }
 
 /**
@@ -34,6 +41,7 @@ export class OpenAIVoiceProvider implements TtsProvider, SttProvider {
     this.#client = new OpenAI({
       apiKey: config.apiKey,
       ...(config.baseURL ? { baseURL: config.baseURL } : {}),
+      ...(config.fetch ? { fetch: config.fetch } : {}),
     });
   }
 

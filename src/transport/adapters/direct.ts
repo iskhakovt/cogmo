@@ -82,6 +82,23 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
           );
         }
       },
+      // Voice payload rides on the same `directOutbound` event as text —
+      // emitted as a separate event with `content: ""` so console clients
+      // can correlate it to the just-delivered text by `platformAddress`.
+      // Present mostly as a capability hook for integration tests; real
+      // CLI consumers may render or save the audio bytes as they prefer.
+      sendVoice: async (platformAddress, audio) => {
+        await inngest.send(
+          directOutbound.create({
+            platformAddress,
+            content: "",
+            voice: {
+              data: audio.audio.toString("base64"),
+              mediaType: audio.mediaType,
+            },
+          }),
+        );
+      },
       stop: async () => {},
     },
     functions: [inboundFn],
