@@ -282,9 +282,6 @@ function writeUserMessage(stdin: Writable, prompt: string): void {
 function drainStderr(exec: ExecHandle, mode: "plan" | "execute"): void {
   void (async () => {
     try {
-      // split2 owns line framing — including the trailing unterminated
-      // chunk emitted at end-of-stream — so we don't carry a manual
-      // buffer or special-case the tail.
       const splitter = exec.stderr.pipe(split2());
       for await (const line of splitter as AsyncIterable<string>) {
         const trimmed = line.trim();
