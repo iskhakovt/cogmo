@@ -1,0 +1,12 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\nExtract facts from the following text chunk.\n\nChunk: 1/1\nEvent Date: [DATE] ([TS])\nContext: none\nNarrator: runner-it-1778196104897 (AI agent — first-person statements like \"I did X\" are the agent's own actions; classify as \"assistant\")\n\nText:\nintegration-fact-97d5f9da"
+      },
+      "response": {
+        "content": "{\n  \"facts\": []\n}"
+      }
+    }
+  ]
+}
