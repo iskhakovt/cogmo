@@ -99,6 +99,7 @@ describe("DrizzleAgentStore", () => {
         extractionModel: null,
         autoRecall: "heuristic",
         toolSet: ["memory_recall"],
+        memoryScope: null,
       });
     });
 
@@ -856,6 +857,73 @@ describe("DrizzleAgentStore", () => {
   // --- Admin methods: profile CRUD, conversation listing, aliases ---
 
   describe("profile admin", () => {
+    it("createProfile defaults memoryScope to null when not supplied", async () => {
+      const userId = await seedUser();
+      const profile = await store.createProfile({
+        userId,
+        name: "no-scope",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+      expect(profile.memoryScope).toBeNull();
+    });
+
+    it("createProfile + getProfile round-trip a memoryScope", async () => {
+      const userId = await seedUser();
+      const created = await store.createProfile({
+        userId,
+        name: "coder",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+        memoryScope: {
+          compartments: ["work", "technical"],
+          trust: ["first-party"],
+        },
+      });
+      expect(created.memoryScope).toEqual({
+        compartments: ["work", "technical"],
+        trust: ["first-party"],
+      });
+      const loaded = await store.getProfile(created.id);
+      expect(loaded?.memoryScope).toEqual(created.memoryScope);
+    });
+
+    it("updateProfile can set and clear memoryScope", async () => {
+      const userId = await seedUser();
+      const { id } = await store.createProfile({
+        userId,
+        name: "p",
+        basePrompt: "p",
+        model: "m",
+        toolSet: [],
+      });
+
+      const set = await store.updateProfile(id, {
+        memoryScope: { compartments: ["health"], trust: ["first-party"] },
+      });
+      expect(set.memoryScope).toEqual({ compartments: ["health"], trust: ["first-party"] });
+
+      const cleared = await store.updateProfile(id, { memoryScope: null });
+      expect(cleared.memoryScope).toBeNull();
+    });
+
+    it("createProfile rejects empty compartments or trust arrays at the store boundary", async () => {
+      const userId = await seedUser();
+      await expect(
+        store.createProfile({
+          userId,
+          name: "bad",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+          // biome-ignore lint/suspicious/noExplicitAny: testing invalid input rejection
+          memoryScope: { compartments: [], trust: ["first-party"] } as any,
+        }),
+      ).rejects.toThrow();
+    });
+
     it("listProfiles returns org profiles + caller's own, not other users'", async () => {
       const u1 = await seedUser();
       const u2 = await seedUser();

@@ -265,35 +265,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         }),
       );
 
-      // Profile reload — needed for auto-recall gating and other per-profile settings.
-      // `model` comes from the turn snapshot, not this read, to preserve the invariant
-      // that one turn = one (profileId, model) stamp even if profile.model changes mid-turn.
+      // Profile reload — needed for auto-recall gating, scope filter, and other
+      // per-profile settings. `model` comes from the turn snapshot, not this read,
+      // to preserve the invariant that one turn = one (profileId, model) stamp
+      // even if profile.model changes mid-turn.
       const profile = await agentStore.getProfile(profileId);
 
-      // Auto-recall: search memory for context relevant to this message.
-      // Best-effort — a Hindsight failure (server down, malformed query, 4xx
-      // from a server-side change we haven't caught up with) must not abort
-      // the turn or trigger Inngest re-enqueue. Degrade to "no memories" and
-      // let the conversation proceed; the LLM-driven `memory_recall` tool
-      // path still surfaces hard failures to the model.
-      const autoRecallMode = profile?.autoRecall ?? "heuristic";
-      const recallResult = shouldSkipRecall(autoRecallMode, userContentText)
-        ? { memories: [] }
-        : await memory
-            .recall(userId, userContentText, { maxTokens: 2000 })
-            .catch((err: unknown) => {
-              logger.warn(
-                { err, conversationId },
-                "auto-recall failed, proceeding without recalled context",
-              );
-              return { memories: [] };
-            });
-      const recalledContext =
-        recallResult.memories.length > 0
-          ? recallResult.memories.map((m) => m.content).join("\n")
-          : null;
-
-      // Build scoped service for this turn
+      // Build scoped service for this turn — must precede auto-recall so the
+      // recall call goes through the same `memoryScope` ACL filter every other
+      // memory operation does.
       const coreMemoryService: Service["coreMemory"] = {
         get: () => agentStore.getCoreMemoryBlocks(userId),
         update: (key, content) => agentStore.upsertCoreMemoryBlock({ userId, key, content }),
@@ -310,7 +290,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const service = createService(
         memory,
         userId,
-        [],
+        profile?.memoryScope ?? null,
         fileService,
         coreMemoryService,
         async (content, opts) => {
@@ -324,6 +304,31 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         codingService,
         skillsService,
       );
+
+      // Auto-recall: search memory for context relevant to this message, via
+      // the scoped service so the profile's `memoryScope` filter applies.
+      // Best-effort — a Hindsight failure (server down, malformed query, 4xx
+      // from a server-side change we haven't caught up with) must not abort
+      // the turn or trigger Inngest re-enqueue. Degrade to "no memories" and
+      // let the conversation proceed; the LLM-driven `memory_recall` tool
+      // path still surfaces hard failures to the model.
+      const autoRecallMode = profile?.autoRecall ?? "heuristic";
+      const recallResult = shouldSkipRecall(autoRecallMode, userContentText)
+        ? { memories: [] }
+        : await service.memory
+            .recall(userContentText, { maxTokens: 2000 })
+            .catch((err: unknown) => {
+              logger.warn(
+                { err, conversationId },
+                "auto-recall failed, proceeding without recalled context",
+              );
+              return { memories: [] };
+            });
+      const recalledContext =
+        recallResult.memories.length > 0
+          ? recallResult.memories.map((m) => m.content).join("\n")
+          : null;
+
       const delivery = await deliveryRouter.prepare({
         conversationId,
         runId,
