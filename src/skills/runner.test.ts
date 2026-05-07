@@ -1,10 +1,19 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type { Service } from "../agent/service.js";
 import type { Database, Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { InputValidationError, SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
+
+function makeMockFiles(): Service["files"] {
+  return {
+    read: vi.fn().mockResolvedValue(""),
+    write: vi.fn().mockResolvedValue(undefined),
+    list: vi.fn().mockResolvedValue([]),
+  };
+}
 
 let db: Database;
 let tx: Transactor;
@@ -46,11 +55,14 @@ function makeMockSecrets(map: Record<string, string> = {}): SecretsStore {
   } as any;
 }
 
-async function makeRunner(opts: { memory?: MemoryProvider; secretsStore?: SecretsStore } = {}) {
+async function makeRunner(
+  opts: { memory?: MemoryProvider; secretsStore?: SecretsStore; files?: Service["files"] } = {},
+) {
   return SkillRunnerImpl.create({
     store,
     memory: opts.memory ?? makeMockMemory(),
     secretsStore: opts.secretsStore ?? makeMockSecrets(),
+    files: opts.files ?? makeMockFiles(),
     user: { id: "user-1", timezone: "UTC" },
     memoryBankId: "bank-1",
   });
@@ -141,6 +153,83 @@ async def run(inputs, ctx):
     const calls = await store.listContextCallsForRun(result.runId);
     expect(calls.map((c) => c.method)).toContain("memory.recall");
     expect(calls.find((c) => c.method === "memory.recall")?.ok).toBe(true);
+  });
+
+  it("round-trips ctx.files.{write,read,list} through the Python SDK", async () => {
+    const files = makeMockFiles();
+    vi.mocked(files.list).mockResolvedValue([
+      { path: "notes/draft.md", size: 5, lastModified: new Date("2026-04-01T00:00:00.000Z") },
+    ]);
+    vi.mocked(files.read).mockResolvedValue("hello");
+    const runner = await makeRunner({ files });
+
+    const manifest = `---
+name: with-files
+description: skill that touches ctx.files
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+effects:
+  - reads_filesystem
+  - writes_filesystem
+---
+`;
+    const body = `
+async def run(inputs, ctx):
+    await ctx.files.write("notes/draft.md", "hello")
+    content = await ctx.files.read("notes/draft.md")
+    entries = await ctx.files.list("notes/")
+    return {"content": content, "first_path": entries[0]["path"], "size": entries[0]["size"]}
+`;
+    await runner.__registerForTests({ name: "with-files", manifestSource: manifest, body });
+
+    const result = await runner.invoke({ name: "with-files", inputs: {} });
+    expect(result.status).toBe("success");
+    expect(result.output).toEqual({
+      content: "hello",
+      first_path: "notes/draft.md",
+      size: 5,
+    });
+
+    expect(files.write).toHaveBeenCalledWith("notes/draft.md", "hello");
+    expect(files.read).toHaveBeenCalledWith("notes/draft.md");
+    expect(files.list).toHaveBeenCalledWith("notes/");
+
+    const calls = await store.listContextCallsForRun(result.runId);
+    const methods = calls.map((c) => c.method);
+    expect(methods).toContain("files.write");
+    expect(methods).toContain("files.read");
+    expect(methods).toContain("files.list");
+  });
+
+  it("rejects ctx.files.read when reads_filesystem is not declared", async () => {
+    const files = makeMockFiles();
+    const runner = await makeRunner({ files });
+
+    const manifest = `---
+name: forbidden-read
+description: skill that tries ctx.files.read without the effect
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+---
+`;
+    const body = `
+async def run(inputs, ctx):
+    try:
+        await ctx.files.read("notes/draft.md")
+        return {"reached": True}
+    except Exception as e:
+        return {"reached": False, "kind": getattr(e, "kind", None)}
+`;
+    await runner.__registerForTests({ name: "forbidden-read", manifestSource: manifest, body });
+
+    const result = await runner.invoke({ name: "forbidden-read", inputs: {} });
+    expect(result.status).toBe("success");
+    expect(result.output).toEqual({ reached: false, kind: "missing_effect" });
+    expect(files.read).not.toHaveBeenCalled();
   });
 
   it("captures a Python exception as status=error", async () => {

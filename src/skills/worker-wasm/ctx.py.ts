@@ -42,6 +42,24 @@ class _Memory:
         return await self._ctx._call("memory.remember", args)
 
 
+class _Files:
+    def __init__(self, ctx):
+        self._ctx = ctx
+
+    async def read(self, path):
+        return await self._ctx._call("files.read", {"path": path})
+
+    async def write(self, path, content):
+        return await self._ctx._call("files.write", {"path": path, "content": content})
+
+    async def list(self, prefix=None):
+        args = {}
+        if prefix is not None:
+            args["prefix"] = prefix
+        result = await self._ctx._call("files.list", args)
+        return result["entries"]
+
+
 class _Log:
     def __init__(self, ctx):
         self._ctx = ctx
@@ -56,6 +74,7 @@ class Ctx:
         self._bridge = bridge
         self.secrets = _Secrets(self)
         self.memory = _Memory(self)
+        self.files = _Files(self)
         self.log = _Log(self)
 
     async def _call(self, method, args):

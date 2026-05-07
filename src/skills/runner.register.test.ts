@@ -175,6 +175,11 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       store,
       memory: makeMockMemory(),
       secretsStore: makeMockSecrets(),
+      files: {
+        read: vi.fn().mockResolvedValue(""),
+        write: vi.fn().mockResolvedValue(undefined),
+        list: vi.fn().mockResolvedValue([]),
+      },
       user: { id: "user-1", timezone: "UTC" },
       memoryBankId: "bank-1",
       skillsRepoPath: repo.bare,

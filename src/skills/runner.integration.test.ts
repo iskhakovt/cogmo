@@ -58,6 +58,11 @@ async function makeRunner() {
     store,
     secretsStore,
     memory,
+    files: {
+      read: async () => "",
+      write: async () => {},
+      list: async () => [],
+    },
     user: { id: "it-user", timezone: "UTC" },
     memoryBankId: BANK_ID,
   });
