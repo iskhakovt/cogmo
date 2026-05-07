@@ -1,4 +1,5 @@
 import type { Writable } from "node:stream";
+import split2 from "split2";
 import { z } from "zod";
 import { logger } from "../../logger.js";
 import type { ExecHandle, TaskContainerHandle } from "../../sandbox/index.js";
@@ -281,18 +282,14 @@ function writeUserMessage(stdin: Writable, prompt: string): void {
 function drainStderr(exec: ExecHandle, mode: "plan" | "execute"): void {
   void (async () => {
     try {
-      let buf = "";
-      for await (const chunk of exec.stderr) {
-        buf += chunk.toString();
-        let nl = buf.indexOf("\n");
-        while (nl !== -1) {
-          const line = buf.slice(0, nl);
-          buf = buf.slice(nl + 1);
-          if (line.trim()) log.warn({ stderr: line.trim(), mode }, "claude stderr");
-          nl = buf.indexOf("\n");
-        }
+      // split2 owns line framing — including the trailing unterminated
+      // chunk emitted at end-of-stream — so we don't carry a manual
+      // buffer or special-case the tail.
+      const splitter = exec.stderr.pipe(split2());
+      for await (const line of splitter as AsyncIterable<string>) {
+        const trimmed = line.trim();
+        if (trimmed) log.warn({ stderr: trimmed, mode }, "claude stderr");
       }
-      if (buf.trim()) log.warn({ stderr: buf.trim(), mode }, "claude stderr");
     } catch (err) {
       log.warn({ err: (err as Error).message, mode }, "claude stderr drain error");
     }
