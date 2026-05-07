@@ -6,6 +6,12 @@ export {
   isRetriableProviderError,
 } from "./fallback.js";
 export type { LlmProvider } from "./provider.js";
+export {
+  constantResolver,
+  createDbProviderResolver,
+  type DbResolverDeps,
+  type LlmProviderResolver,
+} from "./resolver.js";
 export type { TypedChatParams, TypedChatResult } from "./typed.js";
 export { chatTyped } from "./typed.js";
 export type {

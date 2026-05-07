@@ -5,6 +5,7 @@ import {
   mockDeliveryRouter,
   mockMemoryProvider,
   mockProvider,
+  mockResolver,
   mockStep,
   mockToolRegistry,
   mockTransportStore,
@@ -17,7 +18,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
   return {
     agentStore: mockAgentStore(),
     transportStore: mockTransportStore(),
-    provider: mockProvider(),
+    resolveProvider: mockResolver(),
     tools: mockToolRegistry(),
     memory: mockMemoryProvider(),
     promptSource: { assemble: vi.fn().mockResolvedValue("system prompt") },
@@ -835,7 +836,9 @@ describe("createHandleMessage", () => {
   });
 
   it("skips countTokens when fast path detects under budget", async () => {
+    const countTokens = vi.fn().mockResolvedValue(0);
     const deps = mockDeps({
+      resolveProvider: mockResolver(mockProvider({ countTokens })),
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1000, outputTokens: 100 }),
       }),
@@ -848,14 +851,14 @@ describe("createHandleMessage", () => {
     });
 
     // countTokens should NOT be called — fast path skips it
-    expect(deps.provider.countTokens).not.toHaveBeenCalled();
+    expect(countTokens).not.toHaveBeenCalled();
   });
 
   it("forces counting when prior output is the -1 pre-migration sentinel", async () => {
     // Pre-migration rows carry outputTokens = -1. The fast path must NOT skip.
     const countTokens = vi.fn().mockResolvedValue(50_000);
     const deps = mockDeps({
-      provider: mockProvider({ countTokens }),
+      resolveProvider: mockResolver(mockProvider({ countTokens })),
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1000, outputTokens: -1 }),
       }),
@@ -893,7 +896,7 @@ describe("createHandleMessage", () => {
     // First call: over threshold. Second call (after clearing): under.
     const countTokens = vi.fn().mockResolvedValueOnce(600_000).mockResolvedValueOnce(50_000);
     const deps = mockDeps({
-      provider: mockProvider({ countTokens }),
+      resolveProvider: mockResolver(mockProvider({ countTokens })),
       agentStore: mockAgentStore({
         // No prior tokens → fast path won't skip
         getLastTokens: vi.fn().mockResolvedValue(null),
@@ -921,16 +924,18 @@ describe("createHandleMessage", () => {
       .mockResolvedValueOnce(50_000); // after summarization: under
     const handle = mockDeliveryHandle();
     const deps = mockDeps({
-      provider: mockProvider({
-        countTokens,
-        // Summarization uses provider.chat — return a text response
-        chat: vi.fn().mockResolvedValue({
-          content: [{ type: "text", text: "Summary of conversation" }],
-          stopReason: "end_turn",
-          model: "mock",
-          usage: { inputTokens: 10, outputTokens: 5 },
+      resolveProvider: mockResolver(
+        mockProvider({
+          countTokens,
+          // Summarization uses provider.chat — return a text response
+          chat: vi.fn().mockResolvedValue({
+            content: [{ type: "text", text: "Summary of conversation" }],
+            stopReason: "end_turn",
+            model: "mock",
+            usage: { inputTokens: 10, outputTokens: 5 },
+          }),
         }),
-      }),
+      ),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue(null),

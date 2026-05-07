@@ -7,6 +7,7 @@ import { vi } from "vitest";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
 import type { LlmProvider } from "../llm/provider.js";
+import { constantResolver, type LlmProviderResolver } from "../llm/resolver.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
@@ -295,6 +296,15 @@ export function mockProvider(overrides?: Partial<LlmProvider>): LlmProvider {
     countTokens: vi.fn().mockResolvedValue(100),
     ...overrides,
   };
+}
+
+/**
+ * Convenience wrapper — returns a resolver that always yields the supplied
+ * (or default) mock provider. Use this in tests that need to inject
+ * `HandleMessageDeps.resolveProvider` or `ObserverDeps.resolveProvider`.
+ */
+export function mockResolver(provider?: LlmProvider): LlmProviderResolver {
+  return constantResolver(provider ?? mockProvider());
 }
 
 export function mockStreamHandle(overrides?: Partial<StreamHandle>): StreamHandle {

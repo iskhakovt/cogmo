@@ -29,17 +29,18 @@ import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
 import { createRecoverConversation } from "./agent/recover-conversation.js";
 import { CORE_MEMORY_PROMPT_GUIDANCE, MEMORY_PROMPT_GUIDANCE } from "./agent/service.js";
-import type { AgentStore } from "./agent/store/index.js";
 import { DrizzleAgentStore } from "./agent/store/index.js";
 import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
 import { db } from "./db/index.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
-import { AnthropicProvider } from "./llm/anthropic.js";
-import { FallbackLlmProvider } from "./llm/fallback.js";
-import { OpenAICompatibleProvider } from "./llm/openai-compat.js";
 import type { LlmProvider } from "./llm/provider.js";
+import {
+  constantResolver,
+  createDbProviderResolver,
+  type LlmProviderResolver,
+} from "./llm/resolver.js";
 import { logger } from "./logger.js";
 import { HostRunner as McpHostRunner } from "./mcp/client/runner.js";
 import { McpRegistryImpl } from "./mcp/registry.js";
@@ -49,7 +50,7 @@ import { CogmoSocketProxy, LocalInProcessSandbox, type Sandbox } from "./sandbox
 import { createSandboxReaper } from "./sandbox/reaper.js";
 import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
-import { DrizzleSecretsStore, type SecretsStore } from "./secrets/store/index.js";
+import { DrizzleSecretsStore } from "./secrets/store/index.js";
 import { bootstrapSkillsRepo } from "./skills/repo.js";
 import { SkillRunnerImpl } from "./skills/runner.js";
 import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
@@ -60,7 +61,11 @@ import { startChannels } from "./transport/registry.js";
 import { DrizzleTransportStore } from "./transport/store/index.js";
 
 export interface BootstrapOptions {
-  /** Inject a provider directly — skips DB resolution. Used by tests. */
+  /**
+   * Inject a provider directly — skips DB resolution and serves the same
+   * provider for every model. Used by tests; production wiring leaves this
+   * undefined so the DB-backed resolver picks per turn.
+   */
   providerOverride?: LlmProvider;
   /**
    * Custom `fetch` for the fal.ai provider — used by integration tests to
@@ -156,9 +161,15 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     throw new Error("default profile disappeared — database inconsistency");
   }
 
-  const provider =
-    opts.providerOverride ??
-    (await resolveProviderForModel(profile.model, agentStore, secretsStore));
+  // Per-turn provider dispatch: handle-message and observer call this
+  // resolver with the snapshot's model on every fire. The DB-backed
+  // implementation memoizes by model so each (process, model) pair pays
+  // one DB read + one AES decrypt total, then a Map lookup. Tests pass a
+  // `providerOverride` to short-circuit to a single provider for every
+  // model. See design/providers.md → Provider dispatch.
+  const resolveProvider: LlmProviderResolver = opts.providerOverride
+    ? constantResolver(opts.providerOverride)
+    : createDbProviderResolver({ agentStore, secretsStore });
 
   // S3-compatible file storage (MinIO locally, AWS S3 / R2 in production).
   // Constructed before tool registration because image-tools needs the
@@ -409,7 +420,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const handleMessage = createHandleMessage({
     agentStore,
     transportStore,
-    provider,
+    resolveProvider,
     tools,
     memory,
     promptSource,
@@ -426,7 +437,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
 
   const observer = createObserver({
     agentStore,
-    provider,
+    resolveProvider,
     memory,
     ...(profile.extractionModel && { extractionModel: profile.extractionModel }),
   });
@@ -454,70 +465,10 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     sandboxStore,
     sandbox,
     sandboxInstanceId,
-    provider,
+    resolveProvider,
     memory,
     skillRunner,
     skillStore,
     mcpRegistry,
   };
-}
-
-/**
- * Resolve the LLM provider for a model via the model_providers routing table.
- *
- * Loads every provider registered for the model (ordered by position ASC),
- * decrypts each one's API key, constructs its adapter, and wraps the list
- * in a {@link FallbackLlmProvider}. A single-row list still gets the
- * wrapper — uniform wiring for the agent loop, zero fallback cost at
- * runtime. See `design/providers.md` → Fallback for the semantics.
- *
- * Requires COGMO_MASTER_KEY to be set (for secrets decryption).
- */
-async function resolveProviderForModel(
-  model: string,
-  agentStore: AgentStore,
-  secretsStore: SecretsStore,
-): Promise<LlmProvider> {
-  const rows = await agentStore.listProvidersForModel(model);
-  if (rows.length === 0) {
-    throw new Error(
-      `No provider configured for model "${model}". Run \`cogmo setup\` to configure one.`,
-    );
-  }
-
-  const providers: LlmProvider[] = [];
-  for (const row of rows) {
-    const apiKey = await secretsStore.getSecretById(row.secretId);
-    if (!apiKey) {
-      throw new Error(
-        `Secret for provider "${row.name}" not found. Re-run \`cogmo setup\` to reconfigure.`,
-      );
-    }
-
-    switch (row.type) {
-      case "anthropic":
-        providers.push(new AnthropicProvider(apiKey, row.baseUrl ?? undefined));
-        break;
-      case "openai_compatible": {
-        if (!row.baseUrl) {
-          throw new Error(
-            `Provider "${row.name}" (openai_compatible) requires a base URL. Re-run \`cogmo setup\` to reconfigure.`,
-          );
-        }
-        providers.push(
-          new OpenAICompatibleProvider(row.name, {
-            apiKey,
-            baseURL: row.baseUrl,
-            ...(row.attrs.headers && { headers: row.attrs.headers }),
-            promptCaching: row.attrs.promptCaching ?? false,
-          }),
-        );
-        break;
-      }
-      default:
-        throw new Error(`Unknown provider type: ${row.type}`);
-    }
-  }
-
-  return new FallbackLlmProvider(providers);
 }

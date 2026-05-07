@@ -3,7 +3,7 @@ import { inngest } from "../inngest/client.js";
 import { conversationErrored, inboundReady, responseReady } from "../inngest/events.js";
 import { isRetriableProviderError } from "../llm/fallback.js";
 import { computeBudget } from "../llm/models.js";
-import type { LlmProvider } from "../llm/provider.js";
+import type { LlmProviderResolver } from "../llm/resolver.js";
 import type { ContentBlock, Message, StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
@@ -30,7 +30,15 @@ import type { ToolRegistry } from "./tools.js";
 export interface HandleMessageDeps {
   agentStore: AgentStore;
   transportStore: TransportStore;
-  provider: LlmProvider;
+  /**
+   * Per-turn provider lookup. Resolved against `snapshot.model` after the
+   * `load-turn-snapshot` step so each turn dispatches to whichever
+   * provider serves the conversation's currently selected model. The
+   * production resolver in `src/llm/resolver.ts` memoizes by model — the
+   * decrypted-secret + adapter cost is paid once per (process, model)
+   * pair, not per turn.
+   */
+  resolveProvider: LlmProviderResolver;
   tools: ToolRegistry;
   memory: MemoryProvider;
   promptSource: PromptSource;
@@ -74,7 +82,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
   const {
     agentStore,
     transportStore,
-    provider,
+    resolveProvider,
     tools,
     memory,
     promptSource,
@@ -365,6 +373,21 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const model = snapshot.model;
       const budget = computeBudget(model);
 
+      // Per-turn provider dispatch — the snapshot's model determines which
+      // adapter (Anthropic, xAI via OpenAI-compat, etc.) handles the chat,
+      // streaming, and token-counting calls below. Resolved outside any
+      // `step.run` because the resolver returns an `LlmProvider` instance
+      // that isn't JSON-serializable; the production resolver caches by
+      // model, so this is one DB read + one AES decrypt the first time a
+      // model is seen, then a Map lookup for the rest of the process. A
+      // missing routing row throws here — Inngest will retry the run, then
+      // the `onFailure` handler notifies the user. See design/providers.md
+      // → Provider dispatch.
+      const provider = await resolveProvider(model);
+      const summarizationModel = deps.summarizationModel ?? model;
+      const summarizationProvider =
+        summarizationModel === model ? provider : await resolveProvider(summarizationModel);
+
       // Per-turn tool registry — built-ins from bootstrap + one dynamic tool
       // per live skill + MCP tools resolved against the profile's globs.
       // Rebuilt every turn so registered skills + newly-approved MCP tools
@@ -404,9 +427,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // a counter-based ID like `summarize-prefix-${i}` to avoid
             // Inngest's duplicate-step-id error.
             return step.run("summarize-prefix", async () => {
-              const sumModel = deps.summarizationModel ?? model;
-              const response = await provider.chat({
-                model: sumModel,
+              const response = await summarizationProvider.chat({
+                model: summarizationModel,
                 system,
                 messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
                 maxTokens: 4096,
