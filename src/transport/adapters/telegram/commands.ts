@@ -474,6 +474,72 @@ export async function handleRepair(
   }
 }
 
+/**
+ * `/voice` — set the per-conversation voice mode override.
+ *
+ * Forms:
+ *   /voice                    — show the current effective mode + provider
+ *   /voice auto               — mirror inbound modality (voice in → voice out)
+ *   /voice always             — TTS every reply
+ *   /voice off | /voice never — text only
+ *   /voice clear              — clear override; follow profile default
+ *
+ * Mutates `conversations.voice_mode` via Transport.conversations.setVoiceMode.
+ */
+export async function handleVoice(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const handle = String(ctx.from.id);
+  const addr = String(ctx.chat.id);
+  const arg = ctx.match?.trim().toLowerCase() ?? "";
+
+  const session = await transport.resolveSession(addr);
+  if (!session) {
+    await ctx.reply("No active conversation. Send a message first.");
+    return;
+  }
+  const conversationId = session.conversationId;
+
+  if (arg === "") {
+    // Show current — read directly via getCurrent.
+    const current = await transport.conversations.getCurrent(handle, addr);
+    if (current.isErr()) {
+      await ctx.reply(errorMessage(current.error));
+      return;
+    }
+    const mode = current.value?.voiceMode ?? null;
+    const label = mode === null ? "follow profile default" : mode;
+    await ctx.reply(
+      [
+        `Voice mode: ${label}`,
+        "",
+        "Set: /voice auto | /voice always | /voice off",
+        "Clear override: /voice clear",
+      ].join("\n"),
+    );
+    return;
+  }
+
+  let mode: "auto" | "always" | "never" | null;
+  if (arg === "auto") mode = "auto";
+  else if (arg === "always") mode = "always";
+  else if (arg === "off" || arg === "never") mode = "never";
+  else if (arg === "clear") mode = null;
+  else {
+    await ctx.reply("Usage: /voice [auto|always|off|clear]");
+    return;
+  }
+
+  const res = await transport.conversations.setVoiceMode(handle, conversationId, mode);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  const label = mode === null ? "cleared (following profile default)" : mode;
+  await ctx.reply(`Voice mode: ${label}`);
+}
+
 export async function handleNew(transport: Transport, ctx: TelegramCommandContext): Promise<void> {
   const addr = String(ctx.chat.id);
   const handle = String(ctx.from.id);
@@ -768,12 +834,12 @@ export async function handleMcp(transport: Transport, ctx: TelegramCommandContex
       // so a typo'd name surfaces a precise error instead of round-tripping
       // through the schema layer as a generic mcp_invalid_config.
       const nameMatch = rest.match(/^(\S+)\s+(\{.*\})$/s);
-      if (!nameMatch) {
+      if (!nameMatch || nameMatch[1] === undefined || nameMatch[2] === undefined) {
         await ctx.reply(USAGE.mcp);
         return;
       }
-      const name = nameMatch[1]!;
-      const json = nameMatch[2]!;
+      const name = nameMatch[1];
+      const json = nameMatch[2];
       if (!SERVER_NAME_RE.test(name)) {
         await ctx.reply(
           `Invalid MCP server name: ${JSON.stringify(name)} — must match ${SERVER_NAME_RE.source} (lowercase, alphanumerics, single underscores between segments).`,

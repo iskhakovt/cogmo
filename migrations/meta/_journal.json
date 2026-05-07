@@ -162,6 +162,13 @@
       "when": 1778102965277,
       "tag": "0022_abnormal_chameleon",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1778155681057,
+      "tag": "0023_thin_the_leader",
+      "breakpoints": true
     }
   ]
 }

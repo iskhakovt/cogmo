@@ -406,6 +406,67 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const idleTimer = createIdleTimer({ idleTimeoutMs, transportStore });
   const debounceFunctions = createDebounceFunctions(debounceConfig);
 
+  // Voice — bootstrap a single OpenAIVoiceProvider when voice_config is
+  // present. Decoupled from delivery via interfaces so swapping to
+  // ElevenLabs/Deepgram later is a constructor change, not a wiring
+  // change. See design/voice.md.
+  //
+  // voice_config is loaded ONCE at bootstrap; operator config changes
+  // (swap voice, rotate key, change provider) require a process restart
+  // in slice 1. Hot-reload is on the backlog (todo.md → "Voice config
+  // hot-reload"). Personal-scale single-user tolerates the restart
+  // cleanly; promote when multi-user lands or operator-driven tweaks
+  // become frequent.
+  const voiceCfgRow = await agentStore.getVoiceConfig();
+  let ttsProvider: import("./voice/types.js").TtsProvider | undefined;
+  let sttProvider: import("./voice/types.js").SttProvider | undefined;
+  let voiceCfgForTurn: { ttsVoice: string; ttsModel: string } | undefined;
+  if (voiceCfgRow) {
+    // Slice 1 only ships OpenAIVoiceProvider. Surface a warn when the
+    // operator points at an unsupported provider so the misconfig is
+    // visible (otherwise voice silently degrades to text-only with no
+    // operator-facing signal).
+    if (voiceCfgRow.ttsProvider !== "openai") {
+      logger.warn(
+        { ttsProvider: voiceCfgRow.ttsProvider },
+        "voice_config.tts_provider unsupported in slice 1 — voice replies disabled. Set tts_provider='openai' or wait for slice 2 (ElevenLabs/Deepgram).",
+      );
+    } else if (voiceCfgRow.sttProvider !== "openai") {
+      logger.warn(
+        { sttProvider: voiceCfgRow.sttProvider },
+        "voice_config.stt_provider unsupported in slice 1 — voice transcription disabled. Set stt_provider='openai' or wait for slice 2.",
+      );
+    }
+    const ttsKey = await secretsStore.getSecretById(voiceCfgRow.ttsSecretId);
+    const sttKey = await secretsStore.getSecretById(voiceCfgRow.sttSecretId);
+    if (ttsKey && sttKey && voiceCfgRow.ttsProvider === "openai") {
+      const { OpenAIVoiceProvider } = await import("./voice/openai.js");
+      const tts = new OpenAIVoiceProvider({
+        apiKey: ttsKey,
+        ...(voiceCfgRow.ttsBaseUrl && { baseURL: voiceCfgRow.ttsBaseUrl }),
+      });
+      ttsProvider = tts;
+      // Reuse the TTS provider for STT only when both keys AND base URLs
+      // match — `tts` was constructed with `voiceCfgRow.ttsBaseUrl`, so
+      // routing STT to it when sttBaseUrl differs would silently send STT
+      // requests to the wrong endpoint. Swap independently when
+      // ElevenLabs/Deepgram arrive.
+      const canReuse =
+        ttsKey === sttKey &&
+        voiceCfgRow.sttProvider === "openai" &&
+        voiceCfgRow.ttsBaseUrl === voiceCfgRow.sttBaseUrl;
+      sttProvider = canReuse
+        ? tts
+        : voiceCfgRow.sttProvider === "openai"
+          ? new OpenAIVoiceProvider({
+              apiKey: sttKey,
+              ...(voiceCfgRow.sttBaseUrl && { baseURL: voiceCfgRow.sttBaseUrl }),
+            })
+          : undefined;
+      voiceCfgForTurn = { ttsVoice: voiceCfgRow.ttsVoice, ttsModel: voiceCfgRow.ttsModel };
+    }
+  }
+
   const handleMessage = createHandleMessage({
     agentStore,
     transportStore,
@@ -422,6 +483,9 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     skillRunner,
     mcpRegistry,
     ...(profile.summarizationModel && { summarizationModel: profile.summarizationModel }),
+    ...(ttsProvider && { ttsProvider }),
+    ...(sttProvider && { sttProvider }),
+    ...(voiceCfgForTurn && { voiceConfig: voiceCfgForTurn }),
   });
 
   const observer = createObserver({
