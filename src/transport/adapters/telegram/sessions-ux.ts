@@ -8,6 +8,7 @@
 import type { ConversationSummary, Profile } from "../../../agent/store/index.js";
 import type { ProfileMemoryScope } from "../../../agent/store/schema.js";
 import { truncate } from "../../../util/string.js";
+import type { ConversationStatusSummary } from "../../transport.js";
 
 /** Telegram's inline-keyboard button density is workable up to ~10 rows before scrolling feels bad. */
 export const KEYBOARD_THRESHOLD = 10;
@@ -97,4 +98,109 @@ function labelFor(s: ConversationSummary, current: boolean): string {
   const head = s.alias ?? truncate(s.lastMessagePreview, 40) ?? "(untitled)";
   const suffix = current ? " ← current" : "";
   return `${head}${suffix}`;
+}
+
+/**
+ * Render the `/status` reply. Pure function over a `ConversationStatusSummary`
+ * so the dispatch in `commands.ts` stays trivial. `now` is injected so tests
+ * can pin the relative-age line; production callers pass `new Date()`.
+ *
+ * Layout follows the existing one-line-per-fact convention used by `/voice`
+ * and `/sessions` rather than tables — Telegram's plain-text rendering is
+ * the lowest common denominator and survives the HTML-fallback path that
+ * the streaming adapter already exercises.
+ */
+export function renderConversationStatus(
+  summary: ConversationStatusSummary,
+  now: Date = new Date(),
+): string {
+  const idTail = summary.conversationId.slice(-8);
+  const head = summary.alias ?? `id ${idTail}`;
+  const ageMs = now.getTime() - summary.createdAt.getTime();
+  const idleMs =
+    summary.lastMessageAt === null ? null : now.getTime() - summary.lastMessageAt.getTime();
+  const lines: string[] = [
+    "Conversation",
+    `  ${head} · status: ${summary.status} · age: ${formatDuration(ageMs)}`,
+    `  messages: ${summary.messageCount}${idleMs !== null ? ` · idle: ${formatDuration(idleMs)}` : ""}`,
+    "",
+    "Profile",
+    `  ${summary.profile.name} · ${summary.profile.model} · tools: ${summary.profile.toolCount} · auto-recall: ${summary.profile.autoRecall}`,
+    `  scope: ${formatScope(summary.profile.memoryScope)}`,
+  ];
+
+  // Voice mode line — only render when the override differs from the
+  // profile default OR when the user has explicitly set an override. A
+  // null override on a profile already at `auto` is the unsurprising
+  // default; skipping it keeps /status dense for the common case.
+  if (summary.voiceMode !== null && summary.voiceMode !== summary.profile.voiceMode) {
+    lines.push(
+      `  voice: ${summary.voiceMode} (override; profile default ${summary.profile.voiceMode})`,
+    );
+  } else if (summary.profile.voiceMode !== "auto") {
+    lines.push(`  voice: ${summary.profile.voiceMode} (profile default)`);
+  }
+
+  lines.push("", "Context");
+  if (summary.lastTurn === null) {
+    const budgetSuffix =
+      summary.contextBudget === null ? "" : ` · budget: ${formatTokens(summary.contextBudget)}`;
+    lines.push(`  no turns yet${budgetSuffix}`);
+  } else {
+    const inPart =
+      summary.lastTurn.inputTokens === null
+        ? "in: -"
+        : `in: ${formatTokens(summary.lastTurn.inputTokens)}`;
+    // outputTokens === -1 is the "unknown / pre-migration" sentinel — the
+    // last assistant row was written before the column existed. Surface as
+    // "-" rather than the raw number; otherwise the user sees `-1` and
+    // assumes a bug.
+    const outPart =
+      summary.lastTurn.outputTokens < 0
+        ? "out: -"
+        : `out: ${formatTokens(summary.lastTurn.outputTokens)}`;
+    const usagePart =
+      summary.contextBudget === null || summary.lastTurn.inputTokens === null
+        ? summary.contextBudget === null
+          ? ""
+          : ` · budget: ${formatTokens(summary.contextBudget)}`
+        : ` · budget: ${formatTokens(summary.contextBudget)} (${formatPercent(summary.lastTurn.inputTokens, summary.contextBudget)})`;
+    lines.push(`  last turn — ${inPart} · ${outPart}${usagePart}`);
+  }
+
+  // Steering rules + MCP fold into one line — both are small integers and
+  // a dedicated section per metric would dominate the message.
+  const tail: string[] = [`steering: ${summary.steeringRulesCount} rules`];
+  if (summary.mcp !== null) {
+    tail.push(
+      `MCP: ${summary.mcp.enabledServers} servers · ${summary.mcp.approvedTools}/${summary.mcp.toolBudget} tools`,
+    );
+  }
+  lines.push("", tail.join(" · "));
+
+  return lines.join("\n");
+}
+
+function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  const k = n / 1000;
+  return k >= 100 ? `${Math.round(k)}k` : `${k.toFixed(1).replace(/\.0$/, "")}k`;
+}
+
+function formatPercent(used: number, budget: number): string {
+  if (budget <= 0) return "—";
+  const pct = (used / budget) * 100;
+  return pct < 1 ? "<1%" : `${Math.round(pct)}%`;
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 0) return "0s";
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const day = Math.floor(hr / 24);
+  return `${day}d`;
 }

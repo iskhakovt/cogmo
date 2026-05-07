@@ -305,6 +305,20 @@ export interface AgentStore {
     alias: string,
   ): Promise<{ conversationId: string } | undefined>;
 
+  /** Resolve a conversation's alias for a user, or `null` if unaliased. Identity-checked by caller. */
+  getAliasForConversation(userId: string, conversationId: string): Promise<string | null>;
+
+  /**
+   * Conversation lifecycle stats — `createdAt`, total `messageCount`, and the
+   * timestamp of the most recent message (`lastMessageAt`, `null` when no
+   * messages yet). Returned in one transaction. Used by `/status` to surface
+   * conversation age and activity without forcing the caller to make three
+   * separate round-trips.
+   */
+  getConversationStats(
+    conversationId: string,
+  ): Promise<{ createdAt: Date; messageCount: number; lastMessageAt: Date | null } | undefined>;
+
   // --- Model discovery (Transport-facing) ---
 
   /** Distinct models that are user-selectable (user_selectable = true). Used by the `/model` picker. */
@@ -999,6 +1013,48 @@ export class DrizzleAgentStore implements AgentStore {
         .where(and(eq(aliases.userId, userId), eq(aliases.alias, alias)))
         .limit(1);
       return rows[0];
+    });
+  }
+
+  async getAliasForConversation(userId: string, conversationId: string): Promise<string | null> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ alias: aliases.alias })
+        .from(aliases)
+        .where(and(eq(aliases.userId, userId), eq(aliases.conversationId, conversationId)))
+        .limit(1);
+      return rows[0]?.alias ?? null;
+    });
+  }
+
+  async getConversationStats(
+    conversationId: string,
+  ): Promise<{ createdAt: Date; messageCount: number; lastMessageAt: Date | null } | undefined> {
+    return this.#db.transaction(async (tx) => {
+      const convRows = await tx
+        .select({ createdAt: conversations.createdAt })
+        .from(conversations)
+        .where(eq(conversations.id, conversationId))
+        .limit(1);
+      const conv = convRows[0];
+      if (!conv) return undefined;
+      const [countRows, lastRows] = await Promise.all([
+        tx
+          .select({ value: count() })
+          .from(messages)
+          .where(eq(messages.conversationId, conversationId)),
+        tx
+          .select({ createdAt: messages.createdAt })
+          .from(messages)
+          .where(eq(messages.conversationId, conversationId))
+          .orderBy(desc(messages.id))
+          .limit(1),
+      ]);
+      return {
+        createdAt: conv.createdAt,
+        messageCount: countRows[0]?.value ?? 0,
+        lastMessageAt: lastRows[0]?.createdAt ?? null,
+      };
     });
   }
 
