@@ -299,12 +299,40 @@ export function mockProvider(overrides?: Partial<LlmProvider>): LlmProvider {
 }
 
 /**
- * Convenience wrapper — returns a resolver that always yields the supplied
- * (or default) mock provider. Use this in tests that need to inject
- * `HandleMessageDeps.resolveProvider` or `ObserverDeps.resolveProvider`.
+ * Convenience wrapper for `HandleMessageDeps.resolveProvider` /
+ * `ObserverDeps.resolveProvider` injection. Two shapes:
+ *
+ * - `mockResolver()` / `mockResolver(provider)` — returns the same
+ *   provider for **every** model. Fine for tests that don't differentiate
+ *   by model. Reaching for this in a test that depends on per-model
+ *   dispatch will silently pass against a wrong-routing implementation —
+ *   use the map form below for those.
+ * - `mockResolver(new Map([[model, provider], ...]))` — per-model
+ *   dispatch. Throws on unknown models so a wrong `resolveProvider(model)`
+ *   call surfaces as a test failure rather than a silent mismatch.
  */
-export function mockResolver(provider?: LlmProvider): LlmProviderResolver {
-  return constantResolver(provider ?? mockProvider());
+export function mockResolver(
+  arg?: LlmProvider | ReadonlyMap<string, LlmProvider>,
+): LlmProviderResolver {
+  if (isReadonlyMap(arg)) {
+    return (model) => {
+      const provider = arg.get(model);
+      if (!provider) {
+        return Promise.reject(new Error(`mockResolver: no provider configured for "${model}"`));
+      }
+      return Promise.resolve(provider);
+    };
+  }
+  return constantResolver(arg ?? mockProvider());
+}
+
+// `ReadonlyMap` is a structural TS-only interface, so `instanceof Map`
+// doesn't narrow `LlmProvider | ReadonlyMap<...>` directly. Wrap the
+// runtime check in a type predicate that asserts the read-only view —
+// callers keep their immutable contract, the implementation gets the
+// narrowed type for free.
+function isReadonlyMap<K, V>(x: unknown): x is ReadonlyMap<K, V> {
+  return x instanceof Map;
 }
 
 export function mockStreamHandle(overrides?: Partial<StreamHandle>): StreamHandle {

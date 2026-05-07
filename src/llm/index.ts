@@ -11,6 +11,7 @@ export {
   createDbProviderResolver,
   type DbResolverDeps,
   type LlmProviderResolver,
+  ProviderConfigError,
 } from "./resolver.js";
 export type { TypedChatParams, TypedChatResult } from "./typed.js";
 export { chatTyped } from "./typed.js";

@@ -1,4 +1,6 @@
+import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
+import { ProviderConfigError } from "../llm/resolver.js";
 import {
   mockAgentStore,
   mockDeliveryHandle,
@@ -1285,10 +1287,8 @@ describe("createHandleMessage", () => {
       expect(resolveProvider).not.toHaveBeenCalledWith("claude-haiku-4-5-20251001");
     });
 
-    it("propagates resolver errors instead of swallowing them", async () => {
-      const resolveProvider = vi
-        .fn()
-        .mockRejectedValue(new Error('No provider configured for "x-ai/grok-4.20"'));
+    it("propagates transient resolver errors so Inngest retries", async () => {
+      const resolveProvider = vi.fn().mockRejectedValue(new Error("ECONNRESET (db)"));
       const deps = mockDeps({
         resolveProvider,
         agentStore: mockAgentStore({
@@ -1306,15 +1306,60 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      await expect(
-        (createHandleMessage(deps) as any).fn({
+      const caught = await (createHandleMessage(deps) as any)
+        .fn({
           event: testEvent,
           step: mockStep(),
           runId: testRunId,
-        }),
-      ).rejects.toThrow(/No provider configured/);
+        })
+        .catch((e: unknown) => e);
 
-      // The agent loop must NOT have been invoked with an undefined provider.
+      // Plain Error → Inngest sees a regular rejection and runs its retry
+      // path. Must NOT be wrapped in NonRetriableError, otherwise a real
+      // DB blip would burn through retries on the first attempt.
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught).not.toBeInstanceOf(NonRetriableError);
+      expect((caught as Error).message).toMatch(/ECONNRESET/);
+      expect(deps.runStreamingAgentLoop).not.toHaveBeenCalled();
+    });
+
+    it("rewraps ProviderConfigError as NonRetriableError so Inngest aborts immediately", async () => {
+      // Permanent config error (no routing row, missing secret, etc.)
+      // should fail the run on the first attempt instead of burning all
+      // `retries: 2` attempts before `onFailure` notifies the user.
+      const resolveProvider = vi
+        .fn()
+        .mockRejectedValue(
+          new ProviderConfigError('No provider configured for model "x-ai/grok-4.20"'),
+        );
+      const deps = mockDeps({
+        resolveProvider,
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "assistant",
+            basePrompt: "test",
+            model: "x-ai/grok-4.20",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            toolSet: [],
+          }),
+        }),
+      });
+
+      const caught = await (createHandleMessage(deps) as any)
+        .fn({
+          event: testEvent,
+          step: mockStep(),
+          runId: testRunId,
+        })
+        .catch((e: unknown) => e);
+
+      expect(caught).toBeInstanceOf(NonRetriableError);
+      expect((caught as NonRetriableError).cause).toBeInstanceOf(ProviderConfigError);
+      expect((caught as NonRetriableError).message).toMatch(/No provider configured/);
       expect(deps.runStreamingAgentLoop).not.toHaveBeenCalled();
     });
   });

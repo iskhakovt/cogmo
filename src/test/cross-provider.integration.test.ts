@@ -36,11 +36,6 @@ const tag = (s: string) => `it-${SUITE}-${s}`;
 const MODEL_ANTHROPIC = "claude-sonnet-4-6";
 const MODEL_XAI = "x-ai/grok-4.20";
 
-// Test-only master key (32 bytes base64). Only used to encrypt our two
-// secret rows; integration-setup.ts uses the same key for any other
-// secrets it manages, so co-existing under one DB is safe.
-const MASTER_KEY = "bSK9MVRqsqWnRcp4oNTQLQ+LmKJT+BvUvzytD5LH4AE=";
-
 let sql: ReturnType<typeof postgres>;
 let agentStore: DrizzleAgentStore;
 let secretsStore: DrizzleSecretsStore;
@@ -52,9 +47,16 @@ beforeAll(async () => {
   sql = postgres(inject("databaseUrl"), { max: 4 });
   const db = drizzle(sql, { schema });
   agentStore = new DrizzleAgentStore(db);
+  // Read the master key from `process.env` (set by `test/integration-setup.ts`
+  // and propagated to test workers). Hardcoding it here would silently break
+  // decryption if integration-setup ever rotated the key.
+  const masterKey = process.env.COGMO_MASTER_KEY;
+  if (!masterKey) {
+    throw new Error("COGMO_MASTER_KEY missing — should be set by integration-setup.ts");
+  }
   secretsStore = new DrizzleSecretsStore(
     db,
-    deriveMasterKey(parseMasterKey(MASTER_KEY), "cogmo/secrets-at-rest/v1"),
+    deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1"),
   );
   llmockBaseUrl = inject("llmockBaseUrl");
 

@@ -2,10 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentStore } from "../agent/store/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { mockProvider } from "../test/factories.js";
-import { AnthropicProvider } from "./anthropic.js";
 import { FallbackLlmProvider } from "./fallback.js";
-import { OpenAICompatibleProvider } from "./openai-compat.js";
-import { constantResolver, createDbProviderResolver } from "./resolver.js";
+import { constantResolver, createDbProviderResolver, ProviderConfigError } from "./resolver.js";
 
 type ProviderRow = {
   id: string;
@@ -123,34 +121,53 @@ describe("createDbProviderResolver — happy path", () => {
 });
 
 describe("createDbProviderResolver — error matrix", () => {
-  it("throws when no provider is configured for the model", async () => {
+  // Every config error must be a `ProviderConfigError` so handle-message /
+  // observer can rewrap it as `NonRetriableError`. Plain `Error` shape would
+  // hit the default retry path and burn Inngest attempts on a permanent
+  // misconfiguration — exactly what the typed-error contract prevents.
+
+  it("throws ProviderConfigError when no provider is configured for the model", async () => {
     const { agentStore, secretsStore } = makeDeps({ rows: [] });
     const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    await expect(resolve("unknown-model")).rejects.toThrow(ProviderConfigError);
     await expect(resolve("unknown-model")).rejects.toThrow(/No provider configured/);
   });
 
-  it("throws when the secret lookup returns undefined", async () => {
+  it("throws ProviderConfigError when the secret lookup returns undefined", async () => {
     const { agentStore, secretsStore } = makeDeps({ secret: undefined });
-    // Override the default mock above
     (secretsStore.getSecretById as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
     const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    await expect(resolve("m")).rejects.toThrow(ProviderConfigError);
     await expect(resolve("m")).rejects.toThrow(/Secret for provider "anthropic-direct" not found/);
   });
 
-  it("throws when openai_compatible row has no baseUrl", async () => {
+  it("throws ProviderConfigError when an openai_compatible row has no baseUrl", async () => {
     const { agentStore, secretsStore } = makeDeps({
       rows: [row({ type: "openai_compatible", baseUrl: null, name: "broken" })],
     });
     const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    await expect(resolve("m")).rejects.toThrow(ProviderConfigError);
     await expect(resolve("m")).rejects.toThrow(/"broken".*requires a base URL/);
   });
 
-  it("throws on unknown provider type", async () => {
+  it("throws ProviderConfigError on unknown provider type", async () => {
     const { agentStore, secretsStore } = makeDeps({
       rows: [row({ type: "google" })],
     });
     const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    await expect(resolve("m")).rejects.toThrow(ProviderConfigError);
     await expect(resolve("m")).rejects.toThrow(/Unknown provider type: google/);
+  });
+
+  it("does NOT wrap transient DB errors as ProviderConfigError", async () => {
+    // Drives the cache-no-poison test below — a plain Error here proves
+    // the resolver only tags operator-fix-needed failures, leaving infra
+    // hiccups on the default retry path.
+    const { agentStore, secretsStore } = makeDeps({ listFailures: 1 });
+    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const caught = await resolve("flaky").catch((e) => e);
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(ProviderConfigError);
   });
 });
 
@@ -205,16 +222,5 @@ describe("constantResolver", () => {
     const resolve = constantResolver(provider);
     expect(await resolve("anything")).toBe(provider);
     expect(await resolve("else")).toBe(provider);
-  });
-});
-
-// Anchor — keep the imports referenced so future refactors that delete them
-// here trip the test rather than the production wiring.
-describe("module anchors", () => {
-  it("AnthropicProvider and OpenAICompatibleProvider are constructible from this module", () => {
-    expect(new AnthropicProvider("k")).toBeInstanceOf(AnthropicProvider);
-    expect(
-      new OpenAICompatibleProvider("x", { apiKey: "k", baseURL: "https://x.test" }),
-    ).toBeInstanceOf(OpenAICompatibleProvider);
   });
 });

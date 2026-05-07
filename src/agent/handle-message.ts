@@ -3,7 +3,8 @@ import { inngest } from "../inngest/client.js";
 import { conversationErrored, inboundReady, responseReady } from "../inngest/events.js";
 import { isRetriableProviderError } from "../llm/fallback.js";
 import { computeBudget } from "../llm/models.js";
-import type { LlmProviderResolver } from "../llm/resolver.js";
+import type { LlmProvider } from "../llm/provider.js";
+import { type LlmProviderResolver, ProviderConfigError } from "../llm/resolver.js";
 import type { ContentBlock, Message, StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
@@ -69,6 +70,27 @@ export interface HandleMessageDeps {
    */
   mcpRegistry?: McpRegistry;
   summarizationModel?: string;
+}
+
+/**
+ * Resolve a provider, rewrapping permanent config errors as
+ * `NonRetriableError` so Inngest aborts on the first attempt instead of
+ * burning all `retries: 2` attempts before `onFailure` notifies the user.
+ * Transient errors (DB blip, network) keep their plain shape and follow
+ * the default retry path.
+ */
+async function resolveOrFail(
+  resolveProvider: LlmProviderResolver,
+  model: string,
+): Promise<LlmProvider> {
+  try {
+    return await resolveProvider(model);
+  } catch (err) {
+    if (err instanceof ProviderConfigError) {
+      throw new NonRetriableError(err.message, { cause: err });
+    }
+    throw err;
+  }
 }
 
 /**
@@ -379,11 +401,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // `step.run` because the resolver returns an `LlmProvider` instance
       // that isn't JSON-serializable; the production resolver caches by
       // model, so this is one DB read + one AES decrypt the first time a
-      // model is seen, then a Map lookup for the rest of the process. A
-      // missing routing row throws here — Inngest will retry the run, then
-      // the `onFailure` handler notifies the user. See design/providers.md
-      // → Provider dispatch.
-      const provider = await resolveProvider(model);
+      // model is seen, then a Map lookup for the rest of the process.
+      // `resolveOrFail` rewraps permanent config errors (no routing row,
+      // no secret, malformed `llm_providers` row) as `NonRetriableError`
+      // so Inngest aborts immediately and `onFailure` notifies the user
+      // — no point burning retries on a misconfiguration. See
+      // design/providers.md → Provider dispatch.
+      const provider = await resolveOrFail(resolveProvider, model);
       const summarizationModel = deps.summarizationModel ?? model;
 
       // Per-turn tool registry — built-ins from bootstrap + one dynamic tool
@@ -429,7 +453,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // outside the `step.run` below because the provider instance
             // isn't JSON-serializable.
             const summarizationProvider =
-              summarizationModel === model ? provider : await resolveProvider(summarizationModel);
+              summarizationModel === model
+                ? provider
+                : await resolveOrFail(resolveProvider, summarizationModel);
             // Step ID is hardcoded — relies on `compactMessages` calling
             // `summarize` at most once per invocation (contract on
             // ContextManagerDeps.summarize). If that ever changes, switch to
