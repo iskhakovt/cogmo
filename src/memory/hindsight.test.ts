@@ -275,6 +275,20 @@ describe("HindsightMemoryProvider", () => {
     expect(mockRecallMemories).toHaveBeenCalledTimes(2);
   });
 
+  // 10s timeout because withRetry's 2-attempt 5s budget can land just past
+  // vitest's default 5s under load.
+  it("recall surfaces network-level failures (sdk_gen rejects with TypeError)", {
+    timeout: 10_000,
+  }, async () => {
+    const provider = createProvider();
+    // sdk_gen / native fetch rejects with TypeError("fetch failed") on
+    // connection-level errors (refused, DNS, reset). withRetry must
+    // propagate after the retry budget is exhausted, not swallow.
+    mockRecallMemories.mockRejectedValue(new TypeError("fetch failed"));
+
+    await expect(provider.recall("bank-1", "q")).rejects.toThrow(/fetch failed/);
+  });
+
   it("recall retries on 429 (rate limiting is transient)", async () => {
     const provider = createProvider();
     mockRecallMemories

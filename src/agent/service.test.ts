@@ -136,6 +136,31 @@ describe("createService — scope filter (memoryScope set)", () => {
     });
   });
 
+  it("treats caller-supplied empty tags array as no caller filter (drops it from the AND group)", async () => {
+    const memory = mockMemory();
+    const svc = createService(
+      memory,
+      "user-123",
+      workScope(),
+      stubFiles,
+      stubCoreMemory,
+      stubStage,
+    );
+
+    await svc.memory.recall("query", { tags: [], tagsMatch: "all" });
+
+    expect(memory.recall).toHaveBeenCalledWith("user-123", "query", {
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:work", "compartment:technical"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+          ],
+        },
+      ],
+    });
+  });
+
   it("appends caller-supplied tagGroups into the AND group", async () => {
     const memory = mockMemory();
     const svc = createService(
