@@ -13,9 +13,10 @@
  * during the same idle pass.
  */
 
+import { NonRetriableError } from "inngest";
 import { inngest } from "../../inngest/client.js";
 import { conversationIdle } from "../../inngest/events.js";
-import type { LlmProvider } from "../../llm/provider.js";
+import { type LlmProviderResolver, ProviderConfigError } from "../../llm/resolver.js";
 import { logger } from "../../logger.js";
 import type { MemoryProvider } from "../../memory/provider.js";
 import type { AgentStore } from "../store/index.js";
@@ -37,7 +38,13 @@ const PENDING_DRAIN_BATCH_SIZE = 100;
 
 export interface ObserverDeps {
   agentStore: AgentStore;
-  provider: LlmProvider;
+  /**
+   * Per-fire provider lookup. The Observer's extraction model is fixed at
+   * construction (via `extractionModel` or the default), so we resolve
+   * lazily on the first fire and let the resolver's own cache amortize
+   * subsequent calls. See `src/llm/resolver.ts`.
+   */
+  resolveProvider: LlmProviderResolver;
   // TODO: Route through Service.memory once retainBatch is on the Service interface (ACL boundary).
   // Currently called directly on the provider — safe because the Observer is a trusted internal consumer.
   memory: Pick<MemoryProvider, "retainBatch">;
@@ -45,7 +52,7 @@ export interface ObserverDeps {
 }
 
 export function createObserver(deps: ObserverDeps) {
-  const { agentStore, provider } = deps;
+  const { agentStore, resolveProvider } = deps;
   const model = deps.extractionModel ?? DEFAULT_EXTRACTION_MODEL;
 
   return inngest.createFunction(
@@ -76,6 +83,23 @@ export function createObserver(deps: ObserverDeps) {
           "observer: conversation too short for extraction",
         );
         return { status: "skipped", reason: "too_short" };
+      }
+
+      // Resolve once per fire — outside `step.run` because the provider
+      // instance isn't JSON-serializable. The resolver's own per-model
+      // cache amortizes the cost across fires. Permanent config errors
+      // (no routing row for the extraction model, missing secret) are
+      // rewrapped as `NonRetriableError` so Inngest doesn't burn its
+      // single retry on a misconfiguration; transient infra errors keep
+      // their plain shape and follow the default retry path.
+      let provider: Awaited<ReturnType<typeof resolveProvider>>;
+      try {
+        provider = await resolveProvider(model);
+      } catch (err) {
+        if (err instanceof ProviderConfigError) {
+          throw new NonRetriableError(err.message, { cause: err });
+        }
+        throw err;
       }
 
       const result = await step.run("extract-corrections", async () => {

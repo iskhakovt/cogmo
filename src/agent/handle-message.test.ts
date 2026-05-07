@@ -1,10 +1,13 @@
+import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
+import { ProviderConfigError } from "../llm/resolver.js";
 import {
   mockAgentStore,
   mockDeliveryHandle,
   mockDeliveryRouter,
   mockMemoryProvider,
   mockProvider,
+  mockResolver,
   mockStep,
   mockToolRegistry,
   mockTransportStore,
@@ -17,7 +20,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
   return {
     agentStore: mockAgentStore(),
     transportStore: mockTransportStore(),
-    provider: mockProvider(),
+    resolveProvider: mockResolver(),
     tools: mockToolRegistry(),
     memory: mockMemoryProvider(),
     promptSource: { assemble: vi.fn().mockResolvedValue("system prompt") },
@@ -836,7 +839,9 @@ describe("createHandleMessage", () => {
   });
 
   it("skips countTokens when fast path detects under budget", async () => {
+    const countTokens = vi.fn().mockResolvedValue(0);
     const deps = mockDeps({
+      resolveProvider: mockResolver(mockProvider({ countTokens })),
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1000, outputTokens: 100 }),
       }),
@@ -849,14 +854,14 @@ describe("createHandleMessage", () => {
     });
 
     // countTokens should NOT be called — fast path skips it
-    expect(deps.provider.countTokens).not.toHaveBeenCalled();
+    expect(countTokens).not.toHaveBeenCalled();
   });
 
   it("forces counting when prior output is the -1 pre-migration sentinel", async () => {
     // Pre-migration rows carry outputTokens = -1. The fast path must NOT skip.
     const countTokens = vi.fn().mockResolvedValue(50_000);
     const deps = mockDeps({
-      provider: mockProvider({ countTokens }),
+      resolveProvider: mockResolver(mockProvider({ countTokens })),
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1000, outputTokens: -1 }),
       }),
@@ -894,7 +899,7 @@ describe("createHandleMessage", () => {
     // First call: over threshold. Second call (after clearing): under.
     const countTokens = vi.fn().mockResolvedValueOnce(600_000).mockResolvedValueOnce(50_000);
     const deps = mockDeps({
-      provider: mockProvider({ countTokens }),
+      resolveProvider: mockResolver(mockProvider({ countTokens })),
       agentStore: mockAgentStore({
         // No prior tokens → fast path won't skip
         getLastTokens: vi.fn().mockResolvedValue(null),
@@ -922,16 +927,18 @@ describe("createHandleMessage", () => {
       .mockResolvedValueOnce(50_000); // after summarization: under
     const handle = mockDeliveryHandle();
     const deps = mockDeps({
-      provider: mockProvider({
-        countTokens,
-        // Summarization uses provider.chat — return a text response
-        chat: vi.fn().mockResolvedValue({
-          content: [{ type: "text", text: "Summary of conversation" }],
-          stopReason: "end_turn",
-          model: "mock",
-          usage: { inputTokens: 10, outputTokens: 5 },
+      resolveProvider: mockResolver(
+        mockProvider({
+          countTokens,
+          // Summarization uses provider.chat — return a text response
+          chat: vi.fn().mockResolvedValue({
+            content: [{ type: "text", text: "Summary of conversation" }],
+            stopReason: "end_turn",
+            model: "mock",
+            usage: { inputTokens: 10, outputTokens: 5 },
+          }),
         }),
-      }),
+      ),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue(null),
@@ -1093,6 +1100,275 @@ describe("createHandleMessage", () => {
 
     const passedTools = (deps.runStreamingAgentLoop as any).mock.calls[0][0].tools;
     expect(passedTools.snapshot()).toHaveLength(0);
+  });
+
+  describe("per-turn provider dispatch", () => {
+    it("resolves the provider for the snapshot's model and threads it into the loop", async () => {
+      const turnProvider = mockProvider();
+      const resolveProvider = vi.fn().mockResolvedValue(turnProvider);
+      const deps = mockDeps({
+        resolveProvider,
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "assistant",
+            basePrompt: "test",
+            model: "x-ai/grok-4.20",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "auto",
+            toolSet: [],
+            memoryScope: null,
+          }),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // The resolver is called with the snapshot's model — not the default
+      // profile's model, not "claude-sonnet-4-6". This is the regression
+      // guard for the original bug: bootstrap-time resolution would have
+      // pinned the provider to whatever was configured for the default
+      // profile.
+      expect(resolveProvider).toHaveBeenCalledWith("x-ai/grok-4.20");
+      const loopArgs = (deps.runStreamingAgentLoop as any).mock.calls[0][0];
+      expect(loopArgs.provider).toBe(turnProvider);
+      expect(loopArgs.model).toBe("x-ai/grok-4.20");
+    });
+
+    it("reuses the turn provider for summarization when summarization_model matches", async () => {
+      // Threshold: budget * 0.8 ≈ 740_800 for the claude-sonnet-4-6 budget;
+      // 800_000 > 80% triggers summarization.
+      const countTokens = vi
+        .fn()
+        .mockResolvedValueOnce(800_000)
+        .mockResolvedValueOnce(800_000)
+        .mockResolvedValueOnce(50_000);
+      const chat = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "summary" }],
+        stopReason: "end_turn",
+        model: "mock",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      });
+      const provider = mockProvider({ countTokens, chat });
+      const resolveProvider = vi.fn().mockResolvedValue(provider);
+      const deps = mockDeps({
+        resolveProvider,
+        agentStore: mockAgentStore({
+          getLastTokens: vi.fn().mockResolvedValue(null),
+          // Need ≥ keepTurns history to actually trigger summarization
+          getHistory: vi.fn().mockResolvedValue([
+            { role: "user", content: "m1" },
+            { role: "assistant", content: "r1" },
+            { role: "user", content: "m2" },
+            { role: "assistant", content: "r2" },
+            { role: "user", content: "m3" },
+            { role: "assistant", content: "r3" },
+            { role: "user", content: "m4" },
+            { role: "assistant", content: "r4" },
+          ]),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // No `summarizationModel` override → handle-message uses the turn
+      // provider directly. The resolver is called once.
+      expect(resolveProvider).toHaveBeenCalledTimes(1);
+      // And summarization landed on the same provider's `chat` mock.
+      expect(chat).toHaveBeenCalled();
+    });
+
+    it("resolves a separate provider for summarization when summarization_model differs", async () => {
+      const countTokens = vi
+        .fn()
+        .mockResolvedValueOnce(800_000)
+        .mockResolvedValueOnce(800_000)
+        .mockResolvedValueOnce(50_000);
+      const turnProvider = mockProvider({ countTokens });
+      const summaryChat = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "summary" }],
+        stopReason: "end_turn",
+        model: "haiku",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      });
+      const summaryProvider = mockProvider({ chat: summaryChat });
+
+      const resolveProvider = vi.fn().mockImplementation(async (model: string) => {
+        if (model === "claude-sonnet-4-6") return turnProvider;
+        if (model === "claude-haiku-4-5-20251001") return summaryProvider;
+        throw new Error(`unexpected model ${model}`);
+      });
+
+      const deps = mockDeps({
+        resolveProvider,
+        summarizationModel: "claude-haiku-4-5-20251001",
+        agentStore: mockAgentStore({
+          getLastTokens: vi.fn().mockResolvedValue(null),
+          getHistory: vi.fn().mockResolvedValue([
+            { role: "user", content: "m1" },
+            { role: "assistant", content: "r1" },
+            { role: "user", content: "m2" },
+            { role: "assistant", content: "r2" },
+            { role: "user", content: "m3" },
+            { role: "assistant", content: "r3" },
+            { role: "user", content: "m4" },
+            { role: "assistant", content: "r4" },
+          ]),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // Both models were resolved.
+      expect(resolveProvider).toHaveBeenCalledTimes(2);
+      expect(resolveProvider).toHaveBeenCalledWith("claude-sonnet-4-6");
+      expect(resolveProvider).toHaveBeenCalledWith("claude-haiku-4-5-20251001");
+
+      // Summarization went to the SEPARATE provider — this is the
+      // cross-provider summarization scenario the design promises.
+      expect(summaryChat).toHaveBeenCalledWith(
+        expect.objectContaining({ model: "claude-haiku-4-5-20251001" }),
+      );
+      // And the turn provider's chat was NOT used for summarization.
+      expect(turnProvider.chat).not.toHaveBeenCalled();
+    });
+
+    it("does not resolve summarization_model when summarization is skipped", async () => {
+      // Regression guard for an earlier draft of this PR which resolved
+      // the summarization provider eagerly at turn start. That meant a
+      // misconfigured `summarization_model` (missing routing row, missing
+      // secret) failed every turn — even tiny messages whose token count
+      // never approaches the summarization threshold. The fix is lazy
+      // resolution inside the `summarize` callback; this test pins it.
+
+      // Token count well under the 80%-of-budget summarization threshold —
+      // compaction's strategy never enters the SUMMARIZE branch.
+      const countTokens = vi.fn().mockResolvedValue(1_000);
+      const turnProvider = mockProvider({ countTokens });
+
+      const resolveProvider = vi.fn().mockImplementation(async (model: string) => {
+        if (model === "claude-sonnet-4-6") return turnProvider;
+        // A misconfigured summarization model would throw here. The whole
+        // point of the test is that we never get this far.
+        throw new Error(`summarization model "${model}" not configured`);
+      });
+
+      const deps = mockDeps({
+        resolveProvider,
+        summarizationModel: "claude-haiku-4-5-20251001",
+        agentStore: mockAgentStore({
+          // Force the slow path so countTokens actually runs (the fast
+          // path skip would also happen to mask this bug).
+          getLastTokens: vi.fn().mockResolvedValue(null),
+        }),
+      });
+
+      // Turn must complete without ever resolving the summarization model.
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(resolveProvider).toHaveBeenCalledTimes(1);
+      expect(resolveProvider).toHaveBeenCalledWith("claude-sonnet-4-6");
+      expect(resolveProvider).not.toHaveBeenCalledWith("claude-haiku-4-5-20251001");
+    });
+
+    it("propagates transient resolver errors so Inngest retries", async () => {
+      const resolveProvider = vi.fn().mockRejectedValue(new Error("ECONNRESET (db)"));
+      const deps = mockDeps({
+        resolveProvider,
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "assistant",
+            basePrompt: "test",
+            model: "x-ai/grok-4.20",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "auto",
+            toolSet: [],
+            memoryScope: null,
+          }),
+        }),
+      });
+
+      const caught = await (createHandleMessage(deps) as any)
+        .fn({
+          event: testEvent,
+          step: mockStep(),
+          runId: testRunId,
+        })
+        .catch((e: unknown) => e);
+
+      // Plain Error → Inngest sees a regular rejection and runs its retry
+      // path. Must NOT be wrapped in NonRetriableError, otherwise a real
+      // DB blip would burn through retries on the first attempt.
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught).not.toBeInstanceOf(NonRetriableError);
+      expect((caught as Error).message).toMatch(/ECONNRESET/);
+      expect(deps.runStreamingAgentLoop).not.toHaveBeenCalled();
+    });
+
+    it("rewraps ProviderConfigError as NonRetriableError so Inngest aborts immediately", async () => {
+      // Permanent config error (no routing row, missing secret, etc.)
+      // should fail the run on the first attempt instead of burning all
+      // `retries: 2` attempts before `onFailure` notifies the user.
+      const resolveProvider = vi
+        .fn()
+        .mockRejectedValue(
+          new ProviderConfigError('No provider configured for model "x-ai/grok-4.20"'),
+        );
+      const deps = mockDeps({
+        resolveProvider,
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "assistant",
+            basePrompt: "test",
+            model: "x-ai/grok-4.20",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "auto",
+            toolSet: [],
+            memoryScope: null,
+          }),
+        }),
+      });
+
+      const caught = await (createHandleMessage(deps) as any)
+        .fn({
+          event: testEvent,
+          step: mockStep(),
+          runId: testRunId,
+        })
+        .catch((e: unknown) => e);
+
+      expect(caught).toBeInstanceOf(NonRetriableError);
+      expect((caught as NonRetriableError).cause).toBeInstanceOf(ProviderConfigError);
+      expect((caught as NonRetriableError).message).toMatch(/No provider configured/);
+      expect(deps.runStreamingAgentLoop).not.toHaveBeenCalled();
+    });
   });
 
   describe("voice", () => {

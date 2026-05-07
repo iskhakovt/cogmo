@@ -7,6 +7,7 @@ import { vi } from "vitest";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
 import type { LlmProvider } from "../llm/provider.js";
+import { constantResolver, type LlmProviderResolver } from "../llm/resolver.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
@@ -310,6 +311,43 @@ export function mockProvider(overrides?: Partial<LlmProvider>): LlmProvider {
     countTokens: vi.fn().mockResolvedValue(100),
     ...overrides,
   };
+}
+
+/**
+ * Convenience wrapper for `HandleMessageDeps.resolveProvider` /
+ * `ObserverDeps.resolveProvider` injection. Two shapes:
+ *
+ * - `mockResolver()` / `mockResolver(provider)` — returns the same
+ *   provider for **every** model. Fine for tests that don't differentiate
+ *   by model. Reaching for this in a test that depends on per-model
+ *   dispatch will silently pass against a wrong-routing implementation —
+ *   use the map form below for those.
+ * - `mockResolver(new Map([[model, provider], ...]))` — per-model
+ *   dispatch. Throws on unknown models so a wrong `resolveProvider(model)`
+ *   call surfaces as a test failure rather than a silent mismatch.
+ */
+export function mockResolver(
+  arg?: LlmProvider | ReadonlyMap<string, LlmProvider>,
+): LlmProviderResolver {
+  if (isReadonlyMap(arg)) {
+    return (model) => {
+      const provider = arg.get(model);
+      if (!provider) {
+        return Promise.reject(new Error(`mockResolver: no provider configured for "${model}"`));
+      }
+      return Promise.resolve(provider);
+    };
+  }
+  return constantResolver(arg ?? mockProvider());
+}
+
+// `ReadonlyMap` is a structural TS-only interface, so `instanceof Map`
+// doesn't narrow `LlmProvider | ReadonlyMap<...>` directly. Wrap the
+// runtime check in a type predicate that asserts the read-only view —
+// callers keep their immutable contract, the implementation gets the
+// narrowed type for free.
+function isReadonlyMap<K, V>(x: unknown): x is ReadonlyMap<K, V> {
+  return x instanceof Map;
 }
 
 export function mockStreamHandle(overrides?: Partial<StreamHandle>): StreamHandle {
