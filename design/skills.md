@@ -650,6 +650,9 @@ def run(inputs: dict, ctx) -> dict:
 | `ctx.memory.remember(content, ...)` | Persist memory |
 | `ctx.attachments.upload(data, media_type)` | Upload to `AttachmentStore`, return path |
 | `ctx.attachments.download(path)` | Fetch bytes |
+| `ctx.files.read(path)` | Read UTF-8 text from per-user workspace (see [File workspace](#file-workspace-proposed)) |
+| `ctx.files.write(path, content)` | Create or overwrite workspace file |
+| `ctx.files.list(prefix=None)` | List workspace entries |
 | `ctx.llm.complete(prompt, model=...)` | LLM call via Cogmo's provider routing (cost-tracked, provider-fallback, prompt-cache aware) |
 | `ctx.now()` | Canonical time (mockable in tests) |
 | `ctx.user` | User identity object — `id`, `timezone`, `email` where available |
@@ -667,9 +670,49 @@ Every RPC: validates against the skill's manifest (allowlists, permission scopes
 | `ctx.skills.invoke(other_skill, ...)` | No inter-skill composition in v1 (see below). |
 | `ctx.schedule(when, event)` | Scheduling handled externally via Inngest cron declared in `SKILL.md`. |
 
+### File workspace `[proposed]`
+
+Skills share files across invocations through a per-user workspace exposed as `ctx.files`. This is the v1 mechanism for skill-to-skill state — one skill writes `notes/draft.md`, the next polishes it. Backed by the same S3-backed `service.files` store the agent's in-process `read_file` / `write_file` / `list_files` tools use, so the LLM and skills see one workspace.
+
+**Text-only.** The workspace stores UTF-8 text. Binary outputs (images, PDFs, generated artifacts) go through `ctx.attachments`. Two stores, two purposes:
+
+| Store | Use when | Properties |
+|-|-|-|
+| `ctx.files` | Named, mutable, listable text — notes, drafts, CSV, summaries | Logical paths, S3-backed, per-user prefix, eventually consistent |
+| `ctx.attachments` | Binary blobs, write-once outputs — PNG, PDF | Opaque path token, no listing, immutable once uploaded |
+
+**RPC contract.** Defined in TS once on `Service["files"]`, mirrored to Python over the existing skill RPC channel:
+
+| Method | Returns |
+|-|-|
+| `ctx.files.read(path)` | `str` — raises `FileNotFound` if missing |
+| `ctx.files.write(path, content)` | `None` — creates or overwrites |
+| `ctx.files.list(prefix=None)` | `list[FileEntry]` with `path`, `size`, `last_modified` |
+
+Paths are logical (`notes/meeting.md`). The host enforces ACL — a skill cannot escape its user's prefix. Reads cap at 100KB (matches `read_file`); writes have no explicit cap today (bounded by S3 object limits).
+
+**Per-tier POSIX shim.** Most Python libraries take a path, not bytes — `pandas.read_csv`, `pathlib.Path.read_text`, stdlib `open()`. Each tier mounts the workspace at `/files` so existing libraries work unchanged:
+
+| Tier | Mount mechanism |
+|-|-|
+| Sysbox container | `s3fs-fuse` (or `rclone mount`) at `/files`, scoped to the user's S3 prefix via per-task credentials. Same approach E2B and Daytona take ([E2B](https://e2b.dev/docs/sandbox/connect-bucket), [Daytona Volumes](https://www.daytona.io/docs/en/volumes/)). |
+| Pyodide WASM | Custom Emscripten FS at `/files`, proxying `read/readdir/write/stat` to the JS host via `SharedArrayBuffer` + `Atomics.wait`. The JupyterLite DriveFS pattern ([JupyterLite kernel FS](https://jupyterlite.readthedocs.io/en/stable/howto/content/python.html)). |
+
+`/files` is a deliberate choice — `/workspace` is already the bind-mount for coding-delegation worktrees ([coding-delegation.md](coding-delegation.md)). Two distinct workspaces, two distinct paths.
+
+**Why both RPC and POSIX.** Pure RPC loses every Python library that takes a path. Pure FUSE has no clean WASM story (Pyodide's FS hooks are still synchronous; see JSPI note below). The hybrid gives POSIX ergonomics in both tiers behind one ACL-enforcing service. A skill written for one tier runs unchanged on the other. This matches Anthropic's own code-execution tool — real container FS inside, RPC at the boundary ([Anthropic code execution](https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool)).
+
+**Semantics.** Object-storage-with-paths, not POSIX:
+
+- Strongly consistent reads and lists — a successful write is visible to subsequent `read` and `list` calls immediately on every supported backend (AWS S3 since Dec 2020, MinIO distributed/standalone, Cloudflare R2).
+- No file locking — last writer wins. Skills coordinating on the same file should pass state through return values or `ctx.memory`, not file races.
+- `write` is "create or overwrite" — no append, no partial updates. Read-modify-write is racy and the caller owns the consequences.
+
+**JSPI tracking.** Pyodide's filesystem layer is still on synchronous Emscripten FS hooks even after partial JSPI adoption in 0.27.7+ (`asyncio.run`, sync-style `requests.get`). [Pyodide #5720](https://github.com/pyodide/pyodide/discussions/5720) tracks moving FS to JSPI. When that lands and Safari ships JSPI (still pending as of 2026-05), the WASM tier can drop the SAB plumbing and `await` the JS host directly. The RPC contract is unchanged either way — only the Emscripten FS implementation swaps.
+
 ### Inter-skill composition
 
-**Not in v1.** Skills are flat; the agent composes at the LLM level by calling one skill, getting the result, then calling another. This matches what Voyager and Anthropic Skills actually do in practice — runtime skill-to-skill invocation is a solution looking for a problem at personal scale.
+**Not in v1.** Skills are flat; the agent composes at the LLM level by calling one skill, getting the result, then calling another. Persistent state shared across skills lives in `ctx.files` and `ctx.memory`, not in synchronous skill-to-skill calls. This matches what Voyager and Anthropic Skills actually do in practice — runtime skill-to-skill invocation is a solution looking for a problem at personal scale.
 
 **Future shape when added: `ctx.skills.invoke(name, inputs)` — orchestrator-mediated.** Via the host, never direct skill-to-skill imports:
 

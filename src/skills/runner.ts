@@ -1,4 +1,5 @@
 import { Ajv, type ValidateFunction } from "ajv";
+import type { Service } from "../agent/service.js";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -129,6 +130,8 @@ export interface SkillRunnerOptions {
   store: SkillStore;
   secretsStore: SecretsStore;
   memory: MemoryProvider;
+  /** File workspace passed to ctx.files.* — same surface as the agent's file tools. */
+  files: Service["files"];
   user: CtxUser;
   /** Memory bank id passed to ctx.memory.* — typically the user's bank. */
   memoryBankId: string;
@@ -161,6 +164,7 @@ export class SkillRunnerImpl implements SkillRunner {
   #store: SkillStore;
   #secretsStore: SecretsStore;
   #memory: MemoryProvider;
+  #files: Service["files"];
   #user: CtxUser;
   #memoryBankId: string;
   #skillsRepoPath: string | undefined;
@@ -178,6 +182,7 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#store = opts.store;
     this.#secretsStore = opts.secretsStore;
     this.#memory = opts.memory;
+    this.#files = opts.files;
     this.#user = opts.user;
     this.#memoryBankId = opts.memoryBankId;
     this.#skillsRepoPath = opts.skillsRepoPath;
@@ -634,6 +639,7 @@ export class SkillRunnerImpl implements SkillRunner {
       memoryBankId: this.#memoryBankId,
       secretsStore: this.#secretsStore,
       memory: this.#memory,
+      files: this.#files,
       recordContextCall: (call) => this.#store.recordContextCall(call),
     });
 

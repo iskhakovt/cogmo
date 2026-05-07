@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { Service } from "../agent/service.js";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -16,6 +17,9 @@ export const CTX_METHODS = [
   "secrets.get",
   "memory.recall",
   "memory.remember",
+  "files.read",
+  "files.write",
+  "files.list",
   "now",
   "user",
   "log.info",
@@ -36,6 +40,12 @@ export interface DefaultCtxHandlerOptions {
   memoryBankId: string;
   secretsStore: SecretsStore;
   memory: MemoryProvider;
+  /**
+   * The agent's per-user file workspace. Same surface the in-process
+   * `read_file` / `write_file` / `list_files` tools use — one workspace,
+   * two callers. Skills only see paths their own host service exposes.
+   */
+  files: Service["files"];
   /**
    * Persists the call to `skill_context_calls` (target name only — never
    * value). Injected as a function so the handler doesn't require the full
@@ -61,6 +71,14 @@ const MemoryRememberArgsSchema = z.object({
   content: z.string().min(1),
   tags: z.array(z.string().min(1)).optional(),
 });
+const FilesReadArgsSchema = z.object({ path: z.string().min(1) });
+const FilesWriteArgsSchema = z.object({
+  path: z.string().min(1),
+  content: z.string(),
+});
+const FilesListArgsSchema = z.object({
+  prefix: z.string().optional(),
+});
 const LogInfoArgsSchema = z.object({
   message: z.string(),
   fields: z.record(z.string(), z.unknown()).optional(),
@@ -81,6 +99,7 @@ export class DefaultCtxHandler implements CtxHandler {
   #memoryBankId: string;
   #secretsStore: SecretsStore;
   #memory: MemoryProvider;
+  #files: Service["files"];
   #recordContextCall: DefaultCtxHandlerOptions["recordContextCall"];
   #now: () => string;
   #declaredSecrets: ReadonlySet<string>;
@@ -92,6 +111,7 @@ export class DefaultCtxHandler implements CtxHandler {
     this.#memoryBankId = opts.memoryBankId;
     this.#secretsStore = opts.secretsStore;
     this.#memory = opts.memory;
+    this.#files = opts.files;
     this.#recordContextCall = opts.recordContextCall;
     this.#now = opts.now ?? (() => new Date().toISOString());
     this.#declaredSecrets = new Set(
@@ -117,6 +137,12 @@ export class DefaultCtxHandler implements CtxHandler {
         return this.#memoryRecall(args);
       case "memory.remember":
         return this.#memoryRemember(args);
+      case "files.read":
+        return this.#filesRead(args);
+      case "files.write":
+        return this.#filesWrite(args);
+      case "files.list":
+        return this.#filesList(args);
       case "now":
         return this.#nowMethod();
       case "user":
@@ -196,6 +222,86 @@ export class DefaultCtxHandler implements CtxHandler {
     });
     await this.#audit("memory.remember", null, true, null);
     return null;
+  }
+
+  async #filesRead(args: unknown): Promise<string> {
+    const parsed = FilesReadArgsSchema.safeParse(args);
+    if (!parsed.success) {
+      await this.#audit("files.read", null, false, "invalid_args");
+      throw new CtxError("invalid_args", "files.read expects { path: string }");
+    }
+    if (!this.#manifest.effects.includes("reads_filesystem")) {
+      await this.#audit("files.read", parsed.data.path, false, "missing_effect");
+      throw new CtxError(
+        "missing_effect",
+        "files.read requires effects: [reads_filesystem] in SKILL.md",
+      );
+    }
+    try {
+      const content = await this.#files.read(parsed.data.path);
+      await this.#audit("files.read", parsed.data.path, true, null);
+      return content;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.#audit("files.read", parsed.data.path, false, "read_failed");
+      throw new CtxError("read_failed", message);
+    }
+  }
+
+  async #filesWrite(args: unknown): Promise<null> {
+    const parsed = FilesWriteArgsSchema.safeParse(args);
+    if (!parsed.success) {
+      await this.#audit("files.write", null, false, "invalid_args");
+      throw new CtxError("invalid_args", "files.write expects { path: string, content: string }");
+    }
+    if (!this.#manifest.effects.includes("writes_filesystem")) {
+      await this.#audit("files.write", parsed.data.path, false, "missing_effect");
+      throw new CtxError(
+        "missing_effect",
+        "files.write requires effects: [writes_filesystem] in SKILL.md",
+      );
+    }
+    try {
+      await this.#files.write(parsed.data.path, parsed.data.content);
+      await this.#audit("files.write", parsed.data.path, true, null);
+      return null;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.#audit("files.write", parsed.data.path, false, "write_failed");
+      throw new CtxError("write_failed", message);
+    }
+  }
+
+  async #filesList(args: unknown): Promise<{
+    entries: { path: string; size: number; last_modified: string }[];
+  }> {
+    const parsed = FilesListArgsSchema.safeParse(args);
+    if (!parsed.success) {
+      await this.#audit("files.list", null, false, "invalid_args");
+      throw new CtxError("invalid_args", "files.list expects { prefix?: string }");
+    }
+    if (!this.#manifest.effects.includes("reads_filesystem")) {
+      await this.#audit("files.list", parsed.data.prefix ?? null, false, "missing_effect");
+      throw new CtxError(
+        "missing_effect",
+        "files.list requires effects: [reads_filesystem] in SKILL.md",
+      );
+    }
+    try {
+      const entries = await this.#files.list(parsed.data.prefix);
+      await this.#audit("files.list", parsed.data.prefix ?? null, true, null);
+      return {
+        entries: entries.map((e) => ({
+          path: e.path,
+          size: e.size,
+          last_modified: e.lastModified.toISOString(),
+        })),
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.#audit("files.list", parsed.data.prefix ?? null, false, "list_failed");
+      throw new CtxError("list_failed", message);
+    }
   }
 
   async #nowMethod(): Promise<string> {

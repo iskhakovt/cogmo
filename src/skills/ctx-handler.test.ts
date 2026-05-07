@@ -25,6 +25,11 @@ ${overrides}
 interface Deps {
   secretsStore: SecretsStore;
   memory: MemoryProvider;
+  files: {
+    read: ReturnType<typeof vi.fn>;
+    write: ReturnType<typeof vi.fn>;
+    list: ReturnType<typeof vi.fn>;
+  };
   recordContextCall: ReturnType<typeof vi.fn>;
 }
 
@@ -47,6 +52,11 @@ function deps(overrides?: Partial<Deps>): Deps {
       reflect: vi.fn(),
       // biome-ignore lint/suspicious/noExplicitAny: MemoryProvider stub
     } as any,
+    files: {
+      read: vi.fn().mockResolvedValue(""),
+      write: vi.fn().mockResolvedValue(undefined),
+      list: vi.fn().mockResolvedValue([]),
+    },
     recordContextCall: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -60,6 +70,7 @@ function makeHandler(m: SkillManifest, d: Deps): DefaultCtxHandler {
     memoryBankId: "bank-1",
     secretsStore: d.secretsStore,
     memory: d.memory,
+    files: d.files,
     recordContextCall: d.recordContextCall,
     now: () => "2026-01-01T00:00:00.000Z",
   });
@@ -175,6 +186,188 @@ describe("DefaultCtxHandler", () => {
       });
       expect(d.memory.retain).toHaveBeenCalledWith("bank-1", "remember this", {
         tags: ["world"],
+      });
+    });
+  });
+
+  describe("files.read / files.write / files.list", () => {
+    it("read requires the reads_filesystem effect", async () => {
+      const m = manifest();
+      const d = deps();
+      const h = makeHandler(m, d);
+
+      await expect(
+        h.handle({ method: "files.read", args: { path: "notes/x.md" } }),
+      ).rejects.toMatchObject({ kind: "missing_effect" });
+      expect(d.files.read).not.toHaveBeenCalled();
+      expect(d.recordContextCall).toHaveBeenCalledWith({
+        runId: "run-1",
+        method: "files.read",
+        target: "notes/x.md",
+        ok: false,
+        error: "missing_effect",
+      });
+    });
+
+    it("read returns the workspace content when effect is declared", async () => {
+      const m = manifest("effects:\n  - reads_filesystem");
+      const d = deps();
+      d.files.read.mockResolvedValue("hello");
+      const h = makeHandler(m, d);
+
+      const value = await h.handle({ method: "files.read", args: { path: "notes/x.md" } });
+      expect(value).toBe("hello");
+      expect(d.files.read).toHaveBeenCalledWith("notes/x.md");
+      expect(d.recordContextCall).toHaveBeenCalledWith({
+        runId: "run-1",
+        method: "files.read",
+        target: "notes/x.md",
+        ok: true,
+        error: null,
+      });
+    });
+
+    it("read surfaces backend failures as read_failed", async () => {
+      const m = manifest("effects:\n  - reads_filesystem");
+      const d = deps();
+      d.files.read.mockRejectedValue(new Error("File not found: notes/x.md"));
+      const h = makeHandler(m, d);
+
+      await expect(
+        h.handle({ method: "files.read", args: { path: "notes/x.md" } }),
+      ).rejects.toMatchObject({ kind: "read_failed" });
+      expect(d.recordContextCall).toHaveBeenCalledWith({
+        runId: "run-1",
+        method: "files.read",
+        target: "notes/x.md",
+        ok: false,
+        error: "read_failed",
+      });
+    });
+
+    it("write requires the writes_filesystem effect", async () => {
+      const m = manifest();
+      const d = deps();
+      const h = makeHandler(m, d);
+
+      await expect(
+        h.handle({
+          method: "files.write",
+          args: { path: "notes/x.md", content: "hi" },
+        }),
+      ).rejects.toMatchObject({ kind: "missing_effect" });
+      expect(d.files.write).not.toHaveBeenCalled();
+    });
+
+    it("write surfaces backend failures as write_failed", async () => {
+      const m = manifest("effects:\n  - writes_filesystem");
+      const d = deps();
+      d.files.write.mockRejectedValue(new Error("S3 5xx"));
+      const h = makeHandler(m, d);
+
+      await expect(
+        h.handle({
+          method: "files.write",
+          args: { path: "notes/x.md", content: "hi" },
+        }),
+      ).rejects.toMatchObject({ kind: "write_failed" });
+      expect(d.recordContextCall).toHaveBeenCalledWith({
+        runId: "run-1",
+        method: "files.write",
+        target: "notes/x.md",
+        ok: false,
+        error: "write_failed",
+      });
+    });
+
+    it("list surfaces backend failures as list_failed", async () => {
+      const m = manifest("effects:\n  - reads_filesystem");
+      const d = deps();
+      d.files.list.mockRejectedValue(new Error("S3 listing timeout"));
+      const h = makeHandler(m, d);
+
+      await expect(
+        h.handle({ method: "files.list", args: { prefix: "notes/" } }),
+      ).rejects.toMatchObject({ kind: "list_failed" });
+      expect(d.recordContextCall).toHaveBeenCalledWith({
+        runId: "run-1",
+        method: "files.list",
+        target: "notes/",
+        ok: false,
+        error: "list_failed",
+      });
+    });
+
+    it("write persists when effect is declared", async () => {
+      const m = manifest("effects:\n  - writes_filesystem");
+      const d = deps();
+      const h = makeHandler(m, d);
+
+      const r = await h.handle({
+        method: "files.write",
+        args: { path: "notes/x.md", content: "draft v1" },
+      });
+      expect(r).toBeNull();
+      expect(d.files.write).toHaveBeenCalledWith("notes/x.md", "draft v1");
+      expect(d.recordContextCall).toHaveBeenCalledWith({
+        runId: "run-1",
+        method: "files.write",
+        target: "notes/x.md",
+        ok: true,
+        error: null,
+      });
+    });
+
+    it("list requires the reads_filesystem effect", async () => {
+      const m = manifest();
+      const d = deps();
+      const h = makeHandler(m, d);
+
+      await expect(
+        h.handle({ method: "files.list", args: { prefix: "notes/" } }),
+      ).rejects.toMatchObject({ kind: "missing_effect" });
+      expect(d.files.list).not.toHaveBeenCalled();
+    });
+
+    it("list returns entries with last_modified as ISO-8601", async () => {
+      const m = manifest("effects:\n  - reads_filesystem");
+      const d = deps();
+      const lastModified = new Date("2026-04-01T12:00:00.000Z");
+      d.files.list.mockResolvedValue([
+        { path: "notes/a.md", size: 42, lastModified },
+        { path: "notes/b.md", size: 7, lastModified },
+      ]);
+      const h = makeHandler(m, d);
+
+      const value = await h.handle({ method: "files.list", args: { prefix: "notes/" } });
+      expect(value).toEqual({
+        entries: [
+          { path: "notes/a.md", size: 42, last_modified: "2026-04-01T12:00:00.000Z" },
+          { path: "notes/b.md", size: 7, last_modified: "2026-04-01T12:00:00.000Z" },
+        ],
+      });
+      expect(d.files.list).toHaveBeenCalledWith("notes/");
+    });
+
+    it("list with no prefix passes undefined to the backend", async () => {
+      const m = manifest("effects:\n  - reads_filesystem");
+      const d = deps();
+      const h = makeHandler(m, d);
+
+      await h.handle({ method: "files.list", args: {} });
+      expect(d.files.list).toHaveBeenCalledWith(undefined);
+    });
+
+    it("rejects malformed args with invalid_args", async () => {
+      const m = manifest("effects:\n  - reads_filesystem\n  - writes_filesystem");
+      const d = deps();
+      const h = makeHandler(m, d);
+
+      await expect(h.handle({ method: "files.read", args: {} })).rejects.toMatchObject({
+        kind: "invalid_args",
+      });
+      await expect(h.handle({ method: "files.write", args: { path: "x" } })).rejects.toMatchObject({
+        kind: "invalid_args",
       });
     });
   });
