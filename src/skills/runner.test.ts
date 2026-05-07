@@ -420,6 +420,34 @@ inputs:
   });
 });
 
+describe("UTF-8 / non-ASCII body — locks the JSON-as-Python-literal contract", () => {
+  it("a skill body containing emoji and non-BMP chars round-trips through Pyodide", async () => {
+    const runner = await makeRunner();
+    // Body intentionally contains: emoji (non-BMP — surrogate pair),
+    // accented Latin, CJK, an embedded backslash, and a newline literal.
+    // If the body-inlining encoder ever drifts (e.g. someone swaps the JSON
+    // encoder for one that emits `\/` or trims surrogate pairs), this test
+    // catches it before the bug reaches a real skill.
+    const body = `
+async def run(inputs, ctx):
+    return {"emoji": "\\U0001F600", "accented": "café", "cjk": "日本語", "back": "a\\\\b"}
+`;
+    await runner.__registerForTests({
+      name: "unicode",
+      manifestSource: ECHO_MANIFEST.replace("name: echo", "name: unicode"),
+      body,
+    });
+    const r = await runner.invoke({ name: "unicode", inputs: { x: 1 } });
+    expect(r.status).toBe("success");
+    expect(r.output).toEqual({
+      emoji: "😀",
+      accented: "café",
+      cjk: "日本語",
+      back: "a\\b",
+    });
+  });
+});
+
 describe("mapManifestResourceLimits", () => {
   it("maps memory_mb to bytes and cpu_shares to cpus", () => {
     expect(mapManifestResourceLimits({ memory_mb: 1024, cpu_shares: 2, wall_clock_s: 30 })).toEqual(

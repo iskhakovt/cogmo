@@ -26,8 +26,8 @@ import type {
   SkillTier,
 } from "./store/index.js";
 import type { ClassifierLog, SkillInputs, SkillManifest } from "./types.js";
-import { runOnSysboxContainer } from "./worker-sysbox/host.js";
-import { runOnWorker } from "./worker-wasm/host.js";
+import { type RunOnSysboxContainerResult, runOnSysboxContainer } from "./worker-sysbox/host.js";
+import { type RunOnWorkerResult, runOnWorker } from "./worker-wasm/host.js";
 
 /** Default tier-2 container image. Pinned to the Python LTS train. */
 const DEFAULT_TIER2_IMAGE = "python:3.14-slim";
@@ -686,31 +686,52 @@ export class SkillRunnerImpl implements SkillRunner {
     });
 
     const wallClockS = cached.manifest.resources?.wall_clock_s;
-    const result =
-      skill.tier === "wasm"
-        ? await runOnWorker({
-            taskId: run.id,
-            skillName: skill.name,
-            body: cached.body,
-            inputs: opts.inputs,
-            ...(wallClockS !== undefined && { wallClockS }),
-            ...(this.#pyodidePackageCacheDir && {
-              packageCacheDir: this.#pyodidePackageCacheDir,
-            }),
-            ctxHandler,
-          })
-        : await runOnSysboxContainer({
-            taskId: run.id,
-            skillName: skill.name,
-            body: cached.body,
-            inputs: opts.inputs,
-            ...(wallClockS !== undefined && { wallClockS }),
-            resourceLimits: mapManifestResourceLimits(cached.manifest.resources),
-            image: this.#tier2Image,
-            // biome-ignore lint/style/noNonNullAssertion: guarded above by the tier-check throw
-            sandbox: this.#sandbox!,
-            ctxHandler,
-          });
+    // Switch + `never` exhaustiveness so a future SkillTier value (added to
+    // the pgEnum) is a compile-time miss here rather than a silent route
+    // through the sysbox path.
+    let result: RunOnWorkerResult | RunOnSysboxContainerResult;
+    switch (skill.tier) {
+      case "wasm":
+        result = await runOnWorker({
+          taskId: run.id,
+          skillName: skill.name,
+          body: cached.body,
+          inputs: opts.inputs,
+          ...(wallClockS !== undefined && { wallClockS }),
+          ...(this.#pyodidePackageCacheDir && {
+            packageCacheDir: this.#pyodidePackageCacheDir,
+          }),
+          ctxHandler,
+        });
+        break;
+      case "container": {
+        // Narrow the `Sandbox | undefined` field to a non-null local once
+        // the tier-check above has guaranteed it; avoids a non-null
+        // assertion inside the runOnSysboxContainer call.
+        const sandbox = this.#sandbox;
+        if (!sandbox) {
+          // Can't reach this — the early `tier === "container" && !sandbox`
+          // throw above caught it. Re-throw to satisfy the narrowing.
+          throw new Error("invariant: sandbox unset on container tier path");
+        }
+        result = await runOnSysboxContainer({
+          taskId: run.id,
+          skillName: skill.name,
+          body: cached.body,
+          inputs: opts.inputs,
+          ...(wallClockS !== undefined && { wallClockS }),
+          resourceLimits: mapManifestResourceLimits(cached.manifest.resources),
+          image: this.#tier2Image,
+          sandbox,
+          ctxHandler,
+        });
+        break;
+      }
+      default: {
+        const _exhaustive: never = skill.tier;
+        throw new Error(`unhandled skill tier: ${_exhaustive as string}`);
+      }
+    }
 
     const finishedAt = new Date();
     if (result.ok) {

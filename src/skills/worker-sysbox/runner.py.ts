@@ -48,7 +48,10 @@ class _Bridge:
 
     async def call(self, method, args):
         call_id = "ctx-" + uuid.uuid4().hex[:12]
-        future = asyncio.get_event_loop().create_future()
+        # \`get_running_loop\` is the safe form inside a coroutine — \`get_event_loop\`
+        # is deprecated in 3.10+ when no loop is running and slated for harder
+        # removal; on 3.14 (the floor) it already emits DeprecationWarning.
+        future = asyncio.get_running_loop().create_future()
         self._pending[call_id] = future
         await self._send({"type": "ctx_call", "id": call_id, "method": method, "args": args})
         return await future
@@ -158,7 +161,7 @@ async def _read_stdin_lines(bridge, task_invoke_future):
     \`ctx_result\`s deliver through the bridge. Any other shape is logged to
     stderr and ignored.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
     await loop.connect_read_pipe(lambda: protocol, sys.stdin)

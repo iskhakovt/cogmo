@@ -10,11 +10,22 @@ const log = logger.child({ component: "skills.worker.sysbox" });
 /** Default wall-clock cap for tier-2 skills (`design/skills.md` Resource budgets). */
 const DEFAULT_WALL_CLOCK_S = 60;
 
-/** Default resource caps for tier-2 skills — overridden by manifest declarations. */
+/**
+ * Default resource caps for tier-2 skills — overridden by manifest declarations.
+ *
+ * `pids: 1024` is generous enough for ordinary Python workloads (stdlib
+ * threading + a couple of `concurrent.futures` pools + a `requests` /
+ * `urllib3` connection pool clear ~50-100 threads alone; an
+ * import-heavy data skill can sit at 200+ before doing real work). Tight
+ * caps (we initially picked 256) risk surprising `Resource temporarily
+ * unavailable` failures inside otherwise harmless skills. The real ceiling
+ * is the per-task systemd slice; this is a per-container fence to catch
+ * fork bombs, not a budget.
+ */
 const DEFAULT_RESOURCE_LIMITS: ResourceLimits = {
   cpus: 1,
   memory_bytes: 512 * 1024 * 1024,
-  pids: 256,
+  pids: 1024,
 };
 
 /**
@@ -75,9 +86,12 @@ export async function runOnSysboxContainer(
   // Skill body is inlined as a Python literal at the head of the runner. JSON
   // string literals are a compatible subset of Python double-quoted string
   // literals (same backslash escapes, same \uXXXX), so JSON.stringify yields
-  // a valid Python expression. Long-term, if real skills push into the
-  // ARG_MAX wall, we extend `task_invoke` with a `body` field and stream it
-  // — the runner already routes on message type.
+  // a valid Python expression. Safe specifically because JSON.stringify never
+  // emits the `\/` escape (legal in JSON, illegal in Python) — if the encoder
+  // ever changes (or someone hand-rolls an alternative), this assumption
+  // breaks silently. Long-term, if real skills push into the ARG_MAX wall,
+  // we extend `task_invoke` with a `body` field and stream it — the runner
+  // already routes on message type.
   const fullSource = `__skill_body__ = ${JSON.stringify(params.body)}\n${RUNNER_PY}`;
   if (Buffer.byteLength(fullSource, "utf-8") > MAX_RUNNER_SOURCE_BYTES) {
     return {
@@ -147,10 +161,16 @@ export async function runOnSysboxContainer(
       timeoutHandle = setTimeout(() => resolve("timeout"), wallClockS * 1000);
     });
 
-    const winner = await Promise.race([
-      taskPromise.then((r) => ({ kind: "ok" as const, r })),
-      timeoutPromise,
-    ]);
+    // Use the two-arg `.then` so the wrapped promise has a rejection
+    // handler attached BEFORE the race starts. When the timeout wins, we
+    // call `dispatcher.close("timeout")` which rejects `taskPromise`; if
+    // there were no handler the rejection would float past the race and
+    // surface as an unhandled rejection (Node 22+ logs/exits on these).
+    const wrappedTask = taskPromise.then(
+      (r) => ({ kind: "ok" as const, r }),
+      (err: unknown) => ({ kind: "err" as const, err }),
+    );
+    const winner = await Promise.race([wrappedTask, timeoutPromise]);
     // Always release the timer — when the task wins the race, the unfired
     // timeout would otherwise keep the event loop alive until wallClockS
     // elapses, blocking process shutdown and leaking handles in tests.
@@ -167,6 +187,10 @@ export async function runOnSysboxContainer(
     }
 
     dispatcher.close();
+    if (winner.kind === "err") {
+      const message = winner.err instanceof Error ? winner.err.message : String(winner.err);
+      return { ok: false, error: message };
+    }
     return resultToReturn(winner.r);
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
