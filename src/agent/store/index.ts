@@ -305,7 +305,13 @@ export interface AgentStore {
     alias: string,
   ): Promise<{ conversationId: string } | undefined>;
 
-  /** Resolve a conversation's alias for a user, or `null` if unaliased. Identity-checked by caller. */
+  /**
+   * Resolve a conversation's alias scoped to `userId` — the SQL filter
+   * matches on `(userId, conversationId)`, so a conversation owned by a
+   * different user returns `null` (no separate ownership check at the
+   * call site needed). Also returns `null` when the conversation has no
+   * alias set.
+   */
   getAliasForConversation(userId: string, conversationId: string): Promise<string | null>;
 
   /**

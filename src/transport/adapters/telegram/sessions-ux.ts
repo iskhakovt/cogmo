@@ -197,7 +197,6 @@ function formatTokens(n: number): string {
 }
 
 function formatPercent(used: number, budget: number): string {
-  if (budget <= 0) return "—";
   const pct = (used / budget) * 100;
   return pct < 1 ? "<1%" : `${Math.round(pct)}%`;
 }

@@ -1326,7 +1326,7 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("counts messages and surfaces the most recent createdAt", async () => {
-      const { userId, profileId, conversationId } = await seedConversation();
+      const { profileId, conversationId } = await seedConversation();
       await store.insertMessage({
         conversationId,
         role: "user",
@@ -1346,8 +1346,6 @@ describe("DrizzleAgentStore", () => {
       const stats = await store.getConversationStats(conversationId);
       expect(stats?.messageCount).toBe(2);
       expect(stats?.lastMessageAt).toBeInstanceOf(Date);
-      // Sanity-check that we're not mixing in another user's rows.
-      void userId;
     });
 
     it("returns undefined for a nonexistent conversation id", async () => {
