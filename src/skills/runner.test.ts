@@ -4,7 +4,7 @@ import type { Database } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { InputValidationError, SkillRunnerImpl } from "./runner.js";
+import { InputValidationError, mapManifestResourceLimits, SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
 
 function makeMockFiles(): Service["files"] {
@@ -417,5 +417,32 @@ inputs:
       [1, 2, 3, 4, 5].map((x) => runner.invoke({ name: "echo", inputs: { x } })),
     );
     expect(results.every((r) => r.status === "success")).toBe(true);
+  });
+});
+
+describe("mapManifestResourceLimits", () => {
+  it("maps memory_mb to bytes and cpu_shares to cpus", () => {
+    expect(mapManifestResourceLimits({ memory_mb: 1024, cpu_shares: 2, wall_clock_s: 30 })).toEqual(
+      { memory_bytes: 1024 * 1024 * 1024, cpus: 2 },
+    );
+  });
+
+  it("maps cpu_shares alone — regression: was silently dropped before", () => {
+    expect(mapManifestResourceLimits({ cpu_shares: 3 })).toEqual({ cpus: 3 });
+  });
+
+  it("maps memory_mb alone", () => {
+    expect(mapManifestResourceLimits({ memory_mb: 512 })).toEqual({
+      memory_bytes: 512 * 1024 * 1024,
+    });
+  });
+
+  it("returns an empty object when the manifest declares no resources", () => {
+    expect(mapManifestResourceLimits(undefined)).toEqual({});
+    expect(mapManifestResourceLimits({})).toEqual({});
+  });
+
+  it("ignores wall_clock_s — that's threaded as a separate runOnSysboxContainer arg", () => {
+    expect(mapManifestResourceLimits({ wall_clock_s: 60 })).toEqual({});
   });
 });

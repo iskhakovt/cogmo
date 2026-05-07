@@ -79,6 +79,26 @@ describe("createNdjsonTransport", () => {
     expect(stdin.writableEnded).toBe(true);
   });
 
+  it("drops inbound stdout messages that arrive after close()", () => {
+    const { stdin, stdout } = pair();
+    const t = createNdjsonTransport(stdin, stdout);
+    const handler = vi.fn();
+    t.onMessage(handler);
+
+    // Pre-close message routes normally.
+    stdout.write(`{"type":"task_result","id":"x","ok":true}\n`);
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    t.close();
+
+    // Late stdout (e.g. a stray ctx_call from a worker still flushing on
+    // shutdown) must not reach the handler — the dispatcher has already
+    // torn down its pending task, and the host's ctx services may have
+    // been cleaned up.
+    stdout.write(`{"type":"ctx_call","id":"y","method":"now","args":{}}\n`);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   it("ignores empty lines", () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);

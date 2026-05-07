@@ -16,6 +16,11 @@ export function createNdjsonTransport(stdin: Writable, stdout: Readable): RpcTra
 
   stdout.setEncoding("utf-8");
   stdout.on("data", (chunk: string) => {
+    // After close(), drop any remaining stdout. The dispatcher has already
+    // torn down its pending task; routing a late `task_result` /
+    // `ctx_call` past it could either fire a no-op or — worse — invoke
+    // the handler against a service the test/host has already cleaned up.
+    if (closed) return;
     buffer += chunk;
     let newlineIdx = buffer.indexOf("\n");
     while (newlineIdx !== -1) {

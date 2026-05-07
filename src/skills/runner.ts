@@ -32,6 +32,27 @@ import { runOnWorker } from "./worker-wasm/host.js";
 /** Default tier-2 container image. Pinned to the Python LTS train. */
 const DEFAULT_TIER2_IMAGE = "python:3.14-slim";
 
+/**
+ * Translate a manifest's `resources` block into the partial `ResourceLimits`
+ * the tier-2 host expects. Naming differs intentionally: skills declare
+ * `cpu_shares` (integer 1-4) and `memory_mb` (megabytes), while the sandbox
+ * speaks fractional `cpus` and `memory_bytes` — so this function owns the
+ * conversion. Returns only fields the manifest set; the host fills the rest
+ * from `DEFAULT_RESOURCE_LIMITS`. Exported for direct unit-testing — the
+ * mapping has been wrong by omission once already (cpu_shares dropped).
+ */
+export function mapManifestResourceLimits(resources: SkillManifest["resources"] | undefined): {
+  memory_bytes?: number;
+  cpus?: number;
+} {
+  return {
+    ...(resources?.memory_mb !== undefined && {
+      memory_bytes: resources.memory_mb * 1024 * 1024,
+    }),
+    ...(resources?.cpu_shares !== undefined && { cpus: resources.cpu_shares }),
+  };
+}
+
 const log = logger.child({ component: "skills.runner" });
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
@@ -684,9 +705,7 @@ export class SkillRunnerImpl implements SkillRunner {
             body: cached.body,
             inputs: opts.inputs,
             ...(wallClockS !== undefined && { wallClockS }),
-            ...(cached.manifest.resources?.memory_mb !== undefined && {
-              resourceLimits: { memory_bytes: cached.manifest.resources.memory_mb * 1024 * 1024 },
-            }),
+            resourceLimits: mapManifestResourceLimits(cached.manifest.resources),
             image: this.#tier2Image,
             // biome-ignore lint/style/noNonNullAssertion: guarded above by the tier-check throw
             sandbox: this.#sandbox!,

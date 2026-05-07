@@ -142,14 +142,19 @@ export async function runOnSysboxContainer(
     };
     const taskPromise = dispatcher.invoke(invoke);
 
+    let timeoutHandle: NodeJS.Timeout | undefined;
     const timeoutPromise = new Promise<"timeout">((resolve) => {
-      setTimeout(() => resolve("timeout"), wallClockS * 1000);
+      timeoutHandle = setTimeout(() => resolve("timeout"), wallClockS * 1000);
     });
 
     const winner = await Promise.race([
       taskPromise.then((r) => ({ kind: "ok" as const, r })),
       timeoutPromise,
     ]);
+    // Always release the timer — when the task wins the race, the unfired
+    // timeout would otherwise keep the event loop alive until wallClockS
+    // elapses, blocking process shutdown and leaking handles in tests.
+    if (timeoutHandle) clearTimeout(timeoutHandle);
 
     if (winner === "timeout") {
       log.warn(

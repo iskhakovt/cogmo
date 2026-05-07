@@ -7,7 +7,7 @@ import type { Database } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import { CogmoSocketProxy, LocalInProcessSandbox, type Sandbox } from "../sandbox/index.js";
 import { DrizzleSandboxStore } from "../sandbox/store/index.js";
-import { LABEL_MANAGED } from "../sandbox/supervisor.js";
+import { LABEL_INSTANCE, LABEL_MANAGED } from "../sandbox/supervisor.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { SkillRunnerImpl } from "./runner.js";
@@ -66,6 +66,7 @@ let skillStore: DrizzleSkillStore;
 let docker: Docker;
 let proxy: CogmoSocketProxy;
 let sandbox: Sandbox;
+let instanceId: string;
 
 beforeAll(async () => {
   if (!SHOULD_RUN) return;
@@ -80,6 +81,7 @@ beforeAll(async () => {
   });
 
   const instance = await agentStore.insertInstance({ host: hostname(), pid: process.pid });
+  instanceId = instance.id;
   proxy = await CogmoSocketProxy.create({
     socketDir: "/tmp/cogmo-test-skills-proxy",
     hostDockerSocket: "/var/run/docker.sock",
@@ -97,10 +99,13 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!SHOULD_RUN) return;
   if (sandbox) await sandbox.shutdown();
-  // Belt-and-suspenders cleanup.
+  // Belt-and-suspenders cleanup, scoped to this test's instance label so
+  // parallel test files (or stray containers from unrelated runs on the
+  // same daemon) aren't clobbered. The supervisor's own teardown should
+  // handle everything; this is the safety net for crashes mid-run.
   const leftover = await docker.listContainers({
     all: true,
-    filters: { label: [`${LABEL_MANAGED}=true`] },
+    filters: { label: [`${LABEL_MANAGED}=true`, `${LABEL_INSTANCE}=${instanceId}`] },
   });
   for (const c of leftover) {
     await docker
