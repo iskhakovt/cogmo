@@ -1,24 +1,36 @@
 /// <reference path="../../test/vitest.d.ts" />
 
-import { eq } from "drizzle-orm";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { sql as drizzleSql, eq } from "drizzle-orm";
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from "vitest";
-import { conversations, messages, profiles } from "../agent/store/schema.js";
+import { conversations, messages, profiles, voiceConfig } from "../agent/store/schema.js";
 import { db } from "../db/index.js";
 import { bootstrap } from "../index.js";
 import { directOutbound } from "../inngest/events.js";
+import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
+import { DrizzleSecretsStore } from "../secrets/store/index.js";
+import { createAttachmentStore } from "../transport/attachment-store.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
+import { OpenAIVoiceProvider } from "../voice/openai.js";
 import { createFalFetch } from "./fal-mock.js";
+import { createOpenAIVoiceFetch } from "./openai-voice-mock.js";
 import { type OtelHarness, setupOtelHarness } from "./otel-harness.js";
 
 let inngestBaseUrl: string;
 let connection: Awaited<ReturnType<typeof connect>>;
 let otel: OtelHarness;
 
+const VOICE_FIXTURE_DIR = "./test/fixtures/voice";
+const INBOUND_OGG_PATH = join(VOICE_FIXTURE_DIR, "inbound.ogg");
+const INBOUND_PHRASE = "Hello, this is the voice integration test.";
+
 interface CapturedOutbound {
   platformAddress: string;
   content: string;
   images?: Array<{ data: string; mediaType: string }>;
+  voice?: { data: string; mediaType: string };
 }
 // File-scoped capture buffer for `adapter/direct/outbound` events. A dedicated
 // Inngest function (registered alongside the app's functions) pushes each
@@ -51,9 +63,23 @@ beforeAll(async () => {
     fixturePath: "./test/fixtures/fal",
   });
 
+  // Same shape for OpenAI voice (`/v1/audio/speech` and
+  // `/v1/audio/transcriptions`) — wired through `OpenAIVoiceConfig.fetch`
+  // by bootstrap when `voiceFetchOverride` is passed.
+  const voiceFetchOverride = createOpenAIVoiceFetch({
+    mode: process.env.RECORD === "1" ? "record" : "replay",
+    fixturePath: VOICE_FIXTURE_DIR,
+  });
+
+  // Seed `voice_config` BEFORE bootstrap — bootstrap reads voice_config
+  // exactly once at boot to construct the OpenAIVoiceProvider. Inserting
+  // afterwards has no effect on the running pipeline.
+  await seedVoiceConfig();
+
   const { inngest, functions } = await bootstrap({
     providerOverride: provider,
     falFetchOverride,
+    voiceFetchOverride,
   });
 
   // Capture directOutbound events for test assertions — same pattern the
@@ -82,6 +108,73 @@ beforeEach(async () => {
   capturedOutbound.length = 0;
   await otel.reset();
 });
+
+/**
+ * Seed a single `voice_config` row + matching `secrets` entry so bootstrap
+ * wires the OpenAIVoiceProvider. The OpenAI key is "test-openai-key" in
+ * replay (the interceptor never touches the network); record mode requires
+ * a real key in `OPENAI_API_KEY` and the interceptor forwards it.
+ */
+async function seedVoiceConfig() {
+  if (!process.env.COGMO_MASTER_KEY) {
+    throw new Error("COGMO_MASTER_KEY not set — integration setup must run first");
+  }
+  const masterKey = deriveMasterKey(
+    parseMasterKey(process.env.COGMO_MASTER_KEY),
+    "cogmo/secrets-at-rest/v1",
+  );
+  const secrets = new DrizzleSecretsStore(db, masterKey);
+  const apiKey =
+    process.env.RECORD === "1" ? (process.env.OPENAI_API_KEY ?? "") : "test-openai-key";
+  if (process.env.RECORD === "1" && !apiKey) {
+    throw new Error("RECORD=1 requires OPENAI_API_KEY to capture voice fixtures");
+  }
+  const { id: secretId } = await secrets.putSecret({ name: "voice_openai_key", plaintext: apiKey });
+
+  await db.execute(drizzleSql`DELETE FROM voice_config`);
+  await db.insert(voiceConfig).values({
+    ttsSecretId: secretId,
+    sttSecretId: secretId,
+    ttsProvider: "openai",
+    ttsModel: "gpt-4o-mini-tts",
+    ttsVoice: "alloy",
+    sttProvider: "openai",
+    sttModel: "gpt-4o-mini-transcribe",
+  });
+}
+
+/**
+ * Read the inbound voice fixture clip. Bootstrapped on first record run by
+ * TTS-ing INBOUND_PHRASE; replay requires the file to be committed.
+ */
+async function loadInboundOgg(): Promise<Buffer> {
+  try {
+    return await readFile(INBOUND_OGG_PATH);
+  } catch {
+    if (process.env.RECORD !== "1") {
+      throw new Error(
+        `Missing fixture ${INBOUND_OGG_PATH}. Run once with RECORD=1 OPENAI_API_KEY=sk-... pnpm test:integration to seed.`,
+      );
+    }
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) throw new Error("RECORD=1 requires OPENAI_API_KEY");
+    // Bootstrap: TTS the inbound phrase via the same interceptor used by
+    // the pipeline so the resulting fixture audio is reused on replay.
+    const provider = new OpenAIVoiceProvider({
+      apiKey,
+      fetch: createOpenAIVoiceFetch({ mode: "record", fixturePath: VOICE_FIXTURE_DIR }),
+    });
+    const result = await provider.tts({
+      text: INBOUND_PHRASE,
+      voice: "alloy",
+      model: "gpt-4o-mini-tts",
+      format: "ogg",
+    });
+    await mkdir(dirname(INBOUND_OGG_PATH), { recursive: true });
+    await writeFile(INBOUND_OGG_PATH, result.audio);
+    return result.audio;
+  }
+}
 
 async function sendEvent(name: string, data: Record<string, unknown>) {
   const eventKey = inject("inngestEventKey");
@@ -247,6 +340,96 @@ describe("message pipeline", () => {
     expect(img.mediaType).toMatch(/^image\//);
     const bytes = Buffer.from(img.data, "base64");
     expect(bytes.length).toBeGreaterThan(0);
+  });
+
+  it("voice round-trip: STT inbound → text → TTS outbound", async () => {
+    const defaultUserId = inject("defaultUserId");
+
+    const [profile] = await db.select({ id: profiles.id }).from(profiles).limit(1);
+    const [channel] = await db
+      .select({ id: channels.id })
+      .from(channels)
+      .where(eq(channels.type, "direct"))
+      .limit(1);
+    if (!profile || !channel) throw new Error("seed incomplete");
+
+    const platformAddress = `voice-test-${Date.now()}`;
+    const [conv] = await db
+      .insert(conversations)
+      .values({
+        userId: defaultUserId,
+        profileId: profile.id,
+        isPrivate: true,
+        // Force voice on regardless of inbound modality detection — the
+        // integration test asserts the full TTS path lands a voice payload
+        // on directOutbound.
+        voiceMode: "always",
+      })
+      .returning({ id: conversations.id });
+
+    const [session] = await db
+      .insert(channelSessions)
+      .values({
+        channelId: channel.id,
+        platformAddress,
+        conversationId: conv!.id,
+        status: "active",
+        receive: "routed",
+      })
+      .returning({ id: channelSessions.id });
+
+    // Inbound OGG bytes — fed into AttachmentStore so the orchestrator's
+    // transcribe-voice step downloads + STT's them via the intercepted
+    // OpenAI client.
+    const inboundOgg = await loadInboundOgg();
+    const { S3Client } = await import("@aws-sdk/client-s3");
+    const s3 = new S3Client({
+      ...(process.env.S3_ENDPOINT && { endpoint: process.env.S3_ENDPOINT }),
+      region: "us-east-1",
+      forcePathStyle: true,
+      credentials: {
+        accessKeyId: process.env.S3_ACCESS_KEY ?? "minioadmin",
+        secretAccessKey: process.env.S3_SECRET_KEY ?? "minioadmin",
+      },
+    });
+    const attachments = createAttachmentStore(s3, process.env.S3_BUCKET ?? "cogmo-files");
+    const path = await attachments.upload(inboundOgg, "audio/ogg", "inbound");
+    s3.destroy();
+
+    const [inbound] = await db
+      .insert(inboundMessages)
+      .values({
+        channelSessionId: session!.id,
+        conversationId: conv!.id,
+        content: [{ type: "voice", path, mediaType: "audio/ogg" }],
+        platformTs: new Date(),
+      })
+      .returning({ id: inboundMessages.id });
+
+    await sendEvent("inbound/arrived", {
+      conversationId: conv!.id,
+      inboundMessageId: inbound!.id,
+    });
+
+    const timeoutMs = process.env.RECORD === "1" ? 60_000 : 30_000;
+    const outbound = await waitForOutbound(
+      conv!.id,
+      (e) => e.platformAddress === platformAddress && !!e.voice,
+      timeoutMs,
+    );
+
+    expect(outbound.voice).toBeDefined();
+    expect(outbound.voice!.mediaType).toMatch(/^audio\//);
+    const audioBytes = Buffer.from(outbound.voice!.data, "base64");
+    expect(audioBytes.length).toBeGreaterThan(0);
+
+    // The stored user message should be the STT transcript text — voice
+    // blocks are substituted to text before persist.
+    const allMsgs = await db.select().from(messages).where(eq(messages.conversationId, conv!.id));
+    const userMsg = allMsgs.find((r) => r.role === "user");
+    expect(userMsg).toBeDefined();
+    expect(typeof userMsg!.content).toBe("string");
+    expect((userMsg!.content as string).length).toBeGreaterThan(0);
   });
 
   it("emits gen_ai chat spans + token metrics through the live pipeline", async () => {

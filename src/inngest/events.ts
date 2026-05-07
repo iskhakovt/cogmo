@@ -270,5 +270,17 @@ export const directOutbound = eventType("adapter/direct/outbound", {
         }),
       )
       .optional(),
+    /**
+     * Voice payload — present when the orchestrator has TTS'd the reply
+     * and routed it via `DeliveryHandle.deliverVoice`. Carried alongside
+     * `content` (text) so console clients can render either, both, or
+     * neither. Empty / absent = text-only turn.
+     */
+    voice: z
+      .object({
+        data: z.string(), // base64
+        mediaType: z.string(),
+      })
+      .optional(),
   }),
 });

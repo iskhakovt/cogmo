@@ -1,0 +1,12 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Hello, this is the voice integration test."
+      },
+      "response": {
+        "content": "Hey there! I'm your personal AI assistant. I don't think we've met yet — what's your name, and what do you do?"
+      }
+    }
+  ]
+}
