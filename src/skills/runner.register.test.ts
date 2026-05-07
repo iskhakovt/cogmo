@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -33,25 +34,13 @@ afterAll(async () => {
 });
 
 function makeMockMemory(): MemoryProvider {
-  return {
-    name: "mock",
-    retain: vi.fn().mockResolvedValue(undefined),
-    retainBatch: vi.fn().mockResolvedValue(undefined),
-    recall: vi.fn().mockResolvedValue({ memories: [] }),
-    reflect: vi.fn(),
-  };
+  const memory = mock<MemoryProvider>();
+  memory.recall.mockResolvedValue({ memories: [] });
+  return memory;
 }
 
 function makeMockSecrets(): SecretsStore {
-  return {
-    getSecret: vi.fn(),
-    getSecretById: vi.fn(),
-    getSecretMeta: vi.fn(),
-    listSecretNames: vi.fn(),
-    setSecret: vi.fn(),
-    deleteSecret: vi.fn(),
-    // biome-ignore lint/suspicious/noExplicitAny: minimal SecretsStore stub
-  } as any;
+  return mock<SecretsStore>();
 }
 
 const ECHO_MANIFEST = `---
