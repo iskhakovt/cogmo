@@ -5,7 +5,7 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import * as codingSchema from "../agent/coding/store/schema.js";
 import * as agentSchema from "../agent/store/schema.js";
-import type { Database } from "../db/index.js";
+import { type Database, type Transactor, transactor } from "../db/index.js";
 import * as mcpSchema from "../mcp/store/schema.js";
 import * as sandboxSchema from "../sandbox/store/schema.js";
 import * as secretsSchema from "../secrets/store/schema.js";
@@ -24,10 +24,17 @@ const schema = {
 
 /**
  * Boot an in-memory PGlite instance with the full schema applied.
- * Returns the Drizzle db and a cleanup function.
+ *
+ * Returns:
+ * - `db` — the Drizzle handle, for direct test setup like `truncateAll`
+ *   or seeding rows that don't go through a store.
+ * - `tx` — a `Transactor` derived from `db`, ready to hand to store
+ *   constructors. Stores never see `db` itself.
+ * - `close` — releases the PGlite client.
  */
 export async function createTestDatabase(): Promise<{
   db: Database;
+  tx: Transactor;
   close: () => Promise<void>;
 }> {
   const client = new PGlite({ extensions: { pg_uuidv7 } });
@@ -45,6 +52,7 @@ export async function createTestDatabase(): Promise<{
 
   return {
     db,
+    tx: transactor(db),
     close: () => client.close(),
   };
 }

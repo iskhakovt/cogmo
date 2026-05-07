@@ -1,6 +1,6 @@
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import type { Database } from "../../db/index.js";
+import type { Database, Transactor } from "../../db/index.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
@@ -8,15 +8,16 @@ import { DrizzleAgentStore } from "./index.js";
 import { messages } from "./schema.js";
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleAgentStore;
 let secretsStore: DrizzleSecretsStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleAgentStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleAgentStore(tx);
   const key = deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/secrets-at-rest/v1");
-  secretsStore = new DrizzleSecretsStore(db, key);
+  secretsStore = new DrizzleSecretsStore(tx, key);
 });
 
 afterEach(async () => {

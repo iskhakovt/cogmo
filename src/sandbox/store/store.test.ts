@@ -1,17 +1,18 @@
 import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import type { Database } from "../../db/index.js";
+import type { Database, Transactor } from "../../db/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { ContainerLabels, ResourceLimits } from "../types.js";
 import { DrizzleSandboxStore } from "./index.js";
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleSandboxStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleSandboxStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleSandboxStore(tx);
 });
 
 afterEach(async () => {

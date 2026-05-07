@@ -17,6 +17,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
 import { UniqueViolationError } from "../agent/store/errors.js";
 import { DrizzleAgentStore } from "../agent/store/index.js";
+import { transactor } from "../db/index.js";
 import * as schema from "../db/schemas.js";
 
 const SUITE = randomBytes(4).toString("hex"); // unique per test run — no collision with seed data
@@ -28,7 +29,7 @@ let store: DrizzleAgentStore;
 
 beforeAll(async () => {
   sql = postgres(inject("databaseUrl"), { max: 4 });
-  store = new DrizzleAgentStore(drizzle(sql, { schema }));
+  store = new DrizzleAgentStore(transactor(drizzle(sql, { schema })));
 });
 
 afterAll(async () => {

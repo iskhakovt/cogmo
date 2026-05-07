@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Docker from "dockerode";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import type { Database } from "../db/index.js";
+import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { LocalInProcessSandbox } from "./index.js";
 import { DrizzleSandboxStore } from "./store/index.js";
@@ -27,6 +27,7 @@ const RESOURCE_LIMITS: ResourceLimits = {
 };
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleSandboxStore;
 let docker: Docker;
@@ -41,8 +42,8 @@ const sandboxes: LocalInProcessSandbox[] = [];
 const testFileInstanceIds: string[] = [];
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleSandboxStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleSandboxStore(tx);
   docker = new Docker();
   workspaceTmp = mkdtempSync(join(tmpdir(), "cogmo-sandbox-it-"));
   writeFileSync(join(workspaceTmp, "marker.txt"), "hello-from-host");

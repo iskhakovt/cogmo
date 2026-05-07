@@ -3,6 +3,7 @@ import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import { pinoNoticeHandler } from "../db/helpers.js";
+import { transactor } from "../db/index.js";
 import * as schema from "../db/schemas.js";
 import { logger } from "../logger.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
@@ -68,10 +69,11 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     await migrate(db, { migrationsFolder: "./migrations" });
     logger.info("migrations applied");
 
-    const agentStore = new DrizzleAgentStore(db);
-    const transportStore = new DrizzleTransportStore(db);
+    const tx = transactor(db);
+    const agentStore = new DrizzleAgentStore(tx);
+    const transportStore = new DrizzleTransportStore(tx);
     const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
-    const secretsStore = new DrizzleSecretsStore(db, encryptionKey);
+    const secretsStore = new DrizzleSecretsStore(tx, encryptionKey);
 
     if (opts.reset) {
       await applyReset(opts.reset, { db });

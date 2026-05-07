@@ -15,6 +15,7 @@ import { randomBytes } from "node:crypto";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { transactor } from "../db/index.js";
 import * as schema from "../db/schemas.js";
 import { HindsightMemoryProvider } from "../memory/hindsight.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
@@ -34,10 +35,11 @@ const BANK_ID = `runner-it-${Date.now()}`;
 beforeAll(async () => {
   sql = postgres(inject("databaseUrl"), { max: 4 });
   const db = drizzle(sql, { schema });
-  store = new DrizzleSkillStore(db);
+  const tx = transactor(db);
+  store = new DrizzleSkillStore(tx);
 
   const key = deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/secrets-at-rest/v1");
-  secretsStore = new DrizzleSecretsStore(db, key);
+  secretsStore = new DrizzleSecretsStore(tx, key);
 
   const hindsightUrl = inject("hindsightUrl");
   memory = new HindsightMemoryProvider(hindsightUrl);

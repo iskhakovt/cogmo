@@ -32,7 +32,7 @@ import { CORE_MEMORY_PROMPT_GUIDANCE, MEMORY_PROMPT_GUIDANCE } from "./agent/ser
 import { DrizzleAgentStore } from "./agent/store/index.js";
 import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
-import { db } from "./db/index.js";
+import { db, transactor } from "./db/index.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
 import type { LlmProvider } from "./llm/provider.js";
@@ -103,9 +103,10 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     logger.info({ path: skillsRepo.path }, "skills bare repo initialized");
   }
 
-  const agentStore = new DrizzleAgentStore(db);
-  const transportStore = new DrizzleTransportStore(db);
-  const sandboxStore = new DrizzleSandboxStore(db);
+  const tx = transactor(db);
+  const agentStore = new DrizzleAgentStore(tx);
+  const transportStore = new DrizzleTransportStore(tx);
+  const sandboxStore = new DrizzleSandboxStore(tx);
 
   // Sandbox is opt-in via SANDBOX_RUNTIME — coding-delegation features fail
   // with a clear error when the env var is unset. No silent fallback.
@@ -155,7 +156,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     );
   }
   const secretsStore = new DrizzleSecretsStore(
-    db,
+    tx,
     deriveMasterKey(parseMasterKey(env.COGMO_MASTER_KEY), "cogmo/secrets-at-rest/v1"),
   );
 
@@ -215,7 +216,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // orchestrator (publisher, runs inside Inngest) and the Telegram
   // delivery adapter (subscriber, slice 2.0g). Single instance per
   // process; both sides look up by taskId.
-  const codingStore = new DrizzleCodingStore(db);
+  const codingStore = new DrizzleCodingStore(tx);
   const codingBackend = new ClaudeCodeBackend();
   const codingStreamingRegistry = new CodingStreamingRegistry();
   const codingServiceFactory = (conversationId: string) =>
@@ -361,7 +362,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // single-user single-bank model). `skillsRepoPath` is what enables the
   // register / rollback flows to read SKILL.md from git and advance
   // `refs/heads/main`.
-  const skillStore = new DrizzleSkillStore(db);
+  const skillStore = new DrizzleSkillStore(tx);
   const skillRunner = await SkillRunnerImpl.create({
     store: skillStore,
     secretsStore,
@@ -387,7 +388,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // every channel's Transport (admin `/mcp` operations). Constructed before
   // startChannels so the same connection pool is reused — duplicate registries
   // would each spawn their own subprocess on first use.
-  const mcpStore = new DrizzleMcpStore(db);
+  const mcpStore = new DrizzleMcpStore(tx);
   const mcpRegistry = new McpRegistryImpl({
     store: mcpStore,
     secrets: secretsStore,

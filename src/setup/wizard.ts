@@ -10,6 +10,7 @@
 import * as p from "@clack/prompts";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ProviderAttrs } from "../agent/store/schema.js";
+import { transactor } from "../db/index.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import {
   DEFAULT_GITHUB_IDENTITY_NAME,
@@ -606,7 +607,7 @@ export async function runWizard(deps: {
   masterKey: string;
 }): Promise<void> {
   const encryptionKey = deriveMasterKey(parseMasterKey(deps.masterKey), "cogmo/secrets-at-rest/v1");
-  const secretsStore = new DrizzleSecretsStore(deps.db, encryptionKey);
+  const secretsStore = new DrizzleSecretsStore(transactor(deps.db), encryptionKey);
 
   const wizardDeps: WizardDeps = {
     agentStore: deps.agentStore,

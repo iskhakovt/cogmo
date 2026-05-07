@@ -3,6 +3,7 @@ import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 import { DrizzleAgentStore } from "./agent/store/index.js";
 import { pinoNoticeHandler } from "./db/helpers.js";
+import { transactor } from "./db/index.js";
 import * as schema from "./db/schemas.js";
 import { logger } from "./logger.js";
 import { seedDefaults } from "./setup/seed.js";
@@ -29,8 +30,9 @@ export async function seed(): Promise<void> {
     await migrate(db, { migrationsFolder: "./migrations" });
     logger.info("migrations applied");
 
-    const agentStore = new DrizzleAgentStore(db);
-    const transportStore = new DrizzleTransportStore(db);
+    const tx = transactor(db);
+    const agentStore = new DrizzleAgentStore(tx);
+    const transportStore = new DrizzleTransportStore(tx);
 
     await seedDefaults(agentStore, transportStore);
     logger.info("seed complete");

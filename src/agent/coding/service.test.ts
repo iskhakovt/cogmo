@@ -1,17 +1,18 @@
 import type { Inngest } from "inngest";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { Database } from "../../db/index.js";
+import type { Database, Transactor } from "../../db/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { createCodingService } from "./service.js";
 import { DrizzleCodingStore } from "./store/index.js";
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleCodingStore;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
-  store = new DrizzleCodingStore(db);
+  ({ db, tx, close } = await createTestDatabase());
+  store = new DrizzleCodingStore(tx);
 });
 
 afterEach(async () => {

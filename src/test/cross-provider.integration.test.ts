@@ -21,6 +21,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
+import { transactor } from "../db/index.js";
 import * as schema from "../db/schemas.js";
 import { FallbackLlmProvider } from "../llm/fallback.js";
 import { createDbProviderResolver } from "../llm/resolver.js";
@@ -51,7 +52,8 @@ let openaiProviderId: string;
 beforeAll(async () => {
   sql = postgres(inject("databaseUrl"), { max: 4 });
   const db = drizzle(sql, { schema });
-  agentStore = new DrizzleAgentStore(db);
+  const tx = transactor(db);
+  agentStore = new DrizzleAgentStore(tx);
   // Read the master key from `process.env` (set by `test/integration-setup.ts`
   // and propagated to test workers). Hardcoding it here would silently break
   // decryption if integration-setup ever rotated the key.
@@ -60,7 +62,7 @@ beforeAll(async () => {
     throw new Error("COGMO_MASTER_KEY missing — should be set by integration-setup.ts");
   }
   secretsStore = new DrizzleSecretsStore(
-    db,
+    tx,
     deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1"),
   );
   llmockBaseUrl = inject("llmockBaseUrl");
