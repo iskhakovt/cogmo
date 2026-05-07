@@ -111,19 +111,40 @@ Admin toggles via psql or the wizard. There is no Transport mutation for `user_s
 
 ## Provider dispatch
 
-At bootstrap, resolve the model → ordered provider list → credentials chain. Every candidate in `listProvidersForModel(model)` is wrapped in a `FallbackLlmProvider` (see [Fallback](#fallback-confirmed)) — consumers receive a plain `LlmProvider` and never see the chain, even when there is only one row (in which case the wrapper is a no-op pass-through).
+Dispatch is **per turn**, not per bootstrap. Bootstrap builds a resolver — a function `(model: string) => Promise<LlmProvider>` — and hands it to `handle-message` and the Observer. Each turn reads the snapshot's model and calls the resolver, so a profile that targets `claude-sonnet-4-6` lands on `AnthropicProvider` while a sibling profile that targets `x-ai/grok-4` on the same conversation table lands on `OpenAICompatibleProvider` — both running in the same process. This is what makes per-profile cross-provider configuration actually work; bootstrap-only resolution silently mis-routes the moment `/model` switches to a model the bootstrap provider can't serve.
+
+The resolver memoizes by model. The first time a model is seen the resolver reads `model_providers`, decrypts each row's secret, and constructs the adapter chain; every subsequent turn for the same model is a `Map` lookup. Adapter instances and decrypted secrets are immutable for a given row, and the single-user deployment never has competing writers, so cache invalidation is unnecessary — DB changes to `model_providers` / `llm_providers` / `secrets` take effect on next process restart. Hot-reload is deferred until there's a workflow that demands it.
+
+Every candidate in `listProvidersForModel(model)` is wrapped in a `FallbackLlmProvider` (see [Fallback](#fallback-confirmed)) — consumers receive a plain `LlmProvider` and never see the chain, even when there is only one row (in which case the wrapper is a no-op pass-through).
 
 ```typescript
-async function resolveProviderForModel(model: string, store: AgentStore): Promise<LlmProvider> {
+type LlmProviderResolver = (model: string) => Promise<LlmProvider>;
+
+function createDbProviderResolver(deps: {
+  agentStore: AgentStore;
+  secretsStore: SecretsStore;
+}): LlmProviderResolver {
+  const cache = new Map<string, Promise<LlmProvider>>();
+  return (model) => {
+    const hit = cache.get(model);
+    if (hit) return hit;
+    const built = buildProvider(model, deps).catch((err) => {
+      cache.delete(model); // don't poison on transient failures
+      throw err;
+    });
+    cache.set(model, built);
+    return built;
+  };
+}
+
+async function buildProvider(model: string, deps): Promise<LlmProvider> {
   // 1. Find every provider for this model, ordered by position (primary first)
-  const rows = await store.listProvidersForModel(model);
-  // → SELECT lp.* FROM model_providers mp
-  //   JOIN llm_providers lp ON mp.provider_id = lp.id
-  //   WHERE mp.model = $model ORDER BY mp.position ASC
+  const rows = await deps.agentStore.listProvidersForModel(model);
+  if (rows.length === 0) throw new Error(`No provider configured for "${model}"`);
 
   // 2. Construct an adapter per row (each has its own credential)
   const providers = await Promise.all(rows.map(async (row) => {
-    const apiKey = await secretsStore.getSecretById(row.secretId);
+    const apiKey = await deps.secretsStore.getSecretById(row.secretId);
     return row.type === "anthropic"
       ? new AnthropicProvider(apiKey, row.baseUrl)
       : new OpenAICompatibleProvider(row.name, { apiKey, baseURL: row.baseUrl, ... });
@@ -134,7 +155,7 @@ async function resolveProviderForModel(model: string, store: AgentStore): Promis
 }
 ```
 
-Provider instances are constructed per bootstrap, not per turn. If hot-swap is needed later, a lazy-loading wrapper can reconstruct on DB change.
+`handle-message` calls the resolver immediately after `load-turn-snapshot` and uses the returned provider for streaming, summarization, and `countTokens`. When `summarization_model` differs from `model`, summarization gets its own resolution — which can land on a different provider entirely (e.g., main turn on Anthropic, summarization on a cheap haiku via OpenRouter). The Observer resolves once per fire against its fixed extraction model.
 
 ## Fallback `[confirmed]`
 

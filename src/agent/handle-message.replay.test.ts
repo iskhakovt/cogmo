@@ -29,6 +29,7 @@ import {
   mockDeliveryRouter,
   mockMemoryProvider,
   mockProvider,
+  mockResolver,
   mockToolRegistry,
   mockTransportStore,
 } from "../test/factories.js";
@@ -68,7 +69,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
   return {
     agentStore: mockAgentStore(),
     transportStore: mockTransportStore(),
-    provider: mockProvider(),
+    resolveProvider: mockResolver(),
     tools: mockToolRegistry(),
     memory: mockMemoryProvider(),
     promptSource: { assemble: vi.fn().mockResolvedValue("system prompt") },
@@ -175,7 +176,7 @@ describe("handle-message — crash recovery / step replay", () => {
       usage: { inputTokens: 10, outputTokens: 5 },
     });
     const deps = mockDeps({
-      provider: mockProvider({ countTokens, chat }),
+      resolveProvider: mockResolver(mockProvider({ countTokens, chat })),
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
         getHistory: vi.fn().mockResolvedValue([

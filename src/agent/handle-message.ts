@@ -4,6 +4,7 @@ import { conversationErrored, inboundReady, responseReady } from "../inngest/eve
 import { isRetriableProviderError } from "../llm/fallback.js";
 import { computeBudget } from "../llm/models.js";
 import type { LlmProvider } from "../llm/provider.js";
+import { type LlmProviderResolver, ProviderConfigError } from "../llm/resolver.js";
 import type { ContentBlock, Message, StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
@@ -32,7 +33,15 @@ import type { ToolRegistry } from "./tools.js";
 export interface HandleMessageDeps {
   agentStore: AgentStore;
   transportStore: TransportStore;
-  provider: LlmProvider;
+  /**
+   * Per-turn provider lookup. Resolved against `snapshot.model` after the
+   * `load-turn-snapshot` step so each turn dispatches to whichever
+   * provider serves the conversation's currently selected model. The
+   * production resolver in `src/llm/resolver.ts` memoizes by model — the
+   * decrypted-secret + adapter cost is paid once per (process, model)
+   * pair, not per turn.
+   */
+  resolveProvider: LlmProviderResolver;
   tools: ToolRegistry;
   memory: MemoryProvider;
   promptSource: PromptSource;
@@ -83,6 +92,27 @@ export interface HandleMessageDeps {
 }
 
 /**
+ * Resolve a provider, rewrapping permanent config errors as
+ * `NonRetriableError` so Inngest aborts on the first attempt instead of
+ * burning all `retries: 2` attempts before `onFailure` notifies the user.
+ * Transient errors (DB blip, network) keep their plain shape and follow
+ * the default retry path.
+ */
+async function resolveOrFail(
+  resolveProvider: LlmProviderResolver,
+  model: string,
+): Promise<LlmProvider> {
+  try {
+    return await resolveProvider(model);
+  } catch (err) {
+    if (err instanceof ProviderConfigError) {
+      throw new NonRetriableError(err.message, { cause: err });
+    }
+    throw err;
+  }
+}
+
+/**
  * Main message pipeline — thin orchestration only.
  *
  * Receives inbound/ready events (debounce router has decided it's time to process).
@@ -93,7 +123,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
   const {
     agentStore,
     transportStore,
-    provider,
+    resolveProvider,
     tools,
     memory,
     promptSource,
@@ -503,6 +533,21 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const model = snapshot.model;
       const budget = computeBudget(model);
 
+      // Per-turn provider dispatch — the snapshot's model determines which
+      // adapter (Anthropic, xAI via OpenAI-compat, etc.) handles the chat,
+      // streaming, and token-counting calls below. Resolved outside any
+      // `step.run` because the resolver returns an `LlmProvider` instance
+      // that isn't JSON-serializable; the production resolver caches by
+      // model, so this is one DB read + one AES decrypt the first time a
+      // model is seen, then a Map lookup for the rest of the process.
+      // `resolveOrFail` rewraps permanent config errors (no routing row,
+      // no secret, malformed `llm_providers` row) as `NonRetriableError`
+      // so Inngest aborts immediately and `onFailure` notifies the user
+      // — no point burning retries on a misconfiguration. See
+      // design/providers.md → Provider dispatch.
+      const provider = await resolveOrFail(resolveProvider, model);
+      const summarizationModel = snapshot.summarizationModel;
+
       // Per-turn tool registry — built-ins from bootstrap + one dynamic tool
       // per live skill + MCP tools resolved against the profile's globs.
       // Rebuilt every turn so registered skills + newly-approved MCP tools
@@ -536,14 +581,27 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           countTokens: (params) => provider.countTokens({ ...params, model }),
           budget,
           summarize: async (system, msgs) => {
+            // Resolve the summarization provider lazily — only when
+            // compaction actually picks the SUMMARIZE strategy. Resolving
+            // eagerly at turn start would surface a misconfigured
+            // `summarizationModel` (missing routing row, missing secret)
+            // as a per-turn failure, even on small messages that never
+            // trigger summarization. The memoized resolver makes this
+            // a `Map` lookup after the first hit per process. Stays
+            // outside the `step.run` below because the provider instance
+            // isn't JSON-serializable.
+            const summarizationProvider =
+              summarizationModel === model
+                ? provider
+                : await resolveOrFail(resolveProvider, summarizationModel);
             // Step ID is hardcoded — relies on `compactMessages` calling
             // `summarize` at most once per invocation (contract on
             // ContextManagerDeps.summarize). If that ever changes, switch to
             // a counter-based ID like `summarize-prefix-${i}` to avoid
             // Inngest's duplicate-step-id error.
             return step.run("summarize-prefix", async () => {
-              const response = await provider.chat({
-                model: snapshot.summarizationModel,
+              const response = await summarizationProvider.chat({
+                model: summarizationModel,
                 system,
                 messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
                 maxTokens: 4096,
