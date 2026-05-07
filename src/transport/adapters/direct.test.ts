@@ -1,5 +1,6 @@
 import { ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import { inngest } from "../../inngest/client.js";
 import { mockAttachmentStore, mockStep, mockTransport } from "../../test/factories.js";
 import { setup } from "./direct.js";
 
@@ -84,6 +85,50 @@ describe("direct adapter", () => {
     it("is a function", async () => {
       const { adapter } = await setupAdapter();
       expect(adapter.deliver).toBeTypeOf("function");
+    });
+  });
+
+  describe("sendVoice", () => {
+    it("emits directOutbound with base64 audio + mediaType, content empty", async () => {
+      const { adapter } = await setupAdapter();
+      const sendSpy = vi.spyOn(inngest, "send").mockResolvedValue({ ids: [] });
+
+      await adapter.sendVoice!("console-0", {
+        audio: Buffer.from([0x4f, 0x67, 0x67, 0x53, 0x01, 0x02]),
+        mediaType: "audio/ogg",
+      });
+
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      const event = sendSpy.mock.calls[0]![0] as { name: string; data: Record<string, unknown> };
+      expect(event.name).toBe("adapter/direct/outbound");
+      expect(event.data).toMatchObject({
+        platformAddress: "console-0",
+        content: "",
+        voice: {
+          mediaType: "audio/ogg",
+        },
+      });
+      // base64-encoded round-trips back to the original bytes — guards
+      // against accidentally serializing the Buffer object itself.
+      const data = (event.data.voice as { data: string }).data;
+      expect(Buffer.from(data, "base64").toString("hex")).toBe("4f6767530102");
+
+      sendSpy.mockRestore();
+    });
+
+    it("does not include images or other fields on the voice event", async () => {
+      const { adapter } = await setupAdapter();
+      const sendSpy = vi.spyOn(inngest, "send").mockResolvedValue({ ids: [] });
+
+      await adapter.sendVoice!("console-0", {
+        audio: Buffer.from("x"),
+        mediaType: "audio/ogg",
+      });
+
+      const event = sendSpy.mock.calls[0]![0] as { data: Record<string, unknown> };
+      expect(event.data).not.toHaveProperty("images");
+
+      sendSpy.mockRestore();
     });
   });
 });

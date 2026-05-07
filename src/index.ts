@@ -69,6 +69,14 @@ export interface BootstrapOptions {
    * SDK uses `globalThis.fetch`.
    */
   falFetchOverride?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  /**
+   * Custom `fetch` for the OpenAI voice provider — used by integration tests
+   * to intercept `/v1/audio/speech` and `/v1/audio/transcriptions` traffic
+   * (see `src/test/openai-voice-mock.ts`). Production wiring leaves this
+   * undefined so the SDK uses `globalThis.fetch`. Scoped to the voice
+   * provider instance only — does not affect Anthropic/S3/etc.
+   */
+  voiceFetchOverride?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }
 
 /**
@@ -444,6 +452,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       const tts = new OpenAIVoiceProvider({
         apiKey: ttsKey,
         ...(voiceCfgRow.ttsBaseUrl && { baseURL: voiceCfgRow.ttsBaseUrl }),
+        ...(opts.voiceFetchOverride && { fetch: opts.voiceFetchOverride }),
       });
       ttsProvider = tts;
       // Reuse the TTS provider for STT only when both keys AND base URLs
@@ -461,6 +470,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
           ? new OpenAIVoiceProvider({
               apiKey: sttKey,
               ...(voiceCfgRow.sttBaseUrl && { baseURL: voiceCfgRow.sttBaseUrl }),
+              ...(opts.voiceFetchOverride && { fetch: opts.voiceFetchOverride }),
             })
           : undefined;
       voiceCfgForTurn = { ttsVoice: voiceCfgRow.ttsVoice, ttsModel: voiceCfgRow.ttsModel };
