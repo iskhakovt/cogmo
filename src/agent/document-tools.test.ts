@@ -1,24 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { createDocumentTools, parseGeneratedDocumentPayload } from "./document-tools.js";
+import type { Service } from "./service.js";
 
-function stubService() {
-  return {
-    memory: {
-      recall: vi.fn().mockResolvedValue({ memories: [] }),
-      retain: vi.fn().mockResolvedValue(undefined),
-      reflect: vi.fn().mockResolvedValue({ answer: "" }),
-    },
-    files: {
-      read: vi.fn(),
-      write: vi.fn(),
-      list: vi.fn(),
-    },
-    coreMemory: {
-      get: vi.fn(),
-      update: vi.fn(),
-    },
-  };
+function stubService(): Service {
+  const svc = mock<Service>();
+  delete svc.coding;
+  delete svc.skills;
+  return svc;
 }
 
 function fakeAttachments(uploadedPath = "generated/abc.md"): AttachmentStore {

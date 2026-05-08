@@ -2,7 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
-import type { ClassifierLog, SkillIo } from "../types.js";
+import type { ClassifierLog, SkillInputs } from "../types.js";
 import { DrizzleSkillStore, type InsertSkillParams, type SkillRow } from "./index.js";
 import { skillDeploys } from "./schema.js";
 
@@ -27,7 +27,7 @@ afterAll(async () => {
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const SHA_NEW = "fedcba9876543210fedcba9876543210fedcba98";
 
-const INPUTS_SCHEMA: SkillIo = {
+const INPUTS_SCHEMA: SkillInputs = {
   type: "object",
   properties: { x: { type: "integer" } },
   required: ["x"],

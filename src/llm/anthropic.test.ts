@@ -568,7 +568,9 @@ describe("AnthropicProvider", () => {
         messages: [{ role: "user", content: "hi" }],
       });
 
-      const callArgs = mockCountTokens.mock.calls[0][0];
+      const firstCall = mockCountTokens.mock.calls[0];
+      if (!firstCall) throw new Error("expected countTokens to have been called");
+      const callArgs = firstCall[0] as { tools?: unknown };
       expect(callArgs.tools).toBeUndefined();
     });
   });

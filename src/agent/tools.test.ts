@@ -1,25 +1,28 @@
 import { describe, expect, it } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { memoryTools } from "./memory-tools.js";
 import type { Service } from "./service.js";
 import { createDefaultTools, defineTool, ToolRegistry } from "./tools.js";
 
-const stubService: Service = {
-  memory: {
-    recall: async () => ({ memories: [] }),
-    retain: async () => {},
-    reflect: async () => ({ answer: "" }),
-  },
-  files: {
-    read: async () => "",
-    write: async () => {},
-    list: async () => [],
-  },
-  coreMemory: {
-    get: async () => [],
-    update: async () => {},
-  },
-};
+// These tests don't read from Service — `mock<Service>()` gives a typed
+// proxy where every method is a vi.fn() returning undefined. Drop the
+// optional sub-namespaces so an accidental call surfaces as an error.
+const stubService: Service = (() => {
+  const svc = mock<Service>();
+  delete svc.coding;
+  delete svc.skills;
+  return svc;
+})();
+
+const TimeResultSchema = z.object({
+  iso: z.string(),
+  dayOfWeek: z.string(),
+  timezone: z.string(),
+  utcOffset: z.string(),
+  date: z.string(),
+  time: z.string(),
+});
 
 describe("ToolRegistry", () => {
   it("registers and retrieves a tool", () => {
@@ -135,7 +138,7 @@ describe("createDefaultTools", () => {
     const spec = registry.get("get_current_time");
     expect(spec).toBeDefined();
     const result = await spec!.handler({}, stubService);
-    const parsed = JSON.parse(result);
+    const parsed = TimeResultSchema.parse(JSON.parse(result));
 
     expect(parsed.iso).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(parsed.dayOfWeek).toBeTruthy();
@@ -149,7 +152,7 @@ describe("createDefaultTools", () => {
     const registry = createDefaultTools([], "America/New_York");
     const spec = registry.get("get_current_time");
     const result = await spec!.handler({}, stubService);
-    const parsed = JSON.parse(result);
+    const parsed = TimeResultSchema.parse(JSON.parse(result));
 
     expect(parsed.timezone).toBe("America/New_York");
   });

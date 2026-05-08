@@ -60,6 +60,7 @@ function fakeCodingStore(overrides: Partial<CodingStore> = {}): CodingStore {
         taskWallTimeSeconds: params.taskWallTimeSeconds,
         maxConcurrentTasks: params.maxConcurrentTasks,
         identityName: params.identityName ?? "default",
+        verifyTimeoutSeconds: params.verifyTimeoutSeconds ?? 600,
         createdAt: new Date(),
       };
       repos.set(params.name, row);

@@ -53,13 +53,20 @@ function streamOf(events: StreamEvent[]): ChatStreamResult {
  * the SDK failing while establishing the stream (pre-stream failure).
  */
 function streamFailsBeforeFirstEvent(err: unknown): ChatStreamResult {
-  async function* gen(): AsyncIterable<StreamEvent> {
-    throw err;
-    // biome-ignore lint/correctness/noUnreachable: needed to give the generator a yield type
-    yield { type: "text_delta", text: "" };
-  }
+  // Plain async iterable — no generator function, so biome's `useYield` rule
+  // doesn't fire on a generator that only throws. The pre-stream failure
+  // surfaces from the very first `next()` call as an awaited rejection.
+  const events: AsyncIterable<StreamEvent> = {
+    [Symbol.asyncIterator]() {
+      return {
+        async next(): Promise<IteratorResult<StreamEvent>> {
+          throw err;
+        },
+      };
+    },
+  };
   return {
-    events: gen(),
+    events,
     response: Promise.reject(err),
   };
 }

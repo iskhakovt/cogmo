@@ -130,7 +130,8 @@ async function insertContainer(opts: {
     }),
   );
   if (opts.status && opts.status !== "starting") {
-    await tx((trx) => store.updateContainerStatus(trx, { id: row.id, status: opts.status }));
+    const status = opts.status;
+    await tx((trx) => store.updateContainerStatus(trx, { id: row.id, status }));
   }
   return row.id;
 }

@@ -6,7 +6,7 @@ import {
   mockStreamingAdapter,
   mockTransportStore,
 } from "../test/factories.js";
-import { createDeliveryRouter, type RoutingContext } from "./delivery-router.js";
+import { type AdapterEntry, createDeliveryRouter, type RoutingContext } from "./delivery-router.js";
 
 const textDelta: StreamEvent = { type: "text_delta", text: "hello" };
 
@@ -107,7 +107,7 @@ describe("createDeliveryRouter", () => {
   });
 
   it("handles no sessions gracefully", async () => {
-    const adapters = new Map();
+    const adapters = new Map<string, AdapterEntry>();
     const transportStore = mockTransportStore();
 
     const router = createDeliveryRouter({
@@ -168,7 +168,7 @@ describe("createDeliveryRouter", () => {
   });
 
   it("skips sessions with unknown channel adapter", async () => {
-    const adapters = new Map(); // empty — no adapters registered
+    const adapters = new Map<string, AdapterEntry>(); // empty — no adapters registered
     const transportStore = mockTransportStore({
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-unknown")]),
     });

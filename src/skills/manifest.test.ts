@@ -95,7 +95,7 @@ budget:
     const result = parseManifest(frontmatter(yaml));
     expect(result.isErr()).toBe(true);
     if (!result.isErr()) return;
-    expect(result.error.kind).toBe("invalid_manifest");
+    if (result.error.kind !== "invalid_manifest") throw new Error("expected invalid_manifest");
     expect(result.error.issues.join("|")).toContain("name");
   });
 
@@ -104,8 +104,8 @@ budget:
     const result = parseManifest(frontmatter(yaml));
     expect(result.isErr()).toBe(true);
     if (!result.isErr()) return;
-    expect(result.error.kind).toBe("invalid_manifest");
-    expect(result.error.issues.some((i) => i.includes("schedule"))).toBe(true);
+    if (result.error.kind !== "invalid_manifest") throw new Error("expected invalid_manifest");
+    expect(result.error.issues.some((i: string) => i.includes("schedule"))).toBe(true);
   });
 
   it("silently drops `isolation` when tier is wasm", () => {

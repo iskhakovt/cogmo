@@ -399,19 +399,20 @@ describe("Dispatcher", () => {
     // in the worker protocol so the dispatcher dropped it silently and the
     // task hung until host wall-clock fired. The fix routes fatal errors
     // through `onError` and the dispatcher rejects immediately.
-    let fireError: ((err: Error) => void) | null = null;
+    const errorHandlers: Array<(err: Error) => void> = [];
     const transport: RpcTransport = {
       postMessage: () => {},
       onMessage: () => {},
       onError: (h) => {
-        fireError = h;
+        errorHandlers.push(h);
       },
       close: () => {},
     };
     const d = new Dispatcher({ transport, ctxHandler: noopHandler() });
     const promise = d.invoke(INVOKE);
-    expect(fireError).not.toBeNull();
-    fireError?.(new Error("transport: maximum buffer reached"));
+    const fireError = errorHandlers[0];
+    if (!fireError) throw new Error("expected onError to have been wired");
+    fireError(new Error("transport: maximum buffer reached"));
     await expect(promise).rejects.toThrow(/transport: maximum buffer reached/);
   });
 });

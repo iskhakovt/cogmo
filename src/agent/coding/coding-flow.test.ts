@@ -245,7 +245,9 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
 
     // Subscribe the test observer to the registry so we can see what the
     // Telegram subscriber would have rendered.
-    registry.subscribe(taskId, (e) => collected.push(e));
+    registry.subscribe(taskId, (e) => {
+      collected.push(e);
+    });
 
     // ── Step 2: orchestrator runs the plan flow ────────────────────────
     const backend = flowBackend({

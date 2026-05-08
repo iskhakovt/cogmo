@@ -56,6 +56,7 @@ describe("encryption", () => {
   it("throws on tampered ciphertext", () => {
     const key = testKey();
     const { ciphertext, nonce } = encrypt(key, "secret");
+    if (ciphertext[0] === undefined) throw new Error("expected non-empty ciphertext");
     ciphertext[0] ^= 0xff; // flip a byte
     expect(() => decrypt(key, ciphertext, nonce)).toThrow();
   });
@@ -63,6 +64,7 @@ describe("encryption", () => {
   it("throws on tampered nonce", () => {
     const key = testKey();
     const { ciphertext, nonce } = encrypt(key, "secret");
+    if (nonce[0] === undefined) throw new Error("expected non-empty nonce");
     nonce[0] ^= 0xff;
     expect(() => decrypt(key, ciphertext, nonce)).toThrow();
   });

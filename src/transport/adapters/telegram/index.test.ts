@@ -170,7 +170,9 @@ describe("telegram adapter", () => {
     await createAdapter();
 
     expect(mockBotApi.setMyCommands).toHaveBeenCalledOnce();
-    const [commands] = mockBotApi.setMyCommands.mock.calls[0];
+    const firstCall = mockBotApi.setMyCommands.mock.calls[0];
+    if (!firstCall) throw new Error("expected setMyCommands to have been called");
+    const [commands] = firstCall;
     const names = (commands as Array<{ command: string; description: string }>).map(
       (c) => c.command,
     );

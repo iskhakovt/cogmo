@@ -1,6 +1,6 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
-import { mockTransport } from "../../../test/factories.js";
+import { type DeepPartial, mockTransportDeep } from "../../../test/factories.js";
 import type { Transport } from "../../transport.js";
 import { handleRepo, type TelegramCommandContext } from "./commands.js";
 import { RepoDialogs } from "./repo-dialog.js";
@@ -14,8 +14,8 @@ function mkCtx(match?: string): TelegramCommandContext & { reply: ReturnType<typ
   };
 }
 
-function transportWith(overrides: Partial<Transport> = {}): Transport {
-  return mockTransport(overrides);
+function transportWith(overrides: DeepPartial<Transport> = {}): Transport {
+  return mockTransportDeep(overrides);
 }
 
 describe("handleRepo", () => {

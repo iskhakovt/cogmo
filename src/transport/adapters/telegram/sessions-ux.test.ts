@@ -26,7 +26,9 @@ function mkProfile(overrides: Partial<Profile> & { id: string; name: string }): 
     summarizationModel: null,
     extractionModel: null,
     autoRecall: "heuristic",
+    voiceMode: "auto",
     toolSet: [],
+    memoryScope: null,
     ...overrides,
   };
 }
@@ -160,7 +162,7 @@ describe("renderConversationStatus", () => {
   });
 
   it("falls back to id tail when no alias is set", () => {
-    const text = renderConversationStatus(mkStatus({ alias: null }), NOW);
+    const text = renderConversationStatus(mkStatus({ alias: undefined }), NOW);
     expect(text).toContain("id aaaabbbb");
   });
 

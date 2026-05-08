@@ -11,7 +11,7 @@ let store: DrizzleMcpStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleMcpStore(tx);
+  store = new DrizzleMcpStore();
 });
 
 afterEach(async () => {
@@ -73,12 +73,17 @@ describe("DrizzleMcpStore", () => {
     });
 
     it("rejects malformed config at the JSONB boundary", async () => {
+      // The runtime Zod schema (StdioConfigSchema) rejects an empty command,
+      // even though the static TypeScript type — derived from the validated
+      // shape via z.infer — only requires `command: string`. The cast lets
+      // us push the malformed value past the type check while still
+      // exercising the JSONB-boundary validation we care about.
+      const broken = { transport: "stdio", command: "", args: [], env: {} } as McpServerConfig;
       await expect(
         tx((trx) =>
           store.addServer(trx, {
             name: "broken",
-            // @ts-expect-error — empty command violates StdioConfigSchema's min(1)
-            config: { transport: "stdio", command: "", args: [], env: {} },
+            config: broken,
             enabled: true,
           }),
         ),

@@ -106,7 +106,7 @@ describe("startExecStreaming", () => {
       opts: {},
     }).then((h) => h.wait());
 
-    const createSessionMock = proc.createSession as unknown as ReturnType<typeof vi.fn>;
+    const createSessionMock = vi.mocked(proc.createSession);
     const sessionIds = createSessionMock.mock.calls.map((c) => c[0]);
     expect(sessionIds).toHaveLength(2);
     expect(sessionIds[0]).not.toBe(sessionIds[1]);
@@ -120,8 +120,8 @@ describe("startExecStreaming", () => {
       cmd: ["echo", "$(rm -rf /)"],
       opts: {},
     }).then((h) => h.wait());
-    const exec = proc.executeSessionCommand as unknown as ReturnType<typeof vi.fn>;
-    const command = exec.mock.calls[0]?.[1].command as string;
+    const exec = vi.mocked(proc.executeSessionCommand);
+    const command = exec.mock.calls[0]?.[1].command;
     // The dangerous payload is wrapped in literal single quotes — bash
     // never parses `$(...)` inside single quotes.
     expect(command).toContain("'$(rm -rf /)'");
@@ -136,8 +136,8 @@ describe("startExecStreaming", () => {
       cmd: ["pwd"],
       opts: { workingDir: "/workspace", env: { GIT_ASKPASS: "/helper" } },
     }).then((h) => h.wait());
-    const exec = proc.executeSessionCommand as unknown as ReturnType<typeof vi.fn>;
-    const command = exec.mock.calls[0]?.[1].command as string;
+    const exec = vi.mocked(proc.executeSessionCommand);
+    const command = exec.mock.calls[0]?.[1].command;
     expect(command).toMatch(/^cd '\/workspace' &&/);
     expect(command).toContain("env 'GIT_ASKPASS'='/helper'");
   });
@@ -151,7 +151,7 @@ describe("startExecStreaming", () => {
     const proc = fakeProcess({ wsReject: new Error("ws closed") });
     let resolveWs: (() => void) | undefined;
     let rejectWs: ((err: Error) => void) | undefined;
-    (proc.getSessionCommandLogs as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+    vi.mocked(proc.getSessionCommandLogs).mockImplementation(
       (_sid: string, _cid: string, onStdout: (c: string) => void) => {
         stdoutCb = onStdout;
         return new Promise<void>((resolve, reject) => {
@@ -160,7 +160,7 @@ describe("startExecStreaming", () => {
         });
       },
     );
-    (proc.deleteSession as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+    vi.mocked(proc.deleteSession).mockImplementation(async () => {
       // Mimic real Daytona: deleteSession tears down the WS, which
       // causes the still-pending logs Promise to reject.
       rejectWs?.(new Error("session deleted"));
@@ -211,10 +211,13 @@ describe("startExecStreaming", () => {
     // Override `getSessionCommand` to return no exitCode — mimics
     // the rare server-side race where the WS closes but the command
     // record hasn't durably captured the exit status yet.
-    (proc.getSessionCommand as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+    // Omit exitCode (rather than setting it to undefined) — exactOptionalPropertyTypes
+    // forbids `= undefined` for an optional property, and the omission is
+    // exactly the runtime shape we're modelling: server-side race where the
+    // command record hasn't durably captured the exit status yet.
+    vi.mocked(proc.getSessionCommand).mockResolvedValue({
       id: "cmd-fake",
       command: "true",
-      exitCode: undefined,
     });
     const handle = await startExecStreaming({
       process: proc,
@@ -238,7 +241,7 @@ describe("startExecStreaming", () => {
     await handle.dispose();
     // deleteSession called at most once via dispose (the natural exit
     // path doesn't call it).
-    const calls = (proc.deleteSession as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
+    const calls = vi.mocked(proc.deleteSession).mock.calls.length;
     expect(calls).toBeLessThanOrEqual(1);
   });
 
@@ -256,9 +259,7 @@ describe("startExecStreaming", () => {
     // Synchronous after write — wait one tick so the underlying
     // promise-based send flushes.
     await new Promise<void>((resolve) => setImmediate(resolve));
-    const sends = (
-      proc.sendSessionCommandInput as unknown as ReturnType<typeof vi.fn>
-    ).mock.calls.map((c) => c[2]);
+    const sends = vi.mocked(proc.sendSessionCommandInput).mock.calls.map((c) => c[2]);
     expect(sends).toContain("hello");
     expect(sends).toContain("world");
     await handle.wait();
@@ -266,7 +267,7 @@ describe("startExecStreaming", () => {
 
   it("throws + tears down the session if executeSessionCommand returns no cmdId", async () => {
     const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
-    (proc.executeSessionCommand as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+    vi.mocked(proc.executeSessionCommand).mockResolvedValue({
       cmdId: "",
     });
     await expect(
@@ -282,9 +283,7 @@ describe("startExecStreaming", () => {
 
   it("tears down the session if executeSessionCommand throws (network blip / daemon error)", async () => {
     const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
-    (proc.executeSessionCommand as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new Error("network down"),
-    );
+    vi.mocked(proc.executeSessionCommand).mockRejectedValue(new Error("network down"));
     await expect(
       startExecStreaming({
         process: proc,
@@ -354,7 +353,7 @@ describe("startExecStreaming", () => {
     // fires its own attempt that succeeds.
     const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
     let attempt = 0;
-    (proc.deleteSession as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+    vi.mocked(proc.deleteSession).mockImplementation(async () => {
       attempt += 1;
       if (attempt === 1) throw new Error("transient daemon error");
     });
@@ -382,7 +381,7 @@ describe("startExecStreaming", () => {
     // loop has B fall through and fire its own attempt.
     const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
     const attempts: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
-    (proc.deleteSession as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
+    vi.mocked(proc.deleteSession).mockImplementation(() => {
       return new Promise<void>((resolve, reject) => {
         attempts.push({ resolve, reject });
       });
@@ -390,7 +389,7 @@ describe("startExecStreaming", () => {
 
     // Hold the WS open so we orchestrate the race manually.
     let rejectWs: ((err: Error) => void) | undefined;
-    (proc.getSessionCommandLogs as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+    vi.mocked(proc.getSessionCommandLogs).mockImplementation(
       () =>
         new Promise<void>((_resolve, reject) => {
           rejectWs = reject;

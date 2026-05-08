@@ -1,6 +1,10 @@
 import type Docker from "dockerode";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
+import type { Transactor } from "../db/index.js";
 import { createSandboxBackend } from "./factory.js";
+import type { CogmoSocketProxy } from "./proxy/index.js";
+import type { SandboxStore } from "./store/index.js";
 
 // The factory thinly dispatches to either `LocalDockerSandboxClient.create`
 // or `DaytonaSandboxClient.create`. We mock both at the module boundary
@@ -29,22 +33,21 @@ describe("createSandboxBackend", () => {
   describe("local-docker", () => {
     it("threads docker / store / runInTx / runtime / instanceId / proxy / askpassBaseDir", async () => {
       localDockerCreate.mockResolvedValue({ backendId: "local-docker" });
-      const docker = {} as Docker;
-      const store = { kind: "store" };
-      const runInTx = vi.fn();
-      const proxy = { kind: "proxy" };
+      // mock<T>() returns a typed Proxy that satisfies the deps interface
+      // without casts. The factory dispatch test never invokes any of these
+      // methods — it only asserts the values are threaded through unchanged.
+      const docker = mock<Docker>();
+      const store = mock<SandboxStore>();
+      const runInTx: Transactor = vi.fn();
+      const proxy = mock<CogmoSocketProxy>();
       await createSandboxBackend({
         backend: "local-docker",
-        // biome-ignore lint/suspicious/noExplicitAny: minimal stub for factory dispatch test
-        docker: docker as any,
-        // biome-ignore lint/suspicious/noExplicitAny: minimal stub
-        store: store as any,
-        // biome-ignore lint/suspicious/noExplicitAny: minimal stub
-        runInTx: runInTx as any,
+        docker,
+        store,
+        runInTx,
         runtime: "runc",
         instanceId: "inst-1",
-        // biome-ignore lint/suspicious/noExplicitAny: minimal stub
-        proxy: proxy as any,
+        proxy,
         askpassBaseDir: "/run/cogmo/askpass",
       });
       expect(localDockerCreate).toHaveBeenCalledTimes(1);
@@ -64,14 +67,12 @@ describe("createSandboxBackend", () => {
     it("omits proxy + askpassBaseDir from the call when not supplied", async () => {
       localDockerCreate.mockClear();
       localDockerCreate.mockResolvedValue({ backendId: "local-docker" });
+      const runInTx: Transactor = vi.fn();
       await createSandboxBackend({
         backend: "local-docker",
-        // biome-ignore lint/suspicious/noExplicitAny: minimal stub
-        docker: {} as any,
-        // biome-ignore lint/suspicious/noExplicitAny: minimal stub
-        store: {} as any,
-        // biome-ignore lint/suspicious/noExplicitAny: minimal stub
-        runInTx: vi.fn() as any,
+        docker: mock<Docker>(),
+        store: mock<SandboxStore>(),
+        runInTx,
         runtime: "runc",
         instanceId: "inst-2",
       });

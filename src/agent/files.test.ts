@@ -6,6 +6,13 @@ function mockS3Client(overrides?: { send?: ReturnType<typeof vi.fn> }) {
   return { send: overrides?.send ?? vi.fn(), destroy: vi.fn() } as any;
 }
 
+function firstSendInput(send: ReturnType<typeof vi.fn>): Record<string, unknown> {
+  const call = send.mock.calls[0];
+  if (!call) throw new Error("expected s3 client send to have been called");
+  const command = call[0] as { input?: Record<string, unknown> };
+  return command.input ?? {};
+}
+
 function mockBody(content: string) {
   return { transformToString: vi.fn().mockResolvedValue(content) };
 }
@@ -19,8 +26,7 @@ describe("createFileService", () => {
       const result = await files.read("notes/test.md");
 
       expect(result).toBe("hello world");
-      const command = send.mock.calls[0][0];
-      expect(command.input).toEqual({ Bucket: "test-bucket", Key: "notes/test.md" });
+      expect(firstSendInput(send)).toEqual({ Bucket: "test-bucket", Key: "notes/test.md" });
     });
 
     it("throws 'File not found' on NoSuchKey", async () => {
@@ -45,8 +51,7 @@ describe("createFileService", () => {
 
       await files.write("notes/new.md", "content here");
 
-      const command = send.mock.calls[0][0];
-      expect(command.input).toMatchObject({
+      expect(firstSendInput(send)).toMatchObject({
         Bucket: "test-bucket",
         Key: "notes/new.md",
         Body: "content here",
@@ -71,8 +76,7 @@ describe("createFileService", () => {
         { path: "notes/a.md", size: 100, lastModified: new Date("2026-01-01") },
         { path: "notes/b.md", size: 200, lastModified: new Date("2026-01-02") },
       ]);
-      const command = send.mock.calls[0][0];
-      expect(command.input).toMatchObject({ Bucket: "test-bucket", Prefix: "notes/" });
+      expect(firstSendInput(send)).toMatchObject({ Bucket: "test-bucket", Prefix: "notes/" });
     });
 
     it("returns empty array when no contents", async () => {
@@ -90,8 +94,7 @@ describe("createFileService", () => {
 
       await files.list();
 
-      const command = send.mock.calls[0][0];
-      expect(command.input).toEqual({ Bucket: "test-bucket" });
+      expect(firstSendInput(send)).toEqual({ Bucket: "test-bucket" });
     });
   });
 });
