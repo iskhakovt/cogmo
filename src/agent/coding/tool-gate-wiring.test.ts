@@ -17,10 +17,11 @@ import { join } from "node:path";
 import type { Inngest } from "inngest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import type {
-  ExecStreamingHandle,
-  LocalDockerSessionState,
-  SandboxClient,
+import {
+  type ExecStreamingHandle,
+  type LocalDockerSessionState,
+  LocalDockerSessionStateSchema,
+  type SandboxClient,
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
@@ -181,8 +182,8 @@ function fakeSandbox(): { sandbox: SandboxClient<LocalDockerSessionState>; stopC
     deleteByTaskId: vi.fn(async (id: string) => {
       stopCalls.push(id);
     }),
-    serializeState: (state) => state as unknown as Record<string, unknown>,
-    deserializeState: (payload) => payload as unknown as LocalDockerSessionState,
+    serializeState: (state) => LocalDockerSessionStateSchema.parse(state),
+    deserializeState: (payload) => LocalDockerSessionStateSchema.parse(payload),
     shutdown: async () => {},
   };
   return { sandbox, stopCalls };

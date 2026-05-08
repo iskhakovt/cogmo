@@ -1,10 +1,11 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type {
-  ExecStreamingHandle,
-  LocalDockerSessionState,
-  SandboxClient,
-  SandboxSession,
+import {
+  type ExecStreamingHandle,
+  type LocalDockerSessionState,
+  LocalDockerSessionStateSchema,
+  type SandboxClient,
+  type SandboxSession,
 } from "../../sandbox/index.js";
 import type { CtxHandler } from "../dispatcher.js";
 import { runOnSysboxContainer } from "./host.js";
@@ -90,8 +91,8 @@ function buildFakeSandbox(): {
     deleteByTaskId: vi.fn(async (id: string) => {
       calls.push(`stopTask:${id}`);
     }),
-    serializeState: (state) => state as unknown as Record<string, unknown>,
-    deserializeState: (payload) => payload as unknown as LocalDockerSessionState,
+    serializeState: (state) => LocalDockerSessionStateSchema.parse(state),
+    deserializeState: (payload) => LocalDockerSessionStateSchema.parse(payload),
     shutdown: vi.fn(),
   };
 

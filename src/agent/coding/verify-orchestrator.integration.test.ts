@@ -36,12 +36,13 @@ import { GenericContainer, type StartedTestContainer, Wait } from "testcontainer
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import type { StepRun } from "../../inngest/index.js";
-import type {
-  ExecStreamingHandle,
-  LocalDockerSessionState,
-  SandboxClient,
-  SandboxSession,
-  SessionSpec,
+import {
+  type ExecStreamingHandle,
+  type LocalDockerSessionState,
+  LocalDockerSessionStateSchema,
+  type SandboxClient,
+  type SandboxSession,
+  type SessionSpec,
 } from "../../sandbox/index.js";
 import {
   type GitHubIdentity,
@@ -323,8 +324,8 @@ function fakeSandbox(opts: { worktreePath: string }): {
       deleteByTaskId: vi.fn(async (taskId) => {
         stopCalls.push(taskId);
       }),
-      serializeState: (state) => state as unknown as Record<string, unknown>,
-      deserializeState: (payload) => payload as unknown as LocalDockerSessionState,
+      serializeState: (state) => LocalDockerSessionStateSchema.parse(state),
+      deserializeState: (payload) => LocalDockerSessionStateSchema.parse(payload),
       shutdown: async () => {},
     },
     createCalls,

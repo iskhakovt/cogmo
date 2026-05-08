@@ -5,11 +5,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import type {
-  ExecStreamingHandle,
-  LocalDockerSessionState,
-  SandboxClient,
-  SandboxSession,
+import {
+  type ExecStreamingHandle,
+  type LocalDockerSessionState,
+  LocalDockerSessionStateSchema,
+  type SandboxClient,
+  type SandboxSession,
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
@@ -178,8 +179,8 @@ function fakeSandbox(): {
     deleteByTaskId: vi.fn(async (taskId) => {
       stopCalls.push(taskId);
     }),
-    serializeState: (state) => state as unknown as Record<string, unknown>,
-    deserializeState: (payload) => payload as unknown as LocalDockerSessionState,
+    serializeState: (state) => LocalDockerSessionStateSchema.parse(state),
+    deserializeState: (payload) => LocalDockerSessionStateSchema.parse(payload),
     shutdown: async () => {},
   };
 

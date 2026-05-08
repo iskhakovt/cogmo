@@ -11,12 +11,13 @@ import type { Octokit } from "@octokit/rest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import type { StepRun } from "../../inngest/index.js";
-import type {
-  ExecOptions,
-  ExecStreamingHandle,
-  LocalDockerSessionState,
-  SandboxClient,
-  SandboxSession,
+import {
+  type ExecOptions,
+  type ExecStreamingHandle,
+  type LocalDockerSessionState,
+  LocalDockerSessionStateSchema,
+  type SandboxClient,
+  type SandboxSession,
 } from "../../sandbox/index.js";
 import {
   type GitHubIdentity,
@@ -127,8 +128,8 @@ function fakeSandbox(
     tryResumeByTaskId: vi.fn(async () => null),
     delete: vi.fn(async () => {}),
     deleteByTaskId: vi.fn(async () => {}),
-    serializeState: (state) => state as unknown as Record<string, unknown>,
-    deserializeState: (payload) => payload as unknown as LocalDockerSessionState,
+    serializeState: (state) => LocalDockerSessionStateSchema.parse(state),
+    deserializeState: (payload) => LocalDockerSessionStateSchema.parse(payload),
     shutdown: vi.fn(),
   };
 }
