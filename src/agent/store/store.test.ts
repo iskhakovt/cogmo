@@ -2152,6 +2152,45 @@ describe("DrizzleAgentStore", () => {
       expect(legacy?.profileClass).toBeNull();
     });
 
+    it("getPendingMemories scopes the profile JOIN by user_id — no cross-user class contamination", async () => {
+      // Defence in depth: if a `pending_memories.profile_id` ever
+      // points at a profile owned by a different user (manual SQL,
+      // future bug, restored backup), the JOIN must NOT surface that
+      // user's `profile_class`. The composite predicate
+      // (profiles.id = pm.profile_id AND profiles.user_id = pm.user_id)
+      // makes such rows fall through to the LEFT JOIN's NULL on the
+      // class dimension.
+      const userA = await seedUser();
+      const userB = await seedUser();
+      // Create a class + profile under userB.
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId: userB, name: "intimate", description: "x" }),
+      );
+      const profileB = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: userB,
+          name: "p",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profileB.id, "intimate"));
+      // Stage a pending row for userA but maliciously pointing at userB's profile.
+      // This shape can't arise via the supported store API, but we simulate
+      // it via a raw insert to test the JOIN's defence.
+      await db.execute(sql`
+        INSERT INTO pending_memories (user_id, profile_id, content, source)
+        VALUES (${userA}::uuid, ${profileB.id}::uuid, 'cross-user payload', 'live_retain')
+      `);
+
+      const rows = await tx((trx) => store.getPendingMemories(trx, userA));
+      expect(rows).toHaveLength(1);
+      // Class MUST NOT leak across the user boundary even though the
+      // profile_id points at a real (other-user) profile with a class.
+      expect(rows[0]?.profileClass).toBeNull();
+    });
+
     it("getPendingMemories surfaces the staging profile's CURRENT class — re-flows on reassignment", async () => {
       // Documents the JOIN's read-current-class semantic: the pending
       // row stores `profile_id`, NOT a snapshot of `profile_class`. So

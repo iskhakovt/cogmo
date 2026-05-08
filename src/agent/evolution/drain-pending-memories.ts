@@ -126,7 +126,12 @@ export function buildRetainItems(rows: ReadonlyArray<ClassifiedRow>): RetainBatc
       `network:${r.tags.network}`,
       `compartment:${r.tags.compartment}`,
       `trust:${r.tags.trust}`,
-      ...(r.profileClass !== null ? [`profile_class:${r.profileClass}`] : []),
+      // Guard against `undefined` (not just `null`) — Inngest serializes
+      // step output to JSON; an in-flight run started under earlier code
+      // that didn't include `profileClass` on `ClassifiedRow` will
+      // deserialize with `profileClass: undefined` on retry. Bare
+      // `!== null` would slip through and emit `profile_class:undefined`.
+      ...(typeof r.profileClass === "string" ? [`profile_class:${r.profileClass}`] : []),
     ],
     metadata: { source: r.source },
     observationScopes: "per_tag" as const,

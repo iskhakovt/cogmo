@@ -1735,7 +1735,23 @@ export class DrizzleAgentStore implements AgentStore {
         createdAt: pendingMemories.createdAt,
       })
       .from(pendingMemories)
-      .leftJoin(profiles, eq(profiles.id, pendingMemories.profileId))
+      // Defence in depth on the join: require the joined profile to
+      // belong to the SAME user as the pending row. The FK on
+      // `pending_memories.profile_id → profiles.id` doesn't enforce
+      // user ownership (profiles.user_id is independent), so if a row
+      // ever drifts (manual SQL, future bug, data corruption) and
+      // points to another user's profile, we'd otherwise surface that
+      // user's `profile_class` here and leak across the speaker
+      // boundary at retain time. With the second predicate, a
+      // mismatched row falls back to NULL on the join and stamps
+      // untagged on the class dimension.
+      .leftJoin(
+        profiles,
+        and(
+          eq(profiles.id, pendingMemories.profileId),
+          eq(profiles.userId, pendingMemories.userId),
+        ),
+      )
       .where(eq(pendingMemories.userId, userId))
       // Secondary sort by id breaks createdAt ties — bulk inserts share a
       // timestamp, but UUIDv7 ids are time-ordered, so the tiebreak preserves

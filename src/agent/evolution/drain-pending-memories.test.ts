@@ -236,6 +236,23 @@ describe("buildRetainItems", () => {
     expect(items[0]?.tags).toEqual(["network:bank", "compartment:personal", "trust:first-party"]);
   });
 
+  it("treats undefined profileClass as untagged (Inngest replay safety)", () => {
+    // Regression: a row from an in-flight Inngest run started under
+    // earlier code that didn't include `profileClass` on ClassifiedRow
+    // deserializes with the field as `undefined`, not `null`. The bare
+    // `!== null` check would slip past it and emit
+    // `profile_class:undefined`. The typeof guard rejects both.
+    // Reconstruct without the `profileClass` key — the actual shape
+    // Inngest replay yields (the field is missing entirely on the
+    // deserialized object), which is what `typeof === "string"` is
+    // guarding against. `_dropped` rebinds via destructuring without
+    // tripping `noUnusedLocals` on the discard.
+    const { profileClass: _dropped, ...withoutClass } = classified();
+    void _dropped;
+    const items = buildRetainItems([withoutClass as ClassifiedRow]);
+    expect(items[0]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
+  });
+
   it("stamps each row with its OWN class — speaker isolation under mixed batches", () => {
     // Regression for the bug where a single drain batch containing rows
     // staged by different profiles got tagged with the firing

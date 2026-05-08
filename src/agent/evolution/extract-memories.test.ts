@@ -188,4 +188,22 @@ describe("extractMemories", () => {
     const items = call?.[1] ?? [];
     expect(items[0]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
   });
+
+  it("omits profile_class tag when profileClass is undefined (Inngest replay safety)", async () => {
+    // The signature is `string | null`, but Inngest's step memoization
+    // can replay this function with a stale shape that drops the arg —
+    // arriving as `undefined`. Bare `!== null` would emit
+    // `profile_class:undefined`; the typeof guard catches both.
+    const deps = mockExtractionDeps({
+      memories: [
+        { fact: "a fact", network: "world", compartment: "technical", trust: "first-party" },
+      ],
+    });
+
+    await extractMemories(sampleHistory, "user-1", undefined as unknown as string | null, deps);
+
+    const call = vi.mocked(deps.memory.retainBatch).mock.calls[0];
+    const items = call?.[1] ?? [];
+    expect(items[0]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
+  });
 });

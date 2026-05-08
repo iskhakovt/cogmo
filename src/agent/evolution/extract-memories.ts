@@ -80,7 +80,12 @@ export async function extractMemories(
       `network:${mem.network}`,
       `compartment:${mem.compartment}`,
       `trust:${mem.trust}`,
-      ...(profileClass !== null ? [`profile_class:${profileClass}`] : []),
+      // typeof guard not just `!== null` — Inngest's step memoization
+      // can replay this function with a stale arg shape across rolling
+      // deploys, where a missing `profileClass` deserializes as
+      // `undefined` and `undefined !== null` would emit
+      // `profile_class:undefined`.
+      ...(typeof profileClass === "string" ? [`profile_class:${profileClass}`] : []),
     ],
     metadata: { source: "conversation" },
     observationScopes: "per_tag" as const,
