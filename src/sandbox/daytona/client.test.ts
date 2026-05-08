@@ -1,4 +1,8 @@
-import { type Sandbox as DaytonaSdkSandbox, SandboxState } from "@daytonaio/sdk";
+import {
+  DaytonaNotFoundError,
+  type Sandbox as DaytonaSdkSandbox,
+  SandboxState,
+} from "@daytonaio/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionSpec } from "../index.js";
 import { DaytonaSandboxClient } from "./client.js";
@@ -324,6 +328,166 @@ describe("DaytonaSandboxClient", () => {
       const client = await makeClient();
       expect(() => client.deserializeState({ type: "wrong" })).toThrow();
       expect(() => client.deserializeState({ type: "daytona" })).toThrow();
+    });
+  });
+
+  describe("resume — sandbox not found upstream", () => {
+    it("propagates DaytonaNotFoundError from daytona.get without crashing", async () => {
+      // Operator deleted the sandbox out-of-band, or autoDeleteInterval
+      // reaped it past archive. `daytona.get` 404s and the SDK wraps
+      // it in a DaytonaNotFoundError; resume() must let that bubble so
+      // the orchestrator can mark the task failed instead of hanging.
+      daytonaCalls.get.mockRejectedValue(new DaytonaNotFoundError("Sandbox not found"));
+      const client = await makeClient();
+      await expect(
+        client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-gone" }),
+      ).rejects.toBeInstanceOf(DaytonaNotFoundError);
+    });
+  });
+
+  describe("keepalive ticker (fake timers)", () => {
+    it("calls refreshActivity every KEEPALIVE_INTERVAL_MS while alive", async () => {
+      vi.useFakeTimers();
+      try {
+        const sb = fakeSandbox({ id: "sb-keep", state: SandboxState.STARTED });
+        daytonaCalls.create.mockResolvedValue(sb);
+        const client = await makeClient();
+        // 30 minutes — well beyond the first few intervals so we can
+        // observe the ticker fire without hitting the deadline branch.
+        await client.create({ ...BASE_SPEC, expiresAt: new Date(Date.now() + 30 * 60_000) });
+
+        // Advance past the first interval (5 min) and wait one
+        // microtask cycle for the catch on `refreshActivity()` to run.
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("self-stops once Date.now() passes expiresAt — auto-stop reaper takes over", async () => {
+      vi.useFakeTimers();
+      try {
+        const sb = fakeSandbox({ id: "sb-bound", state: SandboxState.STARTED });
+        daytonaCalls.create.mockResolvedValue(sb);
+        const client = await makeClient();
+        // 10-minute deadline. KEEPALIVE_INTERVAL_MS is 5 min so the
+        // ticker fires once at t=5 (within deadline) and then again
+        // at t=10 (boundary — but Date.now() === expiresAt is NOT
+        // past, so this fires too); the t=15 fire is past the
+        // deadline and self-stops without calling refreshActivity.
+        await client.create({ ...BASE_SPEC, expiresAt: new Date(Date.now() + 10 * 60_000) });
+
+        // t=5: within deadline → fires.
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(1);
+
+        // t=10: at deadline (Date.now() === expiresAtMs, so NOT
+        // strictly greater) → fires once more.
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(2);
+
+        // t=15: past deadline → self-stops, no further calls.
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resume-derived sessions have unbounded keepalive (no expiresAt known)", async () => {
+      vi.useFakeTimers();
+      try {
+        const sb = fakeSandbox({ id: "sb-resumed", state: SandboxState.STARTED });
+        daytonaCalls.get.mockResolvedValue(sb);
+        const client = await makeClient();
+        await client.resume({
+          type: "daytona",
+          taskId: "t-resume",
+          sandboxId: "sb-resumed",
+        });
+
+        // Advance well past where a deadline-bounded ticker would
+        // have stopped (the BASE_SPEC's 1h would have been the
+        // ceiling). Resume should keep firing.
+        for (let i = 0; i < 20; i++) {
+          await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        }
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(20);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("delete(session) stops the keepalive — no more refreshActivity firings", async () => {
+      vi.useFakeTimers();
+      try {
+        const sb = fakeSandbox({ id: "sb-del", state: SandboxState.STARTED });
+        daytonaCalls.create.mockResolvedValue(sb);
+        daytonaCalls.list.mockResolvedValue({
+          items: [sb],
+          totalPages: 1,
+          currentPage: 1,
+          totalItems: 1,
+          itemsPerPage: 50,
+        });
+        const client = await makeClient();
+        const session = await client.create({
+          ...BASE_SPEC,
+          expiresAt: new Date(Date.now() + 60 * 60_000),
+        });
+
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(1);
+
+        await client.delete(session);
+
+        // Run more time. Refresh count must NOT advance.
+        await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe("shutdown", () => {
+    it("clears every pending keepalive timer", async () => {
+      vi.useFakeTimers();
+      try {
+        const sbA = fakeSandbox({ id: "sb-A", state: SandboxState.STARTED });
+        const sbB = fakeSandbox({ id: "sb-B", state: SandboxState.STARTED });
+        // Two consecutive `create()`s mint two different keepalives.
+        daytonaCalls.create.mockResolvedValueOnce(sbA).mockResolvedValueOnce(sbB);
+        const client = await makeClient();
+        await client.create({
+          ...BASE_SPEC,
+          taskId: "019d0000-0000-7000-8000-00000000aaaa",
+          expiresAt: new Date(Date.now() + 60 * 60_000),
+        });
+        await client.create({
+          ...BASE_SPEC,
+          taskId: "019d0000-0000-7000-8000-00000000bbbb",
+          expiresAt: new Date(Date.now() + 60 * 60_000),
+        });
+
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        expect(sbA.refreshActivity).toHaveBeenCalledTimes(1);
+        expect(sbB.refreshActivity).toHaveBeenCalledTimes(1);
+
+        await client.shutdown();
+
+        await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+        // Neither timer fires after shutdown.
+        expect(sbA.refreshActivity).toHaveBeenCalledTimes(1);
+        expect(sbB.refreshActivity).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

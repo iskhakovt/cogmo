@@ -272,6 +272,30 @@ describe("startExecStreaming", () => {
     expect(proc.deleteSession).toHaveBeenCalledTimes(1);
   });
 
+  it("upstream WS error rejects wait() AND deletes the session (no leak on real failure)", async () => {
+    const proc = fakeProcess({
+      wsReject: new Error("transient WS drop"),
+      exitCode: 0,
+    });
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: {},
+    });
+    // Attach an `'error'` absorber on the demuxed streams — the
+    // wrapper calls `stream.destroy(err)` on a real error, which
+    // would crash the test if no listener was attached. Production
+    // consumers (DaytonaSandboxSession.exec) attach a no-op error
+    // listener for this exact reason.
+    handle.stdout.on("error", () => {});
+    handle.stderr.on("error", () => {});
+    await expect(handle.wait()).rejects.toThrow(/transient WS drop/);
+    // Wait for the cleanup chained off the WS rejection.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(proc.deleteSession).toHaveBeenCalledTimes(1);
+  });
+
   it("session cleanup is idempotent — dispose after natural exit doesn't double-delete", async () => {
     const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
     const handle = await startExecStreaming({
