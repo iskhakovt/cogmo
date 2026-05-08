@@ -240,4 +240,49 @@ describe("startExecStreaming", () => {
     ).rejects.toThrow(/no cmdId/);
     expect(proc.deleteSession).toHaveBeenCalled();
   });
+
+  it("tears down the session if executeSessionCommand throws (network blip / daemon error)", async () => {
+    const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
+    (proc.executeSessionCommand as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("network down"),
+    );
+    await expect(
+      startExecStreaming({
+        process: proc,
+        sessionIdPrefix: "p",
+        cmd: ["echo"],
+        opts: {},
+      }),
+    ).rejects.toThrow(/network down/);
+    expect(proc.deleteSession).toHaveBeenCalled();
+  });
+
+  it("deletes the session on natural success — no leak across exec calls", async () => {
+    const proc = fakeProcess({ wsResolve: { stdoutChunks: ["ok\n"] }, exitCode: 0 });
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: {},
+    });
+    handle.stdout.on("data", () => {});
+    await handle.wait();
+    // Wait one tick for the cleanup chained off the WS resolve.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(proc.deleteSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("session cleanup is idempotent — dispose after natural exit doesn't double-delete", async () => {
+    const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: {},
+    });
+    await handle.wait();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await handle.dispose();
+    expect(proc.deleteSession).toHaveBeenCalledTimes(1);
+  });
 });

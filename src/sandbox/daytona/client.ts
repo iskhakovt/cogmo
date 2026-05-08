@@ -66,6 +66,9 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
    * Per-sandbox keepalive timers. `refreshActivity()` resets the
    * sandbox's auto-stop countdown so multi-minute coding tasks don't
    * get reaped mid-flight by Daytona's default 15-min idle policy.
+   * The timer self-stops once `Date.now()` passes the session's
+   * `expiresAt` so the auto-stop reaper can do its job; the entry
+   * also gets cleared on `delete` / `deleteByTaskId` / `shutdown`.
    */
   #keepalives = new Map<string, NodeJS.Timeout>();
 
@@ -148,7 +151,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
       resources: resourcesFromLimits(spec.resourceLimits),
     });
 
-    return this.#wrap(sdkSandbox, spec.taskId);
+    return this.#wrap(sdkSandbox, spec.taskId, spec.expiresAt);
   }
 
   async resume(state: DaytonaSessionState): Promise<SandboxSession<DaytonaSessionState>> {
@@ -193,6 +196,12 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
   }
 
   async delete(session: SandboxSession<DaytonaSessionState>): Promise<void> {
+    // Stop the keepalive by sandboxId BEFORE the cascade list call, so
+    // that a missing-on-provider sandbox (already auto-stopped + reaped
+    // before we got here) still has its in-process timer torn down.
+    // `deleteByTaskId` also calls `#stopKeepalive` per item it finds —
+    // the duplicate is a no-op via the `if (handle)` guard.
+    this.#stopKeepalive(session.state.sandboxId);
     await this.deleteByTaskId(session.state.taskId);
   }
 
@@ -232,28 +241,48 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
 
   // ── internals ───────────────────────────────────────────────────────
 
-  #wrap(sdkSandbox: DaytonaSdkSandbox, taskId: string): SandboxSession<DaytonaSessionState> {
-    this.#startKeepalive(sdkSandbox);
+  #wrap(
+    sdkSandbox: DaytonaSdkSandbox,
+    taskId: string,
+    expiresAt?: Date,
+  ): SandboxSession<DaytonaSessionState> {
+    this.#startKeepalive(sdkSandbox, expiresAt);
     return new DaytonaSandboxSession({
       state: { type: "daytona", taskId, sandboxId: sdkSandbox.id },
       sdkSandbox,
     });
   }
 
-  #startKeepalive(sdkSandbox: DaytonaSdkSandbox): void {
+  /**
+   * Start a per-sandbox keepalive ticker. When `expiresAt` is provided
+   * (the create() path), the ticker self-stops once the deadline
+   * passes — at that point we WANT Daytona's auto-stop reaper to take
+   * over, so calling `refreshActivity()` past the deadline would
+   * defeat the explicit task budget. When `expiresAt` is omitted (the
+   * resume() / tryResumeByTaskId() paths — operator brought the
+   * sandbox back, intent is unclear), the ticker fires unconditionally
+   * and only stops on `delete` / `shutdown`.
+   */
+  #startKeepalive(sdkSandbox: DaytonaSdkSandbox, expiresAt?: Date): void {
     if (this.#keepalives.has(sdkSandbox.id)) return;
+    const expiresAtMs = expiresAt?.getTime();
+    const sandboxId = sdkSandbox.id;
     const handle = setInterval(() => {
+      if (expiresAtMs !== undefined && Date.now() > expiresAtMs) {
+        // Deadline passed; stop refreshing. The sandbox's own
+        // `autoStopInterval` (set at create-time from the same
+        // `expiresAt`) will reap it shortly.
+        this.#stopKeepalive(sandboxId);
+        return;
+      }
       sdkSandbox.refreshActivity().catch((err: unknown) => {
-        log.warn(
-          { err: (err as Error).message, sandboxId: sdkSandbox.id },
-          "refreshActivity failed",
-        );
+        log.warn({ err: (err as Error).message, sandboxId }, "refreshActivity failed");
       });
     }, KEEPALIVE_INTERVAL_MS);
     // setInterval keeps the event loop alive; unref so the process can
     // exit cleanly when the keepalive is the only remaining handle.
     handle.unref();
-    this.#keepalives.set(sdkSandbox.id, handle);
+    this.#keepalives.set(sandboxId, handle);
   }
 
   #stopKeepalive(sandboxId: string): void {

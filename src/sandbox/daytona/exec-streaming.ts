@@ -46,10 +46,28 @@ export async function startExecStreaming(args: {
   const { process: daytonaProcess, sessionIdPrefix, cmd, opts, onClose } = args;
 
   // Per-call session — `deleteSession` is the only kill primitive Daytona
-  // offers, and we want it to affect only this command. Crypto-random
-  // suffix avoids collisions across rapid-fire execs.
+  // offers, and we want it to affect only this command. Random suffix
+  // avoids collisions across rapid-fire execs.
   const sessionId = `${sessionIdPrefix}-${randomSuffix()}`;
   await daytonaProcess.createSession(sessionId);
+
+  // Idempotent session teardown. Called from every termination path —
+  // natural WS close (success), WS error (real upstream failure), and
+  // explicit `dispose()`. Without it, sessions leak per `execStreaming`
+  // call: Daytona quotas + per-org sandbox-session limits would bite
+  // the deployer eventually. The first caller wins; subsequent calls
+  // short-circuit so we never get the "already gone" error from a
+  // racing call.
+  let cleanedUp = false;
+  const cleanupSession = async (): Promise<void> => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    try {
+      await daytonaProcess.deleteSession(sessionId);
+    } catch (err) {
+      log.warn({ err: (err as Error).message, sessionId }, "deleteSession during cleanup failed");
+    }
+  };
 
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -60,14 +78,22 @@ export async function startExecStreaming(args: {
   // by bash.
   const command = buildShellCommand(cmd, opts);
 
-  const startResp = await daytonaProcess.executeSessionCommand(sessionId, {
-    command,
-    runAsync: true,
-  });
-  const commandId = startResp.cmdId;
-  if (!commandId) {
-    await daytonaProcess.deleteSession(sessionId).catch(() => {});
-    throw new Error("daytona executeSessionCommand returned no cmdId");
+  // If the kickoff itself fails (network blip, daemon error), the
+  // session we just created would orphan unless we explicitly clean it
+  // up before re-throwing. Wrap in try/catch.
+  let commandId: string;
+  try {
+    const startResp = await daytonaProcess.executeSessionCommand(sessionId, {
+      command,
+      runAsync: true,
+    });
+    if (!startResp.cmdId) {
+      throw new Error("daytona executeSessionCommand returned no cmdId");
+    }
+    commandId = startResp.cmdId;
+  } catch (err) {
+    await cleanupSession();
+    throw err;
   }
 
   // Open the streaming WebSocket. The promise resolves when the WS closes
@@ -87,7 +113,8 @@ export async function startExecStreaming(args: {
 
   // The exit channel: WS close → fetch `getSessionCommand` for the exit
   // code. If WS errored, surface the error (consumers may have already
-  // received partial output via stdout/stderr).
+  // received partial output via stdout/stderr). Every settle path runs
+  // `cleanupSession` so per-call Daytona sessions don't leak.
   let disposed = false;
   const exitPromise = new Promise<{ exitCode: number }>((resolve, reject) => {
     wsPromise
@@ -100,12 +127,14 @@ export async function startExecStreaming(args: {
           // Daytona's Command may not have an exitCode if disposed early.
           // Treat undefined as "we killed it" → use 137 (SIGKILL convention).
           const exitCode = cmd.exitCode ?? (disposed ? 137 : 0);
+          await cleanupSession();
           resolve({ exitCode });
         } catch (err) {
+          await cleanupSession();
           reject(err as Error);
         }
       })
-      .catch((err: Error) => {
+      .catch(async (err: Error) => {
         if (disposed) {
           // Expected — dispose tore down the WS. Resolve with sentinel.
           stdout.end();
@@ -117,6 +146,7 @@ export async function startExecStreaming(args: {
         stdout.destroy(err);
         stderr.destroy(err);
         if (onClose) onClose();
+        await cleanupSession();
         reject(err);
       });
   });
@@ -126,18 +156,12 @@ export async function startExecStreaming(args: {
   const dispose = async (): Promise<void> => {
     if (disposed) return;
     disposed = true;
-    try {
-      // Tear down the session — Daytona's only kill path. The WS closes,
-      // wsPromise rejects, and exitPromise resolves with 137 above.
-      await daytonaProcess.deleteSession(sessionId);
-    } catch (err) {
-      // Already gone, daemon error, etc. — log and move on. Consumers
-      // racing dispose against natural exit will resolve normally.
-      log.warn(
-        { err: (err as Error).message, sessionId, commandId },
-        "deleteSession during dispose failed",
-      );
-    }
+    // `cleanupSession` is the canonical teardown — also called by the
+    // natural-exit path above, so this is idempotent. Tearing down the
+    // session also closes the WS, which triggers the rejection branch
+    // above; that branch sees `disposed=true` and resolves the exit
+    // promise with sentinel 137.
+    await cleanupSession();
     // Cap the wait so dispose can't hang forever if Daytona's WS stays
     // half-open after deleteSession (unlikely but cheap insurance).
     await Promise.race([

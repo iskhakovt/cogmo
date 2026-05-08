@@ -101,17 +101,32 @@ type ExecResult = {
 };
 
 /**
- * Streaming exec handle. Yields lines as the command produces them; await
- * `wait()` for the exit code once the stream completes. Call `dispose()`
- * to kill a runaway exec — it sends SIGTERM (then SIGKILL after a short
- * grace period), closes the stream, and resolves once the backend has
- * confirmed teardown. Idempotent. Implicit on session `cleanup()`, but
- * the orchestrator may call it earlier (timeout, user cancel).
+ * Streaming exec handle. `stdout` / `stderr` are demultiplexed Node
+ * `Readable`s — backends produce them via the appropriate transport
+ * (dockerode demux for Local-Docker, session-logs WS + manual demux for
+ * Daytona). Awaiting `wait()` resolves with the exit code once the
+ * backend reports the process finished.
+ *
+ * `dispose()` aborts the exec by tearing down the backend's transport
+ * (Docker exec API has no direct kill — closing the hijacked socket
+ * lets the daemon reap the process; Daytona's only kill primitive is
+ * `deleteSession`). It does NOT send signals; backends that grow
+ * signal support may upgrade the implementation but not the contract.
+ * Idempotent. After `dispose()`, the streams emit EOF (no error on
+ * `stdout` / `stderr`) and `wait()` rejects with `DisposedError` —
+ * callers racing dispose against natural exit must check for that.
+ *
+ * Consumers wanting line semantics do their own line splitter
+ * (`split2` etc.) on the `Readable`s — backends emit per-chunk, not
+ * per-line.
  */
-type ExecStreamingHandle = AsyncIterable<{ stream: "stdout" | "stderr"; line: string }> & {
+interface ExecStreamingHandle {
+  stdin?: Writable;
+  stdout: Readable;
+  stderr: Readable;
   wait(): Promise<{ exitCode: number }>;
   dispose(): Promise<void>;
-};
+}
 ```
 
 ### Discriminated options and state
@@ -144,7 +159,7 @@ Hard transport differences (how working-tree material moves into the sandbox) li
 | Userns isolation | sysbox (default) | provider-owned |
 | Cogmo cgroup parent | yes | n/a |
 | Cogmo Docker proxy | yes | n/a |
-| `ensureImagePresent` | dockerode inspect + pull | registry-reachability check |
+| `ensureImagePresent` | dockerode inspect + pull | no-op (Daytona builds + snapshots on first `create()`; no separate probe in the SDK) |
 | Buffered exec | dockerode | `executeCommand` |
 | Streaming exec | dockerode demux | session-logs WebSocket + `stdbuf` |
 | `resume(state)` | container-id inspect | sandbox-id rehydrate |

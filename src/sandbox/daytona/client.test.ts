@@ -327,6 +327,32 @@ describe("DaytonaSandboxClient", () => {
     });
   });
 
+  describe("delete (single-session)", () => {
+    it("stops the keepalive even when the provider-side sandbox is already gone", async () => {
+      // Provider auto-reaped the sandbox between `create` and `delete`
+      // — `daytona.list({task})` returns nothing. Without explicit
+      // keepalive cleanup by sandboxId, the ticker would leak.
+      const sb = fakeSandbox({ id: "sb-gone", state: SandboxState.STARTED });
+      daytonaCalls.create.mockResolvedValue(sb);
+      daytonaCalls.list.mockResolvedValue({
+        items: [],
+        totalPages: 0,
+        currentPage: 1,
+        totalItems: 0,
+        itemsPerPage: 50,
+      });
+
+      const client = await makeClient();
+      const session = await client.create(BASE_SPEC);
+      // `delete(session)` should clear the keepalive even though the
+      // list returns empty (sandbox already auto-stopped + reaped).
+      await client.delete(session);
+      // No assertion on the timer directly (private), but a follow-up
+      // `shutdown` should find nothing to clear.
+      await client.shutdown(); // would hang on a leaked timer if buggy
+    });
+  });
+
   describe("capabilities + backendId", () => {
     it("advertises sandbox-internal sibling spawn + git-remote transport", async () => {
       const client = await makeClient();

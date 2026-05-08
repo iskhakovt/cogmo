@@ -33,14 +33,30 @@ export class DaytonaSandboxSession implements SandboxSession<DaytonaSessionState
     const stderrBuf = new BoundedBuffer(EXEC_BUFFER_LIMIT_BYTES);
     handle.stdout.on("data", (chunk: Buffer | string) => stdoutBuf.push(toBuffer(chunk)));
     handle.stderr.on("data", (chunk: Buffer | string) => stderrBuf.push(toBuffer(chunk)));
-    const { exitCode } = await handle.wait();
-    return {
-      stdout: stdoutBuf.toString(),
-      stderr: stderrBuf.toString(),
-      exitCode,
-      wallTimeSeconds: (Date.now() - start) / 1000,
-      truncated: stdoutBuf.truncated || stderrBuf.truncated,
-    };
+    // Attach no-op `'error'` listeners so a stream `destroy(err)` from a
+    // real upstream failure (network drop, daemon refused) doesn't fire
+    // an unhandled `'error'` event that crashes the worker. The actual
+    // error still propagates via the `wait()` rejection below — these
+    // handlers exist only to absorb the per-stream notification.
+    handle.stdout.on("error", () => {});
+    handle.stderr.on("error", () => {});
+    try {
+      const { exitCode } = await handle.wait();
+      return {
+        stdout: stdoutBuf.toString(),
+        stderr: stderrBuf.toString(),
+        exitCode,
+        wallTimeSeconds: (Date.now() - start) / 1000,
+        truncated: stdoutBuf.truncated || stderrBuf.truncated,
+      };
+    } finally {
+      // Defensive: the streaming wrapper deletes its per-call Daytona
+      // session on natural exit too, so this is usually a no-op. But
+      // if `wait()` threw before the WS resolve fired (mid-stream
+      // error path), the cleanup hadn't run yet — `dispose()` here
+      // makes sure we never leak a session.
+      await handle.dispose();
+    }
   }
 
   async execStreaming(
