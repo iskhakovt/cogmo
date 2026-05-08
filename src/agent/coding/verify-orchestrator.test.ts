@@ -11,7 +11,14 @@ import type { Octokit } from "@octokit/rest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import type { StepRun } from "../../inngest/index.js";
-import type { ExecHandle, ExecOptions, Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
+import {
+  type ExecOptions,
+  type ExecStreamingHandle,
+  type LocalDockerSessionState,
+  LocalDockerSessionStateSchema,
+  type SandboxClient,
+  type SandboxSession,
+} from "../../sandbox/index.js";
 import {
   type GitHubIdentity,
   gitHubIdentitySecretName,
@@ -48,7 +55,7 @@ interface FakeExecResult {
   exitCode?: number;
 }
 
-function fakeExec(result: FakeExecResult): ExecHandle {
+function fakeExec(result: FakeExecResult): ExecStreamingHandle {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   if (result.stdout) stdout.write(result.stdout);
@@ -59,6 +66,7 @@ function fakeExec(result: FakeExecResult): ExecHandle {
     stdout: stdout as Readable,
     stderr: stderr as Readable,
     wait: vi.fn(async () => ({ exitCode: result.exitCode ?? 0 })),
+    dispose: vi.fn(async () => {}),
   };
 }
 
@@ -69,8 +77,8 @@ interface FakeContainerScript {
   git: Record<string, FakeExecResult>;
 }
 
-function fakeContainerHandle(script: FakeContainerScript): TaskContainerHandle {
-  const exec = vi.fn(async (cmd: ReadonlyArray<string>, _opts?: ExecOptions) => {
+function fakeContainerHandle(script: FakeContainerScript): SandboxSession<LocalDockerSessionState> {
+  const execStreaming = vi.fn(async (cmd: ReadonlyArray<string>, _opts?: ExecOptions) => {
     if (cmd[0] === "bash") return fakeExec(script.verify);
     if (cmd[0] === "git") {
       const sub = cmd.slice(1).find((a) => !a.startsWith("-c") && !a.includes("="));
@@ -82,22 +90,45 @@ function fakeContainerHandle(script: FakeContainerScript): TaskContainerHandle {
     throw new Error(`unexpected exec: ${cmd.join(" ")}`);
   });
   return {
-    containerRowId: "row-1",
-    dockerId: "docker-1",
-    exec,
+    state: {
+      type: "local-docker",
+      taskId: "t",
+      containerRowId: "row-1",
+      dockerId: "docker-1",
+    },
+    execStreaming,
+    exec: vi.fn(async () => ({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+      wallTimeSeconds: 0,
+      truncated: false,
+    })),
   };
 }
 
-function fakeSandbox(handle: TaskContainerHandle): Sandbox {
+function fakeSandbox(
+  handle: SandboxSession<LocalDockerSessionState>,
+): SandboxClient<LocalDockerSessionState> {
   return {
+    backendId: "fake",
+    capabilities: {
+      siblingContainers: "host-proxy",
+      hostBindMount: true,
+      customImage: true,
+      volumes: "docker",
+      workingTreeTransport: "bind-mount",
+    },
     healthCheck: vi.fn(),
     reconcileCrashedInstances: vi.fn(),
     ensureImagePresent: vi.fn(async () => {}),
-    createTaskContainer: vi.fn(async () => handle),
-    getTaskContainer: vi.fn(async () => handle),
-    stopTask: vi.fn(async () => {}),
-    listContainersForTask: vi.fn(async () => []),
-    inspectContainer: vi.fn(),
+    create: vi.fn(async () => handle),
+    resume: vi.fn(async () => handle),
+    tryResumeByTaskId: vi.fn(async () => null),
+    delete: vi.fn(async () => {}),
+    deleteByTaskId: vi.fn(async () => {}),
+    serializeState: (state) => LocalDockerSessionStateSchema.parse(state),
+    deserializeState: (payload) => LocalDockerSessionStateSchema.parse(payload),
     shutdown: vi.fn(),
   };
 }
@@ -168,7 +199,7 @@ async function seedTask(opts?: {
   return { taskId: task.id, repoId: repo.id };
 }
 
-function makeDeps(handle: TaskContainerHandle): VerifyOrchestratorDeps {
+function makeDeps(handle: SandboxSession<LocalDockerSessionState>): VerifyOrchestratorDeps {
   return {
     runInTx: tx,
     store,
@@ -234,7 +265,7 @@ describe("runCodingVerify", () => {
 
     // Commit step received the canonical noreply author derived from the
     // identity bundle (`<id>+<login>@users.noreply.github.com`).
-    const execMock = handle.exec as unknown as ReturnType<typeof vi.fn>;
+    const execMock = handle.execStreaming as unknown as ReturnType<typeof vi.fn>;
     const commitCall = execMock.mock.calls.find(
       (c) => Array.isArray(c[0]) && (c[0] as string[]).includes("commit"),
     );
@@ -276,7 +307,7 @@ describe("runCodingVerify", () => {
     expect(eventNames).not.toContain("coding/task/pushed");
     expect(eventNames).not.toContain("coding/task/pr-opened");
 
-    const handleExec = handle.exec as unknown as ReturnType<typeof vi.fn>;
+    const handleExec = handle.execStreaming as unknown as ReturnType<typeof vi.fn>;
     const calls = handleExec.mock.calls.map((c) => c[0] as ReadonlyArray<string>);
     // Only the verify exec ran; no `git` exec.
     expect(calls.find((c) => c[0] === "git")).toBeUndefined();
@@ -299,7 +330,7 @@ describe("runCodingVerify", () => {
     if (result.status === "failed") {
       expect(result.failureReason).toMatch(/not configured/i);
     }
-    expect(deps.sandbox.createTaskContainer).not.toHaveBeenCalled();
+    expect(deps.sandbox.create).not.toHaveBeenCalled();
   });
 
   it("unparseable remote URL → status=failed", async () => {
@@ -317,7 +348,7 @@ describe("runCodingVerify", () => {
     if (result.status === "failed") {
       expect(result.failureReason).toMatch(/cannot parse owner\/repo/);
     }
-    expect(deps.sandbox.createTaskContainer).not.toHaveBeenCalled();
+    expect(deps.sandbox.create).not.toHaveBeenCalled();
   });
 
   it("task not in pending_verify → returns skipped without changes", async () => {
@@ -332,7 +363,7 @@ describe("runCodingVerify", () => {
     const result = await runCodingVerify({ taskId, deps, stepRun, inngest });
 
     expect(result.status).toBe("skipped");
-    expect(deps.sandbox.createTaskContainer).not.toHaveBeenCalled();
+    expect(deps.sandbox.create).not.toHaveBeenCalled();
 
     const reloaded = await tx((trx) => store.getTask(trx, taskId));
     expect(reloaded?.status).toBe("queued");
@@ -352,6 +383,6 @@ describe("runCodingVerify", () => {
     const { taskId } = await seedTask();
     await runCodingVerify({ taskId, deps, stepRun, inngest });
 
-    expect(deps.sandbox.stopTask).toHaveBeenCalledWith(taskId);
+    expect(deps.sandbox.deleteByTaskId).toHaveBeenCalledWith(taskId);
   });
 });

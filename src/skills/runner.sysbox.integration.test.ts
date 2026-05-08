@@ -6,7 +6,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
-import { CogmoSocketProxy, LocalInProcessSandbox, type Sandbox } from "../sandbox/index.js";
+import {
+  CogmoSocketProxy,
+  LocalDockerSandboxClient,
+  type SandboxClient,
+} from "../sandbox/index.js";
 import { DrizzleSandboxStore } from "../sandbox/store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "../sandbox/supervisor.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -36,7 +40,7 @@ const noopFiles = {
  *   - Container creation without worktree/home (skills tier-2 contract).
  *   - NDJSON-over-stdio RPC against real Python.
  *   - `ctx.now` round-trip (bridge correctness).
- *   - Wall-clock kill via `stopTask`.
+ *   - Wall-clock kill via `deleteByTaskId`.
  *
  * Gated by `SANDBOX_RUNTIME=sysbox`. Skipped on dev machines without
  * sysbox; runs in the GHA `sysbox-e2e` job. Mirrors the supervisor's own
@@ -52,7 +56,7 @@ let agentStore: DrizzleSandboxStore;
 let skillStore: DrizzleSkillStore;
 let docker: Docker;
 let proxy: CogmoSocketProxy;
-let sandbox: Sandbox;
+let sandbox: SandboxClient;
 let instanceId: string;
 
 beforeAll(async () => {
@@ -75,7 +79,7 @@ beforeAll(async () => {
     socketDir: "/tmp/cogmo-test-skills-proxy",
     hostDockerSocket: "/var/run/docker.sock",
   });
-  sandbox = await LocalInProcessSandbox.create({
+  sandbox = await LocalDockerSandboxClient.create({
     docker,
     store: agentStore,
     runInTx: tx,
