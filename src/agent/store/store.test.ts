@@ -2152,6 +2152,54 @@ describe("DrizzleAgentStore", () => {
       expect(legacy?.profileClass).toBeNull();
     });
 
+    it("getPendingMemories surfaces the staging profile's CURRENT class — re-flows on reassignment", async () => {
+      // Documents the JOIN's read-current-class semantic: the pending
+      // row stores `profile_id`, NOT a snapshot of `profile_class`. So
+      // changing the profile's class (via setProfileClass) before the
+      // drain runs means the row picks up the new class label on its
+      // next read — no backfill of pending rows needed when the user
+      // reorganises which profile belongs to which class.
+      const userId = await seedUser();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "general", description: "y" }),
+      );
+      const profile = await tx((trx) =>
+        store.createProfile(trx, {
+          userId,
+          name: "p",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profile.id, "intimate"));
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          profileId: profile.id,
+          content: "fact staged under intimate",
+          source: "live_retain",
+        }),
+      );
+      const before = await tx((trx) => store.getPendingMemories(trx, userId));
+      expect(before[0]?.profileClass).toBe("intimate");
+
+      // Reassign the profile to a different class — the pending row's
+      // profile_id is unchanged, but the JOIN now resolves to "general".
+      await tx((trx) => store.setProfileClass(trx, profile.id, "general"));
+      const after = await tx((trx) => store.getPendingMemories(trx, userId));
+      expect(after[0]?.profileClass).toBe("general");
+
+      // Clearing the class on the profile drops the row to untagged on
+      // the class dimension — drain stamps no profile_class:* tag.
+      await tx((trx) => store.setProfileClass(trx, profile.id, null));
+      const cleared = await tx((trx) => store.getPendingMemories(trx, userId));
+      expect(cleared[0]?.profileClass).toBeNull();
+    });
+
     it("preserves optional context", async () => {
       const userId = await seedUser();
 

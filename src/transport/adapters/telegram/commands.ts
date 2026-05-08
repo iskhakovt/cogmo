@@ -1029,6 +1029,15 @@ async function replyClassesList(
  * `replyProfileClass` interprets `clear` as the clear-action. Reject
  * up front so the user sees an actionable error instead of creating
  * a class they can't assign via Telegram.
+ *
+ * The reserve lives at the Telegram boundary (not Transport / store)
+ * because "clear" is a string-parser ambiguity specific to this
+ * adapter — a future REST adapter taking `{className: null}` for the
+ * clear case has no such conflict, and pushing the reserve down would
+ * over-constrain it. A direct `Transport.profileClasses.create` caller
+ * (Direct adapter, scripts) can still create a class named `clear`;
+ * it just won't be addressable via `/profile class … clear` until the
+ * Telegram parser learns a different sentinel.
  */
 const RESERVED_CLASS_NAMES = new Set(["clear"]);
 
