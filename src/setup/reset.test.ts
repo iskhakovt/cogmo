@@ -22,8 +22,8 @@ let secretsStore: DrizzleSecretsStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  agentStore = new DrizzleAgentStore(tx);
-  transportStore = new DrizzleTransportStore(tx);
+  agentStore = new DrizzleAgentStore();
+  transportStore = new DrizzleTransportStore();
   const key = deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/secrets-at-rest/v1");
   secretsStore = new DrizzleSecretsStore(tx, key);
 });
@@ -40,33 +40,37 @@ describe("applyReset", () => {
   it("secrets: deletes all secrets, leaves channels untouched", async () => {
     await secretsStore.putSecret({ name: "llm_key", plaintext: "abc" });
     await secretsStore.putSecret({ name: "tg_key", plaintext: "def" });
-    const userId = await ensureDefaultUser(agentStore);
-    await ensureDirectChannel(transportStore, userId);
-    await transportStore.createChannel({
-      type: "telegram",
-      credentials: { tokenSecretName: "tg_key" },
-      identityMode: "mapped",
-    });
+    const userId = await ensureDefaultUser(tx, agentStore);
+    await ensureDirectChannel(tx, transportStore, userId);
+    await tx((trx) =>
+      transportStore.createChannel(trx, {
+        type: "telegram",
+        credentials: { tokenSecretName: "tg_key" },
+        identityMode: "mapped",
+      }),
+    );
 
     await applyReset("secrets", { db });
 
     expect(await secretsStore.listSecrets()).toHaveLength(0);
-    expect(await transportStore.getAllChannels()).toHaveLength(2); // direct + telegram
+    expect(await tx((trx) => transportStore.getAllChannels(trx))).toHaveLength(2); // direct + telegram
   });
 
   it("channels: removes non-direct channels only; direct channel survives", async () => {
-    const userId = await ensureDefaultUser(agentStore);
-    await ensureDirectChannel(transportStore, userId);
-    await transportStore.createChannel({
-      type: "telegram",
-      credentials: {},
-      identityMode: "mapped",
-    });
+    const userId = await ensureDefaultUser(tx, agentStore);
+    await ensureDirectChannel(tx, transportStore, userId);
+    await tx((trx) =>
+      transportStore.createChannel(trx, {
+        type: "telegram",
+        credentials: {},
+        identityMode: "mapped",
+      }),
+    );
     await secretsStore.putSecret({ name: "llm_key", plaintext: "abc" });
 
     await applyReset("channels", { db });
 
-    const channels = await transportStore.getAllChannels();
+    const channels = await tx((trx) => transportStore.getAllChannels(trx));
     expect(channels).toHaveLength(1);
     expect(channels[0]?.type).toBe("direct");
     // Secrets untouched
@@ -74,19 +78,21 @@ describe("applyReset", () => {
   });
 
   it("all: deletes secrets and non-direct channels in one call", async () => {
-    const userId = await ensureDefaultUser(agentStore);
-    await ensureDirectChannel(transportStore, userId);
-    await transportStore.createChannel({
-      type: "telegram",
-      credentials: {},
-      identityMode: "mapped",
-    });
+    const userId = await ensureDefaultUser(tx, agentStore);
+    await ensureDirectChannel(tx, transportStore, userId);
+    await tx((trx) =>
+      transportStore.createChannel(trx, {
+        type: "telegram",
+        credentials: {},
+        identityMode: "mapped",
+      }),
+    );
     await secretsStore.putSecret({ name: "k1", plaintext: "v1" });
 
     await applyReset("all", { db });
 
     expect(await secretsStore.listSecrets()).toHaveLength(0);
-    const channels = await transportStore.getAllChannels();
+    const channels = await tx((trx) => transportStore.getAllChannels(trx));
     expect(channels).toHaveLength(1);
     expect(channels[0]?.type).toBe("direct");
   });
@@ -94,6 +100,6 @@ describe("applyReset", () => {
   it("no-ops cleanly when nothing has been seeded yet", async () => {
     await expect(applyReset("all", { db })).resolves.toBeUndefined();
     expect(await secretsStore.listSecrets()).toHaveLength(0);
-    expect(await transportStore.getAllChannels()).toHaveLength(0);
+    expect(await tx((trx) => transportStore.getAllChannels(trx))).toHaveLength(0);
   });
 });

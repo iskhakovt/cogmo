@@ -104,8 +104,8 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   }
 
   const tx = transactor(db);
-  const agentStore = new DrizzleAgentStore(tx);
-  const transportStore = new DrizzleTransportStore(tx);
+  const agentStore = new DrizzleAgentStore();
+  const transportStore = new DrizzleTransportStore();
   const sandboxStore = new DrizzleSandboxStore(tx);
 
   // Sandbox is opt-in via SANDBOX_RUNTIME — coding-delegation features fail
@@ -160,15 +160,18 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     deriveMasterKey(parseMasterKey(env.COGMO_MASTER_KEY), "cogmo/secrets-at-rest/v1"),
   );
 
-  const user = await agentStore.getFirstUser();
-  const defaultProfile = await agentStore.getDefaultProfile();
-  if (!user || !defaultProfile) {
-    throw new Error("no user or profile found — run `cogmo setup` first");
-  }
-  const profile = await tx((tx) => agentStore.getProfile(tx, defaultProfile.id));
-  if (!profile) {
-    throw new Error("default profile disappeared — database inconsistency");
-  }
+  const { user, profile } = await tx(async (trx) => {
+    const user = await agentStore.getFirstUser(trx);
+    const defaultProfile = await agentStore.getDefaultProfile(trx);
+    if (!user || !defaultProfile) {
+      throw new Error("no user or profile found — run `cogmo setup` first");
+    }
+    const profile = await agentStore.getProfile(trx, defaultProfile.id);
+    if (!profile) {
+      throw new Error("default profile disappeared — database inconsistency");
+    }
+    return { user, profile };
+  });
 
   // Per-turn provider dispatch: handle-message and observer call this
   // resolver with the snapshot's model on every fire. The DB-backed
@@ -178,7 +181,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // model. See design/providers.md → Provider dispatch.
   const resolveProvider: LlmProviderResolver = opts.providerOverride
     ? constantResolver(opts.providerOverride)
-    : createDbProviderResolver({ agentStore, secretsStore });
+    : createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
 
   // S3-compatible file storage (MinIO locally, AWS S3 / R2 in production).
   // Constructed before tool registration because image-tools needs the
@@ -347,7 +350,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       SKILLS_PROMPT_GUIDANCE,
     ],
     getUserContext: async () => {
-      const blocks = await agentStore.getCoreMemoryBlocks(user.id);
+      const blocks = await tx((trx) => agentStore.getCoreMemoryBlocks(trx, user.id));
       if (blocks.length === 0) return null;
       return blocks.map((b) => `## ${b.key}\n${b.content}`).join("\n\n");
     },
@@ -424,8 +427,12 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     reposDir: env.COGMO_REPOS_DIR,
   });
 
-  const deliveryRouter = createDeliveryRouter({ adapters: adapterMap, transportStore });
-  const idleTimer = createIdleTimer({ idleTimeoutMs, transportStore });
+  const deliveryRouter = createDeliveryRouter({
+    runInTx: tx,
+    adapters: adapterMap,
+    transportStore,
+  });
+  const idleTimer = createIdleTimer({ idleTimeoutMs, runInTx: tx, transportStore });
   const debounceFunctions = createDebounceFunctions(debounceConfig);
 
   // Voice — bootstrap a single OpenAIVoiceProvider when voice_config is
@@ -439,7 +446,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // hot-reload"). Personal-scale single-user tolerates the restart
   // cleanly; promote when multi-user lands or operator-driven tweaks
   // become frequent.
-  const voiceCfgRow = await agentStore.getVoiceConfig();
+  const voiceCfgRow = await tx((trx) => agentStore.getVoiceConfig(trx));
   let ttsProvider: import("./voice/types.js").TtsProvider | undefined;
   let sttProvider: import("./voice/types.js").SttProvider | undefined;
   let voiceCfgForTurn: { ttsVoice: string; ttsModel: string } | undefined;
@@ -519,7 +526,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     memory,
   });
 
-  const recoverConversation = createRecoverConversation({ agentStore });
+  const recoverConversation = createRecoverConversation({ runInTx: tx, agentStore });
 
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [

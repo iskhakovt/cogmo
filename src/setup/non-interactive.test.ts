@@ -36,8 +36,8 @@ let secretsStore: DrizzleSecretsStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  agentStore = new DrizzleAgentStore(tx);
-  transportStore = new DrizzleTransportStore(tx);
+  agentStore = new DrizzleAgentStore();
+  transportStore = new DrizzleTransportStore();
   const key = deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/secrets-at-rest/v1");
   secretsStore = new DrizzleSecretsStore(tx, key);
 });
@@ -113,7 +113,7 @@ describe("runNonInteractive", () => {
       validators: v,
     });
 
-    const providers = await agentStore.listProviders();
+    const providers = await tx((trx) => agentStore.listProviders(trx));
     expect(providers).toHaveLength(1);
     expect(providers[0]?.name).toBe("anthropic");
     expect(providers[0]?.type).toBe("anthropic");
@@ -162,7 +162,7 @@ describe("runNonInteractive", () => {
       validators: v,
     });
 
-    const tg = await transportStore.getChannelByType("telegram");
+    const tg = await tx((trx) => transportStore.getChannelByType(trx, "telegram"));
     expect(tg).not.toBeNull();
 
     const identities = await db
@@ -179,6 +179,7 @@ describe("runNonInteractive", () => {
   it("fails fast with no DB writes when required env vars are missing", async () => {
     await expect(
       runNonInteractive({
+        runInTx: tx,
         agentStore,
         transportStore,
         secretsStore,
@@ -200,6 +201,7 @@ describe("runNonInteractive", () => {
 
     await expect(
       runNonInteractive({
+        runInTx: tx,
         agentStore,
         transportStore,
         secretsStore,
@@ -219,6 +221,7 @@ describe("runNonInteractive", () => {
 
     await expect(
       runNonInteractive({
+        runInTx: tx,
         agentStore,
         transportStore,
         secretsStore,
@@ -308,6 +311,7 @@ describe("runNonInteractive", () => {
 
     await expect(
       runNonInteractive({
+        runInTx: tx,
         agentStore,
         transportStore,
         secretsStore,
@@ -387,6 +391,7 @@ describe("runNonInteractive", () => {
     const v = validators();
     await expect(
       runNonInteractive({
+        runInTx: tx,
         agentStore,
         transportStore,
         secretsStore,
@@ -412,6 +417,7 @@ describe("runNonInteractive", () => {
 
     await expect(
       runNonInteractive({
+        runInTx: tx,
         agentStore,
         transportStore,
         secretsStore,
@@ -441,7 +447,7 @@ describe("runNonInteractive", () => {
       env,
       validators: v,
     });
-    const firstId = (await transportStore.getChannelByType("telegram"))?.id;
+    const firstId = (await tx((trx) => transportStore.getChannelByType(trx, "telegram")))?.id;
 
     await runNonInteractive({
       runInTx: tx,
@@ -454,13 +460,13 @@ describe("runNonInteractive", () => {
       }),
       validators: v,
     });
-    const secondId = (await transportStore.getChannelByType("telegram"))?.id;
+    const secondId = (await tx((trx) => transportStore.getChannelByType(trx, "telegram")))?.id;
 
     expect(secondId).toBeDefined();
     expect(secondId).not.toBe(firstId);
 
     // Only one Telegram channel remains.
-    const allTelegram = (await transportStore.getAllChannels()).filter(
+    const allTelegram = (await tx((trx) => transportStore.getAllChannels(trx))).filter(
       (c) => c.type === "telegram",
     );
     expect(allTelegram).toHaveLength(1);

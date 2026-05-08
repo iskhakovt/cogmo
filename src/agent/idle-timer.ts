@@ -1,3 +1,4 @@
+import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import { conversationIdle, inboundArrived, responseReady } from "../inngest/events.js";
 import { logger } from "../logger.js";
@@ -13,8 +14,12 @@ import type { TransportStore } from "../transport/store/index.js";
  * The conversation/idle event triggers the Observer for correction
  * extraction (Stage 1) and future memory extraction.
  */
-export function createIdleTimer(deps: { idleTimeoutMs: number; transportStore: TransportStore }) {
-  const { idleTimeoutMs, transportStore } = deps;
+export function createIdleTimer(deps: {
+  idleTimeoutMs: number;
+  runInTx: Transactor;
+  transportStore: TransportStore;
+}) {
+  const { idleTimeoutMs, runInTx, transportStore } = deps;
 
   return inngest.createFunction(
     {
@@ -31,11 +36,16 @@ export function createIdleTimer(deps: { idleTimeoutMs: number; transportStore: T
 
       // Timer fired — conversation is idle
       const { sessionsClosed } = await step.run("close-sessions", async () => {
-        const sessions = await transportStore.getActiveSessionsForConversation(conversationId);
-        for (const session of sessions) {
-          await transportStore.closeSession(session.id);
-        }
-        return { sessionsClosed: sessions.length };
+        return runInTx(async (tx) => {
+          const sessions = await transportStore.getActiveSessionsForConversation(
+            tx,
+            conversationId,
+          );
+          for (const session of sessions) {
+            await transportStore.closeSession(tx, session.id);
+          }
+          return { sessionsClosed: sessions.length };
+        });
       });
       logger.info({ conversationId, sessionsClosed }, "conversation idle — sessions closed");
 

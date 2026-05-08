@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Transactor } from "../../db/index.js";
 import { mockProvider } from "../../test/factories.js";
 import { type ConsolidationDeps, consolidateRules } from "./consolidate-rules.js";
+
+const FAKE_TX = { __mockTx: true } as never;
+const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 function mockConsolidationDeps(
   chatTypedResponse: { groups: Array<Record<string, unknown>> },
@@ -18,6 +22,7 @@ function mockConsolidationDeps(
   return {
     provider,
     model: "test-model",
+    runInTx: fakeRunInTx,
     store: {
       getCorrections: vi.fn().mockResolvedValue([
         { id: "r1", rule: "Be concise", category: "style", active: true, observationCount: 3 },
@@ -52,7 +57,7 @@ describe("consolidateRules", () => {
 
     expect(result.mergedGroups).toBe(1);
     expect(result.rulesRemoved).toBe(1); // 2 rules → 1 = 1 removed
-    expect(deps.store.replaceRules).toHaveBeenCalledWith({
+    expect(deps.store.replaceRules).toHaveBeenCalledWith(expect.anything(), {
       oldIds: ["r1", "r2"],
       newRule: {
         rule: "Be concise and brief in responses",

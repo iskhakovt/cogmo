@@ -65,7 +65,11 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    expect(deps.transportStore.getUnbatchedInbound).toHaveBeenCalledWith("conv-1", null);
+    expect(deps.transportStore.getUnbatchedInbound).toHaveBeenCalledWith(
+      expect.anything(),
+      "conv-1",
+      null,
+    );
   });
 
   it("calls promptSource.assemble with the loaded conversation context", async () => {
@@ -163,9 +167,11 @@ describe("createHandleMessage", () => {
 
     // Both inserts stamped with the first (snapshot) profile+model, not the later change
     expect(deps.agentStore.insertMessage).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ profileId: "profile-1", model: "claude-sonnet-4-6" }),
     );
     expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ profileId: "profile-1", model: "claude-sonnet-4-6" }),
     );
   });
@@ -181,6 +187,7 @@ describe("createHandleMessage", () => {
     // User message via insertMessage — stamped with the turn snapshot
     expect(deps.agentStore.insertMessage).toHaveBeenCalledTimes(1);
     expect(deps.agentStore.insertMessage).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({
         role: "user",
         lastInboundMessageId: "inbound-1",
@@ -191,6 +198,7 @@ describe("createHandleMessage", () => {
     // Assistant + tool turns via insertMessages (atomic batch) — same snapshot
     expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
     expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({
         conversationId: "conv-1",
         lastInboundMessageId: "inbound-1",
@@ -892,6 +900,7 @@ describe("createHandleMessage", () => {
     // Both counts from the loop's usage must reach insertMessages so the
     // next turn's fast path can include them in the starting-input estimate.
     expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({
         lastMessageInputTokens: 10,
         lastMessageOutputTokens: 5,
@@ -1429,6 +1438,7 @@ describe("createHandleMessage", () => {
       // Persisted user message contains the transcript text, not the voice
       // block JSON literal — so subsequent turns load it cleanly.
       expect(insertMessage).toHaveBeenCalledWith(
+        expect.anything(),
         expect.objectContaining({ role: "user", content: "hello there" }),
       );
     });
@@ -1668,6 +1678,7 @@ describe("createHandleMessage", () => {
       // JSON-stringified block array — even though the inbound row had
       // two blocks, both became text after STT substitution.
       expect(insertMessage).toHaveBeenCalledWith(
+        expect.anything(),
         expect.objectContaining({
           role: "user",
           content: "check this out\nthe meeting was rescheduled",
@@ -1675,7 +1686,8 @@ describe("createHandleMessage", () => {
       );
       // Defensive: assert the persisted content is NOT JSON. A regression
       // (e.g. someone removes the `allText` check) would land "[{...}]".
-      const call = insertMessage.mock.calls[0]![0];
+      // First arg is the tx handle; the params object is at index 1.
+      const call = insertMessage.mock.calls[0]![1];
       expect(call.content).not.toMatch(/^\[/);
     });
 

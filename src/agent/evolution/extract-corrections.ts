@@ -8,6 +8,7 @@
  */
 
 import * as R from "remeda";
+import type { Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
@@ -24,6 +25,7 @@ const CONSOLIDATION_THRESHOLD = 30;
 export interface ExtractionDeps {
   provider: LlmProvider;
   model: string;
+  runInTx: Transactor;
   store: Pick<AgentStore, "getCorrections" | "upsertCorrection" | "countActiveRules">;
 }
 
@@ -59,7 +61,7 @@ export async function extractCorrections(
     };
   }
 
-  const existingRules = await deps.store.getCorrections(profileId);
+  const existingRules = await deps.runInTx((tx) => deps.store.getCorrections(tx, profileId));
   const systemPrompt = buildExtractionPrompt(existingRules);
 
   const { data } = await chatTyped({
@@ -90,13 +92,13 @@ export async function extractCorrections(
       continue;
     }
 
-    const result = await applyCorrection(correction, deps.store);
+    const result = await applyCorrection(correction, deps.runInTx, deps.store);
     if (correction.action === "new") extracted++;
     if (correction.action === "reinforce") reinforced++;
     if (result.promoted) promoted++;
   }
 
-  const activeCount = await deps.store.countActiveRules(profileId);
+  const activeCount = await deps.runInTx((tx) => deps.store.countActiveRules(tx, profileId));
   const consolidationNeeded = activeCount > CONSOLIDATION_THRESHOLD;
 
   logger.info(
@@ -109,16 +111,19 @@ export async function extractCorrections(
 
 async function applyCorrection(
   correction: CorrectionItem,
+  runInTx: Transactor,
   store: Pick<AgentStore, "upsertCorrection">,
 ): Promise<{ promoted: boolean }> {
-  return store.upsertCorrection({
-    rule: correction.rule,
-    category: correction.category,
-    profileId: null, // global — industry standard for personal assistants
-    ...(correction.matchedExistingRuleId != null && {
-      existingRuleId: correction.matchedExistingRuleId,
+  return runInTx((tx) =>
+    store.upsertCorrection(tx, {
+      rule: correction.rule,
+      category: correction.category,
+      profileId: null, // global — industry standard for personal assistants
+      ...(correction.matchedExistingRuleId != null && {
+        existingRuleId: correction.matchedExistingRuleId,
+      }),
     }),
-  });
+  );
 }
 
 // --- Transcript formatting ---

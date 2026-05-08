@@ -1,7 +1,7 @@
 import { and, asc, count, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import * as R from "remeda";
 import { single } from "../../db/helpers.js";
-import type { Transaction, Transactor } from "../../db/index.js";
+import type { Transaction } from "../../db/index.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { truncate } from "../../util/string.js";
 import type { AutoRecallMode } from "../recall-gate.js";
@@ -109,17 +109,23 @@ function previewFromContent(content: unknown): string {
 
 export interface AgentStore {
   /** Create a new user. */
-  createUser(): Promise<{ id: string }>;
+  createUser(tx: Transaction): Promise<{ id: string }>;
 
   /** Create a new conversation. */
-  createConversation(params: {
-    userId: string;
-    profileId: string;
-    isPrivate: boolean;
-  }): Promise<{ id: string }>;
+  createConversation(
+    tx: Transaction,
+    params: {
+      userId: string;
+      profileId: string;
+      isPrivate: boolean;
+    },
+  ): Promise<{ id: string }>;
 
   /** Load a conversation by ID. */
-  getConversation(conversationId: string): Promise<
+  getConversation(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<
     | {
         id: string;
         userId: string;
@@ -140,14 +146,22 @@ export interface AgentStore {
    * inbound while `errored`, refusing to spend more LLM calls on a
    * known-broken conversation.
    */
-  setConversationStatus(conversationId: string, status: ConversationStatus): Promise<void>;
+  setConversationStatus(
+    tx: Transaction,
+    conversationId: string,
+    status: ConversationStatus,
+  ): Promise<void>;
 
   /**
    * Set or clear the per-conversation voice mode override. `null` clears
    * the override (the conversation falls back to the profile default).
    * Used by `Transport.conversations.setVoiceMode` (`/voice` command).
    */
-  setConversationVoiceMode(conversationId: string, mode: VoiceMode | null): Promise<void>;
+  setConversationVoiceMode(
+    tx: Transaction,
+    conversationId: string,
+    mode: VoiceMode | null,
+  ): Promise<void>;
 
   /**
    * Load the singleton voice configuration row, if present. Returns
@@ -156,7 +170,7 @@ export interface AgentStore {
    * leaving `ttsProvider` / `sttProvider` undefined on `HandleMessageDeps`,
    * which means voice-mode resolution always returns false.
    */
-  getVoiceConfig(): Promise<
+  getVoiceConfig(tx: Transaction): Promise<
     | {
         id: string;
         ttsSecretId: string;
@@ -173,15 +187,18 @@ export interface AgentStore {
   >;
 
   /** Insert a message (user or assistant). Returns the new message ID. `profileId` + `model` stamp the turn snapshot (see design/transport/overview.md → Profile and Model Stamping). */
-  insertMessage(params: {
-    conversationId: string;
-    role: "user" | "assistant";
-    content: string | ContentBlock[];
-    profileId: string;
-    model: string;
-    lastInboundMessageId: string;
-    inputTokens?: number;
-  }): Promise<{ id: string }>;
+  insertMessage(
+    tx: Transaction,
+    params: {
+      conversationId: string;
+      role: "user" | "assistant";
+      content: string | ContentBlock[];
+      profileId: string;
+      model: string;
+      lastInboundMessageId: string;
+      inputTokens?: number;
+    },
+  ): Promise<{ id: string }>;
 
   /**
    * Insert multiple messages atomically in a single transaction. Returns the
@@ -193,67 +210,81 @@ export interface AgentStore {
    * assistant's reply is part of next turn's input. Non-final rows (tool
    * turns) get `output_tokens = -1` (sentinel: "unknown, force count").
    */
-  insertMessages(params: {
-    conversationId: string;
-    messages: ReadonlyArray<Message>;
-    profileId: string;
-    model: string;
-    lastInboundMessageId: string;
-    lastMessageInputTokens?: number;
-    lastMessageOutputTokens: number;
-  }): Promise<{ id: string }>;
+  insertMessages(
+    tx: Transaction,
+    params: {
+      conversationId: string;
+      messages: ReadonlyArray<Message>;
+      profileId: string;
+      model: string;
+      lastInboundMessageId: string;
+      lastMessageInputTokens?: number;
+      lastMessageOutputTokens: number;
+    },
+  ): Promise<{ id: string }>;
 
   /** Get the most recent assistant message for a conversation (for cursor chain). */
   getLastAssistantMessage(
+    tx: Transaction,
     conversationId: string,
   ): Promise<{ id: string; lastInboundMessageId: string } | undefined>;
 
   /** Load full message history for a conversation, ordered by id. */
-  getHistory(conversationId: string): Promise<ReadonlyArray<Message>>;
+  getHistory(tx: Transaction, conversationId: string): Promise<ReadonlyArray<Message>>;
 
   /** Load a profile by ID. */
   getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined>;
 
   /** Get the first user (for bootstrapping). */
-  getFirstUser(): Promise<{ id: string } | undefined>;
+  getFirstUser(tx: Transaction): Promise<{ id: string } | undefined>;
 
   /** Get the first profile (for bootstrapping). */
-  getDefaultProfile(): Promise<{ id: string } | undefined>;
+  getDefaultProfile(tx: Transaction): Promise<{ id: string } | undefined>;
 
   /** Create a profile and return the full row. `userId: null` = org profile (read-only via Transport); `userId: <id>` = user profile (owned by that user). Throws `UniqueViolationError` on (user_id, name) collision. */
-  createProfile(params: {
-    userId: string | null;
-    name: string;
-    basePrompt: string;
-    model: string;
-    toolSet: ToolSet;
-    memoryScope?: ProfileMemoryScope | null;
-  }): Promise<Profile>;
+  createProfile(
+    tx: Transaction,
+    params: {
+      userId: string | null;
+      name: string;
+      basePrompt: string;
+      model: string;
+      toolSet: ToolSet;
+      memoryScope?: ProfileMemoryScope | null;
+    },
+  ): Promise<Profile>;
 
   /** List profiles visible to `userId`: org profiles (user_id IS NULL) + the user's own profiles. */
-  listProfiles(userId: string): Promise<ReadonlyArray<Profile>>;
+  listProfiles(tx: Transaction, userId: string): Promise<ReadonlyArray<Profile>>;
 
   /** Return ownership info for a profile, or `undefined` if the profile doesn't exist. The inner `userId: null` means "org profile" — that's a real value stored in the row, distinct from "row not found". */
-  getProfileOwner(profileId: string): Promise<{ userId: string | null } | undefined>;
+  getProfileOwner(
+    tx: Transaction,
+    profileId: string,
+  ): Promise<{ userId: string | null } | undefined>;
 
   /** Update a profile in place. Caller must verify ownership. Throws `UniqueViolationError` on name collision. */
-  updateProfile(profileId: string, changes: ProfileUpdates): Promise<Profile>;
+  updateProfile(tx: Transaction, profileId: string, changes: ProfileUpdates): Promise<Profile>;
 
   /**
    * Count live references to a profile — active conversations + stamped message history.
    * Useful for UX (warn before delete). `deleteProfile` performs the authoritative check-in-tx.
    */
-  countProfileReferences(profileId: string): Promise<{ conversations: number; messages: number }>;
+  countProfileReferences(
+    tx: Transaction,
+    profileId: string,
+  ): Promise<{ conversations: number; messages: number }>;
 
   /**
    * Delete a profile atomically: checks `conversations` and `messages` references inside the
    * same transaction and throws `ProfileInUseError` if any exist. Historical messages pin the
    * profile as audit data — a profile that has ever been used in a turn stays undeletable.
    */
-  deleteProfile(profileId: string): Promise<void>;
+  deleteProfile(tx: Transaction, profileId: string): Promise<void>;
 
   /** Load a single message by ID. */
   getMessage(
+    tx: Transaction,
     messageId: string,
   ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | undefined>;
 
@@ -265,13 +296,19 @@ export interface AgentStore {
   ): Promise<ReadonlyArray<{ rule: string }>>;
 
   /** Get all core memory blocks for a user, ordered by key. */
-  getCoreMemoryBlocks(userId: string): Promise<ReadonlyArray<{ key: string; content: string }>>;
+  getCoreMemoryBlocks(
+    tx: Transaction,
+    userId: string,
+  ): Promise<ReadonlyArray<{ key: string; content: string }>>;
 
   /** Upsert a core memory block. Creates if key doesn't exist, updates if it does. */
-  upsertCoreMemoryBlock(params: { userId: string; key: string; content: string }): Promise<void>;
+  upsertCoreMemoryBlock(
+    tx: Transaction,
+    params: { userId: string; key: string; content: string },
+  ): Promise<void>;
 
   /** Get the timestamp of the most recent message in a conversation (any role). `undefined` when no messages. */
-  getLastMessageTime(conversationId: string): Promise<Date | undefined>;
+  getLastMessageTime(tx: Transaction, conversationId: string): Promise<Date | undefined>;
 
   /**
    * Get `{ inputTokens, outputTokens }` from the most recent assistant
@@ -281,7 +318,10 @@ export interface AgentStore {
    * pre-migration sentinel for `outputTokens`. The fast path treats both
    * as "unknown → force count".
    */
-  getLastTokens(conversationId: string): Promise<
+  getLastTokens(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<
     | {
         inputTokens: number | null;
         outputTokens: number;
@@ -292,16 +332,25 @@ export interface AgentStore {
   // --- Conversation admin (Transport-facing) ---
 
   /** List private conversations owned by a user with last-message preview + alias + profile name. */
-  listConversationsForUser(userId: string): Promise<ReadonlyArray<ConversationSummary>>;
+  listConversationsForUser(
+    tx: Transaction,
+    userId: string,
+  ): Promise<ReadonlyArray<ConversationSummary>>;
 
   /** Update a conversation's active profile. Takes effect on the next turn (current in-flight turn keeps its snapshot). */
-  setConversationProfile(conversationId: string, profileId: string): Promise<void>;
+  setConversationProfile(tx: Transaction, conversationId: string, profileId: string): Promise<void>;
 
   /** Upsert or clear a conversation's alias. `alias: null` removes the alias row. Throws `UniqueViolationError` if the alias is taken. */
-  setAlias(userId: string, conversationId: string, alias: string | null): Promise<void>;
+  setAlias(
+    tx: Transaction,
+    userId: string,
+    conversationId: string,
+    alias: string | null,
+  ): Promise<void>;
 
   /** Resolve an alias to a conversation ID for a user. Returns `undefined` if no match. */
   findConversationByAlias(
+    tx: Transaction,
     userId: string,
     alias: string,
   ): Promise<{ conversationId: string } | undefined>;
@@ -309,24 +358,30 @@ export interface AgentStore {
   // --- Model discovery (Transport-facing) ---
 
   /** Distinct models that are user-selectable (user_selectable = true). Used by the `/model` picker. */
-  listDistinctUserSelectableModels(): Promise<ReadonlyArray<string>>;
+  listDistinctUserSelectableModels(tx: Transaction): Promise<ReadonlyArray<string>>;
 
   /** True if at least one `model_providers` row has `user_selectable = true` for this model. Used to validate `profiles.update({ model })`. */
-  isModelUserSelectable(model: string): Promise<boolean>;
+  isModelUserSelectable(tx: Transaction, model: string): Promise<boolean>;
 
   // --- LLM Providers ---
 
   /** Create an LLM provider configuration. */
-  createProvider(params: {
-    name: string;
-    type: string;
-    baseUrl?: string;
-    secretId: string;
-    attrs: ProviderAttrs;
-  }): Promise<{ id: string }>;
+  createProvider(
+    tx: Transaction,
+    params: {
+      name: string;
+      type: string;
+      baseUrl?: string;
+      secretId: string;
+      attrs: ProviderAttrs;
+    },
+  ): Promise<{ id: string }>;
 
   /** Get a provider by ID. */
-  getProvider(providerId: string): Promise<
+  getProvider(
+    tx: Transaction,
+    providerId: string,
+  ): Promise<
     | {
         id: string;
         name: string;
@@ -339,7 +394,7 @@ export interface AgentStore {
   >;
 
   /** List all providers. */
-  listProviders(): Promise<
+  listProviders(tx: Transaction): Promise<
     ReadonlyArray<{
       id: string;
       name: string;
@@ -348,20 +403,26 @@ export interface AgentStore {
   >;
 
   /** Delete a provider by ID (cascades to model_providers). */
-  deleteProvider(providerId: string): Promise<void>;
+  deleteProvider(tx: Transaction, providerId: string): Promise<void>;
 
   // --- Model → Provider routing ---
 
   /** Register a provider for a model at a given position (lower = preferred). `userSelectable: false` hides the model from the user-facing `/model` picker — use for internal-only models (summarization, experimental). */
-  addModelProvider(params: {
-    model: string;
-    providerId: string;
-    position: number;
-    userSelectable: boolean;
-  }): Promise<{ id: string }>;
+  addModelProvider(
+    tx: Transaction,
+    params: {
+      model: string;
+      providerId: string;
+      position: number;
+      userSelectable: boolean;
+    },
+  ): Promise<{ id: string }>;
 
   /** Resolve the best provider for a model (lowest position). */
-  resolveProviderForModel(model: string): Promise<
+  resolveProviderForModel(
+    tx: Transaction,
+    model: string,
+  ): Promise<
     | {
         id: string;
         name: string;
@@ -378,7 +439,10 @@ export interface AgentStore {
    * (primary first, then fallbacks). Empty array when no provider is
    * registered for the model.
    */
-  listProvidersForModel(model: string): Promise<
+  listProvidersForModel(
+    tx: Transaction,
+    model: string,
+  ): Promise<
     ReadonlyArray<{
       id: string;
       name: string;
@@ -390,27 +454,33 @@ export interface AgentStore {
   >;
 
   /** Get the next available position for a model (MAX(position) + 1, or 0 if none). */
-  getNextModelProviderPosition(model: string): Promise<number>;
+  getNextModelProviderPosition(tx: Transaction, model: string): Promise<number>;
 
   /** Remove all model_providers entries for a given provider. */
-  removeModelProvidersByProvider(providerId: string): Promise<void>;
+  removeModelProvidersByProvider(tx: Transaction, providerId: string): Promise<void>;
 
   // --- Evolution: correction extraction ---
 
   /** Check if any channel-specific rules exist for a given channel type. */
-  hasChannelRules(channelType: string): Promise<boolean>;
+  hasChannelRules(tx: Transaction, channelType: string): Promise<boolean>;
 
   /** Insert a manual steering rule (already active). Used by seed/setup. */
-  insertManualRule(params: {
-    rule: string;
-    category: string;
-    profileId?: string | null;
-    channelType?: string | null;
-    priority: number;
-  }): Promise<{ id: string }>;
+  insertManualRule(
+    tx: Transaction,
+    params: {
+      rule: string;
+      category: string;
+      profileId?: string | null;
+      channelType?: string | null;
+      priority: number;
+    },
+  ): Promise<{ id: string }>;
 
   /** Get all correction-sourced rules (active + inactive) for dedup during extraction. */
-  getCorrections(profileId: string): Promise<
+  getCorrections(
+    tx: Transaction,
+    profileId: string,
+  ): Promise<
     ReadonlyArray<{
       id: string;
       rule: string;
@@ -421,41 +491,51 @@ export interface AgentStore {
   >;
 
   /** Insert a new correction or increment an existing one. Promotes to active when observationCount reaches 2. */
-  upsertCorrection(params: {
-    rule: string;
-    category: string;
-    profileId: string | null;
-    channelType?: string | null;
-    existingRuleId?: string;
-  }): Promise<{ id: string; promoted: boolean }>;
-
-  /** Count active steering rules for a profile (global + profile-specific). */
-  countActiveRules(profileId: string): Promise<number>;
-
-  /** Atomically replace a set of old rules with a single consolidated rule. */
-  replaceRules(params: {
-    oldIds: string[];
-    newRule: {
+  upsertCorrection(
+    tx: Transaction,
+    params: {
       rule: string;
       category: string;
       profileId: string | null;
-      priority: number;
-      observationCount: number;
-    };
-  }): Promise<{ id: string }>;
+      channelType?: string | null;
+      existingRuleId?: string;
+    },
+  ): Promise<{ id: string; promoted: boolean }>;
+
+  /** Count active steering rules for a profile (global + profile-specific). */
+  countActiveRules(tx: Transaction, profileId: string): Promise<number>;
+
+  /** Atomically replace a set of old rules with a single consolidated rule. */
+  replaceRules(
+    tx: Transaction,
+    params: {
+      oldIds: string[];
+      newRule: {
+        rule: string;
+        category: string;
+        profileId: string | null;
+        priority: number;
+        observationCount: number;
+      };
+    },
+  ): Promise<{ id: string }>;
 
   // --- Pending memories (staging for Observer classification) ---
 
   /** Insert a single row into the staging table. Returns the new row id. */
-  stagePendingMemory(params: {
-    userId: string;
-    content: string;
-    context?: string;
-    source: PendingMemorySource;
-  }): Promise<{ id: string }>;
+  stagePendingMemory(
+    tx: Transaction,
+    params: {
+      userId: string;
+      content: string;
+      context?: string;
+      source: PendingMemorySource;
+    },
+  ): Promise<{ id: string }>;
 
   /** Bulk insert via a single statement. Used by the migration script to stage thousands of rows in one round-trip. */
   bulkStagePendingMemories(
+    tx: Transaction,
     rows: ReadonlyArray<{
       userId: string;
       content: string;
@@ -471,37 +551,38 @@ export interface AgentStore {
    * pass a bounded value so the row payload never exceeds the run-state
    * size limit. Omit to read every pending row (tests, ad-hoc tooling).
    */
-  getPendingMemories(userId: string, limit?: number): Promise<ReadonlyArray<PendingMemory>>;
+  getPendingMemories(
+    tx: Transaction,
+    userId: string,
+    limit?: number,
+  ): Promise<ReadonlyArray<PendingMemory>>;
 
   /** Delete pending rows by id. Used by the Observer drain step after successful retain. */
-  deletePendingMemories(ids: ReadonlyArray<string>): Promise<void>;
+  deletePendingMemories(tx: Transaction, ids: ReadonlyArray<string>): Promise<void>;
 }
 
 export class DrizzleAgentStore implements AgentStore {
-  #runInTx: Transactor;
-  constructor(runInTx: Transactor) {
-    this.#runInTx = runInTx;
+  async createUser(tx: Transaction): Promise<{ id: string }> {
+    return single(await tx.insert(users).values({}).returning({ id: users.id }));
   }
 
-  async createUser(): Promise<{ id: string }> {
-    return this.#runInTx(async (tx) => {
-      return single(await tx.insert(users).values({}).returning({ id: users.id }));
-    });
+  async createConversation(
+    tx: Transaction,
+    params: {
+      userId: string;
+      profileId: string;
+      isPrivate: boolean;
+    },
+  ): Promise<{ id: string }> {
+    return single(
+      await tx.insert(conversations).values(params).returning({ id: conversations.id }),
+    );
   }
 
-  async createConversation(params: {
-    userId: string;
-    profileId: string;
-    isPrivate: boolean;
-  }): Promise<{ id: string }> {
-    return this.#runInTx(async (tx) => {
-      return single(
-        await tx.insert(conversations).values(params).returning({ id: conversations.id }),
-      );
-    });
-  }
-
-  async getConversation(conversationId: string): Promise<
+  async getConversation(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<
     | {
         id: string;
         userId: string;
@@ -512,146 +593,141 @@ export class DrizzleAgentStore implements AgentStore {
       }
     | undefined
   > {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({
-          id: conversations.id,
-          userId: conversations.userId,
-          profileId: conversations.profileId,
-          isPrivate: conversations.isPrivate,
-          status: conversations.status,
-          voiceMode: conversations.voiceMode,
-        })
-        .from(conversations)
-        .where(eq(conversations.id, conversationId))
-        .limit(1);
-      return rows[0];
-    });
+    const rows = await tx
+      .select({
+        id: conversations.id,
+        userId: conversations.userId,
+        profileId: conversations.profileId,
+        isPrivate: conversations.isPrivate,
+        status: conversations.status,
+        voiceMode: conversations.voiceMode,
+      })
+      .from(conversations)
+      .where(eq(conversations.id, conversationId))
+      .limit(1);
+    return rows[0];
   }
 
-  async setConversationStatus(conversationId: string, status: ConversationStatus): Promise<void> {
-    await this.#runInTx(async (tx) => {
-      await tx.update(conversations).set({ status }).where(eq(conversations.id, conversationId));
-    });
+  async setConversationStatus(
+    tx: Transaction,
+    conversationId: string,
+    status: ConversationStatus,
+  ): Promise<void> {
+    await tx.update(conversations).set({ status }).where(eq(conversations.id, conversationId));
   }
 
-  async setConversationVoiceMode(conversationId: string, mode: VoiceMode | null): Promise<void> {
-    await this.#runInTx(async (tx) => {
+  async setConversationVoiceMode(
+    tx: Transaction,
+    conversationId: string,
+    mode: VoiceMode | null,
+  ): Promise<void> {
+    await tx
+      .update(conversations)
+      .set({ voiceMode: mode })
+      .where(eq(conversations.id, conversationId));
+  }
+
+  async getVoiceConfig(tx: Transaction) {
+    // ORDER BY created_at DESC defends against the singleton constraint
+    // somehow being bypassed (manual psql, broken migration) — return
+    // the most recent config rather than picking arbitrarily.
+    const rows = await tx.select().from(voiceConfig).orderBy(desc(voiceConfig.createdAt)).limit(1);
+    return rows[0];
+  }
+
+  async insertMessage(
+    tx: Transaction,
+    params: {
+      conversationId: string;
+      role: "user" | "assistant";
+      content: string | ContentBlock[];
+      profileId: string;
+      model: string;
+      lastInboundMessageId: string;
+      inputTokens?: number;
+    },
+  ): Promise<{ id: string }> {
+    return single(
       await tx
-        .update(conversations)
-        .set({ voiceMode: mode })
-        .where(eq(conversations.id, conversationId));
-    });
+        .insert(messages)
+        .values({
+          conversationId: params.conversationId,
+          role: params.role,
+          content: params.content,
+          profileId: params.profileId,
+          model: params.model,
+          lastInboundMessageId: params.lastInboundMessageId,
+          ...(params.inputTokens != null && { inputTokens: params.inputTokens }),
+          // Singular insert is only used for user rows (and the orchestrator's
+          // initial synthesized user message) — they never have an output
+          // count. Sentinel -1 tells the fast path "unknown, force count" if
+          // this row were ever the most-recent assistant (it isn't).
+          outputTokens: UNKNOWN_OUTPUT_TOKENS,
+        })
+        .returning({ id: messages.id }),
+    );
   }
 
-  async getVoiceConfig() {
-    return this.#runInTx(async (tx) => {
-      // ORDER BY created_at DESC defends against the singleton constraint
-      // somehow being bypassed (manual psql, broken migration) — return
-      // the most recent config rather than picking arbitrarily.
-      const rows = await tx
-        .select()
-        .from(voiceConfig)
-        .orderBy(desc(voiceConfig.createdAt))
-        .limit(1);
-      return rows[0];
-    });
-  }
-
-  async insertMessage(params: {
-    conversationId: string;
-    role: "user" | "assistant";
-    content: string | ContentBlock[];
-    profileId: string;
-    model: string;
-    lastInboundMessageId: string;
-    inputTokens?: number;
-  }): Promise<{ id: string }> {
-    return this.#runInTx(async (tx) => {
-      return single(
-        await tx
-          .insert(messages)
-          .values({
-            conversationId: params.conversationId,
-            role: params.role,
-            content: params.content,
-            profileId: params.profileId,
-            model: params.model,
-            lastInboundMessageId: params.lastInboundMessageId,
-            ...(params.inputTokens != null && { inputTokens: params.inputTokens }),
-            // Singular insert is only used for user rows (and the orchestrator's
-            // initial synthesized user message) — they never have an output
-            // count. Sentinel -1 tells the fast path "unknown, force count" if
-            // this row were ever the most-recent assistant (it isn't).
-            outputTokens: UNKNOWN_OUTPUT_TOKENS,
-          })
-          .returning({ id: messages.id }),
-      );
-    });
-  }
-
-  async insertMessages(params: {
-    conversationId: string;
-    messages: ReadonlyArray<Message>; // must be non-empty
-    profileId: string;
-    model: string;
-    lastInboundMessageId: string;
-    lastMessageInputTokens?: number;
-    lastMessageOutputTokens: number;
-  }): Promise<{ id: string }> {
+  async insertMessages(
+    tx: Transaction,
+    params: {
+      conversationId: string;
+      messages: ReadonlyArray<Message>; // must be non-empty
+      profileId: string;
+      model: string;
+      lastInboundMessageId: string;
+      lastMessageInputTokens?: number;
+      lastMessageOutputTokens: number;
+    },
+  ): Promise<{ id: string }> {
     if (params.messages.length === 0) {
       throw new Error("insertMessages requires at least one message");
     }
-    return this.#runInTx(async (tx) => {
-      const lastIdx = params.messages.length - 1;
-      const values = R.map(params.messages, (msg, i) => ({
-        conversationId: params.conversationId,
-        role: msg.role,
-        content: msg.content,
-        profileId: params.profileId,
-        model: params.model,
-        lastInboundMessageId: params.lastInboundMessageId,
-        ...(i === lastIdx &&
-          params.lastMessageInputTokens != null && {
-            inputTokens: params.lastMessageInputTokens,
-          }),
-        // Intermediate tool turns get the sentinel — only the final assistant
-        // row carries the real aggregated outputTokens for the fast path.
-        outputTokens: i === lastIdx ? params.lastMessageOutputTokens : UNKNOWN_OUTPUT_TOKENS,
-      }));
-      const rows = await tx.insert(messages).values(values).returning({ id: messages.id });
-      const last = R.last(rows);
-      if (!last) throw new Error("insertMessages: no rows returned");
-      return last;
-    });
+    const lastIdx = params.messages.length - 1;
+    const values = R.map(params.messages, (msg, i) => ({
+      conversationId: params.conversationId,
+      role: msg.role,
+      content: msg.content,
+      profileId: params.profileId,
+      model: params.model,
+      lastInboundMessageId: params.lastInboundMessageId,
+      ...(i === lastIdx &&
+        params.lastMessageInputTokens != null && {
+          inputTokens: params.lastMessageInputTokens,
+        }),
+      // Intermediate tool turns get the sentinel — only the final assistant
+      // row carries the real aggregated outputTokens for the fast path.
+      outputTokens: i === lastIdx ? params.lastMessageOutputTokens : UNKNOWN_OUTPUT_TOKENS,
+    }));
+    const rows = await tx.insert(messages).values(values).returning({ id: messages.id });
+    const last = R.last(rows);
+    if (!last) throw new Error("insertMessages: no rows returned");
+    return last;
   }
 
   async getLastAssistantMessage(
+    tx: Transaction,
     conversationId: string,
   ): Promise<{ id: string; lastInboundMessageId: string } | undefined> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({
-          id: messages.id,
-          lastInboundMessageId: messages.lastInboundMessageId,
-        })
-        .from(messages)
-        .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
-        .orderBy(desc(messages.id))
-        .limit(1);
-      return rows[0];
-    });
+    const rows = await tx
+      .select({
+        id: messages.id,
+        lastInboundMessageId: messages.lastInboundMessageId,
+      })
+      .from(messages)
+      .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
+      .orderBy(desc(messages.id))
+      .limit(1);
+    return rows[0];
   }
 
-  async getHistory(conversationId: string): Promise<ReadonlyArray<Message>> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({ role: messages.role, content: messages.content })
-        .from(messages)
-        .where(eq(messages.conversationId, conversationId))
-        .orderBy(asc(messages.id));
-      return rows as ReadonlyArray<Message>;
-    });
+  async getHistory(tx: Transaction, conversationId: string): Promise<ReadonlyArray<Message>> {
+    const rows = await tx
+      .select({ role: messages.role, content: messages.content })
+      .from(messages)
+      .where(eq(messages.conversationId, conversationId))
+      .orderBy(asc(messages.id));
+    return rows as ReadonlyArray<Message>;
   }
 
   async getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined> {
@@ -675,54 +751,30 @@ export class DrizzleAgentStore implements AgentStore {
     return rows[0];
   }
 
-  async getFirstUser(): Promise<{ id: string } | undefined> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx.select({ id: users.id }).from(users).limit(1);
-      return rows[0];
-    });
+  async getFirstUser(tx: Transaction): Promise<{ id: string } | undefined> {
+    const rows = await tx.select({ id: users.id }).from(users).limit(1);
+    return rows[0];
   }
 
-  async getDefaultProfile(): Promise<{ id: string } | undefined> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx.select({ id: profiles.id }).from(profiles).limit(1);
-      return rows[0];
-    });
+  async getDefaultProfile(tx: Transaction): Promise<{ id: string } | undefined> {
+    const rows = await tx.select({ id: profiles.id }).from(profiles).limit(1);
+    return rows[0];
   }
 
-  async createProfile(params: {
-    userId: string | null;
-    name: string;
-    basePrompt: string;
-    model: string;
-    toolSet: ToolSet;
-    memoryScope?: ProfileMemoryScope | null;
-  }): Promise<Profile> {
-    return translateUniqueViolation(() =>
-      this.#runInTx(async (tx) => {
-        const row = single(
-          await tx.insert(profiles).values(params).returning({
-            id: profiles.id,
-            userId: profiles.userId,
-            name: profiles.name,
-            basePrompt: profiles.basePrompt,
-            model: profiles.model,
-            summarizationModel: profiles.summarizationModel,
-            extractionModel: profiles.extractionModel,
-            autoRecall: profiles.autoRecall,
-            voiceMode: profiles.voiceMode,
-            toolSet: profiles.toolSet,
-            memoryScope: profiles.memoryScope,
-          }),
-        );
-        return row as Profile;
-      }),
-    );
-  }
-
-  async listProfiles(userId: string): Promise<ReadonlyArray<Profile>> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({
+  async createProfile(
+    tx: Transaction,
+    params: {
+      userId: string | null;
+      name: string;
+      basePrompt: string;
+      model: string;
+      toolSet: ToolSet;
+      memoryScope?: ProfileMemoryScope | null;
+    },
+  ): Promise<Profile> {
+    return translateUniqueViolation(async () => {
+      const row = single(
+        await tx.insert(profiles).values(params).returning({
           id: profiles.id,
           userId: profiles.userId,
           name: profiles.name,
@@ -734,100 +786,118 @@ export class DrizzleAgentStore implements AgentStore {
           voiceMode: profiles.voiceMode,
           toolSet: profiles.toolSet,
           memoryScope: profiles.memoryScope,
-        })
-        .from(profiles)
-        .where(or(isNull(profiles.userId), eq(profiles.userId, userId)))
-        .orderBy(asc(profiles.name));
-      return rows as ReadonlyArray<Profile>;
+        }),
+      );
+      return row as Profile;
     });
   }
 
-  async getProfileOwner(profileId: string): Promise<{ userId: string | null } | undefined> {
-    return this.#runInTx(async (tx) => {
+  async listProfiles(tx: Transaction, userId: string): Promise<ReadonlyArray<Profile>> {
+    const rows = await tx
+      .select({
+        id: profiles.id,
+        userId: profiles.userId,
+        name: profiles.name,
+        basePrompt: profiles.basePrompt,
+        model: profiles.model,
+        summarizationModel: profiles.summarizationModel,
+        extractionModel: profiles.extractionModel,
+        autoRecall: profiles.autoRecall,
+        voiceMode: profiles.voiceMode,
+        toolSet: profiles.toolSet,
+        memoryScope: profiles.memoryScope,
+      })
+      .from(profiles)
+      .where(or(isNull(profiles.userId), eq(profiles.userId, userId)))
+      .orderBy(asc(profiles.name));
+    return rows as ReadonlyArray<Profile>;
+  }
+
+  async getProfileOwner(
+    tx: Transaction,
+    profileId: string,
+  ): Promise<{ userId: string | null } | undefined> {
+    const rows = await tx
+      .select({ userId: profiles.userId })
+      .from(profiles)
+      .where(eq(profiles.id, profileId))
+      .limit(1);
+    return rows[0];
+  }
+
+  async updateProfile(
+    tx: Transaction,
+    profileId: string,
+    changes: ProfileUpdates,
+  ): Promise<Profile> {
+    return translateUniqueViolation(async () => {
       const rows = await tx
-        .select({ userId: profiles.userId })
-        .from(profiles)
+        .update(profiles)
+        .set(changes)
         .where(eq(profiles.id, profileId))
-        .limit(1);
-      return rows[0];
+        .returning({
+          id: profiles.id,
+          userId: profiles.userId,
+          name: profiles.name,
+          basePrompt: profiles.basePrompt,
+          model: profiles.model,
+          summarizationModel: profiles.summarizationModel,
+          extractionModel: profiles.extractionModel,
+          autoRecall: profiles.autoRecall,
+          voiceMode: profiles.voiceMode,
+          toolSet: profiles.toolSet,
+          memoryScope: profiles.memoryScope,
+        });
+      return single(rows) as Profile;
     });
-  }
-
-  async updateProfile(profileId: string, changes: ProfileUpdates): Promise<Profile> {
-    return translateUniqueViolation(() =>
-      this.#runInTx(async (tx) => {
-        const rows = await tx
-          .update(profiles)
-          .set(changes)
-          .where(eq(profiles.id, profileId))
-          .returning({
-            id: profiles.id,
-            userId: profiles.userId,
-            name: profiles.name,
-            basePrompt: profiles.basePrompt,
-            model: profiles.model,
-            summarizationModel: profiles.summarizationModel,
-            extractionModel: profiles.extractionModel,
-            autoRecall: profiles.autoRecall,
-            voiceMode: profiles.voiceMode,
-            toolSet: profiles.toolSet,
-            memoryScope: profiles.memoryScope,
-          });
-        return single(rows) as Profile;
-      }),
-    );
   }
 
   async countProfileReferences(
+    tx: Transaction,
     profileId: string,
   ): Promise<{ conversations: number; messages: number }> {
-    return this.#runInTx(async (tx) => {
-      const [convRows, msgRows] = await Promise.all([
-        tx
-          .select({ value: count() })
-          .from(conversations)
-          .where(eq(conversations.profileId, profileId)),
-        tx.select({ value: count() }).from(messages).where(eq(messages.profileId, profileId)),
-      ]);
-      return {
-        conversations: convRows[0]?.value ?? 0,
-        messages: msgRows[0]?.value ?? 0,
-      };
-    });
+    const [convRows, msgRows] = await Promise.all([
+      tx
+        .select({ value: count() })
+        .from(conversations)
+        .where(eq(conversations.profileId, profileId)),
+      tx.select({ value: count() }).from(messages).where(eq(messages.profileId, profileId)),
+    ]);
+    return {
+      conversations: convRows[0]?.value ?? 0,
+      messages: msgRows[0]?.value ?? 0,
+    };
   }
 
-  async deleteProfile(profileId: string): Promise<void> {
+  async deleteProfile(tx: Transaction, profileId: string): Promise<void> {
     // Check refs + delete in one transaction so a concurrent conversation create / message insert
     // can't sneak in between count and delete. Without this, callers would see a raw FK error
     // instead of the typed ProfileInUseError.
-    await this.#runInTx(async (tx) => {
-      const [convRows, msgRows] = await Promise.all([
-        tx
-          .select({ value: count() })
-          .from(conversations)
-          .where(eq(conversations.profileId, profileId)),
-        tx.select({ value: count() }).from(messages).where(eq(messages.profileId, profileId)),
-      ]);
-      const convCount = convRows[0]?.value ?? 0;
-      const msgCount = msgRows[0]?.value ?? 0;
-      if (convCount > 0 || msgCount > 0) {
-        throw new ProfileInUseError(convCount, msgCount);
-      }
-      await tx.delete(profiles).where(eq(profiles.id, profileId));
-    });
+    const [convRows, msgRows] = await Promise.all([
+      tx
+        .select({ value: count() })
+        .from(conversations)
+        .where(eq(conversations.profileId, profileId)),
+      tx.select({ value: count() }).from(messages).where(eq(messages.profileId, profileId)),
+    ]);
+    const convCount = convRows[0]?.value ?? 0;
+    const msgCount = msgRows[0]?.value ?? 0;
+    if (convCount > 0 || msgCount > 0) {
+      throw new ProfileInUseError(convCount, msgCount);
+    }
+    await tx.delete(profiles).where(eq(profiles.id, profileId));
   }
 
   async getMessage(
+    tx: Transaction,
     messageId: string,
   ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | undefined> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({ id: messages.id, role: messages.role, content: messages.content })
-        .from(messages)
-        .where(eq(messages.id, messageId))
-        .limit(1);
-      return rows[0];
-    });
+    const rows = await tx
+      .select({ id: messages.id, role: messages.role, content: messages.content })
+      .from(messages)
+      .where(eq(messages.id, messageId))
+      .limit(1);
+    return rows[0];
   }
 
   async getActiveRules(
@@ -852,202 +922,206 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async getCoreMemoryBlocks(
+    tx: Transaction,
     userId: string,
   ): Promise<ReadonlyArray<{ key: string; content: string }>> {
-    return this.#runInTx(async (tx) => {
-      return tx
-        .select({ key: coreMemoryBlocks.key, content: coreMemoryBlocks.content })
-        .from(coreMemoryBlocks)
-        .where(eq(coreMemoryBlocks.userId, userId))
-        .orderBy(asc(coreMemoryBlocks.key));
-    });
+    return tx
+      .select({ key: coreMemoryBlocks.key, content: coreMemoryBlocks.content })
+      .from(coreMemoryBlocks)
+      .where(eq(coreMemoryBlocks.userId, userId))
+      .orderBy(asc(coreMemoryBlocks.key));
   }
 
-  async upsertCoreMemoryBlock(params: {
-    userId: string;
-    key: string;
-    content: string;
-  }): Promise<void> {
-    await this.#runInTx(async (tx) => {
-      await tx
-        .insert(coreMemoryBlocks)
-        .values(params)
-        .onConflictDoUpdate({
-          target: [coreMemoryBlocks.userId, coreMemoryBlocks.key],
-          set: { content: params.content, updatedAt: new Date() },
-        });
-    });
+  async upsertCoreMemoryBlock(
+    tx: Transaction,
+    params: {
+      userId: string;
+      key: string;
+      content: string;
+    },
+  ): Promise<void> {
+    await tx
+      .insert(coreMemoryBlocks)
+      .values(params)
+      .onConflictDoUpdate({
+        target: [coreMemoryBlocks.userId, coreMemoryBlocks.key],
+        set: { content: params.content, updatedAt: new Date() },
+      });
   }
 
-  async getLastTokens(conversationId: string): Promise<
+  async getLastTokens(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<
     | {
         inputTokens: number | null;
         outputTokens: number;
       }
     | undefined
   > {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({
-          inputTokens: messages.inputTokens,
-          outputTokens: messages.outputTokens,
-        })
-        .from(messages)
-        .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
-        .orderBy(desc(messages.id))
-        .limit(1);
-      return rows[0];
-    });
+    const rows = await tx
+      .select({
+        inputTokens: messages.inputTokens,
+        outputTokens: messages.outputTokens,
+      })
+      .from(messages)
+      .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
+      .orderBy(desc(messages.id))
+      .limit(1);
+    return rows[0];
   }
 
-  async getLastMessageTime(conversationId: string): Promise<Date | undefined> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({ createdAt: messages.createdAt })
-        .from(messages)
-        .where(eq(messages.conversationId, conversationId))
-        .orderBy(desc(messages.id))
-        .limit(1);
-      return rows[0]?.createdAt;
-    });
+  async getLastMessageTime(tx: Transaction, conversationId: string): Promise<Date | undefined> {
+    const rows = await tx
+      .select({ createdAt: messages.createdAt })
+      .from(messages)
+      .where(eq(messages.conversationId, conversationId))
+      .orderBy(desc(messages.id))
+      .limit(1);
+    return rows[0]?.createdAt;
   }
 
   // --- Conversation admin ---
 
-  async listConversationsForUser(userId: string): Promise<ReadonlyArray<ConversationSummary>> {
+  async listConversationsForUser(
+    tx: Transaction,
+    userId: string,
+  ): Promise<ReadonlyArray<ConversationSummary>> {
     // One round-trip: pull every private conversation for the user with its profile name and
     // (optional) alias. Last-message preview is a correlated subquery — we want the latest row
     // regardless of role so /sessions shows the most recent activity.
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({
-          id: conversations.id,
-          profileName: profiles.name,
-          alias: aliases.alias,
-          content: sql<unknown>`(
-            SELECT ${messages.content}
-            FROM ${messages}
-            WHERE ${messages.conversationId} = ${conversations.id}
-            ORDER BY ${messages.id} DESC
-            LIMIT 1
-          )`,
-          lastMessageAt: sql<string | Date | null>`(
-            SELECT ${messages.createdAt}
-            FROM ${messages}
-            WHERE ${messages.conversationId} = ${conversations.id}
-            ORDER BY ${messages.id} DESC
-            LIMIT 1
-          )`,
-        })
-        .from(conversations)
-        .innerJoin(profiles, eq(profiles.id, conversations.profileId))
-        .leftJoin(aliases, eq(aliases.conversationId, conversations.id))
-        .where(and(eq(conversations.userId, userId), eq(conversations.isPrivate, true)))
-        .orderBy(desc(conversations.id));
+    const rows = await tx
+      .select({
+        id: conversations.id,
+        profileName: profiles.name,
+        alias: aliases.alias,
+        content: sql<unknown>`(
+          SELECT ${messages.content}
+          FROM ${messages}
+          WHERE ${messages.conversationId} = ${conversations.id}
+          ORDER BY ${messages.id} DESC
+          LIMIT 1
+        )`,
+        lastMessageAt: sql<string | Date | null>`(
+          SELECT ${messages.createdAt}
+          FROM ${messages}
+          WHERE ${messages.conversationId} = ${conversations.id}
+          ORDER BY ${messages.id} DESC
+          LIMIT 1
+        )`,
+      })
+      .from(conversations)
+      .innerJoin(profiles, eq(profiles.id, conversations.profileId))
+      .leftJoin(aliases, eq(aliases.conversationId, conversations.id))
+      .where(and(eq(conversations.userId, userId), eq(conversations.isPrivate, true)))
+      .orderBy(desc(conversations.id));
 
-      return rows
-        .filter((r) => r.lastMessageAt != null) // skip conversations with no messages yet
-        .map((r) => {
-          // Correlated subquery loses the Drizzle column type mapper — driver returns either
-          // a Date (postgres-js) or an ISO string (PGlite); normalize.
-          const raw = r.lastMessageAt as Date | string;
-          const lastMessageAt = raw instanceof Date ? raw : new Date(raw);
-          return {
-            id: r.id,
-            profileName: r.profileName,
-            alias: r.alias,
-            lastMessagePreview: previewFromContent(r.content),
-            lastMessageAt,
-          };
-        });
-    });
+    return rows
+      .filter((r) => r.lastMessageAt != null) // skip conversations with no messages yet
+      .map((r) => {
+        // Correlated subquery loses the Drizzle column type mapper — driver returns either
+        // a Date (postgres-js) or an ISO string (PGlite); normalize.
+        const raw = r.lastMessageAt as Date | string;
+        const lastMessageAt = raw instanceof Date ? raw : new Date(raw);
+        return {
+          id: r.id,
+          profileName: r.profileName,
+          alias: r.alias,
+          lastMessagePreview: previewFromContent(r.content),
+          lastMessageAt,
+        };
+      });
   }
 
-  async setConversationProfile(conversationId: string, profileId: string): Promise<void> {
-    await this.#runInTx(async (tx) => {
-      await tx.update(conversations).set({ profileId }).where(eq(conversations.id, conversationId));
-    });
+  async setConversationProfile(
+    tx: Transaction,
+    conversationId: string,
+    profileId: string,
+  ): Promise<void> {
+    await tx.update(conversations).set({ profileId }).where(eq(conversations.id, conversationId));
   }
 
-  async setAlias(userId: string, conversationId: string, alias: string | null): Promise<void> {
-    await translateUniqueViolation(() =>
-      this.#runInTx(async (tx) => {
-        if (alias === null) {
-          await tx.delete(aliases).where(eq(aliases.conversationId, conversationId));
-          return;
-        }
-        await tx.insert(aliases).values({ userId, conversationId, alias }).onConflictDoUpdate({
-          target: aliases.conversationId,
-          set: { alias },
-        });
-      }),
-    );
+  async setAlias(
+    tx: Transaction,
+    userId: string,
+    conversationId: string,
+    alias: string | null,
+  ): Promise<void> {
+    await translateUniqueViolation(async () => {
+      if (alias === null) {
+        await tx.delete(aliases).where(eq(aliases.conversationId, conversationId));
+        return;
+      }
+      await tx.insert(aliases).values({ userId, conversationId, alias }).onConflictDoUpdate({
+        target: aliases.conversationId,
+        set: { alias },
+      });
+    });
   }
 
   async findConversationByAlias(
+    tx: Transaction,
     userId: string,
     alias: string,
   ): Promise<{ conversationId: string } | undefined> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({ conversationId: aliases.conversationId })
-        .from(aliases)
-        .where(and(eq(aliases.userId, userId), eq(aliases.alias, alias)))
-        .limit(1);
-      return rows[0];
-    });
+    const rows = await tx
+      .select({ conversationId: aliases.conversationId })
+      .from(aliases)
+      .where(and(eq(aliases.userId, userId), eq(aliases.alias, alias)))
+      .limit(1);
+    return rows[0];
   }
 
   // --- Model discovery ---
 
-  async listDistinctUserSelectableModels(): Promise<ReadonlyArray<string>> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .selectDistinct({ model: modelProviders.model })
-        .from(modelProviders)
-        .where(eq(modelProviders.userSelectable, true))
-        .orderBy(asc(modelProviders.model));
-      return rows.map((r) => r.model);
-    });
+  async listDistinctUserSelectableModels(tx: Transaction): Promise<ReadonlyArray<string>> {
+    const rows = await tx
+      .selectDistinct({ model: modelProviders.model })
+      .from(modelProviders)
+      .where(eq(modelProviders.userSelectable, true))
+      .orderBy(asc(modelProviders.model));
+    return rows.map((r) => r.model);
   }
 
-  async isModelUserSelectable(model: string): Promise<boolean> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({ id: modelProviders.id })
-        .from(modelProviders)
-        .where(and(eq(modelProviders.model, model), eq(modelProviders.userSelectable, true)))
-        .limit(1);
-      return rows.length > 0;
-    });
+  async isModelUserSelectable(tx: Transaction, model: string): Promise<boolean> {
+    const rows = await tx
+      .select({ id: modelProviders.id })
+      .from(modelProviders)
+      .where(and(eq(modelProviders.model, model), eq(modelProviders.userSelectable, true)))
+      .limit(1);
+    return rows.length > 0;
   }
 
   // --- LLM Providers ---
 
-  async createProvider(params: {
-    name: string;
-    type: string;
-    baseUrl?: string;
-    secretId: string;
-    attrs: ProviderAttrs;
-  }): Promise<{ id: string }> {
-    return this.#runInTx(async (tx) => {
-      return single(
-        await tx
-          .insert(llmProviders)
-          .values({
-            name: params.name,
-            type: params.type,
-            baseUrl: params.baseUrl,
-            secretId: params.secretId,
-            attrs: params.attrs,
-          })
-          .returning({ id: llmProviders.id }),
-      );
-    });
+  async createProvider(
+    tx: Transaction,
+    params: {
+      name: string;
+      type: string;
+      baseUrl?: string;
+      secretId: string;
+      attrs: ProviderAttrs;
+    },
+  ): Promise<{ id: string }> {
+    return single(
+      await tx
+        .insert(llmProviders)
+        .values({
+          name: params.name,
+          type: params.type,
+          baseUrl: params.baseUrl,
+          secretId: params.secretId,
+          attrs: params.attrs,
+        })
+        .returning({ id: llmProviders.id }),
+    );
   }
 
-  async getProvider(providerId: string): Promise<
+  async getProvider(
+    tx: Transaction,
+    providerId: string,
+  ): Promise<
     | {
         id: string;
         name: string;
@@ -1058,64 +1132,62 @@ export class DrizzleAgentStore implements AgentStore {
       }
     | undefined
   > {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({
-          id: llmProviders.id,
-          name: llmProviders.name,
-          type: llmProviders.type,
-          baseUrl: llmProviders.baseUrl,
-          secretId: llmProviders.secretId,
-          attrs: llmProviders.attrs,
-        })
-        .from(llmProviders)
-        .where(eq(llmProviders.id, providerId))
-        .limit(1);
-      return rows[0];
-    });
+    const rows = await tx
+      .select({
+        id: llmProviders.id,
+        name: llmProviders.name,
+        type: llmProviders.type,
+        baseUrl: llmProviders.baseUrl,
+        secretId: llmProviders.secretId,
+        attrs: llmProviders.attrs,
+      })
+      .from(llmProviders)
+      .where(eq(llmProviders.id, providerId))
+      .limit(1);
+    return rows[0];
   }
 
-  async listProviders(): Promise<
+  async listProviders(tx: Transaction): Promise<
     ReadonlyArray<{
       id: string;
       name: string;
       type: string;
     }>
   > {
-    return this.#runInTx(async (tx) => {
-      return tx
-        .select({
-          id: llmProviders.id,
-          name: llmProviders.name,
-          type: llmProviders.type,
-        })
-        .from(llmProviders);
-    });
+    return tx
+      .select({
+        id: llmProviders.id,
+        name: llmProviders.name,
+        type: llmProviders.type,
+      })
+      .from(llmProviders);
   }
 
-  async deleteProvider(providerId: string): Promise<void> {
-    await this.#runInTx(async (tx) => {
-      // model_providers cascade-deletes via ON DELETE CASCADE
-      await tx.delete(llmProviders).where(eq(llmProviders.id, providerId));
-    });
+  async deleteProvider(tx: Transaction, providerId: string): Promise<void> {
+    // model_providers cascade-deletes via ON DELETE CASCADE
+    await tx.delete(llmProviders).where(eq(llmProviders.id, providerId));
   }
 
   // --- Model → Provider routing ---
 
-  async addModelProvider(params: {
-    model: string;
-    providerId: string;
-    position: number;
-    userSelectable: boolean;
-  }): Promise<{ id: string }> {
-    return this.#runInTx(async (tx) => {
-      return single(
-        await tx.insert(modelProviders).values(params).returning({ id: modelProviders.id }),
-      );
-    });
+  async addModelProvider(
+    tx: Transaction,
+    params: {
+      model: string;
+      providerId: string;
+      position: number;
+      userSelectable: boolean;
+    },
+  ): Promise<{ id: string }> {
+    return single(
+      await tx.insert(modelProviders).values(params).returning({ id: modelProviders.id }),
+    );
   }
 
-  async resolveProviderForModel(model: string): Promise<
+  async resolveProviderForModel(
+    tx: Transaction,
+    model: string,
+  ): Promise<
     | {
         id: string;
         name: string;
@@ -1126,26 +1198,27 @@ export class DrizzleAgentStore implements AgentStore {
       }
     | undefined
   > {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({
-          id: llmProviders.id,
-          name: llmProviders.name,
-          type: llmProviders.type,
-          baseUrl: llmProviders.baseUrl,
-          secretId: llmProviders.secretId,
-          attrs: llmProviders.attrs,
-        })
-        .from(modelProviders)
-        .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
-        .where(eq(modelProviders.model, model))
-        .orderBy(asc(modelProviders.position))
-        .limit(1);
-      return rows[0];
-    });
+    const rows = await tx
+      .select({
+        id: llmProviders.id,
+        name: llmProviders.name,
+        type: llmProviders.type,
+        baseUrl: llmProviders.baseUrl,
+        secretId: llmProviders.secretId,
+        attrs: llmProviders.attrs,
+      })
+      .from(modelProviders)
+      .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
+      .where(eq(modelProviders.model, model))
+      .orderBy(asc(modelProviders.position))
+      .limit(1);
+    return rows[0];
   }
 
-  async listProvidersForModel(model: string): Promise<
+  async listProvidersForModel(
+    tx: Transaction,
+    model: string,
+  ): Promise<
     ReadonlyArray<{
       id: string;
       name: string;
@@ -1155,82 +1228,78 @@ export class DrizzleAgentStore implements AgentStore {
       attrs: ProviderAttrs;
     }>
   > {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({
-          id: llmProviders.id,
-          name: llmProviders.name,
-          type: llmProviders.type,
-          baseUrl: llmProviders.baseUrl,
-          secretId: llmProviders.secretId,
-          attrs: llmProviders.attrs,
+    const rows = await tx
+      .select({
+        id: llmProviders.id,
+        name: llmProviders.name,
+        type: llmProviders.type,
+        baseUrl: llmProviders.baseUrl,
+        secretId: llmProviders.secretId,
+        attrs: llmProviders.attrs,
+      })
+      .from(modelProviders)
+      .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
+      .where(eq(modelProviders.model, model))
+      .orderBy(asc(modelProviders.position));
+    return rows;
+  }
+
+  async getNextModelProviderPosition(tx: Transaction, model: string): Promise<number> {
+    const rows = await tx
+      .select({ position: modelProviders.position })
+      .from(modelProviders)
+      .where(eq(modelProviders.model, model))
+      .orderBy(desc(modelProviders.position))
+      .limit(1);
+    return rows[0] ? rows[0].position + 1 : 0;
+  }
+
+  async removeModelProvidersByProvider(tx: Transaction, providerId: string): Promise<void> {
+    await tx.delete(modelProviders).where(eq(modelProviders.providerId, providerId));
+  }
+
+  async hasChannelRules(tx: Transaction, channelType: string): Promise<boolean> {
+    const rows = await tx
+      .select({ id: steeringRules.id })
+      .from(steeringRules)
+      .where(eq(steeringRules.channelType, channelType))
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  async insertManualRule(
+    tx: Transaction,
+    params: {
+      rule: string;
+      category: string;
+      profileId?: string | null;
+      channelType?: string | null;
+      priority: number;
+    },
+  ): Promise<{ id: string }> {
+    return single(
+      await tx
+        .insert(steeringRules)
+        .values({
+          rule: params.rule,
+          category: params.category,
+          source: "manual",
+          active: true,
+          priority: params.priority,
+          observationCount: 0,
+          profileId: params.profileId ?? null,
+          channelType: params.channelType ?? null,
         })
-        .from(modelProviders)
-        .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
-        .where(eq(modelProviders.model, model))
-        .orderBy(asc(modelProviders.position));
-      return rows;
-    });
-  }
-
-  async getNextModelProviderPosition(model: string): Promise<number> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({ position: modelProviders.position })
-        .from(modelProviders)
-        .where(eq(modelProviders.model, model))
-        .orderBy(desc(modelProviders.position))
-        .limit(1);
-      return rows[0] ? rows[0].position + 1 : 0;
-    });
-  }
-
-  async removeModelProvidersByProvider(providerId: string): Promise<void> {
-    await this.#runInTx(async (tx) => {
-      await tx.delete(modelProviders).where(eq(modelProviders.providerId, providerId));
-    });
-  }
-
-  async hasChannelRules(channelType: string): Promise<boolean> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({ id: steeringRules.id })
-        .from(steeringRules)
-        .where(eq(steeringRules.channelType, channelType))
-        .limit(1);
-      return rows.length > 0;
-    });
-  }
-
-  async insertManualRule(params: {
-    rule: string;
-    category: string;
-    profileId?: string | null;
-    channelType?: string | null;
-    priority: number;
-  }): Promise<{ id: string }> {
-    return this.#runInTx(async (tx) => {
-      return single(
-        await tx
-          .insert(steeringRules)
-          .values({
-            rule: params.rule,
-            category: params.category,
-            source: "manual",
-            active: true,
-            priority: params.priority,
-            observationCount: 0,
-            profileId: params.profileId ?? null,
-            channelType: params.channelType ?? null,
-          })
-          .returning({ id: steeringRules.id }),
-      );
-    });
+        .returning({ id: steeringRules.id }),
+    );
   }
 
   // --- Evolution: correction extraction ---
 
-  async getCorrections(profileId: string): Promise<
+  async getCorrections(
+    tx: Transaction,
+    profileId: string,
+  ): Promise<
     ReadonlyArray<{
       id: string;
       rule: string;
@@ -1239,137 +1308,137 @@ export class DrizzleAgentStore implements AgentStore {
       observationCount: number;
     }>
   > {
-    return this.#runInTx(async (tx) => {
-      return tx
-        .select({
-          id: steeringRules.id,
-          rule: steeringRules.rule,
-          category: steeringRules.category,
-          active: steeringRules.active,
-          observationCount: steeringRules.observationCount,
-        })
-        .from(steeringRules)
-        .where(
-          and(
-            inArray(steeringRules.source, ["correction", "evolution"]),
-            or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
-          ),
-        )
-        .orderBy(asc(steeringRules.priority));
-    });
+    return tx
+      .select({
+        id: steeringRules.id,
+        rule: steeringRules.rule,
+        category: steeringRules.category,
+        active: steeringRules.active,
+        observationCount: steeringRules.observationCount,
+      })
+      .from(steeringRules)
+      .where(
+        and(
+          inArray(steeringRules.source, ["correction", "evolution"]),
+          or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
+        ),
+      )
+      .orderBy(asc(steeringRules.priority));
   }
 
-  async upsertCorrection(params: {
-    rule: string;
-    category: string;
-    profileId: string | null;
-    channelType?: string | null;
-    existingRuleId?: string;
-  }): Promise<{ id: string; promoted: boolean }> {
-    return this.#runInTx(async (tx) => {
-      if (params.existingRuleId) {
-        const rows = await tx
-          .update(steeringRules)
-          .set({
-            observationCount: sql`${steeringRules.observationCount} + 1`,
-            active: sql`CASE WHEN ${steeringRules.observationCount} + 1 >= 2 THEN true ELSE ${steeringRules.active} END`,
-          })
-          .where(eq(steeringRules.id, params.existingRuleId))
-          .returning({
-            id: steeringRules.id,
-            active: steeringRules.active,
-            observationCount: steeringRules.observationCount,
-          });
-        const row = rows[0];
-        if (!row) throw new Error(`upsertCorrection: rule not found: ${params.existingRuleId}`);
-        return { id: row.id, promoted: row.observationCount === 2 && row.active };
-      }
-
-      const row = single(
-        await tx
-          .insert(steeringRules)
-          .values({
-            rule: params.rule,
-            category: params.category,
-            source: "correction",
-            active: false,
-            priority: 100,
-            observationCount: 1,
-            profileId: params.profileId,
-            channelType: params.channelType ?? null,
-          })
-          .returning({ id: steeringRules.id }),
-      );
-      return { id: row.id, promoted: false };
-    });
-  }
-
-  async countActiveRules(profileId: string): Promise<number> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({ value: count() })
-        .from(steeringRules)
-        .where(
-          and(
-            eq(steeringRules.active, true),
-            or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
-          ),
-        );
-      return rows[0]?.value ?? 0;
-    });
-  }
-
-  async replaceRules(params: {
-    oldIds: string[];
-    newRule: {
+  async upsertCorrection(
+    tx: Transaction,
+    params: {
       rule: string;
       category: string;
       profileId: string | null;
-      priority: number;
-      observationCount: number;
-    };
-  }): Promise<{ id: string }> {
-    return this.#runInTx(async (tx) => {
-      await tx.delete(steeringRules).where(inArray(steeringRules.id, params.oldIds));
-      return single(
-        await tx
-          .insert(steeringRules)
-          .values({
-            rule: params.newRule.rule,
-            category: params.newRule.category,
-            source: "evolution",
-            active: true,
-            priority: params.newRule.priority,
-            observationCount: params.newRule.observationCount,
-            profileId: params.newRule.profileId,
-          })
-          .returning({ id: steeringRules.id }),
-      );
-    });
+      channelType?: string | null;
+      existingRuleId?: string;
+    },
+  ): Promise<{ id: string; promoted: boolean }> {
+    if (params.existingRuleId) {
+      const rows = await tx
+        .update(steeringRules)
+        .set({
+          observationCount: sql`${steeringRules.observationCount} + 1`,
+          active: sql`CASE WHEN ${steeringRules.observationCount} + 1 >= 2 THEN true ELSE ${steeringRules.active} END`,
+        })
+        .where(eq(steeringRules.id, params.existingRuleId))
+        .returning({
+          id: steeringRules.id,
+          active: steeringRules.active,
+          observationCount: steeringRules.observationCount,
+        });
+      const row = rows[0];
+      if (!row) throw new Error(`upsertCorrection: rule not found: ${params.existingRuleId}`);
+      return { id: row.id, promoted: row.observationCount === 2 && row.active };
+    }
+
+    const row = single(
+      await tx
+        .insert(steeringRules)
+        .values({
+          rule: params.rule,
+          category: params.category,
+          source: "correction",
+          active: false,
+          priority: 100,
+          observationCount: 1,
+          profileId: params.profileId,
+          channelType: params.channelType ?? null,
+        })
+        .returning({ id: steeringRules.id }),
+    );
+    return { id: row.id, promoted: false };
   }
 
-  async stagePendingMemory(params: {
-    userId: string;
-    content: string;
-    context?: string;
-    source: PendingMemorySource;
-  }): Promise<{ id: string }> {
-    return this.#runInTx(async (tx) => {
-      return single(
-        await tx
-          .insert(pendingMemories)
-          .values({
-            userId: params.userId,
-            content: params.content,
-            context: params.context ?? null,
-            source: params.source,
-          })
-          .returning({ id: pendingMemories.id }),
+  async countActiveRules(tx: Transaction, profileId: string): Promise<number> {
+    const rows = await tx
+      .select({ value: count() })
+      .from(steeringRules)
+      .where(
+        and(
+          eq(steeringRules.active, true),
+          or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
+        ),
       );
-    });
+    return rows[0]?.value ?? 0;
+  }
+
+  async replaceRules(
+    tx: Transaction,
+    params: {
+      oldIds: string[];
+      newRule: {
+        rule: string;
+        category: string;
+        profileId: string | null;
+        priority: number;
+        observationCount: number;
+      };
+    },
+  ): Promise<{ id: string }> {
+    await tx.delete(steeringRules).where(inArray(steeringRules.id, params.oldIds));
+    return single(
+      await tx
+        .insert(steeringRules)
+        .values({
+          rule: params.newRule.rule,
+          category: params.newRule.category,
+          source: "evolution",
+          active: true,
+          priority: params.newRule.priority,
+          observationCount: params.newRule.observationCount,
+          profileId: params.newRule.profileId,
+        })
+        .returning({ id: steeringRules.id }),
+    );
+  }
+
+  async stagePendingMemory(
+    tx: Transaction,
+    params: {
+      userId: string;
+      content: string;
+      context?: string;
+      source: PendingMemorySource;
+    },
+  ): Promise<{ id: string }> {
+    return single(
+      await tx
+        .insert(pendingMemories)
+        .values({
+          userId: params.userId,
+          content: params.content,
+          context: params.context ?? null,
+          source: params.source,
+        })
+        .returning({ id: pendingMemories.id }),
+    );
   }
 
   async bulkStagePendingMemories(
+    tx: Transaction,
     rows: ReadonlyArray<{
       userId: string;
       content: string;
@@ -1378,47 +1447,45 @@ export class DrizzleAgentStore implements AgentStore {
     }>,
   ): Promise<void> {
     if (rows.length === 0) return;
-    await this.#runInTx(async (tx) => {
-      // Postgres caps a single statement at 65,535 placeholders. Each row
-      // here binds 4 columns; chunking at 5,000 stays well under the cap
-      // (and atomicity is preserved by the surrounding transaction).
-      for (const chunk of R.chunk([...rows], 5000)) {
-        await tx.insert(pendingMemories).values(
-          chunk.map((r) => ({
-            userId: r.userId,
-            content: r.content,
-            context: r.context ?? null,
-            source: r.source,
-          })),
-        );
-      }
-    });
+    // Postgres caps a single statement at 65,535 placeholders. Each row
+    // here binds 4 columns; chunking at 5,000 stays well under the cap
+    // (and atomicity is preserved by the surrounding transaction).
+    for (const chunk of R.chunk([...rows], 5000)) {
+      await tx.insert(pendingMemories).values(
+        chunk.map((r) => ({
+          userId: r.userId,
+          content: r.content,
+          context: r.context ?? null,
+          source: r.source,
+        })),
+      );
+    }
   }
 
-  async getPendingMemories(userId: string, limit?: number): Promise<ReadonlyArray<PendingMemory>> {
-    return this.#runInTx(async (tx) => {
-      const base = tx
-        .select({
-          id: pendingMemories.id,
-          content: pendingMemories.content,
-          context: pendingMemories.context,
-          source: pendingMemories.source,
-          createdAt: pendingMemories.createdAt,
-        })
-        .from(pendingMemories)
-        .where(eq(pendingMemories.userId, userId))
-        // Secondary sort by id breaks createdAt ties — bulk inserts share a
-        // timestamp, but UUIDv7 ids are time-ordered, so the tiebreak preserves
-        // insertion order for callers that care (drain FIFO, tests).
-        .orderBy(asc(pendingMemories.createdAt), asc(pendingMemories.id));
-      return limit !== undefined ? await base.limit(limit) : await base;
-    });
+  async getPendingMemories(
+    tx: Transaction,
+    userId: string,
+    limit?: number,
+  ): Promise<ReadonlyArray<PendingMemory>> {
+    const base = tx
+      .select({
+        id: pendingMemories.id,
+        content: pendingMemories.content,
+        context: pendingMemories.context,
+        source: pendingMemories.source,
+        createdAt: pendingMemories.createdAt,
+      })
+      .from(pendingMemories)
+      .where(eq(pendingMemories.userId, userId))
+      // Secondary sort by id breaks createdAt ties — bulk inserts share a
+      // timestamp, but UUIDv7 ids are time-ordered, so the tiebreak preserves
+      // insertion order for callers that care (drain FIFO, tests).
+      .orderBy(asc(pendingMemories.createdAt), asc(pendingMemories.id));
+    return limit !== undefined ? await base.limit(limit) : await base;
   }
 
-  async deletePendingMemories(ids: ReadonlyArray<string>): Promise<void> {
+  async deletePendingMemories(tx: Transaction, ids: ReadonlyArray<string>): Promise<void> {
     if (ids.length === 0) return;
-    await this.#runInTx(async (tx) => {
-      await tx.delete(pendingMemories).where(inArray(pendingMemories.id, [...ids]));
-    });
+    await tx.delete(pendingMemories).where(inArray(pendingMemories.id, [...ids]));
   }
 }

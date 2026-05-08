@@ -1,3 +1,4 @@
+import type { Transactor } from "../db/index.js";
 import type { StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type {
@@ -94,6 +95,7 @@ export interface AdapterEntry {
 }
 
 export interface DeliveryRouterDeps {
+  runInTx: Transactor;
   adapters: Map<string, AdapterEntry>;
   transportStore: TransportStore;
 }
@@ -103,20 +105,22 @@ export interface DeliveryRouterDeps {
  * and partitions them into streaming (real-time) and batch (after persist) paths.
  */
 export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
-  const { adapters, transportStore } = deps;
+  const { runInTx, adapters, transportStore } = deps;
 
   return {
     async prepare(ctx: RoutingContext): Promise<DeliveryHandle> {
       // Source routing — find sessions that contributed inbound messages for this turn
-      const sourceSessions = await transportStore.getSourceSessions({
-        conversationId: ctx.conversationId,
-        prevCursor: ctx.prevCursor,
-        maxInboundId: ctx.maxInboundId,
-      });
+      const sourceSessions = await runInTx((tx) =>
+        transportStore.getSourceSessions(tx, {
+          conversationId: ctx.conversationId,
+          prevCursor: ctx.prevCursor,
+          maxInboundId: ctx.maxInboundId,
+        }),
+      );
 
       // Receive-all sessions — private conversations only
       const receiveAllSessions = ctx.isPrivate
-        ? await transportStore.getReceiveAllSessions(ctx.conversationId)
+        ? await runInTx((tx) => transportStore.getReceiveAllSessions(tx, ctx.conversationId))
         : [];
 
       // Merge + dedup by session ID
@@ -235,7 +239,9 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
     },
 
     async notifyConversation(conversationId: string, text: string): Promise<void> {
-      const sessions = await transportStore.getActiveSessionsForConversation(conversationId);
+      const sessions = await runInTx((tx) =>
+        transportStore.getActiveSessionsForConversation(tx, conversationId),
+      );
       if (sessions.length === 0) {
         logger.warn({ conversationId }, "notifyConversation: no active sessions");
         return;

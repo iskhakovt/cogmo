@@ -101,13 +101,13 @@ const PROVIDER_HELP: Partial<Record<ProviderType, { url: string; path: string; k
 async function stepSeedDefaults(deps: WizardDeps): Promise<{ userId: string; profileId: string }> {
   const s = p.spinner();
   s.start("Checking default user and profile...");
-  const result = await seedDefaults(deps.agentStore, deps.transportStore);
+  const result = await seedDefaults(deps.runInTx, deps.agentStore, deps.transportStore);
   s.stop("Default user and profile ready.");
   return result;
 }
 
 async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
-  const existing = await deps.agentStore.listProviders();
+  const existing = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
 
   if (existing.length > 0) {
     const names = existing.map((p) => p.name).join(", ");
@@ -123,7 +123,7 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     if (action === "keep") return;
     if (action === "replace") {
       for (const prov of existing) {
-        await deps.agentStore.deleteProvider(prov.id);
+        await deps.runInTx((tx) => deps.agentStore.deleteProvider(tx, prov.id));
       }
     }
   }
@@ -205,29 +205,31 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     attrs.promptCaching = true;
   }
 
-  const { id: providerId } = await deps.agentStore.createProvider({
-    name: providerName,
-    type: adapterType,
-    ...(baseUrl && { baseUrl }),
-    secretId,
-    attrs,
-  });
+  const { id: providerId } = await deps.runInTx((tx) =>
+    deps.agentStore.createProvider(tx, {
+      name: providerName,
+      type: adapterType,
+      ...(baseUrl && { baseUrl }),
+      secretId,
+      attrs,
+    }),
+  );
 
   // Register this provider for the default profile's model.
   // Use next available position to avoid UNIQUE(model, position) collision.
-  const defaultProfile = await deps.agentStore.getDefaultProfile();
-  if (defaultProfile) {
-    const profile = await deps.runInTx((tx) => deps.agentStore.getProfile(tx, defaultProfile.id));
-    if (profile) {
-      const nextPosition = await deps.agentStore.getNextModelProviderPosition(profile.model);
-      await deps.agentStore.addModelProvider({
-        model: profile.model,
-        providerId,
-        position: nextPosition,
-        userSelectable: true,
-      });
-    }
-  }
+  await deps.runInTx(async (tx) => {
+    const defaultProfile = await deps.agentStore.getDefaultProfile(tx);
+    if (!defaultProfile) return;
+    const profile = await deps.agentStore.getProfile(tx, defaultProfile.id);
+    if (!profile) return;
+    const nextPosition = await deps.agentStore.getNextModelProviderPosition(tx, profile.model);
+    await deps.agentStore.addModelProvider(tx, {
+      model: profile.model,
+      providerId,
+      position: nextPosition,
+      userSelectable: true,
+    });
+  });
 
   p.log.success(`Provider "${providerName}" configured for model routing.`);
 }
@@ -236,7 +238,7 @@ async function stepConfigureTelegram(
   deps: WizardDeps,
   userId: string,
 ): Promise<{ botUsername?: string }> {
-  const existing = await deps.transportStore.getChannelByType("telegram");
+  const existing = await deps.runInTx((tx) => deps.transportStore.getChannelByType(tx, "telegram"));
 
   if (existing) {
     const action = await p.select({
@@ -248,10 +250,10 @@ async function stepConfigureTelegram(
     });
     cancelGuard(action);
     if (action === "keep") {
-      await seedChannelRules(deps.agentStore, "telegram");
+      await seedChannelRules(deps.runInTx, deps.agentStore, "telegram");
       return {};
     }
-    await deps.transportStore.removeChannel(existing.id);
+    await deps.runInTx((tx) => deps.transportStore.removeChannel(tx, existing.id));
   } else {
     const add = await p.confirm({ message: "Add a Telegram channel? (optional)" });
     if (!cancelGuard(add)) return {};
@@ -294,14 +296,16 @@ async function stepConfigureTelegram(
   });
   await deps.secretsStore.markValidated(tokenSecretName);
 
-  const { id: channelId } = await deps.transportStore.createChannel({
-    type: "telegram",
-    credentials: { tokenSecretName },
-    identityMode: "mapped",
-  });
+  const { id: channelId } = await deps.runInTx((tx) =>
+    deps.transportStore.createChannel(tx, {
+      type: "telegram",
+      credentials: { tokenSecretName },
+      identityMode: "mapped",
+    }),
+  );
 
   // Seed default channel-scoped steering rules (idempotent)
-  await seedChannelRules(deps.agentStore, "telegram");
+  await seedChannelRules(deps.runInTx, deps.agentStore, "telegram");
 
   // Allowlist
   p.note(
@@ -329,11 +333,13 @@ async function stepConfigureTelegram(
     .filter(Boolean);
 
   for (const telegramUserId of userIds) {
-    await deps.transportStore.createIdentity({
-      userId,
-      channelId,
-      platformHandle: telegramUserId,
-    });
+    await deps.runInTx((tx) =>
+      deps.transportStore.createIdentity(tx, {
+        userId,
+        channelId,
+        platformHandle: telegramUserId,
+      }),
+    );
   }
 
   p.log.success(
@@ -566,9 +572,11 @@ async function stepValidateHindsight(): Promise<void> {
 }
 
 async function stepSummary(deps: WizardDeps, botUsername?: string): Promise<void> {
-  const providers = await deps.agentStore.listProviders();
+  const providers = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
   const secrets = await deps.secretsStore.listSecrets();
-  const telegramChannel = await deps.transportStore.getChannelByType("telegram");
+  const telegramChannel = await deps.runInTx((tx) =>
+    deps.transportStore.getChannelByType(tx, "telegram"),
+  );
 
   const lines: string[] = [];
   lines.push(`Providers: ${providers.map((p) => p.name).join(", ") || "none"}`);
@@ -627,7 +635,7 @@ export async function runWizard(deps: {
   let hasProvider = false;
   while (!hasProvider) {
     await stepConfigureProvider(wizardDeps);
-    const providers = await wizardDeps.agentStore.listProviders();
+    const providers = await wizardDeps.runInTx((tx) => wizardDeps.agentStore.listProviders(tx));
     hasProvider = providers.length > 0;
     if (!hasProvider) {
       p.log.warn("At least one LLM provider is required. Let's try again.");
