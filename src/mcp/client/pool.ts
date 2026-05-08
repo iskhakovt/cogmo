@@ -145,7 +145,17 @@ export class McpConnectionPool {
       // repopulating the entry map (the close already cleared it).
       if (this.#closed) throw err;
       const message = err instanceof Error ? err.message : String(err);
-      await this.#runInTx((tx) => this.#store.recordLastError(tx, serverId, message));
+      // `recordLastError` is best-effort observability — don't let a DB
+      // blip mask the original spawn error or skip the reconnect-state
+      // bookkeeping below. Log and continue.
+      try {
+        await this.#runInTx((tx) => this.#store.recordLastError(tx, serverId, message));
+      } catch (recordErr) {
+        logger.warn(
+          { err: recordErr, serverId },
+          "failed to record mcp connection error — continuing with reconnect bookkeeping",
+        );
+      }
       // Reconnect counter invariant: only the failed-spawn path increments
       // `reconnectAttempts`. A successful spawn writes `live` (no counter),
       // and the transport-close handler writes `closed` with attempts=0 —
