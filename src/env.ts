@@ -76,15 +76,16 @@ export const env = createEnv({
      * Pinned to the same version as the running cogmo binary (`process.env.VERSION`
      * is set by the app `Dockerfile`'s `ENV VERSION=$VERSION` at build time;
      * "dev" outside Docker). Override with the env var at deploy time to roll
-     * back to a specific image build.
+     * back to a specific image build. `||` (not `??`) so an empty-string
+     * `VERSION=` doesn't yield an image with no tag.
      */
     COGMO_DEVBASE_IMAGE: z
       .string()
-      .default(`ghcr.io/iskhakovt/cogmo-devbase:${process.env.VERSION ?? "dev"}`),
+      .default(`ghcr.io/iskhakovt/cogmo-devbase:${process.env.VERSION || "dev"}`),
     /** Base image for tier-2 (sysbox) skill workers. Same versioning model as devbase. */
     COGMO_SKILLS_IMAGE: z
       .string()
-      .default(`ghcr.io/iskhakovt/cogmo-skills:${process.env.VERSION ?? "dev"}`),
+      .default(`ghcr.io/iskhakovt/cogmo-skills:${process.env.VERSION || "dev"}`),
     /** Host root for git clones registered via `/repo add`. */
     COGMO_REPOS_DIR: z.string().default("/var/lib/cogmo/repos"),
     /** Host root for per-task git worktrees. */
