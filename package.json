@@ -5,6 +5,12 @@
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@10.27.0",
+  "cogmo": {
+    "hindsightCompat": {
+      "min": "0.6.0",
+      "max": "0.7.0"
+    }
+  },
   "files": [
     "dist",
     "migrations"
