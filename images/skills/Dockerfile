@@ -12,10 +12,10 @@
 
 FROM mirror.gcr.io/library/python:3.14-slim@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033
 
-# Non-root user. Sysbox already maps the in-container root to a non-root
-# host uid via user namespaces, so this is defense in depth + parity with
-# `cogmo-devbase`'s `vscode` user.
-RUN useradd -r -m -u 1000 -s /bin/bash cogmo
+# Non-root user (UID 1000, regular-user range — matches devbase's `vscode`
+# user). Sysbox already maps the in-container root to a non-root host uid
+# via user namespaces; this is defense in depth.
+RUN useradd -m -u 1000 -s /bin/bash cogmo
 
 # `python3 -u -c <runner>` is invoked by the host with stdin attached; the
 # image's default entrypoint is irrelevant. Cogmo's supervisor overrides

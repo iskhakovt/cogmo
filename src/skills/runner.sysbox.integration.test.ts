@@ -72,6 +72,17 @@ beforeAll(async () => {
   skillStore = new DrizzleSkillStore();
   docker = new Docker();
 
+  // Fail loudly if the dev forgot to bake the image first. CI's sysbox-e2e
+  // workflow does this for free; locally it's an explicit step that the
+  // runner's deep `image not found` doesn't surface clearly.
+  try {
+    await docker.getImage(SKILLS_IMAGE).inspect();
+  } catch {
+    throw new Error(
+      `${SKILLS_IMAGE} not loaded into local Docker. Run \`VERSION=test docker buildx bake --load skills\` before \`pnpm test:integration\`.`,
+    );
+  }
+
   const instance = await tx((trx) =>
     agentStore.insertInstance(trx, { host: hostname(), pid: process.pid }),
   );

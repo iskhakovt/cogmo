@@ -20,6 +20,15 @@
 //     platform override needed (skills is already amd64-only by default).
 //   - Local: `docker buildx bake skills` builds with default tag :dev.
 //     For fast amd64-only on cogmo locally, override the same as PR check.
+//
+// LOCAL-DEV NOTE: the runtime defaults to `cogmo-skills:dev` when
+// `process.env.VERSION` is unset. That tag is never published to ghcr.io —
+// it only exists locally after a `docker buildx bake --load skills`. Devs
+// who run `pnpm dev` (or `pnpm test:integration` with sysbox) for the
+// first time and invoke a tier-2 skill must run that bake first. The
+// runner's `ensureImagePresent` will otherwise return a 404 from the
+// registry. The integration test enforces this with a beforeAll inspect
+// + clear error.
 
 variable "REGISTRY" {
   default = "ghcr.io/iskhakovt"
@@ -27,6 +36,13 @@ variable "REGISTRY" {
 
 variable "VERSION" {
   default = "dev"
+}
+
+// Git commit SHA of the build. CI sets this from `${{ github.sha }}` so the
+// `org.opencontainers.image.revision` label points at the exact source.
+// Local: empty string is fine (label still emits, just blank).
+variable "REVISION" {
+  default = ""
 }
 
 // Provenance + SBOM produce extra entries in an OCI manifest list. The
@@ -56,6 +72,16 @@ target "_common" {
     "type=provenance,mode=max",
     "type=sbom",
   ] : []
+  // OCI standard image labels. Required by Artifact Hub + various supply-
+  // chain scanners; visible in the GHCR package UI and `crane manifest`.
+  // Previously emitted automatically by `metadata-action`; now explicit
+  // because the bake-only flow doesn't run that action for every target.
+  labels = {
+    "org.opencontainers.image.source"   = "https://github.com/iskhakovt/cogmo"
+    "org.opencontainers.image.revision" = "${REVISION}"
+    "org.opencontainers.image.version"  = "${VERSION}"
+    "org.opencontainers.image.licenses" = "MIT"
+  }
 }
 
 target "cogmo" {

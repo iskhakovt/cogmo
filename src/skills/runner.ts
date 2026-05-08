@@ -1,6 +1,7 @@
 import { Ajv, type ValidateFunction } from "ajv";
 import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
+import { defaultSkillsImage } from "../env.js";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SandboxClient } from "../sandbox/index.js";
@@ -36,10 +37,9 @@ import { type RunOnWorkerResult, runOnWorker } from "./worker-wasm/host.js";
  * env.COGMO_SKILLS_IMAGE`, so this default only matters for tests that
  * construct a runner without an explicit image AND actually invoke a
  * tier-container skill (the integration test does the latter — it overrides).
- * Mirrors `env.ts`'s version-aware default so the two stay in sync when
- * the binary's `VERSION` is set.
+ * Shares the helper with `env.ts` so the two never drift.
  */
-const DEFAULT_TIER2_IMAGE = `ghcr.io/iskhakovt/cogmo-skills:${process.env.VERSION || "dev"}`;
+const DEFAULT_TIER2_IMAGE = defaultSkillsImage();
 
 /**
  * Translate a manifest's `resources` block into the partial `ResourceLimits`

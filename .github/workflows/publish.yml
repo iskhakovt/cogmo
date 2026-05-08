@@ -51,6 +51,8 @@ jobs:
       - uses: docker/bake-action@a66e1c87e2eca0503c343edf1d208c716d54b8a8 # v7.1.0
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          # Git SHA → org.opencontainers.image.revision label.
+          REVISION: ${{ github.sha }}
         with:
           source: .
           files: ./docker-bake.hcl

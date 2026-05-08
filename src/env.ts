@@ -2,6 +2,22 @@ import { createEnv } from "@t3-oss/env-core";
 import { z } from "zod";
 import { resolveEnvFile } from "./secrets/env-file.js";
 
+/**
+ * Default Cogmo-baked image references — read from `process.env.VERSION`
+ * (set by the cogmo `Dockerfile`'s `ENV VERSION=$VERSION` build arg; falls
+ * back to "dev" outside Docker). Single source of truth; the runner
+ * imports `defaultSkillsImage` for its own fallback so the env var and
+ * runner constructor default never drift apart.
+ *
+ * `||` (not `??`) so an empty `VERSION=` doesn't yield a tag-less image.
+ */
+export function defaultDevbaseImage(): string {
+  return `ghcr.io/iskhakovt/cogmo-devbase:${process.env.VERSION || "dev"}`;
+}
+export function defaultSkillsImage(): string {
+  return `ghcr.io/iskhakovt/cogmo-skills:${process.env.VERSION || "dev"}`;
+}
+
 // Apply _FILE convention for Docker secrets before Zod validation.
 // Only specific vars support this — not a global wrapper.
 const resolved: Record<string, string | undefined> = { ...process.env };
@@ -73,19 +89,12 @@ export const env = createEnv({
     SANDBOX_RUNTIME: z.enum(["sysbox", "runc"]).optional(),
     /**
      * Default base image for task containers when a repo has no `.devcontainer/`.
-     * Pinned to the same version as the running cogmo binary (`process.env.VERSION`
-     * is set by the app `Dockerfile`'s `ENV VERSION=$VERSION` at build time;
-     * "dev" outside Docker). Override with the env var at deploy time to roll
-     * back to a specific image build. `||` (not `??`) so an empty-string
-     * `VERSION=` doesn't yield an image with no tag.
+     * Computed from `process.env.VERSION` — see `defaultDevbaseImage`.
+     * Override with the env var at deploy time to roll back to a specific build.
      */
-    COGMO_DEVBASE_IMAGE: z
-      .string()
-      .default(`ghcr.io/iskhakovt/cogmo-devbase:${process.env.VERSION || "dev"}`),
-    /** Base image for tier-2 (sysbox) skill workers. Same versioning model as devbase. */
-    COGMO_SKILLS_IMAGE: z
-      .string()
-      .default(`ghcr.io/iskhakovt/cogmo-skills:${process.env.VERSION || "dev"}`),
+    COGMO_DEVBASE_IMAGE: z.string().default(defaultDevbaseImage()),
+    /** Base image for tier-2 (sysbox) skill workers. Same model as devbase. */
+    COGMO_SKILLS_IMAGE: z.string().default(defaultSkillsImage()),
     /** Host root for git clones registered via `/repo add`. */
     COGMO_REPOS_DIR: z.string().default("/var/lib/cogmo/repos"),
     /** Host root for per-task git worktrees. */

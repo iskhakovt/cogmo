@@ -11,6 +11,11 @@ on:
     # Sunday 04:00 UTC.
     - cron: "0 4 * * 0"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Log what would be deleted without deleting (default: yes for manual runs)"
+        type: boolean
+        default: true
 
 permissions: {}
 
@@ -43,3 +48,8 @@ jobs:
           # entries (e.g. attestation manifests for deleted parents).
           older-than: 14 days
           delete-untagged: true
+          # Manual runs default to dry-run so a human can verify the
+          # would-delete log before flipping. Cron runs (where `inputs`
+          # is empty) actually delete. Free-tier ghcr deletes are
+          # permanent; the safety net is worth one extra YAML branch.
+          dry-run: ${{ inputs.dry_run || 'false' }}
