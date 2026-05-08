@@ -1,7 +1,7 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { Profile } from "../../../agent/store/index.js";
-import { mockTransport } from "../../../test/factories.js";
+import { type DeepPartial, mockTransportDeep } from "../../../test/factories.js";
 import type { Transport } from "../../transport.js";
 import type { TelegramCommandContext } from "./commands.js";
 import { ProfileDialogs } from "./profile-dialog.js";
@@ -29,12 +29,13 @@ function mkProfile(overrides: Partial<Profile> & { id: string; name: string }): 
     voiceMode: "auto",
     toolSet: [],
     memoryScope: null,
+    profileClass: null,
     ...overrides,
   };
 }
 
-function transportWith(overrides: Partial<Transport> = {}): Transport {
-  return mockTransport(overrides);
+function transportWith(overrides: DeepPartial<Transport> = {}): Transport {
+  return mockTransportDeep(overrides);
 }
 
 describe("ProfileDialogs - /profile new happy path", () => {
@@ -174,13 +175,11 @@ describe("ProfileDialogs - /profile edit", () => {
     model: "old-model",
   });
 
-  function editTransport(create?: Partial<Transport>) {
+  function editTransport(create?: DeepPartial<Transport>) {
     return transportWith({
       profiles: {
         list: vi.fn().mockResolvedValue(ok([existing])),
-        create: vi.fn().mockResolvedValue(ok({} as never)),
         update: vi.fn().mockResolvedValue(ok(existing)),
-        delete: vi.fn().mockResolvedValue(ok(undefined)),
       },
       models: { list: vi.fn().mockResolvedValue(["new-model"]) },
       ...create,

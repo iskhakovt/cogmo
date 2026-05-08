@@ -4,12 +4,18 @@ import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
-import { ProfileInUseError, UniqueViolationError } from "../agent/store/errors.js";
+import {
+  ProfileClassInUseError,
+  ProfileInUseError,
+  UniqueViolationError,
+  UnknownProfileClassError,
+} from "../agent/store/errors.js";
 import type {
   AgentStore,
   ConversationStatus,
   ConversationSummary,
   Profile,
+  ProfileClass,
   VoiceMode,
 } from "../agent/store/index.js";
 import type { ProfileMemoryScope, ToolSet } from "../agent/store/schema.js";
@@ -159,6 +165,10 @@ export type TransportError =
   | { code: "profile_not_found" }
   | { code: "profile_in_use" }
   | { code: "profile_name_taken" }
+  | { code: "profile_class_in_use"; profileRefs: number }
+  | { code: "profile_class_not_found"; name: string }
+  | { code: "profile_class_name_taken"; name: string }
+  | { code: "unknown_profile_class"; name: string }
   | { code: "model_unavailable"; model: string }
   | { code: "alias_taken" }
   | { code: "operation_not_permitted" }
@@ -292,6 +302,31 @@ export interface Transport {
       changes: Partial<ProfileInput>,
     ): Promise<Result<Profile, TransportError>>;
     delete(platformUserHandle: string, profileId: string): Promise<Result<void, TransportError>>;
+    /**
+     * Set or clear `profile_class` on a non-org profile. `className: null`
+     * clears it. The class must already exist in the caller's registry —
+     * `unknown_profile_class` is returned otherwise.
+     */
+    setClass(
+      platformUserHandle: string,
+      profileId: string,
+      className: string | null,
+    ): Promise<Result<void, TransportError>>;
+  };
+
+  /**
+   * Profile-class registry — the user-owned label set used by the
+   * speaker-isolation tag axis. Each class is `(name, description)` per
+   * user; profiles assign themselves to a class via `profiles.setClass`.
+   * Org-level classes are not currently supported.
+   */
+  profileClasses: {
+    list(platformUserHandle: string): Promise<Result<ReadonlyArray<ProfileClass>, TransportError>>;
+    create(
+      platformUserHandle: string,
+      input: { name: string; description: string },
+    ): Promise<Result<ProfileClass, TransportError>>;
+    delete(platformUserHandle: string, name: string): Promise<Result<void, TransportError>>;
   };
 
   /** Model discovery — filtered to `user_selectable = true`. */
@@ -928,6 +963,82 @@ export function createTransport(deps: {
             return ok(undefined);
           } catch (e) {
             if (e instanceof ProfileInUseError) return err({ code: "profile_in_use" as const });
+            throw e;
+          }
+        });
+      },
+
+      async setClass(platformUserHandle, profileId, className) {
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          const owner = await agentStore.getProfileOwner(tx, profileId);
+          if (!owner) return err({ code: "profile_not_found" as const });
+          if (owner.userId === null) {
+            return err({
+              code: "access_denied" as const,
+              reason: "org profiles cannot be classed via Transport",
+            });
+          }
+          if (owner.userId !== identity.userId) {
+            return err({ code: "access_denied" as const, reason: "profile not owned by caller" });
+          }
+          try {
+            await agentStore.setProfileClass(tx, profileId, className);
+            return ok(undefined);
+          } catch (e) {
+            if (e instanceof UnknownProfileClassError) {
+              return err({ code: "unknown_profile_class" as const, name: e.className });
+            }
+            throw e;
+          }
+        });
+      },
+    },
+
+    profileClasses: {
+      async list(platformUserHandle) {
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          return ok(await agentStore.listProfileClasses(tx, identity.userId));
+        });
+      },
+
+      async create(platformUserHandle, input) {
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          try {
+            const created = await agentStore.createProfileClass(tx, {
+              userId: identity.userId,
+              name: input.name,
+              description: input.description,
+            });
+            return ok(created);
+          } catch (e) {
+            if (e instanceof UniqueViolationError) {
+              return err({ code: "profile_class_name_taken" as const, name: input.name });
+            }
+            throw e;
+          }
+        });
+      },
+
+      async delete(platformUserHandle, name) {
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          try {
+            const result = await agentStore.deleteProfileClass(tx, identity.userId, name);
+            if (!result.deleted) {
+              return err({ code: "profile_class_not_found" as const, name });
+            }
+            return ok(undefined);
+          } catch (e) {
+            if (e instanceof ProfileClassInUseError) {
+              return err({ code: "profile_class_in_use" as const, profileRefs: e.profileRefs });
+            }
             throw e;
           }
         });

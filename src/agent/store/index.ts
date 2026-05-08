@@ -5,7 +5,13 @@ import type { Transaction } from "../../db/index.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { truncate } from "../../util/string.js";
 import type { AutoRecallMode } from "../recall-gate.js";
-import { ProfileInUseError, translateUniqueViolation } from "./errors.js";
+import {
+  ProfileClassInUseError,
+  ProfileInUseError,
+  translateForeignKeyViolation,
+  translateUniqueViolation,
+  UnknownProfileClassError,
+} from "./errors.js";
 import {
   aliases,
   conversations,
@@ -16,6 +22,7 @@ import {
   type ProfileMemoryScope,
   type ProviderAttrs,
   pendingMemories,
+  profileClasses,
   profiles,
   steeringRules,
   type ToolSet,
@@ -42,12 +49,22 @@ export type VoiceMode = "auto" | "always" | "never";
 /** Mirrors the `pending_memory_source` PG enum. */
 export type PendingMemorySource = "live_retain" | "migration";
 
-/** A memory write awaiting Observer classification before retention to Hindsight. */
+/**
+ * A memory write awaiting Observer classification before retention to
+ * Hindsight. `profileClass` is denormalised onto the row at read time via
+ * a JOIN on `profiles` so the drain can stamp the correct
+ * `profile_class:<class>` tag without having to look up the profile per
+ * row (or worse, per-row group). `null` when either the staging profile
+ * was unclassed or the lineage isn't available — pre-feature live
+ * retains, migration backfill, or rows whose staging profile was deleted
+ * (`profile_id` SET NULL).
+ */
 export interface PendingMemory {
   id: string;
   content: string;
   context: string | null;
   source: PendingMemorySource;
+  profileClass: string | null;
   createdAt: Date;
 }
 
@@ -63,7 +80,9 @@ export interface Profile {
   /** Profile-level voice mode default; overridden per-conversation. */
   voiceMode: VoiceMode;
   toolSet: ToolSet;
-  memoryScope: ProfileMemoryScope | null; // null = no compartment/trust restriction
+  memoryScope: ProfileMemoryScope | null; // null = no compartment/trust/class restriction
+  /** Speaker-isolation label; null = unclassed (Observer emits no class tag). */
+  profileClass: string | null;
 }
 
 export interface ProfileUpdates {
@@ -76,6 +95,15 @@ export interface ProfileUpdates {
   voiceMode?: VoiceMode;
   toolSet?: ToolSet;
   memoryScope?: ProfileMemoryScope | null;
+}
+
+/** Per-user registry row for `profiles.profile_class`. */
+export interface ProfileClass {
+  id: string;
+  userId: string;
+  name: string;
+  description: string;
+  createdAt: Date;
 }
 
 export interface ConversationSummary {
@@ -281,6 +309,33 @@ export interface AgentStore {
    * profile as audit data — a profile that has ever been used in a turn stays undeletable.
    */
   deleteProfile(tx: Transaction, profileId: string): Promise<void>;
+
+  // --- Profile classes (speaker-isolation registry) ---
+
+  /** List the user's registered profile classes, ordered by name. */
+  listProfileClasses(tx: Transaction, userId: string): Promise<ReadonlyArray<ProfileClass>>;
+
+  /** Create a new profile class. Throws `UniqueViolationError` on (user_id, name) collision. */
+  createProfileClass(
+    tx: Transaction,
+    params: { userId: string; name: string; description: string },
+  ): Promise<ProfileClass>;
+
+  /**
+   * Delete a profile class by name. Throws `ProfileClassInUseError` if any
+   * of the user's profiles still reference it via `profile_class`. Returns
+   * `{ deleted: false }` if no row matches; `{ deleted: true }` on success.
+   */
+  deleteProfileClass(tx: Transaction, userId: string, name: string): Promise<{ deleted: boolean }>;
+
+  /**
+   * Set or clear a profile's `profile_class`. `className: null` clears it.
+   * When `className` is non-null, validates the class exists in the
+   * profile's user's registry and throws `UnknownProfileClassError`
+   * otherwise. Org profiles (`user_id IS NULL`) cannot be classed —
+   * passing `className !== null` for one throws `UnknownProfileClassError`.
+   */
+  setProfileClass(tx: Transaction, profileId: string, className: string | null): Promise<void>;
 
   /** Load a single message by ID. */
   getMessage(
@@ -547,18 +602,30 @@ export interface AgentStore {
 
   // --- Pending memories (staging for Observer classification) ---
 
-  /** Insert a single row into the staging table. Returns the new row id. */
+  /**
+   * Insert a single row into the staging table. Returns the new row id.
+   *
+   * `profileId` snapshots which profile staged the row so the Observer
+   * drain stamps the correct `profile_class:<class>` tag at retain
+   * time. Pass `null` for non-conversational stages (the migration
+   * backfill loop) where there's no staging profile.
+   */
   stagePendingMemory(
     tx: Transaction,
     params: {
       userId: string;
+      profileId: string | null;
       content: string;
       context?: string;
       source: PendingMemorySource;
     },
   ): Promise<{ id: string }>;
 
-  /** Bulk insert via a single statement. Used by the migration script to stage thousands of rows in one round-trip. */
+  /**
+   * Bulk insert via a single statement. Used by the migration script to
+   * stage thousands of rows in one round-trip. `profileId` is null on
+   * every row — the migration script has no per-row profile lineage.
+   */
   bulkStagePendingMemories(
     tx: Transaction,
     rows: ReadonlyArray<{
@@ -769,6 +836,7 @@ export class DrizzleAgentStore implements AgentStore {
         voiceMode: profiles.voiceMode,
         toolSet: profiles.toolSet,
         memoryScope: profiles.memoryScope,
+        profileClass: profiles.profileClass,
       })
       .from(profiles)
       .where(eq(profiles.id, profileId))
@@ -811,6 +879,7 @@ export class DrizzleAgentStore implements AgentStore {
           voiceMode: profiles.voiceMode,
           toolSet: profiles.toolSet,
           memoryScope: profiles.memoryScope,
+          profileClass: profiles.profileClass,
         }),
       );
       return row as Profile;
@@ -831,6 +900,7 @@ export class DrizzleAgentStore implements AgentStore {
         voiceMode: profiles.voiceMode,
         toolSet: profiles.toolSet,
         memoryScope: profiles.memoryScope,
+        profileClass: profiles.profileClass,
       })
       .from(profiles)
       .where(or(isNull(profiles.userId), eq(profiles.userId, userId)))
@@ -872,6 +942,7 @@ export class DrizzleAgentStore implements AgentStore {
           voiceMode: profiles.voiceMode,
           toolSet: profiles.toolSet,
           memoryScope: profiles.memoryScope,
+          profileClass: profiles.profileClass,
         });
       return single(rows) as Profile;
     });
@@ -911,6 +982,113 @@ export class DrizzleAgentStore implements AgentStore {
       throw new ProfileInUseError(convCount, msgCount);
     }
     await tx.delete(profiles).where(eq(profiles.id, profileId));
+  }
+
+  async listProfileClasses(tx: Transaction, userId: string): Promise<ReadonlyArray<ProfileClass>> {
+    const rows = await tx
+      .select({
+        id: profileClasses.id,
+        userId: profileClasses.userId,
+        name: profileClasses.name,
+        description: profileClasses.description,
+        createdAt: profileClasses.createdAt,
+      })
+      .from(profileClasses)
+      .where(eq(profileClasses.userId, userId))
+      .orderBy(asc(profileClasses.name));
+    return rows;
+  }
+
+  async createProfileClass(
+    tx: Transaction,
+    params: { userId: string; name: string; description: string },
+  ): Promise<ProfileClass> {
+    return translateUniqueViolation(async () => {
+      return single(
+        await tx.insert(profileClasses).values(params).returning({
+          id: profileClasses.id,
+          userId: profileClasses.userId,
+          name: profileClasses.name,
+          description: profileClasses.description,
+          createdAt: profileClasses.createdAt,
+        }),
+      );
+    });
+  }
+
+  async deleteProfileClass(
+    tx: Transaction,
+    userId: string,
+    name: string,
+  ): Promise<{ deleted: boolean }> {
+    // Atomicity comes from the composite FK on `profiles(user_id, profile_class)`
+    // with ON DELETE RESTRICT — the DELETE fails at the DB level if any
+    // profile still references this class, even when a concurrent
+    // setProfileClass slipped its UPDATE in after our count. The count
+    // below is informational only; a stale value is harmless because the
+    // FK is the authoritative check.
+    const refRows = await tx
+      .select({ value: count() })
+      .from(profiles)
+      .where(and(eq(profiles.userId, userId), eq(profiles.profileClass, name)));
+    const refCount = refRows[0]?.value ?? 0;
+    return translateForeignKeyViolation(
+      async () => {
+        const deleted = await tx
+          .delete(profileClasses)
+          .where(and(eq(profileClasses.userId, userId), eq(profileClasses.name, name)))
+          .returning({ id: profileClasses.id });
+        return { deleted: deleted.length > 0 };
+      },
+      {
+        constraintName: "fk_profiles_profile_class",
+        // refCount may be 0 here (the violating UPDATE landed AFTER we
+        // counted) — that's fine; the message is informational and the
+        // important fact is "in use right now", which the FK confirmed.
+        rethrow: () => new ProfileClassInUseError(Math.max(refCount, 1)),
+      },
+    );
+  }
+
+  async setProfileClass(
+    tx: Transaction,
+    profileId: string,
+    className: string | null,
+  ): Promise<void> {
+    if (className === null) {
+      await tx.update(profiles).set({ profileClass: null }).where(eq(profiles.id, profileId));
+      return;
+    }
+    // Composite FK with MATCH SIMPLE skips its check when either column is
+    // NULL — so for org profiles (user_id IS NULL) the FK would silently
+    // allow any class name. Reject org-profile classing here so the
+    // contract holds for that path too.
+    const owner = await tx
+      .select({ userId: profiles.userId })
+      .from(profiles)
+      .where(eq(profiles.id, profileId))
+      .limit(1);
+    const found = owner[0];
+    if (!found || found.userId === null) {
+      throw new UnknownProfileClassError(className);
+    }
+    // For non-org profiles, the FK is the authoritative check: an unknown
+    // class name surfaces as a 23503 on `fk_profiles_profile_class`.
+    // Concurrent deleteProfileClass landing between this UPDATE and
+    // commit fails the same way, so stale-snapshot races can't leave a
+    // dangling pointer.
+    await translateForeignKeyViolation(
+      async () => {
+        await tx
+          .update(profiles)
+          .set({ profileClass: className })
+          .where(eq(profiles.id, profileId));
+      },
+      {
+        constraintName: "fk_profiles_profile_class",
+        rethrow: () => new UnknownProfileClassError(className),
+      },
+    );
   }
 
   async getMessage(
@@ -1487,6 +1665,7 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     params: {
       userId: string;
+      profileId: string | null;
       content: string;
       context?: string;
       source: PendingMemorySource;
@@ -1497,6 +1676,7 @@ export class DrizzleAgentStore implements AgentStore {
         .insert(pendingMemories)
         .values({
           userId: params.userId,
+          profileId: params.profileId,
           content: params.content,
           context: params.context ?? null,
           source: params.source,
@@ -1516,12 +1696,15 @@ export class DrizzleAgentStore implements AgentStore {
   ): Promise<void> {
     if (rows.length === 0) return;
     // Postgres caps a single statement at 65,535 placeholders. Each row
-    // here binds 4 columns; chunking at 5,000 stays well under the cap
-    // (and atomicity is preserved by the surrounding transaction).
+    // binds 5 columns (profile_id is always null on this path — the
+    // migration script has no per-row profile lineage); chunking at 5,000
+    // stays well under the cap (and atomicity is preserved by the
+    // surrounding transaction).
     for (const chunk of R.chunk([...rows], 5000)) {
       await tx.insert(pendingMemories).values(
         chunk.map((r) => ({
           userId: r.userId,
+          profileId: null,
           content: r.content,
           context: r.context ?? null,
           source: r.source,
@@ -1535,15 +1718,40 @@ export class DrizzleAgentStore implements AgentStore {
     userId: string,
     limit?: number,
   ): Promise<ReadonlyArray<PendingMemory>> {
+    // LEFT JOIN onto profiles so we surface the staging profile's CURRENT
+    // class on each row at drain time. LEFT (not INNER) so rows whose
+    // profile was deleted (`profile_id` SET NULL) or never had one
+    // (migration backfill) still drain — they just stamp untagged on the
+    // class dimension. Reading the profile's current class (rather than
+    // a staging-time snapshot) means renaming a class re-flows all of
+    // the user's pending rows under the new name without a backfill.
     const base = tx
       .select({
         id: pendingMemories.id,
         content: pendingMemories.content,
         context: pendingMemories.context,
         source: pendingMemories.source,
+        profileClass: profiles.profileClass,
         createdAt: pendingMemories.createdAt,
       })
       .from(pendingMemories)
+      // Defence in depth on the join: require the joined profile to
+      // belong to the SAME user as the pending row. The FK on
+      // `pending_memories.profile_id → profiles.id` doesn't enforce
+      // user ownership (profiles.user_id is independent), so if a row
+      // ever drifts (manual SQL, future bug, data corruption) and
+      // points to another user's profile, we'd otherwise surface that
+      // user's `profile_class` here and leak across the speaker
+      // boundary at retain time. With the second predicate, a
+      // mismatched row falls back to NULL on the join and stamps
+      // untagged on the class dimension.
+      .leftJoin(
+        profiles,
+        and(
+          eq(profiles.id, pendingMemories.profileId),
+          eq(profiles.userId, pendingMemories.userId),
+        ),
+      )
       .where(eq(pendingMemories.userId, userId))
       // Secondary sort by id breaks createdAt ties — bulk inserts share a
       // timestamp, but UUIDv7 ids are time-ordered, so the tiebreak preserves
