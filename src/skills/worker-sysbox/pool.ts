@@ -94,6 +94,20 @@ interface PendingWaiter {
   reject: (err: Error) => void;
 }
 
+/**
+ * Internal sentinel for `dispose()` racing an in-flight `#spawnOne()`. Caller
+ * paths (eager `create()`, on-demand acquire, lazy replacement) all unwind
+ * uniformly: foreground awaits surface it; background `void.catch` paths
+ * recognise it and stay silent. Not exported — callers see it as a thrown
+ * `Error` instance, not as a typed branch in their own logic.
+ */
+class PoolDisposedDuringSpawnError extends Error {
+  constructor() {
+    super("SysboxWorkerPool: disposed during worker spawn");
+    this.name = "PoolDisposedDuringSpawnError";
+  }
+}
+
 export const DEFAULT_POOL_OPTIONS = {
   min: 1,
   max: 3,
@@ -148,12 +162,17 @@ export class SysboxWorkerPool {
   #workerIdPrefix: string;
   #sweepHandle: unknown = null;
   /**
-   * Promise of the most recent in-flight worker spawn. Lets parallel
-   * `invoke`s collapse onto the same spawn instead of each starting their
-   * own (which would push pool size past `max` for a tick before the
-   * resolutions fire).
+   * In-flight `#spawnOne` promises. Tracked as a count for `#acquire`'s
+   * "have we already committed up to max?" math, and as a set of promises
+   * so `dispose()` can wait on every spawn to settle before returning —
+   * otherwise a spawn that resolves *after* `dispose()` returns would
+   * dispose its own worker (via the disposed-flag check in `#spawnOne`),
+   * but that teardown happens in the background and the caller's `await
+   * dispose()` would have already resolved with the container still in
+   * shutdown.
    */
   #pendingSpawns = 0;
+  #pendingSpawnPromises = new Set<Promise<unknown>>();
 
   private constructor(opts: SysboxWorkerPoolOptions) {
     this.#sandbox = opts.sandbox;
@@ -203,8 +222,24 @@ export class SysboxWorkerPool {
     // steady-state, not cold. Spawn failures here propagate — a misconfigured
     // pool (bad image, sandbox unreachable) should fail boot, not lurk and
     // surface on the first user invocation.
+    //
+    // Use `allSettled` so one rejection doesn't strand parallel spawns: if
+    // spawn #2 fails after spawn #1 has already pushed its worker into
+    // `#workers`, a bare `Promise.all` would rethrow before disposing #1, and
+    // the caller (whose only handle to the pool was the `create()` return
+    // value they never received) couldn't tear it down. Disposing on any
+    // failure tears down every container that did come up before rethrowing.
     if (pool.#opts.min > 0) {
-      await Promise.all(Array.from({ length: pool.#opts.min }, () => pool.#spawnOne()));
+      const settled = await Promise.allSettled(
+        Array.from({ length: pool.#opts.min }, () => pool.#spawnOne()),
+      );
+      const firstFailure = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
+      if (firstFailure) {
+        await pool.dispose();
+        throw firstFailure.reason instanceof Error
+          ? firstFailure.reason
+          : new Error(String(firstFailure.reason));
+      }
     }
     pool.#sweepHandle = pool.#setInterval(() => pool.#sweepIdle(), pool.#opts.idleSweepIntervalMs);
     return pool;
@@ -259,7 +294,12 @@ export class SysboxWorkerPool {
       w.reject(new Error("SysboxWorkerPool: disposed before worker available"));
     }
     const workers = this.#workers.splice(0, this.#workers.length);
-    await Promise.all(workers.map((w) => w.dispose()));
+    // Wait on already-spawned workers in parallel with any in-flight spawns;
+    // the in-flight ones see `#disposed=true` upon resume and tear their own
+    // new workers down. Awaiting both ensures `dispose()` doesn't return
+    // until every container the pool ever spawned is gone.
+    const pending = Array.from(this.#pendingSpawnPromises);
+    await Promise.allSettled([...workers.map((w) => w.dispose()), ...pending]);
   }
 
   // --- internals ---
@@ -290,7 +330,21 @@ export class SysboxWorkerPool {
     });
   }
 
-  async #spawnOne(): Promise<WorkerHandle> {
+  #spawnOne(): Promise<WorkerHandle> {
+    if (this.#disposed) {
+      return Promise.reject(new PoolDisposedDuringSpawnError());
+    }
+    const promise = this.#runSpawn();
+    this.#pendingSpawnPromises.add(promise);
+    void promise
+      .catch(() => {})
+      .finally(() => {
+        this.#pendingSpawnPromises.delete(promise);
+      });
+    return promise;
+  }
+
+  async #runSpawn(): Promise<WorkerHandle> {
     this.#pendingSpawns += 1;
     try {
       const workerId = `${this.#workerIdPrefix}-${randomUUID().slice(0, 8)}`;
@@ -305,6 +359,20 @@ export class SysboxWorkerPool {
         ...(this.#resourceLimits !== undefined && { resourceLimits: this.#resourceLimits }),
         expiresAt,
       });
+      // `createWorker` is async; `dispose()` may have run while we were
+      // awaiting it. Pushing the new worker into `#workers` now would leak
+      // its container — `dispose()` already iterated and won't see it. Tear
+      // down the new worker and surface a typed disposed-error so the
+      // caller's invoke / queued waiter rejects cleanly.
+      if (this.#disposed) {
+        await w.dispose().catch((e: unknown) => {
+          log.warn(
+            { workerId, err: e instanceof Error ? e.message : String(e) },
+            "post-dispose orphan worker dispose failed",
+          );
+        });
+        throw new PoolDisposedDuringSpawnError();
+      }
       this.#workers.push(w);
       return w;
     } finally {
@@ -333,10 +401,11 @@ export class SysboxWorkerPool {
     if (worker.state === "draining") {
       this.#removeAndDispose(worker);
       // Replace lazily up to `min` if we dropped below.
-      if (this.#workers.length + this.#pendingSpawns < this.#opts.min) {
+      if (!this.#disposed && this.#workers.length + this.#pendingSpawns < this.#opts.min) {
         // Don't await — replacement happens in background; the next invoke
         // either picks up this spawn or spawns its own up to max.
         void this.#spawnOne().catch((e: unknown) => {
+          if (e instanceof PoolDisposedDuringSpawnError) return;
           log.warn(
             { err: e instanceof Error ? e.message : String(e) },
             "replacement worker spawn failed; pool below min until next invoke",
@@ -367,8 +436,13 @@ export class SysboxWorkerPool {
       );
     });
     // If a queued waiter is starving and we have headroom, kick a spawn.
-    if (this.#queue.length > 0 && this.#workers.length + this.#pendingSpawns < this.#opts.max) {
+    if (
+      !this.#disposed &&
+      this.#queue.length > 0 &&
+      this.#workers.length + this.#pendingSpawns < this.#opts.max
+    ) {
       void this.#spawnAndHandToQueue().catch((e: unknown) => {
+        if (e instanceof PoolDisposedDuringSpawnError) return;
         const waiter = this.#queue.shift();
         waiter?.reject(e instanceof Error ? e : new Error(String(e)));
       });

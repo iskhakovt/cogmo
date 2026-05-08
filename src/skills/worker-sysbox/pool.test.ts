@@ -466,4 +466,269 @@ describe("SysboxWorkerPool", () => {
     expect(h.spawned[0]?.state).toBe("disposed");
     await pool.dispose();
   });
+
+  it("disposes already-spawned workers when an eager spawn fails during create", async () => {
+    // Spawn #0 succeeds, spawn #1 fails. Without the cleanup the first
+    // worker would leak: `Promise.all` would reject before the caller has
+    // any handle to dispose it.
+    const sandbox = mock<SandboxClient>();
+    const spawned: WorkerHandle[] = [];
+    let spawnIndex = 0;
+    await expect(
+      SysboxWorkerPool.create({
+        sandbox,
+        image: "fake:test",
+        ...DEFAULT_POOL_OPTIONS,
+        min: 2,
+        max: 3,
+        createWorker: async ({ workerId }) => {
+          const idx = spawnIndex;
+          spawnIndex += 1;
+          if (idx === 1) {
+            throw new Error("scripted second-spawn failure");
+          }
+          const w = makeFakeWorker(workerId);
+          spawned.push(w);
+          return w;
+        },
+        setInterval: (): unknown => ({}),
+        clearInterval: () => {},
+        now: Date.now,
+      }),
+    ).rejects.toThrow(/scripted second-spawn failure/);
+
+    // The successful spawn (#0) must have been disposed by `create()`'s
+    // cleanup path — otherwise its container leaks for the lifetime of the
+    // process with no reference for the caller to clean up.
+    expect(spawned.length).toBe(1);
+    expect(spawned[0]?.state).toBe("disposed");
+  });
+
+  it("disposes a worker spawned mid-flight when the pool is disposed during spawn", async () => {
+    // Gate the spawn so `dispose()` runs while `createWorker` is still
+    // awaiting. Without the guard inside `#runSpawn`, the new worker
+    // would be pushed into `#workers` *after* dispose spliced it empty,
+    // and its container would never be torn down.
+    const sandbox = mock<SandboxClient>();
+    const spawnedWorkers: WorkerHandle[] = [];
+    let releaseSpawn: () => void = () => {};
+    const spawnGate = new Promise<void>((r) => {
+      releaseSpawn = r;
+    });
+
+    const pool = await SysboxWorkerPool.create({
+      sandbox,
+      image: "fake:test",
+      ...DEFAULT_POOL_OPTIONS,
+      min: 0, // eager spawn off so we control timing precisely
+      max: 1,
+      createWorker: async ({ workerId }) => {
+        await spawnGate;
+        const w = makeFakeWorker(workerId);
+        spawnedWorkers.push(w);
+        return w;
+      },
+      setInterval: (): unknown => ({}),
+      clearInterval: () => {},
+      now: Date.now,
+    });
+
+    // Kick a foreground invoke that triggers a spawn (no idle worker).
+    const invokePromise = pool.invoke(invokeParams("t-1"));
+    // Microtask cycle so `#runSpawn` enters the createWorker await.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Race dispose against the spawn: dispose first, then unblock the
+    // spawn. The spawn resolves into a disposed pool — its worker must be
+    // disposed by `#runSpawn`'s post-await guard, not pushed into the
+    // (already-empty) `#workers` array.
+    const disposePromise = pool.dispose();
+    releaseSpawn();
+    await disposePromise;
+
+    // The spawn either finished and disposed itself, or rejected before
+    // creating anything. Either way the invoke must reject and no live
+    // worker can remain.
+    await expect(invokePromise).rejects.toThrow(
+      /(disposed during worker spawn|disposed before worker available)/,
+    );
+    if (spawnedWorkers.length > 0) {
+      // The spawn finished after dispose; the post-await guard kicks in.
+      expect(spawnedWorkers[0]?.state).toBe("disposed");
+    }
+  });
+
+  it("rejects the queued waiter when the replacement spawn fails", async () => {
+    // Pool at max=1, A busy with a non-reusable result, B queued. The
+    // recycle path tries to spawn a replacement for the queued waiter; if
+    // that spawn fails, the waiter must reject — otherwise B hangs forever.
+    const sandbox = mock<SandboxClient>();
+    let releaseFirst: () => void = () => {};
+    const firstGate = new Promise<void>((r) => {
+      releaseFirst = r;
+    });
+    let spawnIndex = 0;
+
+    const pool = await SysboxWorkerPool.create({
+      sandbox,
+      image: "fake:test",
+      ...DEFAULT_POOL_OPTIONS,
+      min: 1,
+      max: 1,
+      createWorker: async ({ workerId }) => {
+        const idx = spawnIndex;
+        spawnIndex += 1;
+        if (idx === 1) {
+          // Replacement spawn for the queued waiter — fail.
+          throw new Error("replacement spawn failed");
+        }
+        let state: WorkerHandle["state"] = "idle";
+        const w: WorkerHandle = {
+          workerId,
+          get state() {
+            return state;
+          },
+          taskCount: 0,
+          idleMs: () => 0,
+          ageMs: () => 0,
+          tryAcquire: () => {
+            if (state !== "idle") return false;
+            state = "busy";
+            return true;
+          },
+          release: () => {
+            if (state === "busy") state = "idle";
+          },
+          markPoisoned: () => {
+            if (state !== "disposed") state = "draining";
+          },
+          invoke: async () => {
+            await firstGate;
+            state = "draining";
+            return { ok: false, error: "wall_clock_exceeded", workerReusable: false };
+          },
+          dispose: async () => {
+            state = "disposed";
+          },
+        };
+        return w;
+      },
+      setInterval: (): unknown => ({}),
+      clearInterval: () => {},
+      now: Date.now,
+    });
+
+    const a = pool.invoke(invokeParams("t-A"));
+    await Promise.resolve();
+    const b = pool.invoke(invokeParams("t-B"));
+    await Promise.resolve();
+    expect(pool.stats().queued).toBe(1);
+
+    releaseFirst();
+    await a; // resolves with non-reusable result
+    await expect(b).rejects.toThrow(/replacement spawn failed/);
+    await pool.dispose();
+  });
+
+  it("recycle with a queued waiter triggers a fresh spawn for the waiter", async () => {
+    // Pool at max=1, a worker is busy with task A. Task B queues. Task A
+    // returns a non-reusable result → recycle. The freed-up max-slot must
+    // get a fresh spawn that resolves task B's wait.
+    const sandbox = mock<SandboxClient>();
+    const spawned: WorkerHandle[] = [];
+    let releaseFirst: () => void = () => {};
+    const firstGate = new Promise<void>((r) => {
+      releaseFirst = r;
+    });
+    let spawnIndex = 0;
+
+    function script(idx: number): WorkerHandle {
+      let state: WorkerHandle["state"] = "idle";
+      let count = 0;
+      let resolveFn: () => void = () => {};
+      const disposeGate = new Promise<void>((r) => {
+        resolveFn = r;
+      });
+      return {
+        workerId: `w-${idx}`,
+        get state() {
+          return state;
+        },
+        get taskCount() {
+          return count;
+        },
+        idleMs: () => 0,
+        ageMs: () => 0,
+        tryAcquire: () => {
+          if (state !== "idle") return false;
+          state = "busy";
+          return true;
+        },
+        release: () => {
+          if (state === "busy") state = "idle";
+        },
+        markPoisoned: () => {
+          if (state !== "disposed") state = "draining";
+        },
+        invoke: async () => {
+          count += 1;
+          if (idx === 0) {
+            await firstGate;
+            // Non-reusable → recycle path
+            state = "draining";
+            return { ok: false, error: "wall_clock_exceeded", workerReusable: false };
+          }
+          return { ok: true, output: { x: idx }, workerReusable: true };
+        },
+        dispose: async () => {
+          state = "disposed";
+          resolveFn();
+          await disposeGate;
+        },
+      };
+    }
+
+    const pool = await SysboxWorkerPool.create({
+      sandbox,
+      image: "fake:test",
+      ...DEFAULT_POOL_OPTIONS,
+      min: 1,
+      max: 1,
+      createWorker: async () => {
+        const idx = spawnIndex;
+        spawnIndex += 1;
+        const w = script(idx);
+        spawned.push(w);
+        return w;
+      },
+      setInterval: (): unknown => ({}),
+      clearInterval: () => {},
+      now: Date.now,
+    });
+
+    expect(spawnIndex).toBe(1);
+    const a = pool.invoke(invokeParams("t-A"));
+    await Promise.resolve();
+    expect(pool.stats().busy).toBe(1);
+
+    // Task B queues — pool is at max.
+    const b = pool.invoke(invokeParams("t-B"));
+    await Promise.resolve();
+    expect(pool.stats().queued).toBe(1);
+
+    // Release task A → recycle path. The pool's `#removeAndDispose` notices
+    // the queued waiter and headroom (max=1 with the recycled worker
+    // departing), so it kicks a fresh spawn that hands itself to the
+    // queued waiter.
+    releaseFirst();
+    const aResult = await a;
+    expect(aResult.ok).toBe(false);
+    const bResult = await b;
+    expect(bResult.ok).toBe(true);
+    expect(bResult.output).toEqual({ x: 1 });
+    expect(spawnIndex).toBe(2);
+
+    await pool.dispose();
+  });
 });
