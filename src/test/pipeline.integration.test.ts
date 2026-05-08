@@ -123,13 +123,16 @@ async function seedVoiceConfig() {
     parseMasterKey(process.env.COGMO_MASTER_KEY),
     "cogmo/secrets-at-rest/v1",
   );
-  const secrets = new DrizzleSecretsStore(transactor(db), masterKey);
+  const secrets = new DrizzleSecretsStore(masterKey);
+  const tx = transactor(db);
   const apiKey =
     process.env.RECORD === "1" ? (process.env.OPENAI_API_KEY ?? "") : "test-openai-key";
   if (process.env.RECORD === "1" && !apiKey) {
     throw new Error("RECORD=1 requires OPENAI_API_KEY to capture voice fixtures");
   }
-  const { id: secretId } = await secrets.putSecret({ name: "voice_openai_key", plaintext: apiKey });
+  const { id: secretId } = await tx((trx) =>
+    secrets.putSecret(trx, { name: "voice_openai_key", plaintext: apiKey }),
+  );
 
   await db.execute(drizzleSql`DELETE FROM voice_config`);
   await db.insert(voiceConfig).values({
@@ -503,11 +506,11 @@ describe("message pipeline", () => {
     const allMetrics = result.scopeMetrics.flatMap((s) => s.metrics);
     const tokenMetric = allMetrics.find((m) => m.descriptor.name === "cogmo.llm.tokens");
     expect(tokenMetric).toBeDefined();
-    const types = new Set((tokenMetric?.dataPoints ?? []).map((p) => p.attributes["type"]));
+    const types = new Set((tokenMetric?.dataPoints ?? []).map((p) => p.attributes.type));
     expect(types).toContain("input");
     expect(types).toContain("output");
-    const inputPoint = tokenMetric?.dataPoints.find((p) => p.attributes["type"] === "input");
-    expect(inputPoint?.attributes["provider"]).toBe("anthropic");
+    const inputPoint = tokenMetric?.dataPoints.find((p) => p.attributes.type === "input");
+    expect(inputPoint?.attributes.provider).toBe("anthropic");
 
     const iterationsMetric = allMetrics.find((m) => m.descriptor.name === "cogmo.agent.iterations");
     expect(iterationsMetric).toBeDefined();

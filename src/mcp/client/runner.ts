@@ -1,4 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { McpServer } from "../config.js";
 import { type McpConnection, SdkMcpConnection } from "./client.js";
@@ -11,7 +12,7 @@ import { createTransport } from "./transport.js";
  * a code-level trust allowlist.
  */
 export interface Runner {
-  spawn(server: McpServer, secrets: SecretsStore): Promise<McpConnection>;
+  spawn(server: McpServer, secrets: SecretsStore, runInTx: Transactor): Promise<McpConnection>;
 }
 
 const CLIENT_INFO = { name: "cogmo", version: "0.1.0" } as const;
@@ -23,8 +24,12 @@ const CLIENT_INFO = { name: "cogmo", version: "0.1.0" } as const;
  * execution for untrusted servers — see `design/integrations/mcp.md`.
  */
 export class HostRunner implements Runner {
-  async spawn(server: McpServer, secrets: SecretsStore): Promise<McpConnection> {
-    const transport = await createTransport(server.config, secrets);
+  async spawn(
+    server: McpServer,
+    secrets: SecretsStore,
+    runInTx: Transactor,
+  ): Promise<McpConnection> {
+    const transport = await createTransport(server.config, secrets, runInTx);
     const client = new Client(CLIENT_INFO);
     const connection = new SdkMcpConnection(client, transport);
     try {

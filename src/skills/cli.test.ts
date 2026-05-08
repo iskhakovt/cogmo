@@ -24,7 +24,6 @@ function makeRunner(overrides: Partial<SkillRunner> = {}): SkillRunner {
     listToolDefs: vi.fn().mockResolvedValue([]),
     invoke: vi.fn(),
     ...overrides,
-    // biome-ignore lint/suspicious/noExplicitAny: test fixture
   } as any;
 }
 

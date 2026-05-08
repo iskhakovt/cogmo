@@ -85,7 +85,7 @@ describe("llm/otel", () => {
     const points = tokenMetric?.dataPoints ?? [];
     const byType = new Map<string, number>();
     for (const p of points) {
-      const type = String(p.attributes["type"]);
+      const type = String(p.attributes.type);
       byType.set(type, p.value as number);
     }
     expect(byType.get("input")).toBe(1000);
@@ -93,9 +93,9 @@ describe("llm/otel", () => {
     expect(byType.get("cache_read")).toBe(500);
     expect(byType.get("cache_create")).toBe(750);
 
-    const inputPoint = points.find((p) => p.attributes["type"] === "input");
-    expect(inputPoint?.attributes["model"]).toBe("anthropic/claude-sonnet-4");
-    expect(inputPoint?.attributes["provider"]).toBe("openrouter");
+    const inputPoint = points.find((p) => p.attributes.type === "input");
+    expect(inputPoint?.attributes.model).toBe("anthropic/claude-sonnet-4");
+    expect(inputPoint?.attributes.provider).toBe("openrouter");
   });
 
   it("marks the span as ERROR when failChatSpan is called", () => {

@@ -3,6 +3,7 @@ import type { JsonValue } from "type-fest";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CodingStreamingRegistry } from "../agent/coding/streaming-registry.js";
 import type { AgentStore } from "../agent/store/index.js";
+import type { Transactor } from "../db/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
@@ -19,6 +20,7 @@ import type { Adapter } from "./types.js";
 export interface RegistryDeps {
   defaultUserId: string;
   defaultProfileId: string;
+  runInTx: Transactor;
   transportStore: TransportStore;
   agentStore: AgentStore;
   /** Optional — when omitted, `repos.*` returns `sandbox_disabled`. */
@@ -73,7 +75,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
   const adapters: Adapter[] = [];
   const adapterMap = new Map<string, AdapterEntry>();
 
-  const channels = await transportStore.getAllChannels();
+  const channels = await deps.runInTx((tx) => transportStore.getAllChannels(tx));
 
   for (const channel of channels) {
     const mod = adaptersByType.get(channel.type);
@@ -88,6 +90,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       channelId: channel.id,
       defaultUserId: deps.defaultUserId,
       defaultProfileId: deps.defaultProfileId,
+      runInTx: deps.runInTx,
       transportStore,
       agentStore,
       ...(deps.codingStore && { codingStore: deps.codingStore }),
@@ -105,7 +108,11 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
     // Resolve secret references in credentials before passing to adapter.
     // Credentials like { tokenSecretName: "telegram_bot_token" } are resolved
     // to { token: "actual-token-value" } so adapters never see secret names.
-    const credentials = await resolveCredentialSecrets(channel.credentials, deps.secretsStore);
+    const credentials = await resolveCredentialSecrets(
+      channel.credentials,
+      deps.secretsStore,
+      deps.runInTx,
+    );
 
     const result = await mod.setup({
       channelId: channel.id,
@@ -116,6 +123,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
         deps.codingStreamingRegistry && {
           codingProgress: {
             inngest: deps.inngest,
+            runInTx: deps.runInTx,
             codingStore: deps.codingStore,
             transportStore: deps.transportStore,
             streamingRegistry: deps.codingStreamingRegistry,
@@ -124,6 +132,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       ...(deps.skillStore && {
         skillsApproval: {
           inngest: deps.inngest,
+          runInTx: deps.runInTx,
           skillStore: deps.skillStore,
           transportStore: deps.transportStore,
         },
@@ -155,6 +164,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
 export async function resolveCredentialSecrets(
   credentials: JsonValue,
   secretsStore: SecretsStore,
+  runInTx: Transactor,
 ): Promise<JsonValue> {
   if (typeof credentials !== "object" || credentials === null || Array.isArray(credentials)) {
     return credentials;
@@ -165,7 +175,7 @@ export async function resolveCredentialSecrets(
   for (const [key, value] of Object.entries(resolved)) {
     if (key.endsWith("SecretName") && typeof value === "string") {
       const baseKey = key.slice(0, -"SecretName".length);
-      const secret = await secretsStore.getSecret(value);
+      const secret = await runInTx((tx) => secretsStore.getSecret(tx, value));
       if (!secret) {
         throw new Error(
           `Channel credential references secret "${value}" but it was not found. Re-run \`cogmo setup\` to reconfigure.`,

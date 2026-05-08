@@ -1,4 +1,5 @@
 import type { AgentStore } from "../agent/store/index.js";
+import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { TransportStore } from "../transport/store/index.js";
 
@@ -19,43 +20,56 @@ If you don't know something and don't have a tool for it, say so honestly.`;
 const DEFAULT_TOOL_SET = ["*"];
 
 /** Create the default user if none exists. Returns the user ID. */
-export async function ensureDefaultUser(agentStore: AgentStore): Promise<string> {
-  const existing = await agentStore.getFirstUser();
-  if (existing) return existing.id;
-  const { id } = await agentStore.createUser();
-  logger.info({ userId: id }, "created default user");
-  return id;
+export async function ensureDefaultUser(
+  runInTx: Transactor,
+  agentStore: AgentStore,
+): Promise<string> {
+  return runInTx(async (tx) => {
+    const existing = await agentStore.getFirstUser(tx);
+    if (existing) return existing.id;
+    const { id } = await agentStore.createUser(tx);
+    logger.info({ userId: id }, "created default user");
+    return id;
+  });
 }
 
 /** Create the default org profile if none exists. Returns the profile ID. Org profiles have `userId: null` — visible to all users, read-only via Transport. */
-export async function ensureDefaultProfile(agentStore: AgentStore): Promise<string> {
-  const existing = await agentStore.getDefaultProfile();
-  if (existing) return existing.id;
-  const { id } = await agentStore.createProfile({
-    userId: null,
-    name: "assistant",
-    basePrompt: DEFAULT_BASE_PROMPT,
-    model: "claude-sonnet-4-6",
-    toolSet: DEFAULT_TOOL_SET,
+export async function ensureDefaultProfile(
+  runInTx: Transactor,
+  agentStore: AgentStore,
+): Promise<string> {
+  return runInTx(async (tx) => {
+    const existing = await agentStore.getDefaultProfile(tx);
+    if (existing) return existing.id;
+    const { id } = await agentStore.createProfile(tx, {
+      userId: null,
+      name: "assistant",
+      basePrompt: DEFAULT_BASE_PROMPT,
+      model: "claude-sonnet-4-6",
+      toolSet: DEFAULT_TOOL_SET,
+    });
+    logger.info({ profileId: id }, "created default org profile");
+    return id;
   });
-  logger.info({ profileId: id }, "created default org profile");
-  return id;
 }
 
 /** Create the direct channel + wildcard identity if none exists. */
 export async function ensureDirectChannel(
+  runInTx: Transactor,
   transportStore: TransportStore,
   userId: string,
 ): Promise<void> {
-  const existing = await transportStore.getChannelByType("direct");
-  if (existing) return;
-  const { id: channelId } = await transportStore.createChannel({
-    type: "direct",
-    credentials: {},
-    identityMode: "fixed",
+  await runInTx(async (tx) => {
+    const existing = await transportStore.getChannelByType(tx, "direct");
+    if (existing) return;
+    const { id: channelId } = await transportStore.createChannel(tx, {
+      type: "direct",
+      credentials: {},
+      identityMode: "fixed",
+    });
+    await transportStore.createWildcardIdentity(tx, { userId, channelId });
+    logger.info({ channelId }, "created direct channel");
   });
-  await transportStore.createWildcardIdentity({ userId, channelId });
-  logger.info({ channelId }, "created direct channel");
 }
 
 const TELEGRAM_DEFAULT_RULES = [
@@ -65,32 +79,39 @@ const TELEGRAM_DEFAULT_RULES = [
 ];
 
 /** Seed default channel-scoped steering rules. Idempotent — skips if channel-specific rules already exist. */
-export async function seedChannelRules(agentStore: AgentStore, channelType: string): Promise<void> {
-  if (await agentStore.hasChannelRules(channelType)) return;
+export async function seedChannelRules(
+  runInTx: Transactor,
+  agentStore: AgentStore,
+  channelType: string,
+): Promise<void> {
+  await runInTx(async (tx) => {
+    if (await agentStore.hasChannelRules(tx, channelType)) return;
 
-  const rules = channelType === "telegram" ? TELEGRAM_DEFAULT_RULES : [];
+    const rules = channelType === "telegram" ? TELEGRAM_DEFAULT_RULES : [];
 
-  for (const rule of rules) {
-    await agentStore.insertManualRule({
-      rule,
-      category: "style",
-      channelType,
-      priority: 50,
-    });
-  }
+    for (const rule of rules) {
+      await agentStore.insertManualRule(tx, {
+        rule,
+        category: "style",
+        channelType,
+        priority: 50,
+      });
+    }
 
-  if (rules.length > 0) {
-    logger.info({ channelType, count: rules.length }, "seeded channel steering rules");
-  }
+    if (rules.length > 0) {
+      logger.info({ channelType, count: rules.length }, "seeded channel steering rules");
+    }
+  });
 }
 
 /** Run all seed steps. Idempotent. */
 export async function seedDefaults(
+  runInTx: Transactor,
   agentStore: AgentStore,
   transportStore: TransportStore,
 ): Promise<{ userId: string; profileId: string }> {
-  const userId = await ensureDefaultUser(agentStore);
-  const profileId = await ensureDefaultProfile(agentStore);
-  await ensureDirectChannel(transportStore, userId);
+  const userId = await ensureDefaultUser(runInTx, agentStore);
+  const profileId = await ensureDefaultProfile(runInTx, agentStore);
+  await ensureDirectChannel(runInTx, transportStore, userId);
   return { userId, profileId };
 }

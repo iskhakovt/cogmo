@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Transactor } from "../../db/index.js";
 import { mockProvider } from "../../test/factories.js";
 import type { PendingMemory } from "../store/index.js";
 import { type DrainPendingDeps, drainPendingMemories } from "./drain-pending-memories.js";
+
+const FAKE_TX = { __mockTx: true } as never;
+const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 function pending(overrides: Partial<PendingMemory> = {}): PendingMemory {
   return {
@@ -39,6 +43,7 @@ function mockDeps(
   return {
     provider,
     model: "test-model",
+    runInTx: fakeRunInTx,
     memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
     store: {
       getPendingMemories: vi.fn().mockResolvedValue(pendingRows),
@@ -77,7 +82,7 @@ describe("drainPendingMemories", () => {
         observationScopes: "per_tag",
       },
     ]);
-    expect(deps.store.deletePendingMemories).toHaveBeenCalledWith(["pm-1"]);
+    expect(deps.store.deletePendingMemories).toHaveBeenCalledWith(expect.anything(), ["pm-1"]);
   });
 
   it("forwards context when present on the pending row", async () => {
@@ -157,6 +162,7 @@ describe("drainPendingMemories", () => {
     const deps: DrainPendingDeps = {
       provider,
       model: "test-model",
+      runInTx: fakeRunInTx,
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       store: {
         getPendingMemories: vi.fn().mockResolvedValue(rows),
@@ -170,7 +176,7 @@ describe("drainPendingMemories", () => {
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       expect.objectContaining({ content: "fact A" }),
     ]);
-    expect(deps.store.deletePendingMemories).toHaveBeenCalledWith(["pm-good"]);
+    expect(deps.store.deletePendingMemories).toHaveBeenCalledWith(expect.anything(), ["pm-good"]);
   });
 
   it("returns zeros and skips IO when every classification fails", async () => {
@@ -180,6 +186,7 @@ describe("drainPendingMemories", () => {
         chat: vi.fn().mockRejectedValue(new Error("boom")),
       }),
       model: "test-model",
+      runInTx: fakeRunInTx,
       memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
       store: {
         getPendingMemories: vi.fn().mockResolvedValue(rows),

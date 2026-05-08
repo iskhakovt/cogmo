@@ -32,7 +32,7 @@ const VALID_IDENTITY: GitHubIdentity = {
 
 class FakeSecretsStore implements Pick<SecretsStore, "getSecret"> {
   #values = new Map<string, string>();
-  async getSecret(name: string): Promise<string | undefined> {
+  async getSecret(_tx: unknown, name: string): Promise<string | undefined> {
     return this.#values.get(name);
   }
   set(name: string, value: string): void {
@@ -40,10 +40,13 @@ class FakeSecretsStore implements Pick<SecretsStore, "getSecret"> {
   }
 }
 
+const FAKE_TX = { __mockTx: true } as never;
+const fakeRunInTx = (cb: (tx: never) => unknown) => cb(FAKE_TX);
+
 function fakeCodingStore(overrides: Partial<CodingStore> = {}): CodingStore {
   const repos = new Map<string, CodingRepoRow>();
   return {
-    insertRepo: vi.fn(async (params) => {
+    insertRepo: vi.fn(async (_tx: unknown, params) => {
       const row: CodingRepoRow = {
         id: `r-${repos.size + 1}`,
         name: params.name,
@@ -62,7 +65,7 @@ function fakeCodingStore(overrides: Partial<CodingStore> = {}): CodingStore {
       repos.set(params.name, row);
       return row;
     }),
-    getRepoByName: vi.fn(async (name: string) => repos.get(name) ?? null),
+    getRepoByName: vi.fn(async (_tx: unknown, name: string) => repos.get(name) ?? null),
     getRepoById: vi.fn(),
     listRepos: vi.fn(async () => [...repos.values()]),
     removeRepo: vi.fn(),
@@ -141,6 +144,7 @@ function makeTransport(
     channelId: "ch-1",
     defaultUserId: "user-1",
     defaultProfileId: "profile-1",
+    runInTx: fakeRunInTx as never,
     transportStore,
     agentStore,
     ...(opts.withCodingStore !== false && { codingStore }),
@@ -201,6 +205,7 @@ describe("Transport.repos.cloneAndAdd", () => {
       channelId: "ch-1",
       defaultUserId: "user-1",
       defaultProfileId: "profile-1",
+      runInTx: fakeRunInTx as never,
       transportStore,
       agentStore,
       codingStore,

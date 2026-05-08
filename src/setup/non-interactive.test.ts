@@ -36,10 +36,10 @@ let secretsStore: DrizzleSecretsStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  agentStore = new DrizzleAgentStore(tx);
-  transportStore = new DrizzleTransportStore(tx);
+  agentStore = new DrizzleAgentStore();
+  transportStore = new DrizzleTransportStore();
   const key = deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/secrets-at-rest/v1");
-  secretsStore = new DrizzleSecretsStore(tx, key);
+  secretsStore = new DrizzleSecretsStore(key);
 });
 
 afterEach(async () => {
@@ -105,6 +105,7 @@ describe("runNonInteractive", () => {
   it("writes provider + model_providers + secret with only the required vars", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -112,12 +113,12 @@ describe("runNonInteractive", () => {
       validators: v,
     });
 
-    const providers = await agentStore.listProviders();
+    const providers = await tx((trx) => agentStore.listProviders(trx));
     expect(providers).toHaveLength(1);
     expect(providers[0]?.name).toBe("anthropic");
     expect(providers[0]?.type).toBe("anthropic");
 
-    const secretNames = (await secretsStore.listSecrets()).map((s) => s.name);
+    const secretNames = (await tx((trx) => secretsStore.listSecrets(trx))).map((s) => s.name);
     expect(secretNames).toContain("anthropic_api_key");
 
     const mpRows = await db.select().from(modelProviders);
@@ -131,6 +132,7 @@ describe("runNonInteractive", () => {
     const path = tempFile("sk-from-secret-file-xxxxx");
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -142,13 +144,14 @@ describe("runNonInteractive", () => {
     });
 
     expect(v.llmAnthropic).toHaveBeenCalledWith("sk-from-secret-file-xxxxx", undefined);
-    const stored = await secretsStore.getSecret("anthropic_api_key");
+    const stored = await tx((trx) => secretsStore.getSecret(trx, "anthropic_api_key"));
     expect(stored).toBe("sk-from-secret-file-xxxxx");
   });
 
   it("writes Telegram channel + identities when bot token + allowed users supplied", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -159,7 +162,7 @@ describe("runNonInteractive", () => {
       validators: v,
     });
 
-    const tg = await transportStore.getChannelByType("telegram");
+    const tg = await tx((trx) => transportStore.getChannelByType(trx, "telegram"));
     expect(tg).not.toBeNull();
 
     const identities = await db
@@ -169,13 +172,14 @@ describe("runNonInteractive", () => {
     const handles = identities.map((r) => r.platformHandle).filter(Boolean);
     expect(handles).toEqual(expect.arrayContaining(["100", "200"]));
 
-    const secretMeta = await secretsStore.getSecretMeta("telegram_bot_token");
+    const secretMeta = await tx((trx) => secretsStore.getSecretMeta(trx, "telegram_bot_token"));
     expect(secretMeta?.description).toBe("Telegram bot token (@cogmo_test_bot)");
   });
 
   it("fails fast with no DB writes when required env vars are missing", async () => {
     await expect(
       runNonInteractive({
+        runInTx: tx,
         agentStore,
         transportStore,
         secretsStore,
@@ -197,6 +201,7 @@ describe("runNonInteractive", () => {
 
     await expect(
       runNonInteractive({
+        runInTx: tx,
         agentStore,
         transportStore,
         secretsStore,
@@ -216,6 +221,7 @@ describe("runNonInteractive", () => {
 
     await expect(
       runNonInteractive({
+        runInTx: tx,
         agentStore,
         transportStore,
         secretsStore,
@@ -236,6 +242,7 @@ describe("runNonInteractive", () => {
   it("applies OpenRouter attrs.promptCaching", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -261,6 +268,7 @@ describe("runNonInteractive", () => {
   it("uses custom baseUrl when provider type is custom", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -283,6 +291,7 @@ describe("runNonInteractive", () => {
   it("persists the Tavily key when supplied and validated", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -290,7 +299,7 @@ describe("runNonInteractive", () => {
       validators: v,
     });
 
-    const stored = await secretsStore.getSecret("tavily_api_key");
+    const stored = await tx((trx) => secretsStore.getSecret(trx, "tavily_api_key"));
     expect(stored).toBe("tvly-0123456789");
     expect(v.tavily).toHaveBeenCalled();
   });
@@ -302,6 +311,7 @@ describe("runNonInteractive", () => {
 
     await expect(
       runNonInteractive({
+        runInTx: tx,
         agentStore,
         transportStore,
         secretsStore,
@@ -316,6 +326,7 @@ describe("runNonInteractive", () => {
   it("persists a GitHub identity bundle when COGMO_GITHUB_PAT is supplied", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -325,7 +336,7 @@ describe("runNonInteractive", () => {
 
     expect(v.githubPat).toHaveBeenCalledWith("ghp_test_xxxxxxxxxxxxxxxxxxxx");
 
-    const raw = await secretsStore.getSecret("github_identity:default");
+    const raw = await tx((trx) => secretsStore.getSecret(trx, "github_identity:default"));
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw ?? "{}");
     expect(parsed.pat).toBe("ghp_test_xxxxxxxxxxxxxxxxxxxx");
@@ -334,7 +345,7 @@ describe("runNonInteractive", () => {
     expect(parsed.login).toBe("cogmo-bot");
     expect(parsed.id).toBe("12345");
 
-    const meta = await secretsStore.getSecretMeta("github_identity:default");
+    const meta = await tx((trx) => secretsStore.getSecretMeta(trx, "github_identity:default"));
     expect(meta?.description).toBe("GitHub identity (@cogmo-bot)");
     expect(meta?.validatedAt).toBeInstanceOf(Date);
   });
@@ -342,6 +353,7 @@ describe("runNonInteractive", () => {
   it("does not store a GitHub identity when no PAT is supplied", async () => {
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -350,7 +362,9 @@ describe("runNonInteractive", () => {
     });
 
     expect(v.githubPat).not.toHaveBeenCalled();
-    expect(await secretsStore.getSecret("github_identity:default")).toBeUndefined();
+    expect(
+      await tx((trx) => secretsStore.getSecret(trx, "github_identity:default")),
+    ).toBeUndefined();
   });
 
   it("ignores COGMO_GITHUB_SSH_PRIVATE_KEY when no PAT is supplied", async () => {
@@ -360,6 +374,7 @@ describe("runNonInteractive", () => {
     // it is the friendly behaviour.
     const v = validators();
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -371,13 +386,16 @@ describe("runNonInteractive", () => {
     });
 
     expect(v.githubPat).not.toHaveBeenCalled();
-    expect(await secretsStore.getSecret("github_identity:default")).toBeUndefined();
+    expect(
+      await tx((trx) => secretsStore.getSecret(trx, "github_identity:default")),
+    ).toBeUndefined();
   });
 
   it("rejects COGMO_GITHUB_SSH_PRIVATE_KEY loudly (importing keys not yet supported)", async () => {
     const v = validators();
     await expect(
       runNonInteractive({
+        runInTx: tx,
         agentStore,
         transportStore,
         secretsStore,
@@ -391,7 +409,9 @@ describe("runNonInteractive", () => {
     ).rejects.toThrowError(/COGMO_GITHUB_SSH_PRIVATE_KEY.*supported/);
 
     // No identity persisted — the validation gate aborts before any DB write.
-    expect(await secretsStore.getSecret("github_identity:default")).toBeUndefined();
+    expect(
+      await tx((trx) => secretsStore.getSecret(trx, "github_identity:default")),
+    ).toBeUndefined();
   });
 
   it("fails fast with no DB writes when COGMO_GITHUB_PAT is rejected", async () => {
@@ -403,6 +423,7 @@ describe("runNonInteractive", () => {
 
     await expect(
       runNonInteractive({
+        runInTx: tx,
         agentStore,
         transportStore,
         secretsStore,
@@ -425,15 +446,17 @@ describe("runNonInteractive", () => {
     });
 
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
       env,
       validators: v,
     });
-    const firstId = (await transportStore.getChannelByType("telegram"))?.id;
+    const firstId = (await tx((trx) => transportStore.getChannelByType(trx, "telegram")))?.id;
 
     await runNonInteractive({
+      runInTx: tx,
       agentStore,
       transportStore,
       secretsStore,
@@ -443,13 +466,13 @@ describe("runNonInteractive", () => {
       }),
       validators: v,
     });
-    const secondId = (await transportStore.getChannelByType("telegram"))?.id;
+    const secondId = (await tx((trx) => transportStore.getChannelByType(trx, "telegram")))?.id;
 
     expect(secondId).toBeDefined();
     expect(secondId).not.toBe(firstId);
 
     // Only one Telegram channel remains.
-    const allTelegram = (await transportStore.getAllChannels()).filter(
+    const allTelegram = (await tx((trx) => transportStore.getAllChannels(trx))).filter(
       (c) => c.type === "telegram",
     );
     expect(allTelegram).toHaveLength(1);

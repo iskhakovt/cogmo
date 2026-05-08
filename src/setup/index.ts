@@ -70,10 +70,10 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     logger.info("migrations applied");
 
     const tx = transactor(db);
-    const agentStore = new DrizzleAgentStore(tx);
-    const transportStore = new DrizzleTransportStore(tx);
+    const agentStore = new DrizzleAgentStore();
+    const transportStore = new DrizzleTransportStore();
     const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
-    const secretsStore = new DrizzleSecretsStore(tx, encryptionKey);
+    const secretsStore = new DrizzleSecretsStore(encryptionKey);
 
     if (opts.reset) {
       await applyReset(opts.reset, { db });
@@ -81,7 +81,7 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
 
     if (validatedNonInteractive) {
       await persistNonInteractive(
-        { agentStore, transportStore, secretsStore },
+        { runInTx: tx, agentStore, transportStore, secretsStore },
         validatedNonInteractive,
       );
       return;

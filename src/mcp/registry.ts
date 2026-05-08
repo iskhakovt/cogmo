@@ -1,5 +1,6 @@
 import { compileToolMatchers } from "../agent/tool-matchers.js";
 import type { ToolSpec } from "../agent/tools.js";
+import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { mcpDescriptorToToolSpec } from "./adapter.js";
@@ -68,6 +69,7 @@ export interface McpRegistry {
 export interface McpRegistryOptions {
   store: McpStore;
   secrets: SecretsStore;
+  runInTx: Transactor;
   runner: Runner;
   /** Per-call timeout for tool dispatch (ms). */
   callTimeoutMs: number;
@@ -81,17 +83,20 @@ export interface McpRegistryOptions {
 
 export class McpRegistryImpl implements McpRegistry {
   #store: McpStore;
+  #runInTx: Transactor;
   #pool: McpConnectionPool;
   #callTimeoutMs: number;
   #toolBudget: number;
 
   constructor(opts: McpRegistryOptions) {
     this.#store = opts.store;
+    this.#runInTx = opts.runInTx;
     this.#callTimeoutMs = opts.callTimeoutMs;
     this.#toolBudget = opts.toolBudget;
     this.#pool = new McpConnectionPool({
       store: opts.store,
       secrets: opts.secrets,
+      runInTx: opts.runInTx,
       runner: opts.runner,
       idleEvictionMs: opts.idleEvictionMs,
       evictionIntervalMs: opts.evictionIntervalMs,
@@ -115,12 +120,12 @@ export class McpRegistryImpl implements McpRegistry {
     const matcher = compileToolMatchers(params.toolGlobs);
     if (params.toolGlobs.length === 0) return [];
 
-    const enabled = await this.#store.listEnabledServers();
+    const enabled = await this.#runInTx((tx) => this.#store.listEnabledServers(tx));
     const approvedServers = enabled.filter((s) => s.approvalStatus === "approved");
 
     const tools: ToolSpec[] = [];
     for (const server of approvedServers) {
-      const pins = await this.#store.getApprovedToolPins(server.id);
+      const pins = await this.#runInTx((tx) => this.#store.getApprovedToolPins(tx, server.id));
       for (const pin of pins) {
         const composed = composeMcpToolName(server.name, pin.toolName);
         if (!matcher(composed)) continue;
@@ -153,20 +158,20 @@ export class McpRegistryImpl implements McpRegistry {
   }
 
   async addServer(spec: McpServerSpec): Promise<McpServer> {
-    return this.#store.addServer(spec);
+    return this.#runInTx((tx) => this.#store.addServer(tx, spec));
   }
 
   async removeServer(id: string): Promise<void> {
     await this.#pool.evict(id);
-    await this.#store.removeServer(id);
+    await this.#runInTx((tx) => this.#store.removeServer(tx, id));
   }
 
   async listServers(): Promise<readonly McpServerStatus[]> {
-    return this.#store.listServerStatuses();
+    return this.#runInTx((tx) => this.#store.listServerStatuses(tx));
   }
 
   async approveServer(id: string): Promise<void> {
-    const server = await this.#store.getServerById(id);
+    const server = await this.#runInTx((tx) => this.#store.getServerById(tx, id));
     if (!server) throw new McpServerNotFoundError(id);
 
     // Operator action — clear any prior unhealthy state so connect retries.
@@ -195,14 +200,16 @@ export class McpRegistryImpl implements McpRegistry {
     // hash matches), delete pins for vanished tools, flip server status to
     // approved. Crash mid-sync can't leave the server `pending` with
     // partially-applied pins.
-    await this.#store.syncServerApproval({ serverId: server.id, snapshots });
+    await this.#runInTx((tx) =>
+      this.#store.syncServerApproval(tx, { serverId: server.id, snapshots }),
+    );
   }
 
   async approveTool(serverId: string, toolName: string): Promise<boolean> {
-    return this.#store.setToolApproval(serverId, toolName, "approved");
+    return this.#runInTx((tx) => this.#store.setToolApproval(tx, serverId, toolName, "approved"));
   }
 
   async rejectTool(serverId: string, toolName: string): Promise<boolean> {
-    return this.#store.setToolApproval(serverId, toolName, "rejected");
+    return this.#runInTx((tx) => this.#store.setToolApproval(tx, serverId, toolName, "rejected"));
   }
 }

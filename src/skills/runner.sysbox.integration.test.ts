@@ -63,11 +63,13 @@ let instanceId: string;
 beforeAll(async () => {
   if (!SHOULD_RUN) return;
   ({ tx, close } = await createTestDatabase());
-  agentStore = new DrizzleSandboxStore(tx);
-  skillStore = new DrizzleSkillStore(tx);
+  agentStore = new DrizzleSandboxStore();
+  skillStore = new DrizzleSkillStore();
   docker = new Docker();
 
-  const instance = await agentStore.insertInstance({ host: hostname(), pid: process.pid });
+  const instance = await tx((trx) =>
+    agentStore.insertInstance(trx, { host: hostname(), pid: process.pid }),
+  );
   instanceId = instance.id;
   proxy = await CogmoSocketProxy.create({
     socketDir: "/tmp/cogmo-test-skills-proxy",
@@ -76,6 +78,7 @@ beforeAll(async () => {
   sandbox = await LocalInProcessSandbox.create({
     docker,
     store: agentStore,
+    runInTx: tx,
     runtime: "sysbox",
     instanceId: instance.id,
     proxy,
@@ -131,6 +134,7 @@ inputs:
 describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)", () => {
   it("invokes a tier-2 skill end-to-end against cogmo-skills:slice1", async () => {
     const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
       store: skillStore,
       memory: stubMemory(),
       secretsStore: stubSecrets(),
@@ -156,6 +160,7 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
 
   it("kills a tier-2 container that exceeds wall_clock_s", async () => {
     const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
       store: skillStore,
       memory: stubMemory(),
       secretsStore: stubSecrets(),

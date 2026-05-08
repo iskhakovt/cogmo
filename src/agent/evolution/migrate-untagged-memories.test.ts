@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Transactor } from "../../db/index.js";
 import {
   type ListMemoriesPage,
   type MigrationDeps,
   migrateUntaggedMemories,
 } from "./migrate-untagged-memories.js";
+
+const FAKE_TX = { __mockTx: true } as never;
+const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 function emptyPage(): ListMemoriesPage {
   return { items: [], total: 0, limit: 100, offset: 0 };
@@ -20,6 +24,7 @@ function makeDeps(overrides: Partial<MigrationDeps> = {}): MigrationDeps {
   return {
     listMemories: vi.fn().mockResolvedValue(emptyPage()),
     clearBankMemories: vi.fn().mockResolvedValue(undefined),
+    runInTx: fakeRunInTx,
     agentStore: { bulkStagePendingMemories: vi.fn().mockResolvedValue(undefined) },
     writeBackup: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -51,7 +56,7 @@ describe("migrateUntaggedMemories", () => {
 
     expect(result.migrated).toBe(2);
     expect(deps.agentStore.bulkStagePendingMemories).toHaveBeenCalledTimes(1);
-    expect(deps.agentStore.bulkStagePendingMemories).toHaveBeenCalledWith([
+    expect(deps.agentStore.bulkStagePendingMemories).toHaveBeenCalledWith(expect.anything(), [
       { userId: "ti", content: "fact A", source: "migration" },
       { userId: "ti", content: "fact B", context: "while planning", source: "migration" },
     ]);
@@ -115,7 +120,7 @@ describe("migrateUntaggedMemories", () => {
     expect(listMemories).toHaveBeenCalledTimes(2);
     expect(deps.agentStore.bulkStagePendingMemories).toHaveBeenCalledTimes(1);
     expect(
-      (deps.agentStore.bulkStagePendingMemories as ReturnType<typeof vi.fn>).mock.calls[0]?.[0],
+      (deps.agentStore.bulkStagePendingMemories as ReturnType<typeof vi.fn>).mock.calls[0]?.[1],
     ).toHaveLength(3);
   });
 

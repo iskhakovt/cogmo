@@ -30,6 +30,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
+import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import { runGit, withGitAskpass } from "../../secrets/git-askpass.js";
 import {
@@ -192,6 +193,8 @@ async function git(cwd: string, args: ReadonlyArray<string>): Promise<void> {
  * ref namespace make the operation idempotent regardless.
  */
 export async function safeTeardownWorktree(opts: {
+  /** Required — identity lookup decrypts a secret, which needs a tx. */
+  runInTx: Transactor;
   secretsStore?: SecretsStore;
   repo: CodingRepoRow;
   taskId: string;
@@ -202,11 +205,14 @@ export async function safeTeardownWorktree(opts: {
   try {
     let identity: GitHubIdentity | undefined = opts.identity;
     if (!identity && opts.secretsStore) {
+      const secretsStore = opts.secretsStore;
       // resolveGitHubIdentity can throw on a DB-level failure
       // (`secretsStore.getSecret` underlying error) — keep it inside the
       // try block so `safeTeardownWorktree` actually honors its "never
       // throws" contract.
-      const result = await resolveGitHubIdentity(opts.secretsStore, opts.repo.identityName);
+      const result = await opts.runInTx((tx) =>
+        resolveGitHubIdentity(tx, secretsStore, opts.repo.identityName),
+      );
       if (result.isOk()) {
         identity = result.value;
       } else {

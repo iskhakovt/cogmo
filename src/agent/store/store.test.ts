@@ -15,9 +15,9 @@ let secretsStore: DrizzleSecretsStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleAgentStore(tx);
+  store = new DrizzleAgentStore();
   const key = deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/secrets-at-rest/v1");
-  secretsStore = new DrizzleSecretsStore(tx, key);
+  secretsStore = new DrizzleSecretsStore(key);
 });
 
 afterEach(async () => {
@@ -31,20 +31,22 @@ afterAll(async () => {
 // --- Helpers ---
 
 async function seedUser(): Promise<string> {
-  return (await store.createUser()).id;
+  return (await tx((trx) => store.createUser(trx))).id;
 }
 
 const TEST_MODEL = "claude-sonnet-4-6";
 
 async function seedProfile(): Promise<string> {
   return (
-    await store.createProfile({
-      userId: null,
-      name: "test",
-      basePrompt: "You are a test assistant.",
-      model: TEST_MODEL,
-      toolSet: ["tool_a"],
-    })
+    await tx((trx) =>
+      store.createProfile(trx, {
+        userId: null,
+        name: "test",
+        basePrompt: "You are a test assistant.",
+        model: TEST_MODEL,
+        toolSet: ["tool_a"],
+      }),
+    )
   ).id;
 }
 
@@ -57,8 +59,9 @@ async function seedConversation(): Promise<{
 }> {
   const userId = await seedUser();
   const profileId = await seedProfile();
-  const conversationId = (await store.createConversation({ userId, profileId, isPrivate: true }))
-    .id;
+  const conversationId = (
+    await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+  ).id;
   return { userId, profileId, conversationId, stamp: { profileId, model: TEST_MODEL } };
 }
 
@@ -67,29 +70,31 @@ async function seedConversation(): Promise<{
 describe("DrizzleAgentStore", () => {
   describe("users", () => {
     it("creates a user and retrieves it", async () => {
-      const { id } = await store.createUser();
+      const { id } = await tx((trx) => store.createUser(trx));
       expect(id).toBeDefined();
 
-      const first = await store.getFirstUser();
+      const first = await tx((trx) => store.getFirstUser(trx));
       expect(first?.id).toBe(id);
     });
 
     it("returns null when no users exist", async () => {
-      expect(await store.getFirstUser()).toBeUndefined();
+      expect(await tx((trx) => store.getFirstUser(trx))).toBeUndefined();
     });
   });
 
   describe("profiles", () => {
     it("creates and retrieves a profile", async () => {
-      const { id } = await store.createProfile({
-        userId: null,
-        name: "main",
-        basePrompt: "Be helpful.",
-        model: "claude-test",
-        toolSet: ["memory_recall"],
-      });
+      const { id } = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: null,
+          name: "main",
+          basePrompt: "Be helpful.",
+          model: "claude-test",
+          toolSet: ["memory_recall"],
+        }),
+      );
 
-      const profile = await store.getProfile(id);
+      const profile = await tx((trx) => store.getProfile(trx, id));
       expect(profile).toEqual({
         id,
         userId: null,
@@ -106,84 +111,102 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("returns null for unknown profile", async () => {
-      expect(await store.getProfile("019d0000-0000-7000-8000-000000000000")).toBeUndefined();
+      expect(
+        await tx((trx) => store.getProfile(trx, "019d0000-0000-7000-8000-000000000000")),
+      ).toBeUndefined();
     });
 
     it("getDefaultProfile returns first profile", async () => {
-      expect(await store.getDefaultProfile()).toBeUndefined();
-      const { id } = await store.createProfile({
-        userId: null,
-        name: "default",
-        basePrompt: "prompt",
-        model: "m",
-        toolSet: [],
-      });
-      expect((await store.getDefaultProfile())?.id).toBe(id);
+      expect(await tx((trx) => store.getDefaultProfile(trx))).toBeUndefined();
+      const { id } = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: null,
+          name: "default",
+          basePrompt: "prompt",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      expect((await tx((trx) => store.getDefaultProfile(trx)))?.id).toBe(id);
     });
 
     it("enforces unique org profile name (user_id null)", async () => {
-      await store.createProfile({
-        userId: null,
-        name: "dup",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
-      await expect(
-        store.createProfile({
+      await tx((trx) =>
+        store.createProfile(trx, {
           userId: null,
           name: "dup",
-          basePrompt: "p2",
-          model: "m2",
+          basePrompt: "p",
+          model: "m",
           toolSet: [],
         }),
+      );
+      await expect(
+        tx((trx) =>
+          store.createProfile(trx, {
+            userId: null,
+            name: "dup",
+            basePrompt: "p2",
+            model: "m2",
+            toolSet: [],
+          }),
+        ),
       ).rejects.toThrow();
     });
 
     it("allows same name across different users (and between org and user)", async () => {
       const u1 = await seedUser();
       const u2 = await seedUser();
-      await store.createProfile({
-        userId: null,
-        name: "coder",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
-      await store.createProfile({
-        userId: u1,
-        name: "coder",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
-      await store.createProfile({
-        userId: u2,
-        name: "coder",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
+      await tx((trx) =>
+        store.createProfile(trx, {
+          userId: null,
+          name: "coder",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await tx((trx) =>
+        store.createProfile(trx, {
+          userId: u1,
+          name: "coder",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await tx((trx) =>
+        store.createProfile(trx, {
+          userId: u2,
+          name: "coder",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
       // No throw — same name is allowed when (user_id, name) differs.
     });
 
     it("rejects duplicate name within the same user", async () => {
       const u = await seedUser();
-      await store.createProfile({
-        userId: u,
-        name: "mine",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
-      await expect(
-        store.createProfile({
+      await tx((trx) =>
+        store.createProfile(trx, {
           userId: u,
           name: "mine",
-          basePrompt: "p2",
-          model: "m2",
+          basePrompt: "p",
+          model: "m",
           toolSet: [],
         }),
+      );
+      await expect(
+        tx((trx) =>
+          store.createProfile(trx, {
+            userId: u,
+            name: "mine",
+            basePrompt: "p2",
+            model: "m2",
+            toolSet: [],
+          }),
+        ),
       ).rejects.toThrow();
     });
   });
@@ -192,7 +215,7 @@ describe("DrizzleAgentStore", () => {
     it("creates and retrieves a conversation with default 'active' status", async () => {
       const { userId, profileId, conversationId } = await seedConversation();
 
-      const conv = await store.getConversation(conversationId);
+      const conv = await tx((trx) => store.getConversation(trx, conversationId));
       expect(conv).toEqual({
         id: conversationId,
         userId,
@@ -205,55 +228,65 @@ describe("DrizzleAgentStore", () => {
 
     it("setConversationStatus flips status and getConversation reflects it", async () => {
       const { conversationId } = await seedConversation();
-      await store.setConversationStatus(conversationId, "errored");
-      const conv = await store.getConversation(conversationId);
+      await tx((trx) => store.setConversationStatus(trx, conversationId, "errored"));
+      const conv = await tx((trx) => store.getConversation(trx, conversationId));
       expect(conv?.status).toBe("errored");
       // Reversibility — future `/repair` (or manual psql) flips back
-      await store.setConversationStatus(conversationId, "active");
-      const conv2 = await store.getConversation(conversationId);
+      await tx((trx) => store.setConversationStatus(trx, conversationId, "active"));
+      const conv2 = await tx((trx) => store.getConversation(trx, conversationId));
       expect(conv2?.status).toBe("active");
     });
 
     it("returns null for unknown conversation", async () => {
-      expect(await store.getConversation("019d0000-0000-7000-8000-000000000000")).toBeUndefined();
+      expect(
+        await tx((trx) => store.getConversation(trx, "019d0000-0000-7000-8000-000000000000")),
+      ).toBeUndefined();
     });
 
     it("rejects conversation with nonexistent userId", async () => {
       const profileId = await seedProfile();
       await expect(
-        store.createConversation({
-          userId: "019d0000-0000-7000-8000-ffffffffffff",
-          profileId,
-          isPrivate: true,
-        }),
+        tx((trx) =>
+          store.createConversation(trx, {
+            userId: "019d0000-0000-7000-8000-ffffffffffff",
+            profileId,
+            isPrivate: true,
+          }),
+        ),
       ).rejects.toThrow();
     });
 
     it("rejects conversation with nonexistent profileId", async () => {
       const userId = await seedUser();
       await expect(
-        store.createConversation({
-          userId,
-          profileId: "019d0000-0000-7000-8000-ffffffffffff",
-          isPrivate: true,
-        }),
+        tx((trx) =>
+          store.createConversation(trx, {
+            userId,
+            profileId: "019d0000-0000-7000-8000-ffffffffffff",
+            isPrivate: true,
+          }),
+        ),
       ).rejects.toThrow();
     });
 
     it("setConversationVoiceMode persists the override", async () => {
       const { conversationId } = await seedConversation();
-      await store.setConversationVoiceMode(conversationId, "always");
-      expect((await store.getConversation(conversationId))?.voiceMode).toBe("always");
+      await tx((trx) => store.setConversationVoiceMode(trx, conversationId, "always"));
+      expect((await tx((trx) => store.getConversation(trx, conversationId)))?.voiceMode).toBe(
+        "always",
+      );
 
-      await store.setConversationVoiceMode(conversationId, "never");
-      expect((await store.getConversation(conversationId))?.voiceMode).toBe("never");
+      await tx((trx) => store.setConversationVoiceMode(trx, conversationId, "never"));
+      expect((await tx((trx) => store.getConversation(trx, conversationId)))?.voiceMode).toBe(
+        "never",
+      );
     });
 
     it("setConversationVoiceMode(null) clears the override (NULL = follow profile)", async () => {
       const { conversationId } = await seedConversation();
-      await store.setConversationVoiceMode(conversationId, "always");
-      await store.setConversationVoiceMode(conversationId, null);
-      expect((await store.getConversation(conversationId))?.voiceMode).toBeNull();
+      await tx((trx) => store.setConversationVoiceMode(trx, conversationId, "always"));
+      await tx((trx) => store.setConversationVoiceMode(trx, conversationId, null));
+      expect((await tx((trx) => store.getConversation(trx, conversationId)))?.voiceMode).toBeNull();
     });
   });
 
@@ -262,24 +295,28 @@ describe("DrizzleAgentStore", () => {
       const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
-      await store.insertMessage({
-        conversationId,
-        role: "user",
-        content: "Hello",
-        lastInboundMessageId: inboundId,
-        ...stamp,
-      });
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content: "Hello",
+          lastInboundMessageId: inboundId,
+          ...stamp,
+        }),
+      );
       // 2ms sleep — PGlite's pg_uuidv7 uses random bits, not monotonic counter
       await new Promise((r) => setTimeout(r, 2));
-      await store.insertMessage({
-        conversationId,
-        role: "assistant",
-        content: "Hi there",
-        lastInboundMessageId: inboundId,
-        ...stamp,
-      });
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "assistant",
+          content: "Hi there",
+          lastInboundMessageId: inboundId,
+          ...stamp,
+        }),
+      );
 
-      const history = await store.getHistory(conversationId);
+      const history = await tx((trx) => store.getHistory(trx, conversationId));
       expect(history).toHaveLength(2);
       expect(history[0]).toEqual({ role: "user", content: "Hello" });
       expect(history[1]).toEqual({ role: "assistant", content: "Hi there" });
@@ -289,52 +326,58 @@ describe("DrizzleAgentStore", () => {
       const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
-      const { id } = await store.insertMessage({
-        conversationId,
-        role: "user",
-        content: [{ type: "text", text: "structured" }],
-        lastInboundMessageId: inboundId,
-        ...stamp,
-      });
+      const { id } = await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content: [{ type: "text", text: "structured" }],
+          lastInboundMessageId: inboundId,
+          ...stamp,
+        }),
+      );
 
-      const msg = await store.getMessage(id);
+      const msg = await tx((trx) => store.getMessage(trx, id));
       expect(msg).toEqual({ id, role: "user", content: [{ type: "text", text: "structured" }] });
     });
 
     it("returns null for unknown message", async () => {
-      expect(await store.getMessage("019d0000-0000-7000-8000-000000000000")).toBeUndefined();
+      expect(
+        await tx((trx) => store.getMessage(trx, "019d0000-0000-7000-8000-000000000000")),
+      ).toBeUndefined();
     });
 
     it("insertMessages batch inserts with tool_use/tool_result pairing", async () => {
       const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
-      const result = await store.insertMessages({
-        conversationId,
-        messages: [
-          {
-            role: "assistant",
-            content: [{ type: "tool_use", id: "t1", name: "search", input: { q: "test" } }],
-          },
-          {
-            role: "user",
-            content: [{ type: "tool_result", toolUseId: "t1", content: "search result" }],
-          },
-          {
-            role: "assistant",
-            content: [{ type: "text", text: "Here is the answer" }],
-          },
-        ],
-        lastInboundMessageId: inboundId,
-        lastMessageInputTokens: 500,
-        lastMessageOutputTokens: 120,
-        ...stamp,
-      });
+      const result = await tx((trx) =>
+        store.insertMessages(trx, {
+          conversationId,
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "tool_use", id: "t1", name: "search", input: { q: "test" } }],
+            },
+            {
+              role: "user",
+              content: [{ type: "tool_result", toolUseId: "t1", content: "search result" }],
+            },
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "Here is the answer" }],
+            },
+          ],
+          lastInboundMessageId: inboundId,
+          lastMessageInputTokens: 500,
+          lastMessageOutputTokens: 120,
+          ...stamp,
+        }),
+      );
 
       expect(result.id).toBeDefined();
       expect(result.id).not.toBe("");
 
-      const history = await store.getHistory(conversationId);
+      const history = await tx((trx) => store.getHistory(trx, conversationId));
       expect(history).toHaveLength(3);
       // PGlite's pg_uuidv7 uses random bits (not monotonic counter), so
       // batch-inserted rows may sort in any order. Check content regardless of position.
@@ -351,13 +394,15 @@ describe("DrizzleAgentStore", () => {
     it("insertMessages throws on empty array", async () => {
       const { conversationId, stamp } = await seedConversation();
       await expect(
-        store.insertMessages({
-          conversationId,
-          messages: [],
-          lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
-          lastMessageOutputTokens: 0,
-          ...stamp,
-        }),
+        tx((trx) =>
+          store.insertMessages(trx, {
+            conversationId,
+            messages: [],
+            lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+            lastMessageOutputTokens: 0,
+            ...stamp,
+          }),
+        ),
       ).rejects.toThrow("insertMessages requires at least one message");
     });
 
@@ -365,18 +410,20 @@ describe("DrizzleAgentStore", () => {
       const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
-      await store.insertMessages({
-        conversationId,
-        messages: [
-          { role: "assistant", content: [{ type: "text", text: "first" }] },
-          { role: "user", content: "follow-up" },
-          { role: "assistant", content: [{ type: "text", text: "second" }] },
-        ],
-        lastInboundMessageId: inboundId,
-        lastMessageInputTokens: 42,
-        lastMessageOutputTokens: 7,
-        ...stamp,
-      });
+      await tx((trx) =>
+        store.insertMessages(trx, {
+          conversationId,
+          messages: [
+            { role: "assistant", content: [{ type: "text", text: "first" }] },
+            { role: "user", content: "follow-up" },
+            { role: "assistant", content: [{ type: "text", text: "second" }] },
+          ],
+          lastInboundMessageId: inboundId,
+          lastMessageInputTokens: 42,
+          lastMessageOutputTokens: 7,
+          ...stamp,
+        }),
+      );
 
       // Query raw table — don't rely on UUID ordering (PGlite's pg_uuidv7
       // uses random bits, so ORDER BY id is non-deterministic within a batch)
@@ -407,33 +454,37 @@ describe("DrizzleAgentStore", () => {
       const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
-      expect(await store.getLastAssistantMessage(conversationId)).toBeUndefined();
+      expect(await tx((trx) => store.getLastAssistantMessage(trx, conversationId))).toBeUndefined();
 
-      await store.insertMessage({
-        conversationId,
-        role: "assistant",
-        content: "first",
-        lastInboundMessageId: inboundId,
-        ...stamp,
-      });
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "assistant",
+          content: "first",
+          lastInboundMessageId: inboundId,
+          ...stamp,
+        }),
+      );
       // UUIDv7 is time-ordered per millisecond — ensure distinct timestamps
       await new Promise((r) => setTimeout(r, 2));
-      const { id: secondId } = await store.insertMessage({
-        conversationId,
-        role: "assistant",
-        content: "second",
-        lastInboundMessageId: inboundId,
-        ...stamp,
-      });
+      const { id: secondId } = await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "assistant",
+          content: "second",
+          lastInboundMessageId: inboundId,
+          ...stamp,
+        }),
+      );
 
-      const last = await store.getLastAssistantMessage(conversationId);
+      const last = await tx((trx) => store.getLastAssistantMessage(trx, conversationId));
       expect(last?.id).toBe(secondId);
       expect(last?.lastInboundMessageId).toBe(inboundId);
     });
 
     it("getHistory returns empty array for no messages", async () => {
       const { conversationId } = await seedConversation();
-      expect(await store.getHistory(conversationId)).toEqual([]);
+      expect(await tx((trx) => store.getHistory(trx, conversationId))).toEqual([]);
     });
 
     it("insertMessages persists both token counts and getLastTokens returns them", async () => {
@@ -442,16 +493,18 @@ describe("DrizzleAgentStore", () => {
       const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
-      await store.insertMessages({
-        conversationId,
-        messages: [{ role: "assistant", content: [{ type: "text", text: "response" }] }],
-        lastInboundMessageId: inboundId,
-        lastMessageInputTokens: 5432,
-        lastMessageOutputTokens: 321,
-        ...stamp,
-      });
+      await tx((trx) =>
+        store.insertMessages(trx, {
+          conversationId,
+          messages: [{ role: "assistant", content: [{ type: "text", text: "response" }] }],
+          lastInboundMessageId: inboundId,
+          lastMessageInputTokens: 5432,
+          lastMessageOutputTokens: 321,
+          ...stamp,
+        }),
+      );
 
-      expect(await store.getLastTokens(conversationId)).toEqual({
+      expect(await tx((trx) => store.getLastTokens(trx, conversationId))).toEqual({
         inputTokens: 5432,
         outputTokens: 321,
       });
@@ -459,32 +512,36 @@ describe("DrizzleAgentStore", () => {
 
     it("getLastTokens returns null when no assistant messages", async () => {
       const { conversationId } = await seedConversation();
-      expect(await store.getLastTokens(conversationId)).toBeUndefined();
+      expect(await tx((trx) => store.getLastTokens(trx, conversationId))).toBeUndefined();
     });
 
     it("getLastTokens returns the most recent assistant row's tokens", async () => {
       const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
-      await store.insertMessages({
-        conversationId,
-        messages: [{ role: "assistant", content: [{ type: "text", text: "first" }] }],
-        lastInboundMessageId: inboundId,
-        lastMessageInputTokens: 1000,
-        lastMessageOutputTokens: 100,
-        ...stamp,
-      });
+      await tx((trx) =>
+        store.insertMessages(trx, {
+          conversationId,
+          messages: [{ role: "assistant", content: [{ type: "text", text: "first" }] }],
+          lastInboundMessageId: inboundId,
+          lastMessageInputTokens: 1000,
+          lastMessageOutputTokens: 100,
+          ...stamp,
+        }),
+      );
       await new Promise((r) => setTimeout(r, 2));
-      await store.insertMessages({
-        conversationId,
-        messages: [{ role: "assistant", content: [{ type: "text", text: "second" }] }],
-        lastInboundMessageId: inboundId,
-        lastMessageInputTokens: 2000,
-        lastMessageOutputTokens: 200,
-        ...stamp,
-      });
+      await tx((trx) =>
+        store.insertMessages(trx, {
+          conversationId,
+          messages: [{ role: "assistant", content: [{ type: "text", text: "second" }] }],
+          lastInboundMessageId: inboundId,
+          lastMessageInputTokens: 2000,
+          lastMessageOutputTokens: 200,
+          ...stamp,
+        }),
+      );
 
-      expect(await store.getLastTokens(conversationId)).toEqual({
+      expect(await tx((trx) => store.getLastTokens(trx, conversationId))).toEqual({
         inputTokens: 2000,
         outputTokens: 200,
       });
@@ -498,13 +555,15 @@ describe("DrizzleAgentStore", () => {
       const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
-      await store.insertMessage({
-        conversationId,
-        role: "user",
-        content: "no tokens",
-        lastInboundMessageId: inboundId,
-        ...stamp,
-      });
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content: "no tokens",
+          lastInboundMessageId: inboundId,
+          ...stamp,
+        }),
+      );
 
       const rows = await db
         .select({ outputTokens: messages.outputTokens })
@@ -514,7 +573,7 @@ describe("DrizzleAgentStore", () => {
       expect(rows[0]!.outputTokens).toBe(-1);
 
       // And getLastTokens still returns null — no assistant row exists.
-      expect(await store.getLastTokens(conversationId)).toBeUndefined();
+      expect(await tx((trx) => store.getLastTokens(trx, conversationId))).toBeUndefined();
     });
   });
 
@@ -522,13 +581,15 @@ describe("DrizzleAgentStore", () => {
     it("returns active rules for profile + global, ordered by priority", async () => {
       const profileId = await seedProfile();
       const otherProfileId = (
-        await store.createProfile({
-          userId: null,
-          name: "other",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        })
+        await tx((trx) =>
+          store.createProfile(trx, {
+            userId: null,
+            name: "other",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
       ).id;
 
       // Insert rules via raw db since store doesn't expose createRule
@@ -572,13 +633,13 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      const rules = await store.getActiveRules(profileId, []);
+      const rules = await tx((trx) => store.getActiveRules(trx, profileId, []));
       expect(rules).toEqual([{ rule: "Global safety rule" }, { rule: "Be concise" }]);
     });
 
     it("returns empty array when no active rules", async () => {
       const profileId = await seedProfile();
-      expect(await store.getActiveRules(profileId, [])).toEqual([]);
+      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([]);
     });
 
     it("returns channel-scoped rules when channel is active", async () => {
@@ -618,58 +679,72 @@ describe("DrizzleAgentStore", () => {
       ]);
 
       // No channels active — only null-scoped rules
-      expect(await store.getActiveRules(profileId, [])).toEqual([{ rule: "Global rule" }]);
+      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
+        { rule: "Global rule" },
+      ]);
 
       // Telegram active — global + telegram
-      expect(await store.getActiveRules(profileId, ["telegram"])).toEqual([
+      expect(await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]))).toEqual([
         { rule: "Global rule" },
         { rule: "Telegram rule" },
       ]);
 
       // Both channels — union
-      expect(await store.getActiveRules(profileId, ["telegram", "slack"])).toEqual([
-        { rule: "Global rule" },
-        { rule: "Telegram rule" },
-        { rule: "Slack rule" },
-      ]);
+      expect(
+        await tx((trx) => store.getActiveRules(trx, profileId, ["telegram", "slack"])),
+      ).toEqual([{ rule: "Global rule" }, { rule: "Telegram rule" }, { rule: "Slack rule" }]);
     });
   });
 
   describe("core memory blocks", () => {
     it("upsert creates a new block", async () => {
       const userId = await seedUser();
-      await store.upsertCoreMemoryBlock({ userId, key: "user_profile", content: "Name: Tim" });
+      await tx((trx) =>
+        store.upsertCoreMemoryBlock(trx, { userId, key: "user_profile", content: "Name: Tim" }),
+      );
 
-      const blocks = await store.getCoreMemoryBlocks(userId);
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId));
       expect(blocks).toEqual([{ key: "user_profile", content: "Name: Tim" }]);
     });
 
     it("upsert updates existing block", async () => {
       const userId = await seedUser();
-      await store.upsertCoreMemoryBlock({ userId, key: "user_profile", content: "Name: Tim" });
-      await store.upsertCoreMemoryBlock({
-        userId,
-        key: "user_profile",
-        content: "Name: Tim\nRole: Engineer",
-      });
+      await tx((trx) =>
+        store.upsertCoreMemoryBlock(trx, { userId, key: "user_profile", content: "Name: Tim" }),
+      );
+      await tx((trx) =>
+        store.upsertCoreMemoryBlock(trx, {
+          userId,
+          key: "user_profile",
+          content: "Name: Tim\nRole: Engineer",
+        }),
+      );
 
-      const blocks = await store.getCoreMemoryBlocks(userId);
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId));
       expect(blocks).toHaveLength(1);
       expect(blocks[0]!.content).toBe("Name: Tim\nRole: Engineer");
     });
 
     it("returns blocks ordered by key", async () => {
       const userId = await seedUser();
-      await store.upsertCoreMemoryBlock({ userId, key: "preferences", content: "Dark mode" });
-      await store.upsertCoreMemoryBlock({ userId, key: "active_projects", content: "Assistant" });
-      await store.upsertCoreMemoryBlock({ userId, key: "user_profile", content: "Tim" });
+      await tx((trx) =>
+        store.upsertCoreMemoryBlock(trx, { userId, key: "preferences", content: "Dark mode" }),
+      );
+      await tx((trx) =>
+        store.upsertCoreMemoryBlock(trx, { userId, key: "active_projects", content: "Assistant" }),
+      );
+      await tx((trx) =>
+        store.upsertCoreMemoryBlock(trx, { userId, key: "user_profile", content: "Tim" }),
+      );
 
-      const blocks = await store.getCoreMemoryBlocks(userId);
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId));
       expect(blocks.map((b) => b.key)).toEqual(["active_projects", "preferences", "user_profile"]);
     });
 
     it("returns empty array for unknown user", async () => {
-      const blocks = await store.getCoreMemoryBlocks("00000000-0000-0000-0000-000000000000");
+      const blocks = await tx((trx) =>
+        store.getCoreMemoryBlocks(trx, "00000000-0000-0000-0000-000000000000"),
+      );
       expect(blocks).toEqual([]);
     });
   });
@@ -679,142 +754,166 @@ describe("DrizzleAgentStore", () => {
       const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
 
-      await store.insertMessage({
-        conversationId,
-        role: "user",
-        content: "hello",
-        lastInboundMessageId: inboundId,
-        ...stamp,
-      });
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content: "hello",
+          lastInboundMessageId: inboundId,
+          ...stamp,
+        }),
+      );
 
-      const time = await store.getLastMessageTime(conversationId);
+      const time = await tx((trx) => store.getLastMessageTime(trx, conversationId));
       expect(time).toBeInstanceOf(Date);
     });
 
     it("returns undefined for conversation with no messages", async () => {
       const { conversationId } = await seedConversation();
-      const time = await store.getLastMessageTime(conversationId);
+      const time = await tx((trx) => store.getLastMessageTime(trx, conversationId));
       expect(time).toBeUndefined();
     });
   });
 
   describe("providers", () => {
     async function seedProvider(name = "test-provider") {
-      const { id: secretId } = await secretsStore.putSecret({
-        name: `${name}_key`,
-        plaintext: "sk-test",
-      });
-      return store.createProvider({
-        name,
-        type: "anthropic",
-        secretId,
-        attrs: {},
-      });
+      const { id: secretId } = await tx((trx) =>
+        secretsStore.putSecret(trx, {
+          name: `${name}_key`,
+          plaintext: "sk-test",
+        }),
+      );
+      return tx((trx) =>
+        store.createProvider(trx, {
+          name,
+          type: "anthropic",
+          secretId,
+          attrs: {},
+        }),
+      );
     }
 
     it("creates and retrieves a provider", async () => {
       const { id } = await seedProvider();
-      const provider = await store.getProvider(id);
+      const provider = await tx((trx) => store.getProvider(trx, id));
       expect(provider).toMatchObject({ name: "test-provider", type: "anthropic" });
     });
 
     it("lists providers", async () => {
       await seedProvider("p1");
       await seedProvider("p2");
-      const list = await store.listProviders();
+      const list = await tx((trx) => store.listProviders(trx));
       expect(list.map((p) => p.name).sort()).toEqual(["p1", "p2"]);
     });
 
     it("deleteProvider cascades to model_providers", async () => {
       const { id: providerId } = await seedProvider();
-      await store.addModelProvider({
-        model: "claude-test",
-        providerId,
-        position: 0,
-        userSelectable: true,
-      });
+      await tx((trx) =>
+        store.addModelProvider(trx, {
+          model: "claude-test",
+          providerId,
+          position: 0,
+          userSelectable: true,
+        }),
+      );
 
-      await store.deleteProvider(providerId);
+      await tx((trx) => store.deleteProvider(trx, providerId));
 
-      expect(await store.getProvider(providerId)).toBeUndefined();
-      expect(await store.resolveProviderForModel("claude-test")).toBeUndefined();
+      expect(await tx((trx) => store.getProvider(trx, providerId))).toBeUndefined();
+      expect(await tx((trx) => store.resolveProviderForModel(trx, "claude-test"))).toBeUndefined();
     });
   });
 
   describe("model_providers", () => {
     async function seedProviderWithSecret(name: string) {
-      const { id: secretId } = await secretsStore.putSecret({
-        name: `${name}_key`,
-        plaintext: "sk-test",
-      });
-      return store.createProvider({ name, type: "anthropic", secretId, attrs: {} });
+      const { id: secretId } = await tx((trx) =>
+        secretsStore.putSecret(trx, {
+          name: `${name}_key`,
+          plaintext: "sk-test",
+        }),
+      );
+      return tx((trx) =>
+        store.createProvider(trx, { name, type: "anthropic", secretId, attrs: {} }),
+      );
     }
 
     it("resolves the lowest-position provider for a model", async () => {
       const { id: fallbackId } = await seedProviderWithSecret("fallback");
       const { id: primaryId } = await seedProviderWithSecret("primary");
 
-      await store.addModelProvider({
-        model: "claude-sonnet-4",
-        providerId: fallbackId,
-        position: 1,
-        userSelectable: true,
-      });
-      await store.addModelProvider({
-        model: "claude-sonnet-4",
-        providerId: primaryId,
-        position: 0,
-        userSelectable: true,
-      });
+      await tx((trx) =>
+        store.addModelProvider(trx, {
+          model: "claude-sonnet-4",
+          providerId: fallbackId,
+          position: 1,
+          userSelectable: true,
+        }),
+      );
+      await tx((trx) =>
+        store.addModelProvider(trx, {
+          model: "claude-sonnet-4",
+          providerId: primaryId,
+          position: 0,
+          userSelectable: true,
+        }),
+      );
 
-      const resolved = await store.resolveProviderForModel("claude-sonnet-4");
+      const resolved = await tx((trx) => store.resolveProviderForModel(trx, "claude-sonnet-4"));
       expect(resolved?.name).toBe("primary");
     });
 
     it("returns undefined when no provider is registered for a model", async () => {
-      const resolved = await store.resolveProviderForModel("nonexistent-model");
+      const resolved = await tx((trx) => store.resolveProviderForModel(trx, "nonexistent-model"));
       expect(resolved).toBeUndefined();
     });
 
     it("removes model_providers by provider", async () => {
       const { id: providerId } = await seedProviderWithSecret("removable");
-      await store.addModelProvider({
-        model: "model-a",
-        providerId,
-        position: 0,
-        userSelectable: true,
-      });
-      await store.addModelProvider({
-        model: "model-b",
-        providerId,
-        position: 0,
-        userSelectable: true,
-      });
+      await tx((trx) =>
+        store.addModelProvider(trx, {
+          model: "model-a",
+          providerId,
+          position: 0,
+          userSelectable: true,
+        }),
+      );
+      await tx((trx) =>
+        store.addModelProvider(trx, {
+          model: "model-b",
+          providerId,
+          position: 0,
+          userSelectable: true,
+        }),
+      );
 
-      await store.removeModelProvidersByProvider(providerId);
+      await tx((trx) => store.removeModelProvidersByProvider(trx, providerId));
 
-      expect(await store.resolveProviderForModel("model-a")).toBeUndefined();
-      expect(await store.resolveProviderForModel("model-b")).toBeUndefined();
+      expect(await tx((trx) => store.resolveProviderForModel(trx, "model-a"))).toBeUndefined();
+      expect(await tx((trx) => store.resolveProviderForModel(trx, "model-b"))).toBeUndefined();
     });
 
     it("enforces unique (model, position)", async () => {
       const { id: p1 } = await seedProviderWithSecret("p1");
       const { id: p2 } = await seedProviderWithSecret("p2");
 
-      await store.addModelProvider({
-        model: "claude-test",
-        providerId: p1,
-        position: 0,
-        userSelectable: true,
-      });
-
-      await expect(
-        store.addModelProvider({
+      await tx((trx) =>
+        store.addModelProvider(trx, {
           model: "claude-test",
-          providerId: p2,
+          providerId: p1,
           position: 0,
           userSelectable: true,
         }),
+      );
+
+      await expect(
+        tx((trx) =>
+          store.addModelProvider(trx, {
+            model: "claude-test",
+            providerId: p2,
+            position: 0,
+            userSelectable: true,
+          }),
+        ),
       ).rejects.toThrow();
     });
 
@@ -824,52 +923,64 @@ describe("DrizzleAgentStore", () => {
       const { id: pTwo } = await seedProviderWithSecret("ter");
 
       // Insert out-of-order to verify sort isn't insertion-order-dependent.
-      await store.addModelProvider({
-        model: "claude-x",
-        providerId: pZero,
-        position: 0,
-        userSelectable: true,
-      });
-      await store.addModelProvider({
-        model: "claude-x",
-        providerId: pTwo,
-        position: 2,
-        userSelectable: true,
-      });
-      await store.addModelProvider({
-        model: "claude-x",
-        providerId: pOne,
-        position: 1,
-        userSelectable: true,
-      });
+      await tx((trx) =>
+        store.addModelProvider(trx, {
+          model: "claude-x",
+          providerId: pZero,
+          position: 0,
+          userSelectable: true,
+        }),
+      );
+      await tx((trx) =>
+        store.addModelProvider(trx, {
+          model: "claude-x",
+          providerId: pTwo,
+          position: 2,
+          userSelectable: true,
+        }),
+      );
+      await tx((trx) =>
+        store.addModelProvider(trx, {
+          model: "claude-x",
+          providerId: pOne,
+          position: 1,
+          userSelectable: true,
+        }),
+      );
 
-      const list = await store.listProvidersForModel("claude-x");
+      const list = await tx((trx) => store.listProvidersForModel(trx, "claude-x"));
       expect(list.map((p) => p.name)).toEqual(["pri", "sec", "ter"]);
     });
 
     it("listProvidersForModel returns empty array when model has no providers", async () => {
-      expect(await store.listProvidersForModel("unknown-model")).toEqual([]);
+      expect(await tx((trx) => store.listProvidersForModel(trx, "unknown-model"))).toEqual([]);
     });
 
     it("listDistinctUserSelectableModels excludes internal-only models", async () => {
       const { id: p } = await seedProviderWithSecret("p");
-      await store.addModelProvider({
-        model: "model-public",
-        providerId: p,
-        position: 0,
-        userSelectable: true,
-      });
-      await store.addModelProvider({
-        model: "model-internal",
-        providerId: p,
-        position: 1,
-        userSelectable: false,
-      });
+      await tx((trx) =>
+        store.addModelProvider(trx, {
+          model: "model-public",
+          providerId: p,
+          position: 0,
+          userSelectable: true,
+        }),
+      );
+      await tx((trx) =>
+        store.addModelProvider(trx, {
+          model: "model-internal",
+          providerId: p,
+          position: 1,
+          userSelectable: false,
+        }),
+      );
 
-      expect(await store.listDistinctUserSelectableModels()).toEqual(["model-public"]);
-      expect(await store.isModelUserSelectable("model-public")).toBe(true);
-      expect(await store.isModelUserSelectable("model-internal")).toBe(false);
-      expect(await store.isModelUserSelectable("model-missing")).toBe(false);
+      expect(await tx((trx) => store.listDistinctUserSelectableModels(trx))).toEqual([
+        "model-public",
+      ]);
+      expect(await tx((trx) => store.isModelUserSelectable(trx, "model-public"))).toBe(true);
+      expect(await tx((trx) => store.isModelUserSelectable(trx, "model-internal"))).toBe(false);
+      expect(await tx((trx) => store.isModelUserSelectable(trx, "model-missing"))).toBe(false);
     });
   });
 
@@ -878,68 +989,77 @@ describe("DrizzleAgentStore", () => {
   describe("profile admin", () => {
     it("createProfile defaults memoryScope to null when not supplied", async () => {
       const userId = await seedUser();
-      const profile = await store.createProfile({
-        userId,
-        name: "no-scope",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
+      const profile = await tx((trx) =>
+        store.createProfile(trx, {
+          userId,
+          name: "no-scope",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
       expect(profile.memoryScope).toBeNull();
     });
 
     it("createProfile + getProfile round-trip a memoryScope", async () => {
       const userId = await seedUser();
-      const created = await store.createProfile({
-        userId,
-        name: "coder",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-        memoryScope: {
-          compartments: ["work", "technical"],
-          trust: ["first-party"],
-        },
-      });
+      const created = await tx((trx) =>
+        store.createProfile(trx, {
+          userId,
+          name: "coder",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+          memoryScope: {
+            compartments: ["work", "technical"],
+            trust: ["first-party"],
+          },
+        }),
+      );
       expect(created.memoryScope).toEqual({
         compartments: ["work", "technical"],
         trust: ["first-party"],
       });
-      const loaded = await store.getProfile(created.id);
+      const loaded = await tx((trx) => store.getProfile(trx, created.id));
       expect(loaded?.memoryScope).toEqual(created.memoryScope);
     });
 
     it("updateProfile can set and clear memoryScope", async () => {
       const userId = await seedUser();
-      const { id } = await store.createProfile({
-        userId,
-        name: "p",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
+      const { id } = await tx((trx) =>
+        store.createProfile(trx, {
+          userId,
+          name: "p",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
 
-      const set = await store.updateProfile(id, {
-        memoryScope: { compartments: ["health"], trust: ["first-party"] },
-      });
+      const set = await tx((trx) =>
+        store.updateProfile(trx, id, {
+          memoryScope: { compartments: ["health"], trust: ["first-party"] },
+        }),
+      );
       expect(set.memoryScope).toEqual({ compartments: ["health"], trust: ["first-party"] });
 
-      const cleared = await store.updateProfile(id, { memoryScope: null });
+      const cleared = await tx((trx) => store.updateProfile(trx, id, { memoryScope: null }));
       expect(cleared.memoryScope).toBeNull();
     });
 
     it("createProfile rejects empty compartments or trust arrays at the store boundary", async () => {
       const userId = await seedUser();
       await expect(
-        store.createProfile({
-          userId,
-          name: "bad",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-          // biome-ignore lint/suspicious/noExplicitAny: testing invalid input rejection
-          memoryScope: { compartments: [], trust: ["first-party"] } as any,
-        }),
+        tx((trx) =>
+          store.createProfile(trx, {
+            userId,
+            name: "bad",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+            memoryScope: { compartments: [], trust: ["first-party"] } as any,
+          }),
+        ),
       ).rejects.toThrow();
     });
 
@@ -947,70 +1067,86 @@ describe("DrizzleAgentStore", () => {
       const u1 = await seedUser();
       const u2 = await seedUser();
       const org = (
-        await store.createProfile({
-          userId: null,
-          name: "default",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        })
+        await tx((trx) =>
+          store.createProfile(trx, {
+            userId: null,
+            name: "default",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
       ).id;
       const mine = (
-        await store.createProfile({
-          userId: u1,
-          name: "mine",
+        await tx((trx) =>
+          store.createProfile(trx, {
+            userId: u1,
+            name: "mine",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      await tx((trx) =>
+        store.createProfile(trx, {
+          userId: u2,
+          name: "theirs",
           basePrompt: "p",
           model: "m",
           toolSet: [],
-        })
-      ).id;
-      await store.createProfile({
-        userId: u2,
-        name: "theirs",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
+        }),
+      );
 
-      const visible = await store.listProfiles(u1);
+      const visible = await tx((trx) => store.listProfiles(trx, u1));
       expect(visible.map((p) => p.id).sort()).toEqual([org, mine].sort());
     });
 
     it("getProfileOwner returns userId (or null for org)", async () => {
       const u = await seedUser();
       const orgId = (
-        await store.createProfile({
-          userId: null,
-          name: "org",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        })
+        await tx((trx) =>
+          store.createProfile(trx, {
+            userId: null,
+            name: "org",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
       ).id;
       const mineId = (
-        await store.createProfile({
-          userId: u,
-          name: "mine",
-          basePrompt: "p",
-          model: "m",
-          toolSet: [],
-        })
+        await tx((trx) =>
+          store.createProfile(trx, {
+            userId: u,
+            name: "mine",
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
       ).id;
-      expect(await store.getProfileOwner(orgId)).toEqual({ userId: null });
-      expect(await store.getProfileOwner(mineId)).toEqual({ userId: u });
-      expect(await store.getProfileOwner("019d0000-0000-7000-8000-000000000000")).toBeUndefined();
+      expect(await tx((trx) => store.getProfileOwner(trx, orgId))).toEqual({ userId: null });
+      expect(await tx((trx) => store.getProfileOwner(trx, mineId))).toEqual({ userId: u });
+      expect(
+        await tx((trx) => store.getProfileOwner(trx, "019d0000-0000-7000-8000-000000000000")),
+      ).toBeUndefined();
     });
 
     it("updateProfile applies partial changes and preserves unlisted fields", async () => {
       const u = await seedUser();
-      const { id } = await store.createProfile({
-        userId: u,
-        name: "before",
-        basePrompt: "before-prompt",
-        model: "m",
-        toolSet: ["a"],
-      });
-      const updated = await store.updateProfile(id, { name: "after", model: "m2" });
+      const { id } = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: u,
+          name: "before",
+          basePrompt: "before-prompt",
+          model: "m",
+          toolSet: ["a"],
+        }),
+      );
+      const updated = await tx((trx) =>
+        store.updateProfile(trx, id, { name: "after", model: "m2" }),
+      );
       expect(updated).toMatchObject({
         id,
         userId: u,
@@ -1025,66 +1161,80 @@ describe("DrizzleAgentStore", () => {
       // cast to `Profile` but leak `undefined` at runtime, silently
       // bypassing resolveVoiceMode's profile-default fallback.
       const u = await seedUser();
-      const created = await store.createProfile({
-        userId: u,
-        name: "voice-test",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
+      const created = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: u,
+          name: "voice-test",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
       expect(created.voiceMode).toBe("auto");
 
-      const updated = await store.updateProfile(created.id, { voiceMode: "always" });
+      const updated = await tx((trx) =>
+        store.updateProfile(trx, created.id, { voiceMode: "always" }),
+      );
       expect(updated.voiceMode).toBe("always");
     });
 
     it("updateProfile translates unique-name collision to UniqueViolationError", async () => {
       const u = await seedUser();
-      await store.createProfile({
-        userId: u,
-        name: "taken",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
-      const { id: other } = await store.createProfile({
-        userId: u,
-        name: "free",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
+      await tx((trx) =>
+        store.createProfile(trx, {
+          userId: u,
+          name: "taken",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      const { id: other } = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: u,
+          name: "free",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
       const { UniqueViolationError } = await import("./errors.js");
-      await expect(store.updateProfile(other, { name: "taken" })).rejects.toThrow(
+      await expect(tx((trx) => store.updateProfile(trx, other, { name: "taken" }))).rejects.toThrow(
         UniqueViolationError,
       );
     });
 
     it("countProfileReferences counts both conversations and messages", async () => {
       const u = await seedUser();
-      const { id: profileId } = await store.createProfile({
-        userId: u,
-        name: "p",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
-      expect(await store.countProfileReferences(profileId)).toEqual({
+      const { id: profileId } = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: u,
+          name: "p",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      expect(await tx((trx) => store.countProfileReferences(trx, profileId))).toEqual({
         conversations: 0,
         messages: 0,
       });
 
-      const { id: c1 } = await store.createConversation({ userId: u, profileId, isPrivate: true });
-      await store.createConversation({ userId: u, profileId, isPrivate: true });
-      await store.insertMessage({
-        conversationId: c1,
-        role: "user",
-        content: "hi",
-        profileId,
-        model: "m",
-        lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
-      });
-      expect(await store.countProfileReferences(profileId)).toEqual({
+      const { id: c1 } = await tx((trx) =>
+        store.createConversation(trx, { userId: u, profileId, isPrivate: true }),
+      );
+      await tx((trx) => store.createConversation(trx, { userId: u, profileId, isPrivate: true }));
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId: c1,
+          role: "user",
+          content: "hi",
+          profileId,
+          model: "m",
+          lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+        }),
+      );
+      expect(await tx((trx) => store.countProfileReferences(trx, profileId))).toEqual({
         conversations: 2,
         messages: 1,
       });
@@ -1092,68 +1242,84 @@ describe("DrizzleAgentStore", () => {
 
     it("deleteProfile removes the row when no references exist", async () => {
       const u = await seedUser();
-      const { id } = await store.createProfile({
-        userId: u,
-        name: "temp",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
-      await store.deleteProfile(id);
-      expect(await store.getProfile(id)).toBeUndefined();
+      const { id } = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: u,
+          name: "temp",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await tx((trx) => store.deleteProfile(trx, id));
+      expect(await tx((trx) => store.getProfile(trx, id))).toBeUndefined();
     });
 
     it("deleteProfile throws ProfileInUseError when conversations reference it", async () => {
       const u = await seedUser();
-      const { id: profileId } = await store.createProfile({
-        userId: u,
-        name: "busy",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
-      await store.createConversation({ userId: u, profileId, isPrivate: true });
+      const { id: profileId } = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: u,
+          name: "busy",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await tx((trx) => store.createConversation(trx, { userId: u, profileId, isPrivate: true }));
       const { ProfileInUseError } = await import("./errors.js");
-      await expect(store.deleteProfile(profileId)).rejects.toThrow(ProfileInUseError);
+      await expect(tx((trx) => store.deleteProfile(trx, profileId))).rejects.toThrow(
+        ProfileInUseError,
+      );
       // Profile still exists — delete rolled back.
-      expect(await store.getProfile(profileId)).not.toBeUndefined();
+      expect(await tx((trx) => store.getProfile(trx, profileId))).not.toBeUndefined();
     });
 
     it("deleteProfile throws ProfileInUseError when only message history references it", async () => {
       // The conversation has been switched away (profileId pointer gone) but stamped messages remain.
       const u = await seedUser();
-      const { id: oldProfileId } = await store.createProfile({
-        userId: u,
-        name: "old",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
-      const { id: newProfileId } = await store.createProfile({
-        userId: u,
-        name: "new",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
-      const { id: convId } = await store.createConversation({
-        userId: u,
-        profileId: oldProfileId,
-        isPrivate: true,
-      });
-      await store.insertMessage({
-        conversationId: convId,
-        role: "user",
-        content: "hi",
-        profileId: oldProfileId,
-        model: "m",
-        lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
-      });
+      const { id: oldProfileId } = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: u,
+          name: "old",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      const { id: newProfileId } = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: u,
+          name: "new",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      const { id: convId } = await tx((trx) =>
+        store.createConversation(trx, {
+          userId: u,
+          profileId: oldProfileId,
+          isPrivate: true,
+        }),
+      );
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId: convId,
+          role: "user",
+          content: "hi",
+          profileId: oldProfileId,
+          model: "m",
+          lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+        }),
+      );
       // Switch the conversation to new profile — old profile now only referenced by stamped msg
-      await store.setConversationProfile(convId, newProfileId);
+      await tx((trx) => store.setConversationProfile(trx, convId, newProfileId));
 
       const { ProfileInUseError } = await import("./errors.js");
-      await expect(store.deleteProfile(oldProfileId)).rejects.toThrow(ProfileInUseError);
+      await expect(tx((trx) => store.deleteProfile(trx, oldProfileId))).rejects.toThrow(
+        ProfileInUseError,
+      );
     });
   });
 
@@ -1161,16 +1327,18 @@ describe("DrizzleAgentStore", () => {
     it("listConversationsForUser returns user's private conversations with alias + last message preview", async () => {
       const { userId, profileId, conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";
-      await store.insertMessage({
-        conversationId,
-        role: "user",
-        content: "hello there this is the last message",
-        lastInboundMessageId: inboundId,
-        ...stamp,
-      });
-      await store.setAlias(userId, conversationId, "work");
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content: "hello there this is the last message",
+          lastInboundMessageId: inboundId,
+          ...stamp,
+        }),
+      );
+      await tx((trx) => store.setAlias(trx, userId, conversationId, "work"));
 
-      const list = await store.listConversationsForUser(userId);
+      const list = await tx((trx) => store.listConversationsForUser(trx, userId));
       expect(list).toHaveLength(1);
       expect(list[0]).toMatchObject({
         id: conversationId,
@@ -1187,71 +1355,90 @@ describe("DrizzleAgentStore", () => {
       const u1 = await seedUser();
       const u2 = await seedUser();
       const profileId = await seedProfile();
-      const c1 = (await store.createConversation({ userId: u1, profileId, isPrivate: true })).id;
-      const c2 = (await store.createConversation({ userId: u2, profileId, isPrivate: true })).id;
+      const c1 = (
+        await tx((trx) => store.createConversation(trx, { userId: u1, profileId, isPrivate: true }))
+      ).id;
+      const c2 = (
+        await tx((trx) => store.createConversation(trx, { userId: u2, profileId, isPrivate: true }))
+      ).id;
       const inboundId = "019d0000-0000-7000-8000-000000000001";
-      await store.insertMessage({
-        conversationId: c1,
-        role: "user",
-        content: "u1",
-        lastInboundMessageId: inboundId,
-        profileId,
-        model: TEST_MODEL,
-      });
-      await store.insertMessage({
-        conversationId: c2,
-        role: "user",
-        content: "u2",
-        lastInboundMessageId: inboundId,
-        profileId,
-        model: TEST_MODEL,
-      });
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId: c1,
+          role: "user",
+          content: "u1",
+          lastInboundMessageId: inboundId,
+          profileId,
+          model: TEST_MODEL,
+        }),
+      );
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId: c2,
+          role: "user",
+          content: "u2",
+          lastInboundMessageId: inboundId,
+          profileId,
+          model: TEST_MODEL,
+        }),
+      );
 
-      const list = await store.listConversationsForUser(u1);
+      const list = await tx((trx) => store.listConversationsForUser(trx, u1));
       expect(list.map((c) => c.id)).toEqual([c1]);
     });
 
     it("listConversationsForUser excludes non-private conversations and empty conversations", async () => {
       const userId = await seedUser();
       const profileId = await seedProfile();
-      const empty = (await store.createConversation({ userId, profileId, isPrivate: true })).id;
-      const nonPrivate = (await store.createConversation({ userId, profileId, isPrivate: false }))
-        .id;
-      const withMsg = (await store.createConversation({ userId, profileId, isPrivate: true })).id;
+      const empty = (
+        await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+      ).id;
+      const nonPrivate = (
+        await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: false }))
+      ).id;
+      const withMsg = (
+        await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+      ).id;
       const inboundId = "019d0000-0000-7000-8000-000000000001";
-      await store.insertMessage({
-        conversationId: nonPrivate,
-        role: "user",
-        content: "noisy",
-        lastInboundMessageId: inboundId,
-        profileId,
-        model: TEST_MODEL,
-      });
-      await store.insertMessage({
-        conversationId: withMsg,
-        role: "user",
-        content: "real",
-        lastInboundMessageId: inboundId,
-        profileId,
-        model: TEST_MODEL,
-      });
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId: nonPrivate,
+          role: "user",
+          content: "noisy",
+          lastInboundMessageId: inboundId,
+          profileId,
+          model: TEST_MODEL,
+        }),
+      );
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId: withMsg,
+          role: "user",
+          content: "real",
+          lastInboundMessageId: inboundId,
+          profileId,
+          model: TEST_MODEL,
+        }),
+      );
 
-      const list = await store.listConversationsForUser(userId);
+      const list = await tx((trx) => store.listConversationsForUser(trx, userId));
       expect(list.map((c) => c.id)).toEqual([withMsg]);
       expect(empty).toBeDefined(); // empty conv excluded
     });
 
     it("setConversationProfile updates conversations.profile_id", async () => {
       const { userId, conversationId } = await seedConversation();
-      const { id: newProfileId } = await store.createProfile({
-        userId,
-        name: "other",
-        basePrompt: "p",
-        model: "m",
-        toolSet: [],
-      });
-      await store.setConversationProfile(conversationId, newProfileId);
-      const conv = await store.getConversation(conversationId);
+      const { id: newProfileId } = await tx((trx) =>
+        store.createProfile(trx, {
+          userId,
+          name: "other",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await tx((trx) => store.setConversationProfile(trx, conversationId, newProfileId));
+      const conv = await tx((trx) => store.getConversation(trx, conversationId));
       expect(conv?.profileId).toBe(newProfileId);
     });
   });
@@ -1259,41 +1446,123 @@ describe("DrizzleAgentStore", () => {
   describe("aliases", () => {
     it("setAlias inserts, then updates on same conversationId", async () => {
       const { userId, conversationId } = await seedConversation();
-      await store.setAlias(userId, conversationId, "work");
-      expect(await store.findConversationByAlias(userId, "work")).toEqual({ conversationId });
+      await tx((trx) => store.setAlias(trx, userId, conversationId, "work"));
+      expect(await tx((trx) => store.findConversationByAlias(trx, userId, "work"))).toEqual({
+        conversationId,
+      });
 
-      await store.setAlias(userId, conversationId, "personal");
-      expect(await store.findConversationByAlias(userId, "work")).toBeUndefined();
-      expect(await store.findConversationByAlias(userId, "personal")).toEqual({
+      await tx((trx) => store.setAlias(trx, userId, conversationId, "personal"));
+      expect(await tx((trx) => store.findConversationByAlias(trx, userId, "work"))).toBeUndefined();
+      expect(await tx((trx) => store.findConversationByAlias(trx, userId, "personal"))).toEqual({
         conversationId,
       });
     });
 
     it("setAlias with null clears the alias", async () => {
       const { userId, conversationId } = await seedConversation();
-      await store.setAlias(userId, conversationId, "work");
-      await store.setAlias(userId, conversationId, null);
-      expect(await store.findConversationByAlias(userId, "work")).toBeUndefined();
+      await tx((trx) => store.setAlias(trx, userId, conversationId, "work"));
+      await tx((trx) => store.setAlias(trx, userId, conversationId, null));
+      expect(await tx((trx) => store.findConversationByAlias(trx, userId, "work"))).toBeUndefined();
     });
 
     it("setAlias collision across conversations throws UniqueViolationError", async () => {
       const userId = await seedUser();
       const profileId = await seedProfile();
-      const c1 = (await store.createConversation({ userId, profileId, isPrivate: true })).id;
-      const c2 = (await store.createConversation({ userId, profileId, isPrivate: true })).id;
-      await store.setAlias(userId, c1, "work");
+      const c1 = (
+        await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+      ).id;
+      const c2 = (
+        await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+      ).id;
+      await tx((trx) => store.setAlias(trx, userId, c1, "work"));
       const { UniqueViolationError } = await import("./errors.js");
-      await expect(store.setAlias(userId, c2, "work")).rejects.toThrow(UniqueViolationError);
+      await expect(tx((trx) => store.setAlias(trx, userId, c2, "work"))).rejects.toThrow(
+        UniqueViolationError,
+      );
     });
 
     it("findConversationByAlias scopes to user", async () => {
       const u1 = await seedUser();
       const u2 = await seedUser();
       const profileId = await seedProfile();
-      const conv = (await store.createConversation({ userId: u1, profileId, isPrivate: true })).id;
-      await store.setAlias(u1, conv, "shared");
+      const conv = (
+        await tx((trx) => store.createConversation(trx, { userId: u1, profileId, isPrivate: true }))
+      ).id;
+      await tx((trx) => store.setAlias(trx, u1, conv, "shared"));
       // u2 searching for same alias should see nothing
-      expect(await store.findConversationByAlias(u2, "shared")).toBeUndefined();
+      expect(await tx((trx) => store.findConversationByAlias(trx, u2, "shared"))).toBeUndefined();
+    });
+
+    it("getAliasForConversation returns the alias when set, undefined when cleared", async () => {
+      const { userId, conversationId } = await seedConversation();
+      expect(
+        await tx((trx) => store.getAliasForConversation(trx, userId, conversationId)),
+      ).toBeUndefined();
+      await tx((trx) => store.setAlias(trx, userId, conversationId, "work"));
+      expect(await tx((trx) => store.getAliasForConversation(trx, userId, conversationId))).toBe(
+        "work",
+      );
+      await tx((trx) => store.setAlias(trx, userId, conversationId, null));
+      expect(
+        await tx((trx) => store.getAliasForConversation(trx, userId, conversationId)),
+      ).toBeUndefined();
+    });
+
+    it("getAliasForConversation scopes to user (other users see undefined)", async () => {
+      const u1 = await seedUser();
+      const u2 = await seedUser();
+      const profileId = await seedProfile();
+      const conv = (
+        await tx((trx) => store.createConversation(trx, { userId: u1, profileId, isPrivate: true }))
+      ).id;
+      await tx((trx) => store.setAlias(trx, u1, conv, "owned-by-u1"));
+      expect(await tx((trx) => store.getAliasForConversation(trx, u2, conv))).toBeUndefined();
+      expect(await tx((trx) => store.getAliasForConversation(trx, u1, conv))).toBe("owned-by-u1");
+    });
+  });
+
+  describe("getConversationStats", () => {
+    it("returns createdAt + zero counts for a fresh conversation with no messages", async () => {
+      const { conversationId } = await seedConversation();
+      const stats = await tx((trx) => store.getConversationStats(trx, conversationId));
+      expect(stats).toBeDefined();
+      expect(stats?.messageCount).toBe(0);
+      expect(stats?.lastMessageAt).toBeNull();
+      expect(stats?.createdAt).toBeInstanceOf(Date);
+    });
+
+    it("counts messages and surfaces the most recent createdAt", async () => {
+      const { profileId, conversationId } = await seedConversation();
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content: "hi",
+          profileId,
+          model: "claude-sonnet-4-6",
+          lastInboundMessageId: "00000000-0000-7000-8000-000000000001",
+        }),
+      );
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "assistant",
+          content: "hello back",
+          profileId,
+          model: "claude-sonnet-4-6",
+          lastInboundMessageId: "00000000-0000-7000-8000-000000000001",
+        }),
+      );
+      const stats = await tx((trx) => store.getConversationStats(trx, conversationId));
+      expect(stats?.messageCount).toBe(2);
+      expect(stats?.lastMessageAt).toBeInstanceOf(Date);
+    });
+
+    it("returns undefined for a nonexistent conversation id", async () => {
+      const stats = await tx((trx) =>
+        store.getConversationStats(trx, "00000000-0000-7000-8000-000000000999"),
+      );
+      expect(stats).toBeUndefined();
     });
   });
 
@@ -1332,17 +1601,19 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      const corrections = await store.getCorrections(profileId);
+      const corrections = await tx((trx) => store.getCorrections(trx, profileId));
       expect(corrections).toHaveLength(2);
       expect(corrections.map((c) => c.rule)).toEqual(["Be concise", "Use tables for data"]);
     });
 
     it("upsertCorrection inserts new rule as inactive with observationCount 1", async () => {
-      const result = await store.upsertCorrection({
-        rule: "Prefer bullet points",
-        category: "style",
-        profileId: null,
-      });
+      const result = await tx((trx) =>
+        store.upsertCorrection(trx, {
+          rule: "Prefer bullet points",
+          category: "style",
+          profileId: null,
+        }),
+      );
 
       expect(result.promoted).toBe(false);
 
@@ -1384,12 +1655,14 @@ describe("DrizzleAgentStore", () => {
         })
         .returning({ id: steeringRules.id });
 
-      const result = await store.upsertCorrection({
-        rule: "Test rule",
-        category: "style",
-        profileId: null,
-        existingRuleId: inserted!.id,
-      });
+      const result = await tx((trx) =>
+        store.upsertCorrection(trx, {
+          rule: "Test rule",
+          category: "style",
+          profileId: null,
+          existingRuleId: inserted!.id,
+        }),
+      );
 
       expect(result.promoted).toBe(false);
 
@@ -1419,12 +1692,14 @@ describe("DrizzleAgentStore", () => {
         })
         .returning({ id: steeringRules.id });
 
-      const result = await store.upsertCorrection({
-        rule: "Be concise",
-        category: "style",
-        profileId: null,
-        existingRuleId: inserted!.id,
-      });
+      const result = await tx((trx) =>
+        store.upsertCorrection(trx, {
+          rule: "Be concise",
+          category: "style",
+          profileId: null,
+          existingRuleId: inserted!.id,
+        }),
+      );
 
       expect(result.promoted).toBe(true);
 
@@ -1453,12 +1728,14 @@ describe("DrizzleAgentStore", () => {
         })
         .returning({ id: steeringRules.id });
 
-      const result = await store.upsertCorrection({
-        rule: "Already active",
-        category: "domain",
-        profileId: null,
-        existingRuleId: inserted!.id,
-      });
+      const result = await tx((trx) =>
+        store.upsertCorrection(trx, {
+          rule: "Already active",
+          category: "domain",
+          profileId: null,
+          existingRuleId: inserted!.id,
+        }),
+      );
 
       expect(result.promoted).toBe(false);
 
@@ -1504,7 +1781,7 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      expect(await store.countActiveRules(profileId)).toBe(2);
+      expect(await tx((trx) => store.countActiveRules(trx, profileId))).toBe(2);
     });
 
     it("replaceRules deletes old and inserts new atomically", async () => {
@@ -1533,16 +1810,18 @@ describe("DrizzleAgentStore", () => {
 
       const oldIds = inserted.map((r) => r.id);
 
-      const result = await store.replaceRules({
-        oldIds,
-        newRule: {
-          rule: "Combined rule A+B",
-          category: "style",
-          profileId: null,
-          priority: 100,
-          observationCount: 5,
-        },
-      });
+      const result = await tx((trx) =>
+        store.replaceRules(trx, {
+          oldIds,
+          newRule: {
+            rule: "Combined rule A+B",
+            category: "style",
+            profileId: null,
+            priority: 100,
+            observationCount: 5,
+          },
+        }),
+      );
 
       // Old rules deleted
       const remaining = await db.select({ id: steeringRules.id }).from(steeringRules);
@@ -1587,25 +1866,27 @@ describe("DrizzleAgentStore", () => {
         ])
         .returning({ id: steeringRules.id });
 
-      await store.replaceRules({
-        oldIds: [inserted[0]!.id],
-        newRule: {
-          rule: "New consolidated rule",
-          category: "style",
-          profileId: null,
-          priority: 100,
-          observationCount: 2,
-        },
-      });
+      await tx((trx) =>
+        store.replaceRules(trx, {
+          oldIds: [inserted[0]!.id],
+          newRule: {
+            rule: "New consolidated rule",
+            category: "style",
+            profileId: null,
+            priority: 100,
+            observationCount: 2,
+          },
+        }),
+      );
 
-      const rules = await store.getActiveRules(profileId, []);
+      const rules = await tx((trx) => store.getActiveRules(trx, profileId, []));
       expect(rules).toEqual([{ rule: "New consolidated rule" }]);
     });
   });
 
   describe("voice config", () => {
     it("returns undefined when no row is present", async () => {
-      expect(await store.getVoiceConfig()).toBeUndefined();
+      expect(await tx((trx) => store.getVoiceConfig(trx))).toBeUndefined();
     });
 
     it("returns the singleton row when present", async () => {
@@ -1613,10 +1894,12 @@ describe("DrizzleAgentStore", () => {
       // insert these via `secretsStore.putSecret` then a row via raw SQL —
       // mirror that here. Same secret id can serve both TTS and STT
       // (when the operator opts to reuse the OpenAI LLM provider's key).
-      const { id: secretId } = await secretsStore.putSecret({
-        name: "voice_openai_key",
-        plaintext: "sk-test-voice",
-      });
+      const { id: secretId } = await tx((trx) =>
+        secretsStore.putSecret(trx, {
+          name: "voice_openai_key",
+          plaintext: "sk-test-voice",
+        }),
+      );
       await db.execute(sql`
         INSERT INTO voice_config (
           tts_secret_id, stt_secret_id,
@@ -1629,7 +1912,7 @@ describe("DrizzleAgentStore", () => {
         )
       `);
 
-      const cfg = await store.getVoiceConfig();
+      const cfg = await tx((trx) => store.getVoiceConfig(trx));
       expect(cfg).toBeDefined();
       expect(cfg).toMatchObject({
         ttsSecretId: secretId,
@@ -1648,10 +1931,12 @@ describe("DrizzleAgentStore", () => {
       // The singleton column + UNIQUE/CHECK make a second row impossible.
       // Without the constraint, getVoiceConfig().limit(1) would pick
       // arbitrarily; the constraint blocks the misconfiguration at write time.
-      const { id: secretId } = await secretsStore.putSecret({
-        name: "voice_openai_key",
-        plaintext: "sk-test-voice",
-      });
+      const { id: secretId } = await tx((trx) =>
+        secretsStore.putSecret(trx, {
+          name: "voice_openai_key",
+          plaintext: "sk-test-voice",
+        }),
+      );
       const insertSql = sql`
         INSERT INTO voice_config (
           tts_secret_id, stt_secret_id,
@@ -1673,15 +1958,17 @@ describe("DrizzleAgentStore", () => {
     it("stages a row with content + source and returns its id", async () => {
       const userId = await seedUser();
 
-      const { id } = await store.stagePendingMemory({
-        userId,
-        content: "homelab IP is 10.0.10.10",
-        source: "live_retain",
-      });
+      const { id } = await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          content: "homelab IP is 10.0.10.10",
+          source: "live_retain",
+        }),
+      );
 
       expect(id).toMatch(/^[0-9a-f-]{36}$/);
 
-      const rows = await store.getPendingMemories(userId);
+      const rows = await tx((trx) => store.getPendingMemories(trx, userId));
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({
         id,
@@ -1695,34 +1982,40 @@ describe("DrizzleAgentStore", () => {
     it("preserves optional context", async () => {
       const userId = await seedUser();
 
-      await store.stagePendingMemory({
-        userId,
-        content: "wife's birthday is March 15",
-        context: "while planning a gift",
-        source: "live_retain",
-      });
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          content: "wife's birthday is March 15",
+          context: "while planning a gift",
+          source: "live_retain",
+        }),
+      );
 
-      const rows = await store.getPendingMemories(userId);
+      const rows = await tx((trx) => store.getPendingMemories(trx, userId));
       expect(rows[0]?.context).toBe("while planning a gift");
     });
 
     it("returns rows ordered oldest-first (FIFO)", async () => {
       const userId = await seedUser();
 
-      const { id: first } = await store.stagePendingMemory({
-        userId,
-        content: "first",
-        source: "live_retain",
-      });
+      const { id: first } = await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          content: "first",
+          source: "live_retain",
+        }),
+      );
       // Brief delay so created_at differs measurably under PGlite.
       await new Promise((r) => setTimeout(r, 5));
-      const { id: second } = await store.stagePendingMemory({
-        userId,
-        content: "second",
-        source: "migration",
-      });
+      const { id: second } = await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          content: "second",
+          source: "migration",
+        }),
+      );
 
-      const rows = await store.getPendingMemories(userId);
+      const rows = await tx((trx) => store.getPendingMemories(trx, userId));
       expect(rows.map((r) => r.id)).toEqual([first, second]);
     });
 
@@ -1730,19 +2023,21 @@ describe("DrizzleAgentStore", () => {
       const userId = await seedUser();
 
       for (let i = 0; i < 5; i++) {
-        await store.stagePendingMemory({
-          userId,
-          content: `fact ${i}`,
-          source: "live_retain",
-        });
+        await tx((trx) =>
+          store.stagePendingMemory(trx, {
+            userId,
+            content: `fact ${i}`,
+            source: "live_retain",
+          }),
+        );
         await new Promise((r) => setTimeout(r, 2));
       }
 
-      const limited = await store.getPendingMemories(userId, 2);
+      const limited = await tx((trx) => store.getPendingMemories(trx, userId, 2));
       expect(limited).toHaveLength(2);
       expect(limited.map((r) => r.content)).toEqual(["fact 0", "fact 1"]);
 
-      const unbounded = await store.getPendingMemories(userId);
+      const unbounded = await tx((trx) => store.getPendingMemories(trx, userId));
       expect(unbounded).toHaveLength(5);
     });
 
@@ -1750,19 +2045,23 @@ describe("DrizzleAgentStore", () => {
       const userA = await seedUser();
       const userB = await seedUser();
 
-      await store.stagePendingMemory({
-        userId: userA,
-        content: "A's fact",
-        source: "live_retain",
-      });
-      await store.stagePendingMemory({
-        userId: userB,
-        content: "B's fact",
-        source: "live_retain",
-      });
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId: userA,
+          content: "A's fact",
+          source: "live_retain",
+        }),
+      );
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId: userB,
+          content: "B's fact",
+          source: "live_retain",
+        }),
+      );
 
-      const rowsA = await store.getPendingMemories(userA);
-      const rowsB = await store.getPendingMemories(userB);
+      const rowsA = await tx((trx) => store.getPendingMemories(trx, userA));
+      const rowsB = await tx((trx) => store.getPendingMemories(trx, userB));
       expect(rowsA).toHaveLength(1);
       expect(rowsA[0]?.content).toBe("A's fact");
       expect(rowsB).toHaveLength(1);
@@ -1772,48 +2071,56 @@ describe("DrizzleAgentStore", () => {
     it("deletes specified rows by id", async () => {
       const userId = await seedUser();
 
-      const a = await store.stagePendingMemory({
-        userId,
-        content: "fact A",
-        source: "live_retain",
-      });
-      const b = await store.stagePendingMemory({
-        userId,
-        content: "fact B",
-        source: "live_retain",
-      });
+      const a = await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          content: "fact A",
+          source: "live_retain",
+        }),
+      );
+      const b = await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          content: "fact B",
+          source: "live_retain",
+        }),
+      );
 
-      await store.deletePendingMemories([a.id]);
+      await tx((trx) => store.deletePendingMemories(trx, [a.id]));
 
-      const remaining = await store.getPendingMemories(userId);
+      const remaining = await tx((trx) => store.getPendingMemories(trx, userId));
       expect(remaining.map((r) => r.id)).toEqual([b.id]);
     });
 
     it("deletePendingMemories with empty list is a no-op", async () => {
       const userId = await seedUser();
 
-      await store.stagePendingMemory({
-        userId,
-        content: "fact",
-        source: "live_retain",
-      });
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          content: "fact",
+          source: "live_retain",
+        }),
+      );
 
-      await store.deletePendingMemories([]);
+      await tx((trx) => store.deletePendingMemories(trx, []));
 
-      const rows = await store.getPendingMemories(userId);
+      const rows = await tx((trx) => store.getPendingMemories(trx, userId));
       expect(rows).toHaveLength(1);
     });
 
     it("bulk-stages multiple rows in one statement", async () => {
       const userId = await seedUser();
 
-      await store.bulkStagePendingMemories([
-        { userId, content: "fact A", source: "migration" },
-        { userId, content: "fact B", context: "with context", source: "migration" },
-        { userId, content: "fact C", source: "migration" },
-      ]);
+      await tx((trx) =>
+        store.bulkStagePendingMemories(trx, [
+          { userId, content: "fact A", source: "migration" },
+          { userId, content: "fact B", context: "with context", source: "migration" },
+          { userId, content: "fact C", source: "migration" },
+        ]),
+      );
 
-      const rows = await store.getPendingMemories(userId);
+      const rows = await tx((trx) => store.getPendingMemories(trx, userId));
       expect(rows).toHaveLength(3);
       expect(rows.map((r) => r.content).sort()).toEqual(["fact A", "fact B", "fact C"]);
       expect(rows.find((r) => r.content === "fact B")?.context).toBe("with context");
@@ -1823,9 +2130,9 @@ describe("DrizzleAgentStore", () => {
     it("bulkStagePendingMemories with empty array is a no-op", async () => {
       const userId = await seedUser();
 
-      await store.bulkStagePendingMemories([]);
+      await tx((trx) => store.bulkStagePendingMemories(trx, []));
 
-      const rows = await store.getPendingMemories(userId);
+      const rows = await tx((trx) => store.getPendingMemories(trx, userId));
       expect(rows).toEqual([]);
     });
 
@@ -1833,12 +2140,13 @@ describe("DrizzleAgentStore", () => {
       const userId = await seedUser();
 
       await expect(
-        store.stagePendingMemory({
-          userId,
-          content: "fact",
-          // biome-ignore lint/suspicious/noExplicitAny: testing invalid input
-          source: "bogus" as any,
-        }),
+        tx((trx) =>
+          store.stagePendingMemory(trx, {
+            userId,
+            content: "fact",
+            source: "bogus" as any,
+          }),
+        ),
       ).rejects.toThrow();
     });
   });

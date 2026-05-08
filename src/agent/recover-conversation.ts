@@ -31,17 +31,19 @@
  * tracing duplicate `conversation/errored` events in telemetry.
  */
 
+import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import { conversationErrored } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import type { AgentStore } from "./store/index.js";
 
 export interface RecoverConversationDeps {
+  runInTx: Transactor;
   agentStore: AgentStore;
 }
 
 export function createRecoverConversation(deps: RecoverConversationDeps) {
-  const { agentStore } = deps;
+  const { runInTx, agentStore } = deps;
 
   return inngest.createFunction(
     {
@@ -54,7 +56,7 @@ export function createRecoverConversation(deps: RecoverConversationDeps) {
       const { conversationId, errorClass, causeClass, errorMessage } = event.data;
 
       const conv = await step.run("load-conversation", async () => {
-        return agentStore.getConversation(conversationId);
+        return runInTx((tx) => agentStore.getConversation(tx, conversationId));
       });
       if (!conv) {
         logger.warn(
@@ -70,7 +72,7 @@ export function createRecoverConversation(deps: RecoverConversationDeps) {
       }
 
       await step.run("mark-errored", async () => {
-        await agentStore.setConversationStatus(conversationId, "errored");
+        await runInTx((tx) => agentStore.setConversationStatus(tx, conversationId, "errored"));
       });
       logger.warn(
         { conversationId, errorClass, causeClass, errorMessage },

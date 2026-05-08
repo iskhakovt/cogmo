@@ -2,6 +2,7 @@ import type { Inngest } from "inngest";
 import type { JsonValue } from "type-fest";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CodingStreamingRegistry } from "../agent/coding/streaming-registry.js";
+import type { Transactor } from "../db/index.js";
 import type { SkillStore } from "../skills/store/index.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { TransportStore } from "./store/index.js";
@@ -17,6 +18,7 @@ import type { Adapter } from "./types.js";
  */
 export interface CodingProgressDeps {
   inngest: Inngest;
+  runInTx: Transactor;
   codingStore: CodingStore;
   transportStore: TransportStore;
   streamingRegistry: CodingStreamingRegistry;
@@ -31,6 +33,7 @@ export interface CodingProgressDeps {
  */
 export interface SkillsApprovalDeps {
   inngest: Inngest;
+  runInTx: Transactor;
   skillStore: SkillStore;
   transportStore: TransportStore;
 }

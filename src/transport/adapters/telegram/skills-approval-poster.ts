@@ -1,3 +1,4 @@
+import type { Transactor } from "../../../db/index.js";
 import { logger } from "../../../logger.js";
 import { buildSkillsApprovalKeyboard } from "../../../skills/skills-keyboard.js";
 import type { SkillStore } from "../../../skills/store/index.js";
@@ -49,13 +50,16 @@ export type PostSkillsApprovalKeyboardResult =
 export async function postSkillsApprovalKeyboard(args: {
   event: PostSkillsApprovalKeyboardEvent;
   channelId: string;
+  runInTx: Transactor;
   skillStore: SkillStore;
   transportStore: TransportStore;
   sendMessage: SkillsApprovalSendMessage;
 }): Promise<PostSkillsApprovalKeyboardResult> {
-  const { event, channelId, skillStore, transportStore, sendMessage } = args;
+  const { event, channelId, skillStore, runInTx, transportStore, sendMessage } = args;
 
-  const sessions = await transportStore.getActiveSessionsForConversation(event.conversationId);
+  const sessions = await runInTx((tx) =>
+    transportStore.getActiveSessionsForConversation(tx, event.conversationId),
+  );
   const tgSession = sessions.find((s) => s.channelId === channelId);
   if (!tgSession) {
     return { posted: false, reason: "no_telegram_session" };
@@ -65,8 +69,8 @@ export async function postSkillsApprovalKeyboard(args: {
   // Either lookup returning null falls back to "(none declared)" rather than
   // failing the post — the user can still approve / deny based on the
   // pendingId + commit shown.
-  const deploy = await skillStore.getDeployById(event.pendingId);
-  const skill = deploy ? await skillStore.getSkillById(deploy.skillId) : null;
+  const deploy = await runInTx((tx) => skillStore.getDeployById(tx, event.pendingId));
+  const skill = deploy ? await runInTx((tx) => skillStore.getSkillById(tx, deploy.skillId)) : null;
   const effects = skill && skill.effects.length > 0 ? skill.effects.join(", ") : "(none declared)";
 
   const keyboard = buildSkillsApprovalKeyboard(event.pendingId);
