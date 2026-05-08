@@ -74,7 +74,9 @@ async function startGitea(): Promise<{ url: string; pat: string }> {
   // Mirrors `dev/containers.ts → gitea(...)`. `INSTALL_LOCK=true` is the
   // only knob required to skip Gitea's web installer; SQLite + Gitea's
   // default paths (under `/data/gitea/`) keep this single-container.
-  const container = await new GenericContainer("gitea/gitea:1.22")
+  // Pull from Gitea's own registry rather than Docker Hub — keeps CI off
+  // the Docker Hub rate-limit budget that pgvector + inngest still spend.
+  const container = await new GenericContainer("docker.gitea.com/gitea:1.22")
     .withExposedPorts(3000)
     .withEnvironment({
       GITEA__security__INSTALL_LOCK: "true",
