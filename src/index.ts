@@ -407,6 +407,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     memory,
     files: fileService,
     ...(sandbox && { sandbox }),
+    tier2Image: env.COGMO_SKILLS_IMAGE,
     user: { id: user.id, timezone: env.USER_TIMEZONE },
     memoryBankId: user.id,
     skillsRepoPath: env.COGMO_SKILLS_PATH,
