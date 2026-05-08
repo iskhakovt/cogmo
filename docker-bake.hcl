@@ -41,10 +41,6 @@ target "cogmo" {
   args = {
     VERSION = "dev"
   }
-  attest = [
-    "type=provenance,mode=max",
-    "type=sbom",
-  ]
 }
 
 target "devbase" {
@@ -54,10 +50,6 @@ target "devbase" {
   tags       = ["${REGISTRY}/cogmo-devbase:dev"]
   cache-from = ["type=gha,scope=devbase"]
   cache-to   = ["type=gha,mode=max,scope=devbase"]
-  attest = [
-    "type=provenance,mode=max",
-    "type=sbom",
-  ]
 }
 
 target "skills" {
@@ -67,8 +59,4 @@ target "skills" {
   tags       = ["${REGISTRY}/cogmo-skills:dev"]
   cache-from = ["type=gha,scope=skills"]
   cache-to   = ["type=gha,mode=max,scope=skills"]
-  attest = [
-    "type=provenance,mode=max",
-    "type=sbom",
-  ]
 }

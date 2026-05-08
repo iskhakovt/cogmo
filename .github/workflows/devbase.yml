@@ -62,3 +62,5 @@ jobs:
             cwd://${{ steps.meta.outputs.bake-file }}
           targets: devbase
           push: ${{ github.event_name != 'pull_request' }}
+          provenance: mode=max
+          sbom: true
