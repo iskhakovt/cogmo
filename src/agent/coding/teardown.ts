@@ -30,6 +30,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
+import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import { runGit, withGitAskpass } from "../../secrets/git-askpass.js";
 import {
@@ -193,6 +194,7 @@ async function git(cwd: string, args: ReadonlyArray<string>): Promise<void> {
  */
 export async function safeTeardownWorktree(opts: {
   secretsStore?: SecretsStore;
+  runInTx?: Transactor;
   repo: CodingRepoRow;
   taskId: string;
   worktreeAssignment: { branch: string; worktreePath: string };
@@ -201,12 +203,15 @@ export async function safeTeardownWorktree(opts: {
 }): Promise<void> {
   try {
     let identity: GitHubIdentity | undefined = opts.identity;
-    if (!identity && opts.secretsStore) {
+    if (!identity && opts.secretsStore && opts.runInTx) {
+      const secretsStore = opts.secretsStore;
       // resolveGitHubIdentity can throw on a DB-level failure
       // (`secretsStore.getSecret` underlying error) — keep it inside the
       // try block so `safeTeardownWorktree` actually honors its "never
       // throws" contract.
-      const result = await resolveGitHubIdentity(opts.secretsStore, opts.repo.identityName);
+      const result = await opts.runInTx((tx) =>
+        resolveGitHubIdentity(tx, secretsStore, opts.repo.identityName),
+      );
       if (result.isOk()) {
         identity = result.value;
       } else {

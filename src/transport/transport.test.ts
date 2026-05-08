@@ -828,7 +828,7 @@ describe("createTransport", () => {
         localPath: "/p",
         remoteUrl: "git@x:y/z.git",
       });
-      const args = insertRepo.mock.calls[0][0];
+      const args = insertRepo.mock.calls[0][1];
       expect(args.defaultBranch).toBe("main");
       expect(args.verifyCommand).toBe("true");
       expect(args.allowedBackends).toEqual(["claude"]);
@@ -969,7 +969,7 @@ describe("createTransport", () => {
         name: "cogmo",
         activeTasks: 2,
       });
-      expect(removeRepoIfIdle).toHaveBeenCalledWith("r1");
+      expect(removeRepoIfIdle).toHaveBeenCalledWith(expect.anything(), "r1");
     });
 
     it("remove deletes when no active tasks", async () => {
@@ -984,7 +984,7 @@ describe("createTransport", () => {
       });
       const res = await transport.repos.remove("cogmo");
       expect(res.isOk()).toBe(true);
-      expect(removeRepoIfIdle).toHaveBeenCalledWith("r1");
+      expect(removeRepoIfIdle).toHaveBeenCalledWith(expect.anything(), "r1");
     });
   });
 
@@ -1062,7 +1062,11 @@ describe("createTransport", () => {
       const res = await transport.coding.approvePlan(taskId, "owner-tg-id");
 
       expect(res.isOk()).toBe(true);
-      expect(codingStore.approvePlanIfPending).toHaveBeenCalledWith(taskId, expect.any(Date));
+      expect(codingStore.approvePlanIfPending).toHaveBeenCalledWith(
+        expect.anything(),
+        taskId,
+        expect.any(Date),
+      );
       expect(inngestSend).toHaveBeenCalledWith(
         expect.objectContaining({
           name: "coding/task/plan-approved",
@@ -1084,7 +1088,7 @@ describe("createTransport", () => {
       await transport.coding.approvePlan(taskId, "owner-tg-id");
 
       const storeCallDate = (codingStore.approvePlanIfPending as ReturnType<typeof vi.fn>).mock
-        .calls[0]?.[1] as Date;
+        .calls[0]?.[2] as Date;
       const eventArg = inngestSend.mock.calls[0]?.[0] as {
         data: { approvedAt: string };
       };
@@ -1162,7 +1166,7 @@ describe("createTransport", () => {
 
       const res = await transport.coding.cancelTask(taskId, "owner-tg-id", "user cancelled");
       expect(res.isOk()).toBe(true);
-      expect(cancel).toHaveBeenCalledWith(taskId, "user cancelled");
+      expect(cancel).toHaveBeenCalledWith(expect.anything(), taskId, "user cancelled");
     });
 
     it("cancelTask: identity_rejected blocks store call", async () => {

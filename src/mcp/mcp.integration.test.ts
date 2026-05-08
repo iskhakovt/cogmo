@@ -23,7 +23,7 @@ const SERVER_EVERYTHING_PATH = require.resolve(
 );
 
 const dummySecrets = {
-  getSecret: async () => undefined,
+  getSecret: async (_tx: unknown, _name: string) => undefined,
   // Only getSecret is used by the transport; the rest are absent because the
   // store interface methods we don't invoke are inaccessible at the type
   // level when we cast through `unknown`.
@@ -36,10 +36,11 @@ let registry: McpRegistryImpl;
 
 beforeAll(async () => {
   ({ tx, close } = await createTestDatabase());
-  store = new DrizzleMcpStore(tx);
+  store = new DrizzleMcpStore();
   registry = new McpRegistryImpl({
     store,
     secrets: dummySecrets,
+    runInTx: tx,
     runner: new HostRunner(),
     callTimeoutMs: 30_000,
     idleEvictionMs: 60_000,
@@ -69,10 +70,10 @@ describe("MCP end-to-end against server-everything", () => {
 
     // approveServer handshakes, lists tools, and pins them as `pending`.
     await registry.approveServer(server.id);
-    const refreshed = await store.getServerById(server.id);
+    const refreshed = await tx((trx) => store.getServerById(trx, server.id));
     expect(refreshed?.approvalStatus).toBe("approved");
 
-    const pins = await store.getToolPins(server.id);
+    const pins = await tx((trx) => store.getToolPins(trx, server.id));
     const pinNames = pins.map((p) => p.toolName);
     // server-everything exposes a moving set of demo tools across releases;
     // assert only the one we round-trip below, plus invariants over the rest.
@@ -109,7 +110,7 @@ describe("MCP end-to-end against server-everything", () => {
     });
     await registry.approveServer(server.id);
     await registry.removeServer(server.id);
-    expect(await store.getServerById(server.id)).toBeUndefined();
+    expect(await tx((trx) => store.getServerById(trx, server.id))).toBeUndefined();
     // No pool sweep needed — evict closes the connection synchronously.
   });
 });

@@ -19,7 +19,6 @@ function service(coding?: Service["coding"]): Service {
       update: vi.fn(),
     },
     ...(coding !== undefined && { coding }),
-    // biome-ignore lint/suspicious/noExplicitAny: minimal mock — tests don't exercise the unused fields
   } as any;
 }
 
@@ -87,7 +86,6 @@ describe("delegate_coding tool", () => {
       {
         goal: "refactor steering rules to support per-channel scoping",
         repo: "cogmo",
-        // biome-ignore lint/suspicious/noExplicitAny: intentionally invalid extra input
         triggerSource: "evolution" as any,
       },
       service({ delegate }),

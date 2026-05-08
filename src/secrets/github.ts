@@ -14,6 +14,7 @@
 
 import { err, ok, type Result } from "neverthrow";
 import { z } from "zod";
+import type { Transaction } from "../db/index.js";
 
 export const GitHubIdentitySchema = z
   .object({
@@ -59,7 +60,7 @@ export type ResolveIdentityError =
  * locally rather than importing `SecretsStore` directly so this module stays
  * dependency-light — any object that can fetch a secret by name fits. */
 export interface GitHubIdentitySecretsLookup {
-  getSecret(name: string): Promise<string | undefined>;
+  getSecret(tx: Transaction, name: string): Promise<string | undefined>;
 }
 
 /**
@@ -74,10 +75,11 @@ export interface GitHubIdentitySecretsLookup {
  *   (e.g. missing `sshPrivateKey`). Same root cause as `malformed_json`.
  */
 export async function resolveGitHubIdentity(
+  tx: Transaction,
   secrets: GitHubIdentitySecretsLookup,
   identityName: string,
 ): Promise<Result<GitHubIdentity, ResolveIdentityError>> {
-  const raw = await secrets.getSecret(gitHubIdentitySecretName(identityName));
+  const raw = await secrets.getSecret(tx, gitHubIdentitySecretName(identityName));
   if (raw === undefined) return err({ code: "missing", identityName });
 
   let parsed: unknown;
@@ -96,10 +98,11 @@ export async function resolveGitHubIdentity(
 
 /** Convenience wrapper: looks up the identity for a given repo row. */
 export function resolveGitHubIdentityForRepo(
+  tx: Transaction,
   secrets: GitHubIdentitySecretsLookup,
   repo: { identityName: string },
 ): Promise<Result<GitHubIdentity, ResolveIdentityError>> {
-  return resolveGitHubIdentity(secrets, repo.identityName);
+  return resolveGitHubIdentity(tx, secrets, repo.identityName);
 }
 
 /** Serialise an identity bundle for storage. The store handles encryption. */

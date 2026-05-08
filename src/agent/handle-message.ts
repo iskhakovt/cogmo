@@ -355,7 +355,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return deps.runInTx((tx) => agentStore.getHistory(tx, conversationId));
       });
 
-      const channelTypes = await step.run("resolve-channel-types", async () => {
+      const _channelTypes = await step.run("resolve-channel-types", async () => {
         return deps.runInTx((tx) => transportStore.getActiveChannelTypes(tx, conversationId));
       });
 

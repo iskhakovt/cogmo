@@ -17,7 +17,7 @@ beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
   store = new DrizzleAgentStore();
   const key = deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/secrets-at-rest/v1");
-  secretsStore = new DrizzleSecretsStore(tx, key);
+  secretsStore = new DrizzleSecretsStore(key);
 });
 
 afterEach(async () => {
@@ -777,10 +777,12 @@ describe("DrizzleAgentStore", () => {
 
   describe("providers", () => {
     async function seedProvider(name = "test-provider") {
-      const { id: secretId } = await secretsStore.putSecret({
-        name: `${name}_key`,
-        plaintext: "sk-test",
-      });
+      const { id: secretId } = await tx((trx) =>
+        secretsStore.putSecret(trx, {
+          name: `${name}_key`,
+          plaintext: "sk-test",
+        }),
+      );
       return tx((trx) =>
         store.createProvider(trx, {
           name,
@@ -824,10 +826,12 @@ describe("DrizzleAgentStore", () => {
 
   describe("model_providers", () => {
     async function seedProviderWithSecret(name: string) {
-      const { id: secretId } = await secretsStore.putSecret({
-        name: `${name}_key`,
-        plaintext: "sk-test",
-      });
+      const { id: secretId } = await tx((trx) =>
+        secretsStore.putSecret(trx, {
+          name: `${name}_key`,
+          plaintext: "sk-test",
+        }),
+      );
       return tx((trx) =>
         store.createProvider(trx, { name, type: "anthropic", secretId, attrs: {} }),
       );
@@ -1053,7 +1057,6 @@ describe("DrizzleAgentStore", () => {
             basePrompt: "p",
             model: "m",
             toolSet: [],
-            // biome-ignore lint/suspicious/noExplicitAny: testing invalid input rejection
             memoryScope: { compartments: [], trust: ["first-party"] } as any,
           }),
         ),
@@ -1819,10 +1822,12 @@ describe("DrizzleAgentStore", () => {
       // insert these via `secretsStore.putSecret` then a row via raw SQL —
       // mirror that here. Same secret id can serve both TTS and STT
       // (when the operator opts to reuse the OpenAI LLM provider's key).
-      const { id: secretId } = await secretsStore.putSecret({
-        name: "voice_openai_key",
-        plaintext: "sk-test-voice",
-      });
+      const { id: secretId } = await tx((trx) =>
+        secretsStore.putSecret(trx, {
+          name: "voice_openai_key",
+          plaintext: "sk-test-voice",
+        }),
+      );
       await db.execute(sql`
         INSERT INTO voice_config (
           tts_secret_id, stt_secret_id,
@@ -1854,10 +1859,12 @@ describe("DrizzleAgentStore", () => {
       // The singleton column + UNIQUE/CHECK make a second row impossible.
       // Without the constraint, getVoiceConfig().limit(1) would pick
       // arbitrarily; the constraint blocks the misconfiguration at write time.
-      const { id: secretId } = await secretsStore.putSecret({
-        name: "voice_openai_key",
-        plaintext: "sk-test-voice",
-      });
+      const { id: secretId } = await tx((trx) =>
+        secretsStore.putSecret(trx, {
+          name: "voice_openai_key",
+          plaintext: "sk-test-voice",
+        }),
+      );
       const insertSql = sql`
         INSERT INTO voice_config (
           tts_secret_id, stt_secret_id,
@@ -2065,7 +2072,6 @@ describe("DrizzleAgentStore", () => {
           store.stagePendingMemory(trx, {
             userId,
             content: "fact",
-            // biome-ignore lint/suspicious/noExplicitAny: testing invalid input
             source: "bogus" as any,
           }),
         ),

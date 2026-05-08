@@ -108,7 +108,11 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
     // Resolve secret references in credentials before passing to adapter.
     // Credentials like { tokenSecretName: "telegram_bot_token" } are resolved
     // to { token: "actual-token-value" } so adapters never see secret names.
-    const credentials = await resolveCredentialSecrets(channel.credentials, deps.secretsStore);
+    const credentials = await resolveCredentialSecrets(
+      channel.credentials,
+      deps.secretsStore,
+      deps.runInTx,
+    );
 
     const result = await mod.setup({
       channelId: channel.id,
@@ -160,6 +164,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
 export async function resolveCredentialSecrets(
   credentials: JsonValue,
   secretsStore: SecretsStore,
+  runInTx: Transactor,
 ): Promise<JsonValue> {
   if (typeof credentials !== "object" || credentials === null || Array.isArray(credentials)) {
     return credentials;
@@ -170,7 +175,7 @@ export async function resolveCredentialSecrets(
   for (const [key, value] of Object.entries(resolved)) {
     if (key.endsWith("SecretName") && typeof value === "string") {
       const baseKey = key.slice(0, -"SecretName".length);
-      const secret = await secretsStore.getSecret(value);
+      const secret = await runInTx((tx) => secretsStore.getSecret(tx, value));
       if (!secret) {
         throw new Error(
           `Channel credential references secret "${value}" but it was not found. Re-run \`cogmo setup\` to reconfigure.`,

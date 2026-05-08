@@ -30,16 +30,17 @@ let sql: ReturnType<typeof postgres>;
 let store: DrizzleSkillStore;
 let secretsStore: DrizzleSecretsStore;
 let memory: HindsightMemoryProvider;
+let tx: ReturnType<typeof transactor>;
 const BANK_ID = `runner-it-${Date.now()}`;
 
 beforeAll(async () => {
   sql = postgres(inject("databaseUrl"), { max: 4 });
   const db = drizzle(sql, { schema });
-  const tx = transactor(db);
-  store = new DrizzleSkillStore(tx);
+  tx = transactor(db);
+  store = new DrizzleSkillStore();
 
   const key = deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/secrets-at-rest/v1");
-  secretsStore = new DrizzleSecretsStore(tx, key);
+  secretsStore = new DrizzleSecretsStore(key);
 
   const hindsightUrl = inject("hindsightUrl");
   memory = new HindsightMemoryProvider(hindsightUrl);
@@ -56,6 +57,7 @@ afterAll(async () => {
 async function makeRunner() {
   return SkillRunnerImpl.create({
     store,
+    runInTx: tx,
     secretsStore,
     memory,
     files: {
@@ -100,7 +102,7 @@ describe("SkillRunnerImpl (integration)", { timeout: 60_000 }, () => {
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
 
-    const run = await store.getRun(result.runId);
+    const run = await tx((trx) => store.getRun(trx, result.runId));
     expect(run?.status).toBe("success");
     expect(run?.output).toEqual({ echo: 8 });
     expect(run?.finishedAt).toBeInstanceOf(Date);
@@ -108,11 +110,13 @@ describe("SkillRunnerImpl (integration)", { timeout: 60_000 }, () => {
 
   it("ctx.secrets.get reads a real AES-GCM-encrypted secret from Postgres", async () => {
     const secretName = skillName("api_key").replace(/-/g, "_");
-    await secretsStore.putSecret({
-      name: secretName,
-      plaintext: "sk-real-secret-value",
-      description: "test secret",
-    });
+    await tx((trx) =>
+      secretsStore.putSecret(trx, {
+        name: secretName,
+        plaintext: "sk-real-secret-value",
+        description: "test secret",
+      }),
+    );
 
     const name = skillName("uses-secret");
     const manifest = `---
@@ -139,7 +143,7 @@ async def run(inputs, ctx):
     expect(result.output).toEqual({ len: "sk-real-secret-value".length, starts_with: "sk-re" });
 
     // Verify audit row landed with the secret NAME (never the value).
-    const calls = await store.listContextCallsForRun(result.runId);
+    const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
     const get = calls.find((c) => c.method === "secrets.get");
     expect(get?.target).toBe(secretName);
     expect(get?.ok).toBe(true);
@@ -181,7 +185,7 @@ async def run(inputs, ctx):
     const result = await runner.invoke({ name, inputs: { fact } });
     expect(result.status).toBe("success");
 
-    const calls = await store.listContextCallsForRun(result.runId);
+    const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
     const remember = calls.find((c) => c.method === "memory.remember");
     expect(remember?.ok).toBe(true);
   });
@@ -208,7 +212,7 @@ async def run(inputs, ctx):
     expect(result.status).toBe("error");
     expect(result.error).toContain("integration kaboom");
 
-    const run = await store.getRun(result.runId);
+    const run = await tx((trx) => store.getRun(trx, result.runId));
     expect(run?.status).toBe("error");
     expect(run?.output).toBeNull();
     expect(run?.error).toContain("integration kaboom");
@@ -258,7 +262,7 @@ async def run(inputs, ctx):
     // survives the JS→Python JsException conversion.
     expect(result.error).toContain("kind=not_in_allowlist");
 
-    const calls = await store.listContextCallsForRun(result.runId);
+    const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
     const get = calls.find((c) => c.method === "secrets.get");
     expect(get?.ok).toBe(false);
     expect(get?.error).toBe("not_in_allowlist");

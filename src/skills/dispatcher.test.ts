@@ -302,7 +302,6 @@ describe("Dispatcher", () => {
   it("ctx handler returning a non-promise value is wrapped correctly", async () => {
     const { host, worker } = makeTransportPair();
     const handler: CtxHandler = {
-      // biome-ignore lint/suspicious/useAwait: testing sync return path
       handle: async () => "raw-string-value",
     };
     const d = new Dispatcher({ transport: host, ctxHandler: handler });
@@ -349,7 +348,6 @@ describe("Dispatcher", () => {
     for (let i = 0; i < N; i++) {
       const r = ctxResults.find((c) => c.id === `c-${i}`);
       expect(r).toBeDefined();
-      // biome-ignore lint/style/noNonNullAssertion: existence asserted above
       expect((r! as unknown as { value: number }).value).toBe(i * 2);
     }
 

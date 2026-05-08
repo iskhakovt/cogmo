@@ -1,3 +1,4 @@
+import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { McpStore } from "../store/index.js";
@@ -23,6 +24,7 @@ type EntryState =
 export interface McpConnectionPoolOptions {
   store: McpStore;
   secrets: SecretsStore;
+  runInTx: Transactor;
   runner: Runner;
   /** ms; live connections idle longer than this are evicted on the next sweep. */
   idleEvictionMs: number;
@@ -48,6 +50,7 @@ export interface McpConnectionPoolOptions {
 export class McpConnectionPool {
   #store: McpStore;
   #secrets: SecretsStore;
+  #runInTx: Transactor;
   #runner: Runner;
   #idleEvictionMs: number;
   #now: () => number;
@@ -59,6 +62,7 @@ export class McpConnectionPool {
   constructor(opts: McpConnectionPoolOptions) {
     this.#store = opts.store;
     this.#secrets = opts.secrets;
+    this.#runInTx = opts.runInTx;
     this.#runner = opts.runner;
     this.#idleEvictionMs = opts.idleEvictionMs;
     this.#now = opts.now ?? Date.now;
@@ -101,11 +105,11 @@ export class McpConnectionPool {
   }
 
   async #doConnect(serverId: string, prev: EntryState | undefined): Promise<McpConnection> {
-    const server = await this.#store.getServerById(serverId);
+    const server = await this.#runInTx((tx) => this.#store.getServerById(tx, serverId));
     if (!server) throw new McpPoolError("server_not_found");
 
     try {
-      const connection = await this.#runner.spawn(server, this.#secrets);
+      const connection = await this.#runner.spawn(server, this.#secrets, this.#runInTx);
 
       // The pool may have been closed *during* this spawn. If so, tear down
       // the just-spawned connection rather than stuffing it into the now-empty
@@ -128,7 +132,7 @@ export class McpConnectionPool {
       // live in the map, will be returned to the caller, and is recoverable.
       // Log and move on instead of rejecting (which would leak the entry).
       try {
-        await this.#store.recordLastConnected(serverId, new Date());
+        await this.#runInTx((tx) => this.#store.recordLastConnected(tx, serverId, new Date()));
       } catch (err) {
         logger.warn(
           { err, serverId },
@@ -141,7 +145,7 @@ export class McpConnectionPool {
       // repopulating the entry map (the close already cleared it).
       if (this.#closed) throw err;
       const message = err instanceof Error ? err.message : String(err);
-      await this.#store.recordLastError(serverId, message);
+      await this.#runInTx((tx) => this.#store.recordLastError(tx, serverId, message));
       // Reconnect counter invariant: only the failed-spawn path increments
       // `reconnectAttempts`. A successful spawn writes `live` (no counter),
       // and the transport-close handler writes `closed` with attempts=0 —

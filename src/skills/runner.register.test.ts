@@ -21,7 +21,7 @@ let store: DrizzleSkillStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleSkillStore(tx);
+  store = new DrizzleSkillStore();
 });
 
 afterEach(async () => {
@@ -50,7 +50,6 @@ function makeMockSecrets(): SecretsStore {
     listSecretNames: vi.fn(),
     setSecret: vi.fn(),
     deleteSecret: vi.fn(),
-    // biome-ignore lint/suspicious/noExplicitAny: minimal SecretsStore stub
   } as any;
 }
 
@@ -173,6 +172,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
   async function makeRunner() {
     return SkillRunnerImpl.create({
       store,
+      runInTx: tx,
       memory: makeMockMemory(),
       secretsStore: makeMockSecrets(),
       files: {
@@ -205,7 +205,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     expect(await getMainSha(repo.bare)).toBe(sha);
 
     // skills row exists with correct sha + tier.
-    const skill = await store.getSkillByName("echo");
+    const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
     expect(skill?.gitSha).toBe(sha);
     expect(skill?.tier).toBe("wasm");
     expect(skill?.disabled).toBe(false);
@@ -434,7 +434,7 @@ tier: wasm
       expect(result.gitSha).toBe(v1);
 
       expect(await getMainSha(repo.bare)).toBe(v1);
-      const skill = await store.getSkillByName("echo");
+      const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
       expect(skill?.gitSha).toBe(v1);
     });
 
@@ -478,7 +478,7 @@ tier: wasm
       const list = await runner.list();
       expect(list).toHaveLength(0);
       // Row still exists for audit history.
-      const skill = await store.getSkillByName("echo");
+      const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
       expect(skill?.disabled).toBe(true);
     });
 
@@ -497,7 +497,7 @@ tier: wasm
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/invalid_branch/);
       // No skills row created.
-      expect(await store.getSkillByName("echo")).toBeUndefined();
+      expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
     });
 
     it("rejects branch == 'refs/heads/main' too", async () => {
@@ -535,7 +535,7 @@ inputs:
       // main is unchanged — no half-deploy.
       expect(await getMainSha(repo.bare)).toBe(before);
       // No skills row.
-      expect(await store.getSkillByName("bad-schema")).toBeUndefined();
+      expect(await tx((trx) => store.getSkillByName(trx, "bad-schema"))).toBeUndefined();
     });
 
     it("rejects a manifest with an inputs schema ajv can't compile (runner prevalidate)", async () => {
@@ -564,7 +564,7 @@ inputs:
       // Either layer is acceptable — what matters is no main advance.
       expect(result.errors?.length).toBeGreaterThan(0);
       expect(await getMainSha(repo.bare)).toBe(before);
-      expect(await store.getSkillByName("bad-properties")).toBeUndefined();
+      expect(await tx((trx) => store.getSkillByName(trx, "bad-properties"))).toBeUndefined();
     });
   });
 
@@ -627,7 +627,7 @@ effects:
 
       // main moved + skills row reflects the approved sha.
       expect(await getMainSha(repo.bare)).toBe(sha);
-      const skill = await store.getSkillByName("notifier");
+      const skill = await tx((trx) => store.getSkillByName(trx, "notifier"));
       expect(skill?.gitSha).toBe(sha);
       expect(skill?.disabled).toBe(false);
       // Manifest-derived columns projected from the approved sha.
@@ -663,7 +663,7 @@ effects:
       expect(result.errors?.[0]).toMatch(/target_skill_mismatch/);
 
       // A's sha is unchanged.
-      const skillA = await store.getSkillByName("alpha");
+      const skillA = await tx((trx) => store.getSkillByName(trx, "alpha"));
       expect(skillA?.gitSha).toBe(aSha);
     });
   });
@@ -724,7 +724,7 @@ effects:
       const approved = await runner.approveDeploy({ pendingId: reg2.pendingId });
       expect(approved.status).toBe("live");
 
-      const skill = await store.getSkillByName("shapeshift");
+      const skill = await tx((trx) => store.getSkillByName(trx, "shapeshift"));
       expect(skill?.gitSha).toBe(v2Sha);
       expect(skill?.inputs).toMatchObject({
         properties: { b: { type: "string" } },
@@ -767,7 +767,7 @@ inputs:
       const result = await runner.rollback({ name: "shape", toGitSha: v1Sha });
       expect(result.status).toBe("live");
 
-      const skill = await store.getSkillByName("shape");
+      const skill = await tx((trx) => store.getSkillByName(trx, "shape"));
       expect(skill?.gitSha).toBe(v1Sha);
       // inputs match v1's schema (x: integer), not v2's (different: string).
       expect(skill?.inputs).toMatchObject({
@@ -807,7 +807,7 @@ effects:
 
       // After insert: skill row exists but disabled=true (first-time
       // pending_approval — there's no prior live version to keep visible).
-      const beforeDeny = await store.getSkillByName("notify-skill");
+      const beforeDeny = await tx((trx) => store.getSkillByName(trx, "notify-skill"));
       expect(beforeDeny?.disabled).toBe(true);
       expect(beforeDeny?.gitSha).toBe(sha);
 
@@ -816,7 +816,7 @@ effects:
       // Row stays at sha, disabled=true; deploy resolved to denied. The
       // bare repo's feature branch is untouched (deleteRef only runs in
       // goesLive applyFilesystem, which approve-tier skips).
-      const afterDeny = await store.getSkillByName("notify-skill");
+      const afterDeny = await tx((trx) => store.getSkillByName(trx, "notify-skill"));
       expect(afterDeny?.disabled).toBe(true);
       expect(afterDeny?.gitSha).toBe(sha);
 
@@ -845,7 +845,7 @@ effects:
       const reg1 = await runner.register({ branch: "skill/upgradable-v1" });
       expect(reg1.status).toBe("live");
 
-      const liveBefore = await store.getSkillByName("upgradable");
+      const liveBefore = await tx((trx) => store.getSkillByName(trx, "upgradable"));
       expect(liveBefore?.disabled).toBe(false);
       expect(liveBefore?.gitSha).toBe(v1Sha);
 
@@ -877,14 +877,14 @@ effects:
       if (!reg2.pendingId) throw new Error("expected pendingId for v2");
 
       // Critical: skills row UNCHANGED — still pointing at v1, still live.
-      const duringApproval = await store.getSkillByName("upgradable");
+      const duringApproval = await tx((trx) => store.getSkillByName(trx, "upgradable"));
       expect(duringApproval?.disabled).toBe(false);
       expect(duringApproval?.gitSha).toBe(v1Sha);
 
       // Deny the v2 upgrade. The live v1 should still be live afterwards —
       // this is the exact regression the row-untouched rule prevents.
       await runner.denyDeploy({ pendingId: reg2.pendingId, reason: "rejected" });
-      const afterDeny = await store.getSkillByName("upgradable");
+      const afterDeny = await tx((trx) => store.getSkillByName(trx, "upgradable"));
       expect(afterDeny?.disabled).toBe(false);
       expect(afterDeny?.gitSha).toBe(v1Sha);
       expect(reg2).toBeDefined(); // no_op-after-denial sanity (v2's pending row resolved to denied)
@@ -899,31 +899,33 @@ effects:
       // structural invariant — register, approveDeploy, and rollback all
       // route through executeRegister/Approve/Rollback and inherit it.
       await expect(
-        store.executeRegister({
-          name: "would-be-skill",
-          tier: "wasm",
-          riskTier: "notify",
-          effects: [],
-          schedule: null,
-          branchTipSha: "0000000000000000000000000000000000000abc",
-          inputs: { type: "object", properties: {} },
-          outputs: null,
-          classifierLog: {
-            classifier_version: "test",
-            risk_tier: "notify",
-            declared_effects: [],
-            detected_effects: [],
-            declared_secrets: [],
-            validation_errors: [],
-          },
-          applyFilesystem: async () => {
-            throw new Error("simulated git update-ref failure");
-          },
-        }),
+        tx((trx) =>
+          store.executeRegister(trx, {
+            name: "would-be-skill",
+            tier: "wasm",
+            riskTier: "notify",
+            effects: [],
+            schedule: null,
+            branchTipSha: "0000000000000000000000000000000000000abc",
+            inputs: { type: "object", properties: {} },
+            outputs: null,
+            classifierLog: {
+              classifier_version: "test",
+              risk_tier: "notify",
+              declared_effects: [],
+              detected_effects: [],
+              declared_secrets: [],
+              validation_errors: [],
+            },
+            applyFilesystem: async () => {
+              throw new Error("simulated git update-ref failure");
+            },
+          }),
+        ),
       ).rejects.toThrow(/simulated git update-ref failure/);
 
       // Both rows rolled back — no skills row, no skill_deploys row.
-      expect(await store.getSkillByName("would-be-skill")).toBeUndefined();
+      expect(await tx((trx) => store.getSkillByName(trx, "would-be-skill"))).toBeUndefined();
     });
   });
 });

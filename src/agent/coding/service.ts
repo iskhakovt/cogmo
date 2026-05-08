@@ -1,4 +1,5 @@
 import type { Inngest } from "inngest";
+import type { Transactor } from "../../db/index.js";
 import { codingTaskStart } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import type { CodingStore } from "./store/index.js";
@@ -6,6 +7,7 @@ import type { CodingStore } from "./store/index.js";
 const log = logger.child({ component: "coding.service" });
 
 export interface CodingServiceDeps {
+  runInTx: Transactor;
   codingStore: CodingStore;
   /**
    * Inngest client used to emit `coding/task/start`. The orchestrator
@@ -66,7 +68,7 @@ export function createCodingService(
         );
       }
 
-      const repo = await deps.codingStore.getRepoByName(input.repoName);
+      const repo = await deps.runInTx((tx) => deps.codingStore.getRepoByName(tx, input.repoName));
       if (!repo) {
         throw new Error(
           `Repo not registered: ${input.repoName}. Use /repo list to see available repos.`,
@@ -80,7 +82,9 @@ export function createCodingService(
       // conversations (or repeated taps from the same one) could each
       // trigger a task concurrently — guard before INSERT to avoid
       // contended worktrees on the same repo.
-      const active = await deps.codingStore.countActiveTasksForRepo(repo.id);
+      const active = await deps.runInTx((tx) =>
+        deps.codingStore.countActiveTasksForRepo(tx, repo.id),
+      );
       if (active >= repo.maxConcurrentTasks) {
         return {
           taskId: null,
@@ -94,14 +98,16 @@ export function createCodingService(
       // Insert in `queued` status. Worktree assignment, container id,
       // session id, etc. all stay null — the orchestrator's steps fill
       // them in.
-      const task = await deps.codingStore.insertTask({
-        repoId: repo.id,
-        conversationId,
-        goal: input.goal,
-        triggerSource: "user",
-        backend: "claude",
-        allowPrivilegedRunc: false,
-      });
+      const task = await deps.runInTx((tx) =>
+        deps.codingStore.insertTask(tx, {
+          repoId: repo.id,
+          conversationId,
+          goal: input.goal,
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
 
       // Hand off to the durable orchestrator. Once this event lands the
       // service has no further role — plan rendering, approval, execute,
@@ -119,12 +125,14 @@ export function createCodingService(
           data: { taskId: task.id },
         });
       } catch (sendErr) {
-        await deps.codingStore
-          .updateTaskStatus({
-            id: task.id,
-            status: "failed",
-            failureReason: `inngest.send failed: ${(sendErr as Error).message}`,
-          })
+        await deps
+          .runInTx((tx) =>
+            deps.codingStore.updateTaskStatus(tx, {
+              id: task.id,
+              status: "failed",
+              failureReason: `inngest.send failed: ${(sendErr as Error).message}`,
+            }),
+          )
           .catch((cleanupErr) => {
             log.error(
               { err: cleanupErr, taskId: task.id, sendErr },

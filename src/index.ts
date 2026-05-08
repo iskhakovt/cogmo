@@ -106,7 +106,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const tx = transactor(db);
   const agentStore = new DrizzleAgentStore();
   const transportStore = new DrizzleTransportStore();
-  const sandboxStore = new DrizzleSandboxStore(tx);
+  const sandboxStore = new DrizzleSandboxStore();
 
   // Sandbox is opt-in via SANDBOX_RUNTIME — coding-delegation features fail
   // with a clear error when the env var is unset. No silent fallback.
@@ -116,10 +116,12 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   if (env.SANDBOX_RUNTIME) {
     const docker = new Docker();
     sandboxDocker = docker;
-    const instance = await sandboxStore.insertInstance({
-      host: hostname(),
-      pid: process.pid,
-    });
+    const instance = await tx((trx) =>
+      sandboxStore.insertInstance(trx, {
+        host: hostname(),
+        pid: process.pid,
+      }),
+    );
     sandboxInstanceId = instance.id;
     const proxy = await CogmoSocketProxy.create({
       socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
@@ -128,6 +130,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     sandbox = await LocalInProcessSandbox.create({
       docker,
       store: sandboxStore,
+      runInTx: tx,
       runtime: env.SANDBOX_RUNTIME,
       instanceId: instance.id,
       proxy,
@@ -156,7 +159,6 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     );
   }
   const secretsStore = new DrizzleSecretsStore(
-    tx,
     deriveMasterKey(parseMasterKey(env.COGMO_MASTER_KEY), "cogmo/secrets-at-rest/v1"),
   );
 
@@ -197,10 +199,12 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const attachmentStore = createAttachmentStore(s3Client, env.S3_BUCKET);
 
   // Tool credentials: DB first (wizard-configured), env fallback (dev convenience).
-  const tavilyKey = (await secretsStore.getSecret("tavily_api_key")) ?? env.TAVILY_API_KEY;
+  const tavilyKey =
+    (await tx((trx) => secretsStore.getSecret(trx, "tavily_api_key"))) ?? env.TAVILY_API_KEY;
   const openrouterKey =
-    (await secretsStore.getSecret("openrouter_api_key")) ?? env.OPENROUTER_API_KEY;
-  const falKey = (await secretsStore.getSecret("fal_api_key")) ?? env.FAL_API_KEY;
+    (await tx((trx) => secretsStore.getSecret(trx, "openrouter_api_key"))) ??
+    env.OPENROUTER_API_KEY;
+  const falKey = (await tx((trx) => secretsStore.getSecret(trx, "fal_api_key"))) ?? env.FAL_API_KEY;
 
   const webTools = createWebTools(tavilyKey, openrouterKey);
   const falProvider = falKey
@@ -219,12 +223,13 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // orchestrator (publisher, runs inside Inngest) and the Telegram
   // delivery adapter (subscriber, slice 2.0g). Single instance per
   // process; both sides look up by taskId.
-  const codingStore = new DrizzleCodingStore(tx);
+  const codingStore = new DrizzleCodingStore();
   const codingBackend = new ClaudeCodeBackend();
   const codingStreamingRegistry = new CodingStreamingRegistry();
   const codingServiceFactory = (conversationId: string) =>
     createCodingService(
       {
+        runInTx: tx,
         codingStore,
         inngest,
         sandboxAvailable: sandbox !== null,
@@ -238,6 +243,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const codingFunctions: any[] = [];
   if (sandbox) {
     const orchestratorDeps = {
+      runInTx: tx,
       store: codingStore,
       sandbox,
       backend: codingBackend,
@@ -296,6 +302,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     codingFunctions.push(
       createCodingVerifyOrchestrator(
         {
+          runInTx: tx,
           store: codingStore,
           sandbox,
           secretsStore,
@@ -318,6 +325,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
           {
             docker: sandboxDocker,
             store: sandboxStore,
+            runInTx: tx,
             instanceId: sandboxInstanceId,
           },
           inngest,
@@ -365,9 +373,10 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // single-user single-bank model). `skillsRepoPath` is what enables the
   // register / rollback flows to read SKILL.md from git and advance
   // `refs/heads/main`.
-  const skillStore = new DrizzleSkillStore(tx);
+  const skillStore = new DrizzleSkillStore();
   const skillRunner = await SkillRunnerImpl.create({
     store: skillStore,
+    runInTx: tx,
     secretsStore,
     memory,
     files: fileService,
@@ -392,10 +401,11 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // every channel's Transport (admin `/mcp` operations). Constructed before
   // startChannels so the same connection pool is reused — duplicate registries
   // would each spawn their own subprocess on first use.
-  const mcpStore = new DrizzleMcpStore(tx);
+  const mcpStore = new DrizzleMcpStore();
   const mcpRegistry = new McpRegistryImpl({
     store: mcpStore,
     secrets: secretsStore,
+    runInTx: tx,
     runner: new McpHostRunner(),
     callTimeoutMs: env.MCP_CALL_TIMEOUT_MS,
     idleEvictionMs: env.MCP_IDLE_EVICTION_MS,
@@ -466,8 +476,8 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
         "voice_config.stt_provider unsupported in slice 1 — voice transcription disabled. Set stt_provider='openai' or wait for slice 2.",
       );
     }
-    const ttsKey = await secretsStore.getSecretById(voiceCfgRow.ttsSecretId);
-    const sttKey = await secretsStore.getSecretById(voiceCfgRow.sttSecretId);
+    const ttsKey = await tx((trx) => secretsStore.getSecretById(trx, voiceCfgRow.ttsSecretId));
+    const sttKey = await tx((trx) => secretsStore.getSecretById(trx, voiceCfgRow.sttSecretId));
     if (ttsKey && sttKey && voiceCfgRow.ttsProvider === "openai") {
       const { OpenAIVoiceProvider } = await import("./voice/openai.js");
       const tts = new OpenAIVoiceProvider({
@@ -554,5 +564,6 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     skillRunner,
     skillStore,
     mcpRegistry,
+    runInTx: tx,
   };
 }

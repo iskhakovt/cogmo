@@ -22,7 +22,7 @@ let store: DrizzleSkillStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleSkillStore(tx);
+  store = new DrizzleSkillStore();
 });
 
 afterEach(async () => {
@@ -45,13 +45,12 @@ function makeMockMemory(): MemoryProvider {
 
 function makeMockSecrets(map: Record<string, string> = {}): SecretsStore {
   return {
-    getSecret: vi.fn(async (name: string) => map[name] ?? null),
+    getSecret: vi.fn(async (_tx: unknown, name: string) => map[name] ?? null),
     getSecretById: vi.fn(),
     getSecretMeta: vi.fn(),
     listSecretNames: vi.fn(),
     setSecret: vi.fn(),
     deleteSecret: vi.fn(),
-    // biome-ignore lint/suspicious/noExplicitAny: minimal SecretsStore stub
   } as any;
 }
 
@@ -60,6 +59,7 @@ async function makeRunner(
 ) {
   return SkillRunnerImpl.create({
     store,
+    runInTx: tx,
     memory: opts.memory ?? makeMockMemory(),
     secretsStore: opts.secretsStore ?? makeMockSecrets(),
     files: opts.files ?? makeMockFiles(),
@@ -114,7 +114,7 @@ describe("SkillRunnerImpl", { timeout: 60_000 }, () => {
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
 
-    const run = await store.getRun(result.runId);
+    const run = await tx((trx) => store.getRun(trx, result.runId));
     expect(run?.status).toBe("success");
     expect(run?.output).toEqual({ echo: 8 });
     expect(run?.error).toBeNull();
@@ -150,7 +150,7 @@ async def run(inputs, ctx):
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ count: 1 });
 
-    const calls = await store.listContextCallsForRun(result.runId);
+    const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
     expect(calls.map((c) => c.method)).toContain("memory.recall");
     expect(calls.find((c) => c.method === "memory.recall")?.ok).toBe(true);
   });
@@ -196,7 +196,7 @@ async def run(inputs, ctx):
     expect(files.read).toHaveBeenCalledWith("notes/draft.md");
     expect(files.list).toHaveBeenCalledWith("notes/");
 
-    const calls = await store.listContextCallsForRun(result.runId);
+    const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
     const methods = calls.map((c) => c.method);
     expect(methods).toContain("files.write");
     expect(methods).toContain("files.read");
@@ -248,7 +248,7 @@ async def run(inputs, ctx):
     expect(result.status).toBe("error");
     expect(result.error).toContain("kaboom");
 
-    const run = await store.getRun(result.runId);
+    const run = await tx((trx) => store.getRun(trx, result.runId));
     expect(run?.status).toBe("error");
     expect(run?.output).toBeNull();
     expect(run?.error).toContain("kaboom");
@@ -283,7 +283,7 @@ async def run(inputs, ctx):
       manifestSource: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    await store.setSkillDisabled({ id: row.id, disabled: true });
+    await tx((trx) => store.setSkillDisabled(trx, { id: row.id, disabled: true }));
 
     await expect(runner.invoke({ name: "echo", inputs: { x: 1 } })).rejects.toThrow(/disabled/);
   });
@@ -350,7 +350,7 @@ inputs:
       body: ECHO_BODY,
     });
     const result = await runner.invoke({ name: "echo", inputs: { x: 1 }, trigger: "cron" });
-    const run = await store.getRun(result.runId);
+    const run = await tx((trx) => store.getRun(trx, result.runId));
     expect(run?.trigger).toBe("cron");
   });
 
@@ -379,7 +379,7 @@ inputs:
       manifestSource: ECHO_MANIFEST.replace("name: echo", "name: beta"),
       body: ECHO_BODY,
     });
-    await store.setSkillDisabled({ id: a.id, disabled: true });
+    await tx((trx) => store.setSkillDisabled(trx, { id: a.id, disabled: true }));
     const list = await runner.list();
     expect(list.map((s) => s.name)).toEqual(["beta"]);
   });
@@ -389,16 +389,18 @@ inputs:
     // Insert a skill row directly via the store, bypassing the runner's
     // source cache. Invoke should fail with "no source for skill" instead
     // of crashing — proves the cache miss path is handled.
-    await store.insertSkill({
-      name: "ghost",
-      tier: "wasm",
-      riskTier: "auto",
-      effects: [],
-      schedule: null,
-      gitSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-      inputs: { type: "object", properties: {} },
-      outputs: null,
-    });
+    await tx((trx) =>
+      store.insertSkill(trx, {
+        name: "ghost",
+        tier: "wasm",
+        riskTier: "auto",
+        effects: [],
+        schedule: null,
+        gitSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        inputs: { type: "object", properties: {} },
+        outputs: null,
+      }),
+    );
     await expect(runner.invoke({ name: "ghost", inputs: {} })).rejects.toThrow(/no source/);
   });
 

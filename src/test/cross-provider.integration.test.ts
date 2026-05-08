@@ -63,20 +63,23 @@ beforeAll(async () => {
     throw new Error("COGMO_MASTER_KEY missing — should be set by integration-setup.ts");
   }
   secretsStore = new DrizzleSecretsStore(
-    tx,
     deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1"),
   );
   llmockBaseUrl = inject("llmockBaseUrl");
 
   // Two secrets — distinct so we'd notice if the wrong one got decrypted.
-  const anthropicSecret = await secretsStore.putSecret({
-    name: tag("anthropic-key"),
-    plaintext: "test-anthropic-key",
-  });
-  const openaiSecret = await secretsStore.putSecret({
-    name: tag("xai-key"),
-    plaintext: "test-xai-key",
-  });
+  const anthropicSecret = await tx((trx) =>
+    secretsStore.putSecret(trx, {
+      name: tag("anthropic-key"),
+      plaintext: "test-anthropic-key",
+    }),
+  );
+  const openaiSecret = await tx((trx) =>
+    secretsStore.putSecret(trx, {
+      name: tag("xai-key"),
+      plaintext: "test-xai-key",
+    }),
+  );
 
   // Two providers, both pointing at llmock (which serves both Anthropic
   // and OpenAI-compatible endpoints from one process). Different secrets

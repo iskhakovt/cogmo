@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { DefaultCtxHandler } from "./ctx-handler.js";
 import { CtxError } from "./dispatcher.js";
 import { parseManifest } from "./manifest.js";
 import type { SkillManifest } from "./types.js";
+
+const FAKE_TX = { __mockTx: true } as never;
+const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 function manifest(overrides: string = ""): SkillManifest {
   const source = `---
@@ -42,7 +46,6 @@ function deps(overrides?: Partial<Deps>): Deps {
       listSecretNames: vi.fn(),
       setSecret: vi.fn(),
       deleteSecret: vi.fn(),
-      // biome-ignore lint/suspicious/noExplicitAny: minimal SecretsStore stub for tests
     } as any,
     memory: {
       name: "mock",
@@ -50,7 +53,6 @@ function deps(overrides?: Partial<Deps>): Deps {
       retainBatch: vi.fn().mockResolvedValue(undefined),
       recall: vi.fn().mockResolvedValue({ memories: [] }),
       reflect: vi.fn(),
-      // biome-ignore lint/suspicious/noExplicitAny: MemoryProvider stub
     } as any,
     files: {
       read: vi.fn().mockResolvedValue(""),
@@ -69,6 +71,7 @@ function makeHandler(m: SkillManifest, d: Deps): DefaultCtxHandler {
     user: { id: "user-1", timezone: "UTC" },
     memoryBankId: "bank-1",
     secretsStore: d.secretsStore,
+    runInTx: fakeRunInTx,
     memory: d.memory,
     files: d.files,
     recordContextCall: d.recordContextCall,
@@ -563,7 +566,7 @@ describe("DefaultCtxHandler", () => {
         `secrets:\n  - bare\n  - name: object_form\n    binding:\n      destination: "https://x.com/*"`,
       );
       const d = deps();
-      vi.mocked(d.secretsStore.getSecret).mockImplementation(async (name) =>
+      vi.mocked(d.secretsStore.getSecret).mockImplementation(async (_tx, name) =>
         name === "bare" ? "BARE" : name === "object_form" ? "OBJ" : null,
       );
       const h = makeHandler(m, d);

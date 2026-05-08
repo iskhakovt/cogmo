@@ -33,8 +33,8 @@ let repoPath: string;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleCodingStore(tx);
-  sandboxStore = new DrizzleSandboxStore(tx);
+  store = new DrizzleCodingStore();
+  sandboxStore = new DrizzleSandboxStore();
 
   baseDir = mkdtempSync(join(tmpdir(), "cogmo-orch-test-"));
   repoPath = join(baseDir, "repo");
@@ -50,7 +50,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   // Fresh cogmo_instances row per test so the FK from containers.instance_id
   // is satisfied when the fake sandbox inserts containers rows.
-  instanceId = (await sandboxStore.insertInstance({ host: "test", pid: 1 })).id;
+  instanceId = (await tx((trx) => sandboxStore.insertInstance(trx, { host: "test", pid: 1 }))).id;
 });
 
 afterEach(async () => {
@@ -66,34 +66,37 @@ afterAll(async () => {
 // step.run (return type Jsonify<T>); tests run the body inline. Cast at
 // the seam — explicitly justified per CLAUDE.md "intentionally invalid
 // input in tests".
-// biome-ignore lint/suspicious/noExplicitAny: test shim bypasses Jsonify wrapping
 const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
 
 const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
 
 async function seedRepo(name = "cogmo"): Promise<CodingRepoRow> {
-  return store.insertRepo({
-    name,
-    localPath: repoPath,
-    defaultBranch: "main",
-    remoteUrl: "git@github.com:user/cogmo.git",
-    devcontainer: null,
-    allowedBackends: ["claude"],
-    verifyCommand: "true",
-    taskTokenBudget: 100_000,
-    taskWallTimeSeconds: 600,
-    maxConcurrentTasks: 1,
-  });
+  return tx((trx) =>
+    store.insertRepo(trx, {
+      name,
+      localPath: repoPath,
+      defaultBranch: "main",
+      remoteUrl: "git@github.com:user/cogmo.git",
+      devcontainer: null,
+      allowedBackends: ["claude"],
+      verifyCommand: "true",
+      taskTokenBudget: 100_000,
+      taskWallTimeSeconds: 600,
+      maxConcurrentTasks: 1,
+    }),
+  );
 }
 
 async function seedTask(repo: CodingRepoRow): Promise<CodingTaskRow> {
-  return store.insertTask({
-    repoId: repo.id,
-    goal: "do a thing",
-    triggerSource: "user",
-    backend: "claude",
-    allowPrivilegedRunc: false,
-  });
+  return tx((trx) =>
+    store.insertTask(trx, {
+      repoId: repo.id,
+      goal: "do a thing",
+      triggerSource: "user",
+      backend: "claude",
+      allowPrivilegedRunc: false,
+    }),
+  );
 }
 
 interface FakeContainerOpts {
@@ -123,24 +126,26 @@ function fakeSandbox(opts: FakeContainerOpts = {}): {
       });
       // Insert a real `containers` row so coding_tasks.container_id FK is
       // satisfied. Uses the per-test instanceId seeded in beforeEach.
-      const row = await sandboxStore.insertContainer({
-        dockerId: `docker-${Math.random().toString(36).slice(2)}`,
-        parentId: null,
-        rootTaskId: spec.rootTaskId,
-        depth: 0,
-        image: spec.image,
-        runtime: "runc",
-        labels: {
-          "cogmo.managed": "true",
-          "cogmo.instance": instanceId,
-          "cogmo.root_task": spec.rootTaskId,
-          "cogmo.parent": "",
-          "cogmo.depth": "0",
-        },
-        resourceLimits: spec.resourceLimits,
-        ttlExpiresAt: spec.ttl.expiresAt,
-        instanceId,
-      });
+      const row = await tx((trx) =>
+        sandboxStore.insertContainer(trx, {
+          dockerId: `docker-${Math.random().toString(36).slice(2)}`,
+          parentId: null,
+          rootTaskId: spec.rootTaskId,
+          depth: 0,
+          image: spec.image,
+          runtime: "runc",
+          labels: {
+            "cogmo.managed": "true",
+            "cogmo.instance": instanceId,
+            "cogmo.root_task": spec.rootTaskId,
+            "cogmo.parent": "",
+            "cogmo.depth": "0",
+          },
+          resourceLimits: spec.resourceLimits,
+          ttlExpiresAt: spec.ttl.expiresAt,
+          instanceId,
+        }),
+      );
       lastContainerHandle = {
         containerRowId: row.id,
         dockerId: row.dockerId,
@@ -216,7 +221,6 @@ function recordingPlanStream(): RecordingPlanStream {
     text: [],
     finalized: [],
     failed: [],
-    // biome-ignore lint/style/noNonNullAssertion: assigned below
     handle: undefined!,
   };
   out.handle = {
@@ -240,6 +244,7 @@ function makeDeps(
   },
 ): CodingOrchestratorDeps {
   return {
+    runInTx: tx,
     store,
     devbaseImage: "cogmo/devbase:slice1-test",
     defaultResourceLimits: RESOURCE_LIMITS,
@@ -273,7 +278,7 @@ describe("runCodingTask", () => {
     expect(result.status).toBe("awaiting_approval");
     expect(result.plan).toBe("## Plan\n1. Do X\n");
 
-    const reloaded = await store.getTask(task.id);
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("awaiting_approval");
     expect(reloaded?.sessionId).toBe("sess-AAA");
     expect(reloaded?.plan).toBe("## Plan\n1. Do X\n");
@@ -300,14 +305,16 @@ describe("runCodingTask", () => {
 
   it("automated trigger (evolution) auto-advances to executing", async () => {
     const repo = await seedRepo();
-    const task = await store.insertTask({
-      repoId: repo.id,
-      goal: "g",
-      triggerSource: "evolution",
-      triggerRef: "evo-1",
-      backend: "claude",
-      allowPrivilegedRunc: false,
-    });
+    const task = await tx((trx) =>
+      store.insertTask(trx, {
+        repoId: repo.id,
+        goal: "g",
+        triggerSource: "evolution",
+        triggerRef: "evo-1",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      }),
+    );
     const { sandbox } = fakeSandbox();
     const backend = backendYielding([
       { kind: "session_started", sessionId: "sess-EVO" },
@@ -322,7 +329,7 @@ describe("runCodingTask", () => {
       stepRun,
     });
     expect(result.status).toBe("executing");
-    expect((await store.getTask(task.id))?.status).toBe("executing");
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("executing");
   });
 
   it("backend reports error → status=failed, sandbox stopped, plan stream failed", async () => {
@@ -342,9 +349,9 @@ describe("runCodingTask", () => {
     });
     expect(result.status).toBe("failed");
     expect(result.failureReason).toMatch(/exit code 2/);
-    expect((await store.getTask(task.id))?.status).toBe("failed");
-    expect((await store.getTask(task.id))?.failureReason).toMatch(/exit code 2/);
-    expect((await store.getTask(task.id))?.sessionId).toBe("sess-X");
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("failed");
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.failureReason).toMatch(/exit code 2/);
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.sessionId).toBe("sess-X");
     expect(stopCalls).toEqual([task.id]);
     expect(planStream.failed).toHaveLength(1);
     expect(planStream.finalized).toEqual([]);
@@ -364,7 +371,7 @@ describe("runCodingTask", () => {
       stepRun,
     });
     expect(result.status).toBe("failed");
-    expect((await store.getTask(task.id))?.status).toBe("failed");
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("failed");
     expect(stopCalls).toEqual([task.id]);
   });
 
@@ -382,31 +389,35 @@ describe("runCodingTask", () => {
     });
     expect(result.status).toBe("failed");
     expect(result.failureReason).toMatch(/docker daemon down/);
-    expect((await store.getTask(task.id))?.status).toBe("failed");
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("failed");
     expect(stopCalls).toEqual([]);
   });
 
   it("worktree allocation failure → status=failed", async () => {
     // Repo with a non-existent local path so `git worktree add` errors out.
-    const badRepo = await store.insertRepo({
-      name: "bad-path-repo",
-      localPath: "/no/such/repo/path",
-      defaultBranch: "main",
-      remoteUrl: "x",
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 1,
-      taskWallTimeSeconds: 1,
-      maxConcurrentTasks: 1,
-    });
-    const badTask = await store.insertTask({
-      repoId: badRepo.id,
-      goal: "g",
-      triggerSource: "user",
-      backend: "claude",
-      allowPrivilegedRunc: false,
-    });
+    const badRepo = await tx((trx) =>
+      store.insertRepo(trx, {
+        name: "bad-path-repo",
+        localPath: "/no/such/repo/path",
+        defaultBranch: "main",
+        remoteUrl: "x",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 1,
+        taskWallTimeSeconds: 1,
+        maxConcurrentTasks: 1,
+      }),
+    );
+    const badTask = await tx((trx) =>
+      store.insertTask(trx, {
+        repoId: badRepo.id,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      }),
+    );
 
     const { sandbox } = fakeSandbox();
     const result = await runCodingTask({
@@ -415,7 +426,7 @@ describe("runCodingTask", () => {
       stepRun,
     });
     expect(result.status).toBe("failed");
-    expect((await store.getTask(badTask.id))?.status).toBe("failed");
+    expect((await tx((trx) => store.getTask(trx, badTask.id)))?.status).toBe("failed");
   });
 
   it("missing task throws", async () => {
@@ -473,7 +484,6 @@ function recordingExecuteStream(): RecordingExecuteStream {
     toolResults: [],
     completed: [],
     failed: [],
-    // biome-ignore lint/style/noNonNullAssertion: assigned below
     handle: undefined!,
   };
   out.handle = {
@@ -505,50 +515,58 @@ function recordingExecuteStream(): RecordingExecuteStream {
 async function seedExecutableTask(
   repo: CodingRepoRow,
 ): Promise<{ task: CodingTaskRow; dockerId: string }> {
-  const task = await store.insertTask({
-    repoId: repo.id,
-    goal: "execute me",
-    triggerSource: "user",
-    backend: "claude",
-    allowPrivilegedRunc: false,
-  });
-  await store.setTaskWorktreeAssignment(task.id, {
-    branch: "cogmo/abc",
-    worktreePath: join(baseDir, "worktrees", "cogmo", "abc"),
-  });
-  await store.setTaskSessionId(task.id, "sess-from-plan");
+  const task = await tx((trx) =>
+    store.insertTask(trx, {
+      repoId: repo.id,
+      goal: "execute me",
+      triggerSource: "user",
+      backend: "claude",
+      allowPrivilegedRunc: false,
+    }),
+  );
+  await tx((trx) =>
+    store.setTaskWorktreeAssignment(trx, task.id, {
+      branch: "cogmo/abc",
+      worktreePath: join(baseDir, "worktrees", "cogmo", "abc"),
+    }),
+  );
+  await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
   // Stamp plan_approved_at via the atomic helper so the test exercises
   // the same path the callback handler uses in production.
-  await store.updateTaskStatus({ id: task.id, status: "awaiting_approval" });
-  const approval = await store.approvePlanIfPending(task.id, new Date());
+  await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
+  const approval = await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
   expect(approval.kind).toBe("approved");
 
   // Seed a real containers row + record its dockerId so findLiveContainer
   // discovers something. Not required for the recreate path, but keeps
   // the happy-path test honest about what production does.
   const dockerId = `docker-${Math.random().toString(36).slice(2)}`;
-  const containerRow = await sandboxStore.insertContainer({
-    dockerId,
-    parentId: null,
-    rootTaskId: task.id,
-    depth: 0,
-    image: "cogmo/devbase:slice2-test",
-    runtime: "runc",
-    labels: {
-      "cogmo.managed": "true",
-      "cogmo.instance": instanceId,
-      "cogmo.root_task": task.id,
-      "cogmo.parent": "",
-      "cogmo.depth": "0",
-    },
-    resourceLimits: RESOURCE_LIMITS,
-    ttlExpiresAt: new Date(Date.now() + 60_000),
-    instanceId,
-  });
-  await sandboxStore.updateContainerStatus({ id: containerRow.id, status: "running" });
-  await store.setTaskContainerId(task.id, containerRow.id);
+  const containerRow = await tx((trx) =>
+    sandboxStore.insertContainer(trx, {
+      dockerId,
+      parentId: null,
+      rootTaskId: task.id,
+      depth: 0,
+      image: "cogmo/devbase:slice2-test",
+      runtime: "runc",
+      labels: {
+        "cogmo.managed": "true",
+        "cogmo.instance": instanceId,
+        "cogmo.root_task": task.id,
+        "cogmo.parent": "",
+        "cogmo.depth": "0",
+      },
+      resourceLimits: RESOURCE_LIMITS,
+      ttlExpiresAt: new Date(Date.now() + 60_000),
+      instanceId,
+    }),
+  );
+  await tx((trx) =>
+    sandboxStore.updateContainerStatus(trx, { id: containerRow.id, status: "running" }),
+  );
+  await tx((trx) => store.setTaskContainerId(trx, task.id, containerRow.id));
 
-  const reloaded = await store.getTask(task.id);
+  const reloaded = await tx((trx) => store.getTask(trx, task.id));
   if (!reloaded) throw new Error("seedExecutableTask: reload failed");
   return { task: reloaded, dockerId };
 }
@@ -558,7 +576,6 @@ async function seedExecutableTask(
 // required to avoid the orchestrator throwing on the emit step. The
 // tool gate isn't exercised here (no permission_request events in these
 // backends), so `stepWaitForEvent` is a stub that never fires.
-// biome-ignore lint/suspicious/noExplicitAny: test shim — never awaited
 const fakeStepWaitForEvent = (async () => null) as any;
 const fakeInngest = { send: vi.fn().mockResolvedValue(undefined) };
 
@@ -627,7 +644,7 @@ describe("runCodingExecute", () => {
     });
 
     expect(result.status).toBe("pending_verify");
-    const reloaded = await store.getTask(task.id);
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("pending_verify");
     expect(reloaded?.resourceUsage).toEqual({
       tokens_input: 100,
@@ -699,7 +716,7 @@ describe("runCodingExecute", () => {
 
     expect(result.status).toBe("failed");
     expect(result.failureReason).toMatch(/exit code 2/);
-    expect((await store.getTask(task.id))?.status).toBe("failed");
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("failed");
     expect(stopCalls).toEqual([task.id]);
     expect(stream.completed).toEqual([false]);
     expect(stream.failed).toHaveLength(1);
@@ -709,7 +726,7 @@ describe("runCodingExecute", () => {
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
     // Simulate first event already advanced status to executing.
-    await store.updateTaskStatus({ id: task.id, status: "executing" });
+    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
 
     const { sandbox } = fakeSandbox();
     const backend = executeBackendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
@@ -722,18 +739,20 @@ describe("runCodingExecute", () => {
 
     expect(result.status).toBe("skipped");
     // Status unchanged — second run didn't touch the DB.
-    expect((await store.getTask(task.id))?.status).toBe("executing");
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("executing");
   });
 
   it("throws when plan_approved_at is missing (event fired before approve handler stamped it)", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
-    await store.setTaskSessionId(task.id, "sess-x");
-    await store.setTaskWorktreeAssignment(task.id, {
-      branch: "cogmo/x",
-      worktreePath: join(baseDir, "wt"),
-    });
-    await store.updateTaskStatus({ id: task.id, status: "awaiting_approval" });
+    await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-x"));
+    await tx((trx) =>
+      store.setTaskWorktreeAssignment(trx, task.id, {
+        branch: "cogmo/x",
+        worktreePath: join(baseDir, "wt"),
+      }),
+    );
+    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
     const { sandbox } = fakeSandbox();
     await expect(
       runCodingExecute({
@@ -751,12 +770,14 @@ describe("runCodingExecute", () => {
   it("throws when session_id is missing (plan phase didn't capture it)", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
-    await store.setTaskWorktreeAssignment(task.id, {
-      branch: "cogmo/x",
-      worktreePath: join(baseDir, "wt"),
-    });
-    await store.updateTaskStatus({ id: task.id, status: "awaiting_approval" });
-    await store.approvePlanIfPending(task.id, new Date());
+    await tx((trx) =>
+      store.setTaskWorktreeAssignment(trx, task.id, {
+        branch: "cogmo/x",
+        worktreePath: join(baseDir, "wt"),
+      }),
+    );
+    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
+    await tx((trx) => store.approvePlanIfPending(trx, task.id, new Date()));
     const { sandbox } = fakeSandbox();
     await expect(
       runCodingExecute({

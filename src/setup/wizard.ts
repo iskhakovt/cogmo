@@ -191,13 +191,15 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
 
   // Store
   const providerName = providerType as string;
-  const { id: secretId } = await deps.secretsStore.putSecret({
-    name: `${providerName}_api_key`,
-    plaintext: apiKey,
-    description: `API key for ${providerName}`,
-  });
+  const { id: secretId } = await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: `${providerName}_api_key`,
+      plaintext: apiKey,
+      description: `API key for ${providerName}`,
+    }),
+  );
   if (result.valid) {
-    await deps.secretsStore.markValidated(`${providerName}_api_key`);
+    await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, `${providerName}_api_key`));
   }
 
   const attrs: ProviderAttrs = {};
@@ -289,12 +291,14 @@ async function stepConfigureTelegram(
   // Store bot token as an encrypted secret, reference by name in channel credentials.
   // The adapter resolves the secret at startup via the secrets store.
   const tokenSecretName = "telegram_bot_token";
-  await deps.secretsStore.putSecret({
-    name: tokenSecretName,
-    plaintext: token,
-    description: `Telegram bot token (@${result.meta?.botUsername})`,
-  });
-  await deps.secretsStore.markValidated(tokenSecretName);
+  await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: tokenSecretName,
+      plaintext: token,
+      description: `Telegram bot token (@${result.meta?.botUsername})`,
+    }),
+  );
+  await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, tokenSecretName));
 
   const { id: channelId } = await deps.runInTx((tx) =>
     deps.transportStore.createChannel(tx, {
@@ -362,12 +366,14 @@ async function stepConfigureOptionalTools(deps: WizardDeps): Promise<void> {
     s.start("Validating Tavily key...");
     const result = await validateTavilyKey(tavilyKey);
     if (result.valid) {
-      await deps.secretsStore.putSecret({
-        name: "tavily_api_key",
-        plaintext: tavilyKey,
-        description: "Tavily web search",
-      });
-      await deps.secretsStore.markValidated("tavily_api_key");
+      await deps.runInTx((tx) =>
+        deps.secretsStore.putSecret(tx, {
+          name: "tavily_api_key",
+          plaintext: tavilyKey,
+          description: "Tavily web search",
+        }),
+      );
+      await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, "tavily_api_key"));
       s.stop("Tavily key validated and saved.");
     } else {
       s.stop(`Tavily validation failed: ${result.error}`);
@@ -379,17 +385,21 @@ async function stepConfigureOptionalTools(deps: WizardDeps): Promise<void> {
   p.note("Get a key at https://fal.ai/dashboard/keys", "fal.ai image generation");
   const falKey = cancelGuard(await p.password({ message: "fal.ai API key (Enter to skip):" }));
   if (falKey) {
-    await deps.secretsStore.putSecret({
-      name: "fal_api_key",
-      plaintext: falKey,
-      description: "fal.ai image generation",
-    });
+    await deps.runInTx((tx) =>
+      deps.secretsStore.putSecret(tx, {
+        name: "fal_api_key",
+        plaintext: falKey,
+        description: "fal.ai image generation",
+      }),
+    );
     p.log.success("fal.ai key saved.");
   }
 }
 
 async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
-  const existing = await resolveGitHubIdentity(deps.secretsStore, DEFAULT_GITHUB_IDENTITY_NAME);
+  const existing = await deps.runInTx((tx) =>
+    resolveGitHubIdentity(tx, deps.secretsStore, DEFAULT_GITHUB_IDENTITY_NAME),
+  );
 
   if (existing.isOk()) {
     const ident = existing.value;
@@ -476,12 +486,16 @@ async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
     id: userId,
   };
 
-  await deps.secretsStore.putSecret({
-    name: gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME),
-    plaintext: serializeGitHubIdentity(identity),
-    description: `GitHub identity (@${login})`,
-  });
-  await deps.secretsStore.markValidated(gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME));
+  await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME),
+      plaintext: serializeGitHubIdentity(identity),
+      description: `GitHub identity (@${login})`,
+    }),
+  );
+  await deps.runInTx((tx) =>
+    deps.secretsStore.markValidated(tx, gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME)),
+  );
 
   p.note(
     [
@@ -548,12 +562,16 @@ async function collectAndStorePat(deps: WizardDeps, existing: GitHubIdentity): P
     id: userId,
   };
 
-  await deps.secretsStore.putSecret({
-    name: gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME),
-    plaintext: serializeGitHubIdentity(identity),
-    description: `GitHub identity (@${login})`,
-  });
-  await deps.secretsStore.markValidated(gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME));
+  await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME),
+      plaintext: serializeGitHubIdentity(identity),
+      description: `GitHub identity (@${login})`,
+    }),
+  );
+  await deps.runInTx((tx) =>
+    deps.secretsStore.markValidated(tx, gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME)),
+  );
   p.log.success("GitHub PAT rotated.");
 }
 
@@ -573,7 +591,7 @@ async function stepValidateHindsight(): Promise<void> {
 
 async function stepSummary(deps: WizardDeps, botUsername?: string): Promise<void> {
   const providers = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
-  const secrets = await deps.secretsStore.listSecrets();
+  const secrets = await deps.runInTx((tx) => deps.secretsStore.listSecrets(tx));
   const telegramChannel = await deps.runInTx((tx) =>
     deps.transportStore.getChannelByType(tx, "telegram"),
   );
@@ -617,7 +635,7 @@ export async function runWizard(deps: {
 }): Promise<void> {
   const encryptionKey = deriveMasterKey(parseMasterKey(deps.masterKey), "cogmo/secrets-at-rest/v1");
   const tx = transactor(deps.db);
-  const secretsStore = new DrizzleSecretsStore(tx, encryptionKey);
+  const secretsStore = new DrizzleSecretsStore(encryptionKey);
 
   const wizardDeps: WizardDeps = {
     runInTx: tx,

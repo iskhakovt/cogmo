@@ -21,6 +21,7 @@
 
 import type { Octokit } from "@octokit/rest";
 import type { Inngest } from "inngest";
+import type { Transactor } from "../../db/index.js";
 import { codingTaskCliDone } from "../../inngest/events.js";
 import type { StepRun } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
@@ -62,6 +63,7 @@ function commitAuthorFor(identity: GitHubIdentity): { name: string; email: strin
 }
 
 export interface VerifyOrchestratorDeps {
+  runInTx: Transactor;
   store: CodingStore;
   sandbox: Sandbox;
   /** Resolves `github_identity:<name>` rows. */
@@ -123,12 +125,12 @@ interface RunParams {
  */
 export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestratorResult> {
   const { taskId, deps, stepRun, inngest } = params;
-  const { store, sandbox, secretsStore, askpassBaseDir } = deps;
+  const { runInTx, store, sandbox, secretsStore, askpassBaseDir } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
 
-  const task = await store.getTask(taskId);
+  const task = await runInTx((tx) => store.getTask(tx, taskId));
   if (!task) throw new Error(`coding task not found: ${taskId}`);
-  const repo = await store.getRepoById(task.repoId);
+  const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
   if (task.status !== "pending_verify") {
@@ -155,10 +157,12 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     stream?: ExecuteStreamHandle | null,
   ): Promise<VerifyOrchestratorResult> => {
     await stepRun("set-status-failed", () =>
-      store.updateTaskStatus({ id: taskId, status: "failed", failureReason: reason }),
+      runInTx((tx) =>
+        store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
+      ),
     );
     await stepRun("teardown-worktree", () =>
-      safeTeardownWorktree({ secretsStore, repo, taskId, worktreeAssignment }),
+      safeTeardownWorktree({ secretsStore, runInTx, repo, taskId, worktreeAssignment }),
     ).catch(() => undefined);
     if (stream) {
       await stream.fail(reason).catch(() => {});
@@ -174,7 +178,9 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   // Identity resolution happens before any container work — fast-fail when
   // the wizard hasn't been run rather than spinning up a container we'll
   // throw away.
-  const identityResult = await resolveGitHubIdentity(secretsStore, repo.identityName);
+  const identityResult = await runInTx((tx) =>
+    resolveGitHubIdentity(tx, secretsStore, repo.identityName),
+  );
   if (identityResult.isErr()) {
     return await failAndTeardown(describeResolveIdentityError(identityResult.error));
   }
@@ -189,7 +195,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     // event (Inngest replay or operator nudge) finds the row already
     // verifying and returns kind=skipped.
     const transition = await stepRun("set-status-verifying", () =>
-      store.transitionTaskStatus(taskId, "pending_verify", "verifying"),
+      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "pending_verify", "verifying")),
     );
     if (transition.kind !== "transitioned") {
       log.info(
@@ -295,7 +301,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     }
 
     await stepRun("set-status-pushed", () =>
-      store.updateTaskStatus({ id: taskId, status: "pushed" }),
+      runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "pushed" })),
     );
     await stepRun("emit-pushed", () =>
       inngest
@@ -344,9 +350,11 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       branchSha: prResult.branchSha,
       openedAt: prResult.openedAt,
     };
-    await stepRun("set-pr-metadata", () => store.setTaskPrMetadata(taskId, metadata));
+    await stepRun("set-pr-metadata", () =>
+      runInTx((tx) => store.setTaskPrMetadata(tx, taskId, metadata)),
+    );
     await stepRun("set-status-pr-open", () =>
-      store.updateTaskStatus({ id: taskId, status: "pr_open" }),
+      runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "pr_open" })),
     );
     await stepRun("emit-pr-opened", () =>
       inngest
@@ -367,12 +375,16 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   } catch (err) {
     const reason = (err as Error).message;
     log.error({ err, taskId }, "coding verify failed");
-    await store
-      .updateTaskStatus({ id: taskId, status: "failed", failureReason: reason })
-      .catch(() => {});
-    await safeTeardownWorktree({ secretsStore, repo, taskId, worktreeAssignment }).catch(
-      () => undefined,
-    );
+    await runInTx((tx) =>
+      store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
+    ).catch(() => {});
+    await safeTeardownWorktree({
+      secretsStore,
+      runInTx,
+      repo,
+      taskId,
+      worktreeAssignment,
+    }).catch(() => undefined);
     if (executeStream) {
       await executeStream.fail(reason).catch(() => {});
     }

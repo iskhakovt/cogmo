@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { McpServer } from "../config.js";
 import type { McpStore } from "../store/index.js";
 import type { McpConnection } from "./client.js";
 import { McpConnectionPool, McpPoolError } from "./pool.js";
 import type { Runner } from "./runner.js";
+
+const FAKE_TX = { __mockTx: true } as never;
+const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 // --- Fakes ---
 
@@ -56,7 +60,7 @@ function fakeConnection(): FakeConnection {
 function makeStore(servers: McpServer[]): McpStore {
   const byId = new Map(servers.map((s) => [s.id, s]));
   return {
-    getServerById: vi.fn(async (id: string) => byId.get(id)),
+    getServerById: vi.fn(async (_tx: unknown, id: string) => byId.get(id)),
     recordLastConnected: vi.fn(async () => {}),
     recordLastError: vi.fn(async () => {}),
     // Other methods unused by the pool — left as undefined casts.
@@ -83,6 +87,7 @@ describe("McpConnectionPool.getConnection", () => {
     const pool = new McpConnectionPool({
       store: makeStore([makeServer("s1")]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner,
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
@@ -107,6 +112,7 @@ describe("McpConnectionPool.getConnection", () => {
     const pool = new McpConnectionPool({
       store: makeStore([makeServer("s1")]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner,
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
@@ -128,6 +134,7 @@ describe("McpConnectionPool.getConnection", () => {
     const pool = new McpConnectionPool({
       store: makeStore([]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner,
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
@@ -143,6 +150,7 @@ describe("McpConnectionPool.getConnection", () => {
     const pool = new McpConnectionPool({
       store: makeStore([makeServer("s1")]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner,
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
@@ -165,6 +173,7 @@ describe("McpConnectionPool.getConnection", () => {
     const pool = new McpConnectionPool({
       store: makeStore([makeServer("s1")]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner: { spawn },
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
@@ -189,6 +198,7 @@ describe("McpConnectionPool.getConnection", () => {
     const pool = new McpConnectionPool({
       store: makeStore([makeServer("s1")]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner: { spawn },
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
@@ -216,6 +226,7 @@ describe("McpConnectionPool.getConnection", () => {
     const pool = new McpConnectionPool({
       store: makeStore([makeServer("s1")]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner: { spawn },
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
@@ -243,6 +254,7 @@ describe("McpConnectionPool.getConnection", () => {
     const pool = new McpConnectionPool({
       store,
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner: { spawn: vi.fn(async () => conn) },
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
@@ -264,6 +276,7 @@ describe("McpConnectionPool.getConnection", () => {
     const pool = new McpConnectionPool({
       store: makeStore([makeServer("s1")]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner: { spawn: vi.fn(() => spawnPromise) },
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
@@ -287,6 +300,7 @@ describe("McpConnectionPool.getConnection", () => {
     const pool = new McpConnectionPool({
       store: makeStore([makeServer("s1")]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner: { spawn: vi.fn(async () => conn) },
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
@@ -308,6 +322,7 @@ describe("McpConnectionPool.getConnection", () => {
     const pool = new McpConnectionPool({
       store: makeStore([makeServer("s1")]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner: { spawn },
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
@@ -327,18 +342,24 @@ describe("McpConnectionPool.getConnection", () => {
     const pool = new McpConnectionPool({
       store,
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner: { spawn: vi.fn(async () => conn) },
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
       now: () => now,
     });
     await pool.getConnection("s1");
-    expect(store.recordLastConnected).toHaveBeenCalledWith("s1", expect.any(Date));
+    expect(store.recordLastConnected).toHaveBeenCalledWith(
+      expect.anything(),
+      "s1",
+      expect.any(Date),
+    );
     await pool.close();
 
     const failingPool = new McpConnectionPool({
       store,
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner: {
         spawn: vi.fn(async () => {
           throw new Error("nope");
@@ -349,7 +370,7 @@ describe("McpConnectionPool.getConnection", () => {
       now: () => now,
     });
     await expect(failingPool.getConnection("s1")).rejects.toThrow();
-    expect(store.recordLastError).toHaveBeenCalledWith("s1", "nope");
+    expect(store.recordLastError).toHaveBeenCalledWith(expect.anything(), "s1", "nope");
     await failingPool.close();
   });
 });
@@ -361,6 +382,7 @@ describe("McpConnectionPool.evict / close", () => {
     const pool = new McpConnectionPool({
       store: makeStore([makeServer("s1")]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner: { spawn: vi.fn(async () => conn) },
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
@@ -377,6 +399,7 @@ describe("McpConnectionPool.evict / close", () => {
     const pool = new McpConnectionPool({
       store: makeStore([makeServer("s1")]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner: { spawn: vi.fn(async () => fakeConnection()) },
       idleEvictionMs: 60_000,
       evictionIntervalMs: 0,
@@ -395,6 +418,7 @@ describe("McpConnectionPool idle eviction", () => {
     const pool = new McpConnectionPool({
       store: makeStore([makeServer("s1")]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner: { spawn: vi.fn(async () => conn) },
       idleEvictionMs: 1_000,
       evictionIntervalMs: 100,
@@ -422,6 +446,7 @@ describe("McpConnectionPool idle eviction", () => {
     const pool = new McpConnectionPool({
       store: makeStore([makeServer("s1")]),
       secrets: dummySecrets,
+      runInTx: fakeRunInTx,
       runner: { spawn: vi.fn(async () => conn) },
       idleEvictionMs: 1_000,
       evictionIntervalMs: 100,

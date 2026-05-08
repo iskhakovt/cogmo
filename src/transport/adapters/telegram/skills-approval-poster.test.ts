@@ -18,10 +18,17 @@ interface FakeSkillStoreOpts {
 
 function makeSkillStore(opts: FakeSkillStoreOpts = {}) {
   return {
-    getDeployById: vi.fn().mockResolvedValue(opts.deploy === undefined ? null : { ...opts.deploy }),
-    getSkillById: vi.fn().mockResolvedValue(opts.skill === undefined ? null : { ...opts.skill }),
+    getDeployById: vi
+      .fn()
+      .mockImplementation(async (_tx: unknown, _id: string) =>
+        opts.deploy === undefined ? null : { ...opts.deploy },
+      ),
+    getSkillById: vi
+      .fn()
+      .mockImplementation(async (_tx: unknown, _id: string) =>
+        opts.skill === undefined ? null : { ...opts.skill },
+      ),
     // Other methods aren't exercised by the poster; cast at the use site.
-    // biome-ignore lint/suspicious/noExplicitAny: minimal SkillStore stub
   } as any;
 }
 

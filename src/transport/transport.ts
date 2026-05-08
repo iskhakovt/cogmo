@@ -804,7 +804,7 @@ export function createTransport(deps: {
     repos: {
       async list() {
         if (!codingStore) return err({ code: "sandbox_disabled" as const });
-        const rows = await codingStore.listRepos();
+        const rows = await runInTx((tx) => codingStore.listRepos(tx));
         return ok(
           rows.map((r) => ({
             id: r.id,
@@ -827,22 +827,24 @@ export function createTransport(deps: {
         const validation = validateRepoInput(input);
         if (validation) return err(validation);
         try {
-          const row = await codingStore.insertRepo({
-            name: input.name,
-            localPath: input.localPath,
-            defaultBranch: input.defaultBranch ?? "main",
-            remoteUrl: input.remoteUrl,
-            devcontainer: null,
-            allowedBackends: ["claude"],
-            // Slice-1 default: a no-op so plan-only tasks have something to
-            // record. Slice 4's verify+push step needs a real value before
-            // it can use the repo. /repo edit (later) or SQL update for now.
-            verifyCommand: input.verifyCommand ?? "true",
-            taskTokenBudget: 200_000,
-            taskWallTimeSeconds: 1800,
-            maxConcurrentTasks: 1,
-            ...(input.identityName !== undefined && { identityName: input.identityName }),
-          });
+          const row = await runInTx((tx) =>
+            codingStore.insertRepo(tx, {
+              name: input.name,
+              localPath: input.localPath,
+              defaultBranch: input.defaultBranch ?? "main",
+              remoteUrl: input.remoteUrl,
+              devcontainer: null,
+              allowedBackends: ["claude"],
+              // Slice-1 default: a no-op so plan-only tasks have something to
+              // record. Slice 4's verify+push step needs a real value before
+              // it can use the repo. /repo edit (later) or SQL update for now.
+              verifyCommand: input.verifyCommand ?? "true",
+              taskTokenBudget: 200_000,
+              taskWallTimeSeconds: 1800,
+              maxConcurrentTasks: 1,
+              ...(input.identityName !== undefined && { identityName: input.identityName }),
+            }),
+          );
           return ok({
             id: row.id,
             name: row.name,
@@ -868,7 +870,10 @@ export function createTransport(deps: {
           });
         }
         const identityName = input.identityName ?? DEFAULT_GITHUB_IDENTITY_NAME;
-        const identity = await resolveGitHubIdentity(secretsStore, identityName);
+        const secretsStoreLocal = secretsStore;
+        const identity = await runInTx((tx) =>
+          resolveGitHubIdentity(tx, secretsStoreLocal, identityName),
+        );
         if (identity.isErr()) {
           return err({
             code: "github_identity_unavailable" as const,
@@ -890,7 +895,7 @@ export function createTransport(deps: {
         // clean up by hand. Tiny TOCTOU window between this check and
         // `insertRepo` below; UNIQUE(name) still catches the race so the
         // worst case is the rare orphan rather than the common one.
-        const existing = await codingStore.getRepoByName(input.name);
+        const existing = await runInTx((tx) => codingStore.getRepoByName(tx, input.name));
         if (existing) {
           return err({ code: "repo_name_taken" as const, name: input.name });
         }
@@ -915,19 +920,21 @@ export function createTransport(deps: {
         }
 
         try {
-          const row = await codingStore.insertRepo({
-            name: input.name,
-            localPath,
-            defaultBranch: input.defaultBranch ?? "main",
-            remoteUrl: input.remoteUrl,
-            devcontainer: null,
-            allowedBackends: ["claude"],
-            verifyCommand: input.verifyCommand ?? "true",
-            taskTokenBudget: 200_000,
-            taskWallTimeSeconds: 1800,
-            maxConcurrentTasks: 1,
-            ...(input.identityName !== undefined && { identityName: input.identityName }),
-          });
+          const row = await runInTx((tx) =>
+            codingStore.insertRepo(tx, {
+              name: input.name,
+              localPath,
+              defaultBranch: input.defaultBranch ?? "main",
+              remoteUrl: input.remoteUrl,
+              devcontainer: null,
+              allowedBackends: ["claude"],
+              verifyCommand: input.verifyCommand ?? "true",
+              taskTokenBudget: 200_000,
+              taskWallTimeSeconds: 1800,
+              maxConcurrentTasks: 1,
+              ...(input.identityName !== undefined && { identityName: input.identityName }),
+            }),
+          );
           return ok({
             id: row.id,
             name: row.name,
@@ -949,9 +956,9 @@ export function createTransport(deps: {
         // doesn't race meaningfully — names are unique). The active-task
         // count + delete run inside one transaction in `removeRepoIfIdle`,
         // so a concurrent `insertTask` can't slip past the count.
-        const repo = await codingStore.getRepoByName(name);
+        const repo = await runInTx((tx) => codingStore.getRepoByName(tx, name));
         if (!repo) return err({ code: "repo_not_found" as const, name });
-        const result = await codingStore.removeRepoIfIdle(repo.id);
+        const result = await runInTx((tx) => codingStore.removeRepoIfIdle(tx, repo.id));
         switch (result.kind) {
           case "deleted":
             return ok(undefined);
@@ -975,7 +982,9 @@ export function createTransport(deps: {
         // and the Inngest event payload — the receiver downstream can
         // trust them to match without a second clock read.
         const approvedAt = new Date();
-        const result = await codingStore.approvePlanIfPending(taskId, approvedAt);
+        const result = await runInTx((tx) =>
+          codingStore.approvePlanIfPending(tx, taskId, approvedAt),
+        );
         switch (result.kind) {
           case "approved":
             await inngest.send({
@@ -999,7 +1008,7 @@ export function createTransport(deps: {
         if (!codingStore) return err({ code: "sandbox_disabled" as const });
         const identityCheck = await checkTaskOwnership(taskId, tapperPlatformHandle);
         if (identityCheck.isErr()) return err(identityCheck.error);
-        const result = await codingStore.cancelTaskIfActive(taskId, reason);
+        const result = await runInTx((tx) => codingStore.cancelTaskIfActive(tx, taskId, reason));
         switch (result.kind) {
           case "cancelled":
             return ok({ taskId });
@@ -1050,7 +1059,7 @@ export function createTransport(deps: {
         // that's fine — runner.approveDeploy is itself atomic and the
         // worst case is we return "live" when the user expected
         // already-resolved.
-        const deploy = await skillStore.getDeployById(pendingId);
+        const deploy = await runInTx((tx) => skillStore.getDeployById(tx, pendingId));
         if (!deploy) return err({ code: "skill_deploy_not_found" as const, pendingId });
         if (deploy.status !== "pending_approval") {
           return err({
@@ -1084,7 +1093,7 @@ export function createTransport(deps: {
         const identityCheck = await checkSkillsTapper(tapperPlatformHandle);
         if (identityCheck.isErr()) return err(identityCheck.error);
 
-        const deploy = await skillStore.getDeployById(pendingId);
+        const deploy = await runInTx((tx) => skillStore.getDeployById(tx, pendingId));
         if (!deploy) return err({ code: "skill_deploy_not_found" as const, pendingId });
         // denyDeploy is idempotent on already-resolved deploys (the store
         // method skips the update + returns silently). We still surface a
@@ -1229,7 +1238,7 @@ export function createTransport(deps: {
     tapperPlatformHandle: string,
   ): Promise<Result<void, TransportError>> {
     if (!codingStore) return err({ code: "sandbox_disabled" as const });
-    const task = await codingStore.getTask(taskId);
+    const task = await runInTx((tx) => codingStore.getTask(tx, taskId));
     if (!task) return err({ code: "task_not_found" as const, taskId });
     const taskConversationId = task.conversationId;
     if (!taskConversationId) {

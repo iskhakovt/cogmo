@@ -12,7 +12,7 @@ let store: DrizzleSandboxStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleSandboxStore(tx);
+  store = new DrizzleSandboxStore();
 });
 
 afterEach(async () => {
@@ -43,7 +43,7 @@ function labels(extra: Partial<ContainerLabels> = {}): ContainerLabels {
 }
 
 async function seedInstance(): Promise<string> {
-  return (await store.insertInstance({ host: "test-host", pid: 42 })).id;
+  return (await tx((trx) => store.insertInstance(trx, { host: "test-host", pid: 42 }))).id;
 }
 
 async function insertTaskContainer(opts: {
@@ -53,25 +53,27 @@ async function insertTaskContainer(opts: {
   parentId?: string | null;
   depth?: number;
 }): Promise<string> {
-  const row = await store.insertContainer({
-    dockerId: opts.dockerId ?? `docker-${Math.random().toString(36).slice(2)}`,
-    parentId: opts.parentId ?? null,
-    rootTaskId: opts.rootTaskId ?? TASK_ID,
-    depth: opts.depth ?? 0,
-    image: "cogmo/devbase:slice1",
-    runtime: "sysbox-runc",
-    labels: labels(),
-    resourceLimits: RESOURCE_LIMITS,
-    ttlExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
-    instanceId: opts.instanceId,
-  });
+  const row = await tx((trx) =>
+    store.insertContainer(trx, {
+      dockerId: opts.dockerId ?? `docker-${Math.random().toString(36).slice(2)}`,
+      parentId: opts.parentId ?? null,
+      rootTaskId: opts.rootTaskId ?? TASK_ID,
+      depth: opts.depth ?? 0,
+      image: "cogmo/devbase:slice1",
+      runtime: "sysbox-runc",
+      labels: labels(),
+      resourceLimits: RESOURCE_LIMITS,
+      ttlExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      instanceId: opts.instanceId,
+    }),
+  );
   return row.id;
 }
 
 describe("DrizzleSandboxStore", () => {
   describe("instances", () => {
     it("inserts an instance with stoppedAt null", async () => {
-      const inst = await store.insertInstance({ host: "host-1", pid: 1234 });
+      const inst = await tx((trx) => store.insertInstance(trx, { host: "host-1", pid: 1234 }));
       expect(inst.host).toBe("host-1");
       expect(inst.pid).toBe(1234);
       expect(inst.stoppedAt).toBeNull();
@@ -79,40 +81,44 @@ describe("DrizzleSandboxStore", () => {
     });
 
     it("closeInstance sets stoppedAt", async () => {
-      const inst = await store.insertInstance({ host: "h", pid: 1 });
-      await store.closeInstance(inst.id);
-      const reloaded = await store.getInstance(inst.id);
+      const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+      await tx((trx) => store.closeInstance(trx, inst.id));
+      const reloaded = await tx((trx) => store.getInstance(trx, inst.id));
       expect(reloaded?.stoppedAt).toBeInstanceOf(Date);
     });
 
     it("listLiveInstances excludes stopped instances", async () => {
-      const a = await store.insertInstance({ host: "a", pid: 1 });
-      const b = await store.insertInstance({ host: "b", pid: 2 });
-      await store.closeInstance(a.id);
-      const live = await store.listLiveInstances();
+      const a = await tx((trx) => store.insertInstance(trx, { host: "a", pid: 1 }));
+      const b = await tx((trx) => store.insertInstance(trx, { host: "b", pid: 2 }));
+      await tx((trx) => store.closeInstance(trx, a.id));
+      const live = await tx((trx) => store.listLiveInstances(trx));
       expect(live.map((i) => i.id)).toEqual([b.id]);
     });
 
     it("getInstance returns null for unknown id", async () => {
-      expect(await store.getInstance("019d0000-0000-7000-8000-000000000099")).toBeUndefined();
+      expect(
+        await tx((trx) => store.getInstance(trx, "019d0000-0000-7000-8000-000000000099")),
+      ).toBeUndefined();
     });
   });
 
   describe("containers", () => {
     it("inserts a container with starting status and parsed JSONB", async () => {
       const instanceId = await seedInstance();
-      const row = await store.insertContainer({
-        dockerId: "abc123",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        image: "cogmo/devbase:slice1",
-        runtime: "sysbox-runc",
-        labels: labels(),
-        resourceLimits: RESOURCE_LIMITS,
-        ttlExpiresAt: new Date("2026-04-26T00:00:00Z"),
-        instanceId,
-      });
+      const row = await tx((trx) =>
+        store.insertContainer(trx, {
+          dockerId: "abc123",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          image: "cogmo/devbase:slice1",
+          runtime: "sysbox-runc",
+          labels: labels(),
+          resourceLimits: RESOURCE_LIMITS,
+          ttlExpiresAt: new Date("2026-04-26T00:00:00Z"),
+          instanceId,
+        }),
+      );
       expect(row.dockerId).toBe("abc123");
       expect(row.status).toBe("starting");
       expect(row.depth).toBe(0);
@@ -127,38 +133,40 @@ describe("DrizzleSandboxStore", () => {
     it("rejects malformed labels at the store boundary", async () => {
       const instanceId = await seedInstance();
       await expect(
-        store.insertContainer({
-          dockerId: "bad",
-          parentId: null,
-          rootTaskId: TASK_ID,
-          depth: 0,
-          image: "img",
-          runtime: "runc",
-          // biome-ignore lint/suspicious/noExplicitAny: intentionally invalid input
-          labels: { "cogmo.depth": 0 } as any,
-          resourceLimits: RESOURCE_LIMITS,
-          ttlExpiresAt: new Date(),
-          instanceId,
-        }),
+        tx((trx) =>
+          store.insertContainer(trx, {
+            dockerId: "bad",
+            parentId: null,
+            rootTaskId: TASK_ID,
+            depth: 0,
+            image: "img",
+            runtime: "runc",
+            labels: { "cogmo.depth": 0 } as any,
+            resourceLimits: RESOURCE_LIMITS,
+            ttlExpiresAt: new Date(),
+            instanceId,
+          }),
+        ),
       ).rejects.toThrow();
     });
 
     it("rejects malformed resourceLimits at the store boundary", async () => {
       const instanceId = await seedInstance();
       await expect(
-        store.insertContainer({
-          dockerId: "bad",
-          parentId: null,
-          rootTaskId: TASK_ID,
-          depth: 0,
-          image: "img",
-          runtime: "runc",
-          labels: labels(),
-          // biome-ignore lint/suspicious/noExplicitAny: intentionally invalid input
-          resourceLimits: { cpus: -1, memory_bytes: 1, pids: 1 } as any,
-          ttlExpiresAt: new Date(),
-          instanceId,
-        }),
+        tx((trx) =>
+          store.insertContainer(trx, {
+            dockerId: "bad",
+            parentId: null,
+            rootTaskId: TASK_ID,
+            depth: 0,
+            image: "img",
+            runtime: "runc",
+            labels: labels(),
+            resourceLimits: { cpus: -1, memory_bytes: 1, pids: 1 } as any,
+            ttlExpiresAt: new Date(),
+            instanceId,
+          }),
+        ),
       ).rejects.toThrow();
     });
 
@@ -166,7 +174,7 @@ describe("DrizzleSandboxStore", () => {
       const instanceId = await seedInstance();
       const id = await insertTaskContainer({ instanceId });
       await db.execute(sql`UPDATE containers SET labels = '{"junk":true}'::jsonb WHERE id = ${id}`);
-      await expect(store.getContainer(id)).rejects.toThrow();
+      await expect(tx((trx) => store.getContainer(trx, id))).rejects.toThrow();
     });
 
     it("rejects malformed resourceLimits via raw SQL on read", async () => {
@@ -175,7 +183,7 @@ describe("DrizzleSandboxStore", () => {
       await db.execute(
         sql`UPDATE containers SET resource_limits = '{"junk":true}'::jsonb WHERE id = ${id}`,
       );
-      await expect(store.getContainer(id)).rejects.toThrow();
+      await expect(tx((trx) => store.getContainer(trx, id))).rejects.toThrow();
     });
 
     it("enforces unique docker_id", async () => {
@@ -188,14 +196,16 @@ describe("DrizzleSandboxStore", () => {
       const instanceId = await seedInstance();
       const id = await insertTaskContainer({ instanceId });
       const startedAt = new Date("2026-04-25T10:00:00Z");
-      await store.updateContainerStatus({ id, status: "running", startedAt });
-      let row = await store.getContainer(id);
+      await tx((trx) => store.updateContainerStatus(trx, { id, status: "running", startedAt }));
+      let row = await tx((trx) => store.getContainer(trx, id));
       expect(row?.status).toBe("running");
       expect(row?.startedAt?.toISOString()).toBe(startedAt.toISOString());
 
       const exitedAt = new Date("2026-04-25T10:05:00Z");
-      await store.updateContainerStatus({ id, status: "exited", exitCode: 0, exitedAt });
-      row = await store.getContainer(id);
+      await tx((trx) =>
+        store.updateContainerStatus(trx, { id, status: "exited", exitCode: 0, exitedAt }),
+      );
+      row = await tx((trx) => store.getContainer(trx, id));
       expect(row?.status).toBe("exited");
       expect(row?.exitCode).toBe(0);
       expect(row?.exitedAt?.toISOString()).toBe(exitedAt.toISOString());
@@ -204,56 +214,62 @@ describe("DrizzleSandboxStore", () => {
     it("getContainerByDockerId returns the row", async () => {
       const instanceId = await seedInstance();
       await insertTaskContainer({ instanceId, dockerId: "lookup-me" });
-      const row = await store.getContainerByDockerId("lookup-me");
+      const row = await tx((trx) => store.getContainerByDockerId(trx, "lookup-me"));
       expect(row?.dockerId).toBe("lookup-me");
     });
 
     it("getContainer returns null for unknown id", async () => {
-      expect(await store.getContainer("019d0000-0000-7000-8000-000000000099")).toBeUndefined();
+      expect(
+        await tx((trx) => store.getContainer(trx, "019d0000-0000-7000-8000-000000000099")),
+      ).toBeUndefined();
     });
 
     it("listContainersForInstance returns all rows for the instance, ordered by createdAt", async () => {
       const instA = await seedInstance();
-      const instB = (await store.insertInstance({ host: "b", pid: 2 })).id;
+      const instB = (await tx((trx) => store.insertInstance(trx, { host: "b", pid: 2 }))).id;
       await insertTaskContainer({ instanceId: instA, dockerId: "a1" });
       await insertTaskContainer({ instanceId: instA, dockerId: "a2" });
       await insertTaskContainer({ instanceId: instB, dockerId: "b1" });
 
-      const rowsA = await store.listContainersForInstance(instA);
+      const rowsA = await tx((trx) => store.listContainersForInstance(trx, instA));
       expect(rowsA.map((r) => r.dockerId)).toEqual(["a1", "a2"]);
-      const rowsB = await store.listContainersForInstance(instB);
+      const rowsB = await tx((trx) => store.listContainersForInstance(trx, instB));
       expect(rowsB.map((r) => r.dockerId)).toEqual(["b1"]);
     });
 
     it("listContainersForTask returns rows in cascade order (depth DESC: children first)", async () => {
       const instanceId = await seedInstance();
       const taskId = "019d0000-0000-7000-8000-000000000010";
-      const taskContainer = await store.insertContainer({
-        dockerId: "task",
-        parentId: null,
-        rootTaskId: taskId,
-        depth: 0,
-        image: "img",
-        runtime: "runc",
-        labels: labels({ "cogmo.root_task": taskId }),
-        resourceLimits: RESOURCE_LIMITS,
-        ttlExpiresAt: new Date(),
-        instanceId,
-      });
-      await store.insertContainer({
-        dockerId: "child",
-        parentId: taskContainer.id,
-        rootTaskId: taskId,
-        depth: 1,
-        image: "img",
-        runtime: "runc",
-        labels: labels({ "cogmo.root_task": taskId, "cogmo.depth": "1" }),
-        resourceLimits: RESOURCE_LIMITS,
-        ttlExpiresAt: new Date(),
-        instanceId,
-      });
+      const taskContainer = await tx((trx) =>
+        store.insertContainer(trx, {
+          dockerId: "task",
+          parentId: null,
+          rootTaskId: taskId,
+          depth: 0,
+          image: "img",
+          runtime: "runc",
+          labels: labels({ "cogmo.root_task": taskId }),
+          resourceLimits: RESOURCE_LIMITS,
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      );
+      await tx((trx) =>
+        store.insertContainer(trx, {
+          dockerId: "child",
+          parentId: taskContainer.id,
+          rootTaskId: taskId,
+          depth: 1,
+          image: "img",
+          runtime: "runc",
+          labels: labels({ "cogmo.root_task": taskId, "cogmo.depth": "1" }),
+          resourceLimits: RESOURCE_LIMITS,
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      );
 
-      const rows = await store.listContainersForTask(taskId);
+      const rows = await tx((trx) => store.listContainersForTask(trx, taskId));
       expect(rows.map((r) => r.dockerId)).toEqual(["child", "task"]);
       expect(rows.map((r) => r.depth)).toEqual([1, 0]);
     });
@@ -267,7 +283,7 @@ describe("DrizzleSandboxStore", () => {
         parentId,
         depth: 1,
       });
-      const child = await store.getContainer(childId);
+      const child = await tx((trx) => store.getContainer(trx, childId));
       expect(child?.parentId).toBe(parentId);
     });
 
@@ -281,15 +297,17 @@ describe("DrizzleSandboxStore", () => {
   describe("networks", () => {
     it("inserts a network with status='created' and parsed JSONB labels", async () => {
       const instanceId = await seedInstance();
-      const row = await store.insertNetwork({
-        dockerId: "net-abc",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date("2026-04-26T00:00:00Z"),
-        instanceId,
-      });
+      const row = await tx((trx) =>
+        store.insertNetwork(trx, {
+          dockerId: "net-abc",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date("2026-04-26T00:00:00Z"),
+          instanceId,
+        }),
+      );
       expect(row.dockerId).toBe("net-abc");
       expect(row.status).toBe("created");
       expect(row.depth).toBe(0);
@@ -299,49 +317,43 @@ describe("DrizzleSandboxStore", () => {
     it("rejects malformed labels at the store boundary", async () => {
       const instanceId = await seedInstance();
       await expect(
-        store.insertNetwork({
-          dockerId: "net-bad",
-          parentId: null,
-          rootTaskId: TASK_ID,
-          depth: 0,
-          // biome-ignore lint/suspicious/noExplicitAny: intentionally invalid input
-          labels: { "cogmo.depth": 0 } as any,
-          ttlExpiresAt: new Date(),
-          instanceId,
-        }),
+        tx((trx) =>
+          store.insertNetwork(trx, {
+            dockerId: "net-bad",
+            parentId: null,
+            rootTaskId: TASK_ID,
+            depth: 0,
+            labels: { "cogmo.depth": 0 } as any,
+            ttlExpiresAt: new Date(),
+            instanceId,
+          }),
+        ),
       ).rejects.toThrow();
     });
 
     it("rejects malformed labels via raw SQL on read", async () => {
       const instanceId = await seedInstance();
-      const row = await store.insertNetwork({
-        dockerId: "net-corrupt",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId,
-      });
+      const row = await tx((trx) =>
+        store.insertNetwork(trx, {
+          dockerId: "net-corrupt",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      );
       await db.execute(
         sql`UPDATE networks SET labels = '{"junk":true}'::jsonb WHERE id = ${row.id}`,
       );
-      await expect(store.getNetwork(row.id)).rejects.toThrow();
+      await expect(tx((trx) => store.getNetwork(trx, row.id))).rejects.toThrow();
     });
 
     it("enforces unique docker_id", async () => {
       const instanceId = await seedInstance();
-      await store.insertNetwork({
-        dockerId: "dup-net",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId,
-      });
-      await expect(
-        store.insertNetwork({
+      await tx((trx) =>
+        store.insertNetwork(trx, {
           dockerId: "dup-net",
           parentId: null,
           rootTaskId: TASK_ID,
@@ -350,37 +362,54 @@ describe("DrizzleSandboxStore", () => {
           ttlExpiresAt: new Date(),
           instanceId,
         }),
+      );
+      await expect(
+        tx((trx) =>
+          store.insertNetwork(trx, {
+            dockerId: "dup-net",
+            parentId: null,
+            rootTaskId: TASK_ID,
+            depth: 0,
+            labels: labels(),
+            ttlExpiresAt: new Date(),
+            instanceId,
+          }),
+        ),
       ).rejects.toThrow();
     });
 
     it("updateNetworkStatus marks reaped", async () => {
       const instanceId = await seedInstance();
-      const row = await store.insertNetwork({
-        dockerId: "net-1",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId,
-      });
-      await store.updateNetworkStatus({ id: row.id, status: "reaped" });
-      const reloaded = await store.getNetwork(row.id);
+      const row = await tx((trx) =>
+        store.insertNetwork(trx, {
+          dockerId: "net-1",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      );
+      await tx((trx) => store.updateNetworkStatus(trx, { id: row.id, status: "reaped" }));
+      const reloaded = await tx((trx) => store.getNetwork(trx, row.id));
       expect(reloaded?.status).toBe("reaped");
     });
 
     it("getNetworkByDockerId returns the row", async () => {
       const instanceId = await seedInstance();
-      await store.insertNetwork({
-        dockerId: "lookup-net",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId,
-      });
-      const row = await store.getNetworkByDockerId("lookup-net");
+      await tx((trx) =>
+        store.insertNetwork(trx, {
+          dockerId: "lookup-net",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      );
+      const row = await tx((trx) => store.getNetworkByDockerId(trx, "lookup-net"));
       expect(row?.dockerId).toBe("lookup-net");
     });
 
@@ -388,66 +417,80 @@ describe("DrizzleSandboxStore", () => {
       const instanceId = await seedInstance();
       const taskId = "019d0000-0000-7000-8000-000000000020";
       const parentId = await insertTaskContainer({ instanceId, rootTaskId: taskId });
-      await store.insertNetwork({
-        dockerId: "n-root",
-        parentId: null,
-        rootTaskId: taskId,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId,
-      });
-      await store.insertNetwork({
-        dockerId: "n-child",
-        parentId,
-        rootTaskId: taskId,
-        depth: 1,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId,
-      });
-      const rows = await store.listNetworksForTask(taskId);
+      await tx((trx) =>
+        store.insertNetwork(trx, {
+          dockerId: "n-root",
+          parentId: null,
+          rootTaskId: taskId,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      );
+      await tx((trx) =>
+        store.insertNetwork(trx, {
+          dockerId: "n-child",
+          parentId,
+          rootTaskId: taskId,
+          depth: 1,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      );
+      const rows = await tx((trx) => store.listNetworksForTask(trx, taskId));
       expect(rows.map((r) => r.dockerId)).toEqual(["n-child", "n-root"]);
     });
 
     it("listNetworksForInstance scopes by instance", async () => {
       const instA = await seedInstance();
-      const instB = (await store.insertInstance({ host: "b", pid: 2 })).id;
-      await store.insertNetwork({
-        dockerId: "n-a",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId: instA,
-      });
-      await store.insertNetwork({
-        dockerId: "n-b",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId: instB,
-      });
-      expect((await store.listNetworksForInstance(instA)).map((r) => r.dockerId)).toEqual(["n-a"]);
-      expect((await store.listNetworksForInstance(instB)).map((r) => r.dockerId)).toEqual(["n-b"]);
+      const instB = (await tx((trx) => store.insertInstance(trx, { host: "b", pid: 2 }))).id;
+      await tx((trx) =>
+        store.insertNetwork(trx, {
+          dockerId: "n-a",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId: instA,
+        }),
+      );
+      await tx((trx) =>
+        store.insertNetwork(trx, {
+          dockerId: "n-b",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId: instB,
+        }),
+      );
+      expect(
+        (await tx((trx) => store.listNetworksForInstance(trx, instA))).map((r) => r.dockerId),
+      ).toEqual(["n-a"]);
+      expect(
+        (await tx((trx) => store.listNetworksForInstance(trx, instB))).map((r) => r.dockerId),
+      ).toEqual(["n-b"]);
     });
   });
 
   describe("volumes", () => {
     it("inserts a volume with status='created' and parsed JSONB labels", async () => {
       const instanceId = await seedInstance();
-      const row = await store.insertVolume({
-        dockerId: "vol-abc",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date("2026-04-26T00:00:00Z"),
-        instanceId,
-      });
+      const row = await tx((trx) =>
+        store.insertVolume(trx, {
+          dockerId: "vol-abc",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date("2026-04-26T00:00:00Z"),
+          instanceId,
+        }),
+      );
       expect(row.dockerId).toBe("vol-abc");
       expect(row.status).toBe("created");
       expect(row.labels["cogmo.managed"]).toBe("true");
@@ -455,17 +498,8 @@ describe("DrizzleSandboxStore", () => {
 
     it("enforces unique docker_id", async () => {
       const instanceId = await seedInstance();
-      await store.insertVolume({
-        dockerId: "dup-vol",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId,
-      });
-      await expect(
-        store.insertVolume({
+      await tx((trx) =>
+        store.insertVolume(trx, {
           dockerId: "dup-vol",
           parentId: null,
           rootTaskId: TASK_ID,
@@ -474,91 +508,120 @@ describe("DrizzleSandboxStore", () => {
           ttlExpiresAt: new Date(),
           instanceId,
         }),
+      );
+      await expect(
+        tx((trx) =>
+          store.insertVolume(trx, {
+            dockerId: "dup-vol",
+            parentId: null,
+            rootTaskId: TASK_ID,
+            depth: 0,
+            labels: labels(),
+            ttlExpiresAt: new Date(),
+            instanceId,
+          }),
+        ),
       ).rejects.toThrow();
     });
 
     it("rejects malformed labels via raw SQL on read", async () => {
       const instanceId = await seedInstance();
-      const row = await store.insertVolume({
-        dockerId: "vol-corrupt",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId,
-      });
+      const row = await tx((trx) =>
+        store.insertVolume(trx, {
+          dockerId: "vol-corrupt",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      );
       await db.execute(
         sql`UPDATE volumes SET labels = '{"junk":true}'::jsonb WHERE id = ${row.id}`,
       );
-      await expect(store.getVolume(row.id)).rejects.toThrow();
+      await expect(tx((trx) => store.getVolume(trx, row.id))).rejects.toThrow();
     });
 
     it("updateVolumeStatus + lookups round-trip", async () => {
       const instanceId = await seedInstance();
-      const row = await store.insertVolume({
-        dockerId: "v-1",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId,
-      });
-      await store.updateVolumeStatus({ id: row.id, status: "reaped" });
-      expect((await store.getVolume(row.id))?.status).toBe("reaped");
-      expect((await store.getVolumeByDockerId("v-1"))?.id).toBe(row.id);
+      const row = await tx((trx) =>
+        store.insertVolume(trx, {
+          dockerId: "v-1",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      );
+      await tx((trx) => store.updateVolumeStatus(trx, { id: row.id, status: "reaped" }));
+      expect((await tx((trx) => store.getVolume(trx, row.id)))?.status).toBe("reaped");
+      expect((await tx((trx) => store.getVolumeByDockerId(trx, "v-1")))?.id).toBe(row.id);
     });
 
     it("listVolumesForTask returns rows depth DESC", async () => {
       const instanceId = await seedInstance();
       const taskId = "019d0000-0000-7000-8000-000000000030";
       const parentId = await insertTaskContainer({ instanceId, rootTaskId: taskId });
-      await store.insertVolume({
-        dockerId: "v-root",
-        parentId: null,
-        rootTaskId: taskId,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId,
-      });
-      await store.insertVolume({
-        dockerId: "v-child",
-        parentId,
-        rootTaskId: taskId,
-        depth: 1,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId,
-      });
-      const rows = await store.listVolumesForTask(taskId);
+      await tx((trx) =>
+        store.insertVolume(trx, {
+          dockerId: "v-root",
+          parentId: null,
+          rootTaskId: taskId,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      );
+      await tx((trx) =>
+        store.insertVolume(trx, {
+          dockerId: "v-child",
+          parentId,
+          rootTaskId: taskId,
+          depth: 1,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId,
+        }),
+      );
+      const rows = await tx((trx) => store.listVolumesForTask(trx, taskId));
       expect(rows.map((r) => r.dockerId)).toEqual(["v-child", "v-root"]);
     });
 
     it("listVolumesForInstance scopes by instance", async () => {
       const instA = await seedInstance();
-      const instB = (await store.insertInstance({ host: "b", pid: 2 })).id;
-      await store.insertVolume({
-        dockerId: "v-a",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId: instA,
-      });
-      await store.insertVolume({
-        dockerId: "v-b",
-        parentId: null,
-        rootTaskId: TASK_ID,
-        depth: 0,
-        labels: labels(),
-        ttlExpiresAt: new Date(),
-        instanceId: instB,
-      });
-      expect((await store.listVolumesForInstance(instA)).map((r) => r.dockerId)).toEqual(["v-a"]);
-      expect((await store.listVolumesForInstance(instB)).map((r) => r.dockerId)).toEqual(["v-b"]);
+      const instB = (await tx((trx) => store.insertInstance(trx, { host: "b", pid: 2 }))).id;
+      await tx((trx) =>
+        store.insertVolume(trx, {
+          dockerId: "v-a",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId: instA,
+        }),
+      );
+      await tx((trx) =>
+        store.insertVolume(trx, {
+          dockerId: "v-b",
+          parentId: null,
+          rootTaskId: TASK_ID,
+          depth: 0,
+          labels: labels(),
+          ttlExpiresAt: new Date(),
+          instanceId: instB,
+        }),
+      );
+      expect(
+        (await tx((trx) => store.listVolumesForInstance(trx, instA))).map((r) => r.dockerId),
+      ).toEqual(["v-a"]);
+      expect(
+        (await tx((trx) => store.listVolumesForInstance(trx, instB))).map((r) => r.dockerId),
+      ).toEqual(["v-b"]);
     });
   });
 });

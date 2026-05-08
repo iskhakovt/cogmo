@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentStore } from "../agent/store/index.js";
+import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { mockProvider } from "../test/factories.js";
 import { FallbackLlmProvider } from "./fallback.js";
 import { constantResolver, createDbProviderResolver, ProviderConfigError } from "./resolver.js";
+
+const FAKE_TX = { __mockTx: true } as never;
+const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 type ProviderRow = {
   id: string;
@@ -57,7 +61,7 @@ function makeDeps(opts: DepsOpts = {}) {
 describe("createDbProviderResolver — happy path", () => {
   it("returns a FallbackLlmProvider that wraps the configured chain", async () => {
     const { agentStore, secretsStore } = makeDeps();
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
     const provider = await resolve("claude-sonnet-4-6");
     expect(provider).toBeInstanceOf(FallbackLlmProvider);
   });
@@ -72,7 +76,7 @@ describe("createDbProviderResolver — happy path", () => {
     const { agentStore, secretsStore } = makeDeps({
       rows: [row({ type: "anthropic", baseUrl: "https://custom.anthropic.test" })],
     });
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
     const provider = await resolve("m");
     expect(provider).toBeInstanceOf(FallbackLlmProvider);
     expect(provider.name).toBe("anthropic");
@@ -89,7 +93,7 @@ describe("createDbProviderResolver — happy path", () => {
         }),
       ],
     });
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
     const provider = await resolve("grok-4");
     expect(provider).toBeInstanceOf(FallbackLlmProvider);
     // Single-row fallback wrapper inherits the inner provider's name; the
@@ -111,7 +115,7 @@ describe("createDbProviderResolver — happy path", () => {
         }),
       ],
     });
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
     const provider = await resolve("m");
     // anthropic adapter's inner name is hardcoded to "anthropic"; the second
     // row uses its DB `name` ("fallback-or"). Composite shape proves both
@@ -128,7 +132,7 @@ describe("createDbProviderResolver — error matrix", () => {
 
   it("throws ProviderConfigError when no provider is configured for the model", async () => {
     const { agentStore, secretsStore } = makeDeps({ rows: [] });
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
     await expect(resolve("unknown-model")).rejects.toThrow(ProviderConfigError);
     await expect(resolve("unknown-model")).rejects.toThrow(/No provider configured/);
   });
@@ -136,7 +140,7 @@ describe("createDbProviderResolver — error matrix", () => {
   it("throws ProviderConfigError when the secret lookup returns undefined", async () => {
     const { agentStore, secretsStore } = makeDeps({ secret: undefined });
     (secretsStore.getSecretById as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
     await expect(resolve("m")).rejects.toThrow(ProviderConfigError);
     await expect(resolve("m")).rejects.toThrow(/Secret for provider "anthropic-direct" not found/);
   });
@@ -145,7 +149,7 @@ describe("createDbProviderResolver — error matrix", () => {
     const { agentStore, secretsStore } = makeDeps({
       rows: [row({ type: "openai_compatible", baseUrl: null, name: "broken" })],
     });
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
     await expect(resolve("m")).rejects.toThrow(ProviderConfigError);
     await expect(resolve("m")).rejects.toThrow(/"broken".*requires a base URL/);
   });
@@ -154,7 +158,7 @@ describe("createDbProviderResolver — error matrix", () => {
     const { agentStore, secretsStore } = makeDeps({
       rows: [row({ type: "google" })],
     });
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
     await expect(resolve("m")).rejects.toThrow(ProviderConfigError);
     await expect(resolve("m")).rejects.toThrow(/Unknown provider type: google/);
   });
@@ -164,7 +168,7 @@ describe("createDbProviderResolver — error matrix", () => {
     // the resolver only tags operator-fix-needed failures, leaving infra
     // hiccups on the default retry path.
     const { agentStore, secretsStore } = makeDeps({ listFailures: 1 });
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
     const caught = await resolve("flaky").catch((e) => e);
     expect(caught).toBeInstanceOf(Error);
     expect(caught).not.toBeInstanceOf(ProviderConfigError);
@@ -174,7 +178,7 @@ describe("createDbProviderResolver — error matrix", () => {
 describe("createDbProviderResolver — caching", () => {
   it("memoizes by model — second call doesn't re-decrypt", async () => {
     const { agentStore, secretsStore, listProvidersForModel, getSecretById } = makeDeps();
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
     const first = await resolve("claude-sonnet-4-6");
     const second = await resolve("claude-sonnet-4-6");
     expect(first).toBe(second);
@@ -184,18 +188,22 @@ describe("createDbProviderResolver — caching", () => {
 
   it("builds independent chains for different models", async () => {
     const { agentStore, secretsStore, listProvidersForModel } = makeDeps();
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
     const a = await resolve("claude-sonnet-4-6");
     const b = await resolve("grok-4");
     expect(a).not.toBe(b);
     expect(listProvidersForModel).toHaveBeenCalledTimes(2);
-    expect(listProvidersForModel).toHaveBeenNthCalledWith(1, "claude-sonnet-4-6");
-    expect(listProvidersForModel).toHaveBeenNthCalledWith(2, "grok-4");
+    expect(listProvidersForModel).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      "claude-sonnet-4-6",
+    );
+    expect(listProvidersForModel).toHaveBeenNthCalledWith(2, expect.anything(), "grok-4");
   });
 
   it("does not poison the cache on failure — next call retries", async () => {
     const { agentStore, secretsStore, listProvidersForModel } = makeDeps({ listFailures: 1 });
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
 
     await expect(resolve("flaky")).rejects.toThrow(/transient db error/);
     // Second call must retry, not return the cached rejection
@@ -206,7 +214,7 @@ describe("createDbProviderResolver — caching", () => {
 
   it("dedups concurrent first-time resolves for the same model (no thundering herd)", async () => {
     const { agentStore, secretsStore, listProvidersForModel, getSecretById } = makeDeps();
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
     const [a, b, c] = await Promise.all([resolve("m"), resolve("m"), resolve("m")]);
     expect(a).toBe(b);
     expect(b).toBe(c);

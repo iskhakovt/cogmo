@@ -5,7 +5,6 @@ const baseEvent = {
   data: { conversationId: "conv-1", inboundMessageId: "inbound-1" },
 };
 
-// biome-ignore lint/suspicious/noExplicitAny: Inngest function opts aren't part of the public TS surface
 function debounceOpts(fn: any): any {
   return fn?.opts ?? fn?.options;
 }
@@ -129,7 +128,6 @@ describe("native router — handler behavior", () => {
       resumePolicy: "debounce",
     });
     const step = mockStep();
-    // biome-ignore lint/suspicious/noExplicitAny: reaching into Inngest's internal handler
     await (router as any).fn({ event: baseEvent, step });
 
     expect(step.sendEvent).toHaveBeenCalledTimes(1);
@@ -156,7 +154,6 @@ describe("native router — handler behavior", () => {
       ...baseEvent,
       ts: Date.now() - 2500, // pretend the trigger event was created 2.5s ago
     };
-    // biome-ignore lint/suspicious/noExplicitAny: reaching into Inngest's internal handler
     await (router as any).fn({ event: eventWithTs, step });
 
     expect(recordSpy).toHaveBeenCalledWith(expect.any(Number), { kind: "native" });
@@ -176,7 +173,6 @@ describe("legacy router — handler behavior", () => {
       resumePolicy: "debounce",
     });
     const step = mockStep();
-    // biome-ignore lint/suspicious/noExplicitAny: reaching into Inngest's internal handler
     await (router as any).fn({ event: baseEvent, step });
 
     expect(step.sendEvent).toHaveBeenCalledWith(
@@ -197,7 +193,6 @@ describe("legacy router — handler behavior", () => {
       resumePolicy: "debounce",
     });
     const step = mockStep();
-    // biome-ignore lint/suspicious/noExplicitAny: reaching into Inngest's internal handler
     await (router as any).fn({ event: baseEvent, step });
 
     expect(step.sendEvent).toHaveBeenCalledWith(
@@ -213,7 +208,6 @@ describe("legacy router — handler behavior", () => {
       resumePolicy: "debounce",
     });
     const step = mockStep();
-    // biome-ignore lint/suspicious/noExplicitAny: reaching into Inngest's internal handler
     await (router as any).fn({ event: baseEvent, step });
 
     const events = step.sendEvent.mock.calls[0][1];

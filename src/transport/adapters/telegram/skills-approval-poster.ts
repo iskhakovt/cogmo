@@ -55,7 +55,7 @@ export async function postSkillsApprovalKeyboard(args: {
   transportStore: TransportStore;
   sendMessage: SkillsApprovalSendMessage;
 }): Promise<PostSkillsApprovalKeyboardResult> {
-  const { event, channelId, runInTx, skillStore, transportStore, sendMessage } = args;
+  const { event, channelId, skillStore, runInTx, transportStore, sendMessage } = args;
 
   const sessions = await runInTx((tx) =>
     transportStore.getActiveSessionsForConversation(tx, event.conversationId),
@@ -69,8 +69,8 @@ export async function postSkillsApprovalKeyboard(args: {
   // Either lookup returning null falls back to "(none declared)" rather than
   // failing the post — the user can still approve / deny based on the
   // pendingId + commit shown.
-  const deploy = await skillStore.getDeployById(event.pendingId);
-  const skill = deploy ? await skillStore.getSkillById(deploy.skillId) : null;
+  const deploy = await runInTx((tx) => skillStore.getDeployById(tx, event.pendingId));
+  const skill = deploy ? await runInTx((tx) => skillStore.getSkillById(tx, deploy.skillId)) : null;
   const effects = skill && skill.effects.length > 0 ? skill.effects.join(", ") : "(none declared)";
 
   const keyboard = buildSkillsApprovalKeyboard(event.pendingId);

@@ -94,7 +94,7 @@ async function buildProvider(model: string, deps: DbResolverDeps): Promise<LlmPr
 type ProviderRow = Awaited<ReturnType<AgentStore["listProvidersForModel"]>>[number];
 
 async function buildAdapter(row: ProviderRow, deps: DbResolverDeps): Promise<LlmProvider> {
-  const apiKey = await deps.secretsStore.getSecretById(row.secretId);
+  const apiKey = await deps.runInTx((tx) => deps.secretsStore.getSecretById(tx, row.secretId));
   if (!apiKey) {
     throw new ProviderConfigError(
       `Secret for provider "${row.name}" not found. Re-run \`cogmo setup\` to reconfigure.`,

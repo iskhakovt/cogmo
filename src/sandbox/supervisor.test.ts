@@ -27,7 +27,7 @@ let store: DrizzleSandboxStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleSandboxStore(tx);
+  store = new DrizzleSandboxStore();
 });
 
 afterEach(async () => {
@@ -102,14 +102,14 @@ function fakeProxy(): {
 
 describe("LocalInProcessSandbox — proxy wiring", () => {
   it("registers the proxy with placeholder, then upserts the parent docker id", async () => {
-    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, calls } = fakeDocker({ dockerId: "docker-task-xyz" });
     const { proxy, registers } = fakeProxy();
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const sandbox = await LocalInProcessSandbox.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
+      runInTx: tx,
       runtime: "runc",
       instanceId: inst.id,
       proxy,
@@ -156,14 +156,14 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
   });
 
   it("unregisters the proxy on stopTask", async () => {
-    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-x" });
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const { proxy, unregisters } = fakeProxy();
     const sandbox = await LocalInProcessSandbox.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
+      runInTx: tx,
       runtime: "runc",
       instanceId: inst.id,
       proxy,
@@ -183,7 +183,7 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
   });
 
   it("rolls back the proxy registration when Docker createContainer fails", async () => {
-    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker();
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     docker.createContainer = vi.fn(async () => {
@@ -191,9 +191,9 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     });
     const { proxy, registers, unregisters } = fakeProxy();
     const sandbox = await LocalInProcessSandbox.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
+      runInTx: tx,
       runtime: "runc",
       instanceId: inst.id,
       proxy,
@@ -216,14 +216,14 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
   });
 
   it("rolls back the proxy registration when container.start fails", async () => {
-    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-fail-start", failStart: true });
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const { proxy, registers, unregisters } = fakeProxy();
     const sandbox = await LocalInProcessSandbox.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
+      runInTx: tx,
       runtime: "runc",
       instanceId: inst.id,
       proxy,
@@ -249,13 +249,13 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
   });
 
   it("works without a proxy (no socket mount, no register calls)", async () => {
-    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, calls } = fakeDocker({ dockerId: "docker-no-proxy" });
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const sandbox = await LocalInProcessSandbox.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
+      runInTx: tx,
       runtime: "runc",
       instanceId: inst.id,
       // proxy intentionally omitted
@@ -277,13 +277,13 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
   });
 
   it("bind-mounts the askpass dir read-only when askpassMount is provided", async () => {
-    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, calls } = fakeDocker({ dockerId: "docker-askpass" });
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const sandbox = await LocalInProcessSandbox.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
+      runInTx: tx,
       runtime: "runc",
       instanceId: inst.id,
     });
@@ -318,13 +318,13 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     mkdirSync(taskDir, { recursive: true });
     writeFileSync(join(taskDir, "pat"), "secret");
 
-    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-stopAskpass" });
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const sandbox = await LocalInProcessSandbox.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
+      runInTx: tx,
       runtime: "runc",
       instanceId: inst.id,
       askpassBaseDir: baseDir,
@@ -364,7 +364,7 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     mkdirSync(taskDir, { recursive: true });
     writeFileSync(join(taskDir, "pat"), "secret");
 
-    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     // Custom docker stub: kill rejects with a non-recoverable error
     // (statusCode 500 — not the 304/404 the supervisor swallows). The
     // error must propagate out of the for-loop into the finally without
@@ -384,9 +384,9 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
       info: vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } })),
     };
     const sandbox = await LocalInProcessSandbox.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
+      runInTx: tx,
       runtime: "runc",
       instanceId: inst.id,
       askpassBaseDir: baseDir,
@@ -413,13 +413,13 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
   });
 
   it("stopTask is a no-op for askpass when no baseDir is configured", async () => {
-    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-noaskpass" });
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const sandbox = await LocalInProcessSandbox.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
+      runInTx: tx,
       runtime: "runc",
       instanceId: inst.id,
     });
@@ -438,14 +438,14 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
   });
 
   it("shutdown closes the proxy", async () => {
-    const inst = await store.insertInstance({ host: "h", pid: 1 });
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker();
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const { proxy } = fakeProxy();
     const sandbox = await LocalInProcessSandbox.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
+      runInTx: tx,
       runtime: "runc",
       instanceId: inst.id,
       proxy,

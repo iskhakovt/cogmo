@@ -73,7 +73,7 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     const agentStore = new DrizzleAgentStore();
     const transportStore = new DrizzleTransportStore();
     const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
-    const secretsStore = new DrizzleSecretsStore(tx, encryptionKey);
+    const secretsStore = new DrizzleSecretsStore(encryptionKey);
 
     if (opts.reset) {
       await applyReset(opts.reset, { db });

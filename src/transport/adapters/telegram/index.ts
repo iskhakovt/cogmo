@@ -763,7 +763,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [];
   if (deps.codingProgress) {
-    const { inngest, runInTx, codingStore, transportStore, streamingRegistry } =
+    const { inngest, codingStore, runInTx, transportStore, streamingRegistry } =
       deps.codingProgress;
     const channelId = deps.channelId;
     functions.push(
@@ -776,7 +776,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         },
         async ({ event }) => {
           const taskId = event.data.taskId;
-          const task = await codingStore.getTask(taskId);
+          const task = await runInTx((tx) => codingStore.getTask(tx, taskId));
           const taskConversationId = task?.conversationId;
           if (!taskConversationId) return { skipped: "no conversation" };
 
@@ -818,7 +818,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         },
         async ({ event }) => {
           const { taskId, requestId, tool } = event.data;
-          const task = await codingStore.getTask(taskId);
+          const task = await runInTx((tx) => codingStore.getTask(tx, taskId));
           const taskConversationId = task?.conversationId;
           if (!taskConversationId) return { skipped: "no conversation" };
 
@@ -851,7 +851,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   // already returned with status=pending_approval; the keyboard tap routes
   // straight to transport.skills.approveDeploy/denyDeploy.
   if (deps.skillsApproval) {
-    const { inngest, runInTx, skillStore, transportStore } = deps.skillsApproval;
+    const { inngest, skillStore, runInTx, transportStore } = deps.skillsApproval;
     const channelId = deps.channelId;
     functions.push(
       inngest.createFunction(

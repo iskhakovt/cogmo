@@ -20,11 +20,11 @@ let instanceId: string;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleSandboxStore(tx);
+  store = new DrizzleSandboxStore();
 });
 
 beforeEach(async () => {
-  const inst = await store.insertInstance({ host: "h", pid: 1 });
+  const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
   instanceId = inst.id;
 });
 
@@ -95,7 +95,6 @@ function fakeDocker(opts: { containers?: DockerSideContainer[]; failKill?: Set<s
     }),
   };
   return {
-    // biome-ignore lint/suspicious/noExplicitAny: minimal docker stub
     docker: docker as any,
     killCalls,
     removeCalls,
@@ -116,20 +115,22 @@ async function insertContainer(opts: {
   instanceId?: string;
   parentId?: string | null;
 }): Promise<string> {
-  const row = await store.insertContainer({
-    dockerId: opts.dockerId,
-    parentId: opts.parentId ?? null,
-    rootTaskId: opts.rootTaskId ?? TASK_ID,
-    depth: opts.depth ?? 0,
-    image: "img",
-    runtime: "runc",
-    labels: labels(),
-    resourceLimits: RESOURCE_LIMITS,
-    ttlExpiresAt: new Date(NOW().getTime() + opts.ttlMs),
-    instanceId: opts.instanceId ?? instanceId,
-  });
+  const row = await tx((trx) =>
+    store.insertContainer(trx, {
+      dockerId: opts.dockerId,
+      parentId: opts.parentId ?? null,
+      rootTaskId: opts.rootTaskId ?? TASK_ID,
+      depth: opts.depth ?? 0,
+      image: "img",
+      runtime: "runc",
+      labels: labels(),
+      resourceLimits: RESOURCE_LIMITS,
+      ttlExpiresAt: new Date(NOW().getTime() + opts.ttlMs),
+      instanceId: opts.instanceId ?? instanceId,
+    }),
+  );
   if (opts.status && opts.status !== "starting") {
-    await store.updateContainerStatus({ id: row.id, status: opts.status });
+    await tx((trx) => store.updateContainerStatus(trx, { id: row.id, status: opts.status }));
   }
   return row.id;
 }
@@ -144,11 +145,11 @@ describe("runReap — TTL pass", () => {
       status: "running",
     });
 
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.ttlReaped).toBe(1);
     expect(killCalls).toEqual(["c1"]);
     expect(removeCalls).toEqual(["c1"]);
-    const reloaded = await store.getContainer(cogmoId);
+    const reloaded = await tx((trx) => store.getContainer(trx, cogmoId));
     expect(reloaded?.status).toBe("reaped");
   });
 
@@ -157,7 +158,7 @@ describe("runReap — TTL pass", () => {
       containers: [{ Id: "c-fresh", Labels: labels() }],
     });
     await insertContainer({ dockerId: "c-fresh", ttlMs: 60_000, status: "running" });
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.ttlReaped).toBe(0);
     expect(killCalls).toEqual([]);
   });
@@ -182,7 +183,7 @@ describe("runReap — TTL pass", () => {
       depth: 1,
       parentId,
     });
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.ttlReaped).toBe(2);
     expect(killCalls).toEqual(["child", "parent"]);
   });
@@ -196,7 +197,7 @@ describe("runReap — TTL pass", () => {
       ttlMs: -10_000,
       status: "reaped",
     });
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.ttlReaped).toBe(0);
     expect(killCalls).toEqual([]);
   });
@@ -215,17 +216,17 @@ describe("runReap — TTL pass", () => {
     const { docker, killCalls } = fakeDocker({
       containers: [{ Id: "c-boundary", Labels: labels() }],
     });
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.ttlReaped).toBe(0);
     expect(killCalls).toEqual([]);
-    expect((await store.getContainer(cogmoId))?.status).toBe("running");
+    expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("running");
   });
 });
 
 describe("runReap — orphan pass", () => {
   it("reaps a container labelled with a dead instance id", async () => {
-    const deadInstance = await store.insertInstance({ host: "h", pid: 99 });
-    await store.closeInstance(deadInstance.id);
+    const deadInstance = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 99 }));
+    await tx((trx) => store.closeInstance(trx, deadInstance.id));
     const { docker, killCalls, removeCalls } = fakeDocker({
       containers: [
         {
@@ -235,7 +236,7 @@ describe("runReap — orphan pass", () => {
       ],
     });
     // No DB row for c-orphan — purely Docker-side discovery.
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.orphansReaped).toBe(1);
     expect(killCalls).toEqual(["c-orphan"]);
     expect(removeCalls).toEqual(["c-orphan"]);
@@ -250,7 +251,7 @@ describe("runReap — orphan pass", () => {
         },
       ],
     });
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.orphansReaped).toBe(1);
     expect(killCalls).toEqual(["c-bare"]);
   });
@@ -260,7 +261,7 @@ describe("runReap — orphan pass", () => {
       containers: [{ Id: "c-no-db", Labels: labels() }],
     });
     // No insertContainer for c-no-db.
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.orphansReaped).toBe(1);
     expect(killCalls).toEqual(["c-no-db"]);
   });
@@ -270,14 +271,14 @@ describe("runReap — orphan pass", () => {
       containers: [{ Id: "c-good", Labels: labels() }],
     });
     await insertContainer({ dockerId: "c-good", ttlMs: 60_000, status: "running" });
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.orphansReaped).toBe(0);
     expect(killCalls).toEqual([]);
   });
 
   it("marks the DB row reaped when an orphan with a stale-instance row is killed", async () => {
-    const deadInstance = await store.insertInstance({ host: "h", pid: 99 });
-    await store.closeInstance(deadInstance.id);
+    const deadInstance = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 99 }));
+    await tx((trx) => store.closeInstance(trx, deadInstance.id));
     const cogmoId = await insertContainer({
       dockerId: "c-stale-row",
       ttlMs: 60_000,
@@ -292,9 +293,9 @@ describe("runReap — orphan pass", () => {
         },
       ],
     });
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.orphansReaped).toBe(1);
-    expect((await store.getContainer(cogmoId))?.status).toBe("reaped");
+    expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("reaped");
   });
 });
 
@@ -306,9 +307,9 @@ describe("runReap — stale DB pass", () => {
       status: "running",
     });
     const { docker } = fakeDocker({ containers: [] });
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.staleMarked).toBe(1);
-    expect((await store.getContainer(cogmoId))?.status).toBe("exited");
+    expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("exited");
   });
 
   it("does not double-count rows the TTL pass just reaped", async () => {
@@ -316,7 +317,7 @@ describe("runReap — stale DB pass", () => {
     const { docker } = fakeDocker({
       containers: [{ Id: "c-double", Labels: labels() }],
     });
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.ttlReaped).toBe(1);
     expect(result.staleMarked).toBe(0);
   });
@@ -324,68 +325,76 @@ describe("runReap — stale DB pass", () => {
 
 describe("runReap — networks + volumes", () => {
   it("reaps expired networks", async () => {
-    const net = await store.insertNetwork({
-      dockerId: "net-old",
-      parentId: null,
-      rootTaskId: TASK_ID,
-      depth: 0,
-      labels: labels(),
-      ttlExpiresAt: new Date(NOW().getTime() - 1000),
-      instanceId,
-    });
+    const net = await tx((trx) =>
+      store.insertNetwork(trx, {
+        dockerId: "net-old",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(NOW().getTime() - 1000),
+        instanceId,
+      }),
+    );
     const { docker, networkRemoveCalls } = fakeDocker();
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.networksReaped).toBe(1);
     expect(networkRemoveCalls).toEqual(["net-old"]);
-    expect((await store.getNetwork(net.id))?.status).toBe("reaped");
+    expect((await tx((trx) => store.getNetwork(trx, net.id)))?.status).toBe("reaped");
   });
 
   it("reaps expired volumes", async () => {
-    const vol = await store.insertVolume({
-      dockerId: "vol-old",
-      parentId: null,
-      rootTaskId: TASK_ID,
-      depth: 0,
-      labels: labels(),
-      ttlExpiresAt: new Date(NOW().getTime() - 1000),
-      instanceId,
-    });
+    const vol = await tx((trx) =>
+      store.insertVolume(trx, {
+        dockerId: "vol-old",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(NOW().getTime() - 1000),
+        instanceId,
+      }),
+    );
     const { docker, volumeRemoveCalls } = fakeDocker();
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.volumesReaped).toBe(1);
     expect(volumeRemoveCalls).toEqual(["vol-old"]);
-    expect((await store.getVolume(vol.id))?.status).toBe("reaped");
+    expect((await tx((trx) => store.getVolume(trx, vol.id)))?.status).toBe("reaped");
   });
 
   it("skips already-reaped networks/volumes (idempotent)", async () => {
-    const net = await store.insertNetwork({
-      dockerId: "net-already-gone",
-      parentId: null,
-      rootTaskId: TASK_ID,
-      depth: 0,
-      labels: labels(),
-      ttlExpiresAt: new Date(NOW().getTime() - 60_000),
-      instanceId,
-    });
-    await store.updateNetworkStatus({ id: net.id, status: "reaped" });
+    const net = await tx((trx) =>
+      store.insertNetwork(trx, {
+        dockerId: "net-already-gone",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(NOW().getTime() - 60_000),
+        instanceId,
+      }),
+    );
+    await tx((trx) => store.updateNetworkStatus(trx, { id: net.id, status: "reaped" }));
     const { docker, networkRemoveCalls } = fakeDocker();
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.networksReaped).toBe(0);
     expect(networkRemoveCalls).toEqual([]);
   });
 
   it("does not reap networks with future TTL", async () => {
-    await store.insertNetwork({
-      dockerId: "net-fresh",
-      parentId: null,
-      rootTaskId: TASK_ID,
-      depth: 0,
-      labels: labels(),
-      ttlExpiresAt: new Date(NOW().getTime() + 60_000),
-      instanceId,
-    });
+    await tx((trx) =>
+      store.insertNetwork(trx, {
+        dockerId: "net-fresh",
+        parentId: null,
+        rootTaskId: TASK_ID,
+        depth: 0,
+        labels: labels(),
+        ttlExpiresAt: new Date(NOW().getTime() + 60_000),
+        instanceId,
+      }),
+    );
     const { docker } = fakeDocker();
-    const result = await runReap({ docker, store, instanceId, now: NOW });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.networksReaped).toBe(0);
   });
 });
@@ -401,13 +410,16 @@ describe("runReap — resilience", () => {
         kill: vi.fn(),
         remove: vi.fn(),
       }),
-      // biome-ignore lint/suspicious/noExplicitAny: stub
       getNetwork: () => ({ remove: vi.fn() }) as any,
-      // biome-ignore lint/suspicious/noExplicitAny: stub
       getVolume: () => ({ remove: vi.fn() }) as any,
     };
-    // biome-ignore lint/suspicious/noExplicitAny: minimal docker stub
-    const result = await runReap({ docker: docker as any, store, instanceId, now: NOW });
+    const result = await runReap({
+      docker: docker as any,
+      store,
+      runInTx: tx,
+      instanceId,
+      now: NOW,
+    });
     // TTL pass still ran (it doesn't depend on listContainers).
     expect(result.ttlReaped).toBe(1);
     // Orphan pass got 0 (listContainers threw, dockerContainers is empty).
@@ -441,16 +453,19 @@ describe("runReap — resilience", () => {
         throw new Error("daemon down");
       }),
       getContainer: () => ({ kill: vi.fn(), remove: vi.fn() }),
-      // biome-ignore lint/suspicious/noExplicitAny: stub
       getNetwork: () => ({ remove: vi.fn() }) as any,
-      // biome-ignore lint/suspicious/noExplicitAny: stub
       getVolume: () => ({ remove: vi.fn() }) as any,
     };
-    // biome-ignore lint/suspicious/noExplicitAny: minimal docker stub
-    const result = await runReap({ docker: docker as any, store, instanceId, now: NOW });
+    const result = await runReap({
+      docker: docker as any,
+      store,
+      runInTx: tx,
+      instanceId,
+      now: NOW,
+    });
     expect(result.staleMarked).toBe(0);
-    expect((await store.getContainer(aliveA))?.status).toBe("running");
-    expect((await store.getContainer(aliveB))?.status).toBe("starting");
+    expect((await tx((trx) => store.getContainer(trx, aliveA)))?.status).toBe("running");
+    expect((await tx((trx) => store.getContainer(trx, aliveB)))?.status).toBe("starting");
   });
 });
 
@@ -487,16 +502,16 @@ describe("runReap — concurrent invocation", () => {
     const idB = await insertContainer({ dockerId: "c-b", ttlMs: -2000, status: "running" });
 
     const [r1, r2] = await Promise.all([
-      runReap({ docker, store, instanceId, now: NOW }),
-      runReap({ docker, store, instanceId, now: NOW }),
+      runReap({ docker, store, runInTx: tx, instanceId, now: NOW }),
+      runReap({ docker, store, runInTx: tx, instanceId, now: NOW }),
     ]);
 
     // Terminal DB state is identical to a single-run terminal state.
     // `updateContainerStatus({status: "reaped"})` is idempotent at the
     // row level — a second write of the same value is a no-op-equivalent
     // — so whichever call commits last lands the same row contents.
-    expect((await store.getContainer(idA))?.status).toBe("reaped");
-    expect((await store.getContainer(idB))?.status).toBe("reaped");
+    expect((await tx((trx) => store.getContainer(trx, idA)))?.status).toBe("reaped");
+    expect((await tx((trx) => store.getContainer(trx, idB)))?.status).toBe("reaped");
 
     // Every TTL-expired container is killed at least once. The exact
     // count may be 1 or 2 per container depending on interleave —
@@ -526,7 +541,7 @@ describe("runReap — concurrent invocation", () => {
       status: "running",
     });
 
-    const r1 = await runReap({ docker, store, instanceId, now: NOW });
+    const r1 = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(r1.ttlReaped).toBe(1);
     expect(killCalls).toEqual(["c-seq"]);
 
@@ -537,13 +552,13 @@ describe("runReap — concurrent invocation", () => {
     // reaped row, which counts as "DB row present + live instance"
     // → not an orphan. The stale-DB pass also skips it because the
     // row is no longer running. Strict no-op.
-    const r2 = await runReap({ docker, store, instanceId, now: NOW });
+    const r2 = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(r2.ttlReaped).toBe(0);
     expect(r2.staleMarked).toBe(0);
     expect(r2.orphansReaped).toBe(0);
     // killCalls is cumulative across both runs; only the first touched
     // the daemon.
     expect(killCalls).toEqual(["c-seq"]);
-    expect((await store.getContainer(cogmoId))?.status).toBe("reaped");
+    expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("reaped");
   });
 });
