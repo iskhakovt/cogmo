@@ -149,15 +149,8 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
       },
       autoStopInterval,
       resources: resourcesFromLimits(spec.resourceLimits),
-      // Process-level env injected at sandbox-create time. Today the
-      // only consumer is coding-delegation's `CLAUDE_CODE_OAUTH_TOKEN`
-      // (see PR #174 / `design/coding-delegation.md` → Subscription
-      // Auth); skills tier-2 and any other future caller benefit
-      // automatically. `envVars` is Daytona's name for the same
-      // concept; `Record<string,string>` shape matches both sides.
-      // Spread conditionally so the SDK falls back to image defaults
-      // when no env is set (matches LocalDocker's `omit Env when
-      // absent` invariant).
+      // Empty / absent env must NOT clobber the image's defaults; only
+      // spread `envVars` when populated.
       ...(spec.env && Object.keys(spec.env).length > 0 && { envVars: { ...spec.env } }),
     });
 

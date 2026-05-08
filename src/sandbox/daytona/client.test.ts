@@ -129,12 +129,7 @@ describe("DaytonaSandboxClient", () => {
       expect(call.autoStopInterval).toBe(1);
     });
 
-    it("threads spec.env into Daytona's `envVars` field (subscription token / etc.)", async () => {
-      // Mirrors the LocalDocker `HostConfig.Env` test in
-      // `supervisor.test.ts` (added in PR #174). Coding-delegation
-      // passes `CLAUDE_CODE_OAUTH_TOKEN` here so `claude -p` can
-      // authenticate against the user's Max/Pro subscription —
-      // the contract must match across backends.
+    it("threads spec.env into Daytona's `envVars` field", async () => {
       daytonaCalls.create.mockResolvedValue(
         fakeSandbox({ id: "sb-env", state: SandboxState.STARTED }),
       );
@@ -153,9 +148,6 @@ describe("DaytonaSandboxClient", () => {
     });
 
     it("omits envVars entirely when spec.env is absent", async () => {
-      // Symmetric to LocalDocker's "omit HostConfig.Env when absent"
-      // invariant — empty/missing env should let the image's own env
-      // pass through, never get clobbered with `{}`.
       daytonaCalls.create.mockResolvedValue(
         fakeSandbox({ id: "sb-noenv", state: SandboxState.STARTED }),
       );
