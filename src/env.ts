@@ -85,8 +85,12 @@ export const env = createEnv({
      * before upload using a key derived from `COGMO_MASTER_KEY`. The
      * bucket then only sees ciphertext — useful when the bucket is
      * provider-managed (Cloudflare R2, public-cloud S3) and the operator
-     * doesn't want the storage provider readable. Cost: master-key
-     * rotation requires re-encrypting every object, and the bucket loses
+     * doesn't want the storage provider readable. Reads transparently
+     * fall back to plaintext when the 4-byte Cogmo magic prefix is
+     * absent, so flipping the flag on a populated bucket Just Works:
+     * old objects stay readable, new uploads are encrypted, the bucket
+     * converges over time. Cost: master-key rotation still requires
+     * re-encrypting every existing object, and the bucket loses
      * direct-browser-serve. Off by default. Same `"true" | "1"` semantics
      * as `INNGEST_DEV` — see that comment for why we don't `z.coerce`.
      */

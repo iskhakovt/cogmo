@@ -1,29 +1,52 @@
 /**
  * Client-side encryption wrapper around `AttachmentStore`.
  *
- * Wraps `upload` / `download` with AES-256-GCM so the underlying S3 /
- * R2 bucket only ever sees ciphertext. The key is derived from
- * `COGMO_MASTER_KEY` via HKDF (purpose `cogmo/s3-attachments/v1`),
- * mirroring the secrets-at-rest pattern.
+ * Wraps `upload` with AES-256-GCM so newly-stored objects are
+ * ciphertext. The key is derived from `COGMO_MASTER_KEY` via HKDF
+ * (purpose `cogmo/s3-attachments/v1`), mirroring the secrets-at-rest
+ * pattern.
  *
  * Object body layout (single self-contained blob):
- *   [version (1B)] [nonce (12B)] [ciphertext + GCM tag]
  *
- * The version byte lets a future format change roll forward without a
- * re-encryption migration: the decoder fans out on the leading byte and
- * picks the matching cipher / nonce / tag layout. v1 is the only format
- * today.
+ *   [magic 4B: 0xC0 0x6C 0x6D 0x6F] [version 2B BE] [nonce 12B] [ciphertext + GCM tag]
+ *
+ * The 4-byte magic — `0xC0` (an invalid UTF-8 lead byte, never a valid
+ * first byte of UTF-8 text) followed by `lmo` — distinguishes encrypted
+ * blobs from objects uploaded before the flag was flipped. `download`
+ * returns the raw bytes when the magic prefix is missing, so turning the
+ * flag on a populated bucket is a no-op for reads: pre-flag plaintext
+ * stays readable, new uploads are encrypted, the bucket converges over
+ * time. No flush, no sweep script. Collision probability for arbitrary
+ * plaintext is 1 in 2^32; for the file formats this app actually handles
+ * (JPEG / PNG / GIF / WebP / PDF / OGG / UTF-8 text) it's zero — none
+ * starts with `0xC0`.
+ *
+ * The 2-byte big-endian version field lets future format changes roll
+ * forward without a re-encryption migration: `decryptBuffer` fans out on
+ * the version and picks the matching cipher / nonce / tag layout. v1 is
+ * the only version today.
+ *
+ * The transparent fallback is safe at this threat model — confidentiality
+ * of *new* uploads against the storage provider, not integrity of all
+ * reads against an attacker who already controls the bucket. We don't
+ * end-to-end-authenticate attachments today (no DB-side checksums), so
+ * accepting an unauthenticated plaintext object on read doesn't weaken
+ * any property the encrypted-write path was protecting.
  *
  * See `design/infrastructure.md` → Secrets and the `S3_CLIENT_ENCRYPT`
- * todo for the threat model and trade-offs.
+ * env-var doc for the threat model and trade-offs.
  */
 
 import { decryptBytes, encryptBytes } from "../secrets/encryption.js";
 import type { AttachmentStore } from "./attachment-store.js";
 
-const VERSION_V1 = 0x01;
+const MAGIC = Buffer.from([0xc0, 0x6c, 0x6d, 0x6f]);
+const MAGIC_LENGTH = MAGIC.length;
+const VERSION_LENGTH = 2;
 const NONCE_LENGTH = 12;
-const HEADER_LENGTH = 1 + NONCE_LENGTH;
+const HEADER_LENGTH = MAGIC_LENGTH + VERSION_LENGTH + NONCE_LENGTH;
+
+const VERSION_V1 = 1;
 
 /**
  * Wrap an `AttachmentStore` so bytes are encrypted before reaching the
@@ -42,37 +65,52 @@ export function wrapAttachmentStoreWithEncryption(
 
     async download(path: string): Promise<Buffer> {
       const blob = await inner.download(path);
-      return decryptBuffer(blob, key);
+      return isEncrypted(blob) ? decryptBuffer(blob, key) : blob;
     },
   };
 }
 
 /**
- * Format an encrypted attachment blob: `[ver][nonce][ciphertext+tag]`.
+ * Whether `blob` carries the Cogmo-encrypted-attachment magic prefix.
+ * Magic-only — does not validate the version, nonce, or ciphertext.
+ * Version dispatch is `decryptBuffer`'s job.
+ */
+export function isEncrypted(blob: Buffer): boolean {
+  return blob.length >= MAGIC_LENGTH && blob.subarray(0, MAGIC_LENGTH).equals(MAGIC);
+}
+
+/**
+ * Format a v1 encrypted attachment blob:
+ *   [magic 4B] [version 2B BE] [nonce 12B] [ciphertext + GCM tag]
  * Exported for tests; production callers use the wrapper.
  */
 export function encryptBuffer(plaintext: Buffer, key: Uint8Array): Buffer {
   const { ciphertext, nonce } = encryptBytes(key, new Uint8Array(plaintext));
   const out = Buffer.allocUnsafe(HEADER_LENGTH + ciphertext.length);
-  out[0] = VERSION_V1;
-  out.set(nonce, 1);
+  MAGIC.copy(out, 0);
+  out.writeUInt16BE(VERSION_V1, MAGIC_LENGTH);
+  out.set(nonce, MAGIC_LENGTH + VERSION_LENGTH);
   out.set(ciphertext, HEADER_LENGTH);
   return out;
 }
 
 /**
- * Parse and decrypt an attachment blob. Throws on unknown version, short
- * blob, or auth-tag failure — corrupt input never returns partial data.
+ * Parse and decrypt an attachment blob. Throws on missing magic, short
+ * blob, unknown version, or auth-tag failure — corrupt input never
+ * returns partial data.
  */
 export function decryptBuffer(blob: Buffer, key: Uint8Array): Buffer {
   if (blob.length < HEADER_LENGTH) {
     throw new Error(`encrypted attachment too short: ${blob.length} bytes`);
   }
-  const version = blob[0];
+  if (!isEncrypted(blob)) {
+    throw new Error("encrypted attachment missing magic prefix");
+  }
+  const version = blob.readUInt16BE(MAGIC_LENGTH);
   if (version !== VERSION_V1) {
     throw new Error(`unknown encrypted-attachment version: ${version}`);
   }
-  const nonce = new Uint8Array(blob.subarray(1, HEADER_LENGTH));
+  const nonce = new Uint8Array(blob.subarray(MAGIC_LENGTH + VERSION_LENGTH, HEADER_LENGTH));
   const ciphertext = new Uint8Array(blob.subarray(HEADER_LENGTH));
   return Buffer.from(decryptBytes(key, ciphertext, nonce));
 }
