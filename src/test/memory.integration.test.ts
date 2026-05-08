@@ -43,6 +43,15 @@ describe("hindsight memory", () => {
   // recall through a profile-style tag_groups filter scoped to one of
   // them, assert the other compartment's memories don't surface. Mirrors
   // the shape `applyScopeToRecall` produces in src/agent/service.ts.
+  //
+  // Test design: query semantically targets PERSONAL content and runs
+  // twice — once under work scope (expect no personal substrings to
+  // leak through) and once under personal scope (expect them to
+  // surface). A work-specific query would let a broken filter pass
+  // silently because semantic ranking would deprioritize the personal
+  // memories below the recall threshold even with no filter at all.
+  // Targeting personal content forces the filter to be the only thing
+  // separating signal from leakage.
   it("compartment isolation via tag_groups recall", { timeout: 90_000 }, async () => {
     await memory.retainBatch(COMPARTMENT_BANK_ID, [
       {
@@ -72,24 +81,46 @@ describe("hindsight memory", () => {
         ],
       },
     ];
+    const personalScope: TagGroup[] = [
+      {
+        and: [
+          { tags: ["compartment:personal"], match: "any_strict" },
+          { tags: ["trust:first-party"], match: "any_strict" },
+        ],
+      },
+    ];
 
-    // Poll the scoped recall — Hindsight processes retainBatch async,
-    // so memories materialize a second or two after the call returns.
-    let scoped: { memories: { content: string }[] } = { memories: [] };
+    // The query targets a personal-only fact (the dog's name). Under
+    // a working filter, work scope returns nothing about Pepper and
+    // personal scope returns the hiking/Pepper memory. Under a broken
+    // filter, the work-scoped call leaks Pepper through; under a
+    // null-on-everything filter, the personal-scoped call returns
+    // empty — both directions are caught.
+    const personalQuery = "what is the user's dog called?";
+
+    // Poll the personal-scoped recall first — Hindsight processes
+    // retainBatch async, so we wait for at least one memory to
+    // materialise before asserting on either scope.
+    let personal: { memories: { content: string }[] } = { memories: [] };
     for (let attempt = 0; attempt < 60; attempt++) {
       await new Promise((r) => setTimeout(r, 1000));
-      scoped = await memory.recall(COMPARTMENT_BANK_ID, "what does the user do for a living?", {
-        tagGroups: workScope,
+      personal = await memory.recall(COMPARTMENT_BANK_ID, personalQuery, {
+        tagGroups: personalScope,
       });
-      if (scoped.memories.length > 0) break;
+      if (personal.memories.length > 0) break;
     }
 
-    expect(scoped.memories.length).toBeGreaterThan(0);
+    expect(personal.memories.length).toBeGreaterThan(0);
+    const personalHaystack = personal.memories.map((m) => m.content.toLowerCase()).join("\n");
+    expect(personalHaystack).toMatch(/pepper|hiking|retriever/);
 
-    const haystack = scoped.memories.map((m) => m.content.toLowerCase()).join("\n");
-    // At least one of the work-tagged retentions surfaces under the work scope.
-    expect(haystack).toMatch(/engineer|acme|payments-service/);
-    // None of the personal-tagged retentions leak across the ACL boundary.
-    expect(haystack).not.toMatch(/pepper|hiking|kreuzberg|berlin|apartment/);
+    // Same query, work scope. The dog memory is personal-tagged, so
+    // a working filter excludes it entirely. Any leakage of
+    // pepper/hiking/retriever would mean the tag_groups ACL is broken.
+    const work = await memory.recall(COMPARTMENT_BANK_ID, personalQuery, {
+      tagGroups: workScope,
+    });
+    const workHaystack = work.memories.map((m) => m.content.toLowerCase()).join("\n");
+    expect(workHaystack).not.toMatch(/pepper|hiking|retriever|kreuzberg|berlin|apartment/);
   });
 });
