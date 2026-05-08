@@ -31,10 +31,10 @@ export async function seed(): Promise<void> {
     logger.info("migrations applied");
 
     const tx = transactor(db);
-    const agentStore = new DrizzleAgentStore(tx);
-    const transportStore = new DrizzleTransportStore(tx);
+    const agentStore = new DrizzleAgentStore();
+    const transportStore = new DrizzleTransportStore();
 
-    await seedDefaults(agentStore, transportStore);
+    await seedDefaults(tx, agentStore, transportStore);
     logger.info("seed complete");
   } finally {
     await db.$client.end();

@@ -43,6 +43,7 @@ const MODEL_ANTHROPIC = tag("anthropic-test-model");
 const MODEL_XAI = tag("openai-test-model");
 
 let sql: ReturnType<typeof postgres>;
+let tx: ReturnType<typeof transactor>;
 let agentStore: DrizzleAgentStore;
 let secretsStore: DrizzleSecretsStore;
 let llmockBaseUrl: string;
@@ -52,8 +53,8 @@ let openaiProviderId: string;
 beforeAll(async () => {
   sql = postgres(inject("databaseUrl"), { max: 4 });
   const db = drizzle(sql, { schema });
-  const tx = transactor(db);
-  agentStore = new DrizzleAgentStore(tx);
+  tx = transactor(db);
+  agentStore = new DrizzleAgentStore();
   // Read the master key from `process.env` (set by `test/integration-setup.ts`
   // and propagated to test workers). Hardcoding it here would silently break
   // decryption if integration-setup ever rotated the key.
@@ -62,55 +63,66 @@ beforeAll(async () => {
     throw new Error("COGMO_MASTER_KEY missing — should be set by integration-setup.ts");
   }
   secretsStore = new DrizzleSecretsStore(
-    tx,
     deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1"),
   );
   llmockBaseUrl = inject("llmockBaseUrl");
 
   // Two secrets — distinct so we'd notice if the wrong one got decrypted.
-  const anthropicSecret = await secretsStore.putSecret({
-    name: tag("anthropic-key"),
-    plaintext: "test-anthropic-key",
-  });
-  const openaiSecret = await secretsStore.putSecret({
-    name: tag("xai-key"),
-    plaintext: "test-xai-key",
-  });
+  const anthropicSecret = await tx((trx) =>
+    secretsStore.putSecret(trx, {
+      name: tag("anthropic-key"),
+      plaintext: "test-anthropic-key",
+    }),
+  );
+  const openaiSecret = await tx((trx) =>
+    secretsStore.putSecret(trx, {
+      name: tag("xai-key"),
+      plaintext: "test-xai-key",
+    }),
+  );
 
   // Two providers, both pointing at llmock (which serves both Anthropic
   // and OpenAI-compatible endpoints from one process). Different secrets
   // and types so a wrong-adapter construction is observable.
-  const anthropic = await agentStore.createProvider({
-    name: tag("anthropic-direct"),
-    type: "anthropic",
-    baseUrl: llmockBaseUrl,
-    secretId: anthropicSecret.id,
-    attrs: {},
-  });
-  const openai = await agentStore.createProvider({
-    name: tag("xai-grok"),
-    type: "openai_compatible",
-    baseUrl: `${llmockBaseUrl}/v1`,
-    secretId: openaiSecret.id,
-    attrs: { promptCaching: false },
-  });
+  const anthropic = await tx((trx) =>
+    agentStore.createProvider(trx, {
+      name: tag("anthropic-direct"),
+      type: "anthropic",
+      baseUrl: llmockBaseUrl,
+      secretId: anthropicSecret.id,
+      attrs: {},
+    }),
+  );
+  const openai = await tx((trx) =>
+    agentStore.createProvider(trx, {
+      name: tag("xai-grok"),
+      type: "openai_compatible",
+      baseUrl: `${llmockBaseUrl}/v1`,
+      secretId: openaiSecret.id,
+      attrs: { promptCaching: false },
+    }),
+  );
   anthropicProviderId = anthropic.id;
   openaiProviderId = openai.id;
 
   // Route each model to its provider. Position 0 = primary (no fallback
   // chain — single-row FallbackLlmProvider is a no-op pass-through).
-  await agentStore.addModelProvider({
-    model: MODEL_ANTHROPIC,
-    providerId: anthropicProviderId,
-    position: 0,
-    userSelectable: true,
-  });
-  await agentStore.addModelProvider({
-    model: MODEL_XAI,
-    providerId: openaiProviderId,
-    position: 0,
-    userSelectable: true,
-  });
+  await tx((trx) =>
+    agentStore.addModelProvider(trx, {
+      model: MODEL_ANTHROPIC,
+      providerId: anthropicProviderId,
+      position: 0,
+      userSelectable: true,
+    }),
+  );
+  await tx((trx) =>
+    agentStore.addModelProvider(trx, {
+      model: MODEL_XAI,
+      providerId: openaiProviderId,
+      position: 0,
+      userSelectable: true,
+    }),
+  );
 });
 
 afterAll(async () => {
@@ -119,14 +131,14 @@ afterAll(async () => {
   // model_providers (FK CASCADE on the schema), and `deleteSecret` would
   // be ideal but the DrizzleSecretsStore interface above doesn't expose
   // it; the rows leak harmlessly behind their suite-tagged names.
-  if (anthropicProviderId) await agentStore.deleteProvider(anthropicProviderId);
-  if (openaiProviderId) await agentStore.deleteProvider(openaiProviderId);
+  if (anthropicProviderId) await tx((trx) => agentStore.deleteProvider(trx, anthropicProviderId));
+  if (openaiProviderId) await tx((trx) => agentStore.deleteProvider(trx, openaiProviderId));
   await sql.end();
 });
 
 describe("createDbProviderResolver — DB-backed cross-provider routing", () => {
   it("resolves the anthropic model to an Anthropic adapter", async () => {
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
     const provider = await resolve(MODEL_ANTHROPIC);
     expect(provider).toBeInstanceOf(FallbackLlmProvider);
     // Single-row chain: FallbackLlmProvider inherits the inner provider's
@@ -135,7 +147,7 @@ describe("createDbProviderResolver — DB-backed cross-provider routing", () => 
   });
 
   it("resolves the xAI model to an OpenAI-compatible adapter", async () => {
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
     const provider = await resolve(MODEL_XAI);
     expect(provider).toBeInstanceOf(FallbackLlmProvider);
     // OpenAICompatibleProvider's name comes from its constructor arg, which
@@ -144,7 +156,7 @@ describe("createDbProviderResolver — DB-backed cross-provider routing", () => 
   });
 
   it("returns different providers for different models in the same process", async () => {
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
     const a = await resolve(MODEL_ANTHROPIC);
     const b = await resolve(MODEL_XAI);
     // The whole point of per-turn dispatch: two models, two adapter
@@ -155,7 +167,7 @@ describe("createDbProviderResolver — DB-backed cross-provider routing", () => 
   });
 
   it("memoizes per model — second resolution returns the same instance", async () => {
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
     const first = await resolve(MODEL_ANTHROPIC);
     const second = await resolve(MODEL_ANTHROPIC);
     expect(first).toBe(second);
@@ -171,7 +183,7 @@ describe("createDbProviderResolver — DB-backed cross-provider routing", () => 
   // Successful round-trip + a recognisable response is the proof.
 
   it("anthropic adapter completes a real chat round-trip via llmock /v1/messages", async () => {
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
     const provider = await resolve(MODEL_ANTHROPIC);
     const response = await provider.chat({
       model: MODEL_ANTHROPIC,
@@ -195,7 +207,7 @@ describe("createDbProviderResolver — DB-backed cross-provider routing", () => 
   });
 
   it("openai-compatible adapter completes a real chat round-trip via llmock /v1/chat/completions", async () => {
-    const resolve = createDbProviderResolver({ agentStore, secretsStore });
+    const resolve = createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
     const provider = await resolve(MODEL_XAI);
     const response = await provider.chat({
       model: MODEL_XAI,

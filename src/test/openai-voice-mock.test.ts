@@ -144,7 +144,6 @@ describe("createOpenAIVoiceFetch", () => {
     const fetch = createOpenAIVoiceFetch({ mode: "replay", fixturePath: fixtureDir });
     const resp = await fetch("https://api.openai.com/v1/audio/speech", {
       method: "POST",
-      // biome-ignore lint/suspicious/noExplicitAny: testing invalid body type
       body: new Blob(["x"]) as any,
     });
     expect(resp.status).toBe(500);

@@ -11,6 +11,7 @@
 import { err, ok, type Result } from "neverthrow";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ProviderAttrs } from "../agent/store/schema.js";
+import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import {
   DEFAULT_GITHUB_IDENTITY_NAME,
@@ -52,6 +53,7 @@ export const defaultValidators: Validators = {
 };
 
 export interface PersistDeps {
+  runInTx: Transactor;
   agentStore: AgentStore;
   transportStore: TransportStore;
   secretsStore: SecretsStore;
@@ -121,7 +123,7 @@ export async function persistNonInteractive(
 ): Promise<void> {
   const { answers, telegramBotUsername, githubLogin, githubUserId } = validated;
 
-  const { userId } = await seedDefaults(deps.agentStore, deps.transportStore);
+  const { userId } = await seedDefaults(deps.runInTx, deps.agentStore, deps.transportStore);
 
   await persistProvider(deps, answers);
 
@@ -130,20 +132,26 @@ export async function persistNonInteractive(
   }
 
   if (answers.tavilyApiKey) {
-    await deps.secretsStore.putSecret({
-      name: "tavily_api_key",
-      plaintext: answers.tavilyApiKey,
-      description: "Tavily web search",
-    });
-    await deps.secretsStore.markValidated("tavily_api_key");
+    const tavilyApiKey = answers.tavilyApiKey;
+    await deps.runInTx((tx) =>
+      deps.secretsStore.putSecret(tx, {
+        name: "tavily_api_key",
+        plaintext: tavilyApiKey,
+        description: "Tavily web search",
+      }),
+    );
+    await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, "tavily_api_key"));
   }
 
   if (answers.falApiKey) {
-    await deps.secretsStore.putSecret({
-      name: "fal_api_key",
-      plaintext: answers.falApiKey,
-      description: "fal.ai image generation",
-    });
+    const falApiKey = answers.falApiKey;
+    await deps.runInTx((tx) =>
+      deps.secretsStore.putSecret(tx, {
+        name: "fal_api_key",
+        plaintext: falApiKey,
+        description: "fal.ai image generation",
+      }),
+    );
   }
 
   let generatedSshPublicKey: string | undefined;
@@ -296,41 +304,47 @@ async function persistProvider(deps: PersistDeps, answers: NonInteractiveAnswers
   // Idempotent: re-running with the same provider name replaces the old row.
   // Model_providers cascade-deletes via the FK. The interactive wizard lets
   // the user choose Keep/Add/Replace; non-interactive converges by replacing.
-  const existing = await deps.agentStore.listProviders();
+  const existing = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
   for (const prov of existing.filter((p) => p.name === providerName)) {
-    await deps.agentStore.deleteProvider(prov.id);
+    await deps.runInTx((tx) => deps.agentStore.deleteProvider(tx, prov.id));
   }
 
-  const { id: secretId } = await deps.secretsStore.putSecret({
-    name: `${providerName}_api_key`,
-    plaintext: answers.llmApiKey,
-    description: `API key for ${providerName}`,
-  });
-  await deps.secretsStore.markValidated(`${providerName}_api_key`);
+  const { id: secretId } = await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: `${providerName}_api_key`,
+      plaintext: answers.llmApiKey,
+      description: `API key for ${providerName}`,
+    }),
+  );
+  await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, `${providerName}_api_key`));
 
   const attrs: ProviderAttrs = {};
   if (answers.llmProviderType === "openrouter") {
     attrs.promptCaching = true;
   }
 
-  const { id: providerId } = await deps.agentStore.createProvider({
-    name: providerName,
-    type: adapterType,
-    ...(baseUrl && { baseUrl }),
-    secretId,
-    attrs,
-  });
+  const { id: providerId } = await deps.runInTx((tx) =>
+    deps.agentStore.createProvider(tx, {
+      name: providerName,
+      type: adapterType,
+      ...(baseUrl && { baseUrl }),
+      secretId,
+      attrs,
+    }),
+  );
 
-  const defaultProfile = await deps.agentStore.getDefaultProfile();
-  if (!defaultProfile) return;
-  const profile = await deps.agentStore.getProfile(defaultProfile.id);
-  if (!profile) return;
-  const nextPosition = await deps.agentStore.getNextModelProviderPosition(profile.model);
-  await deps.agentStore.addModelProvider({
-    model: profile.model,
-    providerId,
-    position: nextPosition,
-    userSelectable: true,
+  await deps.runInTx(async (tx) => {
+    const defaultProfile = await deps.agentStore.getDefaultProfile(tx);
+    if (!defaultProfile) return;
+    const profile = await deps.agentStore.getProfile(tx, defaultProfile.id);
+    if (!profile) return;
+    const nextPosition = await deps.agentStore.getNextModelProviderPosition(tx, profile.model);
+    await deps.agentStore.addModelProvider(tx, {
+      model: profile.model,
+      providerId,
+      position: nextPosition,
+      userSelectable: true,
+    });
   });
 }
 
@@ -347,36 +361,42 @@ async function persistTelegram(
     throw new Error("persistTelegram called without token + allowedUsers");
   }
 
-  const existing = await deps.transportStore.getChannelByType("telegram");
+  const existing = await deps.runInTx((tx) => deps.transportStore.getChannelByType(tx, "telegram"));
   if (existing) {
     // Non-interactive replaces existing — the caller is expected to have
     // used --reset channels if they wanted a clean slate, but re-running
     // with the same config should still converge.
-    await deps.transportStore.removeChannel(existing.id);
+    await deps.runInTx((tx) => deps.transportStore.removeChannel(tx, existing.id));
   }
 
   const tokenSecretName = "telegram_bot_token";
-  await deps.secretsStore.putSecret({
-    name: tokenSecretName,
-    plaintext: token,
-    description: botUsername ? `Telegram bot token (@${botUsername})` : "Telegram bot token",
-  });
-  await deps.secretsStore.markValidated(tokenSecretName);
+  await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: tokenSecretName,
+      plaintext: token,
+      description: botUsername ? `Telegram bot token (@${botUsername})` : "Telegram bot token",
+    }),
+  );
+  await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, tokenSecretName));
 
-  const { id: channelId } = await deps.transportStore.createChannel({
-    type: "telegram",
-    credentials: { tokenSecretName },
-    identityMode: "mapped",
-  });
+  const { id: channelId } = await deps.runInTx((tx) =>
+    deps.transportStore.createChannel(tx, {
+      type: "telegram",
+      credentials: { tokenSecretName },
+      identityMode: "mapped",
+    }),
+  );
 
-  await seedChannelRules(deps.agentStore, "telegram");
+  await seedChannelRules(deps.runInTx, deps.agentStore, "telegram");
 
   for (const telegramUserId of allowed) {
-    await deps.transportStore.createIdentity({
-      userId,
-      channelId,
-      platformHandle: telegramUserId,
-    });
+    await deps.runInTx((tx) =>
+      deps.transportStore.createIdentity(tx, {
+        userId,
+        channelId,
+        platformHandle: telegramUserId,
+      }),
+    );
   }
 }
 
@@ -422,12 +442,14 @@ async function persistGitHubIdentity(
   };
 
   const secretName = gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME);
-  await deps.secretsStore.putSecret({
-    name: secretName,
-    plaintext: serializeGitHubIdentity(identity),
-    description: `GitHub identity (@${githubLogin ?? "unknown"})`,
-  });
-  await deps.secretsStore.markValidated(secretName);
+  await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: secretName,
+      plaintext: serializeGitHubIdentity(identity),
+      description: `GitHub identity (@${githubLogin ?? "unknown"})`,
+    }),
+  );
+  await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, secretName));
 
   return keys.publicKey;
 }

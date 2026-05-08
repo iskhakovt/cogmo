@@ -19,6 +19,7 @@
  */
 
 import * as R from "remeda";
+import type { Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
 import { logger } from "../../logger.js";
@@ -43,6 +44,7 @@ export interface ClassifyDeps {
 }
 
 export interface DrainPendingDeps extends ClassifyDeps {
+  runInTx: Transactor;
   memory: Pick<MemoryProvider, "retainBatch">;
   store: Pick<AgentStore, "getPendingMemories" | "deletePendingMemories">;
 }
@@ -108,7 +110,7 @@ export async function drainPendingMemories(
   userId: string,
   deps: DrainPendingDeps,
 ): Promise<DrainPendingResult> {
-  const pending = await deps.store.getPendingMemories(userId);
+  const pending = await deps.runInTx((tx) => deps.store.getPendingMemories(tx, userId));
   if (pending.length === 0) {
     logger.debug({ userId }, "no pending memories to drain");
     return { drained: 0, byNetwork: {} };
@@ -126,7 +128,12 @@ export async function drainPendingMemories(
 
   const items = buildRetainItems(successful);
   await deps.memory.retainBatch(userId, items);
-  await deps.store.deletePendingMemories(successful.map((c) => c.id));
+  await deps.runInTx((tx) =>
+    deps.store.deletePendingMemories(
+      tx,
+      successful.map((c) => c.id),
+    ),
+  );
 
   logger.info({ drained: successful.length, byNetwork, userId }, "pending memory drain complete");
 

@@ -55,7 +55,6 @@ import { runCodingVerify, type VerifyOrchestratorDeps } from "./verify-orchestra
 
 const execFileP = promisify(execFile);
 
-// biome-ignore lint/suspicious/noExplicitAny: test shim mirroring step.run's signature
 const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
 
 // --- Gitea bootstrap ─────────────────────────────────────────────────
@@ -324,7 +323,7 @@ function streamFromBuffer(buf: Buffer): Readable {
 
 class FakeSecretsStore {
   #values = new Map<string, string>();
-  async getSecret(name: string): Promise<string | null> {
+  async getSecret(_tx: unknown, name: string): Promise<string | null> {
     return this.#values.get(name) ?? null;
   }
   set(name: string, value: string): void {
@@ -341,7 +340,7 @@ let store: DrizzleCodingStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleCodingStore(tx);
+  store = new DrizzleCodingStore();
   ({ url: giteaUrl, pat: giteaPat } = await startGitea());
 }, 120_000);
 
@@ -419,39 +418,45 @@ async function seedTask(opts?: {
   remoteUrl?: string;
   verifyCommand?: string;
 }): Promise<{ taskId: string; branch: string }> {
-  const repoRow = await store.insertRepo({
-    name: "fixture",
-    localPath: worktreePath,
-    defaultBranch: GITEA_DEFAULT_BRANCH,
-    remoteUrl: opts?.remoteUrl ?? `${giteaUrl}/${GITEA_USER}/${GITEA_REPO}.git`,
-    devcontainer: null,
-    allowedBackends: ["claude"] as ReadonlyArray<CodingBackend>,
-    verifyCommand: opts?.verifyCommand ?? "true",
-    taskTokenBudget: 200_000,
-    taskWallTimeSeconds: 1800,
-    maxConcurrentTasks: 1,
-    verifyTimeoutSeconds: 30,
-  });
+  const repoRow = await tx((trx) =>
+    store.insertRepo(trx, {
+      name: "fixture",
+      localPath: worktreePath,
+      defaultBranch: GITEA_DEFAULT_BRANCH,
+      remoteUrl: opts?.remoteUrl ?? `${giteaUrl}/${GITEA_USER}/${GITEA_REPO}.git`,
+      devcontainer: null,
+      allowedBackends: ["claude"] as ReadonlyArray<CodingBackend>,
+      verifyCommand: opts?.verifyCommand ?? "true",
+      taskTokenBudget: 200_000,
+      taskWallTimeSeconds: 1800,
+      maxConcurrentTasks: 1,
+      verifyTimeoutSeconds: 30,
+    }),
+  );
 
-  const task = await store.insertTask({
-    repoId: repoRow.id,
-    goal: "integration test fixture goal",
-    triggerSource: "user",
-    backend: "claude",
-    allowPrivilegedRunc: false,
-  });
+  const task = await tx((trx) =>
+    store.insertTask(trx, {
+      repoId: repoRow.id,
+      goal: "integration test fixture goal",
+      triggerSource: "user",
+      backend: "claude",
+      allowPrivilegedRunc: false,
+    }),
+  );
 
   // Branch derived from the first 8 chars of the task UUID — orchestrator
   // doesn't read this, just uses worktreeAssignment.branch directly.
   const branch = `cogmo/${task.id.slice(0, 8)}`;
   await execFileP("git", ["-C", worktreePath, "checkout", "-b", branch]);
 
-  await store.setTaskWorktreeAssignment(task.id, {
-    branch,
-    worktreePath,
-  });
-  await store.setTaskPlan(task.id, "1. add a file\n2. verify");
-  await store.updateTaskStatus({ id: task.id, status: "pending_verify" });
+  await tx((trx) =>
+    store.setTaskWorktreeAssignment(trx, task.id, {
+      branch,
+      worktreePath,
+    }),
+  );
+  await tx((trx) => store.setTaskPlan(trx, task.id, "1. add a file\n2. verify"));
+  await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "pending_verify" }));
 
   return { taskId: task.id, branch };
 }
@@ -462,6 +467,7 @@ function makeDeps(opts: {
 }): VerifyOrchestratorDeps {
   const { sandbox } = fakeSandbox({ worktreePath });
   return {
+    runInTx: tx,
     store,
     sandbox,
     secretsStore: secrets as unknown as SecretsStore,
@@ -517,7 +523,7 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
     expect(capture[0]?.body.title).toMatch(/integration test fixture goal/);
 
     // pr_metadata persisted with the canned mock URL + number.
-    const reloaded = await store.getTask(taskId);
+    const reloaded = await tx((trx) => store.getTask(trx, taskId));
     expect(reloaded?.status).toBe("pr_open");
     expect(reloaded?.prMetadata).toMatchObject({
       url: "https://github.example/owner/repo/pull/1",

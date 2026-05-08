@@ -76,7 +76,6 @@ describe("delegate_coding tool", () => {
       {
         goal: "refactor steering rules to support per-channel scoping",
         repo: "cogmo",
-        // biome-ignore lint/suspicious/noExplicitAny: intentionally invalid extra input
         triggerSource: "evolution" as any,
       },
       service({ delegate }),

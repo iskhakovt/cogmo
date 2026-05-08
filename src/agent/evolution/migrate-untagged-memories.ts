@@ -18,6 +18,7 @@
  */
 
 import { z } from "zod";
+import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import type { AgentStore } from "../store/index.js";
 
@@ -48,6 +49,7 @@ export interface MigrationDeps {
   ) => Promise<ListMemoriesPage>;
   /** Wipe every memory in the bank, preserving the bank profile. */
   clearBankMemories: (bankId: string) => Promise<void>;
+  runInTx: Transactor;
   agentStore: Pick<AgentStore, "bulkStagePendingMemories">;
   /** Persist a pre-clear snapshot. Must succeed before staging or clear runs. */
   writeBackup: (rows: ReadonlyArray<RawBankMemory>) => Promise<void>;
@@ -73,13 +75,16 @@ export async function migrateUntaggedMemories(
   await deps.writeBackup(rows);
 
   logger.info({ bankId, count: rows.length }, "migration: staging into pending_memories");
-  await deps.agentStore.bulkStagePendingMemories(
-    rows.map((row) => ({
-      userId: bankId,
-      content: row.content,
-      ...(row.context !== null && { context: row.context }),
-      source: "migration",
-    })),
+  await deps.runInTx((tx) =>
+    deps.agentStore.bulkStagePendingMemories(
+      tx,
+      rows.map((row) => ({
+        userId: bankId,
+        content: row.content,
+        ...(row.context !== null && { context: row.context }),
+        source: "migration",
+      })),
+    ),
   );
 
   logger.info({ bankId }, "migration: clearing Hindsight bank");

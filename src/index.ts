@@ -116,9 +116,9 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   }
 
   const tx = transactor(db);
-  const agentStore = new DrizzleAgentStore(tx);
-  const transportStore = new DrizzleTransportStore(tx);
-  const sandboxStore = new DrizzleSandboxStore(tx);
+  const agentStore = new DrizzleAgentStore();
+  const transportStore = new DrizzleTransportStore();
+  const sandboxStore = new DrizzleSandboxStore();
 
   // Sandbox is opt-in via SANDBOX_RUNTIME — coding-delegation features fail
   // with a clear error when the env var is unset. No silent fallback.
@@ -128,10 +128,12 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   if (env.SANDBOX_RUNTIME) {
     const docker = new Docker();
     sandboxDocker = docker;
-    const instance = await sandboxStore.insertInstance({
-      host: hostname(),
-      pid: process.pid,
-    });
+    const instance = await tx((trx) =>
+      sandboxStore.insertInstance(trx, {
+        host: hostname(),
+        pid: process.pid,
+      }),
+    );
     sandboxInstanceId = instance.id;
     const proxy = await CogmoSocketProxy.create({
       socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
@@ -140,6 +142,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     sandbox = await LocalInProcessSandbox.create({
       docker,
       store: sandboxStore,
+      runInTx: tx,
       runtime: env.SANDBOX_RUNTIME,
       instanceId: instance.id,
       proxy,
@@ -168,19 +171,21 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     );
   }
   const secretsStore = new DrizzleSecretsStore(
-    tx,
     deriveMasterKey(parseMasterKey(env.COGMO_MASTER_KEY), "cogmo/secrets-at-rest/v1"),
   );
 
-  const user = await agentStore.getFirstUser();
-  const defaultProfile = await agentStore.getDefaultProfile();
-  if (!user || !defaultProfile) {
-    throw new Error("no user or profile found — run `cogmo setup` first");
-  }
-  const profile = await agentStore.getProfile(defaultProfile.id);
-  if (!profile) {
-    throw new Error("default profile disappeared — database inconsistency");
-  }
+  const { user, profile } = await tx(async (trx) => {
+    const user = await agentStore.getFirstUser(trx);
+    const defaultProfile = await agentStore.getDefaultProfile(trx);
+    if (!user || !defaultProfile) {
+      throw new Error("no user or profile found — run `cogmo setup` first");
+    }
+    const profile = await agentStore.getProfile(trx, defaultProfile.id);
+    if (!profile) {
+      throw new Error("default profile disappeared — database inconsistency");
+    }
+    return { user, profile };
+  });
 
   // Per-turn provider dispatch: handle-message and observer call this
   // resolver with the snapshot's model on every fire. The DB-backed
@@ -190,7 +195,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // model. See design/providers.md → Provider dispatch.
   const resolveProvider: LlmProviderResolver = opts.providerOverride
     ? constantResolver(opts.providerOverride)
-    : createDbProviderResolver({ agentStore, secretsStore });
+    : createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
 
   // S3-compatible file storage (MinIO locally, AWS S3 / R2 in production).
   // Constructed before tool registration because image-tools needs the
@@ -210,10 +215,12 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const attachmentStore = createAttachmentStore(s3Client, env.S3_BUCKET);
 
   // Tool credentials: DB first (wizard-configured), env fallback (dev convenience).
-  const tavilyKey = (await secretsStore.getSecret("tavily_api_key")) ?? env.TAVILY_API_KEY;
+  const tavilyKey =
+    (await tx((trx) => secretsStore.getSecret(trx, "tavily_api_key"))) ?? env.TAVILY_API_KEY;
   const openrouterKey =
-    (await secretsStore.getSecret("openrouter_api_key")) ?? env.OPENROUTER_API_KEY;
-  const falKey = (await secretsStore.getSecret("fal_api_key")) ?? env.FAL_API_KEY;
+    (await tx((trx) => secretsStore.getSecret(trx, "openrouter_api_key"))) ??
+    env.OPENROUTER_API_KEY;
+  const falKey = (await tx((trx) => secretsStore.getSecret(trx, "fal_api_key"))) ?? env.FAL_API_KEY;
 
   const webTools = createWebTools(tavilyKey, openrouterKey);
   const falProvider = falKey
@@ -232,12 +239,13 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // orchestrator (publisher, runs inside Inngest) and the Telegram
   // delivery adapter (subscriber, slice 2.0g). Single instance per
   // process; both sides look up by taskId.
-  const codingStore = new DrizzleCodingStore(tx);
+  const codingStore = new DrizzleCodingStore();
   const codingBackend = new ClaudeCodeBackend();
   const codingStreamingRegistry = new CodingStreamingRegistry();
   const codingServiceFactory = (conversationId: string) =>
     createCodingService(
       {
+        runInTx: tx,
         codingStore,
         inngest,
         sandboxAvailable: sandbox !== null,
@@ -251,6 +259,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const codingFunctions: any[] = [];
   if (sandbox) {
     const orchestratorDeps = {
+      runInTx: tx,
       store: codingStore,
       sandbox,
       backend: codingBackend,
@@ -309,6 +318,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     codingFunctions.push(
       createCodingVerifyOrchestrator(
         {
+          runInTx: tx,
           store: codingStore,
           sandbox,
           secretsStore,
@@ -331,6 +341,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
           {
             docker: sandboxDocker,
             store: sandboxStore,
+            runInTx: tx,
             instanceId: sandboxInstanceId,
           },
           inngest,
@@ -363,7 +374,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       SKILLS_PROMPT_GUIDANCE,
     ],
     getUserContext: async () => {
-      const blocks = await agentStore.getCoreMemoryBlocks(user.id);
+      const blocks = await tx((trx) => agentStore.getCoreMemoryBlocks(trx, user.id));
       if (blocks.length === 0) return null;
       return blocks.map((b) => `## ${b.key}\n${b.content}`).join("\n\n");
     },
@@ -383,9 +394,10 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // single-user single-bank model). `skillsRepoPath` is what enables the
   // register / rollback flows to read SKILL.md from git and advance
   // `refs/heads/main`.
-  const skillStore = new DrizzleSkillStore(tx);
+  const skillStore = new DrizzleSkillStore();
   const skillRunner = await SkillRunnerImpl.create({
     store: skillStore,
+    runInTx: tx,
     secretsStore,
     memory,
     files: fileService,
@@ -411,10 +423,11 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // every channel's Transport (admin `/mcp` operations). Constructed before
   // startChannels so the same connection pool is reused — duplicate registries
   // would each spawn their own subprocess on first use.
-  const mcpStore = new DrizzleMcpStore(tx);
+  const mcpStore = new DrizzleMcpStore();
   const mcpRegistry = new McpRegistryImpl({
     store: mcpStore,
     secrets: secretsStore,
+    runInTx: tx,
     runner: new McpHostRunner(),
     callTimeoutMs: env.MCP_CALL_TIMEOUT_MS,
     idleEvictionMs: env.MCP_IDLE_EVICTION_MS,
@@ -430,6 +443,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   } = await startChannels({
     defaultUserId: user.id,
     defaultProfileId: profile.id,
+    runInTx: tx,
     transportStore,
     agentStore,
     codingStore,
@@ -445,8 +459,12 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     reposDir: env.COGMO_REPOS_DIR,
   });
 
-  const deliveryRouter = createDeliveryRouter({ adapters: adapterMap, transportStore });
-  const idleTimer = createIdleTimer({ idleTimeoutMs, transportStore });
+  const deliveryRouter = createDeliveryRouter({
+    runInTx: tx,
+    adapters: adapterMap,
+    transportStore,
+  });
+  const idleTimer = createIdleTimer({ idleTimeoutMs, runInTx: tx, transportStore });
   const debounceFunctions = createDebounceFunctions(debounceConfig);
 
   // Voice — bootstrap a single OpenAIVoiceProvider when voice_config is
@@ -460,7 +478,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // hot-reload"). Personal-scale single-user tolerates the restart
   // cleanly; promote when multi-user lands or operator-driven tweaks
   // become frequent.
-  const voiceCfgRow = await agentStore.getVoiceConfig();
+  const voiceCfgRow = await tx((trx) => agentStore.getVoiceConfig(trx));
   let ttsProvider: import("./voice/types.js").TtsProvider | undefined;
   let sttProvider: import("./voice/types.js").SttProvider | undefined;
   let voiceCfgForTurn: { ttsVoice: string; ttsModel: string } | undefined;
@@ -480,8 +498,8 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
         "voice_config.stt_provider unsupported in slice 1 — voice transcription disabled. Set stt_provider='openai' or wait for slice 2.",
       );
     }
-    const ttsKey = await secretsStore.getSecretById(voiceCfgRow.ttsSecretId);
-    const sttKey = await secretsStore.getSecretById(voiceCfgRow.sttSecretId);
+    const ttsKey = await tx((trx) => secretsStore.getSecretById(trx, voiceCfgRow.ttsSecretId));
+    const sttKey = await tx((trx) => secretsStore.getSecretById(trx, voiceCfgRow.sttSecretId));
     if (ttsKey && sttKey && voiceCfgRow.ttsProvider === "openai") {
       const { OpenAIVoiceProvider } = await import("./voice/openai.js");
       const tts = new OpenAIVoiceProvider({
@@ -513,6 +531,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   }
 
   const handleMessage = createHandleMessage({
+    runInTx: tx,
     agentStore,
     transportStore,
     resolveProvider,
@@ -533,12 +552,13 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   });
 
   const observer = createObserver({
+    runInTx: tx,
     agentStore,
     resolveProvider,
     memory,
   });
 
-  const recoverConversation = createRecoverConversation({ agentStore });
+  const recoverConversation = createRecoverConversation({ runInTx: tx, agentStore });
 
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [
@@ -566,5 +586,6 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     skillRunner,
     skillStore,
     mcpRegistry,
+    runInTx: tx,
   };
 }
