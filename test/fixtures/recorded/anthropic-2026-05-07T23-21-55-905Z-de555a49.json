@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Hello integration test"
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "memory_recall",
+            "arguments": "{\"query\": \"user profile name role timezone preferences\"}",
+            "id": "toolu_01GKg5MvcPhzN7t5w7JTWB21"
+          }
+        ]
+      }
+    }
+  ]
+}

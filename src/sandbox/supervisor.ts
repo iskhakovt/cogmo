@@ -90,6 +90,31 @@ export class LocalInProcessSandbox implements Sandbox {
     return { ok: true, runtime: dockerRuntimeName(this.#runtime) };
   }
 
+  /**
+   * Inspect the image; pull if not present locally. The first lookup costs
+   * one daemon round-trip; subsequent calls hit the same fast path.
+   * Concurrent callers on the same image race harmlessly — the daemon
+   * deduplicates pulls.
+   */
+  async ensureImagePresent(image: string): Promise<void> {
+    try {
+      await this.#docker.getImage(image).inspect();
+      return;
+    } catch (err) {
+      // Treat "not found" as the only condition we recover from. Anything
+      // else (daemon unreachable, permission denied) should propagate so the
+      // caller fails fast instead of waiting on a pull that won't succeed.
+      const statusCode = (err as { statusCode?: number }).statusCode;
+      if (statusCode !== 404) throw err;
+    }
+    log.info({ image }, "image not present locally — pulling");
+    const stream = await this.#docker.pull(image);
+    await new Promise<void>((resolve, reject) => {
+      this.#docker.modem.followProgress(stream, (e: Error | null) => (e ? reject(e) : resolve()));
+    });
+    log.info({ image }, "image pull complete");
+  }
+
   async reconcileCrashedInstances(currentInstanceId: string): Promise<{ orphansReaped: number }> {
     if (currentInstanceId !== this.#instanceId) {
       throw new Error(
@@ -160,7 +185,10 @@ export class LocalInProcessSandbox implements Sandbox {
         })
       : null;
 
-    const binds = [`${spec.worktreePath}:/workspace`];
+    const binds: string[] = [];
+    if (spec.worktreePath) {
+      binds.push(`${spec.worktreePath}:/workspace`);
+    }
     if (proxySocketPath) {
       binds.push(`${proxySocketPath}:/var/run/docker.sock`);
     }
@@ -172,34 +200,36 @@ export class LocalInProcessSandbox implements Sandbox {
       binds.push(`${spec.askpassMount.hostDir}:${spec.askpassMount.containerDir}:ro`);
     }
 
+    // Home volume mounted at /home/vscode — coding-delegation contract: task
+    // images run as user `vscode` (devbase inherits this from
+    // mcr.microsoft.com/devcontainers/base:ubuntu-24.04). Skills tier-2 omits
+    // the home volume entirely because the `recycle` isolation contract
+    // forbids any state surviving the task. When slice 4 grows custom
+    // devcontainer support, the mount target needs to become image-declared.
+    const mounts: Docker.MountSettings[] = spec.homeVolumeName
+      ? [{ Type: "volume", Source: spec.homeVolumeName, Target: "/home/vscode" }]
+      : [];
+
     let container: Docker.Container;
     try {
       container = await this.#docker.createContainer({
         Image: spec.image,
-        // Hold the container open so we can `exec` claude/codex into it on demand.
-        // The CLI runs as a transient exec rather than as PID 1.
+        // Hold the container open so we can `exec` claude/codex/python into
+        // it on demand. The CLI runs as a transient exec rather than as PID 1.
         Entrypoint: ["/bin/sleep"],
         Cmd: ["infinity"],
         Tty: false,
         OpenStdin: false,
-        WorkingDir: "/workspace",
+        // WorkingDir defaults to /workspace when a worktree is bound; falls
+        // back to the image's own default when omitted (skills tier-2 lands
+        // here — the runner's stdin/stdout protocol doesn't depend on cwd).
+        ...(spec.worktreePath && { WorkingDir: "/workspace" }),
         Labels: labels,
         HostConfig: {
           Runtime: runtime,
           CgroupParent: cgroupParent,
           Binds: binds,
-          // Home volume mounted at /home/vscode — slice 1 contract: task images
-          // MUST run as user `vscode` (devbase inherits this from the
-          // mcr.microsoft.com/devcontainers/base:ubuntu-24.04 base). When slice 4
-          // grows custom devcontainer support, this needs to become part of
-          // TaskContainerSpec (image-declared user → mount target lookup).
-          Mounts: [
-            {
-              Type: "volume",
-              Source: spec.homeVolumeName,
-              Target: "/home/vscode",
-            },
-          ],
+          Mounts: mounts,
           // Resource caps. NanoCpus uses billionths of a CPU.
           NanoCpus: Math.round(spec.resourceLimits.cpus * 1_000_000_000),
           Memory: spec.resourceLimits.memory_bytes,

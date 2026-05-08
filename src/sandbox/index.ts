@@ -11,10 +11,20 @@ export type { ContainerLabels, ResourceLimits } from "./types.js";
 export interface TaskContainerSpec {
   /** Logical task id (denormalized into the `containers.root_task_id` column). */
   rootTaskId: string;
-  /** Host path bind-mounted into the container at `/workspace`. */
-  worktreePath: string;
-  /** Per-task named volume mounted at the user's home (`/home/<image-user>`). */
-  homeVolumeName: string;
+  /**
+   * Host path bind-mounted into the container at `/workspace` and used as the
+   * container's working directory. Optional — coding-delegation tasks always
+   * supply one (the worktree); skills tier-2 omits it because skill workers
+   * don't run in a git checkout.
+   */
+  worktreePath?: string;
+  /**
+   * Per-task named volume mounted at the user's home (`/home/<image-user>`).
+   * Optional — coding-delegation uses it to persist the Claude Code CLI's
+   * session state across exec calls; skills tier-2 omits it because the
+   * `recycle` isolation contract forbids any state surviving the task.
+   */
+  homeVolumeName?: string;
   /** Image to launch. */
   image: string;
   /** Resource caps applied via Docker `HostConfig`. */
@@ -88,6 +98,14 @@ export interface Sandbox {
 
   /** Boot-time reconciliation: kill containers tagged with a different `cogmo.instance`. */
   reconcileCrashedInstances(currentInstanceId: string): Promise<{ orphansReaped: number }>;
+
+  /**
+   * Verify the image is present on the daemon, pulling it if not. Idempotent
+   * and cheap when the image is already cached. Skills tier-2 calls this
+   * lazily on the first invocation per process; coding-delegation pre-pulls
+   * the devbase image at bootstrap.
+   */
+  ensureImagePresent(image: string): Promise<void>;
 
   createTaskContainer(spec: TaskContainerSpec): Promise<TaskContainerHandle>;
 

@@ -32,6 +32,12 @@ import { CORE_MEMORY_PROMPT_GUIDANCE, MEMORY_PROMPT_GUIDANCE } from "./agent/ser
 import { DrizzleAgentStore } from "./agent/store/index.js";
 import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
+import {
+  checkHindsightVersion,
+  checkS3Bucket,
+  checkUuidv7,
+  loadHindsightCompat,
+} from "./boot/checks.js";
 import { db, transactor } from "./db/index.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
@@ -93,6 +99,12 @@ export interface BootstrapOptions {
 export async function bootstrap(opts: BootstrapOptions = {}) {
   await migrate(db, { migrationsFolder: "./migrations" });
   logger.info("database migrations applied");
+
+  // Schema PKs default to `uuidv7()`. Verify the function is callable
+  // before any code path inserts a row — a missing extension turns
+  // every INSERT into a mid-turn `function does not exist` error
+  // instead of a clear boot-time failure.
+  await checkUuidv7(db);
 
   // Bring the skills bare repo to its expected state on every boot —
   // idempotent. The pre-receive hook is rewritten unconditionally so a Cogmo
@@ -195,6 +207,10 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       ? { credentials: { accessKeyId: env.S3_ACCESS_KEY, secretAccessKey: env.S3_SECRET_KEY } }
       : {}),
   });
+  // Confirm the bucket is reachable + credentials work before tools that
+  // depend on it (image generation, file workspace, attachment delivery)
+  // start handling traffic. HeadBucket is the cheapest probe.
+  await checkS3Bucket(s3Client, env.S3_BUCKET);
   const fileService = createFileService(s3Client, env.S3_BUCKET);
   const attachmentStore = createAttachmentStore(s3Client, env.S3_BUCKET);
 
@@ -366,6 +382,11 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL, {
     maxQueryTokens: env.HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
   });
+  // Hard-fail when the running server reports a version outside the
+  // compat range pinned in `package.json` → `cogmo.hindsightCompat`.
+  // Soft-fail (warn) when /version itself can't be reached — memory
+  // tools surface their own errors at request time. See `src/boot/checks.ts`.
+  await checkHindsightVersion(memory, loadHindsightCompat());
 
   // Skills runtime — Tier 1 ready in P3.1; register / classifier ship in P3.3.
   // The runner is exposed so the `cogmo skills` CLI subcommand can drive it
@@ -380,6 +401,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     secretsStore,
     memory,
     files: fileService,
+    ...(sandbox && { sandbox }),
     user: { id: user.id, timezone: env.USER_TIMEZONE },
     memoryBankId: user.id,
     skillsRepoPath: env.COGMO_SKILLS_PATH,

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { ConversationSummary, Profile } from "../../../agent/store/index.js";
-import { renderModelList, renderProfileList, renderSessionsList } from "./sessions-ux.js";
+import type { ConversationStatusSummary } from "../../transport.js";
+import {
+  renderConversationStatus,
+  renderModelList,
+  renderProfileList,
+  renderSessionsList,
+} from "./sessions-ux.js";
 
 function mkSummary(overrides: Partial<ConversationSummary> & { id: string }): ConversationSummary {
   return {
@@ -111,6 +117,142 @@ describe("renderProfileList", () => {
 
   it("handles empty list", () => {
     expect(renderProfileList([]).text).toContain("No profiles");
+  });
+});
+
+describe("renderConversationStatus", () => {
+  function mkStatus(overrides: Partial<ConversationStatusSummary> = {}): ConversationStatusSummary {
+    return {
+      conversationId: "11111111-2222-3333-4444-aaaaaaaabbbb",
+      alias: "work",
+      status: "active",
+      createdAt: new Date("2026-04-16T10:00:00Z"),
+      lastMessageAt: new Date("2026-04-16T11:30:00Z"),
+      messageCount: 7,
+      profile: {
+        id: "p1",
+        name: "main",
+        model: "claude-sonnet-4-6",
+        toolCount: 4,
+        autoRecall: "heuristic",
+        memoryScope: null,
+        voiceMode: "auto",
+      },
+      voiceMode: null,
+      lastTurn: { inputTokens: 23_400, outputTokens: 412 },
+      contextBudget: 180_000,
+      steeringRulesCount: 2,
+      mcp: { enabledServers: 3, approvedTools: 14, toolBudget: 25 },
+      ...overrides,
+    };
+  }
+  const NOW = new Date("2026-04-16T13:00:00Z"); // 3h after createdAt, 1h30m after last msg
+
+  it("renders alias and includes profile, last-turn, steering, and MCP lines", () => {
+    const text = renderConversationStatus(mkStatus(), NOW);
+    expect(text).toContain("work · status: active · age: 3h");
+    expect(text).toContain("messages: 7 · idle: 1h");
+    expect(text).toContain("main · claude-sonnet-4-6 · tools: 4 · auto-recall: heuristic");
+    expect(text).toContain("scope: unrestricted");
+    expect(text).toContain("last turn — in: 23.4k · out: 412 · budget: 180k (13%)");
+    expect(text).toContain("steering: 2 rules");
+    expect(text).toContain("MCP: 3 servers · 14/25 tools");
+  });
+
+  it("falls back to id tail when no alias is set", () => {
+    const text = renderConversationStatus(mkStatus({ alias: null }), NOW);
+    expect(text).toContain("id aaaabbbb");
+  });
+
+  it("renders 'no turns yet' when lastTurn is null", () => {
+    const text = renderConversationStatus(
+      mkStatus({ lastTurn: null, messageCount: 0, lastMessageAt: null }),
+      NOW,
+    );
+    expect(text).toContain("no turns yet · budget: 180k");
+    // No idle line when there are no messages.
+    expect(text).not.toContain("idle:");
+  });
+
+  it("masks the -1 output sentinel as '-' (pre-migration row)", () => {
+    const text = renderConversationStatus(
+      mkStatus({ lastTurn: { inputTokens: 9000, outputTokens: -1 } }),
+      NOW,
+    );
+    expect(text).toContain("out: -");
+    expect(text).not.toContain("-1");
+  });
+
+  it("renders 'in: -' when persisted inputTokens is null and skips the percent", () => {
+    const text = renderConversationStatus(
+      mkStatus({ lastTurn: { inputTokens: null, outputTokens: 200 } }),
+      NOW,
+    );
+    expect(text).toContain("in: - · out: 200 · budget: 180k");
+    expect(text).not.toMatch(/\(\d+%\)/);
+  });
+
+  it("omits the budget number when contextBudget is null", () => {
+    const text = renderConversationStatus(mkStatus({ contextBudget: null }), NOW);
+    expect(text).not.toContain("budget:");
+  });
+
+  it("omits the MCP line when mcp is null (disabled)", () => {
+    const text = renderConversationStatus(mkStatus({ mcp: null }), NOW);
+    expect(text).not.toContain("MCP:");
+    expect(text).toContain("steering: 2 rules");
+  });
+
+  it("renders only the override label when override differs from profile default", () => {
+    const text = renderConversationStatus(
+      mkStatus({ voiceMode: "always", profile: { ...mkStatus().profile, voiceMode: "auto" } }),
+      NOW,
+    );
+    expect(text).toContain("voice: always (override; profile default auto)");
+  });
+
+  it("renders the profile default line when override is null and default is non-auto", () => {
+    const text = renderConversationStatus(
+      mkStatus({ voiceMode: null, profile: { ...mkStatus().profile, voiceMode: "always" } }),
+      NOW,
+    );
+    expect(text).toContain("voice: always (profile default)");
+  });
+
+  it("hides the voice line in the unsurprising case (override=null, default=auto)", () => {
+    const text = renderConversationStatus(mkStatus(), NOW);
+    expect(text).not.toMatch(/voice:/);
+  });
+
+  it("surfaces an explicit override even when it equals the profile default", () => {
+    // Regression: an earlier version hid the override when override === default,
+    // which lost the fact that the user had explicitly pinned the value (and
+    // that `/voice clear` would still change semantics on a future default flip).
+    const text = renderConversationStatus(
+      mkStatus({ voiceMode: "always", profile: { ...mkStatus().profile, voiceMode: "always" } }),
+      NOW,
+    );
+    expect(text).toContain("voice: always (override matches profile default)");
+  });
+
+  it("surfaces an explicit auto override even when the profile default is also auto", () => {
+    // Same regression — profile default `auto` is the case that was hidden
+    // entirely, dropping the "explicitly overridden" signal on the floor.
+    const text = renderConversationStatus(mkStatus({ voiceMode: "auto" }), NOW);
+    expect(text).toContain("voice: auto (override matches profile default)");
+  });
+
+  it("annotates a set memory scope via formatScope", () => {
+    const text = renderConversationStatus(
+      mkStatus({
+        profile: {
+          ...mkStatus().profile,
+          memoryScope: { compartments: ["work", "technical"], trust: ["first-party"] },
+        },
+      }),
+      NOW,
+    );
+    expect(text).toContain("scope: compartments: work, technical / trust: first-party");
   });
 });
 

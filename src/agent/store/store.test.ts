@@ -1492,6 +1492,78 @@ describe("DrizzleAgentStore", () => {
       // u2 searching for same alias should see nothing
       expect(await tx((trx) => store.findConversationByAlias(trx, u2, "shared"))).toBeUndefined();
     });
+
+    it("getAliasForConversation returns the alias when set, undefined when cleared", async () => {
+      const { userId, conversationId } = await seedConversation();
+      expect(
+        await tx((trx) => store.getAliasForConversation(trx, userId, conversationId)),
+      ).toBeUndefined();
+      await tx((trx) => store.setAlias(trx, userId, conversationId, "work"));
+      expect(await tx((trx) => store.getAliasForConversation(trx, userId, conversationId))).toBe(
+        "work",
+      );
+      await tx((trx) => store.setAlias(trx, userId, conversationId, null));
+      expect(
+        await tx((trx) => store.getAliasForConversation(trx, userId, conversationId)),
+      ).toBeUndefined();
+    });
+
+    it("getAliasForConversation scopes to user (other users see undefined)", async () => {
+      const u1 = await seedUser();
+      const u2 = await seedUser();
+      const profileId = await seedProfile();
+      const conv = (
+        await tx((trx) => store.createConversation(trx, { userId: u1, profileId, isPrivate: true }))
+      ).id;
+      await tx((trx) => store.setAlias(trx, u1, conv, "owned-by-u1"));
+      expect(await tx((trx) => store.getAliasForConversation(trx, u2, conv))).toBeUndefined();
+      expect(await tx((trx) => store.getAliasForConversation(trx, u1, conv))).toBe("owned-by-u1");
+    });
+  });
+
+  describe("getConversationStats", () => {
+    it("returns createdAt + zero counts for a fresh conversation with no messages", async () => {
+      const { conversationId } = await seedConversation();
+      const stats = await tx((trx) => store.getConversationStats(trx, conversationId));
+      expect(stats).toBeDefined();
+      expect(stats?.messageCount).toBe(0);
+      expect(stats?.lastMessageAt).toBeNull();
+      expect(stats?.createdAt).toBeInstanceOf(Date);
+    });
+
+    it("counts messages and surfaces the most recent createdAt", async () => {
+      const { profileId, conversationId } = await seedConversation();
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content: "hi",
+          profileId,
+          model: "claude-sonnet-4-6",
+          lastInboundMessageId: "00000000-0000-7000-8000-000000000001",
+        }),
+      );
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "assistant",
+          content: "hello back",
+          profileId,
+          model: "claude-sonnet-4-6",
+          lastInboundMessageId: "00000000-0000-7000-8000-000000000001",
+        }),
+      );
+      const stats = await tx((trx) => store.getConversationStats(trx, conversationId));
+      expect(stats?.messageCount).toBe(2);
+      expect(stats?.lastMessageAt).toBeInstanceOf(Date);
+    });
+
+    it("returns undefined for a nonexistent conversation id", async () => {
+      const stats = await tx((trx) =>
+        store.getConversationStats(trx, "00000000-0000-7000-8000-000000000999"),
+      );
+      expect(stats).toBeUndefined();
+    });
   });
 
   describe("evolution: corrections", () => {

@@ -92,6 +92,7 @@ function fakeSandbox(handle: TaskContainerHandle): Sandbox {
   return {
     healthCheck: vi.fn(),
     reconcileCrashedInstances: vi.fn(),
+    ensureImagePresent: vi.fn(async () => {}),
     createTaskContainer: vi.fn(async () => handle),
     getTaskContainer: vi.fn(async () => handle),
     stopTask: vi.fn(async () => {}),

@@ -476,6 +476,161 @@ describe("createTransport", () => {
     });
   });
 
+  describe("conversations.summary", () => {
+    function makeAgentStore(overrides?: Parameters<typeof mockAgentStore>[0]) {
+      return mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p1",
+          isPrivate: true,
+          status: "active",
+          voiceMode: null,
+        }),
+        getProfile: vi.fn().mockResolvedValue({
+          id: "p1",
+          userId: "user-1",
+          name: "main",
+          basePrompt: "",
+          model: "claude-sonnet-4-6",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "heuristic",
+          voiceMode: "auto",
+          toolSet: ["recall_memory", "retain_memory"],
+          memoryScope: null,
+        }),
+        getConversationStats: vi.fn().mockResolvedValue({
+          createdAt: new Date("2026-04-16T10:00:00Z"),
+          messageCount: 7,
+          lastMessageAt: new Date("2026-04-16T11:30:00Z"),
+        }),
+        getAliasForConversation: vi.fn().mockResolvedValue("work"),
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 12_345, outputTokens: 678 }),
+        countActiveRules: vi.fn().mockResolvedValue(3),
+        ...overrides,
+      });
+    }
+
+    function makeTransportStore() {
+      return mockTransportStore({
+        resolveSession: vi.fn().mockResolvedValue({
+          id: "s1",
+          channelId: "ch-1",
+          platformAddress: "addr-1",
+          conversationId: "c1",
+          status: "active",
+          receive: "routed",
+        }),
+      });
+    }
+
+    it("returns identity_rejected when handle does not resolve", async () => {
+      const transportStore = mockTransportStore({
+        resolveUser: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ transportStore });
+      const res = await transport.conversations.summary("ghost", "addr-1");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    });
+
+    it("returns ok(null) when no active session for the address", async () => {
+      const { transport } = setup();
+      const res = await transport.conversations.summary("handle", "addr-empty");
+      expect(res._unsafeUnwrap()).toBeNull();
+    });
+
+    it("returns ok(null) when conversation is not owned by the caller (mirrors getCurrent)", async () => {
+      const agentStore = makeAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-other",
+          profileId: "p1",
+          isPrivate: true,
+          status: "active",
+          voiceMode: null,
+        }),
+      });
+      const { transport } = setup({ agentStore, transportStore: makeTransportStore() });
+      const res = await transport.conversations.summary("handle", "addr-1");
+      expect(res._unsafeUnwrap()).toBeNull();
+    });
+
+    it("returns profile_not_found when profile row is missing", async () => {
+      const agentStore = makeAgentStore({
+        getProfile: vi.fn().mockResolvedValue(undefined),
+      });
+      const { transport } = setup({ agentStore, transportStore: makeTransportStore() });
+      const res = await transport.conversations.summary("handle", "addr-1");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_not_found" });
+    });
+
+    it("returns conversation_not_found when stats row is missing (race)", async () => {
+      const agentStore = makeAgentStore({
+        getConversationStats: vi.fn().mockResolvedValue(undefined),
+      });
+      const { transport } = setup({ agentStore, transportStore: makeTransportStore() });
+      const res = await transport.conversations.summary("handle", "addr-1");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "conversation_not_found" });
+    });
+
+    it("aggregates conversation, profile, last-turn tokens, steering rules, and budget", async () => {
+      const agentStore = makeAgentStore();
+      const { transport } = setup({ agentStore, transportStore: makeTransportStore() });
+      const res = await transport.conversations.summary("handle", "addr-1");
+      const value = res._unsafeUnwrap();
+      expect(value).toMatchObject({
+        conversationId: "c1",
+        alias: "work",
+        status: "active",
+        messageCount: 7,
+        profile: {
+          id: "p1",
+          name: "main",
+          model: "claude-sonnet-4-6",
+          toolCount: 2,
+          autoRecall: "heuristic",
+        },
+        lastTurn: { inputTokens: 12_345, outputTokens: 678 },
+        steeringRulesCount: 3,
+      });
+      // claude-sonnet-4-6: contextWindow 1_000_000 - maxOutputTokens 64_000 - safetyBuffer 10_000
+      expect(value?.contextBudget).toBe(926_000);
+      // No mcpRegistry wired in setup() → mcp namespace is null.
+      expect(value?.mcp).toBeNull();
+    });
+
+    it("normalizes missing last-turn tokens to null", async () => {
+      const agentStore = makeAgentStore({
+        getLastTokens: vi.fn().mockResolvedValue(undefined),
+      });
+      const { transport } = setup({ agentStore, transportStore: makeTransportStore() });
+      const res = await transport.conversations.summary("handle", "addr-1");
+      expect(res._unsafeUnwrap()?.lastTurn).toBeNull();
+    });
+
+    it("returns contextBudget=null when the active model is not in the registry", async () => {
+      const agentStore = makeAgentStore({
+        getProfile: vi.fn().mockResolvedValue({
+          id: "p1",
+          userId: "user-1",
+          name: "main",
+          basePrompt: "",
+          model: "removed-model-id",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "heuristic",
+          voiceMode: "auto",
+          toolSet: [],
+          memoryScope: null,
+        }),
+      });
+      const { transport } = setup({ agentStore, transportStore: makeTransportStore() });
+      const res = await transport.conversations.summary("handle", "addr-1");
+      expect(res._unsafeUnwrap()?.contextBudget).toBeNull();
+    });
+  });
+
   describe("conversations.setVoiceMode", () => {
     it("returns identity_rejected when handle does not resolve", async () => {
       const transportStore = mockTransportStore({

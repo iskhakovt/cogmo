@@ -79,8 +79,8 @@ importers:
         specifier: ^0.13.11
         version: 0.13.11(typescript@6.0.3)(zod@4.4.3)
       '@vectorize-io/hindsight-client':
-        specifier: ^0.5.6
-        version: 0.5.6
+        specifier: ^0.6.0
+        version: 0.6.0
       ai:
         specifier: ^6.0.175
         version: 6.0.175(zod@4.4.3)
@@ -100,8 +100,8 @@ importers:
         specifier: ^1.42.0
         version: 1.42.0
       inngest:
-        specifier: ^4.2.6
-        version: 4.2.6(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.16)(typescript@6.0.3)(zod@4.4.3)
+        specifier: ^4.3.0
+        version: 4.3.0(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.16)(typescript@6.0.3)(zod@4.4.3)
       js-tiktoken:
         specifier: ^1.0.21
         version: 1.0.21
@@ -138,6 +138,12 @@ importers:
       remeda:
         specifier: ^2.33.7
         version: 2.33.7
+      semver:
+        specifier: ^7.7.4
+        version: 7.7.4
+      split2:
+        specifier: 4.2.0
+        version: 4.2.0
       yaml:
         specifier: ^2.8.4
         version: 2.8.4
@@ -156,7 +162,7 @@ importers:
         version: 0.4.5
       '@inngest/test':
         specifier: ^1.0.0
-        version: 1.0.0(inngest@4.2.6(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.16)(typescript@6.0.3)(zod@4.4.3))
+        version: 1.0.0(inngest@4.3.0(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.16)(typescript@6.0.3)(zod@4.4.3))
       '@modelcontextprotocol/server-everything':
         specifier: ^2026.1.26
         version: 2026.1.26
@@ -178,6 +184,12 @@ importers:
       '@types/picomatch':
         specifier: ^4.0.3
         version: 4.0.3
+      '@types/semver':
+        specifier: ^7.7.1
+        version: 7.7.1
+      '@types/split2':
+        specifier: 4.2.3
+        version: 4.2.3
       '@vitest/coverage-v8':
         specifier: ^4.1.5
         version: 4.1.5(vitest@4.1.5)
@@ -211,6 +223,9 @@ importers:
       vitest:
         specifier: ^4.1.5
         version: 4.1.5(@opentelemetry/api@1.9.1)(@types/node@25.6.0)(@vitest/coverage-v8@4.1.5)(jsdom@29.1.1(@noble/hashes@2.2.0))(msw@2.13.3(@types/node@25.6.0)(typescript@6.0.3))(vite@8.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@25.6.0)(esbuild@0.27.4)(tsx@4.21.0)(yaml@2.8.4))
+      vitest-mock-extended:
+        specifier: 4.0.0
+        version: 4.0.0(typescript@6.0.3)(vitest@4.1.5)
 
 packages:
 
@@ -2290,6 +2305,12 @@ packages:
   '@types/picomatch@4.0.3':
     resolution: {integrity: sha512-iG0T6+nYJ9FAPmx9SsUlnwcq1ZVRuCXcVEvWnntoPlrOpwtSTKNDC9uVAxTsC3PUvJ+99n4RpAcNgBbHX3JSnQ==}
 
+  '@types/semver@7.7.1':
+    resolution: {integrity: sha512-FmgJfu+MOcQ370SD0ev7EI8TlCAfKYU+B4m5T3yXc1CiRN94g/SZPtsCkk506aUDtlMnFZvasDwHHUcZUEaYuA==}
+
+  '@types/split2@4.2.3':
+    resolution: {integrity: sha512-59OXIlfUsi2k++H6CHgUQKEb2HKRokUA39HY1i1dS8/AIcqVjtAAFdf8u+HxTWK/4FUHMJQlKSZ4I6irCBJ1Zw==}
+
   '@types/ssh2-streams@0.1.13':
     resolution: {integrity: sha512-faHyY3brO9oLEA0QlcO8N2wT7R0+1sHWZvQ+y3rMLwdY1ZyS1z0W3t65j9PqT4HmQ6ALzNe7RZlNuCNE0wBSWA==}
 
@@ -2308,8 +2329,8 @@ packages:
   '@types/tough-cookie@4.0.5':
     resolution: {integrity: sha512-/Ad8+nIOV7Rl++6f1BdKxFSMgmoqEoYbHRpPcx3JEfv8VRsQe9Z4mCXeJBzxs7mbHY/XOZZuXlRNfhpVPbs6ZA==}
 
-  '@vectorize-io/hindsight-client@0.5.6':
-    resolution: {integrity: sha512-VBMkCQP7dCy9BqkoqhZxxl5sVW6opKT3l6wexval7ZM4syTOGlmpu7BRhtFycxWmkWjXwH+XM6n4lzBoWTSPdA==}
+  '@vectorize-io/hindsight-client@0.6.0':
+    resolution: {integrity: sha512-Vp308C8XOE1Pd/bDiRW0wxVceJtB2y26GxrhLflv6jmQ0zq7EcRag3Oe2fXaf3YS+aOb2xpvIwZYGSEvov/d5Q==}
 
   '@vercel/oidc@3.2.0':
     resolution: {integrity: sha512-UycprH3T6n3jH0k44NHMa7pnFHGu/N05MjojYr+Mc6I7obkoLIJujSWwin1pCvdy/eOxrI/l3uDLQsmcrOb4ug==}
@@ -3130,8 +3151,8 @@ packages:
   inherits@2.0.4:
     resolution: {integrity: sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==}
 
-  inngest@4.2.6:
-    resolution: {integrity: sha512-d6oFhG4CXIyJHJ8Z029shqENn9R2Etn/5PPZHXVlK0YgHOW77DchO5gnMu9TQdUoyWnZeXKq1veZQL+NCRmRNQ==}
+  inngest@4.3.0:
+    resolution: {integrity: sha512-UYx2fFbtcEDq092yL088iEeB0j57+6fjvTbrkH3JX+c87j2YsSNVxUddr20EHzd5psXQX5CC5+39hA16OcxdzQ==}
     engines: {node: '>=20'}
     peerDependencies:
       '@sveltejs/kit': '>=1.27.3'
@@ -4104,6 +4125,14 @@ packages:
   ts-algebra@2.0.0:
     resolution: {integrity: sha512-FPAhNPFMrkwz76P7cdjdmiShwMynZYN6SgOujD1urY4oNm80Ou9oMdmbR45LotcKOXoy7wSmHkRFE6Mxbrhefw==}
 
+  ts-essentials@10.2.0:
+    resolution: {integrity: sha512-z9FlLywg0XEV46Ws1FwYN4NZDMr9qAe38lTTtgVBqzhhyEgwrnCUkFe4MEqnvar1kY1kFEnlkp56bxn2g0V+UA==}
+    peerDependencies:
+      typescript: '>=4.5.0'
+    peerDependenciesMeta:
+      typescript:
+        optional: true
+
   ts-interface-checker@0.1.13:
     resolution: {integrity: sha512-Y/arvbn+rrz3JCKl9C4kVNfTfSm2/mEp5FSz5EsZSANGPSlQrpRI5M4PKF+mJnE52jOO90PnPSc3Ur3bTQw0gA==}
 
@@ -4246,6 +4275,12 @@ packages:
         optional: true
       yaml:
         optional: true
+
+  vitest-mock-extended@4.0.0:
+    resolution: {integrity: sha512-m2FmH8JYfxzZoLsHuhXRY+Pv++a3zd91HYpSz81tpRLEHbtFkEL2QcWvJowucWuNTirzQURKfWbJJSXbYqkTsA==}
+    peerDependencies:
+      typescript: 3.x || 4.x || 5.x || 6.x
+      vitest: '>=4.0.0'
 
   vitest@4.1.5:
     resolution: {integrity: sha512-9Xx1v3/ih3m9hN+SbfkUyy0JAs72ap3r7joc87XL6jwF0jGg6mFBvQ1SrwaX+h8BlkX6Hz9shdd1uo6AF+ZGpg==}
@@ -5283,9 +5318,9 @@ snapshots:
       '@types/node': 22.19.17
       typescript: 5.9.3
 
-  '@inngest/test@1.0.0(inngest@4.2.6(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.16)(typescript@6.0.3)(zod@4.4.3))':
+  '@inngest/test@1.0.0(inngest@4.3.0(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.16)(typescript@6.0.3)(zod@4.4.3))':
     dependencies:
-      inngest: 4.2.6(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.16)(typescript@6.0.3)(zod@4.4.3)
+      inngest: 4.3.0(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.16)(typescript@6.0.3)(zod@4.4.3)
       tinyspy: 3.0.2
       ulid: 2.4.0
 
@@ -6805,7 +6840,7 @@ snapshots:
 
   '@types/pg-pool@2.0.7':
     dependencies:
-      '@types/pg': 8.15.6
+      '@types/pg': 8.20.0
 
   '@types/pg@8.15.6':
     dependencies:
@@ -6818,9 +6853,14 @@ snapshots:
       '@types/node': 25.6.0
       pg-protocol: 1.13.0
       pg-types: 2.2.0
-    optional: true
 
   '@types/picomatch@4.0.3': {}
+
+  '@types/semver@7.7.1': {}
+
+  '@types/split2@4.2.3':
+    dependencies:
+      '@types/node': 25.6.0
 
   '@types/ssh2-streams@0.1.13':
     dependencies:
@@ -6844,7 +6884,7 @@ snapshots:
 
   '@types/tough-cookie@4.0.5': {}
 
-  '@vectorize-io/hindsight-client@0.5.6': {}
+  '@vectorize-io/hindsight-client@0.6.0': {}
 
   '@vercel/oidc@3.2.0': {}
 
@@ -7684,7 +7724,7 @@ snapshots:
 
   inherits@2.0.4: {}
 
-  inngest@4.2.6(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.16)(typescript@6.0.3)(zod@4.4.3):
+  inngest@4.3.0(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.16)(typescript@6.0.3)(zod@4.4.3):
     dependencies:
       '@bufbuild/protobuf': 2.12.0
       '@inngest/ai': 0.1.7
@@ -8749,6 +8789,10 @@ snapshots:
 
   ts-algebra@2.0.0: {}
 
+  ts-essentials@10.2.0(typescript@6.0.3):
+    optionalDependencies:
+      typescript: 6.0.3
+
   ts-interface-checker@0.1.13: {}
 
   tslib@2.8.1: {}
@@ -8849,6 +8893,12 @@ snapshots:
     transitivePeerDependencies:
       - '@emnapi/core'
       - '@emnapi/runtime'
+
+  vitest-mock-extended@4.0.0(typescript@6.0.3)(vitest@4.1.5):
+    dependencies:
+      ts-essentials: 10.2.0(typescript@6.0.3)
+      typescript: 6.0.3
+      vitest: 4.1.5(@opentelemetry/api@1.9.1)(@types/node@25.6.0)(@vitest/coverage-v8@4.1.5)(jsdom@29.1.1(@noble/hashes@2.2.0))(msw@2.13.3(@types/node@25.6.0)(typescript@6.0.3))(vite@8.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@25.6.0)(esbuild@0.27.4)(tsx@4.21.0)(yaml@2.8.4))
 
   vitest@4.1.5(@opentelemetry/api@1.9.1)(@types/node@25.6.0)(@vitest/coverage-v8@4.1.5)(jsdom@29.1.1(@noble/hashes@2.2.0))(msw@2.13.3(@types/node@25.6.0)(typescript@6.0.3))(vite@8.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@25.6.0)(esbuild@0.27.4)(tsx@4.21.0)(yaml@2.8.4)):
     dependencies:

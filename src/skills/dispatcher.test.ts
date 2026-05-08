@@ -392,4 +392,26 @@ describe("Dispatcher", () => {
     expect(result).toMatchObject({ output: 1 });
     d.close();
   });
+
+  it("rejects pending invoke when transport reports a fatal error", async () => {
+    // Regression test: an earlier sysbox transport surfaced overflow as a
+    // synthetic `{ type: "fatal" }` frame on `onMessage`, but `fatal` isn't
+    // in the worker protocol so the dispatcher dropped it silently and the
+    // task hung until host wall-clock fired. The fix routes fatal errors
+    // through `onError` and the dispatcher rejects immediately.
+    let fireError: ((err: Error) => void) | null = null;
+    const transport: RpcTransport = {
+      postMessage: () => {},
+      onMessage: () => {},
+      onError: (h) => {
+        fireError = h;
+      },
+      close: () => {},
+    };
+    const d = new Dispatcher({ transport, ctxHandler: noopHandler() });
+    const promise = d.invoke(INVOKE);
+    expect(fireError).not.toBeNull();
+    fireError?.(new Error("transport: maximum buffer reached"));
+    await expect(promise).rejects.toThrow(/transport: maximum buffer reached/);
+  });
 });

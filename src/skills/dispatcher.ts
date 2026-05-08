@@ -18,6 +18,18 @@ export interface RpcTransport {
   postMessage(message: unknown): void;
   /** Receive parsed messages. Same callback shape `MessagePort.on('message', …)` uses. */
   onMessage(handler: (message: unknown) => void): void;
+  /**
+   * Subscribe to fatal transport errors — conditions where the transport
+   * cannot deliver any more messages (line-framing overflow, underlying
+   * stream error, etc.). Distinct from normal close: transports that don't
+   * have a meaningful error path (e.g. the in-process Pyodide MessagePort
+   * adapter, where the worker thread's error flows up via the host's own
+   * worker.on('error') handler) may leave this unimplemented. When set,
+   * the Dispatcher uses it to reject the pending task immediately so the
+   * caller doesn't sit on the wall-clock timeout for a transport that
+   * already gave up.
+   */
+  onError?(handler: (err: Error) => void): void;
   close(): void;
 }
 
@@ -72,6 +84,20 @@ export class Dispatcher {
     this.#transport = opts.transport;
     this.#ctxHandler = opts.ctxHandler;
     this.#transport.onMessage((raw) => this.#onMessage(raw));
+    this.#transport.onError?.((err) => this.#onTransportError(err));
+  }
+
+  #onTransportError(err: Error): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    const pending = this.#pendingTask;
+    this.#pendingTask = null;
+    log.warn({ err: err.message }, "transport reported fatal error — rejecting pending task");
+    pending?.reject(new Error(`dispatcher: transport error: ${err.message}`));
+    // Don't call transport.close() here — the transport already closed itself
+    // by reporting fatal. Calling close again would just be a no-op given
+    // the closed flag, but it would also be an unnecessary nesting of the
+    // close path during error propagation.
   }
 
   /** Send a `task_invoke` and resolve when the matching `task_result` arrives. */

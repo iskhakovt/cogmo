@@ -46,6 +46,7 @@ import {
   handleResumeCallback,
   handleSessions,
   handleSkillsApprovalCallback,
+  handleStatus,
   handleVoice,
   type TelegramCommandContext,
 } from "./commands.js";
@@ -424,6 +425,9 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         "",
         "Voice:",
         "  /voice [auto|always|off|clear] — set per-conversation voice mode",
+        "",
+        "Status:",
+        "  /status — show conversation, profile, and context stats",
       ].join("\n"),
     );
   });
@@ -442,6 +446,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("mcp", (ctx) => handleMcp(transport, toCmdCtx(ctx)));
   bot.command("repair", (ctx) => handleRepair(transport, toCmdCtx(ctx)));
   bot.command("voice", (ctx) => handleVoice(transport, toCmdCtx(ctx)));
+  bot.command("status", (ctx) => handleStatus(transport, toCmdCtx(ctx)));
 
   // Mid-dialog abort for /profile new|edit and /repo add flows. Evaluate
   // both branches (no `||` short-circuit) so a hypothetical "both dialogs
@@ -747,6 +752,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       { command: "mcp", description: "Manage MCP integrations" },
       { command: "repair", description: "Clear errored status on a conversation" },
       { command: "voice", description: "Set voice mode (auto / always / off)" },
+      { command: "status", description: "Show conversation, profile, and context stats" },
       { command: "cancel", description: "Abort the current interactive dialog" },
       { command: "start", description: "Show help" },
     ])

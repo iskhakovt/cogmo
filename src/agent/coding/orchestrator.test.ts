@@ -118,6 +118,7 @@ function fakeSandbox(opts: FakeContainerOpts = {}): {
   const sandbox: Sandbox = {
     healthCheck: async () => ({ ok: true, runtime: "runc" }),
     reconcileCrashedInstances: async () => ({ orphansReaped: 0 }),
+    ensureImagePresent: vi.fn(async () => {}),
     createTaskContainer: vi.fn(async (spec) => {
       createCalls.push({
         rootTaskId: spec.rootTaskId,
