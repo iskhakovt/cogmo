@@ -484,6 +484,11 @@ export class DrizzleSkillStore implements SkillStore {
       .returning();
     const updatedSkill = single(updatedSkillRows);
 
+    // Guard the promote on `status = 'pending_approval'`. The earlier
+    // SELECT + advisory lock narrows the race, but Tx B's stale SELECT
+    // result (read before Tx A committed) is still in scope when Tx B
+    // gets the lock — without the guard, B happily writes over A's
+    // already-promoted state. 0 rows means we lost the race; bail.
     const resolvedDeployRows = await tx
       .update(skillDeploys)
       .set({
@@ -491,8 +496,16 @@ export class DrizzleSkillStore implements SkillStore {
         approvedBy: params.approvedBy,
         resolvedAt: new Date(),
       })
-      .where(eq(skillDeploys.id, params.pendingId))
+      .where(
+        and(eq(skillDeploys.id, params.pendingId), eq(skillDeploys.status, "pending_approval")),
+      )
       .returning();
+    if (resolvedDeployRows.length === 0) {
+      return {
+        kind: "rejected",
+        reason: "deploy_not_pending_at_commit: lost concurrent approval race",
+      } as const;
+    }
     const resolvedDeploy = single(resolvedDeployRows);
 
     await params.applyFilesystem();
