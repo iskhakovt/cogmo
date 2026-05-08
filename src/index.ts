@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { createFal } from "@ai-sdk/fal";
 import { S3Client } from "@aws-sdk/client-s3";
@@ -52,6 +53,7 @@ import { HostRunner as McpHostRunner } from "./mcp/client/runner.js";
 import { McpRegistryImpl } from "./mcp/registry.js";
 import { DrizzleMcpStore } from "./mcp/store/index.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
+import { createSandboxBackend } from "./sandbox/factory.js";
 import {
   CogmoSocketProxy,
   LocalDockerSandboxClient,
@@ -125,51 +127,9 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const transportStore = new DrizzleTransportStore();
   const sandboxStore = new DrizzleSandboxStore();
 
-  // Sandbox is opt-in via SANDBOX_RUNTIME — coding-delegation features fail
-  // with a clear error when the env var is unset. No silent fallback.
-  let sandbox: SandboxClient<LocalDockerSessionState> | null = null;
-  let sandboxInstanceId: string | null = null;
-  let sandboxDocker: Docker | null = null;
-  if (env.SANDBOX_RUNTIME) {
-    const docker = new Docker();
-    sandboxDocker = docker;
-    const instance = await tx((trx) =>
-      sandboxStore.insertInstance(trx, {
-        host: hostname(),
-        pid: process.pid,
-      }),
-    );
-    sandboxInstanceId = instance.id;
-    const proxy = await CogmoSocketProxy.create({
-      socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
-      hostDockerSocket: env.SANDBOX_HOST_DOCKER_SOCKET,
-    });
-    sandbox = await LocalDockerSandboxClient.create({
-      docker,
-      store: sandboxStore,
-      runInTx: tx,
-      runtime: env.SANDBOX_RUNTIME,
-      instanceId: instance.id,
-      proxy,
-      askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
-    });
-    const { orphansReaped } = await sandbox.reconcileCrashedInstances(instance.id);
-    if (orphansReaped > 0) {
-      logger.warn({ orphansReaped }, "reaped orphan containers from prior instance(s)");
-    }
-    logger.info(
-      {
-        runtime: env.SANDBOX_RUNTIME,
-        instanceId: instance.id,
-        proxySocketDir: env.SANDBOX_PROXY_SOCKET_DIR,
-      },
-      "sandbox initialized",
-    );
-  } else {
-    logger.info("SANDBOX_RUNTIME unset — sandbox module disabled (coding-delegation unavailable)");
-  }
-
-  // Secrets store — required for decrypting provider credentials and channel tokens.
+  // Secrets store — required for decrypting provider credentials and
+  // channel tokens. Constructed before the sandbox block because the
+  // Daytona backend pulls its API key from the secrets table at boot.
   if (!env.COGMO_MASTER_KEY) {
     throw new Error(
       "COGMO_MASTER_KEY is required. Generate one with: cogmo gen-key\n" + "Then run: cogmo setup",
@@ -178,6 +138,94 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const secretsStore = new DrizzleSecretsStore(
     deriveMasterKey(parseMasterKey(env.COGMO_MASTER_KEY), "cogmo/secrets-at-rest/v1"),
   );
+
+  // Sandbox is opt-in by backend:
+  //   - `SANDBOX_BACKEND=local-docker` (default) requires `SANDBOX_RUNTIME`;
+  //     unset = sandbox disabled (coding-delegation features fail at call
+  //     time with a clear error). No silent fallback.
+  //   - `SANDBOX_BACKEND=daytona` requires `daytona_api_key` in the
+  //     encrypted secrets table; missing = sandbox disabled.
+  // Phase 3a only supports skills tier-2 on Daytona; coding-delegation
+  // requires the local-docker backend until Phase 3b ships
+  // git-as-transport. `codingSandbox` is the narrowed handle the coding
+  // orchestrator wires against; `sandbox` is the wide handle the skills
+  // runner takes.
+  let sandbox: SandboxClient | null = null;
+  let codingSandbox: SandboxClient<LocalDockerSessionState> | null = null;
+  let sandboxInstanceId: string | null = null;
+  let sandboxDocker: Docker | null = null;
+  if (env.SANDBOX_BACKEND === "local-docker") {
+    if (!env.SANDBOX_RUNTIME) {
+      logger.info(
+        "SANDBOX_RUNTIME unset — sandbox module disabled (coding-delegation unavailable)",
+      );
+    } else {
+      const docker = new Docker();
+      sandboxDocker = docker;
+      const instance = await tx((trx) =>
+        sandboxStore.insertInstance(trx, { host: hostname(), pid: process.pid }),
+      );
+      sandboxInstanceId = instance.id;
+      const proxy = await CogmoSocketProxy.create({
+        socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
+        hostDockerSocket: env.SANDBOX_HOST_DOCKER_SOCKET,
+      });
+      const localDocker = await createSandboxBackend({
+        backend: "local-docker",
+        docker,
+        store: sandboxStore,
+        runInTx: tx,
+        runtime: env.SANDBOX_RUNTIME,
+        instanceId: instance.id,
+        proxy,
+        askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
+      });
+      sandbox = localDocker;
+      // `instanceof` narrowing — only the local-Docker class implements
+      // the LocalDocker-typed interface that coding orchestrators need.
+      if (localDocker instanceof LocalDockerSandboxClient) codingSandbox = localDocker;
+      const { orphansReaped } = await sandbox.reconcileCrashedInstances(instance.id);
+      if (orphansReaped > 0) {
+        logger.warn({ orphansReaped }, "reaped orphan containers from prior instance(s)");
+      }
+      logger.info(
+        {
+          runtime: env.SANDBOX_RUNTIME,
+          instanceId: instance.id,
+          proxySocketDir: env.SANDBOX_PROXY_SOCKET_DIR,
+        },
+        "local-docker sandbox initialized",
+      );
+    }
+  } else if (env.SANDBOX_BACKEND === "daytona") {
+    const apiKey = await tx((trx) => secretsStore.getSecret(trx, "daytona_api_key"));
+    if (!apiKey) {
+      logger.warn(
+        "SANDBOX_BACKEND=daytona but `daytona_api_key` secret is absent — sandbox disabled. Run `cogmo setup` to add it.",
+      );
+    } else {
+      // Daytona needs a process-run id for label-stamping orphan
+      // detection in a future reconcile pass. We don't insert into
+      // sandbox_instances (that table FK's to local-docker
+      // `containers`) — just generate one for symmetry with the
+      // local-docker `cogmo.instance` label.
+      sandboxInstanceId = randomUUID();
+      sandbox = await createSandboxBackend({
+        backend: "daytona",
+        apiKey,
+        instanceId: sandboxInstanceId,
+        ...(env.DAYTONA_API_URL && { apiUrl: env.DAYTONA_API_URL }),
+        ...(env.DAYTONA_ORGANIZATION_ID && { organizationId: env.DAYTONA_ORGANIZATION_ID }),
+      });
+      logger.info(
+        {
+          instanceId: sandboxInstanceId,
+          apiUrl: env.DAYTONA_API_URL ?? "https://app.daytona.io/api",
+        },
+        "daytona sandbox initialized (coding-delegation requires local-docker until Phase 3b)",
+      );
+    }
+  }
 
   const { user, profile } = await tx(async (trx) => {
     const user = await agentStore.getFirstUser(trx);
@@ -253,20 +301,21 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
         runInTx: tx,
         codingStore,
         inngest,
-        sandboxAvailable: sandbox !== null,
+        sandboxAvailable: codingSandbox !== null,
       },
       conversationId,
     );
 
-  // Register the durable orchestrator only when the sandbox is available
-  // — without it the function would always fail at create-container.
+  // Register the durable orchestrator only when the LOCAL-DOCKER sandbox
+  // is available — coding-delegation needs the host-bind-mount + askpass
+  // surface that Phase 3a doesn't expose on Daytona. Phase 3b lifts this.
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const codingFunctions: any[] = [];
-  if (sandbox) {
+  if (codingSandbox) {
     const orchestratorDeps = {
       runInTx: tx,
       store: codingStore,
-      sandbox,
+      sandbox: codingSandbox,
       backend: codingBackend,
       // Threaded for the failure-cascade WIP-ref push (`safeTeardownWorktree`).
       // Verify-orchestrator already needs it for commit signing + push auth;
@@ -325,7 +374,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
         {
           runInTx: tx,
           store: codingStore,
-          sandbox,
+          sandbox: codingSandbox,
           secretsStore,
           askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
           devbaseImage: env.COGMO_DEVBASE_IMAGE,
