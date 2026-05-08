@@ -45,6 +45,7 @@ beforeAll(async () => {
 
 afterEach(async () => {
   await truncateAll(db);
+  vi.unstubAllEnvs();
 });
 
 afterAll(async () => {
@@ -63,6 +64,7 @@ function validators(overrides?: Partial<Validators>): Validators {
     githubPat: vi
       .fn()
       .mockResolvedValue({ valid: true, meta: { login: "cogmo-bot", id: "12345" } }),
+    daytonaApiKey: vi.fn().mockResolvedValue(okResult),
     ...overrides,
   };
 }
@@ -302,6 +304,64 @@ describe("runNonInteractive", () => {
 
     const stored = await tx((trx) => secretsStore.getSecret(trx, "claude_code_oauth_token"));
     expect(stored).toBe("sk-test-claude-oauth-token-1234");
+  });
+
+  it("persists COGMO_DAYTONA_API_KEY as the daytona_api_key secret", async () => {
+    const v = validators();
+    await runNonInteractive({
+      runInTx: tx,
+      agentStore,
+      transportStore,
+      secretsStore,
+      env: baseEnv({ COGMO_DAYTONA_API_KEY: "dtn_test_api_key_abcdef0123456789" }),
+      validators: v,
+    });
+
+    const stored = await tx((trx) => secretsStore.getSecret(trx, "daytona_api_key"));
+    expect(stored).toBe("dtn_test_api_key_abcdef0123456789");
+    expect(v.daytonaApiKey).toHaveBeenCalledWith("dtn_test_api_key_abcdef0123456789", {});
+  });
+
+  it("forwards DAYTONA_API_URL / DAYTONA_ORGANIZATION_ID to the validator", async () => {
+    vi.stubEnv("DAYTONA_API_URL", "https://daytona.example.com/api");
+    vi.stubEnv("DAYTONA_ORGANIZATION_ID", "org-7");
+
+    const v = validators();
+    await runNonInteractive({
+      runInTx: tx,
+      agentStore,
+      transportStore,
+      secretsStore,
+      env: baseEnv({ COGMO_DAYTONA_API_KEY: "dtn_test_api_key_abcdef0123456789" }),
+      validators: v,
+    });
+
+    expect(v.daytonaApiKey).toHaveBeenCalledWith("dtn_test_api_key_abcdef0123456789", {
+      apiUrl: "https://daytona.example.com/api",
+      organizationId: "org-7",
+    });
+  });
+
+  it("fails fast with no DB writes when the Daytona key is rejected", async () => {
+    const v = validators({
+      daytonaApiKey: vi
+        .fn()
+        .mockResolvedValue({ valid: false, error: "API key rejected (401 Unauthorized)" }),
+    });
+
+    await expect(
+      runNonInteractive({
+        runInTx: tx,
+        agentStore,
+        transportStore,
+        secretsStore,
+        env: baseEnv({ COGMO_DAYTONA_API_KEY: "dtn_test_api_key_abcdef0123456789" }),
+        validators: v,
+      }),
+    ).rejects.toBeInstanceOf(NonInteractiveValidationError);
+
+    expect(await rowCount(db, secretsTable)).toBe(0);
+    expect(await rowCount(db, llmProviders)).toBe(0);
   });
 
   it("persists the Tavily key when supplied and validated", async () => {

@@ -53,6 +53,7 @@ import { HostRunner as McpHostRunner } from "./mcp/client/runner.js";
 import { McpRegistryImpl } from "./mcp/registry.js";
 import { DrizzleMcpStore } from "./mcp/store/index.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
+import { DAYTONA_API_KEY_SECRET } from "./sandbox/daytona/auth.js";
 import { createSandboxBackend } from "./sandbox/factory.js";
 import {
   CogmoSocketProxy,
@@ -198,10 +199,10 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       );
     }
   } else if (env.SANDBOX_BACKEND === "daytona") {
-    const apiKey = await tx((trx) => secretsStore.getSecret(trx, "daytona_api_key"));
+    const apiKey = await tx((trx) => secretsStore.getSecret(trx, DAYTONA_API_KEY_SECRET));
     if (!apiKey) {
       logger.warn(
-        "SANDBOX_BACKEND=daytona but `daytona_api_key` secret is absent — sandbox disabled. Run `cogmo setup` to add it.",
+        `SANDBOX_BACKEND=daytona but \`${DAYTONA_API_KEY_SECRET}\` secret is absent — sandbox disabled. Run \`cogmo setup\` to add it.`,
       );
     } else {
       // Daytona needs a process-run id for label-stamping orphan

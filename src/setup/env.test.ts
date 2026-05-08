@@ -156,4 +156,35 @@ describe("parseNonInteractiveEnv", () => {
     if (r.isErr()) throw r.error;
     expect(r.value.claudeCodeOauthToken).toBe("sk-claude-code-from-file-xxxxxx");
   });
+
+  it("accepts COGMO_DAYTONA_API_KEY and exposes it as `daytonaApiKey`", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+      COGMO_DAYTONA_API_KEY: "dtn_test_api_key_abcdef0123456789",
+    });
+    if (r.isErr()) throw r.error;
+    expect(r.value.daytonaApiKey).toBe("dtn_test_api_key_abcdef0123456789");
+  });
+
+  it("reads COGMO_DAYTONA_API_KEY from the _FILE variant", () => {
+    const path = tempFile("dtn_from_file_abcdef0123456789");
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+      COGMO_DAYTONA_API_KEY_FILE: path,
+    });
+    if (r.isErr()) throw r.error;
+    expect(r.value.daytonaApiKey).toBe("dtn_from_file_abcdef0123456789");
+  });
+
+  it("rejects a too-short COGMO_DAYTONA_API_KEY", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+      COGMO_DAYTONA_API_KEY: "short",
+    });
+    if (r.isOk()) throw new Error("expected error");
+    expect(r.error.issues.join("\n")).toMatch(/COGMO_DAYTONA_API_KEY/);
+  });
 });

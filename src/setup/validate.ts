@@ -2,8 +2,18 @@
  * Provider and channel validation helpers for the setup wizard.
  *
  * Each validator pings the provider's API to confirm the credential works.
- * Uses fetch() directly — no SDK imports, no side effects beyond the HTTP call.
+ * `fetch()` direct for HTTP-API providers; the Daytona check goes through
+ * the SDK because Daytona's REST surface isn't a documented stable contract.
  */
+
+import {
+  Daytona,
+  DaytonaAuthenticationError,
+  DaytonaAuthorizationError,
+  DaytonaConnectionError,
+  DaytonaError,
+} from "@daytonaio/sdk";
+import { daytonaHealthProbe } from "../sandbox/daytona/probe.js";
 
 export interface ValidationResult {
   valid: boolean;
@@ -147,6 +157,56 @@ export async function validateClaudeCodeOauthToken(token: string): Promise<Valid
     return { valid: false, error: `Unexpected response: ${res.status}` };
   } catch (err) {
     return { valid: false, error: `Connection failed: ${(err as Error).message}` };
+  }
+}
+
+export interface DaytonaProbeOpts {
+  /** Daytona Cloud URL when omitted (`https://app.daytona.io/api`). */
+  apiUrl?: string;
+  /** Required only when the API key spans multiple orgs. */
+  organizationId?: string;
+}
+
+/**
+ * Validate a Daytona API key by running the same `daytonaHealthProbe`
+ * `DaytonaSandboxClient.healthCheck` uses, so the wizard fails on
+ * whatever bootstrap will. Each typed `DaytonaError` subclass gets its
+ * own actionable message; the base-class arm catches the rest
+ * (`DaytonaRateLimitError`, `DaytonaTimeoutError`, `DaytonaConflictError`,
+ * `DaytonaValidationError`, `DaytonaNotFoundError`) so a rate-limit hit
+ * during repeated `cogmo setup` runs surfaces the SDK message instead
+ * of the generic "Unexpected error" arm.
+ */
+export async function validateDaytonaApiKey(
+  apiKey: string,
+  opts: DaytonaProbeOpts = {},
+): Promise<ValidationResult> {
+  try {
+    const config: ConstructorParameters<typeof Daytona>[0] = { apiKey };
+    if (opts.apiUrl) config.apiUrl = opts.apiUrl;
+    if (opts.organizationId) config.organizationId = opts.organizationId;
+    await daytonaHealthProbe(new Daytona(config));
+    return { valid: true };
+  } catch (err) {
+    if (err instanceof DaytonaAuthenticationError) {
+      return { valid: false, error: "API key rejected (401 Unauthorized)" };
+    }
+    if (err instanceof DaytonaAuthorizationError) {
+      // Not the same as 401 — the key authenticated but lacks scope or
+      // the org-id pin is wrong. Distinct message helps the operator
+      // pick between rotating the key vs setting `DAYTONA_ORGANIZATION_ID`.
+      return {
+        valid: false,
+        error: "API key rejected (403 Forbidden — wrong organization or insufficient scopes)",
+      };
+    }
+    if (err instanceof DaytonaConnectionError) {
+      return { valid: false, error: `Connection failed: ${err.message}` };
+    }
+    if (err instanceof DaytonaError) {
+      return { valid: false, error: `Daytona API error: ${err.message}` };
+    }
+    return { valid: false, error: `Unexpected error: ${(err as Error).message}` };
   }
 }
 

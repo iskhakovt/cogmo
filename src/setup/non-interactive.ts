@@ -18,6 +18,10 @@ import type { ProviderAttrs } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import {
+  DAYTONA_API_KEY_SECRET,
+  DAYTONA_API_KEY_SECRET_DESCRIPTION,
+} from "../sandbox/daytona/auth.js";
+import {
   DEFAULT_GITHUB_IDENTITY_NAME,
   type GitHubIdentity,
   gitHubIdentitySecretName,
@@ -31,8 +35,10 @@ import { parseNonInteractiveEnv, SetupEnvError } from "./env.js";
 import { PROVIDER_BASE_URLS, type ProviderType } from "./providers.js";
 import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
+  type DaytonaProbeOpts,
   type ValidationResult,
   validateAnthropicKey,
+  validateDaytonaApiKey,
   validateGitHubPat,
   validateOpenAICompatibleKey,
   validateTavilyKey,
@@ -46,6 +52,7 @@ export interface Validators {
   telegram: (token: string) => Promise<ValidationResult>;
   tavily: (apiKey: string) => Promise<ValidationResult>;
   githubPat: (pat: string) => Promise<ValidationResult>;
+  daytonaApiKey: (apiKey: string, opts?: DaytonaProbeOpts) => Promise<ValidationResult>;
 }
 
 export const defaultValidators: Validators = {
@@ -54,6 +61,7 @@ export const defaultValidators: Validators = {
   telegram: validateTelegramToken,
   tavily: validateTavilyKey,
   githubPat: validateGitHubPat,
+  daytonaApiKey: validateDaytonaApiKey,
 };
 
 export interface PersistDeps {
@@ -174,6 +182,18 @@ export async function persistNonInteractive(
     );
   }
 
+  if (answers.daytonaApiKey) {
+    const apiKey = answers.daytonaApiKey;
+    await deps.runInTx((tx) =>
+      deps.secretsStore.putSecret(tx, {
+        name: DAYTONA_API_KEY_SECRET,
+        plaintext: apiKey,
+        description: DAYTONA_API_KEY_SECRET_DESCRIPTION,
+      }),
+    );
+    await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, DAYTONA_API_KEY_SECRET));
+  }
+
   logger.info(
     {
       provider: answers.llmProviderType,
@@ -183,6 +203,7 @@ export async function persistNonInteractive(
       github: Boolean(answers.githubPat),
       githubGeneratedSshKey: Boolean(generatedSshPublicKey),
       claudeCodeOauth: Boolean(answers.claudeCodeOauthToken),
+      daytona: Boolean(answers.daytonaApiKey),
     },
     "non-interactive setup complete",
   );
@@ -298,6 +319,22 @@ async function validateAll(
   }
 
   // fal.ai has no cheap ping endpoint — errors surface on first use.
+
+  // Daytona managed sandbox (optional — required only when SANDBOX_BACKEND=daytona).
+  // `DAYTONA_API_URL` / `DAYTONA_ORGANIZATION_ID` live in the runtime env, not the
+  // setup-env schema; pull them straight off `process.env` so the probe targets the
+  // same URL bootstrap will use.
+  if (answers.daytonaApiKey) {
+    const daytonaOpts: DaytonaProbeOpts = {};
+    if (process.env.DAYTONA_API_URL) daytonaOpts.apiUrl = process.env.DAYTONA_API_URL;
+    if (process.env.DAYTONA_ORGANIZATION_ID) {
+      daytonaOpts.organizationId = process.env.DAYTONA_ORGANIZATION_ID;
+    }
+    const dt = await validators.daytonaApiKey(answers.daytonaApiKey, daytonaOpts);
+    if (!dt.valid) {
+      failures.push(`Daytona API key: ${dt.error ?? "invalid"}`);
+    }
+  }
 
   return {
     failures,
