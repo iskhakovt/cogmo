@@ -116,13 +116,28 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
-      - uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+
+      # Build the cogmo app image via bake (same target + Dockerfile as
+      # publish.yml) so e2e and publish share the GHA cache scope. Override
+      # to amd64-only with a matching cache scope — multi-arch is for
+      # release artifacts, not test verification, and an amd64-only build
+      # writing to the arm64 scope would degrade the next release's arm64
+      # cache hits (moby/buildkit#2758). `WITH_ATTEST=false` because
+      # `--load` can't import the manifest list that attestations produce.
+      # Tag overridden to `cogmo:ci` to match `E2E_IMAGE` below.
+      - uses: docker/bake-action@a66e1c87e2eca0503c343edf1d208c716d54b8a8 # v7.1.0
+        env:
+          WITH_ATTEST: "false"
         with:
-          context: .
+          source: .
+          files: ./docker-bake.hcl
+          targets: cogmo
           load: true
-          tags: cogmo:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          set: |
+            cogmo.tags=cogmo:ci
+            cogmo.platform=linux/amd64
+            cogmo.cache-from=type=gha,scope=cogmo-amd64
+            cogmo.cache-to=type=gha,scope=cogmo-amd64,mode=max
       - uses: pnpm/action-setup@8912a9102ac27614460f54aedde9e1e7f9aec20d # v6.0.5
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
