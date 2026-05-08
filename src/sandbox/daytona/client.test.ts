@@ -374,26 +374,25 @@ describe("DaytonaSandboxClient", () => {
         const sb = fakeSandbox({ id: "sb-bound", state: SandboxState.STARTED });
         daytonaCalls.create.mockResolvedValue(sb);
         const client = await makeClient();
-        // 10-minute deadline. KEEPALIVE_INTERVAL_MS is 5 min so the
-        // ticker fires once at t=5 (within deadline) and then again
-        // at t=10 (boundary — but Date.now() === expiresAt is NOT
-        // past, so this fires too); the t=15 fire is past the
-        // deadline and self-stops without calling refreshActivity.
+        // 10-minute deadline + 5-min KEEPALIVE_INTERVAL_MS:
+        //   - t=5: within deadline → fires.
+        //   - t=10: AT deadline (`Date.now() >= expiresAtMs`) →
+        //          self-stops without firing.
+        //   - t=15+: ticker is gone.
         await client.create({ ...BASE_SPEC, expiresAt: new Date(Date.now() + 10 * 60_000) });
 
         // t=5: within deadline → fires.
         await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
         expect(sb.refreshActivity).toHaveBeenCalledTimes(1);
 
-        // t=10: at deadline (Date.now() === expiresAtMs, so NOT
-        // strictly greater) → fires once more.
+        // t=10: at deadline → self-stops, no fire.
         await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
-        expect(sb.refreshActivity).toHaveBeenCalledTimes(2);
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(1);
 
-        // t=15: past deadline → self-stops, no further calls.
+        // t=15+: ticker already cleared.
         await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
         await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
-        expect(sb.refreshActivity).toHaveBeenCalledTimes(2);
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(1);
       } finally {
         vi.useRealTimers();
       }

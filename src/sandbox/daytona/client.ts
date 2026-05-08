@@ -206,8 +206,13 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
   }
 
   async deleteByTaskId(taskId: string): Promise<void> {
-    // Find by label — there should be at most one root sandbox per
-    // taskId, but we tolerate stale duplicates from a crashed retry.
+    // Find by `cogmo.task` only — NOT also `cogmo.role: "root"` like
+    // `tryResumeByTaskId` does. Today every sandbox we create stamps
+    // `cogmo.role: "root"`, so the filter is functionally identical;
+    // the role-less query is forward-compat for if Phase 3b grows
+    // child / sibling sandboxes per task. Catching every sandbox
+    // tagged with the taskId at delete time guarantees a single
+    // deleteByTaskId call cascades the whole tree, not just the root.
     const result = await this.#daytona.list({ [LABEL_TASK]: taskId });
     for (const sdkSandbox of result.items) {
       this.#stopKeepalive(sdkSandbox.id);
@@ -268,10 +273,11 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     const expiresAtMs = expiresAt?.getTime();
     const sandboxId = sdkSandbox.id;
     const handle = setInterval(() => {
-      if (expiresAtMs !== undefined && Date.now() > expiresAtMs) {
-        // Deadline passed; stop refreshing. The sandbox's own
-        // `autoStopInterval` (set at create-time from the same
-        // `expiresAt`) will reap it shortly.
+      // Use `>=` so a tick at the exact deadline stops cleanly rather
+      // than firing one last refresh; the sandbox's own
+      // `autoStopInterval` (set at create-time from the same
+      // `expiresAt`) takes over from here.
+      if (expiresAtMs !== undefined && Date.now() >= expiresAtMs) {
         this.#stopKeepalive(sandboxId);
         return;
       }

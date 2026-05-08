@@ -1,6 +1,6 @@
 import type { Process } from "@daytonaio/sdk";
 import { describe, expect, it, vi } from "vitest";
-import { startExecStreaming } from "./exec-streaming.js";
+import { DisposedError, startExecStreaming } from "./exec-streaming.js";
 
 /**
  * Minimal `Process` stub. Each test scripts its own behaviour via the
@@ -142,10 +142,13 @@ describe("startExecStreaming", () => {
     expect(command).toContain("env 'GIT_ASKPASS'='/helper'");
   });
 
-  it("dispose() calls deleteSession and resolves wait() with exit code 137", async () => {
+  it("dispose() calls deleteSession and rejects wait() with DisposedError", async () => {
+    // Per the `ExecStreamingHandle` contract, `wait()` must REJECT
+    // (not resolve with a sentinel exit code) after `dispose()` so
+    // backend-agnostic consumers can branch on the dispose path
+    // explicitly. Mirrors the Local-Docker backend's behaviour.
     let stdoutCb: ((c: string) => void) | undefined;
     const proc = fakeProcess({ wsReject: new Error("ws closed") });
-    // Override getSessionCommandLogs to hold open until disposed
     let resolveWs: (() => void) | undefined;
     let rejectWs: ((err: Error) => void) | undefined;
     (proc.getSessionCommandLogs as unknown as ReturnType<typeof vi.fn>).mockImplementation(
@@ -171,6 +174,9 @@ describe("startExecStreaming", () => {
       cmd: ["sleep", "infinity"],
       opts: {},
     });
+    // Suppress the (expected) unhandled-rejection from the wait
+    // promise — caller will await it explicitly below.
+    handle.wait().catch(() => undefined);
 
     const TIMEOUT_MS = 500;
     let timeoutHandle: NodeJS.Timeout | undefined;
@@ -182,8 +188,41 @@ describe("startExecStreaming", () => {
 
     expect(winner).toBe("disposed");
     expect(proc.deleteSession).toHaveBeenCalled();
-    const { exitCode } = await handle.wait();
-    expect(exitCode).toBe(137);
+    await expect(handle.wait()).rejects.toBeInstanceOf(DisposedError);
+  });
+
+  it("rejects opts.user as Phase-3a-unsupported (matches LocalDocker silently honoring; loud diff is better)", async () => {
+    const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
+    await expect(
+      startExecStreaming({
+        process: proc,
+        sessionIdPrefix: "p",
+        cmd: ["whoami"],
+        opts: { user: "claude" },
+      }),
+    ).rejects.toThrow(/opts\.user is not supported in Phase 3a/);
+    // No session created — the rejection must fire before the
+    // `createSession` call.
+    expect(proc.createSession).not.toHaveBeenCalled();
+  });
+
+  it("rejects wait() when natural-exit returns no exit code (don't mask 'unknown' as 0)", async () => {
+    const proc = fakeProcess({ wsResolve: {} });
+    // Override `getSessionCommand` to return no exitCode — mimics
+    // the rare server-side race where the WS closes but the command
+    // record hasn't durably captured the exit status yet.
+    (proc.getSessionCommand as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "cmd-fake",
+      command: "true",
+      exitCode: undefined,
+    });
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: {},
+    });
+    await expect(handle.wait()).rejects.toThrow(/reported no exit code/);
   });
 
   it("dispose() is idempotent — second call is a no-op", async () => {

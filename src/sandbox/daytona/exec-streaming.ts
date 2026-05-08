@@ -1,14 +1,20 @@
-import { PassThrough, type Readable, Writable } from "node:stream";
+import { randomUUID } from "node:crypto";
+import { PassThrough, Writable } from "node:stream";
 import type { Process } from "@daytonaio/sdk";
 import { logger } from "../../logger.js";
 import type { ExecOptions, ExecStreamingHandle } from "../index.js";
 
 const log = logger.child({ component: "sandbox.daytona.exec-streaming" });
 
-/** Thrown by `dispose()` to settle the exit promise. */
-class DisposedError extends Error {
+/**
+ * Thrown by `wait()` after `dispose()` so consumers branching on exit
+ * status can distinguish "we killed it" from a real exit code. Matches
+ * the contract documented on `ExecStreamingHandle` in
+ * `src/sandbox/index.ts` and the Local-Docker backend's behaviour.
+ */
+export class DisposedError extends Error {
   constructor() {
-    super("daytona execStreaming dispose called");
+    super("daytona execStreaming was disposed");
     this.name = "DisposedError";
   }
 }
@@ -45,10 +51,24 @@ export async function startExecStreaming(args: {
 }): Promise<ExecStreamingHandle> {
   const { process: daytonaProcess, sessionIdPrefix, cmd, opts, onClose } = args;
 
-  // Per-call session — `deleteSession` is the only kill primitive Daytona
-  // offers, and we want it to affect only this command. Random suffix
-  // avoids collisions across rapid-fire execs.
-  const sessionId = `${sessionIdPrefix}-${randomSuffix()}`;
+  // Phase 3a does not implement `opts.user` for Daytona. The
+  // Local-Docker backend honours it via dockerode's `User` field;
+  // silently dropping it here would diverge backends invisibly. Match
+  // the rest of the Phase-3a "not supported" pattern (`worktree`,
+  // `askpass`, `homeVolume`) and reject loudly.
+  if (opts.user !== undefined) {
+    throw new Error(
+      "DaytonaSandboxSession.execStreaming: opts.user is not supported in Phase 3a (use `runuser` / `sudo` inside the cmd argv until upstream support lands)",
+    );
+  }
+
+  // Per-call session — `deleteSession` is the only kill primitive
+  // Daytona offers, and we want it to affect only this command.
+  // `randomUUID()` (128 bits, crypto-grade) makes collisions
+  // effectively impossible — important because a collision wouldn't
+  // fail loudly, it would silently make `dispose()` on one call tear
+  // down a sibling call's session.
+  const sessionId = `${sessionIdPrefix}-${randomUUID()}`;
   await daytonaProcess.createSession(sessionId);
 
   // Idempotent session teardown. Called from every termination path —
@@ -94,6 +114,15 @@ export async function startExecStreaming(args: {
 
   const stdout = new PassThrough();
   const stderr = new PassThrough();
+  // Always-attached no-op `'error'` absorbers. Stream errors fire when
+  // the WS error path calls `stream.destroy(err)`; without a listener,
+  // Node escalates to `uncaughtException` and crashes the worker.
+  // Consumers attaching their own `'error'` listeners get them
+  // additively — Node delivers events to all listeners. This is the
+  // contract guarantee that lets `ExecStreamingHandle.stdout` /
+  // `.stderr` be safe even when nobody else is listening.
+  stdout.on("error", () => {});
+  stderr.on("error", () => {});
 
   // Daytona's session-exec command is a single shell command string, not
   // argv. Quote each arg for `bash -lc` safely. `cmd[0]` may already be
@@ -138,6 +167,11 @@ export async function startExecStreaming(args: {
   // code. If WS errored, surface the error (consumers may have already
   // received partial output via stdout/stderr). Every settle path runs
   // `cleanupSession` so per-call Daytona sessions don't leak.
+  //
+  // Per the `ExecStreamingHandle` contract, `wait()` rejects with
+  // `DisposedError` after `dispose()` instead of resolving with a
+  // sentinel exit code — that forces consumers to handle the dispose
+  // path explicitly rather than confusing it with a real exit signal.
   let disposed = false;
   const exitPromise = new Promise<{ exitCode: number }>((resolve, reject) => {
     wsPromise
@@ -145,31 +179,48 @@ export async function startExecStreaming(args: {
         stdout.end();
         stderr.end();
         if (onClose) onClose();
+        if (disposed) {
+          await cleanupSession();
+          reject(new DisposedError());
+          return;
+        }
         try {
           const cmd = await daytonaProcess.getSessionCommand(sessionId, commandId);
-          // Daytona's Command may not have an exitCode if disposed early.
-          // Treat undefined as "we killed it" → use 137 (SIGKILL convention).
-          const exitCode = cmd.exitCode ?? (disposed ? 137 : 0);
           await cleanupSession();
-          resolve({ exitCode });
+          if (cmd.exitCode === undefined || cmd.exitCode === null) {
+            // Natural WS close + Daytona reports no exit code.
+            // Surface as a real failure rather than coercing to 0 —
+            // "we don't know what happened" must not look like
+            // success to consumers branching on exit status.
+            reject(
+              new Error(
+                `Daytona session ${sessionId} command ${commandId} exited but reported no exit code`,
+              ),
+            );
+            return;
+          }
+          resolve({ exitCode: cmd.exitCode });
         } catch (err) {
           await cleanupSession();
           reject(err as Error);
         }
       })
       .catch(async (err: Error) => {
-        if (disposed) {
-          // Expected — dispose tore down the WS. Resolve with sentinel.
-          stdout.end();
-          stderr.end();
-          if (onClose) onClose();
-          resolve({ exitCode: 137 });
-          return;
-        }
-        stdout.destroy(err);
-        stderr.destroy(err);
+        stdout.end();
+        stderr.end();
         if (onClose) onClose();
         await cleanupSession();
+        if (disposed) {
+          // Expected — dispose tore down the WS. Reject with the
+          // sentinel error type per the interface contract.
+          reject(new DisposedError());
+          return;
+        }
+        // Real upstream error — destroy downstreams so any consumers
+        // currently reading see the failure (and our own no-op
+        // `'error'` absorbers swallow the per-stream notification).
+        stdout.destroy(err);
+        stderr.destroy(err);
         reject(err);
       });
   });
@@ -202,8 +253,10 @@ export async function startExecStreaming(args: {
       : undefined;
 
   const handle: ExecStreamingHandle = {
-    stdout: stdout as Readable,
-    stderr: stderr as Readable,
+    // PassThrough is a Duplex which is itself a Readable — direct
+    // assignment without a cast is structurally type-safe.
+    stdout,
+    stderr,
     wait: () => exitPromise,
     dispose,
   };
@@ -265,12 +318,4 @@ function buildShellCommand(cmd: readonly string[], opts: ExecOptions): string {
  */
 function shellEscape(s: string): string {
   return `'${s.replaceAll("'", "'\"'\"'")}'`;
-}
-
-function randomSuffix(): string {
-  // 6 hex chars = 24 bits — collision-resistant within a single Daytona
-  // sandbox's session id namespace at single-user concurrency.
-  return Math.floor(Math.random() * 0xff_ff_ff)
-    .toString(16)
-    .padStart(6, "0");
 }
