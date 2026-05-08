@@ -135,6 +135,17 @@ async def run(inputs, ctx):
     return {"unreachable": True}
 `;
 
+/**
+ * Returns the container's hostname — by default the docker short container
+ * ID. Two invocations from the same warm-pool worker share a hostname; two
+ * from different containers (cold start, recycle) don't.
+ */
+const HOSTNAME_BODY = `
+import socket
+async def run(inputs, ctx):
+    return {"host": socket.gethostname()}
+`;
+
 const containerManifest = (name: string) => `---
 name: ${name}
 description: a tier-2 sysbox skill
@@ -212,5 +223,43 @@ resources:
     // The kill must land before the skill's own 60 s sleep would resolve.
     // Generous upper bound to absorb container startup + reaper jitter.
     expect(elapsedMs).toBeLessThan(30_000);
+
+    await runner.shutdown();
   }, 60_000);
+
+  it("two sequential invocations reuse the same warm worker", async () => {
+    const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
+      store: skillStore,
+      memory: stubMemory(),
+      secretsStore: stubSecrets(),
+      files: noopFiles,
+      sandbox,
+      tier2Image: SKILLS_IMAGE,
+      user: { id: "u-1", timezone: "UTC" },
+      memoryBankId: "bank-1",
+      // Default min=1: the runner.create call eagerly spawns one worker
+      // before the first invoke, so both invokes run on a warm container.
+      // Tighter idle/recycle caps don't matter for a two-task test.
+    });
+
+    await runner.__registerForTests({
+      name: "tier2-host",
+      manifestSource: containerManifest("tier2-host"),
+      body: HOSTNAME_BODY,
+    });
+
+    const r1 = await runner.invoke({ name: "tier2-host", inputs: {} });
+    const r2 = await runner.invoke({ name: "tier2-host", inputs: {} });
+    expect(r1.status).toBe("success");
+    expect(r2.status).toBe("success");
+    const h1 = (r1.output as { host: string }).host;
+    const h2 = (r2.output as { host: string }).host;
+    // Same container — pool reused the warm worker. If this drifts, the
+    // pool is spawning per-task again and the warm-pool win is gone.
+    expect(h1).toBe(h2);
+    expect(h1).toMatch(/^[0-9a-f]{12}$/);
+
+    await runner.shutdown();
+  }, 180_000);
 });

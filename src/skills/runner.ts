@@ -28,7 +28,16 @@ import type {
   SkillTier,
 } from "./store/index.js";
 import type { ClassifierLog, SkillInputs, SkillManifest } from "./types.js";
-import { type RunOnSysboxContainerResult, runOnSysboxContainer } from "./worker-sysbox/host.js";
+import {
+  type RunOnSysboxContainerResult,
+  type RunTaskOnSessionResult,
+  runOnSysboxContainer,
+} from "./worker-sysbox/host.js";
+import {
+  DEFAULT_POOL_OPTIONS,
+  SysboxWorkerPool,
+  type SysboxWorkerPoolOptions,
+} from "./worker-sysbox/pool.js";
 import { type RunOnWorkerResult, runOnWorker } from "./worker-wasm/host.js";
 
 /**
@@ -193,6 +202,23 @@ export interface SkillRunnerOptions {
    * Override when shipping a Cogmo-baked image with deps pre-installed.
    */
   tier2Image?: string;
+  /**
+   * Pool sizing overrides. Defaults from `DEFAULT_POOL_OPTIONS` are tuned
+   * for personal scale (min=1, max=3, recycle every 500 tasks or 24h).
+   * Tests can shrink to `min: 0` to avoid eager-spawning a worker on
+   * `create()`.
+   */
+  poolOptions?: Partial<
+    Pick<
+      SysboxWorkerPoolOptions,
+      | "min"
+      | "max"
+      | "recycleAfterTasks"
+      | "recycleAfterMs"
+      | "idleShutdownMs"
+      | "idleSweepIntervalMs"
+    >
+  >;
 }
 
 interface SkillSourceCacheEntry {
@@ -220,6 +246,15 @@ export class SkillRunnerImpl implements SkillRunner {
   #pyodidePackageCacheDir: string | undefined;
   #sandbox: SandboxClient | undefined;
   #tier2Image: string;
+  /**
+   * Lazily-created warm pool over `#sandbox`. `undefined` until either the
+   * `create()` factory eagerly initialises it (production wiring with
+   * sandbox + image) or it's left `undefined` because no sandbox is wired
+   * (tier-1-only deployments). `invoke()` checks for it before routing a
+   * tier-container task.
+   */
+  #pool: SysboxWorkerPool | undefined;
+  #poolOptions: SkillRunnerOptions["poolOptions"];
   #ajv: Ajv;
   /**
    * Parsed manifest + compiled validator cache, keyed by `<name>@<sha>`. A new
@@ -241,11 +276,39 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#pyodidePackageCacheDir = opts.pyodidePackageCacheDir;
     this.#sandbox = opts.sandbox;
     this.#tier2Image = opts.tier2Image ?? DEFAULT_TIER2_IMAGE;
+    this.#poolOptions = opts.poolOptions;
     this.#ajv = new Ajv({ allErrors: true, strict: false });
   }
 
   static async create(opts: SkillRunnerOptions): Promise<SkillRunnerImpl> {
-    return new SkillRunnerImpl(opts);
+    const runner = new SkillRunnerImpl(opts);
+    if (opts.sandbox) {
+      // Eagerly bring the warm pool up so the first invocation hits a hot
+      // worker. Spawn failures here surface at the boot site (clear signal
+      // for misconfig — bad image, sandbox unreachable) instead of being
+      // deferred to the first user-driven invocation. If a deployment has
+      // sandbox wired but never invokes a tier-container skill, the always-
+      // warm worker is one container's worth of memory — acceptable.
+      runner.#pool = await SysboxWorkerPool.create({
+        sandbox: opts.sandbox,
+        image: opts.tier2Image ?? DEFAULT_TIER2_IMAGE,
+        ...DEFAULT_POOL_OPTIONS,
+        ...opts.poolOptions,
+      });
+    }
+    return runner;
+  }
+
+  /**
+   * Tear down the warm pool. Idempotent. Bootstrap callers wire this into
+   * graceful-shutdown when they add SIGTERM handling. Leaves tier-1 (Pyodide)
+   * untouched — those workers are short-lived per-call and self-clean.
+   */
+  async shutdown(): Promise<void> {
+    if (this.#pool) {
+      await this.#pool.dispose();
+      this.#pool = undefined;
+    }
   }
 
   // --- Deployment pipeline ---
@@ -712,7 +775,7 @@ export class SkillRunnerImpl implements SkillRunner {
     // Switch + `never` exhaustiveness so a future SkillTier value (added to
     // the pgEnum) is a compile-time miss here rather than a silent route
     // through the sysbox path.
-    let result: RunOnWorkerResult | RunOnSysboxContainerResult;
+    let result: RunOnWorkerResult | RunTaskOnSessionResult | RunOnSysboxContainerResult;
     switch (skill.tier) {
       case "wasm":
         result = await runOnWorker({
@@ -728,26 +791,42 @@ export class SkillRunnerImpl implements SkillRunner {
         });
         break;
       case "container": {
-        // Narrow the `Sandbox | undefined` field to a non-null local once
-        // the tier-check above has guaranteed it; avoids a non-null
-        // assertion inside the runOnSysboxContainer call.
+        const pool = this.#pool;
         const sandbox = this.#sandbox;
-        if (!sandbox) {
+        if (!pool || !sandbox) {
           // Can't reach this — the early `tier === "container" && !sandbox`
-          // throw above caught it. Re-throw to satisfy the narrowing.
-          throw new Error("invariant: sandbox unset on container tier path");
+          // throw above caught it (pool is created iff sandbox is wired).
+          throw new Error("invariant: pool unset on container tier path");
         }
-        result = await runOnSysboxContainer({
-          taskId: run.id,
-          skillName: skill.name,
-          body: cached.body,
-          inputs: opts.inputs,
-          ...(wallClockS !== undefined && { wallClockS }),
-          resourceLimits: mapManifestResourceLimits(cached.manifest.resources),
-          image: this.#tier2Image,
-          sandbox,
-          ctxHandler,
-        });
+        // Per-skill resource overrides are honoured via a one-shot
+        // container — the pool runs every worker at the default resource
+        // budget, so a skill that wants 2 GB of RAM can't share a 512 MB
+        // worker. Bypass the pool when overrides are declared; pay the
+        // ~1-2s cold-start that pre-pool tier-2 skills paid every time.
+        // This is rare: most skills don't override and ride the warm path.
+        const overrides = mapManifestResourceLimits(cached.manifest.resources);
+        if (overrides.cpus !== undefined || overrides.memory_bytes !== undefined) {
+          result = await runOnSysboxContainer({
+            taskId: run.id,
+            skillName: skill.name,
+            body: cached.body,
+            inputs: opts.inputs,
+            ...(wallClockS !== undefined && { wallClockS }),
+            resourceLimits: overrides,
+            image: this.#tier2Image,
+            sandbox,
+            ctxHandler,
+          });
+        } else {
+          result = await pool.invoke({
+            taskId: run.id,
+            skillName: skill.name,
+            body: cached.body,
+            inputs: opts.inputs,
+            ...(wallClockS !== undefined && { wallClockS }),
+            ctxHandler,
+          });
+        }
         break;
       }
       default: {
