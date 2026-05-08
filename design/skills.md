@@ -114,17 +114,19 @@ resources:
 
 Overrides validated at deploy against a per-tier hard ceiling (e.g., ≤2 GB memory, ≤10 min wall-clock) to prevent runaway declarations.
 
-## Warm pool `[proposed]`
+## Warm pool `[confirmed]`
 
 The container tier is warmed from day 1. A 1–2s cold start on every interactive skill invocation is user-visible latency. The dispatcher abstraction also removes the need for a sync/async tier split — one pool handles both uniformly.
 
-### Shape
+Implementation lives in `src/skills/worker-sysbox/` — `pool.ts` owns the lifecycle, `worker.ts` wraps a long-lived `SandboxSession`, and `host.ts` runs one task on a session. `SkillRunnerImpl.create` eagerly stands the pool up when a sandbox is wired; `shutdown()` tears it down.
+
+### Shape `[confirmed]`
 
 | Piece | Responsibility |
 |-|-|
-| **Pool manager** | Track each worker's state (`idle` / `busy` / `draining`). Scale between `min` and `max`. Recycle workers after N tasks or T minutes idle. Health-check; replace stuck workers. |
-| **Dispatcher** | Pick an idle worker, mark `busy`, send task, receive result, mark `idle`. If all busy, queue briefly; spawn new worker if queue grows past threshold. |
-| **Worker** | Python process inside a sysbox container, listening on stdin/stdout for JSON-RPC task requests. Loads common imports once at boot. |
+| **Pool manager** (`SysboxWorkerPool`) | Track each worker's state (`idle` / `busy` / `draining`). Scale between `min` and `max` on demand. Recycle workers after N tasks or T ms age. Sweep idle workers above `min`. |
+| **Worker** (`SysboxSkillWorker`) | One sysbox container with a `SandboxSession`, reused across many tasks. Spawns a fresh `python3 -u -c <RUNNER>` exec per task — no long-lived python process in v1, so per-task isolation comes for free at the OS level. |
+| **Dispatcher** | One `Dispatcher` per task drives `task_invoke` → `task_result` over a per-exec NDJSON transport. Per-task `CtxHandler` carries the run id, manifest, and audit hooks for that invocation. |
 
 ### Protocol
 
@@ -158,34 +160,40 @@ stdin/stdout chosen over HTTP / Unix socket for simplicity — one process per w
 
 Between tasks, "state" means Python module-level globals, library internals (connection pools, engine caches), `sys.modules` entries, monkey-patches, open file handles, background threads. Any of this leaking from task 1 into task 2 is a correctness or security bug.
 
-**v1: subinterpreter per task** (Python 3.14+, PEP 734's `concurrent.interpreters`). Fresh interpreter per invocation, shared process. ~50ms per task, full reset. Cheaper than worker recycle (~300ms) and strictly safer than logical reset. PEP 684 added the C-level per-interpreter GIL in 3.12, but the stable Python-level API for spawning + communicating with subinterpreters only landed in 3.14 — so 3.14 is the floor.
+**v1 (shipped): fresh `python -c` exec per task on a long-lived container.** ~300ms per task, full process-level isolation between tasks. Container drift (tmpfs growth, kernel state) is bounded by the pool's recycle policy (`recycleAfterTasks` / `recycleAfterMs`). Cheaper than spawn-per-task (~1-2s) by skipping container create + image load. Wall-clock kills mark the worker non-reusable so the next invoke spawns a fresh container.
 
-**Per-skill opt-out** — skills whose C-extension dependencies don't support subinterpreters declare `isolation: recycle` in `SKILL.md`. Deploy-time check sniffs known-incompatible wheels and either forces the declaration or rejects. Options per skill:
+**v2 (deferred — see todo): subinterpreter per task** (Python 3.14+, PEP 734's `concurrent.interpreters`). Fresh interpreter per invocation, shared process. ~50ms per task, full reset. Cheaper than v1 worker recycle (~300ms). PEP 684 added the C-level per-interpreter GIL in 3.12, but the stable Python-level API for spawning + communicating with subinterpreters only landed in 3.14 — so 3.14 is the floor.
+
+**Per-skill opt-out** — skills whose C-extension dependencies don't support subinterpreters declare `isolation: recycle` in `SKILL.md`. Deploy-time check sniffs known-incompatible wheels and either forces the declaration or rejects. The `isolation` enum is already in the manifest schema; v1 ignores it (every task already runs in a fresh process). Options per skill (relevant from v2 onwards):
 
 | Mode | When to use |
 |-|-|
 | `subinterpreter` (default) | Most skills. Pure Python + well-behaved C extensions. |
-| `recycle` | Skills importing libraries with subinterpreter-hostile C extensions. Worker is killed and respawned after each task (~300ms overhead). |
+| `recycle` | Skills importing libraries with subinterpreter-hostile C extensions. Worker is killed and respawned after each task (~300ms overhead — same as v1). |
 
-**System fallback** — if a meaningful fraction of skills need `recycle`, flip the default to `recycle` via one config knob. Revisit as the CPython 3.14+ subinterpreter ecosystem matures.
+**System fallback** — if a meaningful fraction of skills need `recycle`, flip the default to `recycle` system-wide via one config knob. Revisit as the CPython 3.14+ subinterpreter ecosystem matures.
 
 **Not used:** logical reset (`importlib.reload` + globals clear). Too leaky — misses library state and monkey-patches. Present in the option space but never the right answer.
 
-### Sizing
+### Sizing `[confirmed]`
+
+`DEFAULT_POOL_OPTIONS` in `src/skills/worker-sysbox/pool.ts`:
 
 | Parameter | Starting value | Notes |
 |-|-|-|
 | `min` (always warm) | 1 | Handles interactive latency from day 1. |
 | `max` (hard cap) | 3 | Personal scale — concurrent skill invocations rarely exceed. |
-| Queue depth → spawn threshold | 2 | If queue reaches 2 tasks, spawn another worker up to `max`. |
-| Worker replacement | Every 500 tasks or 24h idle | Bounds drift in the shared process (imports, C-ext state) independent of per-task subinterpreter reset. |
-| Idle shutdown | 30 min | Worker exits with no tasks; `min` replenishes immediately. |
+| Spawn-on-demand | up to `max` | When no idle worker is free, spawn one up to `max` rather than queuing. Personal-scale latency wins over backpressure economy. (The original "queue depth → spawn at 2" knob was kept simple at v1 — re-introduce if usage shows we're paying for over-spawn.) |
+| `recycleAfterTasks` | 500 tasks | Bounds container drift (tmpfs, log accumulation, allocator fragmentation). |
+| `recycleAfterMs` | 24 h | Wall-clock ceiling — catches workers that ran few tasks but sat warm forever. |
+| `idleShutdownMs` | 30 min | Idle workers above `min` get reaped. `min` replenishes lazily on next invoke. |
+| `idleSweepIntervalMs` | 1 min | Sweep cadence. |
 
-Starting values; revisit with usage data.
+Starting values; revisit with usage data. Skills that declare `resources.{cpu_shares,memory_mb}` overrides bypass the pool — they get a fresh, per-skill-resource-budget container, paying the cold-start every invoke. Most skills don't override and ride the warm path.
 
-### Tier 1 pool
+### Tier 1 pool `[proposed]`
 
-WASM workers are also pooled but much lighter — one Pyodide instance per Node worker thread, reused across skill invocations. No container, no recycle tuning. Reset between tasks via fresh Pyodide globals scope (built-in). Sizing: `min = 1`, `max = tier2.max` (share fate).
+WASM workers are not pooled today — each invocation spawns a fresh Node worker thread + Pyodide bootstrap, costing ~5s. The future shape: one Pyodide instance per Node worker thread, reused across skill invocations. No container, no recycle tuning. Reset between tasks via fresh Pyodide globals scope (built-in). Sizing: `min = 1`, `max = tier2.max` (share fate). Defer until tier-1 invocation latency becomes user-visible — most production traffic ships through tier-2.
 
 ## Skill storage `[proposed]`
 
