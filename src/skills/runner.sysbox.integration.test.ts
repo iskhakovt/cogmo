@@ -78,6 +78,7 @@ beforeAll(async () => {
   sandbox = await LocalInProcessSandbox.create({
     docker,
     store: agentStore,
+    runInTx: tx,
     runtime: "sysbox",
     instanceId: instance.id,
     proxy,
