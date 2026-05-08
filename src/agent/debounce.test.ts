@@ -182,7 +182,9 @@ describe("legacy router — handler behavior", () => {
         expect.objectContaining({ name: "debounce/maxwait" }),
       ]),
     );
-    const events = step.sendEvent.mock.calls[0][1];
+    const sendCall = step.sendEvent.mock.calls[0];
+    if (!sendCall) throw new Error("expected sendEvent to have been called");
+    const events = sendCall[1] as Array<{ name: string }>;
     expect(events.every((e) => e.name !== "inbound/ready")).toBe(true);
   });
 
@@ -210,8 +212,10 @@ describe("legacy router — handler behavior", () => {
     const step = mockStep();
     await (router as any).fn({ event: baseEvent, step });
 
-    const events = step.sendEvent.mock.calls[0][1];
+    const sendCall = step.sendEvent.mock.calls[0];
+    if (!sendCall) throw new Error("expected sendEvent to have been called");
+    const events = sendCall[1] as Array<{ name: string }>;
     expect(events).toHaveLength(1);
-    expect(events[0].name).toBe("debounce/maxwait");
+    expect(events[0]?.name).toBe("debounce/maxwait");
   });
 });

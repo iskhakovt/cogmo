@@ -1,7 +1,7 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { Profile } from "../../../agent/store/index.js";
-import { mockTransport } from "../../../test/factories.js";
+import { type DeepPartial, mockTransportDeep } from "../../../test/factories.js";
 import type { Transport } from "../../transport.js";
 import {
   formatScope,
@@ -33,8 +33,8 @@ function mkCtx(match?: string): TelegramCommandContext & { reply: ReturnType<typ
   };
 }
 
-function transportWith(overrides: Partial<Transport> = {}): Transport {
-  return mockTransport(overrides);
+function transportWith(overrides: DeepPartial<Transport> = {}): Transport {
+  return mockTransportDeep(overrides);
 }
 
 function mkDialogs(): ProfileDialogs {
@@ -369,6 +369,7 @@ describe("handleProfile", () => {
         summarizationModel: null,
         extractionModel: null,
         autoRecall: "heuristic",
+        voiceMode: "auto",
         toolSet: [],
         memoryScope,
       };
@@ -428,8 +429,11 @@ describe("handleProfile", () => {
     });
 
     it("set → calls update with parsed scope", async () => {
-      const set = { compartments: ["work", "technical"] as const, trust: ["first-party"] as const };
-      const update = vi.fn().mockResolvedValue(ok(makeProfile({ ...set })));
+      const set: Profile["memoryScope"] = {
+        compartments: ["work", "technical"],
+        trust: ["first-party"],
+      };
+      const update = vi.fn().mockResolvedValue(ok(makeProfile(set)));
       const transport = transportWith({
         profiles: {
           list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
@@ -1472,13 +1476,13 @@ describe("handleRepair", () => {
 describe("handleVoice", () => {
   function transportForVoice(
     overrides: {
-      setVoiceMode?: ReturnType<typeof vi.fn>;
+      setVoiceMode?: Transport["conversations"]["setVoiceMode"];
       voiceMode?: "auto" | "always" | "never" | null;
       profileVoiceMode?: "auto" | "always" | "never";
       noSession?: boolean;
     } = {},
   ) {
-    return mockTransport({
+    return transportWith({
       resolveSession: overrides.noSession
         ? vi.fn().mockResolvedValue(null)
         : vi.fn().mockResolvedValue({
@@ -1490,7 +1494,6 @@ describe("handleVoice", () => {
             receive: "routed",
           }),
       conversations: {
-        list: vi.fn().mockResolvedValue(ok([])),
         getCurrent: vi.fn().mockResolvedValue(
           ok({
             conversationId: "c1",
@@ -1501,10 +1504,7 @@ describe("handleVoice", () => {
             profileVoiceMode: overrides.profileVoiceMode ?? "auto",
           }),
         ),
-        setAlias: vi.fn().mockResolvedValue(ok(undefined)),
-        setProfile: vi.fn().mockResolvedValue(ok(undefined)),
-        repair: vi.fn().mockResolvedValue(ok({ wasErrored: false })),
-        setVoiceMode: overrides.setVoiceMode ?? vi.fn().mockResolvedValue(ok(undefined)),
+        ...(overrides.setVoiceMode !== undefined && { setVoiceMode: overrides.setVoiceMode }),
       },
     });
   }
@@ -1576,17 +1576,11 @@ describe("handleVoice", () => {
 
 describe("handleStatus", () => {
   function transportWithSummary(value: unknown) {
-    return mockTransport({
+    return transportWith({
       conversations: {
-        list: vi.fn().mockResolvedValue(ok([])),
-        getCurrent: vi.fn().mockResolvedValue(ok(null)),
         summary: vi.fn().mockResolvedValue(value),
-        setAlias: vi.fn().mockResolvedValue(ok(undefined)),
-        setProfile: vi.fn().mockResolvedValue(ok(undefined)),
-        repair: vi.fn().mockResolvedValue(ok({ wasErrored: false })),
-        setVoiceMode: vi.fn().mockResolvedValue(ok(undefined)),
       },
-    } as Partial<Transport>);
+    });
   }
 
   it("nudges the user to send a message when no active session", async () => {

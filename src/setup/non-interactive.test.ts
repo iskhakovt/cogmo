@@ -14,6 +14,7 @@ import { DrizzleAgentStore } from "../agent/store/index.js";
 import { llmProviders, modelProviders } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
+import { GitHubIdentitySchema } from "../secrets/github.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { secrets as secretsTable } from "../secrets/store/schema.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
@@ -353,7 +354,7 @@ describe("runNonInteractive", () => {
 
     const raw = await tx((trx) => secretsStore.getSecret(trx, "github_identity:default"));
     expect(raw).not.toBeNull();
-    const parsed = JSON.parse(raw ?? "{}");
+    const parsed = GitHubIdentitySchema.parse(JSON.parse(raw ?? "{}"));
     expect(parsed.pat).toBe("ghp_test_xxxxxxxxxxxxxxxxxxxx");
     expect(parsed.sshPrivateKey).toMatch(/-----BEGIN OPENSSH PRIVATE KEY-----/);
     expect(parsed.sshPublicKey).toMatch(/^ssh-ed25519 /);

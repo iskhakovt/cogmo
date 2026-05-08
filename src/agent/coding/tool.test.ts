@@ -1,16 +1,34 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, type Mock, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { z } from "zod";
 import type { Service } from "../service.js";
 import { delegateCodingTool } from "./tool.js";
 
 function service(coding?: Service["coding"]): Service {
-  const s = mock<Service>();
-  // mock<Service>() auto-mocks every property including the optional `coding`
-  // sub-service; assign explicitly so an absent argument really yields
-  // undefined (the path the "no sandbox" test exercises).
-  s.coding = coding;
-  return s;
+  // mock<Service>() returns a Proxy that auto-mocks every property — including
+  // optional `coding` and `skills`. The "no sandbox" path needs `coding` to
+  // genuinely be `undefined`, so build a hand-rolled stub for the surfaces the
+  // tool actually touches and add `coding` only when supplied.
+  const stub: Service = {
+    memory: mock<Service["memory"]>(),
+    files: mock<Service["files"]>(),
+    coreMemory: mock<Service["coreMemory"]>(),
+    ...(coding !== undefined && { coding }),
+  };
+  return stub;
 }
+
+// What `delegateCodingTool.handler` returns: a JSON-encoded ack envelope.
+const DelegateAckSchema = z
+  .object({
+    ok: z.boolean(),
+    taskId: z.string().nullable().optional(),
+    status: z.string().optional(),
+    reason: z.string().optional(),
+    plan: z.string().optional(),
+    nextStep: z.string().optional(),
+  })
+  .passthrough();
 
 describe("delegate_coding tool", () => {
   it("calls service.coding.delegate with parsed input and returns the queued ack", async () => {
@@ -23,7 +41,7 @@ describe("delegate_coding tool", () => {
       goal: "refactor steering rules to support per-channel scoping",
       repoName: "cogmo",
     });
-    const parsed = JSON.parse(result);
+    const parsed = DelegateAckSchema.parse(JSON.parse(result));
     expect(parsed.ok).toBe(true);
     expect(parsed.taskId).toBe("t-1");
     expect(parsed.status).toBe("queued");
@@ -52,7 +70,7 @@ describe("delegate_coding tool", () => {
       { goal: "refactor steering rules to support per-channel scoping", repo: "cogmo" },
       service({ delegate }),
     );
-    const parsed = JSON.parse(result);
+    const parsed = DelegateAckSchema.parse(JSON.parse(result));
     expect(parsed.ok).toBe(false);
     expect(parsed.reason).toMatch(/active task/);
   });
@@ -71,19 +89,28 @@ describe("delegate_coding tool", () => {
     // triggerSource in the input, the tool's Zod schema strips it before
     // the handler sees it, and the handler never forwards extras to
     // service.coding.delegate.
-    const delegate = vi.fn(async () => ({ taskId: "t-1", status: "queued" as const }));
+    type Delegate = NonNullable<Service["coding"]>["delegate"];
+    const delegate: Mock<Delegate> = vi.fn(async () => ({
+      taskId: "t-1",
+      status: "queued" as const,
+    }));
     await delegateCodingTool.handler(
+      // The LLM-supplied `triggerSource` is intentionally not in the tool's
+      // input schema — Zod strips it. Cast away the input type so the test
+      // compiles while still exercising the strip behaviour.
       {
         goal: "refactor steering rules to support per-channel scoping",
         repo: "cogmo",
-        triggerSource: "evolution" as any,
-      },
+        triggerSource: "evolution",
+      } as Parameters<typeof delegateCodingTool.handler>[0],
       service({ delegate }),
     );
     expect(delegate).toHaveBeenCalledWith({
       goal: "refactor steering rules to support per-channel scoping",
       repoName: "cogmo",
     });
-    expect(delegate.mock.calls[0]?.[0]).not.toHaveProperty("triggerSource");
+    const firstCall = delegate.mock.calls[0];
+    if (!firstCall) throw new Error("expected delegate to have been called");
+    expect(firstCall[0]).not.toHaveProperty("triggerSource");
   });
 });

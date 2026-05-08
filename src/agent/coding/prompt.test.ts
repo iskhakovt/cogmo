@@ -15,6 +15,8 @@ function repo(overrides: Partial<CodingRepoRow> = {}): CodingRepoRow {
     taskTokenBudget: 200_000,
     taskWallTimeSeconds: 1800,
     maxConcurrentTasks: 1,
+    identityName: "default",
+    verifyTimeoutSeconds: 600,
     createdAt: new Date(),
     ...overrides,
   };
@@ -24,6 +26,7 @@ function task(overrides: Partial<CodingTaskRow> = {}): CodingTaskRow {
   return {
     id: "t",
     repoId: "r",
+    conversationId: null,
     goal: "refactor steering rules to support per-channel scoping",
     triggerSource: "user",
     triggerRef: null,

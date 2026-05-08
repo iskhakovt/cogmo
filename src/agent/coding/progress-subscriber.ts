@@ -66,7 +66,7 @@ export class CodingProgressSubscriber {
 
     async function postOrEdit(replyMarkup?: PlanInlineKeyboardMarkup): Promise<void> {
       const text = formatProgressMessage(state);
-      const opts = replyMarkup === undefined ? undefined : { reply_markup: replyMarkup };
+      const opts = replyMarkup ? { reply_markup: replyMarkup } : undefined;
       pending = pending.then(async () => {
         try {
           if (messageId === null) {

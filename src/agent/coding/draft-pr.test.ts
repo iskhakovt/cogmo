@@ -213,7 +213,7 @@ describe("runOpenDraftPr", () => {
   });
 
   it("truncates a long goal in the title", async () => {
-    const create = vi.fn(async () => ({
+    const create = vi.fn(async (_args: { title: string; body: string }) => ({
       data: { html_url: "https://github.com/x/y/pull/1", number: 1 },
     }));
     await runOpenDraftPr({
@@ -221,7 +221,9 @@ describe("runOpenDraftPr", () => {
       goal: "x".repeat(200),
       octokit: fakeOctokit(create),
     });
-    const callArg = create.mock.calls[0]?.[0] as { title: string };
+    const firstCall = create.mock.calls[0];
+    if (!firstCall) throw new Error("expected pulls.create to have been called");
+    const [callArg] = firstCall;
     expect(callArg.title.length).toBe(70);
     expect(callArg.title.endsWith("…")).toBe(true);
   });

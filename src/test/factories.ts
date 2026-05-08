@@ -148,6 +148,35 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
   };
 }
 
+// Functions / Date / RegExp stay as leaves in DeepPartial so a test can
+// override one method on a sub-namespace (`conversations`, `profiles`,
+// etc.) without TypeScript trying to recurse into the function signature.
+// biome-ignore lint/complexity/noBannedTypes: Function leaf type is intentional
+type Leaf = Function | Date | RegExp;
+export type DeepPartial<T> = T extends Leaf
+  ? T
+  : { [K in keyof T]?: T[K] extends Leaf ? T[K] : DeepPartial<T[K]> };
+
+/**
+ * Like `mockTransport` but deep-merges the override into each Transport
+ * sub-namespace. Tests can pass `{ conversations: { list: vi.fn()... } }`
+ * and pick up the default mocks for `getCurrent`, `summary`, etc.
+ */
+export function mockTransportDeep(overrides: DeepPartial<Transport> = {}): Transport {
+  const base = mockTransport();
+  return {
+    ...base,
+    ...overrides,
+    conversations: { ...base.conversations, ...(overrides.conversations ?? {}) },
+    profiles: { ...base.profiles, ...(overrides.profiles ?? {}) },
+    models: { ...base.models, ...(overrides.models ?? {}) },
+    repos: { ...base.repos, ...(overrides.repos ?? {}) },
+    coding: { ...base.coding, ...(overrides.coding ?? {}) },
+    skills: { ...base.skills, ...(overrides.skills ?? {}) },
+    mcp: { ...base.mcp, ...(overrides.mcp ?? {}) },
+  };
+}
+
 export function mockTransport(overrides?: Partial<Transport>): Transport {
   return {
     resolveSession: vi.fn().mockResolvedValue(null),

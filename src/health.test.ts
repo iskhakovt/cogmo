@@ -1,7 +1,18 @@
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { createHealthServer } from "./health.js";
+
+const HealthBodySchema = z
+  .object({
+    status: z.string(),
+    version: z.string(),
+    releaseId: z.string(),
+    description: z.string(),
+    notes: z.array(z.string()),
+  })
+  .passthrough();
 
 vi.mock("./env.js", () => ({
   env: {
@@ -30,7 +41,7 @@ describe("health server", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("application/health+json");
 
-    const body = await res.json();
+    const body = HealthBodySchema.parse(await res.json());
     expect(body).toMatchObject({
       status: "pass",
       version: "1.2.3",
@@ -38,8 +49,8 @@ describe("health server", () => {
       description: "cogmo",
     });
     expect(Array.isArray(body.notes)).toBe(true);
-    expect(body.notes.some((n: string) => n.startsWith("node:"))).toBe(true);
-    expect(body.notes.some((n: string) => n.startsWith("startedAt:"))).toBe(true);
+    expect(body.notes.some((n) => n.startsWith("node:"))).toBe(true);
+    expect(body.notes.some((n) => n.startsWith("startedAt:"))).toBe(true);
   });
 
   it("returns 404 for unknown paths", async () => {

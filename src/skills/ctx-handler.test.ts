@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
+import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import type { DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import { DefaultCtxHandler } from "./ctx-handler.js";
 import { CtxError } from "./dispatcher.js";
 import { parseManifest } from "./manifest.js";
@@ -30,12 +32,8 @@ ${overrides}
 interface Deps {
   secretsStore: MockProxy<SecretsStore>;
   memory: MockProxy<MemoryProvider>;
-  files: {
-    read: ReturnType<typeof vi.fn>;
-    write: ReturnType<typeof vi.fn>;
-    list: ReturnType<typeof vi.fn>;
-  };
-  recordContextCall: ReturnType<typeof vi.fn>;
+  files: Service["files"];
+  recordContextCall: DefaultCtxHandlerOptions["recordContextCall"];
 }
 
 function deps(overrides?: Partial<Deps>): Deps {
@@ -205,7 +203,7 @@ describe("DefaultCtxHandler", () => {
     it("read returns the workspace content when effect is declared", async () => {
       const m = manifest("effects:\n  - reads_filesystem");
       const d = deps();
-      d.files.read.mockResolvedValue("hello");
+      vi.mocked(d.files.read).mockResolvedValue("hello");
       const h = makeHandler(m, d);
 
       const value = await h.handle({ method: "files.read", args: { path: "notes/x.md" } });
@@ -223,7 +221,7 @@ describe("DefaultCtxHandler", () => {
     it("read surfaces backend failures as read_failed", async () => {
       const m = manifest("effects:\n  - reads_filesystem");
       const d = deps();
-      d.files.read.mockRejectedValue(new Error("File not found: notes/x.md"));
+      vi.mocked(d.files.read).mockRejectedValue(new Error("File not found: notes/x.md"));
       const h = makeHandler(m, d);
 
       await expect(
@@ -255,7 +253,7 @@ describe("DefaultCtxHandler", () => {
     it("write surfaces backend failures as write_failed", async () => {
       const m = manifest("effects:\n  - writes_filesystem");
       const d = deps();
-      d.files.write.mockRejectedValue(new Error("S3 5xx"));
+      vi.mocked(d.files.write).mockRejectedValue(new Error("S3 5xx"));
       const h = makeHandler(m, d);
 
       await expect(
@@ -276,7 +274,7 @@ describe("DefaultCtxHandler", () => {
     it("list surfaces backend failures as list_failed", async () => {
       const m = manifest("effects:\n  - reads_filesystem");
       const d = deps();
-      d.files.list.mockRejectedValue(new Error("S3 listing timeout"));
+      vi.mocked(d.files.list).mockRejectedValue(new Error("S3 listing timeout"));
       const h = makeHandler(m, d);
 
       await expect(
@@ -326,7 +324,7 @@ describe("DefaultCtxHandler", () => {
       const m = manifest("effects:\n  - reads_filesystem");
       const d = deps();
       const lastModified = new Date("2026-04-01T12:00:00.000Z");
-      d.files.list.mockResolvedValue([
+      vi.mocked(d.files.list).mockResolvedValue([
         { path: "notes/a.md", size: 42, lastModified },
         { path: "notes/b.md", size: 7, lastModified },
       ]);
@@ -530,7 +528,7 @@ describe("DefaultCtxHandler", () => {
 
     it("recordContextCall throwing is swallowed (the call still returns/throws as expected)", async () => {
       const d = deps();
-      d.recordContextCall.mockRejectedValue(new Error("audit DB down"));
+      vi.mocked(d.recordContextCall).mockRejectedValue(new Error("audit DB down"));
       const m = manifest();
       const h = makeHandler(m, d);
       // The success path: now() — even if audit fails, return value is correct.

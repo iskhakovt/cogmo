@@ -15,7 +15,9 @@ describe("CodingStreamingRegistry", () => {
   it("delivers events to subscribers in publish order", () => {
     const reg = new CodingStreamingRegistry();
     const seen: CodingStreamEvent[] = [];
-    reg.subscribe("t1", (e) => seen.push(e));
+    reg.subscribe("t1", (e) => {
+      seen.push(e);
+    });
 
     reg.publish("t1", { kind: "text", delta: "hello " });
     reg.publish("t1", { kind: "text", delta: "world" });
@@ -53,7 +55,9 @@ describe("CodingStreamingRegistry", () => {
     reg.publish("t1", { kind: "text", delta: "missed" });
 
     const seen: CodingStreamEvent[] = [];
-    reg.subscribe("t1", (e) => seen.push(e));
+    reg.subscribe("t1", (e) => {
+      seen.push(e);
+    });
     expect(seen).toEqual([]);
     expect(reg.getSnapshot("t1")?.accumulatedText).toBe("missed");
 
@@ -66,8 +70,12 @@ describe("CodingStreamingRegistry", () => {
     const reg = new CodingStreamingRegistry();
     const a: CodingStreamEvent[] = [];
     const b: CodingStreamEvent[] = [];
-    reg.subscribe("t1", (e) => a.push(e));
-    reg.subscribe("t1", (e) => b.push(e));
+    reg.subscribe("t1", (e) => {
+      a.push(e);
+    });
+    reg.subscribe("t1", (e) => {
+      b.push(e);
+    });
 
     reg.publish("t1", { kind: "tool_result", tool: "Read", ok: true });
 
@@ -78,7 +86,9 @@ describe("CodingStreamingRegistry", () => {
   it("scopes subscribers and snapshots by taskId", () => {
     const reg = new CodingStreamingRegistry();
     const seen: CodingStreamEvent[] = [];
-    reg.subscribe("t1", (e) => seen.push(e));
+    reg.subscribe("t1", (e) => {
+      seen.push(e);
+    });
 
     reg.publish("t2", { kind: "text", delta: "for-t2" });
 
@@ -90,7 +100,9 @@ describe("CodingStreamingRegistry", () => {
   it("unsubscribe stops further deliveries", () => {
     const reg = new CodingStreamingRegistry();
     const seen: CodingStreamEvent[] = [];
-    const unsubscribe = reg.subscribe("t1", (e) => seen.push(e));
+    const unsubscribe = reg.subscribe("t1", (e) => {
+      seen.push(e);
+    });
 
     reg.publish("t1", { kind: "text", delta: "1" });
     unsubscribe();
@@ -231,7 +243,9 @@ describe("CodingStreamingRegistry", () => {
       const late: CodingStreamEvent[] = [];
       reg.subscribe("t1", (e) => {
         if (e.kind === "text" && e.delta === "first") {
-          reg.subscribe("t1", (ev) => late.push(ev));
+          reg.subscribe("t1", (ev) => {
+            late.push(ev);
+          });
         }
       });
 

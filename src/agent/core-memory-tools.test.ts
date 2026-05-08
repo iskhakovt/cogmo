@@ -8,6 +8,7 @@ function mockService(coreOverrides?: Partial<Service["coreMemory"]>): Service {
       recall: vi.fn().mockResolvedValue({ memories: [] }),
       retain: vi.fn().mockResolvedValue(undefined),
       reflect: vi.fn().mockResolvedValue({ answer: "" }),
+      stageRetain: vi.fn().mockResolvedValue(undefined),
     },
     files: {
       read: vi.fn().mockResolvedValue(""),

@@ -72,7 +72,7 @@ describe("formatProgressMessage", () => {
       phase: "planning",
       body: "",
     });
-    const headerLine = out.split("\n")[0];
+    const headerLine = out.split("\n")[0] ?? "";
     // header plus goal preview (≤80 chars) plus the trailing ellipsis.
     expect(headerLine.length).toBeLessThanOrEqual("🧠 Planning — ".length + 80);
     expect(headerLine).toMatch(/…$/);
@@ -121,7 +121,7 @@ describe("formatProgressMessage", () => {
       phase: "planning",
       body: "",
     });
-    const headerLine = out.split("\n")[0];
+    const headerLine = out.split("\n")[0] ?? "";
     expect(headerLine.length).toBeLessThanOrEqual("🧠 Planning — ".length + 80);
     expect(headerLine).toMatch(/…$/);
     // Whole message stays well under Telegram's 4096 cap.
@@ -153,11 +153,12 @@ describe("formatProgressMessage", () => {
   });
 
   it("missing tokens field omits the status line entirely (no 'null tokens' literal)", () => {
+    // Omit `tokens` rather than passing `undefined` — exactOptionalPropertyTypes
+    // forbids the explicit `undefined` for an optional property.
     const out = formatProgressMessage({
       goal: "g",
       phase: "planning",
       body: "",
-      tokens: undefined,
     });
     expect(out).toBe("🧠 Planning — g");
     expect(out).not.toMatch(/null|undefined|NaN/i);

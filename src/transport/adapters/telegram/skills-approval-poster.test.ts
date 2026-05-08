@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../../db/index.js";
-import type { SkillStore } from "../../../skills/store/index.js";
+import type { SkillDeployRow, SkillRow, SkillStore } from "../../../skills/store/index.js";
 import { mockTransportStore } from "../../../test/factories.js";
 import { postSkillsApprovalKeyboard } from "./skills-approval-poster.js";
 
@@ -14,19 +14,21 @@ const DEPLOY_ID = PENDING_ID;
 const CONV_ID = "019d0000-0000-7000-8000-000000000777";
 
 interface FakeSkillStoreOpts {
-  deploy?: { id: string; skillId: string };
-  skill?: { id: string; effects: string[] };
+  deploy?: Pick<SkillDeployRow, "id" | "skillId">;
+  skill?: Pick<SkillRow, "id" | "effects">;
 }
 
 function makeSkillStore(opts: FakeSkillStoreOpts = {}): SkillStore {
   const store = mock<SkillStore>();
+  // The poster only reads {id, skillId} on the deploy row and {id, effects}
+  // on the skill row; spread a `mock<…Row>()` to fill the rest of the
+  // required fields with vi.fn() / proxy values that satisfy the type
+  // without inventing realistic data.
   store.getDeployById.mockResolvedValue(
-    // biome-ignore lint/suspicious/noExplicitAny: test fixture — the poster only reads {id, skillId}
-    opts.deploy === undefined ? null : ({ ...opts.deploy } as any),
+    opts.deploy ? { ...mock<SkillDeployRow>(), ...opts.deploy } : undefined,
   );
   store.getSkillById.mockResolvedValue(
-    // biome-ignore lint/suspicious/noExplicitAny: test fixture — the poster only reads {id, effects}
-    opts.skill === undefined ? null : ({ ...opts.skill } as any),
+    opts.skill ? { ...mock<SkillRow>(), ...opts.skill } : undefined,
   );
   return store;
 }

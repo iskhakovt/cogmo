@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { expectDefined } from "../../test/assertions.js";
 import {
   buildPlanKeyboard,
   encodePlanCallback,
@@ -12,12 +13,12 @@ describe("plan-keyboard encoding", () => {
   it("buildPlanKeyboard returns Approve / Revise / Cancel in one row", () => {
     const kb = buildPlanKeyboard(TASK_ID);
     expect(kb.inline_keyboard).toHaveLength(1);
-    const row = kb.inline_keyboard[0];
+    const row = expectDefined(kb.inline_keyboard[0], "first keyboard row");
     expect(row).toHaveLength(3);
     expect(row.map((b) => b.text)).toEqual(["✅ Approve", "✏️ Revise", "❌ Cancel"]);
-    expect(row[0].callback_data).toBe(`plan:${TASK_ID}:approve`);
-    expect(row[1].callback_data).toBe(`plan:${TASK_ID}:revise`);
-    expect(row[2].callback_data).toBe(`plan:${TASK_ID}:cancel`);
+    expect(expectDefined(row[0], "approve").callback_data).toBe(`plan:${TASK_ID}:approve`);
+    expect(expectDefined(row[1], "revise").callback_data).toBe(`plan:${TASK_ID}:revise`);
+    expect(expectDefined(row[2], "cancel").callback_data).toBe(`plan:${TASK_ID}:cancel`);
   });
 
   it("encodePlanCallback stays within Telegram's 64-byte callback_data cap", () => {

@@ -4,8 +4,37 @@ import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { expectDefined } from "../../test/assertions.js";
 import { CogmoSocketProxy } from "./index.js";
 import type { TaskScope } from "./types.js";
+
+// Subset of the Docker /containers/create body schema covering the fields
+// these tests assert on. `passthrough()` keeps all upstream fields visible
+// without requiring the test to enumerate them.
+const ContainerCreateBodySchema = z
+  .object({
+    Image: z.string().optional(),
+    HostConfig: z
+      .object({
+        Runtime: z.string().optional(),
+        CgroupParent: z.string().optional(),
+      })
+      .passthrough()
+      .optional(),
+    Labels: z.record(z.string(), z.string()).optional(),
+  })
+  .passthrough();
+
+const ErrorBodySchema = z.object({ message: z.string() }).passthrough();
+
+function parseContainerCreate(body: string): z.infer<typeof ContainerCreateBodySchema> {
+  return ContainerCreateBodySchema.parse(JSON.parse(body));
+}
+
+function parseError(body: string): z.infer<typeof ErrorBodySchema> {
+  return ErrorBodySchema.parse(JSON.parse(body));
+}
 
 let baseDir: string;
 let upstreamSocketPath: string;
@@ -119,15 +148,16 @@ describe("CogmoSocketProxy", () => {
     expect(r.status).toBe(200);
     expect(JSON.parse(r.body)).toEqual({ Version: "24.0.0" });
     expect(upstreamRequests).toHaveLength(1);
-    expect(upstreamRequests[0].method).toBe("GET");
-    expect(upstreamRequests[0].url).toBe("/version");
+    const versionReq = expectDefined(upstreamRequests[0], "/version request");
+    expect(versionReq.method).toBe("GET");
+    expect(versionReq.url).toBe("/version");
   });
 
   it("denies /swarm/* with 403 without contacting upstream", async () => {
     const sock = await proxy.registerTask(SCOPE);
     const r = await unixRequest(sock, "GET", "/swarm/inspect");
     expect(r.status).toBe(403);
-    expect(JSON.parse(r.body).message).toContain("swarm");
+    expect(parseError(r.body).message).toContain("swarm");
     expect(upstreamRequests).toHaveLength(0);
   });
 
@@ -147,7 +177,7 @@ describe("CogmoSocketProxy", () => {
       JSON.stringify({ Image: "alpine", HostConfig: { Privileged: true } }),
     );
     expect(r.status).toBe(403);
-    expect(JSON.parse(r.body).message).toContain("Privileged");
+    expect(parseError(r.body).message).toContain("Privileged");
     expect(upstreamRequests).toHaveLength(0);
   });
 
@@ -166,18 +196,17 @@ describe("CogmoSocketProxy", () => {
     expect(r.status).toBe(201);
 
     expect(upstreamRequests).toHaveLength(1);
-    const seen = JSON.parse(upstreamRequests[0].body);
+    const createReq = expectDefined(upstreamRequests[0], "containers/create request");
+    const seen = parseContainerCreate(createReq.body);
     expect(seen.Image).toBe("alpine");
-    expect(seen.HostConfig.Runtime).toBe("sysbox-runc");
-    expect(seen.HostConfig.CgroupParent).toBe("cogmo-task-abc.slice");
-    expect(seen.Labels["user.foo"]).toBe("bar");
-    expect(seen.Labels["cogmo.managed"]).toBe("true");
-    expect(seen.Labels["cogmo.parent"]).toBe("docker-parent-abc");
-    expect(seen.Labels["cogmo.depth"]).toBe("1");
+    expect(seen.HostConfig?.Runtime).toBe("sysbox-runc");
+    expect(seen.HostConfig?.CgroupParent).toBe("cogmo-task-abc.slice");
+    expect(seen.Labels?.["user.foo"]).toBe("bar");
+    expect(seen.Labels?.["cogmo.managed"]).toBe("true");
+    expect(seen.Labels?.["cogmo.parent"]).toBe("docker-parent-abc");
+    expect(seen.Labels?.["cogmo.depth"]).toBe("1");
     // Re-supplied content-length matches the mutated body length.
-    expect(upstreamRequests[0].headers["content-length"]).toBe(
-      String(Buffer.byteLength(upstreamRequests[0].body)),
-    );
+    expect(createReq.headers["content-length"]).toBe(String(Buffer.byteLength(createReq.body)));
   });
 
   it("propagates upstream errors as 502 when upstream socket isn't writable", async () => {
@@ -197,7 +226,7 @@ describe("CogmoSocketProxy", () => {
     const r = await unixRequest(sock, "DELETE", "/containers/abc");
     expect(r.status).toBe(204);
     expect(upstreamRequests).toHaveLength(1);
-    expect(upstreamRequests[0].method).toBe("DELETE");
+    expect(expectDefined(upstreamRequests[0], "DELETE request").method).toBe("DELETE");
   });
 
   it("isolates task scopes — two registered tasks each get their own socket", async () => {
@@ -219,13 +248,13 @@ describe("CogmoSocketProxy", () => {
     await unixRequest(sockB, "POST", "/containers/create", JSON.stringify({ Image: "alpine" }));
 
     expect(upstreamRequests).toHaveLength(2);
-    const seenA = JSON.parse(upstreamRequests[0].body);
-    const seenB = JSON.parse(upstreamRequests[1].body);
-    expect(seenA.HostConfig.CgroupParent).toBe("cogmo-task-abc.slice");
-    expect(seenA.Labels["cogmo.root_task"]).toBe(taskA.taskId);
-    expect(seenB.HostConfig.CgroupParent).toBe("cogmo-task-b.slice");
-    expect(seenB.Labels["cogmo.root_task"]).toBe(taskB.taskId);
-    expect(seenB.Labels["cogmo.parent"]).toBe("docker-parent-different");
+    const seenA = parseContainerCreate(expectDefined(upstreamRequests[0], "task A request").body);
+    const seenB = parseContainerCreate(expectDefined(upstreamRequests[1], "task B request").body);
+    expect(seenA.HostConfig?.CgroupParent).toBe("cogmo-task-abc.slice");
+    expect(seenA.Labels?.["cogmo.root_task"]).toBe(taskA.taskId);
+    expect(seenB.HostConfig?.CgroupParent).toBe("cogmo-task-b.slice");
+    expect(seenB.Labels?.["cogmo.root_task"]).toBe(taskB.taskId);
+    expect(seenB.Labels?.["cogmo.parent"]).toBe("docker-parent-different");
   });
 
   it("unregisterTask removes the socket file", async () => {
@@ -285,7 +314,7 @@ describe("CogmoSocketProxy hijack/forward — fuzz the transcript", () => {
     const sock = await proxy.registerTask(SCOPE);
     const r = await unixRequest(sock, "GET", "/foo?bar=baz");
     expect(r.body).toBe("hello");
-    expect(upstreamRequests[0].url).toBe("/foo?bar=baz");
+    expect(expectDefined(upstreamRequests[0], "GET /foo request").url).toBe("/foo?bar=baz");
   });
 
   it("forwards POST /containers/create with chunked transfer encoding", async () => {
@@ -332,11 +361,13 @@ describe("CogmoSocketProxy hijack/forward — fuzz the transcript", () => {
     expect(reply).toContain("201");
 
     expect(upstreamRequests).toHaveLength(1);
-    const seen = JSON.parse(upstreamRequests[0].body);
+    const seen = parseContainerCreate(
+      expectDefined(upstreamRequests[0], "chunked create request").body,
+    );
     expect(seen.Image).toBe("alpine");
     // Mutations applied through chunked-encoding the same as Content-Length.
-    expect(seen.HostConfig.CgroupParent).toBe("cogmo-task-abc.slice");
-    expect(seen.Labels["cogmo.managed"]).toBe("true");
+    expect(seen.HostConfig?.CgroupParent).toBe("cogmo-task-abc.slice");
+    expect(seen.Labels?.["cogmo.managed"]).toBe("true");
   });
 
   it("rejects POST /containers/create with body > 1 MiB cap", async () => {
@@ -346,7 +377,7 @@ describe("CogmoSocketProxy hijack/forward — fuzz the transcript", () => {
     const huge = JSON.stringify({ Image: "alpine", Cmd: [oversized] });
     const r = await unixRequest(sock, "POST", "/containers/create", huge);
     expect(r.status).toBe(413);
-    expect(JSON.parse(r.body).message).toContain("body exceeds");
+    expect(parseError(r.body).message).toContain("body exceeds");
     expect(upstreamRequests).toHaveLength(0);
   });
 

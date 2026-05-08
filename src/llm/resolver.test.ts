@@ -49,9 +49,7 @@ function makeDeps(opts: DepsOpts = {}) {
     return rows;
   });
 
-  const getSecretById = vi
-    .fn()
-    .mockResolvedValue(opts.secret === undefined ? "test-key" : opts.secret);
+  const getSecretById = vi.fn().mockResolvedValue(opts.secret ?? "test-key");
 
   const agentStore = { listProvidersForModel } as unknown as AgentStore;
   const secretsStore = { getSecretById } as unknown as SecretsStore;
