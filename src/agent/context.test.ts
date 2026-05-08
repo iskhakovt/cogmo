@@ -65,10 +65,10 @@ describe("compactMessages", () => {
     const toolResults = result.messages.flatMap((m) =>
       typeof m.content === "string" ? [] : m.content.filter((b) => b.type === "tool_result"),
     );
-    expect(toolResults[0].content).toBe("[Cleared — call tool again if needed]");
-    expect(toolResults[1].content).toBe("[Cleared — call tool again if needed]");
+    expect(toolResults[0]?.content).toBe("[Cleared — call tool again if needed]");
+    expect(toolResults[1]?.content).toBe("[Cleared — call tool again if needed]");
     // Last 5 should be intact
-    expect(toolResults[2].content).toContain("result-2-");
+    expect(toolResults[2]?.content).toContain("result-2-");
   });
 
   it("does not call summarize when tool clearing is sufficient", async () => {
@@ -127,9 +127,9 @@ describe("compactMessages", () => {
     expect(summarize).toHaveBeenCalledOnce();
 
     // Should keep last 6 messages, summarize the rest
-    expect(result.messages[0].role).toBe("user");
-    expect(result.messages[0].content).toContain("[Previous conversation summary]");
-    expect(result.messages[0].content).toContain("Summary of old messages");
+    expect(result.messages[0]?.role).toBe("user");
+    expect(result.messages[0]?.content).toContain("[Previous conversation summary]");
+    expect(result.messages[0]?.content).toContain("Summary of old messages");
     // 1 summary + 6 kept = 7 messages
     expect(result.messages).toHaveLength(7);
   });
@@ -226,10 +226,11 @@ describe("compactMessages", () => {
 
     expect(result.didCompact).toBe(true);
     // If first remaining is assistant, synthetic user message is prepended
-    if (result.messages[0].role === "user") {
+    const first = result.messages[0];
+    if (first?.role === "user") {
       expect(
-        result.messages[0].content === "[Earlier conversation history was truncated]" ||
-          result.messages[0].content === "latest",
+        first.content === "[Earlier conversation history was truncated]" ||
+          first.content === "latest",
       ).toBe(true);
     }
   });

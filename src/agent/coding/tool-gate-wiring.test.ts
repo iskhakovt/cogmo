@@ -17,6 +17,7 @@ import { join } from "node:path";
 import type { Inngest } from "inngest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
+import type { StepWaitForEvent } from "../../inngest/index.js";
 import {
   type ExecStreamingHandle,
   type LocalDockerSessionState,
@@ -534,7 +535,10 @@ describe("tool gate wiring", () => {
 
     const inngestSend = vi.fn().mockResolvedValue(undefined);
     let waitCount = 0;
-    const stepWaitForEvent = vi.fn(async () => {
+    // The real `StepWaitForEvent` is a generic Inngest helper whose signature
+    // depends on the event registry; this fake only satisfies the call sites
+    // the test exercises, so cast through the loose async signature.
+    const stepWaitForEvent = (async () => {
       waitCount += 1;
       if (waitCount === 1) {
         return {
@@ -544,7 +548,7 @@ describe("tool gate wiring", () => {
       return {
         data: { taskId: task.id, requestId: "req_b", decision: "deny", scope: "once" },
       };
-    });
+    }) as unknown as StepWaitForEvent;
 
     await runCodingExecute({
       taskId: task.id,

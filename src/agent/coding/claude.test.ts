@@ -1,28 +1,59 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import type {
   ExecStreamingHandle,
   LocalDockerSessionState,
   SandboxSession,
 } from "../../sandbox/index.js";
+import { assertKind, expectDefined } from "../../test/assertions.js";
 import type { CodingEvent } from "./backend.js";
 import { ClaudeCodeBackend } from "./claude.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
+
+// Frame shapes the runner writes to stdin. Schemas live in the test file
+// because they only describe the observable wire format we assert on, not
+// the runner's internal types.
+const StdinFrameSchema = z.object({
+  type: z.literal("user"),
+  message: z.object({ role: z.literal("user"), content: z.string() }),
+});
+
+const ControlResponseFrameSchema = z.object({
+  type: z.literal("control_response"),
+  response: z.object({
+    request_id: z.string(),
+    subtype: z.string(),
+    response: z.object({
+      behavior: z.enum(["allow", "deny"]),
+      message: z.string().optional(),
+    }),
+  }),
+});
+
+const TaggedFrameSchema = z.object({ type: z.string() }).passthrough();
 
 /**
  * Build a fake `TaskContainerHandle` whose `exec()` returns an `ExecHandle`
  * backed by the given fixture stdout. stderr is empty; wait() resolves with
  * the configured exit code once the script `end()`s the stdout.
  */
+type ExecStreamingMock = ReturnType<
+  typeof vi.fn<
+    (cmd: ReadonlyArray<string>, opts?: { attachStdin?: boolean }) => Promise<ExecStreamingHandle>
+  >
+>;
+
 function fakeContainer(
   fixture: string,
   exitCode = 0,
 ): {
   container: SandboxSession<LocalDockerSessionState>;
+  execStreaming: ExecStreamingMock;
   stdinChunks: string[];
 } {
   const stdinChunks: string[] = [];
-  const execStreaming = vi.fn(async (): Promise<ExecStreamingHandle> => {
+  const execStreaming: ExecStreamingMock = vi.fn(async () => {
     const stdout = new PassThrough();
     const stderr = new PassThrough();
     const stdin: Writable = new PassThrough();
@@ -61,6 +92,7 @@ function fakeContainer(
       })),
       execStreaming,
     },
+    execStreaming,
     stdinChunks,
   };
 }
@@ -77,12 +109,15 @@ const repo: CodingRepoRow = {
   taskTokenBudget: 100_000,
   taskWallTimeSeconds: 600,
   maxConcurrentTasks: 1,
+  identityName: "default",
+  verifyTimeoutSeconds: 600,
   createdAt: new Date(),
 };
 
 const task: CodingTaskRow = {
   id: "t",
   repoId: "r",
+  conversationId: null,
   goal: "add a foo function",
   triggerSource: "user",
   triggerRef: null,
@@ -93,7 +128,7 @@ const task: CodingTaskRow = {
   allowPrivilegedRunc: false,
   plan: null,
   planApprovedAt: null,
-  prUrl: null,
+  prMetadata: null,
   status: "queued",
   failureReason: null,
   resourceUsage: null,
@@ -134,13 +169,16 @@ describe("ClaudeCodeBackend.plan", () => {
       "complete",
     ]);
 
-    const session = events[0] as Extract<CodingEvent, { kind: "session_started" }>;
+    const session = events[0];
+    assertKind(session, "session_started");
     expect(session.sessionId).toBe("sess-abc-123");
 
-    const planReady = events[4] as Extract<CodingEvent, { kind: "plan_ready" }>;
+    const planReady = events[4];
+    assertKind(planReady, "plan_ready");
     expect(planReady.plan).toBe("## Plan\n1. Add foo()\n2. Add a test\n");
 
-    const complete = events[5] as Extract<CodingEvent, { kind: "complete" }>;
+    const complete = events[5];
+    assertKind(complete, "complete");
     expect(complete.exitCode).toBe(0);
     expect(complete.isError).toBe(false);
     expect(complete.usage).toEqual({ inputTokens: 420, outputTokens: 86, costUsd: 0.012 });
@@ -153,7 +191,7 @@ describe("ClaudeCodeBackend.plan", () => {
 
     const written = stdinChunks.join("");
     expect(written).toMatch(/\n$/);
-    const parsed = JSON.parse(written.trim());
+    const parsed = StdinFrameSchema.parse(JSON.parse(written.trim()));
     expect(parsed.type).toBe("user");
     expect(parsed.message.role).toBe("user");
     expect(parsed.message.content).toContain("add a foo function");
@@ -161,13 +199,12 @@ describe("ClaudeCodeBackend.plan", () => {
   });
 
   it("invokes claude with the slice-1 plan flag set", async () => {
-    const { container } = fakeContainer(FIXTURE);
+    const { container, execStreaming } = fakeContainer(FIXTURE);
     const backend = new ClaudeCodeBackend();
     await collect(backend.plan({ task, repo, container }));
 
-    const exec = container.execStreaming as ReturnType<typeof vi.fn>;
-    expect(exec).toHaveBeenCalledTimes(1);
-    const [cmd, opts] = exec.mock.calls[0];
+    expect(execStreaming).toHaveBeenCalledTimes(1);
+    const [cmd, opts] = expectDefined(execStreaming.mock.calls[0], "execStreaming call");
     expect(cmd[0]).toBe("claude");
     expect(cmd).toContain("-p");
     expect(cmd).toContain("--output-format");
@@ -188,7 +225,8 @@ describe("ClaudeCodeBackend.plan", () => {
     const { container } = fakeContainer(fixture, 2);
     const backend = new ClaudeCodeBackend();
     const events = await collect(backend.plan({ task, repo, container }));
-    const complete = events.at(-1) as Extract<CodingEvent, { kind: "complete" }>;
+    const complete = events.at(-1);
+    assertKind(complete, "complete");
     expect(complete.exitCode).toBe(2);
     expect(complete.isError).toBe(true);
     // Plan-ready not emitted on error.
@@ -219,10 +257,8 @@ describe("ClaudeCodeBackend.plan", () => {
     const { container } = fakeContainer(fixture);
     const backend = new ClaudeCodeBackend();
     const events = await collect(backend.plan({ task, repo, container }));
-    const text = events.find((e) => e.kind === "text_delta") as Extract<
-      CodingEvent,
-      { kind: "text_delta" }
-    >;
+    const text = events.find((e) => e.kind === "text_delta");
+    assertKind(text, "text_delta");
     expect(text.text).toBe("hello");
   });
 });
@@ -288,37 +324,35 @@ describe("ClaudeCodeBackend.execute", () => {
     ]);
     expect(kinds).not.toContain("plan_ready");
 
-    const calls = events.filter((e) => e.kind === "tool_call") as Extract<
-      CodingEvent,
-      { kind: "tool_call" }
-    >[];
+    const calls = events.filter(
+      (e): e is Extract<CodingEvent, { kind: "tool_call" }> => e.kind === "tool_call",
+    );
     expect(calls.map((c) => c.tool)).toEqual(["Read", "Edit", "Bash"]);
 
-    const results = events.filter((e) => e.kind === "tool_result") as Extract<
-      CodingEvent,
-      { kind: "tool_result" }
-    >[];
+    const results = events.filter(
+      (e): e is Extract<CodingEvent, { kind: "tool_result" }> => e.kind === "tool_result",
+    );
     expect(results.every((r) => r.ok)).toBe(true);
-    expect(results[0].summary).toBe("export function foo() {}");
+    expect(expectDefined(results[0]).summary).toBe("export function foo() {}");
     // tool_result.tool must be the human-readable name (resolved from the
     // tool_use block), NOT the opaque tool_use_id.
     expect(results.map((r) => r.tool)).toEqual(["Read", "Edit", "Bash"]);
 
-    const complete = events.at(-1) as Extract<CodingEvent, { kind: "complete" }>;
+    const complete = events.at(-1);
+    assertKind(complete, "complete");
     expect(complete.exitCode).toBe(0);
     expect(complete.isError).toBe(false);
     expect(complete.usage).toEqual({ inputTokens: 3120, outputTokens: 640, costUsd: 0.084 });
   });
 
   it("invokes claude with --resume <sid> and NO --permission-mode flag (default mode gates every tool call)", async () => {
-    const { container } = fakeContainer(EXECUTE_FIXTURE);
+    const { container, execStreaming } = fakeContainer(EXECUTE_FIXTURE);
     const backend = new ClaudeCodeBackend();
     const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
     await collect(handle.events);
 
-    const exec = container.execStreaming as ReturnType<typeof vi.fn>;
-    expect(exec).toHaveBeenCalledTimes(1);
-    const [cmd] = exec.mock.calls[0];
+    expect(execStreaming).toHaveBeenCalledTimes(1);
+    const [cmd] = expectDefined(execStreaming.mock.calls[0], "execStreaming call");
     expect(cmd[0]).toBe("claude");
     expect(cmd).toContain("--resume");
     expect(cmd[cmd.indexOf("--resume") + 1]).toBe(sessionId);
@@ -340,7 +374,7 @@ describe("ClaudeCodeBackend.execute", () => {
     // First frame is the user prompt — find it among any subsequent
     // control_response frames the orchestrator may have written.
     const firstFrame = written.split("\n").find((line) => line.trim().length > 0) ?? "";
-    const parsed = JSON.parse(firstFrame);
+    const parsed = StdinFrameSchema.parse(JSON.parse(firstFrame));
     expect(parsed.type).toBe("user");
     expect(parsed.message.content).toContain("# Approved");
     expect(parsed.message.content).toContain("Proceed with the implementation");
@@ -376,10 +410,8 @@ describe("ClaudeCodeBackend.execute", () => {
     const backend = new ClaudeCodeBackend();
     const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
     const events = await collect(handle.events);
-    const result = events.find((e) => e.kind === "tool_result") as Extract<
-      CodingEvent,
-      { kind: "tool_result" }
-    >;
+    const result = events.find((e) => e.kind === "tool_result");
+    assertKind(result, "tool_result");
     expect(result.ok).toBe(false);
     expect(result.summary).toBe("exit 1");
   });
@@ -414,10 +446,8 @@ describe("ClaudeCodeBackend.execute", () => {
         }
       }
 
-      const req = events.find((e) => e.kind === "permission_request") as Extract<
-        CodingEvent,
-        { kind: "permission_request" }
-      >;
+      const req = events.find((e) => e.kind === "permission_request");
+      assertKind(req, "permission_request");
       expect(req.requestId).toBe("req_42");
       expect(req.tool).toBe("Bash");
       expect(req.input).toEqual({ command: "git push" });
@@ -429,7 +459,7 @@ describe("ClaudeCodeBackend.execute", () => {
         .map((l) => l.trim())
         .filter((l) => l.length > 0);
       // First line: user prompt; second: control_response.
-      const responseFrame = JSON.parse(lines[1] ?? "{}");
+      const responseFrame = ControlResponseFrameSchema.parse(JSON.parse(lines[1] ?? "{}"));
       expect(responseFrame.type).toBe("control_response");
       expect(responseFrame.response.request_id).toBe("req_42");
       expect(responseFrame.response.subtype).toBe("success");
@@ -461,7 +491,7 @@ describe("ClaudeCodeBackend.execute", () => {
         .split("\n")
         .map((l) => l.trim())
         .filter((l) => l.length > 0);
-      const responseFrame = JSON.parse(lines[1] ?? "{}");
+      const responseFrame = ControlResponseFrameSchema.parse(JSON.parse(lines[1] ?? "{}"));
       expect(responseFrame.response.response.behavior).toBe("deny");
       expect(responseFrame.response.response.message).toBe("user-rejected");
     });
@@ -490,10 +520,11 @@ describe("ClaudeCodeBackend.execute", () => {
         .split("\n")
         .map((l) => l.trim())
         .filter((l) => l.length > 0)
-        .map((l) => JSON.parse(l))
-        .filter((f) => f.type === "control_response");
+        .map((l) => TaggedFrameSchema.parse(JSON.parse(l)))
+        .filter((f) => f.type === "control_response")
+        .map((f) => ControlResponseFrameSchema.parse(f));
       expect(responseFrames).toHaveLength(1);
-      expect(responseFrames[0].response.response.behavior).toBe("allow");
+      expect(expectDefined(responseFrames[0]).response.response.behavior).toBe("allow");
     });
 
     it("ignores control_request with unknown subtype", async () => {
@@ -538,9 +569,9 @@ describe("ClaudeCodeBackend.execute", () => {
         .split("\n")
         .map((l) => l.trim())
         .filter((l) => l.length > 0)
-        .map((l) => JSON.parse(l))
+        .map((l) => TaggedFrameSchema.parse(JSON.parse(l)))
         .filter((f) => f.type === "control_response")
-        .map((f) => f.response.request_id);
+        .map((f) => ControlResponseFrameSchema.parse(f).response.request_id);
       expect(responseFrames).toEqual(["req_first", "req_second"]);
     });
   });
@@ -583,9 +614,9 @@ describe("ClaudeCodeBackend stream-json schema robustness", () => {
     // Only the well-formed system event surfaces session_started.
     const sessions = events.filter((e) => e.kind === "session_started");
     expect(sessions).toHaveLength(1);
-    expect((sessions[0] as Extract<CodingEvent, { kind: "session_started" }>).sessionId).toBe(
-      "sess-nt",
-    );
+    const firstNt = sessions[0];
+    assertKind(firstNt, "session_started");
+    expect(firstNt.sessionId).toBe("sess-nt");
   });
 
   it("does not emit session_started when system event has no session_id", async () => {
@@ -625,9 +656,9 @@ describe("ClaudeCodeBackend stream-json schema robustness", () => {
     const events = await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
     const sessions = events.filter((e) => e.kind === "session_started");
     expect(sessions).toHaveLength(1);
-    expect((sessions[0] as Extract<CodingEvent, { kind: "session_started" }>).sessionId).toBe(
-      "sess-1",
-    );
+    const first1 = sessions[0];
+    assertKind(first1, "session_started");
+    expect(first1.sessionId).toBe("sess-1");
   });
 
   it("skips assistant tool_use blocks missing required fields", async () => {
@@ -649,12 +680,11 @@ describe("ClaudeCodeBackend stream-json schema robustness", () => {
       "sess-tu",
     );
     const events = await collect(handle.events);
-    const calls = events.filter((e) => e.kind === "tool_call") as Extract<
-      CodingEvent,
-      { kind: "tool_call" }
-    >[];
+    const calls = events.filter(
+      (e): e is Extract<CodingEvent, { kind: "tool_call" }> => e.kind === "tool_call",
+    );
     expect(calls).toHaveLength(1);
-    expect(calls[0].tool).toBe("Edit");
+    expect(expectDefined(calls[0]).tool).toBe("Edit");
   });
 
   it("emits tool_result without summary when content is not a string", async () => {
@@ -679,11 +709,8 @@ describe("ClaudeCodeBackend stream-json schema robustness", () => {
       "sess-tr",
     );
     const events = await collect(handle.events);
-    const result = events.find((e) => e.kind === "tool_result") as Extract<
-      CodingEvent,
-      { kind: "tool_result" }
-    >;
-    expect(result).toBeDefined();
+    const result = events.find((e) => e.kind === "tool_result");
+    assertKind(result, "tool_result");
     expect(result.tool).toBe("Read");
     expect(result.ok).toBe(true);
     expect(result.summary).toBeUndefined();
@@ -719,8 +746,8 @@ describe("ClaudeCodeBackend stream-json schema robustness", () => {
     ].join("\n");
     const { container } = fakeContainer(fixture);
     const events = await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
-    const complete = events.at(-1) as Extract<CodingEvent, { kind: "complete" }>;
-    expect(complete.kind).toBe("complete");
+    const complete = events.at(-1);
+    assertKind(complete, "complete");
     expect(complete.usage?.inputTokens).toBeUndefined();
     expect(complete.usage?.outputTokens).toBeUndefined();
     expect(complete.usage?.costUsd).toBeUndefined();
@@ -747,11 +774,8 @@ describe("ClaudeCodeBackend stream-json schema robustness", () => {
       "sess-oo",
     );
     const events = await collect(handle.events);
-    const result = events.find((e) => e.kind === "tool_result") as Extract<
-      CodingEvent,
-      { kind: "tool_result" }
-    >;
-    expect(result).toBeDefined();
+    const result = events.find((e) => e.kind === "tool_result");
+    assertKind(result, "tool_result");
     expect(result.tool).toBe("toolu_orphan");
     expect(result.ok).toBe(true);
   });
@@ -778,10 +802,8 @@ describe("ClaudeCodeBackend stream-json schema robustness", () => {
       "plan_ready",
       "complete",
     ]);
-    const planReady = events.find((e) => e.kind === "plan_ready") as Extract<
-      CodingEvent,
-      { kind: "plan_ready" }
-    >;
+    const planReady = events.find((e) => e.kind === "plan_ready");
+    assertKind(planReady, "plan_ready");
     expect(planReady.plan).toBe("earlylate");
   });
 });

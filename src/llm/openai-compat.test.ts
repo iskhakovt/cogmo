@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { OpenAICompatibleProvider } from "./openai-compat.js";
 import type { StreamEvent } from "./types.js";
 
@@ -10,6 +11,48 @@ vi.mock("openai", () => {
     },
   };
 });
+
+// What the provider passes to openai.chat.completions.create. We assert on
+// shape (messages array, tools array, etc.) — fields are kept loose because
+// the upstream type surface is large and not worth re-enumerating here.
+const ChatCreateArgsSchema = z
+  .object({
+    messages: z.array(
+      z
+        .object({
+          role: z.string(),
+          content: z.unknown().optional(),
+          tool_call_id: z.string().optional(),
+          tool_calls: z.array(z.unknown()).optional(),
+        })
+        .passthrough(),
+    ),
+    tools: z.array(z.unknown()).optional(),
+    model: z.string().optional(),
+  })
+  .passthrough();
+
+type ChatCreateArgs = z.infer<typeof ChatCreateArgsSchema>;
+type ChatMessage = ChatCreateArgs["messages"][number];
+
+function firstCreateArgs(): ChatCreateArgs {
+  const call = mockCreate.mock.calls[0];
+  if (!call) throw new Error("expected openai.chat.completions.create to have been called");
+  return ChatCreateArgsSchema.parse(call[0]);
+}
+
+function getMessage(args: ChatCreateArgs, index: number): ChatMessage {
+  const msg = args.messages[index];
+  if (!msg) throw new Error(`expected messages[${index}] to be present`);
+  return msg;
+}
+
+function getTool(args: ChatCreateArgs, index: number): unknown {
+  if (!args.tools) throw new Error("expected tools array on create args");
+  const tool = args.tools[index];
+  if (tool === undefined) throw new Error(`expected tools[${index}] to be present`);
+  return tool;
+}
 
 function createProvider(): OpenAICompatibleProvider {
   mockCreate.mockReset();
@@ -103,9 +146,9 @@ describe("OpenAICompatibleProvider", () => {
         messages: [{ role: "user", content: "hi" }],
       });
 
-      const args = mockCreate.mock.calls[0][0];
-      expect(args.messages[0]).toEqual({ role: "system", content: "Be concise" });
-      expect(args.messages[1]).toEqual({ role: "user", content: "hi" });
+      const args = firstCreateArgs();
+      expect(getMessage(args, 0)).toEqual({ role: "system", content: "Be concise" });
+      expect(getMessage(args, 1)).toEqual({ role: "user", content: "hi" });
     });
 
     it("translates tool_result blocks to tool role messages", async () => {
@@ -131,10 +174,10 @@ describe("OpenAICompatibleProvider", () => {
         ],
       });
 
-      const args = mockCreate.mock.calls[0][0];
+      const args = firstCreateArgs();
       // System + assistant + tool + (no text user msg)
       expect(args.messages).toHaveLength(3);
-      expect(args.messages[2]).toEqual({
+      expect(getMessage(args, 2)).toEqual({
         role: "tool",
         tool_call_id: "call_1",
         content: "result data",
@@ -162,8 +205,8 @@ describe("OpenAICompatibleProvider", () => {
         ],
       });
 
-      const args = mockCreate.mock.calls[0][0];
-      expect(args.tools[0]).toEqual({
+      const args = firstCreateArgs();
+      expect(getTool(args, 0)).toEqual({
         type: "function",
         function: {
           name: "my_tool",
@@ -292,7 +335,7 @@ describe("OpenAICompatibleProvider", () => {
         /* drain */
       }
 
-      const args = mockCreate.mock.calls[0][0];
+      const args = firstCreateArgs();
       expect(args.stream).toBe(true);
     });
   });
@@ -317,8 +360,8 @@ describe("OpenAICompatibleProvider", () => {
         messages: [{ role: "user", content: "hi" }],
       });
 
-      const args = mockCreate.mock.calls[0][0];
-      expect(args.messages[0].content).toEqual([
+      const args = firstCreateArgs();
+      expect(getMessage(args, 0).content).toEqual([
         expect.objectContaining({
           type: "text",
           text: "Be helpful",
@@ -341,8 +384,8 @@ describe("OpenAICompatibleProvider", () => {
         messages: [{ role: "user", content: "hi" }],
       });
 
-      const args = mockCreate.mock.calls[0][0];
-      expect(args.messages[0].content).toBe("Be helpful");
+      const args = firstCreateArgs();
+      expect(getMessage(args, 0).content).toBe("Be helpful");
     });
   });
 
@@ -433,7 +476,7 @@ describe("OpenAICompatibleProvider", () => {
 
       expect(result.content).toEqual([{ type: "text", text: '{"name":"Alice","age":30}' }]);
 
-      const args = mockCreate.mock.calls[0][0];
+      const args = firstCreateArgs();
       expect(args.response_format).toEqual({
         type: "json_schema",
         json_schema: {
@@ -493,8 +536,8 @@ describe("OpenAICompatibleProvider", () => {
         ],
       });
 
-      const args = mockCreate.mock.calls[0][0];
-      const assistantMsg = args.messages[1]; // [0] is system
+      const args = firstCreateArgs();
+      const assistantMsg = getMessage(args, 1); // [0] is system
       // Text extracted, thinking blocks filtered out
       expect(assistantMsg.content).toBe("visible answer");
       // No thinking content leaked into the message
@@ -536,8 +579,8 @@ describe("OpenAICompatibleProvider", () => {
         ],
       });
 
-      const args = mockCreate.mock.calls[0][0];
-      const userMsg = args.messages[1];
+      const args = firstCreateArgs();
+      const userMsg = getMessage(args, 1);
       expect(userMsg.role).toBe("user");
       // No images → flattened to a single text string concatenating both parts.
       expect(typeof userMsg.content).toBe("string");
@@ -564,8 +607,8 @@ describe("OpenAICompatibleProvider", () => {
         ],
       });
 
-      const args = mockCreate.mock.calls[0][0];
-      const userMsg = args.messages[1];
+      const args = firstCreateArgs();
+      const userMsg = getMessage(args, 1);
       expect(userMsg.content).toBe("[document: text/markdown]\nhello");
     });
 
@@ -590,8 +633,8 @@ describe("OpenAICompatibleProvider", () => {
         ],
       });
 
-      const args = mockCreate.mock.calls[0][0];
-      const userMsg = args.messages[1];
+      const args = firstCreateArgs();
+      const userMsg = getMessage(args, 1);
       expect(userMsg.content).toBe(
         "[document: report.pdf — binary content not supported on this provider]",
       );
@@ -626,8 +669,8 @@ describe("OpenAICompatibleProvider", () => {
         ],
       });
 
-      const args = mockCreate.mock.calls[0][0];
-      const userMsg = args.messages[1];
+      const args = firstCreateArgs();
+      const userMsg = getMessage(args, 1);
       expect(typeof userMsg.content).toBe("string");
       const text = userMsg.content as string;
 
@@ -665,8 +708,8 @@ describe("OpenAICompatibleProvider", () => {
         ],
       });
 
-      const args = mockCreate.mock.calls[0][0];
-      const userMsg = args.messages[1];
+      const args = firstCreateArgs();
+      const userMsg = getMessage(args, 1);
       expect(userMsg.content).toBe("[document: small.txt]\nhello world");
       // No spurious elision marker on a payload that didn't need truncating.
       expect(userMsg.content).not.toContain("truncated");
@@ -695,8 +738,8 @@ describe("OpenAICompatibleProvider", () => {
         ],
       });
 
-      const args = mockCreate.mock.calls[0][0];
-      const userMsg = args.messages[1];
+      const args = firstCreateArgs();
+      const userMsg = getMessage(args, 1);
       expect(Array.isArray(userMsg.content)).toBe(true);
       const parts = userMsg.content as Array<{ type: string; text?: string; image_url?: unknown }>;
       // 2 text parts (caption + inlined document) + 1 image part

@@ -20,6 +20,7 @@
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 const execFile = promisify(execFileCb);
 
@@ -86,7 +87,7 @@ describe("skills e2e (production Docker image)", { timeout: 120_000 }, () => {
       "-e",
       'const fs=require("fs");const s=fs.statSync("/var/lib/cogmo/skills/hooks/pre-receive");process.stdout.write(JSON.stringify({mode:s.mode&0o777,size:s.size}))',
     ]);
-    const meta = JSON.parse(r.stdout);
+    const meta = z.object({ mode: z.number(), size: z.number() }).parse(JSON.parse(r.stdout));
     expect(meta.mode).toBe(0o755);
     expect(meta.size).toBeGreaterThan(0);
   });

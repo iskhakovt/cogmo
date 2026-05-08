@@ -977,9 +977,13 @@ describe("createHandleMessage", () => {
     });
 
     // Should have pushed a status event for summarization
-    const statusCalls = handle.push.mock.calls.filter(([event]: any) => event.type === "status");
+    const statusCalls = vi
+      .mocked(handle.push)
+      .mock.calls.filter(([event]) => event.type === "status");
     expect(statusCalls).toHaveLength(1);
-    expect(statusCalls[0][0].message).toBe("Summarizing conversation...");
+    const firstStatus = statusCalls[0]?.[0];
+    if (firstStatus?.type !== "status") throw new Error("expected first status event");
+    expect(firstStatus.message).toBe("Summarizing conversation...");
   });
 
   it("calls mcpRegistry.resolveTools with the profile's toolSet globs", async () => {
@@ -1296,10 +1300,24 @@ describe("createHandleMessage", () => {
         throw new Error(`summarization model "${model}" not configured`);
       });
 
+      // Profile carries summarizationModel — the snapshot picks it up from
+      // here, not from a deps field.
       const deps = mockDeps({
         resolveProvider,
-        summarizationModel: "claude-haiku-4-5-20251001",
         agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "assistant",
+            basePrompt: "test",
+            model: "claude-sonnet-4-6",
+            summarizationModel: "claude-haiku-4-5-20251001",
+            extractionModel: null,
+            autoRecall: "heuristic",
+            voiceMode: "auto",
+            toolSet: [],
+            memoryScope: null,
+          }),
           // Force the slow path so countTokens actually runs (the fast
           // path skip would also happen to mask this bug).
           getLastTokens: vi.fn().mockResolvedValue(null),

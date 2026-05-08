@@ -29,8 +29,8 @@ const INBOUND_PHRASE = "Hello, this is the voice integration test.";
 interface CapturedOutbound {
   platformAddress: string;
   content: string;
-  images?: Array<{ data: string; mediaType: string }>;
-  voice?: { data: string; mediaType: string };
+  images?: Array<{ data: string; mediaType: string }> | undefined;
+  voice?: { data: string; mediaType: string } | undefined;
 }
 // File-scoped capture buffer for `adapter/direct/outbound` events. A dedicated
 // Inngest function (registered alongside the app's functions) pushes each

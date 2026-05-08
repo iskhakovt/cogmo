@@ -231,9 +231,19 @@ describe("runCodingVerify", () => {
   it("happy path: verify passes → commit+push → PR opens, status reaches pr_open", async () => {
     const handle = fakeContainerHandle(successScript);
     const deps = makeDeps(handle);
-    const create = vi.fn(async () => ({
-      data: { html_url: "https://github.com/user/cogmo/pull/42", number: 42 },
-    }));
+    const create = vi.fn(
+      async (_args: {
+        owner: string;
+        repo: string;
+        head: string;
+        base: string;
+        title: string;
+        body: string;
+        draft: boolean;
+      }) => ({
+        data: { html_url: "https://github.com/user/cogmo/pull/42", number: 42 },
+      }),
+    );
     deps.octokitFactory = fakeOctokitFactory(create);
     const inngestSend = vi.fn().mockResolvedValue(undefined);
     const inngest = { send: inngestSend } as unknown as Pick<import("inngest").Inngest, "send">;

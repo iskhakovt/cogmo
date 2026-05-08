@@ -1,6 +1,23 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { applyContainerCreatePolicy } from "./policy.js";
 import type { TaskScope } from "./types.js";
+
+// Subset of the Docker /containers/create body the policy tests assert on.
+const DecodedBodySchema = z
+  .object({
+    Image: z.string().optional(),
+    HostConfig: z
+      .object({
+        Runtime: z.string().optional(),
+        CgroupParent: z.string().optional(),
+      })
+      .passthrough()
+      .optional()
+      .default({}),
+    Labels: z.record(z.string(), z.string()).optional().default({}),
+  })
+  .passthrough();
 
 const SCOPE: TaskScope = {
   taskId: "019d0000-0000-7000-8000-00000000aaaa",
@@ -16,8 +33,8 @@ function body(spec: object): Buffer {
   return Buffer.from(JSON.stringify(spec), "utf8");
 }
 
-function decode(buf: Buffer) {
-  return JSON.parse(buf.toString("utf8"));
+function decode(buf: Buffer): z.infer<typeof DecodedBodySchema> {
+  return DecodedBodySchema.parse(JSON.parse(buf.toString("utf8")));
 }
 
 describe("applyContainerCreatePolicy", () => {

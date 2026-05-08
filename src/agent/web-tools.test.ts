@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
+import { z } from "zod";
+import type { Service } from "./service.js";
 import { createWebTools } from "./web-tools.js";
 
 // Mock withRetry as a no-delay retry loop that honours AbortError. We
@@ -30,31 +33,42 @@ vi.mock("../util/with-retry.js", async () => {
   };
 });
 
-const mockFetch = vi.fn();
+// We type the call site (input + init) but leave the response as `unknown`
+// so tests can return partial { ok, status, headers, json, text } shapes
+// without the full Response surface. headers passed in are always plain
+// records here.
+type FetchInit = { headers?: Record<string, string>; body?: string; method?: string };
+const mockFetch = vi.fn<(input: string, init?: FetchInit) => Promise<unknown>>();
 vi.stubGlobal("fetch", mockFetch);
+
+function fetchCall(index: number): { url: string; headers: Record<string, string>; body: string } {
+  const call = mockFetch.mock.calls[index];
+  if (!call) throw new Error(`expected fetch call at index ${index}`);
+  const [url, init] = call;
+  return { url, headers: init?.headers ?? {}, body: init?.body ?? "" };
+}
 
 afterEach(() => {
   mockFetch.mockReset();
 });
 
-function stubService() {
-  return {
-    memory: {
-      recall: vi.fn().mockResolvedValue({ memories: [] }),
-      retain: vi.fn().mockResolvedValue(undefined),
-      reflect: vi.fn().mockResolvedValue({ answer: "" }),
-    },
-    files: {
-      read: vi.fn().mockResolvedValue(""),
-      write: vi.fn().mockResolvedValue(undefined),
-      list: vi.fn().mockResolvedValue([]),
-    },
-    coreMemory: {
-      get: vi.fn().mockResolvedValue([]),
-      update: vi.fn().mockResolvedValue(undefined),
-    },
-  };
+// web tools don't read from Service — `mock<Service>()` gives us a typed
+// proxy where every method is a vi.fn() returning undefined. Optional
+// surfaces (`coding`, `skills`) are auto-mocked too; drop them so an
+// accidental call surfaces as a missing-property error rather than silent
+// success. exactOptionalPropertyTypes blocks `= undefined`, hence `delete`.
+function stubService(): Service {
+  const svc = mock<Service>();
+  delete svc.coding;
+  delete svc.skills;
+  return svc;
 }
+
+const OpenRouterRequestBodySchema = z.object({ model: z.string() }).passthrough();
+
+const TavilyExtractBodySchema = z
+  .object({ urls: z.string(), extract_depth: z.string() })
+  .passthrough();
 
 describe("web_search", () => {
   it("returns formatted search results", async () => {
@@ -137,7 +151,7 @@ describe("web_answer", () => {
     expect(result).toContain("Sources:");
     expect(result).toContain("https://source.com/1");
 
-    const body = JSON.parse(mockFetch.mock.calls[0]![1].body);
+    const body = OpenRouterRequestBodySchema.parse(JSON.parse(fetchCall(0).body));
     expect(body.model).toBe("perplexity/sonar");
   });
 
@@ -305,7 +319,7 @@ describe("fetch_url", () => {
 
     await fetchUrl.handler({ url: "https://example.com/page" }, stubService());
 
-    const headers = mockFetch.mock.calls[0]![1].headers as Record<string, string>;
+    const headers = fetchCall(0).headers;
     expect(headers["User-Agent"]).toMatch(/Chrome\/\d+/);
     expect(headers["sec-ch-ua"]).toContain("Chromium");
     expect(headers["sec-ch-ua-mobile"]).toBe("?0");
@@ -336,8 +350,8 @@ describe("fetch_url", () => {
     expect(result).toBe("got through");
 
     expect(mockFetch).toHaveBeenCalledTimes(2);
-    const firstHeaders = mockFetch.mock.calls[0]![1].headers as Record<string, string>;
-    const retryHeaders = mockFetch.mock.calls[1]![1].headers as Record<string, string>;
+    const firstHeaders = fetchCall(0).headers;
+    const retryHeaders = fetchCall(1).headers;
 
     expect(firstHeaders.Referer).toBeUndefined();
     expect(firstHeaders["Sec-Fetch-Site"]).toBe("none");
@@ -398,9 +412,11 @@ describe("fetch_url", () => {
     expect(result).toContain("Extracted via Tavily");
 
     // 3 direct attempts (1 + 2 retries) + 1 Tavily call.
-    const tavilyCall = mockFetch.mock.calls.find((c) => c[0] === "https://api.tavily.com/extract");
-    expect(tavilyCall).toBeDefined();
-    const tavilyBody = JSON.parse(tavilyCall![1].body);
+    const tavilyIdx = mockFetch.mock.calls.findIndex(
+      (c) => c[0] === "https://api.tavily.com/extract",
+    );
+    expect(tavilyIdx).toBeGreaterThanOrEqual(0);
+    const tavilyBody = TavilyExtractBodySchema.parse(JSON.parse(fetchCall(tavilyIdx).body));
     expect(tavilyBody.urls).toBe("https://walled.example.com/page");
     expect(tavilyBody.extract_depth).toBe("basic");
   });

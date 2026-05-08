@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
+import type { CodingStore } from "../agent/coding/store/index.js";
 import type { Transactor } from "../db/index.js";
 import type { inboundArrived } from "../inngest/events.js";
 import { mockAgentStore, mockTransportStore } from "../test/factories.js";
@@ -879,7 +881,7 @@ describe("createTransport", () => {
   });
 
   describe("repos", () => {
-    function setupWithCoding(codingStore: unknown) {
+    function setupWithCoding(overrides: Partial<CodingStore>) {
       const transportStore = mockTransportStore();
       const agentStore = mockAgentStore();
       const inngestSend = vi.fn().mockResolvedValue(undefined);
@@ -889,6 +891,7 @@ describe("createTransport", () => {
       const mockEvent = {
         create: vi.fn((data: unknown) => ({ name: "inbound/arrived", data })),
       } as unknown as typeof inboundArrived;
+      const codingStore: CodingStore = { ...mock<CodingStore>(), ...overrides };
       const transport = createTransport({
         channelId: "ch-1",
         defaultUserId: "user-1",
@@ -896,7 +899,7 @@ describe("createTransport", () => {
         runInTx: fakeRunInTx,
         transportStore,
         agentStore,
-        codingStore: codingStore as Parameters<typeof createTransport>[0]["codingStore"],
+        codingStore,
         inngest,
         inboundArrived: mockEvent,
         attachments: { upload: vi.fn(), download: vi.fn() } as unknown as Parameters<
@@ -983,7 +986,9 @@ describe("createTransport", () => {
         localPath: "/p",
         remoteUrl: "git@x:y/z.git",
       });
-      const args = insertRepo.mock.calls[0][1];
+      const insertCall = insertRepo.mock.calls[0];
+      if (!insertCall) throw new Error("expected insertRepo to have been called");
+      const args = insertCall[1] as Parameters<CodingStore["insertRepo"]>[1];
       expect(args.defaultBranch).toBe("main");
       expect(args.verifyCommand).toBe("true");
       expect(args.allowedBackends).toEqual(["claude"]);
@@ -1152,8 +1157,8 @@ describe("createTransport", () => {
       task: { conversationId: string | null } | null;
       conversation: { userId: string } | null;
       tapperUserId: string | null;
-      approvePlanIfPending?: ReturnType<typeof vi.fn>;
-      cancelTaskIfActive?: ReturnType<typeof vi.fn>;
+      approvePlanIfPending?: CodingStore["approvePlanIfPending"];
+      cancelTaskIfActive?: CodingStore["cancelTaskIfActive"];
       inngestSend?: ReturnType<typeof vi.fn>;
     }) {
       const inngestSend = args.inngestSend ?? vi.fn().mockResolvedValue(undefined);
@@ -1177,7 +1182,8 @@ describe("createTransport", () => {
             : null,
         ),
       });
-      const codingStore = {
+      const codingStore: CodingStore = {
+        ...mock<CodingStore>(),
         getTask: vi.fn().mockResolvedValue(args.task ? { id: taskId, ...args.task } : null),
         approvePlanIfPending:
           args.approvePlanIfPending ??
@@ -1196,7 +1202,7 @@ describe("createTransport", () => {
         runInTx: fakeRunInTx,
         transportStore,
         agentStore,
-        codingStore: codingStore as Parameters<typeof createTransport>[0]["codingStore"],
+        codingStore,
         inngest,
         inboundArrived: mockEvent,
         attachments: { upload: vi.fn(), download: vi.fn() } as unknown as Parameters<

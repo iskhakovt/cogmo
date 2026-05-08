@@ -7,6 +7,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
+import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { LocalDockerSandboxClient } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
@@ -69,6 +70,9 @@ function fakeDocker(opts: { dockerId: string; failStart?: boolean } = { dockerId
     }),
     listContainers: vi.fn(async () => []),
     getContainer: () => ({ inspect, kill: vi.fn(), remove }),
+    // Default `info` returns just runc; tests that need a different runtime
+    // map call `docker.info.mockResolvedValueOnce(...)` to override.
+    info: vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } })),
   };
   return { docker, calls };
 }
@@ -105,7 +109,6 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, calls } = fakeDocker({ dockerId: "docker-task-xyz" });
     const { proxy, registers } = fakeProxy();
-    docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const sandbox = await LocalDockerSandboxClient.create({
       // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
@@ -129,22 +132,25 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
 
     // Two register calls: pre-create placeholder, post-create upsert.
     expect(registers).toHaveLength(2);
-    expect(registers[0].parentDockerId).toBe("");
-    expect(registers[0].parentContainerRowId).toBe("");
-    expect(registers[0].runtime).toBe("runc");
-    expect(registers[1].parentDockerId).toBe("docker-task-xyz");
-    expect(registers[1].parentContainerRowId).toBeTruthy();
+    const reg0 = expectDefined(registers[0], "first register");
+    const reg1 = expectDefined(registers[1], "second register");
+    expect(reg0.parentDockerId).toBe("");
+    expect(reg0.parentContainerRowId).toBe("");
+    expect(reg0.runtime).toBe("runc");
+    expect(reg1.parentDockerId).toBe("docker-task-xyz");
+    expect(reg1.parentContainerRowId).toBeTruthy();
 
     // Cgroup parent (slice 3.0h): both registers carry the same slice
     // name; the proxy uses it to inject CgroupParent on every child
     // create so siblings land in the same subtree.
     const expectedSlice = "cogmo-task-019d0000000070008000000000000aaa.slice";
-    expect(registers[0].cgroupParent).toBe(expectedSlice);
-    expect(registers[1].cgroupParent).toBe(expectedSlice);
+    expect(reg0.cgroupParent).toBe(expectedSlice);
+    expect(reg1.cgroupParent).toBe(expectedSlice);
 
     // Container created with the proxy socket bind-mounted at /var/run/docker.sock.
     expect(calls.create).toHaveLength(1);
-    const binds = calls.create[0].HostConfig?.Binds ?? [];
+    const create0 = expectDefined(calls.create[0], "first create call");
+    const binds = create0.HostConfig?.Binds ?? [];
     expect(binds).toContain("/tmp/wt:/workspace");
     expect(binds).toContain(
       "/run/cogmo/sockets/019d0000-0000-7000-8000-000000000aaa.sock:/var/run/docker.sock",
@@ -152,13 +158,12 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     // Task container itself pinned to the slice — Docker creates the
     // slice on demand and aborts here if systemd refuses (e.g. on a
     // non-systemd host).
-    expect(calls.create[0].HostConfig?.CgroupParent).toBe(expectedSlice);
+    expect(create0.HostConfig?.CgroupParent).toBe(expectedSlice);
   });
 
   it("unregisters the proxy on stopTask", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-x" });
-    docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const { proxy, unregisters } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
       // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
@@ -185,7 +190,6 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
   it("rolls back the proxy registration when Docker createContainer fails", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker();
-    docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     docker.createContainer = vi.fn(async () => {
       throw new Error("daemon refused");
     });
@@ -218,7 +222,6 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
   it("rolls back the proxy registration when container.start fails", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-fail-start", failStart: true });
-    docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const { proxy, registers, unregisters } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
       // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
@@ -251,7 +254,6 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
   it("works without a proxy (no socket mount, no register calls)", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, calls } = fakeDocker({ dockerId: "docker-no-proxy" });
-    docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const sandbox = await LocalDockerSandboxClient.create({
       // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
@@ -271,7 +273,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       expiresAt: new Date(Date.now() + 60_000),
     });
 
-    const binds = calls.create[0].HostConfig?.Binds ?? [];
+    const binds = expectDefined(calls.create[0], "first create call").HostConfig?.Binds ?? [];
     expect(binds).toContain("/tmp/wt:/workspace");
     expect(binds.find((b) => b.includes("/var/run/docker.sock"))).toBeUndefined();
   });
@@ -279,7 +281,6 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
   it("bind-mounts the askpass dir read-only when askpassMount is provided", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, calls } = fakeDocker({ dockerId: "docker-askpass" });
-    docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const sandbox = await LocalDockerSandboxClient.create({
       // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
@@ -302,7 +303,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       },
     });
 
-    const binds = calls.create[0].HostConfig?.Binds ?? [];
+    const binds = expectDefined(calls.create[0], "first create call").HostConfig?.Binds ?? [];
     expect(binds).toContain(
       "/run/cogmo/askpass/019d0000-0000-7000-8000-000000000fff:/.cogmo-askpass:ro",
     );
@@ -320,7 +321,6 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
 
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-stopAskpass" });
-    docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const sandbox = await LocalDockerSandboxClient.create({
       // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
@@ -415,7 +415,6 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
   it("stopTask is a no-op for askpass when no baseDir is configured", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-noaskpass" });
-    docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const sandbox = await LocalDockerSandboxClient.create({
       // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
@@ -440,7 +439,6 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
   it("shutdown closes the proxy", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker();
-    docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const { proxy } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
       // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub

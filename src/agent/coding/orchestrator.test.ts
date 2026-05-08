@@ -327,17 +327,19 @@ describe("runCodingTask", () => {
     expect(reloaded?.containerId).toBeTruthy();
 
     expect(createCalls).toHaveLength(1);
-    expect(createCalls[0].taskId).toBe(task.id);
-    expect(createCalls[0].image).toBe("cogmo/devbase:slice1-test");
+    const create0 = createCalls[0];
+    if (!create0) throw new Error("expected first create call");
+    expect(create0.taskId).toBe(task.id);
+    expect(create0.image).toBe("cogmo/devbase:slice1-test");
     // Worktree path is derived in the orchestrator's allocate-worktree step:
     // ${worktreesDir}/<repo.name>/<id-short>. Assert the structural contract,
     // not a literal path (the id-short is whatever UUIDv7 the DB generated).
-    expect(createCalls[0].worktreePath).toContain(`${baseDir}/worktrees/cogmo/`);
+    expect(create0.worktreePath).toContain(`${baseDir}/worktrees/cogmo/`);
     // Persisted worktreeAssignment carries both fields atomically.
     // 12 hex chars, dashes stripped — covers the full 48-bit UUIDv7 timestamp
     // ms portion to avoid prefix collisions on rapid-fire task creation.
     expect(reloaded?.worktreeAssignment?.branch).toMatch(/^cogmo\/[a-f0-9]{12}$/);
-    expect(reloaded?.worktreeAssignment?.worktreePath).toBe(createCalls[0].worktreePath);
+    expect(reloaded?.worktreeAssignment?.worktreePath).toBe(create0.worktreePath);
 
     expect(planStream.text).toEqual(["## Plan\n", "1. Do X\n"]);
     expect(planStream.finalized).toEqual(["## Plan\n1. Do X\n"]);
@@ -705,7 +707,7 @@ describe("runCodingExecute", () => {
 
     expect(result.status).toBe("pending_verify");
     expect(createCalls).toHaveLength(1);
-    expect(createCalls[0].taskId).toBe(task.id);
+    expect(createCalls[0]?.taskId).toBe(task.id);
     expect(stopCalls).toEqual([task.id]);
   });
 
@@ -749,6 +751,8 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
+      stepWaitForEvent: fakeStepWaitForEvent,
+      inngest: fakeInngest,
     });
 
     expect(result.status).toBe("skipped");
@@ -777,6 +781,8 @@ describe("runCodingExecute", () => {
           openExecuteStream: async () => NULL_EXECUTE_STREAM,
         }),
         stepRun,
+        stepWaitForEvent: fakeStepWaitForEvent,
+        inngest: fakeInngest,
       }),
     ).rejects.toThrow(/plan_approved_at/);
   });
@@ -798,6 +804,8 @@ describe("runCodingExecute", () => {
         taskId: task.id,
         deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
         stepRun,
+        stepWaitForEvent: fakeStepWaitForEvent,
+        inngest: fakeInngest,
       }),
     ).rejects.toThrow(/no session_id/);
   });
@@ -809,6 +817,8 @@ describe("runCodingExecute", () => {
         taskId: "019d0000-0000-7000-8000-000000000099",
         deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
         stepRun,
+        stepWaitForEvent: fakeStepWaitForEvent,
+        inngest: fakeInngest,
       }),
     ).rejects.toThrow(/coding task not found/);
   });

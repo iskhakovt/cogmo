@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { expectDefined } from "../../test/assertions.js";
 import { CodingProgressSubscriber, type ProgressBot } from "./progress-subscriber.js";
 import { CodingStreamingRegistry } from "./streaming-registry.js";
+
+const InlineKeyboardSchema = z.object({
+  inline_keyboard: z.array(z.array(z.object({ callback_data: z.string() }).passthrough())),
+});
 
 const TASK_ID = "019d0000-0000-7000-8000-000000000001";
 
@@ -64,16 +70,17 @@ describe("CodingProgressSubscriber", () => {
     await new Promise((r) => setImmediate(r));
 
     expect(bot.sent).toHaveLength(1);
-    expect(bot.sent[0].chatId).toBe(42);
-    expect(bot.sent[0].text).toContain("🧠 Planning");
-    expect(bot.sent[0].text).toContain("Hello");
-    expect(bot.sent[0].replyMarkup).toBeUndefined();
+    const sent0 = expectDefined(bot.sent[0], "first send");
+    expect(sent0.chatId).toBe(42);
+    expect(sent0.text).toContain("🧠 Planning");
+    expect(sent0.text).toContain("Hello");
+    expect(sent0.replyMarkup).toBeUndefined();
     expect(bot.edits).toHaveLength(0);
 
     registry.publish(TASK_ID, { kind: "text", delta: " world" });
     await new Promise((r) => setImmediate(r));
     expect(bot.edits).toHaveLength(1);
-    expect(bot.edits[0].text).toContain("Hello world");
+    expect(expectDefined(bot.edits[0], "first edit").text).toContain("Hello world");
   });
 
   it("plan_finalized attaches the inline keyboard with Approve / Revise / Cancel", async () => {
@@ -83,17 +90,14 @@ describe("CodingProgressSubscriber", () => {
     await new Promise((r) => setImmediate(r));
 
     expect(bot.sent).toHaveLength(1);
-    expect(bot.sent[0].text).toContain("Plan ready");
-    expect(bot.sent[0].text).toContain("## Plan\nbody");
+    const planSent = expectDefined(bot.sent[0], "plan sent");
+    expect(planSent.text).toContain("Plan ready");
+    expect(planSent.text).toContain("## Plan\nbody");
 
-    const markup = bot.sent[0].replyMarkup as {
-      inline_keyboard: { callback_data: string }[][];
-    };
-    expect(markup.inline_keyboard[0].map((b) => b.callback_data)).toEqual([
-      `plan:${TASK_ID}:approve`,
-      `plan:${TASK_ID}:revise`,
-      `plan:${TASK_ID}:cancel`,
-    ]);
+    const markup = InlineKeyboardSchema.parse(planSent.replyMarkup);
+    expect(
+      expectDefined(markup.inline_keyboard[0], "first keyboard row").map((b) => b.callback_data),
+    ).toEqual([`plan:${TASK_ID}:approve`, `plan:${TASK_ID}:revise`, `plan:${TASK_ID}:cancel`]);
   });
 
   it("execute_started flips phase to executing and resets the body", async () => {
@@ -284,7 +288,7 @@ describe("CodingProgressSubscriber", () => {
       registry.publish(TASK_ID, { kind: "text", delta: "after" });
       await new Promise((r) => setImmediate(r));
       expect(bot.edits).toHaveLength(1);
-      expect(bot.edits[0].text).toContain("after");
+      expect(expectDefined(bot.edits[0], "after edit").text).toContain("after");
     });
 
     it("force-edits on plan_finalized even when the throttle window is open", async () => {
@@ -312,9 +316,10 @@ describe("CodingProgressSubscriber", () => {
       await new Promise((r) => setImmediate(r));
 
       expect(bot.edits).toHaveLength(1);
-      expect(bot.edits[0].text).toContain("Plan ready");
-      expect(bot.edits[0].text).toContain("## Plan\nbody");
-      expect(bot.edits[0].replyMarkup).toBeDefined();
+      const planEdit = expectDefined(bot.edits[0], "plan edit");
+      expect(planEdit.text).toContain("Plan ready");
+      expect(planEdit.text).toContain("## Plan\nbody");
+      expect(planEdit.replyMarkup).toBeDefined();
     });
 
     it("force-edits on terminal failed event regardless of throttle", async () => {
@@ -334,8 +339,9 @@ describe("CodingProgressSubscriber", () => {
       await new Promise((r) => setImmediate(r));
 
       expect(bot.edits).toHaveLength(1);
-      expect(bot.edits[0].text).toContain("❌ Failed");
-      expect(bot.edits[0].text).toContain("boom");
+      const failEdit = expectDefined(bot.edits[0], "fail edit");
+      expect(failEdit.text).toContain("❌ Failed");
+      expect(failEdit.text).toContain("boom");
     });
   });
 });

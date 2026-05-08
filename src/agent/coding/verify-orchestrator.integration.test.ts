@@ -252,7 +252,11 @@ function fakeSandbox(opts: { worktreePath: string }): {
           ? opts.worktreePath
           : (execOpts?.workingDir ?? opts.worktreePath);
 
-      const env: Record<string, string> = { ...process.env };
+      const env: Record<string, string> = Object.fromEntries(
+        Object.entries(process.env).filter(
+          (entry): entry is [string, string] => entry[1] !== undefined,
+        ),
+      );
       if (execOpts?.env) {
         for (const [k, v] of Object.entries(execOpts.env)) {
           env[k] = hostDir && containerDir ? rewrite(v, hostDir, containerDir) : v;

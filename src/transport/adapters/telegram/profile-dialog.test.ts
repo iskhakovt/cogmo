@@ -26,7 +26,9 @@ function mkProfile(overrides: Partial<Profile> & { id: string; name: string }): 
     summarizationModel: null,
     extractionModel: null,
     autoRecall: "heuristic",
+    voiceMode: "auto",
     toolSet: [],
+    memoryScope: null,
     ...overrides,
   };
 }

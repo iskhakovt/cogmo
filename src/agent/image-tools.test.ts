@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { AbortError } from "../util/with-retry.js";
 import { createImageTools, type FalProvider } from "./image-tools.js";
+import type { Service } from "./service.js";
 
 // Passthrough withRetry — tests exercise the handler's error classification
 // without paying real backoff delays. Retry behaviour itself is covered in
@@ -37,23 +39,15 @@ afterEach(() => {
   mockGenerateImage.mockReset();
 });
 
-function stubService() {
-  return {
-    memory: {
-      recall: vi.fn().mockResolvedValue({ memories: [] }),
-      retain: vi.fn().mockResolvedValue(undefined),
-      reflect: vi.fn().mockResolvedValue({ answer: "" }),
-    },
-    files: {
-      read: vi.fn(),
-      write: vi.fn(),
-      list: vi.fn(),
-    },
-    coreMemory: {
-      get: vi.fn(),
-      update: vi.fn(),
-    },
-  };
+// image_generate doesn't read from Service — `mock<Service>()` gives us
+// a typed proxy of every method as vi.fn(). Optional sub-namespaces
+// (`coding`, `skills`) auto-mock too; drop them so an accidental call
+// surfaces as a missing-property error rather than a silent no-op.
+function stubService(): Service {
+  const svc = mock<Service>();
+  delete svc.coding;
+  delete svc.skills;
+  return svc;
 }
 
 function fakeFalProvider(): FalProvider {
