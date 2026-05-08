@@ -21,6 +21,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { HeadBucketCommand, type S3Client } from "@aws-sdk/client-s3";
 import { sql } from "drizzle-orm";
+import semver from "semver";
 import { z } from "zod";
 import type { Database } from "../db/index.js";
 import { logger } from "../logger.js";
@@ -30,10 +31,24 @@ export class BootCheckError extends Error {
   override readonly name = "BootCheckError";
 }
 
-export const HindsightCompatSchema = z.object({
-  min: z.string(),
-  max: z.string(),
-});
+/**
+ * The Hindsight server version this codebase has been validated against,
+ * as a node-semver range string (e.g. `">=0.6.0 <0.7.0"`,
+ * `"^0.6.0"`). Stored next to the npm client pin in `package.json`
+ * under `cogmo.hindsightCompat`.
+ *
+ * Wildcards (`*`, empty string, `>=0.0.0`) are rejected — they make the
+ * version check a no-op, which is almost certainly a mistake.
+ */
+export const HindsightCompatSchema = z
+  .string()
+  .min(1, { message: "must not be empty" })
+  .refine((s) => semver.validRange(s) !== null, {
+    message: "must be a valid node-semver range",
+  })
+  .refine((s) => semver.validRange(s) !== "*", {
+    message: "wildcard ranges (`*`, empty string) are rejected — pin a real range",
+  });
 export type HindsightCompat = z.infer<typeof HindsightCompatSchema>;
 
 const PackageJsonSchema = z.object({
@@ -55,24 +70,6 @@ export function loadHindsightCompat(): HindsightCompat {
   const pkgUrl = new URL("../../package.json", import.meta.url);
   const raw = readFileSync(fileURLToPath(pkgUrl), "utf-8");
   return PackageJsonSchema.parse(JSON.parse(raw)).cogmo.hindsightCompat;
-}
-
-interface SemVer {
-  major: number;
-  minor: number;
-  patch: number;
-}
-
-function parseSemver(v: string): SemVer {
-  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v);
-  if (!m?.[1] || !m[2] || !m[3]) {
-    throw new BootCheckError(`unparseable semver: ${v}`);
-  }
-  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) };
-}
-
-function cmpSemver(a: SemVer, b: SemVer): number {
-  return a.major - b.major || a.minor - b.minor || a.patch - b.patch;
 }
 
 /**
@@ -114,10 +111,10 @@ export async function checkS3Bucket(s3: S3Client, bucket: string): Promise<void>
  * Probe the Hindsight server's `/version` and enforce the compat range
  * pinned in package.json.
  *
- * Hard fail when the server reports a version outside `[min, max)` —
- * that's a real compatibility problem (e.g. against 0.5.x the async
- * `retainBatch` path silently drops items past the first), and the
- * operator needs to fix the deployment, not retry.
+ * Hard fail when the server reports a version outside the range — that's
+ * a real compatibility problem (e.g. against 0.5.x the async `retainBatch`
+ * path silently drops items past the first), and the operator needs to
+ * fix the deployment, not retry.
  *
  * Soft fail when `/version` itself can't be reached — Hindsight could
  * be restarting during a deploy, and killing `serve` over that is
@@ -125,29 +122,37 @@ export async function checkS3Bucket(s3: S3Client, bucket: string): Promise<void>
  */
 export async function checkHindsightVersion(
   memory: HindsightMemoryProvider,
-  compat: HindsightCompat,
+  range: HindsightCompat,
 ): Promise<void> {
   let actual: string;
   try {
     actual = await memory.getServerVersion();
   } catch (err) {
     logger.warn(
-      { err: stringifyError(err), compat },
+      { err: stringifyError(err), range },
       "hindsight /version probe failed at boot — skipping version check; memory tools will surface errors at request time if the server stays unreachable",
     );
     return;
   }
-  const a = parseSemver(actual);
-  const min = parseSemver(compat.min);
-  const max = parseSemver(compat.max);
-  if (cmpSemver(a, min) < 0 || cmpSemver(a, max) >= 0) {
+  // Always coerce — strips prerelease (`0.6.0-rc.1`) and build (`0.6.0+sha`)
+  // suffixes down to the stable triple. node-semver's range matching is
+  // famously strict about prereleases (a prerelease only satisfies a
+  // range if some comparator in that range explicitly mentions one),
+  // and we care about wire-compat at the major/minor/patch level, not
+  // about whether someone shipped a stable build.
+  const coerced = semver.coerce(actual)?.version;
+  if (coerced === undefined) {
     throw new BootCheckError(
-      `Hindsight server version ${actual} is outside the supported range ` +
-        `[${compat.min}, ${compat.max}). Upgrade Hindsight, or bump ` +
-        `cogmo.hindsightCompat in package.json after verifying compatibility.`,
+      `Hindsight server reported an unparseable version: ${JSON.stringify(actual)}`,
     );
   }
-  logger.info({ actual, compat }, "hindsight version check passed");
+  if (!semver.satisfies(coerced, range)) {
+    throw new BootCheckError(
+      `Hindsight server version ${actual} does not satisfy the supported range "${range}". ` +
+        `Upgrade Hindsight, or bump cogmo.hindsightCompat in package.json after verifying compatibility.`,
+    );
+  }
+  logger.info({ actual, range }, "hindsight version check passed");
 }
 
 function stringifyError(err: unknown): string {
