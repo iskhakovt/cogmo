@@ -31,9 +31,10 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      # Logging in only matters when we'll push (main / dispatch). PR builds
-      # are verification-only and skip the push.
-      - if: github.event_name != 'pull_request'
+      # Logging in only matters when we'll push (push-to-main, or
+      # workflow_dispatch from main). Anything else — PR builds, dispatches
+      # from feature branches — is verification-only and skips the push.
+      - if: github.ref == 'refs/heads/main'
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ghcr.io
@@ -61,4 +62,8 @@ jobs:
             ./docker-bake.hcl
             cwd://${{ steps.meta.outputs.bake-file }}
           targets: skills
-          push: ${{ github.event_name != 'pull_request' }}
+          # Only push when running from main — `event != 'pull_request'`
+          # alone would also push on a `workflow_dispatch` run started from
+          # a feature branch, overwriting the stable `slice1` tag with
+          # unmerged code.
+          push: ${{ github.ref == 'refs/heads/main' }}
