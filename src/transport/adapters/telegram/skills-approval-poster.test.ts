@@ -25,10 +25,10 @@ function makeSkillStore(opts: FakeSkillStoreOpts = {}): SkillStore {
   // required fields with vi.fn() / proxy values that satisfy the type
   // without inventing realistic data.
   store.getDeployById.mockResolvedValue(
-    opts.deploy === undefined ? undefined : { ...mock<SkillDeployRow>(), ...opts.deploy },
+    opts.deploy ? { ...mock<SkillDeployRow>(), ...opts.deploy } : undefined,
   );
   store.getSkillById.mockResolvedValue(
-    opts.skill === undefined ? undefined : { ...mock<SkillRow>(), ...opts.skill },
+    opts.skill ? { ...mock<SkillRow>(), ...opts.skill } : undefined,
   );
   return store;
 }
