@@ -58,8 +58,8 @@ let instanceId: string;
 beforeAll(async () => {
   if (!SHOULD_RUN) return;
   ({ tx, close } = await createTestDatabase());
-  agentStore = new DrizzleSandboxStore(tx);
-  skillStore = new DrizzleSkillStore(tx);
+  agentStore = new DrizzleSandboxStore();
+  skillStore = new DrizzleSkillStore();
   docker = new Docker();
 
   const stream = await docker.pull(PYTHON_IMAGE);
@@ -67,7 +67,9 @@ beforeAll(async () => {
     docker.modem.followProgress(stream, (err) => (err ? reject(err) : resolve()));
   });
 
-  const instance = await agentStore.insertInstance({ host: hostname(), pid: process.pid });
+  const instance = await tx((trx) =>
+    agentStore.insertInstance(trx, { host: hostname(), pid: process.pid }),
+  );
   instanceId = instance.id;
   proxy = await CogmoSocketProxy.create({
     socketDir: "/tmp/cogmo-test-skills-proxy",

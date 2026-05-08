@@ -12,7 +12,11 @@ import type { AgentStore, Profile } from "../store/index.js";
  * the reads. We accept that here: the profile is effectively immutable
  * during a turn, and channel-types / rules drift in a non-harmful way
  * for prompt assembly. If a strictly consistent snapshot is ever
- * needed, lift to REPEATABLE READ via `tx.transaction(cb, { isolationLevel })`.
+ * needed, lift to REPEATABLE READ at the outer `db.transaction(cb,
+ * { isolationLevel: "repeatable read" })` boundary — Drizzle accepts
+ * the config there but not on nested `tx.transaction(cb)` (savepoints
+ * don't carry their own isolation). Our `Transactor` doesn't surface
+ * this knob today; widen its signature when the first caller needs it.
  *
  * Use-case shape: `function name(deps, args)` in a kebab-case file
  * under the relevant domain folder. `deps` carries store interfaces +
