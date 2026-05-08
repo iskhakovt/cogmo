@@ -2,7 +2,7 @@ import { Ajv, type ValidateFunction } from "ajv";
 import type { Service } from "../agent/service.js";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
-import type { Sandbox } from "../sandbox/index.js";
+import type { LocalDockerSessionState, SandboxClient } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
 import { type CtxUser, DefaultCtxHandler } from "./ctx-handler.js";
@@ -177,7 +177,7 @@ export interface SkillRunnerOptions {
    * skills then fail with a clear `tier_2_unavailable` error at invoke time.
    * Tier-1 (Pyodide WASM) skills work either way.
    */
-  sandbox?: Sandbox;
+  sandbox?: SandboxClient<LocalDockerSessionState>;
   /**
    * Container image for tier-2 skills. Defaults to `python:3.14-slim`.
    * Override when shipping a Cogmo-baked image with deps pre-installed.
@@ -207,7 +207,7 @@ export class SkillRunnerImpl implements SkillRunner {
   #memoryBankId: string;
   #skillsRepoPath: string | undefined;
   #pyodidePackageCacheDir: string | undefined;
-  #sandbox: Sandbox | undefined;
+  #sandbox: SandboxClient<LocalDockerSessionState> | undefined;
   #tier2Image: string;
   #ajv: Ajv;
   /**

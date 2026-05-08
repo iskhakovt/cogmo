@@ -22,12 +22,12 @@
  * code so the operator sees a clear message instead of generic git output.
  */
 
-import type { TaskContainerHandle } from "../../sandbox/index.js";
+import type { LocalDockerSessionState, SandboxSession } from "../../sandbox/index.js";
 
 const REMOTE = "origin";
 
 export interface CommitAndPushParams {
-  container: Pick<TaskContainerHandle, "exec">;
+  container: Pick<SandboxSession<LocalDockerSessionState>, "execStreaming">;
   /** Working directory inside the container — typically `/workspace`. */
   worktreeDir: string;
   /** Branch to push, e.g. `cogmo/<idShort>`. */
@@ -144,11 +144,11 @@ interface ExecCapture {
 }
 
 async function runGit(
-  container: Pick<TaskContainerHandle, "exec">,
+  container: Pick<SandboxSession<LocalDockerSessionState>, "execStreaming">,
   args: ReadonlyArray<string>,
   opts: { workingDir: string; env: Readonly<Record<string, string>> },
 ): Promise<ExecCapture> {
-  const handle = await container.exec(["git", ...args], {
+  const handle = await container.execStreaming(["git", ...args], {
     workingDir: opts.workingDir,
     env: opts.env,
   });

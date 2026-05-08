@@ -1,4 +1,4 @@
-import type { TaskContainerHandle } from "../../sandbox/index.js";
+import type { LocalDockerSessionState, SandboxSession } from "../../sandbox/index.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 
 /**
@@ -32,7 +32,7 @@ export interface BackendUsage {
 export interface BackendCallContext {
   task: CodingTaskRow;
   repo: CodingRepoRow;
-  container: TaskContainerHandle;
+  container: SandboxSession<LocalDockerSessionState>;
 }
 
 /**

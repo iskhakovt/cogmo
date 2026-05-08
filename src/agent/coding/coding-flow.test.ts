@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import type { ExecHandle, Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
+import type {
+  ExecStreamingHandle,
+  LocalDockerSessionState,
+  SandboxClient,
+  SandboxSession,
+} from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
@@ -87,7 +92,7 @@ function flowBackend(args: {
 }
 
 function fakeSandbox(): {
-  sandbox: Sandbox;
+  sandbox: SandboxClient<LocalDockerSessionState>;
   createCalls: string[];
   stopCalls: string[];
   liveContainerDockerIds: Set<string>;
@@ -95,68 +100,86 @@ function fakeSandbox(): {
   const createCalls: string[] = [];
   const stopCalls: string[] = [];
   const liveContainerDockerIds = new Set<string>();
-  let lastHandle: TaskContainerHandle | null = null;
+  let lastSessionState: LocalDockerSessionState | null = null;
 
-  const exec = (): ExecHandle => ({
+  const exec = (): ExecStreamingHandle => ({
     stdout: process.stdin,
     stderr: process.stdin,
     wait: async () => ({ exitCode: 0 }),
+    dispose: async () => {},
   });
 
-  const sandbox: Sandbox = {
+  function makeSession(state: LocalDockerSessionState): SandboxSession<LocalDockerSessionState> {
+    return {
+      state,
+      execStreaming: vi.fn(async () => exec()),
+      exec: vi.fn(async () => ({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+        wallTimeSeconds: 0,
+        truncated: false,
+      })),
+    };
+  }
+
+  const sandbox: SandboxClient<LocalDockerSessionState> = {
+    backendId: "fake",
+    capabilities: {
+      siblingContainers: "host-proxy",
+      hostBindMount: true,
+      customImage: true,
+      volumes: "docker",
+      workingTreeTransport: "bind-mount",
+    },
     healthCheck: async () => ({ ok: true, runtime: "runc" }),
     reconcileCrashedInstances: async () => ({ orphansReaped: 0 }),
     ensureImagePresent: vi.fn(async () => {}),
-    createTaskContainer: vi.fn(async (spec) => {
-      createCalls.push(spec.rootTaskId);
+    create: vi.fn(async (spec) => {
+      createCalls.push(spec.taskId);
       const row = await sandboxStore.insertContainer({
         dockerId: `docker-${Math.random().toString(36).slice(2)}`,
         parentId: null,
-        rootTaskId: spec.rootTaskId,
+        rootTaskId: spec.taskId,
         depth: 0,
         image: spec.image,
         runtime: "runc",
         labels: {
           "cogmo.managed": "true",
           "cogmo.instance": instanceId,
-          "cogmo.root_task": spec.rootTaskId,
+          "cogmo.root_task": spec.taskId,
           "cogmo.parent": "",
           "cogmo.depth": "0",
         },
         resourceLimits: spec.resourceLimits,
-        ttlExpiresAt: spec.ttl.expiresAt,
+        ttlExpiresAt: spec.expiresAt,
         instanceId,
       });
       await sandboxStore.updateContainerStatus({ id: row.id, status: "running" });
       liveContainerDockerIds.add(row.dockerId);
-      lastHandle = {
+      lastSessionState = {
+        type: "local-docker",
+        taskId: spec.taskId,
         containerRowId: row.id,
         dockerId: row.dockerId,
-        exec: vi.fn(async () => exec()),
       };
-      return lastHandle;
+      return makeSession(lastSessionState);
     }),
-    getTaskContainer: vi.fn(async (dockerId) => {
-      if (lastHandle && lastHandle.dockerId === dockerId) return lastHandle;
-      // Re-derive a fresh handle if asked for a known docker id (mirrors prod
-      // behaviour where this is just a thin factory after a step boundary).
-      return {
-        containerRowId: "rederived",
-        dockerId,
-        exec: vi.fn(async () => exec()),
-      };
+    resume: vi.fn(async (state) => makeSession(state)),
+    tryResumeByTaskId: vi.fn(async (_taskId) => {
+      // Reuse path: return a session for the most-recently-created live
+      // container, mirroring production behaviour.
+      if (lastSessionState && liveContainerDockerIds.has(lastSessionState.dockerId)) {
+        return makeSession(lastSessionState);
+      }
+      return null;
     }),
-    stopTask: vi.fn(async (taskId) => {
+    delete: vi.fn(async () => {}),
+    deleteByTaskId: vi.fn(async (taskId) => {
       stopCalls.push(taskId);
     }),
-    listContainersForTask: vi.fn(async (taskId) => {
-      const rows = await sandboxStore.listContainersForTask(taskId);
-      return rows;
-    }),
-    inspectContainer: vi.fn(async (dockerId) => ({
-      status: liveContainerDockerIds.has(dockerId) ? "running" : "exited",
-      runtime: "runc",
-    })),
+    serializeState: (state) => state as unknown as Record<string, unknown>,
+    deserializeState: (payload) => payload as unknown as LocalDockerSessionState,
     shutdown: async () => {},
   };
 

@@ -25,7 +25,11 @@ import { codingTaskCliDone } from "../../inngest/events.js";
 import type { StepRun } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import { cleanupAskpass, provisionAskpass } from "../../sandbox/askpass.js";
-import type { Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
+import type {
+  LocalDockerSessionState,
+  SandboxClient,
+  SandboxSession,
+} from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import {
   describeResolveIdentityError,
@@ -63,7 +67,7 @@ function commitAuthorFor(identity: GitHubIdentity): { name: string; email: strin
 
 export interface VerifyOrchestratorDeps {
   store: CodingStore;
-  sandbox: Sandbox;
+  sandbox: SandboxClient<LocalDockerSessionState>;
   /** Resolves `github_identity:<name>` rows. */
   secretsStore: SecretsStore;
   /** Host root for per-task askpass material (slice 4.0d). */
@@ -212,21 +216,21 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     // Create a fresh container with the askpass dir mounted read-only at
     // /.cogmo-askpass. The execute orchestrator already tore the previous
     // container down, so this is always a fresh handle.
-    const containerInfo = await stepRun("create-container", async () => {
-      const handle = await sandbox.createTaskContainer({
-        rootTaskId: taskId,
-        worktreePath: worktreeAssignment.worktreePath,
-        homeVolumeName: `${HOME_VOLUME_PREFIX}-${taskId}`,
+    const sessionState = await stepRun("create-container", async () => {
+      const session = await sandbox.create({
+        taskId,
+        worktree: { hostPath: worktreeAssignment.worktreePath },
+        homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
         image: repo.devcontainer?.image ?? deps.devbaseImage,
         resourceLimits: deps.defaultResourceLimits,
-        ttl: { expiresAt: new Date(Date.now() + deps.taskTtlMs) },
+        expiresAt: new Date(Date.now() + deps.taskTtlMs),
         allowPrivilegedRunc: task.allowPrivilegedRunc,
-        askpassMount: { hostDir: askpass.hostDir, containerDir: askpass.containerDir },
+        askpass: { hostDir: askpass.hostDir, containerDir: askpass.containerDir },
       });
       containerCreated = true;
-      return { dockerId: handle.dockerId };
+      return session.state;
     });
-    const container: TaskContainerHandle = await sandbox.getTaskContainer(containerInfo.dockerId);
+    const container: SandboxSession<LocalDockerSessionState> = await sandbox.resume(sessionState);
 
     executeStream = await openExecuteStream(taskId);
 
@@ -379,11 +383,11 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     return { status: "failed", failureReason: reason };
   } finally {
     if (containerCreated) {
-      // stopTask cascades the container kill AND wipes the per-task askpass
-      // dir (slice 4.0d). Idempotent — safe to call even when create-
-      // container failed mid-flight.
-      await sandbox.stopTask(taskId).catch((err: unknown) => {
-        log.warn({ err, taskId }, "verify: stopTask failed");
+      // deleteByTaskId cascades the container kill AND wipes the per-task
+      // askpass dir (slice 4.0d). Idempotent — safe to call even when
+      // create-container failed mid-flight.
+      await sandbox.deleteByTaskId(taskId).catch((err: unknown) => {
+        log.warn({ err, taskId }, "verify: deleteByTaskId failed");
       });
     } else if (askpassProvisioned) {
       // Container creation never started (or failed before stopTask could
@@ -396,8 +400,10 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   }
 }
 
-async function readHeadSha(container: Pick<TaskContainerHandle, "exec">): Promise<string> {
-  const handle = await container.exec(["git", "rev-parse", "HEAD"], {
+async function readHeadSha(
+  container: Pick<SandboxSession<LocalDockerSessionState>, "execStreaming">,
+): Promise<string> {
+  const handle = await container.execStreaming(["git", "rev-parse", "HEAD"], {
     workingDir: WORKTREE_DIR_IN_CONTAINER,
   });
   const chunks: Buffer[] = [];

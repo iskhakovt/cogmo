@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import type { ExecHandle, Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
+import type {
+  ExecStreamingHandle,
+  LocalDockerSessionState,
+  SandboxClient,
+  SandboxSession,
+} from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
@@ -97,79 +102,114 @@ async function seedTask(repo: CodingRepoRow): Promise<CodingTaskRow> {
 }
 
 interface FakeContainerOpts {
-  exec?: ExecHandle;
+  exec?: ExecStreamingHandle;
 }
 
-function fakeSandbox(opts: FakeContainerOpts = {}): {
-  sandbox: Sandbox;
-  createCalls: { rootTaskId: string; image: string; worktreePath: string }[];
+interface FakeSandboxResult {
+  sandbox: SandboxClient<LocalDockerSessionState>;
+  createCalls: { taskId: string; image: string; worktreePath: string | undefined }[];
   stopCalls: string[];
-  inspectCalls: string[];
-} {
-  const createCalls: { rootTaskId: string; image: string; worktreePath: string }[] = [];
+  /** When non-null, `tryResumeByTaskId` returns a session derived from this state. */
+  setExistingSession: (state: LocalDockerSessionState | null) => void;
+}
+
+function fakeSandbox(opts: FakeContainerOpts = {}): FakeSandboxResult {
+  const createCalls: { taskId: string; image: string; worktreePath: string | undefined }[] = [];
   const stopCalls: string[] = [];
-  const inspectCalls: string[] = [];
 
-  let lastContainerHandle: TaskContainerHandle | null = null;
+  let lastSessionState: LocalDockerSessionState | null = null;
+  let existingSessionState: LocalDockerSessionState | null = null;
 
-  const sandbox: Sandbox = {
+  function makeSession(state: LocalDockerSessionState): SandboxSession<LocalDockerSessionState> {
+    return {
+      state,
+      execStreaming: vi.fn(async () => opts.exec ?? noopExec()),
+      exec: vi.fn(async () => ({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+        wallTimeSeconds: 0,
+        truncated: false,
+      })),
+    };
+  }
+
+  const sandbox: SandboxClient<LocalDockerSessionState> = {
+    backendId: "fake",
+    capabilities: {
+      siblingContainers: "host-proxy",
+      hostBindMount: true,
+      customImage: true,
+      volumes: "docker",
+      workingTreeTransport: "bind-mount",
+    },
     healthCheck: async () => ({ ok: true, runtime: "runc" }),
     reconcileCrashedInstances: async () => ({ orphansReaped: 0 }),
     ensureImagePresent: vi.fn(async () => {}),
-    createTaskContainer: vi.fn(async (spec) => {
+    create: vi.fn(async (spec) => {
       createCalls.push({
-        rootTaskId: spec.rootTaskId,
+        taskId: spec.taskId,
         image: spec.image,
-        worktreePath: spec.worktreePath,
+        worktreePath: spec.worktree?.hostPath,
       });
       // Insert a real `containers` row so coding_tasks.container_id FK is
       // satisfied. Uses the per-test instanceId seeded in beforeEach.
       const row = await sandboxStore.insertContainer({
         dockerId: `docker-${Math.random().toString(36).slice(2)}`,
         parentId: null,
-        rootTaskId: spec.rootTaskId,
+        rootTaskId: spec.taskId,
         depth: 0,
         image: spec.image,
         runtime: "runc",
         labels: {
           "cogmo.managed": "true",
           "cogmo.instance": instanceId,
-          "cogmo.root_task": spec.rootTaskId,
+          "cogmo.root_task": spec.taskId,
           "cogmo.parent": "",
           "cogmo.depth": "0",
         },
         resourceLimits: spec.resourceLimits,
-        ttlExpiresAt: spec.ttl.expiresAt,
+        ttlExpiresAt: spec.expiresAt,
         instanceId,
       });
-      lastContainerHandle = {
+      lastSessionState = {
+        type: "local-docker",
+        taskId: spec.taskId,
         containerRowId: row.id,
         dockerId: row.dockerId,
-        exec: vi.fn(async () => opts.exec ?? noopExec()),
       };
-      return lastContainerHandle;
+      return makeSession(lastSessionState);
     }),
-    getTaskContainer: vi.fn(async (dockerId) => {
-      inspectCalls.push(dockerId);
-      if (!lastContainerHandle) throw new Error("getTaskContainer called before create");
-      return lastContainerHandle;
+    resume: vi.fn(async (state) => makeSession(state)),
+    tryResumeByTaskId: vi.fn(async (_taskId) => {
+      if (existingSessionState) return makeSession(existingSessionState);
+      return null;
     }),
-    stopTask: vi.fn(async (taskId) => {
+    delete: vi.fn(async () => {}),
+    deleteByTaskId: vi.fn(async (taskId) => {
       stopCalls.push(taskId);
     }),
-    listContainersForTask: async () => [],
-    inspectContainer: async () => ({ status: "running", runtime: "runc" }),
+    serializeState: (state) => state as unknown as Record<string, unknown>,
+    deserializeState: (payload) => payload as unknown as LocalDockerSessionState,
     shutdown: async () => {},
   };
 
-  return { sandbox, createCalls, stopCalls, inspectCalls };
+  return {
+    sandbox,
+    createCalls,
+    stopCalls,
+    setExistingSession: (state) => {
+      existingSessionState = state;
+    },
+  };
 }
 
-function noopExec(): ExecHandle {
+function noopExec(): ExecStreamingHandle {
   return {
     stdout: process.stdin,
     stderr: process.stdin,
     wait: async () => ({ exitCode: 0 }),
+    dispose: async () => {},
   };
 }
 
@@ -236,7 +276,7 @@ function recordingPlanStream(): RecordingPlanStream {
 
 function makeDeps(
   overrides: Partial<CodingOrchestratorDeps> & {
-    sandbox: Sandbox;
+    sandbox: SandboxClient<LocalDockerSessionState>;
     backend: CodingBackend;
   },
 ): CodingOrchestratorDeps {
@@ -281,7 +321,7 @@ describe("runCodingTask", () => {
     expect(reloaded?.containerId).toBeTruthy();
 
     expect(createCalls).toHaveLength(1);
-    expect(createCalls[0].rootTaskId).toBe(task.id);
+    expect(createCalls[0].taskId).toBe(task.id);
     expect(createCalls[0].image).toBe("cogmo/devbase:slice1-test");
     // Worktree path is derived in the orchestrator's allocate-worktree step:
     // ${worktreesDir}/<repo.name>/<id-short>. Assert the structural contract,
@@ -373,7 +413,7 @@ describe("runCodingTask", () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const { sandbox, stopCalls } = fakeSandbox();
-    (sandbox.createTaskContainer as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    (sandbox.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error("docker daemon down"),
     );
     const result = await runCodingTask({
@@ -567,41 +607,15 @@ describe("runCodingExecute", () => {
   it("happy path: container reused, deltas streamed, status → pending_verify, usage persisted", async () => {
     const repo = await seedRepo();
     const { task, dockerId } = await seedExecutableTask(repo);
-    const { sandbox, createCalls, stopCalls } = fakeSandbox();
-    // Override listContainersForTask + getTaskContainer so the function
-    // finds the seeded container and reuses it.
-    sandbox.listContainersForTask = async () => [
-      {
-        id: "row-x",
-        dockerId,
-        parentId: null,
-        rootTaskId: task.id,
-        depth: 0,
-        image: "cogmo/devbase:slice2-test",
-        runtime: "runc",
-        labels: {
-          "cogmo.managed": "true",
-          "cogmo.instance": instanceId,
-          "cogmo.root_task": task.id,
-          "cogmo.parent": "",
-          "cogmo.depth": "0",
-        },
-        resourceLimits: RESOURCE_LIMITS,
-        status: "running",
-        exitCode: null,
-        ttlExpiresAt: new Date(Date.now() + 60_000),
-        startedAt: new Date(),
-        exitedAt: null,
-        instanceId,
-        createdAt: new Date(),
-      },
-    ];
-    sandbox.inspectContainer = async () => ({ status: "running", runtime: "runc" });
-    sandbox.getTaskContainer = vi.fn(async (id) => ({
+    const { sandbox, createCalls, stopCalls, setExistingSession } = fakeSandbox();
+    // Make `tryResumeByTaskId` return a session — production reuses it
+    // instead of creating a new container.
+    setExistingSession({
+      type: "local-docker",
+      taskId: task.id,
       containerRowId: "row-x",
-      dockerId: id,
-      exec: vi.fn(async () => noopExec()),
-    }));
+      dockerId,
+    });
 
     const stream = recordingExecuteStream();
     const backend = executeBackendYielding([
@@ -655,8 +669,7 @@ describe("runCodingExecute", () => {
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
     const { sandbox, createCalls, stopCalls } = fakeSandbox();
-    // No containers in the listing → triggers the recreate branch.
-    sandbox.listContainersForTask = async () => [];
+    // tryResumeByTaskId returns null by default → triggers the recreate branch.
 
     const stream = recordingExecuteStream();
     const backend = executeBackendYielding([
@@ -674,7 +687,7 @@ describe("runCodingExecute", () => {
 
     expect(result.status).toBe("pending_verify");
     expect(createCalls).toHaveLength(1);
-    expect(createCalls[0].rootTaskId).toBe(task.id);
+    expect(createCalls[0].taskId).toBe(task.id);
     expect(stopCalls).toEqual([task.id]);
   });
 
@@ -682,7 +695,6 @@ describe("runCodingExecute", () => {
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
     const { sandbox, stopCalls } = fakeSandbox();
-    sandbox.listContainersForTask = async () => [];
     const stream = recordingExecuteStream();
     const backend = executeBackendYielding([
       { kind: "session_started", sessionId: "sess-from-plan" },

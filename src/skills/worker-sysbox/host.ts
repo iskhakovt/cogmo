@@ -1,5 +1,9 @@
 import { logger } from "../../logger.js";
-import type { ResourceLimits, Sandbox } from "../../sandbox/index.js";
+import type {
+  LocalDockerSessionState,
+  ResourceLimits,
+  SandboxClient,
+} from "../../sandbox/index.js";
 import { type CtxHandler, Dispatcher } from "../dispatcher.js";
 import type { TaskInvoke, TaskResult } from "../protocol.js";
 import { RUNNER_PY } from "./runner.py.js";
@@ -49,7 +53,7 @@ export interface RunOnSysboxContainerParams {
   resourceLimits?: Partial<ResourceLimits>;
   /** Container image — typically `python:3.14-slim` or a Cogmo-baked equivalent. */
   image: string;
-  sandbox: Sandbox;
+  sandbox: SandboxClient<LocalDockerSessionState>;
   ctxHandler: CtxHandler;
 }
 
@@ -101,19 +105,19 @@ export async function runOnSysboxContainer(
   }
 
   // Reaper TTL is a backstop — host-side timer below kills first. Add a
-  // 30 s buffer so the reaper never beats us during normal operation; if the
-  // host crashes between createTaskContainer and stopTask, the reaper still
+  // 30 s buffer so the reaper never beats us during normal operation; if
+  // the host crashes between create and deleteByTaskId, the reaper still
   // collects the orphan within wallClockS + 30 s.
-  const ttl = { expiresAt: new Date(Date.now() + (wallClockS + 30) * 1000) };
+  const expiresAt = new Date(Date.now() + (wallClockS + 30) * 1000);
 
   let stoppedByHost = false;
   const stop = async (): Promise<void> => {
     if (stoppedByHost) return;
     stoppedByHost = true;
-    await params.sandbox.stopTask(params.taskId).catch((e: unknown) => {
+    await params.sandbox.deleteByTaskId(params.taskId).catch((e: unknown) => {
       log.warn(
         { err: e instanceof Error ? e.message : String(e), taskId: params.taskId },
-        "stopTask failed during cleanup",
+        "deleteByTaskId failed during cleanup",
       );
     });
   };
@@ -121,15 +125,14 @@ export async function runOnSysboxContainer(
   try {
     await params.sandbox.ensureImagePresent(params.image);
 
-    const handle = await params.sandbox.createTaskContainer({
-      rootTaskId: params.taskId,
+    const session = await params.sandbox.create({
+      taskId: params.taskId,
       image: params.image,
       resourceLimits,
-      ttl,
-      allowPrivilegedRunc: false,
+      expiresAt,
     });
 
-    const exec = await handle.exec(["python3", "-u", "-c", fullSource], {
+    const exec = await session.execStreaming(["python3", "-u", "-c", fullSource], {
       attachStdin: true,
     });
     if (!exec.stdin) {

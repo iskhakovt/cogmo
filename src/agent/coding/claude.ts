@@ -1,7 +1,11 @@
 import type { Writable } from "node:stream";
 import { z } from "zod";
 import { logger } from "../../logger.js";
-import type { ExecHandle, TaskContainerHandle } from "../../sandbox/index.js";
+import type {
+  ExecStreamingHandle,
+  LocalDockerSessionState,
+  SandboxSession,
+} from "../../sandbox/index.js";
 import type {
   BackendCallContext,
   BackendUsage,
@@ -187,11 +191,11 @@ export class ClaudeCodeBackend implements CodingBackend {
  */
 async function* runClaudePlan(
   binary: string,
-  container: TaskContainerHandle,
+  container: SandboxSession<LocalDockerSessionState>,
   flags: readonly string[],
   prompt: string,
 ): AsyncIterable<CodingEvent> {
-  const exec = await container.exec([binary, ...flags], { attachStdin: true });
+  const exec = await container.execStreaming([binary, ...flags], { attachStdin: true });
   if (!exec.stdin) throw new Error("ClaudeCodeBackend: stdin not attached");
   writeUserMessage(exec.stdin, prompt);
   exec.stdin.end();
@@ -208,11 +212,11 @@ async function* runClaudePlan(
  */
 async function runClaudeExecute(
   binary: string,
-  container: TaskContainerHandle,
+  container: SandboxSession<LocalDockerSessionState>,
   flags: readonly string[],
   prompt: string,
 ): Promise<CodingExecuteHandle> {
-  const exec = await container.exec([binary, ...flags], { attachStdin: true });
+  const exec = await container.execStreaming([binary, ...flags], { attachStdin: true });
   if (!exec.stdin) throw new Error("ClaudeCodeBackend: stdin not attached");
   writeUserMessage(exec.stdin, prompt);
   // Don't end() — stdin must stay open for permission control_response
@@ -278,7 +282,7 @@ function writeUserMessage(stdin: Writable, prompt: string): void {
  * severity on stderr; treating everything as warn surfaces issues without
  * being noisy in the success path).
  */
-function drainStderr(exec: ExecHandle, mode: "plan" | "execute"): void {
+function drainStderr(exec: ExecStreamingHandle, mode: "plan" | "execute"): void {
   void (async () => {
     try {
       let buf = "";
@@ -305,7 +309,7 @@ function drainStderr(exec: ExecHandle, mode: "plan" | "execute"): void {
  * text deltas for `plan_ready` (plan) vs let them stream by (execute).
  */
 async function* parseClaudeStream(
-  exec: ExecHandle,
+  exec: ExecStreamingHandle,
   mode: "plan" | "execute",
 ): AsyncIterable<CodingEvent> {
   let textBuf = "";

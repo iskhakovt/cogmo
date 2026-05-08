@@ -8,7 +8,11 @@ import {
 } from "../../inngest/events.js";
 import type { StepRun, StepWaitForEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
-import type { Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
+import type {
+  LocalDockerSessionState,
+  SandboxClient,
+  SandboxSession,
+} from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { CodingBackend, PermissionResponse } from "./backend.js";
@@ -67,7 +71,7 @@ export const NULL_EXECUTE_STREAM: ExecuteStreamHandle = {
 
 export interface CodingOrchestratorDeps {
   store: CodingStore;
-  sandbox: Sandbox;
+  sandbox: SandboxClient<LocalDockerSessionState>;
   backend: CodingBackend;
   /**
    * Resolves `github_identity:<name>` rows for the failure-cascade WIP
@@ -210,29 +214,30 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       throw new Error("allocate-worktree completed without setting worktreeAssignment");
     }
 
-    const created = await stepRun("create-container", async () => {
+    const sessionState = await stepRun("create-container", async () => {
       // biome-ignore lint/style/noNonNullAssertion: guarded by the throw above
       const wt = assignment!;
-      const handle = await sandbox.createTaskContainer({
-        rootTaskId: taskId,
-        worktreePath: wt.worktreePath,
-        homeVolumeName: `${HOME_VOLUME_PREFIX}-${taskId}`,
+      const session = await sandbox.create({
+        taskId,
+        worktree: { hostPath: wt.worktreePath },
+        homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
         image: repo.devcontainer?.image ?? devbaseImage,
         resourceLimits: defaultResourceLimits,
-        ttl: { expiresAt: new Date(Date.now() + taskTtlMs) },
+        expiresAt: new Date(Date.now() + taskTtlMs),
         allowPrivilegedRunc: task.allowPrivilegedRunc,
       });
       // Mark created BEFORE the DB write so a failed setTaskContainerId
       // still triggers cleanup via the outer catch (the container exists
       // on Docker side regardless of whether we recorded it).
       containerCreated = true;
-      await store.setTaskContainerId(taskId, handle.containerRowId);
-      return { dockerId: handle.dockerId, containerRowId: handle.containerRowId };
+      await store.setTaskContainerId(taskId, session.state.containerRowId);
+      return session.state;
     });
 
-    // Re-derive the handle on this side of the step boundary — handles
-    // can't cross step.run because they aren't JSON-serializable.
-    const container = await sandbox.getTaskContainer(created.dockerId);
+    // Re-attach a session handle on this side of the step boundary —
+    // handles can't cross step.run because they aren't
+    // JSON-serializable, but the state is.
+    const container = await sandbox.resume(sessionState);
 
     // ── Non-durable: stream the plan ──
     planStream = await openPlanStream(taskId);
@@ -269,7 +274,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
           }),
         );
       }
-      await stepRun("teardown", () => sandbox.stopTask(taskId).catch(() => {}));
+      await stepRun("teardown", () => sandbox.deleteByTaskId(taskId).catch(() => {}));
       // Stream notification post-commit — wrap so a subscriber error
       // doesn't escape into the outer catch and write a second failed
       // status that masks the original reason.
@@ -318,7 +323,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       }).catch(() => {});
     }
     if (containerCreated) {
-      await sandbox.stopTask(taskId).catch(() => {});
+      await sandbox.deleteByTaskId(taskId).catch(() => {});
     }
     // Notify the plan stream if it was opened. Best-effort — we're already
     // in the catch path, don't let a delivery failure mask the original error.
@@ -330,7 +335,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
 interface PlanStreamingParams {
   task: CodingTaskRow;
   repo: CodingRepoRow;
-  container: TaskContainerHandle;
+  container: SandboxSession<LocalDockerSessionState>;
   backend: CodingBackend;
   planStream: PlanStreamHandle;
   store: CodingStore;
@@ -504,25 +509,25 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     // than that, the reaper stopped it and we recreate. `claude --resume
     // <sid>` reloads the prior session from disk inside the container's
     // persistent home volume, so the recreate is transparent to Claude.
-    const containerInfo = await stepRun("get-or-create-container", async () => {
-      const existing = await findLiveContainer(sandbox, taskId);
-      if (existing) return { dockerId: existing.dockerId, recreated: false };
+    const sessionState = await stepRun("get-or-create-container", async () => {
+      const existing = await sandbox.tryResumeByTaskId(taskId);
+      if (existing) return existing.state;
 
-      const handle = await sandbox.createTaskContainer({
-        rootTaskId: taskId,
-        worktreePath: worktreeAssignment.worktreePath,
-        homeVolumeName: `${HOME_VOLUME_PREFIX}-${taskId}`,
+      const session = await sandbox.create({
+        taskId,
+        worktree: { hostPath: worktreeAssignment.worktreePath },
+        homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
         image: repo.devcontainer?.image ?? devbaseImage,
         resourceLimits: defaultResourceLimits,
-        ttl: { expiresAt: new Date(Date.now() + taskTtlMs) },
+        expiresAt: new Date(Date.now() + taskTtlMs),
         allowPrivilegedRunc: task.allowPrivilegedRunc,
       });
       containerCreated = true;
-      await store.setTaskContainerId(taskId, handle.containerRowId);
-      return { dockerId: handle.dockerId, recreated: true };
+      await store.setTaskContainerId(taskId, session.state.containerRowId);
+      return session.state;
     });
 
-    const container = await sandbox.getTaskContainer(containerInfo.dockerId);
+    const container = await sandbox.resume(sessionState);
 
     executeStream = await openExecuteStream(taskId);
     await executeStream.started?.();
@@ -551,7 +556,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
           worktreeAssignment,
         }),
       );
-      await stepRun("teardown", () => sandbox.stopTask(taskId).catch(() => {}));
+      await stepRun("teardown", () => sandbox.deleteByTaskId(taskId).catch(() => {}));
       // Stream notifications post-commit — wrap so a subscriber failure
       // doesn't bubble into the outer catch, which would write a second
       // (less informative) failed-status overwriting the original reason.
@@ -585,7 +590,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     await stepRun("set-status-pending-verify", () =>
       store.updateTaskStatus({ id: taskId, status: "pending_verify" }),
     );
-    await stepRun("teardown", () => sandbox.stopTask(taskId).catch(() => {}));
+    await stepRun("teardown", () => sandbox.deleteByTaskId(taskId).catch(() => {}));
     // Hand off to the slice 4.0h verify orchestrator. The dedicated function
     // re-creates a container with the askpass mount, runs verify → push → PR,
     // and tears down on its own. Emitting after the teardown means a concurrent
@@ -626,7 +631,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       worktreeAssignment,
     }).catch(() => {});
     if (containerCreated) {
-      await sandbox.stopTask(taskId).catch(() => {});
+      await sandbox.deleteByTaskId(taskId).catch(() => {});
     }
     await executeStream?.fail(reason).catch(() => {});
     return { status: "failed", failureReason: reason };
@@ -636,7 +641,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
 interface ExecuteStreamingParams {
   task: CodingTaskRow;
   repo: CodingRepoRow;
-  container: TaskContainerHandle;
+  container: SandboxSession<LocalDockerSessionState>;
   backend: CodingBackend;
   executeStream: ExecuteStreamHandle;
   sessionId: string;
@@ -850,39 +855,4 @@ async function persistDecision(
       throw err;
     }
   }
-}
-
-/**
- * Find the most recently created live container for this task, or null if
- * none exist (or all are stopped/failed). Returns the `dockerId` so
- * `getTaskContainer` can re-derive a handle on the orchestrator side of a
- * step boundary.
- */
-async function findLiveContainer(
-  sandbox: Sandbox,
-  taskId: string,
-): Promise<{ dockerId: string } | null> {
-  const containers = await sandbox.listContainersForTask(taskId);
-  if (containers.length === 0) return null;
-  // Sorted DESC by depth (children first); for a single non-nested task
-  // this is just the depth-0 container. Pick the first that's still
-  // running according to Docker's view.
-  for (const row of containers) {
-    // Skip rows the supervisor already marked terminal — it's a hint that
-    // the container won't be coming back. `starting` is included because
-    // the row is inserted in that state before Docker reports running;
-    // a fast approve-tap could find it mid-bring-up.
-    if (row.status !== "running" && row.status !== "starting") continue;
-    try {
-      const inspected = await sandbox.inspectContainer(row.dockerId);
-      // Docker `State.Status` values: created, running, paused,
-      // restarting, removing, exited, dead. Anything not running means
-      // the reaper or daemon stopped it — recreate.
-      if (inspected.status === "running") return { dockerId: row.dockerId };
-    } catch {
-      // inspectContainer throws when the container is gone (404). Skip
-      // to the next candidate or fall through to "no live container".
-    }
-  }
-  return null;
 }

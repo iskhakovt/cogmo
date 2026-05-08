@@ -19,7 +19,7 @@
  * the in-container process from here, which keeps the runner pure I/O.
  */
 
-import type { TaskContainerHandle } from "../../sandbox/index.js";
+import type { LocalDockerSessionState, SandboxSession } from "../../sandbox/index.js";
 import type { ExecuteStreamHandle } from "./orchestrator.js";
 
 /** Cap for the persisted verify output (8 KiB). Streamed text is unaffected
@@ -30,7 +30,7 @@ export const OUTPUT_CAP_BYTES = 8 * 1024;
 export const TIMEOUT_EXIT_CODE = 124;
 
 export interface VerifyParams {
-  container: Pick<TaskContainerHandle, "exec">;
+  container: Pick<SandboxSession<LocalDockerSessionState>, "execStreaming">;
   /** `coding_repos.verify_command` — passed verbatim to `bash -lc`. */
   verifyCommand: string;
   /** `coding_repos.verify_timeout_seconds` — wall-clock cap. */
@@ -59,7 +59,7 @@ export async function runVerifyStreaming(params: VerifyParams): Promise<VerifyRe
   const { container, verifyCommand, timeoutSeconds, executeStream } = params;
   const start = Date.now();
 
-  const handle = await container.exec(["bash", "-lc", verifyCommand]);
+  const handle = await container.execStreaming(["bash", "-lc", verifyCommand]);
 
   // One decoder per stream — TextDecoder carries streaming state for
   // multi-byte UTF-8 sequences split across chunk boundaries. Sharing one

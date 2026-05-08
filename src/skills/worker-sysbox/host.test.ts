@@ -1,6 +1,11 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ExecHandle, Sandbox, TaskContainerHandle } from "../../sandbox/index.js";
+import type {
+  ExecStreamingHandle,
+  LocalDockerSessionState,
+  SandboxClient,
+  SandboxSession,
+} from "../../sandbox/index.js";
 import type { CtxHandler } from "../dispatcher.js";
 import { runOnSysboxContainer } from "./host.js";
 
@@ -16,7 +21,11 @@ interface FakeWorker {
  * test drives the worker side by writing `task_result` / `ctx_call` lines
  * into stdout and reading host messages back from stdin.
  */
-function buildFakeSandbox(): { sandbox: Sandbox; worker: FakeWorker; calls: string[] } {
+function buildFakeSandbox(): {
+  sandbox: SandboxClient<LocalDockerSessionState>;
+  worker: FakeWorker;
+  calls: string[];
+} {
   const calls: string[] = [];
   const stdin = new PassThrough();
   const stdout = new PassThrough();
@@ -29,38 +38,60 @@ function buildFakeSandbox(): { sandbox: Sandbox; worker: FakeWorker; calls: stri
   stdin.on("end", () => stdinResolve());
   stdin.on("finish", () => stdinResolve());
 
-  const exec: ExecHandle = {
+  const exec: ExecStreamingHandle = {
     stdin: stdin as unknown as Writable,
     stdout: stdout as unknown as Readable,
     stderr: stderr as unknown as Readable,
     wait: async () => ({ exitCode: 0 }),
+    dispose: async () => {},
   };
-  const handle: TaskContainerHandle = {
-    containerRowId: "row-1",
-    dockerId: "docker-fake",
-    exec: vi.fn(async (cmd) => {
+  const session: SandboxSession<LocalDockerSessionState> = {
+    state: {
+      type: "local-docker",
+      taskId: "task",
+      containerRowId: "row-1",
+      dockerId: "docker-fake",
+    },
+    exec: vi.fn(async () => ({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+      wallTimeSeconds: 0,
+      truncated: false,
+    })),
+    execStreaming: vi.fn(async (cmd) => {
       calls.push(`exec:${cmd[0]}`);
       return exec;
     }),
   };
-  const sandbox: Sandbox = {
+  const sandbox: SandboxClient<LocalDockerSessionState> = {
+    backendId: "fake",
+    capabilities: {
+      siblingContainers: "host-proxy",
+      hostBindMount: true,
+      customImage: true,
+      volumes: "docker",
+      workingTreeTransport: "bind-mount",
+    },
     healthCheck: vi.fn(),
     reconcileCrashedInstances: vi.fn(),
     ensureImagePresent: vi.fn(async (image: string) => {
       calls.push(`ensureImage:${image}`);
     }),
-    createTaskContainer: vi.fn(async (spec) => {
+    create: vi.fn(async (spec) => {
       calls.push(
-        `createTaskContainer:${spec.image}:home=${spec.homeVolumeName ?? "none"}:wt=${spec.worktreePath ?? "none"}`,
+        `createTaskContainer:${spec.image}:home=${spec.homeVolume?.volumeName ?? "none"}:wt=${spec.worktree?.hostPath ?? "none"}`,
       );
-      return handle;
+      return session;
     }),
-    getTaskContainer: vi.fn(),
-    stopTask: vi.fn(async (id: string) => {
+    resume: vi.fn(async () => session),
+    tryResumeByTaskId: vi.fn(async () => null),
+    delete: vi.fn(async () => {}),
+    deleteByTaskId: vi.fn(async (id: string) => {
       calls.push(`stopTask:${id}`);
     }),
-    listContainersForTask: vi.fn(),
-    inspectContainer: vi.fn(),
+    serializeState: (state) => state as unknown as Record<string, unknown>,
+    deserializeState: (payload) => payload as unknown as LocalDockerSessionState,
     shutdown: vi.fn(),
   };
 
@@ -136,7 +167,7 @@ describe("runOnSysboxContainer", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/runner source exceeds/);
     // Container must NOT be created when the body is rejected pre-flight.
-    expect(sandbox.createTaskContainer).not.toHaveBeenCalled();
+    expect(sandbox.create).not.toHaveBeenCalled();
   });
 
   it("services ctx_call mid-task and returns the host's value to the worker", async () => {
@@ -230,6 +261,6 @@ describe("runOnSysboxContainer", () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/daemon unreachable/);
-    expect(sandbox.createTaskContainer).not.toHaveBeenCalled();
+    expect(sandbox.create).not.toHaveBeenCalled();
   });
 });
