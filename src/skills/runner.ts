@@ -28,11 +28,7 @@ import type {
   SkillTier,
 } from "./store/index.js";
 import type { ClassifierLog, SkillInputs, SkillManifest } from "./types.js";
-import {
-  type RunOnSysboxContainerResult,
-  type RunTaskOnSessionResult,
-  runOnSysboxContainer,
-} from "./worker-sysbox/host.js";
+import { type RunTaskOnSessionResult, runOnSysboxContainer } from "./worker-sysbox/host.js";
 import {
   DEFAULT_POOL_OPTIONS,
   SysboxWorkerPool,
@@ -775,7 +771,7 @@ export class SkillRunnerImpl implements SkillRunner {
     // Switch + `never` exhaustiveness so a future SkillTier value (added to
     // the pgEnum) is a compile-time miss here rather than a silent route
     // through the sysbox path.
-    let result: RunOnWorkerResult | RunTaskOnSessionResult | RunOnSysboxContainerResult;
+    let result: RunOnWorkerResult | RunTaskOnSessionResult;
     switch (skill.tier) {
       case "wasm":
         result = await runOnWorker({

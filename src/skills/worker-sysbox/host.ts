@@ -222,21 +222,17 @@ export interface RunOnSysboxContainerParams {
   ctxHandler: CtxHandler;
 }
 
-export interface RunOnSysboxContainerResult {
-  ok: boolean;
-  output?: unknown;
-  error?: string;
-}
-
 /**
  * Spawn a one-shot sysbox container, drive a single skill task to completion,
  * and tear the container down. Used when no worker pool is wired in (tests,
- * tools without a long-lived runner). Production wiring uses the pool — see
- * `worker-sysbox/pool.ts`.
+ * skills with per-skill resource overrides that bypass the shared-budget
+ * pool). Production wiring for ordinary skills uses the pool — see
+ * `worker-sysbox/pool.ts`. Returns `RunTaskOnSessionResult`; `workerReusable`
+ * is always `true` because the one-shot session is destroyed regardless.
  */
 export async function runOnSysboxContainer(
   params: RunOnSysboxContainerParams,
-): Promise<RunOnSysboxContainerResult> {
+): Promise<RunTaskOnSessionResult> {
   const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S;
   const resourceLimits: ResourceLimits = {
     cpus: params.resourceLimits?.cpus ?? DEFAULT_RESOURCE_LIMITS.cpus,
@@ -249,7 +245,7 @@ export async function runOnSysboxContainer(
   // but here it would happen after `sandbox.create` — wasted work.
   const built = buildRunnerSource(params.body);
   if (!built.ok) {
-    return { ok: false, error: built.error };
+    return { ok: false, error: built.error, workerReusable: true };
   }
 
   let stoppedByHost = false;
@@ -274,7 +270,7 @@ export async function runOnSysboxContainer(
       expiresAt: expiresAtForOneShot(wallClockS),
     });
 
-    const r = await runTaskOnSession(session, {
+    return await runTaskOnSession(session, {
       taskId: params.taskId,
       skillName: params.skillName,
       body: params.body,
@@ -282,11 +278,12 @@ export async function runOnSysboxContainer(
       ...(params.wallClockS !== undefined && { wallClockS: params.wallClockS }),
       ctxHandler: params.ctxHandler,
     });
-    return r.ok
-      ? { ok: true, ...(r.output !== undefined && { output: r.output }) }
-      : { ok: false, ...(r.error !== undefined && { error: r.error }) };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+      workerReusable: true,
+    };
   } finally {
     await stop();
   }

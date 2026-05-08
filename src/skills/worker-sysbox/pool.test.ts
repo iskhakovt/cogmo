@@ -175,7 +175,6 @@ describe("SysboxWorkerPool", () => {
     // Workers take a real "tick" via a manual gate so we can hold three busy
     // simultaneously. Each scripted invoke result is the default (ok+reusable).
     const gates: Array<{ resolve: () => void; promise: Promise<void> }> = [];
-    const scripts: FakeWorkerScript[] = [];
     // Fake worker whose invoke awaits an external gate before resolving.
     function gatedWorker(_id: string): WorkerHandle {
       let state: WorkerHandle["state"] = "idle";
@@ -220,10 +219,6 @@ describe("SysboxWorkerPool", () => {
       };
     }
 
-    // The buildPoolHarness wiring isn't reused — this test builds its own
-    // pool from scratch with gated workers. Reference unused `scripts` to
-    // keep the closure pattern consistent with other tests.
-    void scripts;
     const sandbox = mock<SandboxClient>();
     const spawned: WorkerHandle[] = [];
     let count = 0;
@@ -295,6 +290,30 @@ describe("SysboxWorkerPool", () => {
     await new Promise<void>((r) => setTimeout(r, 0));
     expect(h.spawnCount()).toBe(2);
     expect(h.spawned[0]?.state).toBe("disposed");
+    await pool.dispose();
+  });
+
+  it("recycles a worker once its age exceeds `recycleAfterMs`", async () => {
+    // Single worker, big task budget so taskCount can't trigger recycle —
+    // age is the only path to draining. Advance the fake clock past the
+    // age cap before the next invoke; the post-invoke check should drain
+    // and replace the worker even though it ran few tasks.
+    const h = buildPoolHarness({
+      poolOptions: { min: 1, max: 1, recycleAfterTasks: 1000, recycleAfterMs: 5_000 },
+    });
+    const pool = await h.pool;
+    expect(h.spawnCount()).toBe(1);
+    const original = h.spawned[0];
+
+    // Push the clock past the age cap and run one task; the worker is
+    // young enough mid-invoke but post-invoke checks against `now` again.
+    h.advanceTime(6_000);
+    const r = await pool.invoke(invokeParams("t-aged"));
+    expect(r.ok).toBe(true);
+    await new Promise<void>((r) => setTimeout(r, 0));
+    expect(original?.state).toBe("disposed");
+    expect(h.spawnCount()).toBe(2); // lazy replacement spawned
+
     await pool.dispose();
   });
 

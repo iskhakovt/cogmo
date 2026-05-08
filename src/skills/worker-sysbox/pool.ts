@@ -95,6 +95,17 @@ interface PendingWaiter {
 }
 
 /**
+ * Margin between the pool's wall-clock recycle ceiling and the sandbox
+ * reaper's `expiresAt`. Sized so the pool's own recycle policy fires first
+ * during normal operation; the reaper is the safety net for crashed Cogmo,
+ * not part of the steady-state lifecycle. Symmetric in intent with
+ * `REAPER_BACKSTOP_S` in `host.ts` (per-task one-shots use a 30 s margin
+ * because they're short-lived; pool workers ride the recycle ceiling so
+ * the margin is hours, not seconds).
+ */
+const REAPER_BACKSTOP_MS = 60 * 60 * 1000;
+
+/**
  * Internal sentinel for `dispose()` racing an in-flight `#spawnOne()`. Caller
  * paths (eager `create()`, on-demand acquire, lazy replacement) all unwind
  * uniformly: foreground awaits surface it; background `void.catch` paths
@@ -322,7 +333,16 @@ export class SysboxWorkerPool {
       if (w.tryAcquire()) {
         return w;
       }
-      // Lost the race; fall through to queue.
+      // Lost the race for the worker we just spawned. Some *other* worker
+      // may have gone idle while we were awaiting the spawn (a parallel
+      // task finished, postInvoke released, queue handover took ours).
+      // Re-scan before queuing — at max=3 this is a 3-iteration loop and
+      // saves a queue round-trip when one is available.
+      for (const other of this.#workers) {
+        if (other.tryAcquire()) {
+          return other;
+        }
+      }
     }
     // At max: queue.
     return new Promise<WorkerHandle>((resolve, reject) => {
@@ -348,10 +368,7 @@ export class SysboxWorkerPool {
     this.#pendingSpawns += 1;
     try {
       const workerId = `${this.#workerIdPrefix}-${randomUUID().slice(0, 8)}`;
-      // expiresAt = recycle ceiling + 1h margin. The reaper backstops crashed
-      // Cogmo (so a worker container can't outlive its owner indefinitely)
-      // but should never beat the pool's own recycle policy.
-      const expiresAt = new Date(this.#now() + this.#opts.recycleAfterMs + 60 * 60 * 1000);
+      const expiresAt = new Date(this.#now() + this.#opts.recycleAfterMs + REAPER_BACKSTOP_MS);
       const w = await this.#createWorker({
         workerId,
         sandbox: this.#sandbox,
@@ -383,7 +400,12 @@ export class SysboxWorkerPool {
   #postInvoke(worker: WorkerHandle): void {
     // Promote to draining if we've crossed a recycle threshold. The worker
     // either set itself draining via markPoisoned (non-reusable result) or
-    // we set it now based on age / task count.
+    // we set it now based on age / task count. The age check fires only on
+    // task return — a workers-of-min that ages past recycleAfterMs with no
+    // active tasks is *not* swept by `#sweepIdle` (sweep refuses to drop
+    // below `min`), so it lives until the next invocation. That's
+    // intentional: idle staleness doesn't grow without active work; the
+    // reaper backstops the pathological "crashed and never came back" case.
     if (worker.state === "busy") {
       const taskCap = worker.taskCount >= this.#opts.recycleAfterTasks;
       const ageCap = worker.ageMs(this.#now()) >= this.#opts.recycleAfterMs;

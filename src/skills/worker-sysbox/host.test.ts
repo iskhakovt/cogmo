@@ -133,7 +133,7 @@ describe("runOnSysboxContainer", () => {
       ctxHandler: noopCtx,
     });
 
-    expect(result).toEqual({ ok: true, output: { ok: 1 } });
+    expect(result).toMatchObject({ ok: true, output: { ok: 1 }, workerReusable: true });
     expect(calls).toContain("ensureImage:python:3.14-slim");
     expect(calls).toContain("createTaskContainer:python:3.14-slim:home=none:wt=none");
     expect(calls).toContain("exec:python3");
@@ -212,7 +212,7 @@ describe("runOnSysboxContainer", () => {
       ctxHandler: ctx,
     });
 
-    expect(result).toEqual({ ok: true, output: { t: "ok" } });
+    expect(result).toMatchObject({ ok: true, output: { t: "ok" }, workerReusable: true });
     // Verify the worker received the ctx_result with the host-supplied value.
     const ctxResultLine = buf
       .join("")
@@ -242,7 +242,11 @@ describe("runOnSysboxContainer", () => {
       ctxHandler: noopCtx,
     });
 
-    expect(result).toEqual({ ok: false, error: "wall_clock_exceeded" });
+    expect(result).toMatchObject({
+      ok: false,
+      error: "wall_clock_exceeded",
+      workerReusable: false,
+    });
     expect(calls).toContain("stopTask:task-4");
   });
 
