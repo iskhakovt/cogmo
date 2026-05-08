@@ -33,6 +33,14 @@ describe("HindsightCompatSchema", () => {
     expect(() => HindsightCompatSchema.parse("not-a-range")).toThrow();
     expect(() => HindsightCompatSchema.parse("")).toThrow();
   });
+
+  it("rejects semantic wildcards beyond literal `*`", () => {
+    // Anything that matches every version, regardless of how the user
+    // spelled it — pinning these defeats the boot-time compat check.
+    for (const wildcard of ["*", "x", "X", ">=0.0.0", ">=0.0.0-0", ">=0.0.0-pre"]) {
+      expect(() => HindsightCompatSchema.parse(wildcard)).toThrow();
+    }
+  });
 });
 
 describe("checkUuidv7", () => {

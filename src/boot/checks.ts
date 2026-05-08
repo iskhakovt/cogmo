@@ -37,8 +37,16 @@ export class BootCheckError extends Error {
  * `"^0.6.0"`). Stored next to the npm client pin in `package.json`
  * under `cogmo.hindsightCompat`.
  *
- * Wildcards (`*`, empty string, `>=0.0.0`) are rejected — they make the
- * version check a no-op, which is almost certainly a mistake.
+ * Semantic wildcards are rejected — `*`, `x`, `X`, the empty string,
+ * `>=0.0.0`, `>=0.0.0-0`, etc. Any pin where every published Hindsight
+ * version would satisfy the range makes the version check a no-op,
+ * which is almost certainly a mistake.
+ *
+ * Detection uses `semver.subset("*", range)`: if the all-versions range
+ * (`*`) is a subset of the pin, the pin accepts everything. Catches both
+ * literal `"*"` (which `validRange` canonicalises to `"*"`) and the
+ * less-obvious cases like `>=0.0.0-0` (which `validRange` leaves alone
+ * but which still semantically matches every version).
  */
 export const HindsightCompatSchema = z
   .string()
@@ -46,8 +54,8 @@ export const HindsightCompatSchema = z
   .refine((s) => semver.validRange(s) !== null, {
     message: "must be a valid node-semver range",
   })
-  .refine((s) => semver.validRange(s) !== "*", {
-    message: "wildcard ranges (`*`, empty string) are rejected — pin a real range",
+  .refine((s) => !semver.subset("*", semver.validRange(s) ?? ""), {
+    message: "wildcard ranges (matches every version) are rejected — pin a real range",
   });
 export type HindsightCompat = z.infer<typeof HindsightCompatSchema>;
 
