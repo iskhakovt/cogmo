@@ -1,5 +1,5 @@
 {
-  "id": "8f9d0453-1dda-4eee-9124-326d19fbad71",
+  "id": "ad48a8a2-3803-44a8-8e96-43bb41d086de",
   "prevId": "22c2a2c5-a623-481f-8b32-226d8c8b1688",
   "version": "7",
   "dialect": "postgresql",
@@ -873,6 +873,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "profile_id": {
+          "name": "profile_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "content": {
           "name": "content",
           "type": "text",
@@ -931,6 +937,15 @@
           "columnsFrom": ["user_id"],
           "columnsTo": ["id"],
           "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "pending_memories_profile_id_profiles_id_fk": {
+          "name": "pending_memories_profile_id_profiles_id_fk",
+          "tableFrom": "pending_memories",
+          "tableTo": "profiles",
+          "columnsFrom": ["profile_id"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -1099,6 +1114,15 @@
           "columnsFrom": ["user_id"],
           "columnsTo": ["id"],
           "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_profiles_profile_class": {
+          "name": "fk_profiles_profile_class",
+          "tableFrom": "profiles",
+          "tableTo": "profile_classes",
+          "columnsFrom": ["user_id", "profile_class"],
+          "columnsTo": ["user_id", "name"],
+          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },

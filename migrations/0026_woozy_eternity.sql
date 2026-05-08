@@ -1,2 +1,0 @@
-ALTER TABLE "pending_memories" ADD COLUMN "profile_id" uuid;--> statement-breakpoint
-ALTER TABLE "pending_memories" ADD CONSTRAINT "pending_memories_profile_id_profiles_id_fk" FOREIGN KEY ("profile_id") REFERENCES "public"."profiles"("id") ON DELETE set null ON UPDATE no action;
