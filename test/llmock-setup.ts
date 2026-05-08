@@ -48,10 +48,12 @@ function normalizeContent(text: string): string {
         /\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+\w+\s+\d{1,2},\s+\d{4}\b/g,
         "[DATE]",
       )
-      // Test bank IDs (`test-1775815196908`) — Hindsight bakes the bank ID
-      // into extraction prompts as the narrator name. Word boundary prevents
-      // accidentally matching `test-` substrings inside other tokens.
-      .replace(/\btest-\d{10,}\b/g, "test-[ID]")
+      // Test bank IDs (`test-1775815196908`, `test-compartments-1775...`) —
+      // Hindsight bakes the bank ID into extraction prompts as the narrator
+      // name. Optional `-<word>` segment lets per-suite banks include a
+      // descriptive infix without breaking fixture matching across runs.
+      // Word boundary prevents accidentally matching inside other tokens.
+      .replace(/\btest-(?:[a-z]+-)?\d{10,}\b/g, "test-[ID]")
   );
 }
 
