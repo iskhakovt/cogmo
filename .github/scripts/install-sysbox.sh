@@ -4,6 +4,14 @@
 # bumping sysbox is "edit version + recompute SHA"; runtime registration
 # is the postcondition that gates the rest of the sysbox-e2e workflow.
 #
+# v0.7.0 is genuine upstream Nestybox — `nestybox/sysbox` carries the
+# `v0.7.0` git tag with a CHANGELOG entry (2025-03-02; runc CVE patches
+# + sysbox-deploy-k8s updates), and `downloads.nestybox.com/sysbox/
+# releases/v0.7.0/` redirects to Nestybox's own GCS bucket
+# (`storage.googleapis.com/sysbox-releases/`). Nestybox stopped
+# publishing GitHub *Releases* after v0.6.7, so the /releases page is
+# stale — the canonical distribution channel is the downloads server.
+#
 # The `sysbox-ce` postinst stops Docker, registers `sysbox-runc`, then
 # restarts Docker. On busy runners, `sysbox-mgr` (a `Wants=` dep of
 # `sysbox.service`) starts before Docker is fully ready, fails its
