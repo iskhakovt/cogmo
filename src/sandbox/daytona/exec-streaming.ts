@@ -55,18 +55,41 @@ export async function startExecStreaming(args: {
   // natural WS close (success), WS error (real upstream failure), and
   // explicit `dispose()`. Without it, sessions leak per `execStreaming`
   // call: Daytona quotas + per-org sandbox-session limits would bite
-  // the deployer eventually. The first caller wins; subsequent calls
-  // short-circuit so we never get the "already gone" error from a
-  // racing call.
+  // the deployer eventually.
+  //
+  // `cleanedUp` flips ONLY after `deleteSession` resolves successfully.
+  // A failed delete (transient network, daemon hiccup) leaves the
+  // flag false so a subsequent caller (typically `dispose()` after a
+  // failed natural-exit cleanup) retries. `inFlight` guards against
+  // a concurrent caller firing a duplicate `deleteSession` while
+  // another is mid-await — they all observe the same outcome.
   let cleanedUp = false;
+  let inFlight: Promise<void> | null = null;
   const cleanupSession = async (): Promise<void> => {
     if (cleanedUp) return;
-    cleanedUp = true;
-    try {
-      await daytonaProcess.deleteSession(sessionId);
-    } catch (err) {
-      log.warn({ err: (err as Error).message, sessionId }, "deleteSession during cleanup failed");
+    if (inFlight) {
+      // Wait for the in-flight attempt; swallow its error so callers
+      // get a consistent "best-effort, never throws" contract.
+      await inFlight.catch(() => undefined);
+      return;
     }
+    inFlight = (async () => {
+      try {
+        await daytonaProcess.deleteSession(sessionId);
+        cleanedUp = true;
+      } catch (err) {
+        log.warn(
+          { err: (err as Error).message, sessionId },
+          "deleteSession during cleanup failed (next caller will retry)",
+        );
+        // Don't rethrow — every caller in the codebase awaits this
+        // for side effect, not value. The `cleanedUp` flag stays
+        // false so the next call retries.
+      } finally {
+        inFlight = null;
+      }
+    })();
+    await inFlight;
   };
 
   const stdout = new PassThrough();

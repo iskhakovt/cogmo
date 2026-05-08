@@ -309,4 +309,35 @@ describe("startExecStreaming", () => {
     await handle.dispose();
     expect(proc.deleteSession).toHaveBeenCalledTimes(1);
   });
+
+  it("retries deleteSession on the next call when the first attempt failed", async () => {
+    // The cleanup contract is "best-effort, never throws, retries on
+    // the next caller". A transient daemon error on natural-exit
+    // cleanup must NOT prevent a follow-up `dispose()` from firing
+    // its own `deleteSession` — otherwise the upstream session
+    // orphans.
+    const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
+    let attempt = 0;
+    (proc.deleteSession as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error("transient daemon error");
+      // 2nd attempt succeeds.
+    });
+
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: {},
+    });
+    await handle.wait();
+    // Allow the natural-exit cleanup attempt (which fails) to settle.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(proc.deleteSession).toHaveBeenCalledTimes(1);
+
+    // Dispose retries — `cleanedUp` was never set on the failed
+    // first attempt.
+    await handle.dispose();
+    expect(proc.deleteSession).toHaveBeenCalledTimes(2);
+  });
 });

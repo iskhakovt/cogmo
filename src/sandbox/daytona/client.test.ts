@@ -495,25 +495,50 @@ describe("DaytonaSandboxClient", () => {
     it("stops the keepalive even when the provider-side sandbox is already gone", async () => {
       // Provider auto-reaped the sandbox between `create` and `delete`
       // — `daytona.list({task})` returns nothing. Without explicit
-      // keepalive cleanup by sandboxId, the ticker would leak.
-      const sb = fakeSandbox({ id: "sb-gone", state: SandboxState.STARTED });
-      daytonaCalls.create.mockResolvedValue(sb);
-      daytonaCalls.list.mockResolvedValue({
-        items: [],
-        totalPages: 0,
-        currentPage: 1,
-        totalItems: 0,
-        itemsPerPage: 50,
-      });
+      // keepalive cleanup by `sandboxId`, the in-process ticker would
+      // leak.
+      //
+      // Asserted via fake timers: confirm the ticker fires once before
+      // delete, then advance time past several intervals AFTER delete
+      // and assert it does NOT fire again. Crucially, we never call
+      // `shutdown()` before the assertion — `shutdown()` itself
+      // iterates `#keepalives` and would clear a leaked timer,
+      // masking a broken `delete(session)`.
+      vi.useFakeTimers();
+      try {
+        const sb = fakeSandbox({ id: "sb-gone", state: SandboxState.STARTED });
+        daytonaCalls.create.mockResolvedValue(sb);
+        daytonaCalls.list.mockResolvedValue({
+          items: [],
+          totalPages: 0,
+          currentPage: 1,
+          totalItems: 0,
+          itemsPerPage: 50,
+        });
 
-      const client = await makeClient();
-      const session = await client.create(BASE_SPEC);
-      // `delete(session)` should clear the keepalive even though the
-      // list returns empty (sandbox already auto-stopped + reaped).
-      await client.delete(session);
-      // No assertion on the timer directly (private), but a follow-up
-      // `shutdown` should find nothing to clear.
-      await client.shutdown(); // would hang on a leaked timer if buggy
+        const client = await makeClient();
+        const session = await client.create({
+          ...BASE_SPEC,
+          expiresAt: new Date(Date.now() + 60 * 60_000),
+        });
+
+        // Baseline: keepalive is alive and firing.
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(1);
+
+        // `delete(session)` must clear the timer even though the
+        // cascade `daytona.list({task})` returns empty (provider-side
+        // sandbox already gone).
+        await client.delete(session);
+
+        // Advance well past several intervals — refreshActivity must
+        // NOT fire again. If `delete(session)` failed to stop the
+        // timer by sandboxId, this would tick up to 7+.
+        await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
