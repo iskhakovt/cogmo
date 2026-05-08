@@ -384,10 +384,10 @@ describe("runCodingVerify", () => {
     if (result.status === "failed") {
       expect(result.failureReason).toMatch(/claude_code_oauth_token/);
     }
-    // sandbox.create is reached but throws inside the step; the helpful
-    // assertion is on `failureReason`, not on whether `create` got a chance
-    // to be called (it didn't — the auth lookup runs first inside the same
-    // step).
+    // OAuth check runs as a fail-fast gate alongside identity resolution
+    // (see verify-orchestrator.ts), so we never spin up a container or
+    // provision askpass on a missing token.
+    expect(deps.sandbox.create).not.toHaveBeenCalled();
   });
 
   it("unparseable remote URL → status=failed", async () => {

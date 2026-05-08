@@ -125,6 +125,31 @@ export async function validateGitHubPat(pat: string): Promise<ValidationResult> 
   }
 }
 
+/**
+ * Validate a Claude Code subscription OAuth token (`claude setup-token`
+ * output) by pinging `GET /v1/models` with `Authorization: Bearer …`.
+ *
+ * Per Anthropic's auth precedence, `CLAUDE_CODE_OAUTH_TOKEN` is sent as
+ * a bearer token, so a 200 here confirms the token authenticates against
+ * the Anthropic API. Free, no token consumed. 401 → invalid; anything
+ * else → ambiguous (network, auth-scope mismatch on a non-`/messages`
+ * endpoint, server-side hiccup) — reported as a soft warning so the
+ * operator can decide whether to save anyway, matching the pattern used
+ * elsewhere in the wizard.
+ */
+export async function validateClaudeCodeOauthToken(token: string): Promise<ValidationResult> {
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/models", {
+      headers: { Authorization: `Bearer ${token}`, "anthropic-version": "2023-06-01" },
+    });
+    if (res.ok) return { valid: true };
+    if (res.status === 401) return { valid: false, error: "Token rejected (401 Unauthorized)" };
+    return { valid: false, error: `Unexpected response: ${res.status}` };
+  } catch (err) {
+    return { valid: false, error: `Connection failed: ${(err as Error).message}` };
+  }
+}
+
 /** Validate Hindsight server connectivity. */
 export async function validateHindsight(url: string): Promise<ValidationResult> {
   try {

@@ -225,6 +225,13 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     // Process-level env (e.g. `CLAUDE_CODE_OAUTH_TOKEN` for the Claude Code
     // backend). Lives on the container's process env only — never written to
     // the home volume, never persisted on the container row.
+    //
+    // INVARIANT: only `spec.env` lands here. Do NOT forward host `process.env`
+    // entries into the container — `ANTHROPIC_API_KEY` outranks
+    // `CLAUDE_CODE_OAUTH_TOKEN` in Claude Code's auth precedence (see
+    // design/coding-delegation.md → Subscription Auth → "Why not
+    // ANTHROPIC_API_KEY"), so a forward-everything change would silently
+    // bill the user's Console account instead of their Max/Pro subscription.
     const envList = spec.env ? Object.entries(spec.env).map(([k, v]) => `${k}=${v}`) : undefined;
 
     let container: Docker.Container;

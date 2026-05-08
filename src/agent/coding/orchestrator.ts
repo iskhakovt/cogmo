@@ -226,19 +226,24 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       throw new Error("allocate-worktree completed without setting worktreeAssignment");
     }
 
+    // Resolve subscription auth before the durable create-container step
+    // so a missing secret short-circuits without spinning up a worktree-
+    // bound container that `claude -p` would then hang on. Skipped when
+    // the orchestrator is wired without a secrets store (unit tests).
+    // Local-capture narrows the type and avoids `secretsStore!`.
+    const secretsStore = deps.secretsStore;
+    let sandboxEnv: Record<string, string> | undefined;
+    if (secretsStore) {
+      const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
+      if (authResult.isErr()) {
+        throw new Error(authResult.error.message);
+      }
+      sandboxEnv = authResult.value;
+    }
+
     const sessionState = await stepRun("create-container", async () => {
       // biome-ignore lint/style/noNonNullAssertion: guarded by the throw above
       const wt = assignment!;
-      // Resolve subscription auth before the docker call so a missing
-      // secret throws here (cheap) rather than letting the container come
-      // up and `claude -p` hang on a browser-OAuth prompt. Skipped when
-      // the orchestrator is wired without a secrets store (unit tests).
-      const sandboxEnv = deps.secretsStore
-        ? await runInTx((tx) =>
-            // biome-ignore lint/style/noNonNullAssertion: guarded by the ternary above
-            loadCodingSandboxEnv(tx, deps.secretsStore!),
-          )
-        : undefined;
       const session = await sandbox.create({
         taskId,
         worktree: { hostPath: wt.worktreePath },
@@ -535,6 +540,20 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       return { status: "skipped" };
     }
 
+    // Resolve subscription auth before the durable get-or-create-container
+    // step. Same fail-fast contract as the plan phase: missing secret
+    // surfaces here, not after a container comes up. Local-capture
+    // narrows the type and avoids `secretsStore!`.
+    const secretsStore = deps.secretsStore;
+    let sandboxEnv: Record<string, string> | undefined;
+    if (secretsStore) {
+      const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
+      if (authResult.isErr()) {
+        throw new Error(authResult.error.message);
+      }
+      sandboxEnv = authResult.value;
+    }
+
     // Get-or-create the task container. The plan-phase container has an
     // idle TTL (CODING_TASK_IDLE_TTL_MINUTES); if approval took longer
     // than that, the reaper stopped it and we recreate. `claude --resume
@@ -553,12 +572,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         return existing.state;
       }
 
-      const sandboxEnv = deps.secretsStore
-        ? await runInTx((tx) =>
-            // biome-ignore lint/style/noNonNullAssertion: guarded by the ternary above
-            loadCodingSandboxEnv(tx, deps.secretsStore!),
-          )
-        : undefined;
       const session = await sandbox.create({
         taskId,
         worktree: { hostPath: worktreeAssignment.worktreePath },

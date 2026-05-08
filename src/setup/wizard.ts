@@ -29,6 +29,7 @@ import type { TransportStore } from "../transport/store/index.js";
 import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
   validateAnthropicKey,
+  validateClaudeCodeOauthToken,
   validateGitHubPat,
   validateHindsight,
   validateOpenAICompatibleKey,
@@ -613,15 +614,29 @@ async function stepConfigureClaudeCodeAuth(deps: WizardDeps): Promise<void> {
     "Where to get a Claude Code OAuth token",
   );
 
-  const token = cancelGuard(
+  const rawToken = cancelGuard(
     await p.password({
       message: "Paste your Claude Code OAuth token:",
       validate: (v) => {
-        if (!v || v.length < 20) return "Token looks too short";
+        if (!v || v.trim().length < 20) return "Token looks too short";
         return undefined;
       },
     }),
   );
+  // Trim — clipboard pastes routinely carry a trailing newline that would
+  // corrupt the env var when injected into the sandbox.
+  const token = rawToken.trim();
+
+  const s = p.spinner();
+  s.start("Validating Claude Code OAuth token...");
+  const result = await validateClaudeCodeOauthToken(token);
+  if (result.valid) {
+    s.stop("Token validated.");
+  } else {
+    s.stop(`Validation failed: ${result.error}`);
+    const saveAnyway = await p.confirm({ message: "Save anyway?", initialValue: false });
+    if (!cancelGuard(saveAnyway)) return;
+  }
 
   await deps.runInTx((tx) =>
     deps.secretsStore.putSecret(tx, {
@@ -630,6 +645,9 @@ async function stepConfigureClaudeCodeAuth(deps: WizardDeps): Promise<void> {
       description: CLAUDE_CODE_OAUTH_TOKEN_SECRET_DESCRIPTION,
     }),
   );
+  if (result.valid) {
+    await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, CLAUDE_CODE_OAUTH_TOKEN_SECRET));
+  }
 
   p.log.success("Claude Code OAuth token stored.");
 }

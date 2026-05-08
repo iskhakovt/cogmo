@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
 import {
   type ExecStreamingHandle,
@@ -369,10 +370,10 @@ describe("runCodingTask", () => {
       { kind: "plan_ready", plan: "## Plan\n" },
       { kind: "complete", exitCode: 0, isError: false },
     ]);
-    const fakeSecrets = {
-      getSecret: async (_tx: unknown, name: string) =>
-        name === "claude_code_oauth_token" ? "sk-test-oauth" : undefined,
-    } as unknown as SecretsStore;
+    const fakeSecrets = mock<SecretsStore>();
+    fakeSecrets.getSecret.mockImplementation(async (_tx, name) =>
+      name === "claude_code_oauth_token" ? "sk-test-oauth" : undefined,
+    );
     const deps = makeDeps({ sandbox, backend, secretsStore: fakeSecrets });
 
     const result = await runCodingTask({ taskId: task.id, deps, stepRun });
@@ -385,9 +386,8 @@ describe("runCodingTask", () => {
     const task = await seedTask(repo);
     const { sandbox, createCalls } = fakeSandbox();
     const backend = backendYielding([]);
-    const fakeSecrets = {
-      getSecret: async (_tx: unknown, _name: string) => undefined,
-    } as unknown as SecretsStore;
+    const fakeSecrets = mock<SecretsStore>();
+    fakeSecrets.getSecret.mockResolvedValue(undefined);
     const deps = makeDeps({ sandbox, backend, secretsStore: fakeSecrets });
 
     const result = await runCodingTask({ taskId: task.id, deps, stepRun });

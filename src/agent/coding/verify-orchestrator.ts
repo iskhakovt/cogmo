@@ -191,6 +191,15 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   }
   const identity: GitHubIdentity = identityResult.value;
 
+  // Same fail-fast contract for the Claude Code subscription token —
+  // resolved here (not inside the create-container step) so a missing
+  // secret doesn't waste an askpass provision on disk before surfacing.
+  const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
+  if (authResult.isErr()) {
+    return await failAndTeardown(authResult.error.message);
+  }
+  const sandboxEnv = authResult.value;
+
   let executeStream: ExecuteStreamHandle | null = null;
   let containerCreated = false;
   let askpassProvisioned = false;
@@ -224,10 +233,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     // /.cogmo-askpass. The execute orchestrator already tore the previous
     // container down, so this is always a fresh handle.
     const sessionState = await stepRun("create-container", async () => {
-      // Verify still uses `claude` (and Codex in future) inside the sandbox,
-      // so the same subscription-auth env applies — see
-      // design/coding-delegation.md → Subscription Auth.
-      const sandboxEnv = await runInTx((tx) => loadCodingSandboxEnv(tx, deps.secretsStore));
       const session = await sandbox.create({
         taskId,
         worktree: { hostPath: worktreeAssignment.worktreePath },
