@@ -127,11 +127,18 @@ interface FakeBackendHandle {
 
 function fakeBackend(events: CodingEvent[]): { backend: CodingBackend; handle: FakeBackendHandle } {
   const responses: { requestId: string; response: PermissionResponse }[] = [];
+  // AsyncIterable whose first `next()` throws — used as a `plan` stub in
+  // tests that only exercise `execute`. Hand-rolled to dodge biome's
+  // `useYield` rule on a generator that has nothing to yield.
+  const throwingPlan: AsyncIterable<CodingEvent> = {
+    [Symbol.asyncIterator]: () => ({
+      async next(): Promise<IteratorResult<CodingEvent>> {
+        throw new Error("plan not exercised by this test");
+      },
+    }),
+  };
   const backend: CodingBackend = {
-    // biome-ignore lint/correctness/useYield: stub never reached
-    plan: async function* () {
-      throw new Error("plan not exercised by this test");
-    },
+    plan: () => throwingPlan,
     execute: async (): Promise<CodingExecuteHandle> => ({
       events: (async function* () {
         for (const ev of events) yield ev;

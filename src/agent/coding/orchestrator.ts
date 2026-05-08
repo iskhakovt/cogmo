@@ -16,7 +16,7 @@ import type {
 } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
-import type { CodingBackend, PermissionResponse } from "./backend.js";
+import type { BackendUsage, CodingBackend, PermissionResponse } from "./backend.js";
 import { shortenRequestId } from "./permission-keyboard.js";
 import * as policy from "./policy.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow, ToolDecision } from "./store/index.js";
@@ -224,10 +224,11 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     if (!assignment) {
       throw new Error("allocate-worktree completed without setting worktreeAssignment");
     }
+    // Capture the narrowed value in a const so the closure below sees the
+    // non-null type — TS doesn't carry `let` narrowing across closures.
+    const wt = assignment;
 
     const sessionState = await stepRun("create-container", async () => {
-      // biome-ignore lint/style/noNonNullAssertion: guarded by the throw above
-      const wt = assignment!;
       const session = await sandbox.create({
         taskId,
         worktree: { hostPath: wt.worktreePath },
@@ -689,8 +690,7 @@ interface ExecuteStreamingParams {
 interface ExecuteStreamingResult {
   isError: boolean;
   failureReason?: string;
-  // biome-ignore lint/suspicious/noExplicitAny: BackendUsage shape is opaque to the orchestrator
-  usage?: any;
+  usage?: BackendUsage;
 }
 
 async function runExecuteStreaming(
@@ -710,8 +710,7 @@ async function runExecuteStreaming(
   } = params;
   let isError = false;
   let failureReason: string | undefined;
-  // biome-ignore lint/suspicious/noExplicitAny: BackendUsage shape is opaque to the orchestrator
-  let usage: any;
+  let usage: BackendUsage | undefined;
 
   const handle = await backend.execute({ task, repo, container }, sessionId);
   for await (const event of handle.events) {

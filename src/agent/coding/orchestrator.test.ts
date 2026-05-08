@@ -238,15 +238,26 @@ function executeBackendYielding(
   ) => Promise<void> = async () => {},
 ): CodingBackend {
   return {
-    // biome-ignore lint/correctness/useYield: stub never reached in execute-only tests
-    plan: async function* (): AsyncGenerator<CodingEvent> {
-      throw new Error("plan not exercised by this test — use backendYielding");
-    },
+    plan: () => throwingPlan("plan not exercised by this test — use backendYielding"),
     execute: async () => ({
       events: (async function* () {
         for (const ev of events) yield ev;
       })(),
       respondPermission,
+    }),
+  };
+}
+
+// AsyncIterable whose first `next()` throws — used as a stub in tests that
+// only exercise `execute`. A generator function (`async function*`) would
+// trip biome's `useYield` rule because it has no `yield`, so we hand-roll
+// the iterator instead.
+function throwingPlan(message: string): AsyncIterable<CodingEvent> {
+  return {
+    [Symbol.asyncIterator]: () => ({
+      async next(): Promise<IteratorResult<CodingEvent>> {
+        throw new Error(message);
+      },
     }),
   };
 }

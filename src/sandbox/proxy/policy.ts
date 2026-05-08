@@ -148,20 +148,26 @@ export function applyContainerCreatePolicy(
   }
 
   // Mutations — write a copy to avoid surprising callers that hold the
-  // original buffer.
-  const mutated: ContainerCreateBody = { ...parsed, HostConfig: { ...host } };
-  // biome-ignore lint/style/noNonNullAssertion: we just spread it
-  const mutatedHost = mutated.HostConfig!;
-  mutatedHost.Runtime = scope.runtime;
-  mutatedHost.CgroupParent = scope.cgroupParent;
-
-  mutated.Labels = {
+  // original buffer. Build the mutated HostConfig and Labels first as
+  // locals, then assemble `mutated` so every field is typed as defined
+  // (no need for a non-null assertion to set `Runtime`/`CgroupParent`).
+  const mutatedHost = {
+    ...host,
+    Runtime: scope.runtime,
+    CgroupParent: scope.cgroupParent,
+  };
+  const mutatedLabels = {
     ...(parsed.Labels ?? {}),
     "cogmo.managed": "true",
     "cogmo.instance": scope.instanceId,
     "cogmo.root_task": scope.taskId,
     "cogmo.parent": scope.parentDockerId,
     "cogmo.depth": String(scope.parentDepth + 1),
+  };
+  const mutated: ContainerCreateBody = {
+    ...parsed,
+    HostConfig: mutatedHost,
+    Labels: mutatedLabels,
   };
 
   const out = Buffer.from(JSON.stringify(mutated), "utf8");

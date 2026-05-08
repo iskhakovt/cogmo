@@ -5,6 +5,7 @@
  * stub proxy to verify the supervisor calls the proxy in the right order
  * and bind-mounts the returned socket path.
  */
+import type Docker from "dockerode";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
 import { expectDefined } from "../test/assertions.js";
@@ -48,8 +49,15 @@ interface DockerCreateCallArgs {
   };
 }
 
-/** Minimal dockerode stub — enough to drive createTaskContainer. */
-function fakeDocker(opts: { dockerId: string; failStart?: boolean } = { dockerId: "docker-abc" }) {
+/**
+ * Minimal dockerode stub — enough to drive createTaskContainer. The shape
+ * is far smaller than the real `Docker` type; the cast is centralised here
+ * so call sites can pass `docker` without a per-call `as any`.
+ */
+function fakeDocker(opts: { dockerId: string; failStart?: boolean } = { dockerId: "docker-abc" }): {
+  docker: Docker;
+  calls: { create: DockerCreateCallArgs[]; start: number; remove: number };
+} {
   const calls: { create: DockerCreateCallArgs[]; start: number; remove: number } = {
     create: [],
     start: 0,
@@ -73,7 +81,10 @@ function fakeDocker(opts: { dockerId: string; failStart?: boolean } = { dockerId
     // Default `info` returns just runc; tests that need a different runtime
     // map call `docker.info.mockResolvedValueOnce(...)` to override.
     info: vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } })),
-  };
+    // The real dockerode `Docker` exposes ~50 methods; this stub covers the
+    // few `createTaskContainer` reaches for. `as unknown as Docker` is the
+    // single boundary cast — call sites stay typed.
+  } as unknown as Docker;
   return { docker, calls };
 }
 
@@ -110,8 +121,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const { docker, calls } = fakeDocker({ dockerId: "docker-task-xyz" });
     const { proxy, registers } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
-      docker: docker as any,
+      docker,
       store,
       runInTx: tx,
       runtime: "runc",
@@ -166,8 +176,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const { docker } = fakeDocker({ dockerId: "docker-x" });
     const { proxy, unregisters } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
-      docker: docker as any,
+      docker,
       store,
       runInTx: tx,
       runtime: "runc",
@@ -195,8 +204,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     });
     const { proxy, registers, unregisters } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
-      docker: docker as any,
+      docker,
       store,
       runInTx: tx,
       runtime: "runc",
@@ -224,8 +232,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const { docker } = fakeDocker({ dockerId: "docker-fail-start", failStart: true });
     const { proxy, registers, unregisters } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
-      docker: docker as any,
+      docker,
       store,
       runInTx: tx,
       runtime: "runc",
@@ -255,8 +262,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, calls } = fakeDocker({ dockerId: "docker-no-proxy" });
     const sandbox = await LocalDockerSandboxClient.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
-      docker: docker as any,
+      docker,
       store,
       runInTx: tx,
       runtime: "runc",
@@ -282,8 +288,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, calls } = fakeDocker({ dockerId: "docker-askpass" });
     const sandbox = await LocalDockerSandboxClient.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
-      docker: docker as any,
+      docker,
       store,
       runInTx: tx,
       runtime: "runc",
@@ -322,8 +327,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-stopAskpass" });
     const sandbox = await LocalDockerSandboxClient.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
-      docker: docker as any,
+      docker,
       store,
       runInTx: tx,
       runtime: "runc",
@@ -382,10 +386,9 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       listContainers: vi.fn(async () => []),
       getContainer: () => ({ inspect, kill, remove }),
       info: vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } })),
-    };
+    } as unknown as Docker;
     const sandbox = await LocalDockerSandboxClient.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
-      docker: docker as any,
+      docker,
       store,
       runInTx: tx,
       runtime: "runc",
@@ -416,8 +419,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-noaskpass" });
     const sandbox = await LocalDockerSandboxClient.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
-      docker: docker as any,
+      docker,
       store,
       runInTx: tx,
       runtime: "runc",
@@ -441,8 +443,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const { docker } = fakeDocker();
     const { proxy } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
-      docker: docker as any,
+      docker,
       store,
       runInTx: tx,
       runtime: "runc",
@@ -492,10 +493,9 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       // demuxStream is normally dockerode's frame parser — bypass it
       // since we're not feeding real Docker frames.
       modem: { demuxStream: vi.fn() },
-    };
+    } as unknown as Docker;
     const sandbox = await LocalDockerSandboxClient.create({
-      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
-      docker: docker as any,
+      docker,
       store,
       runInTx: tx,
       runtime: "runc",
