@@ -8,7 +8,7 @@
 import { GenericContainer, type StartedNetwork, Wait } from "testcontainers";
 
 export function postgres(network: StartedNetwork) {
-  return new GenericContainer("pgvector/pgvector:pg18")
+  return new GenericContainer("mirror.gcr.io/pgvector/pgvector:pg18")
     .withNetwork(network)
     .withNetworkAliases("postgres")
     .withExposedPorts(5432)
@@ -38,7 +38,7 @@ export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
   if (opts?.appUrl) {
     cmd.push("-u", opts.appUrl);
   }
-  return new GenericContainer("inngest/inngest:v1.19.2")
+  return new GenericContainer("mirror.gcr.io/inngest/inngest:v1.19.2")
     .withNetwork(network)
     .withNetworkAliases("inngest")
     .withExposedPorts(8288, 8289)
