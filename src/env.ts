@@ -3,19 +3,28 @@ import { z } from "zod";
 import { resolveEnvFile } from "./secrets/env-file.js";
 
 /**
- * Default Cogmo-baked image references — read from `process.env.VERSION`
- * (set by the cogmo `Dockerfile`'s `ENV VERSION=$VERSION` build arg; falls
- * back to "dev" outside Docker). Single source of truth; the runner
- * imports `defaultSkillsImage` for its own fallback so the env var and
- * runner constructor default never drift apart.
+ * Default Cogmo-baked image references. Two cases:
  *
- * `||` (not `??`) so an empty `VERSION=` doesn't yield a tag-less image.
+ *   - **Inside the cogmo container** (`process.env.VERSION` is set by the
+ *     app `Dockerfile`'s `ENV VERSION=$VERSION` build arg): pull the
+ *     matched-version image. `cogmo:1.46.0` always pairs with
+ *     `cogmo-devbase:1.46.0` and `cogmo-skills:1.46.0`.
+ *   - **Outside the container** (local `pnpm dev` / scripts / tests):
+ *     pull `:latest`. `publish.yml` pushes a floating `:latest` alongside
+ *     each release semver, so a fresh checkout works without a local
+ *     image build. Devs iterating on the Dockerfiles override via the
+ *     `COGMO_{DEVBASE,SKILLS}_IMAGE` env vars (e.g.
+ *     `COGMO_SKILLS_IMAGE=cogmo-skills:dev` after a local
+ *     `docker buildx bake --load skills`).
+ *
+ * `||` (not `??`) so an empty `VERSION=` falls back to `:latest` instead
+ * of yielding a tag-less image.
  */
 export function defaultDevbaseImage(): string {
-  return `ghcr.io/iskhakovt/cogmo-devbase:${process.env.VERSION || "dev"}`;
+  return `ghcr.io/iskhakovt/cogmo-devbase:${process.env.VERSION || "latest"}`;
 }
 export function defaultSkillsImage(): string {
-  return `ghcr.io/iskhakovt/cogmo-skills:${process.env.VERSION || "dev"}`;
+  return `ghcr.io/iskhakovt/cogmo-skills:${process.env.VERSION || "latest"}`;
 }
 
 // Apply _FILE convention for Docker secrets before Zod validation.

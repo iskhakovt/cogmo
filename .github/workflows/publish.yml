@@ -41,6 +41,38 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # One `metadata-action` call per image. Each emits a per-target
+      # bake-file with `tags` (semver + `latest`) and the standard OCI
+      # labels (`org.opencontainers.image.{source,revision,version,
+      # created,licenses,…}`). bake-action layers all three on top of
+      # `docker-bake.hcl`, populating the empty `*-meta` stubs.
+      - uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        id: meta-cogmo
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
+          bake-target: cogmo-meta
+
+      - uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        id: meta-devbase
+        with:
+          images: ghcr.io/${{ github.repository }}-devbase
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
+          bake-target: devbase-meta
+
+      - uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        id: meta-skills
+        with:
+          images: ghcr.io/${{ github.repository }}-skills
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
+          bake-target: skills-meta
+
       # binfmt_misc + QEMU for arm64-on-amd64 emulation. ubuntu-latest does
       # not pre-register QEMU, and setup-buildx-action doesn't either —
       # without this, the first arm64 RUN step fails with "exec format error".
@@ -51,11 +83,13 @@ jobs:
       - uses: docker/bake-action@a66e1c87e2eca0503c343edf1d208c716d54b8a8 # v7.1.0
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          # Git SHA → org.opencontainers.image.revision label.
-          REVISION: ${{ github.sha }}
         with:
           source: .
-          files: ./docker-bake.hcl
-          # Default group → cogmo + devbase + skills, all tagged at VERSION.
+          files: |
+            ./docker-bake.hcl
+            cwd://${{ steps.meta-cogmo.outputs.bake-file }}
+            cwd://${{ steps.meta-devbase.outputs.bake-file }}
+            cwd://${{ steps.meta-skills.outputs.bake-file }}
+          # Default group → cogmo + devbase + skills.
           targets: default
           push: true

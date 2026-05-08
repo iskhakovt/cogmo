@@ -11,9 +11,10 @@
 // model — the answer is always "the same version".
 //
 // Build pipeline:
-//   - publish.yml on release: VERSION=<dunamai>, no overrides — full prod
-//     defaults (multi-arch for cogmo, single-arch for devbase/skills,
-//     attestations on, all caches written).
+//   - publish.yml on release: VERSION=<dunamai>. Three `metadata-action`
+//     calls (one per image) emit per-target bake-files with `tags` (semver
+//     + `latest`) + OCI labels; bake-action layers them on top of this
+//     file, so the empty `*-meta` stubs below populate at runtime.
 //   - images-pr-check.yml on PR: bake verify-only (no push), overrides
 //     cogmo to amd64-only + amd64-only cache scope so PR cost stays low.
 //   - sysbox-e2e.yml: VERSION=test, --load skills, WITH_ATTEST=false. No
@@ -21,14 +22,11 @@
 //   - Local: `docker buildx bake skills` builds with default tag :dev.
 //     For fast amd64-only on cogmo locally, override the same as PR check.
 //
-// LOCAL-DEV NOTE: the runtime defaults to `cogmo-skills:dev` when
-// `process.env.VERSION` is unset. That tag is never published to ghcr.io —
-// it only exists locally after a `docker buildx bake --load skills`. Devs
-// who run `pnpm dev` (or `pnpm test:integration` with sysbox) for the
-// first time and invoke a tier-2 skill must run that bake first. The
-// runner's `ensureImagePresent` will otherwise return a 404 from the
-// registry. The integration test enforces this with a beforeAll inspect
-// + clear error.
+// Local-dev convention: the runtime defaults to `cogmo-{devbase,skills}:latest`
+// when `process.env.VERSION` is unset (publish.yml pushes `:latest` alongside
+// each release semver via metadata-action). Devs iterating on a Dockerfile
+// override the runtime env (`COGMO_SKILLS_IMAGE=cogmo-skills:dev`) and bake
+// the matching tag here.
 
 variable "REGISTRY" {
   default = "ghcr.io/iskhakovt"
@@ -36,13 +34,6 @@ variable "REGISTRY" {
 
 variable "VERSION" {
   default = "dev"
-}
-
-// Git commit SHA of the build. CI sets this from `${{ github.sha }}` so the
-// `org.opencontainers.image.revision` label points at the exact source.
-// Local: empty string is fine (label still emits, just blank).
-variable "REVISION" {
-  default = ""
 }
 
 // Provenance + SBOM produce extra entries in an OCI manifest list. The
@@ -61,6 +52,21 @@ group "default" {
   targets = ["cogmo", "devbase", "skills"]
 }
 
+// Per-image meta targets. publish.yml's three `metadata-action` calls each
+// emit a JSON bake-file that redefines the corresponding `*-meta` with
+// release tags + OCI labels; bake-action layers them on top of this file.
+// Workflows without metadata-action (PR check, sysbox-e2e, local) fall
+// through to these in-file fallback tags.
+target "cogmo-meta" {
+  tags = ["${REGISTRY}/cogmo:${VERSION}"]
+}
+target "devbase-meta" {
+  tags = ["${REGISTRY}/cogmo-devbase:${VERSION}"]
+}
+target "skills-meta" {
+  tags = ["${REGISTRY}/cogmo-skills:${VERSION}"]
+}
+
 target "_common" {
   // Multi-arch is the production default. Apple Silicon dev machines plus
   // Graviton / Ampere / Hetzner CAX cloud consumers all pull the right
@@ -72,23 +78,12 @@ target "_common" {
     "type=provenance,mode=max",
     "type=sbom",
   ] : []
-  // OCI standard image labels. Required by Artifact Hub + various supply-
-  // chain scanners; visible in the GHCR package UI and `crane manifest`.
-  // Previously emitted automatically by `metadata-action`; now explicit
-  // because the bake-only flow doesn't run that action for every target.
-  labels = {
-    "org.opencontainers.image.source"   = "https://github.com/iskhakovt/cogmo"
-    "org.opencontainers.image.revision" = "${REVISION}"
-    "org.opencontainers.image.version"  = "${VERSION}"
-    "org.opencontainers.image.licenses" = "MIT"
-  }
 }
 
 target "cogmo" {
-  inherits   = ["_common"]
+  inherits   = ["_common", "cogmo-meta"]
   context    = "."
   dockerfile = "Dockerfile"
-  tags       = ["${REGISTRY}/cogmo:${VERSION}"]
   args = {
     VERSION = "${VERSION}"
   }
@@ -108,10 +103,9 @@ target "cogmo" {
 }
 
 target "devbase" {
-  inherits   = ["_common"]
+  inherits   = ["_common", "devbase-meta"]
   context    = "./images/devbase"
   dockerfile = "Dockerfile"
-  tags       = ["${REGISTRY}/cogmo-devbase:${VERSION}"]
   // Sysbox amd64-only today — see _common comment. Single-platform cache
   // scope matches the platform.
   platforms  = ["linux/amd64"]
@@ -120,10 +114,9 @@ target "devbase" {
 }
 
 target "skills" {
-  inherits   = ["_common"]
+  inherits   = ["_common", "skills-meta"]
   context    = "./images/skills"
   dockerfile = "Dockerfile"
-  tags       = ["${REGISTRY}/cogmo-skills:${VERSION}"]
   platforms  = ["linux/amd64"]
   cache-from = ["type=gha,scope=skills-amd64"]
   cache-to   = ["type=gha,scope=skills-amd64,mode=max"]
