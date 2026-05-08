@@ -7,7 +7,7 @@ import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Transactor } from "../db/index.js";
 import { createTestDatabase } from "../test/pglite.js";
-import { LocalInProcessSandbox } from "./index.js";
+import { LocalDockerSandboxClient } from "./index.js";
 import { DrizzleSandboxStore } from "./store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "./supervisor.js";
 import type { ResourceLimits } from "./types.js";
@@ -38,7 +38,7 @@ let close: () => Promise<void>;
 let store: DrizzleSandboxStore;
 let docker: Docker;
 let workspaceTmp: string;
-const sandboxes: LocalInProcessSandbox[] = [];
+const sandboxes: LocalDockerSandboxClient[] = [];
 const homeVolumes: string[] = [];
 
 beforeAll(async () => {
@@ -82,12 +82,12 @@ function uniqueName(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-describe.skipIf(!SHOULD_RUN)("LocalInProcessSandbox (sysbox runtime, GHA only)", () => {
+describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only)", () => {
   it("creates a sysbox-runc container and inspects with the right runtime", async () => {
     const inst = await tx((trx) =>
       store.insertInstance(trx, { host: "test-host", pid: process.pid }),
     );
-    const sandbox = await LocalInProcessSandbox.create({
+    const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
       runInTx: tx,
@@ -100,21 +100,20 @@ describe.skipIf(!SHOULD_RUN)("LocalInProcessSandbox (sysbox runtime, GHA only)",
     homeVolumes.push(homeVolume);
     const taskId = "019d0000-0000-7000-8000-0000000000aa";
 
-    const handle = await sandbox.createTaskContainer({
-      rootTaskId: taskId,
-      worktreePath: workspaceTmp,
-      homeVolumeName: homeVolume,
+    const handle = await sandbox.create({
+      taskId,
+      worktree: { hostPath: workspaceTmp },
+      homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
 
-    const inspected = await docker.getContainer(handle.dockerId).inspect();
+    const inspected = await docker.getContainer(handle.state.dockerId).inspect();
     expect(inspected.HostConfig.Runtime).toBe("sysbox-runc");
     expect(inspected.Config.Labels?.[LABEL_INSTANCE]).toBe(inst.id);
 
-    await sandbox.stopTask(taskId);
+    await sandbox.deleteByTaskId(taskId);
   });
 
   it("delivers userns isolation — container root maps to a non-root host uid", async () => {
@@ -126,7 +125,7 @@ describe.skipIf(!SHOULD_RUN)("LocalInProcessSandbox (sysbox runtime, GHA only)",
     const inst = await tx((trx) =>
       store.insertInstance(trx, { host: "test-host", pid: process.pid }),
     );
-    const sandbox = await LocalInProcessSandbox.create({
+    const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
       runInTx: tx,
@@ -139,18 +138,17 @@ describe.skipIf(!SHOULD_RUN)("LocalInProcessSandbox (sysbox runtime, GHA only)",
     homeVolumes.push(homeVolume);
     const taskId = "019d0000-0000-7000-8000-0000000000bb";
 
-    const handle = await sandbox.createTaskContainer({
-      rootTaskId: taskId,
-      worktreePath: workspaceTmp,
-      homeVolumeName: homeVolume,
+    const handle = await sandbox.create({
+      taskId,
+      worktree: { hostPath: workspaceTmp },
+      homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
 
     // Inside the container: `id -u` returns 0 (we run as root).
-    const inExec = await handle.exec(["id", "-u"]);
+    const inExec = await handle.execStreaming(["id", "-u"]);
     const inOut = await readToEnd(inExec.stdout);
     const inResult = await inExec.wait();
     expect(inResult.exitCode).toBe(0);
@@ -161,7 +159,7 @@ describe.skipIf(!SHOULD_RUN)("LocalInProcessSandbox (sysbox runtime, GHA only)",
     // — the second column is the *host-side* uid for inner uid 0. Anything
     // other than `0` proves userns remapping is in effect. Under plain runc
     // (without userns-remap on the daemon) we'd see `0 0 4294967295`.
-    const mapExec = await handle.exec(["cat", "/proc/self/uid_map"]);
+    const mapExec = await handle.execStreaming(["cat", "/proc/self/uid_map"]);
     const mapOut = await readToEnd(mapExec.stdout);
     await mapExec.wait();
     const firstLine = mapOut.trim().split("\n")[0] ?? "";
@@ -170,7 +168,7 @@ describe.skipIf(!SHOULD_RUN)("LocalInProcessSandbox (sysbox runtime, GHA only)",
     const hostUidForRoot = Number.parseInt(cols[1] ?? "-1", 10);
     expect(hostUidForRoot).toBeGreaterThan(0);
 
-    await sandbox.stopTask(taskId);
+    await sandbox.deleteByTaskId(taskId);
   });
 });
 

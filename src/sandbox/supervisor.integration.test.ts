@@ -7,7 +7,7 @@ import Docker from "dockerode";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Transactor } from "../db/index.js";
 import { createTestDatabase } from "../test/pglite.js";
-import { LocalInProcessSandbox } from "./index.js";
+import { LocalDockerSandboxClient } from "./index.js";
 import { DrizzleSandboxStore } from "./store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED, LABEL_ROOT_TASK } from "./supervisor.js";
 import type { ResourceLimits } from "./types.js";
@@ -32,7 +32,7 @@ let store: DrizzleSandboxStore;
 let docker: Docker;
 let workspaceTmp: string;
 const homeVolumes: string[] = [];
-const sandboxes: LocalInProcessSandbox[] = [];
+const sandboxes: LocalDockerSandboxClient[] = [];
 /**
  * Instance ids this test file created — used to scope `afterEach` cleanup
  * so a failing test only deletes containers tagged with one of these
@@ -93,12 +93,12 @@ afterAll(async () => {
   await close();
 });
 
-async function bootSandbox(): Promise<{ sandbox: LocalInProcessSandbox; instanceId: string }> {
+async function bootSandbox(): Promise<{ sandbox: LocalDockerSandboxClient; instanceId: string }> {
   const inst = await tx((trx) =>
     store.insertInstance(trx, { host: "test-host", pid: process.pid }),
   );
   testFileInstanceIds.push(inst.id);
-  const sandbox = await LocalInProcessSandbox.create({
+  const sandbox = await LocalDockerSandboxClient.create({
     docker,
     store,
     runInTx: tx,
@@ -119,7 +119,7 @@ async function readToEnd(stream: NodeJS.ReadableStream): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-describe("LocalInProcessSandbox (real Docker, runc runtime)", () => {
+describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
   it("healthCheck passes when the configured runtime is registered", async () => {
     const { sandbox } = await bootSandbox();
     const result = await sandbox.healthCheck();
@@ -127,26 +127,25 @@ describe("LocalInProcessSandbox (real Docker, runc runtime)", () => {
     expect(result.runtime).toBe("runc");
   });
 
-  it("createTaskContainer applies labels, runtime, binds, and resource caps", async () => {
+  it("create applies labels, runtime, binds, and resource caps", async () => {
     const { sandbox, instanceId } = await bootSandbox();
     const homeVolume = uniqueName("cogmo-task-home");
     homeVolumes.push(homeVolume);
     const taskId = "019d0000-0000-7000-8000-000000000abc";
 
-    const handle = await sandbox.createTaskContainer({
-      rootTaskId: taskId,
-      worktreePath: workspaceTmp,
-      homeVolumeName: homeVolume,
+    const handle = await sandbox.create({
+      taskId,
+      worktree: { hostPath: workspaceTmp },
+      homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
-    expect(handle.dockerId).toBeTruthy();
-    expect(handle.containerRowId).toBeTruthy();
+    expect(handle.state.dockerId).toBeTruthy();
+    expect(handle.state.containerRowId).toBeTruthy();
 
     // Daemon-side verification.
-    const inspected = await docker.getContainer(handle.dockerId).inspect();
+    const inspected = await docker.getContainer(handle.state.dockerId).inspect();
     expect(inspected.State.Status).toBe("running");
     expect(inspected.Config.Labels?.[LABEL_MANAGED]).toBe("true");
     expect(inspected.Config.Labels?.[LABEL_INSTANCE]).toBe(instanceId);
@@ -158,11 +157,11 @@ describe("LocalInProcessSandbox (real Docker, runc runtime)", () => {
     expect(inspected.HostConfig.PidsLimit).toBe(64);
 
     // Cogmo-side verification.
-    const row = await tx((trx) => store.getContainerByDockerId(trx, handle.dockerId));
+    const row = await tx((trx) => store.getContainerByDockerId(trx, handle.state.dockerId));
     expect(row?.status).toBe("running");
     expect(row?.startedAt).toBeInstanceOf(Date);
 
-    await sandbox.stopTask(taskId);
+    await sandbox.deleteByTaskId(taskId);
   });
 
   it("exec runs a command and reports exit code + stdout", async () => {
@@ -171,24 +170,23 @@ describe("LocalInProcessSandbox (real Docker, runc runtime)", () => {
     homeVolumes.push(homeVolume);
     const taskId = "019d0000-0000-7000-8000-00000000bbbb";
 
-    const handle = await sandbox.createTaskContainer({
-      rootTaskId: taskId,
-      worktreePath: workspaceTmp,
-      homeVolumeName: homeVolume,
+    const handle = await sandbox.create({
+      taskId,
+      worktree: { hostPath: workspaceTmp },
+      homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
 
     // The bind mount is visible from inside.
-    const exec = await handle.exec(["cat", "/workspace/marker.txt"]);
+    const exec = await handle.execStreaming(["cat", "/workspace/marker.txt"]);
     const out = await readToEnd(exec.stdout);
     const result = await exec.wait();
     expect(out.trim()).toBe("hello-from-host");
     expect(result.exitCode).toBe(0);
 
-    await sandbox.stopTask(taskId);
+    await sandbox.deleteByTaskId(taskId);
   });
 
   it("exec demultiplexes stdout and stderr separately", async () => {
@@ -197,65 +195,62 @@ describe("LocalInProcessSandbox (real Docker, runc runtime)", () => {
     homeVolumes.push(homeVolume);
     const taskId = "019d0000-0000-7000-8000-00000000cccc";
 
-    const handle = await sandbox.createTaskContainer({
-      rootTaskId: taskId,
-      worktreePath: workspaceTmp,
-      homeVolumeName: homeVolume,
+    const handle = await sandbox.create({
+      taskId,
+      worktree: { hostPath: workspaceTmp },
+      homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
 
-    const exec = await handle.exec(["sh", "-c", "echo to-out; echo to-err >&2; exit 7"]);
+    const exec = await handle.execStreaming(["sh", "-c", "echo to-out; echo to-err >&2; exit 7"]);
     const [out, err] = await Promise.all([readToEnd(exec.stdout), readToEnd(exec.stderr)]);
     const result = await exec.wait();
     expect(out.trim()).toBe("to-out");
     expect(err.trim()).toBe("to-err");
     expect(result.exitCode).toBe(7);
 
-    await sandbox.stopTask(taskId);
+    await sandbox.deleteByTaskId(taskId);
   });
 
-  it("stopTask removes the container and marks the row reaped", async () => {
+  it("deleteByTaskId removes the container and marks the row reaped", async () => {
     const { sandbox } = await bootSandbox();
     const homeVolume = uniqueName("cogmo-task-home");
     homeVolumes.push(homeVolume);
     const taskId = "019d0000-0000-7000-8000-00000000dddd";
 
-    const handle = await sandbox.createTaskContainer({
-      rootTaskId: taskId,
-      worktreePath: workspaceTmp,
-      homeVolumeName: homeVolume,
+    const handle = await sandbox.create({
+      taskId,
+      worktree: { hostPath: workspaceTmp },
+      homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
-    await sandbox.stopTask(taskId);
+    await sandbox.deleteByTaskId(taskId);
 
-    await expect(docker.getContainer(handle.dockerId).inspect()).rejects.toThrow();
-    const row = await tx((trx) => store.getContainerByDockerId(trx, handle.dockerId));
+    await expect(docker.getContainer(handle.state.dockerId).inspect()).rejects.toThrow();
+    const row = await tx((trx) => store.getContainerByDockerId(trx, handle.state.dockerId));
     expect(row?.status).toBe("reaped");
   });
 
-  it("stopTask is idempotent — second call is a no-op", async () => {
+  it("deleteByTaskId is idempotent — second call is a no-op", async () => {
     const { sandbox } = await bootSandbox();
     const homeVolume = uniqueName("cogmo-task-home");
     homeVolumes.push(homeVolume);
     const taskId = "019d0000-0000-7000-8000-00000000eeee";
 
-    await sandbox.createTaskContainer({
-      rootTaskId: taskId,
-      worktreePath: workspaceTmp,
-      homeVolumeName: homeVolume,
+    await sandbox.create({
+      taskId,
+      worktree: { hostPath: workspaceTmp },
+      homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
-    await sandbox.stopTask(taskId);
-    await expect(sandbox.stopTask(taskId)).resolves.toBeUndefined();
+    await sandbox.deleteByTaskId(taskId);
+    await expect(sandbox.deleteByTaskId(taskId)).resolves.toBeUndefined();
   });
 
   it("reconcileCrashedInstances reaps containers labelled with a stale instance id", async () => {
@@ -266,14 +261,13 @@ describe("LocalInProcessSandbox (real Docker, runc runtime)", () => {
     homeVolumes.push(homeVolume);
     const taskId = "019d0000-0000-7000-8000-00000000ffff";
 
-    const handle = await stale.createTaskContainer({
-      rootTaskId: taskId,
-      worktreePath: workspaceTmp,
-      homeVolumeName: homeVolume,
+    const handle = await stale.create({
+      taskId,
+      worktree: { hostPath: workspaceTmp },
+      homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
     await tx((trx) => store.closeInstance(trx, staleId));
 
@@ -281,29 +275,30 @@ describe("LocalInProcessSandbox (real Docker, runc runtime)", () => {
     const result = await current.reconcileCrashedInstances(currentId);
     expect(result.orphansReaped).toBeGreaterThanOrEqual(1);
 
-    await expect(docker.getContainer(handle.dockerId).inspect()).rejects.toThrow();
-    const row = await tx((trx) => store.getContainerByDockerId(trx, handle.dockerId));
+    await expect(docker.getContainer(handle.state.dockerId).inspect()).rejects.toThrow();
+    const row = await tx((trx) => store.getContainerByDockerId(trx, handle.state.dockerId));
     expect(row?.status).toBe("reaped");
   });
 
-  it("inspectContainer returns runtime + status reported by the daemon", async () => {
+  it("inspect (via daemon) returns runtime + status", async () => {
     const { sandbox } = await bootSandbox();
     const homeVolume = uniqueName("cogmo-task-home");
     homeVolumes.push(homeVolume);
     const taskId = "019d0000-0000-7000-8000-000000001111";
 
-    const handle = await sandbox.createTaskContainer({
-      rootTaskId: taskId,
-      worktreePath: workspaceTmp,
-      homeVolumeName: homeVolume,
+    const handle = await sandbox.create({
+      taskId,
+      worktree: { hostPath: workspaceTmp },
+      homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
-    const result = await sandbox.inspectContainer(handle.dockerId);
-    expect(result.runtime).toBe("runc");
-    expect(["running", "created"]).toContain(result.status);
-    await sandbox.stopTask(taskId);
+    // inspectContainer was removed from the public interface; verify
+    // the underlying state by querying the Docker daemon directly.
+    const inspected = await docker.getContainer(handle.state.dockerId).inspect();
+    expect(inspected.HostConfig.Runtime).toBe("runc");
+    expect(["running", "created"]).toContain(inspected.State.Status);
+    await sandbox.deleteByTaskId(taskId);
   });
 });

@@ -17,7 +17,12 @@ import { join } from "node:path";
 import type { Inngest } from "inngest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import type { Sandbox } from "../../sandbox/index.js";
+import {
+  type ExecStreamingHandle,
+  type LocalDockerSessionState,
+  LocalDockerSessionStateSchema,
+  type SandboxClient,
+} from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
@@ -138,54 +143,63 @@ function fakeBackend(events: CodingEvent[]): { backend: CodingBackend; handle: F
   return { backend, handle: { events, responses } };
 }
 
-function fakeSandbox(): { sandbox: Sandbox; stopCalls: string[] } {
+function fakeSandbox(): { sandbox: SandboxClient<LocalDockerSessionState>; stopCalls: string[] } {
   const stopCalls: string[] = [];
-  const sandbox: Sandbox = {
+
+  const noopExec = (): ExecStreamingHandle => ({
+    stdout: process.stdin,
+    stderr: process.stdin,
+    wait: async () => ({ exitCode: 0 }),
+    dispose: async () => {},
+  });
+
+  const session = {
+    state: {
+      type: "local-docker" as const,
+      taskId: "task",
+      containerRowId: "row-x",
+      dockerId: "docker-x",
+    },
+    execStreaming: vi.fn(async () => noopExec()),
+    exec: vi.fn(async () => ({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+      wallTimeSeconds: 0,
+      truncated: false,
+    })),
+  };
+
+  const sandbox: SandboxClient<LocalDockerSessionState> = {
+    backendId: "fake",
+    capabilities: {
+      siblingContainers: "host-proxy",
+      hostBindMount: true,
+      customImage: true,
+      volumes: "docker",
+      workingTreeTransport: "bind-mount",
+    },
     healthCheck: async () => ({ ok: true, runtime: "runc" }),
     reconcileCrashedInstances: async () => ({ orphansReaped: 0 }),
     ensureImagePresent: vi.fn(async () => {}),
-    createTaskContainer: vi.fn(),
-    getTaskContainer: vi.fn(async (id) => ({
-      containerRowId: "row-x",
-      dockerId: id,
-      exec: vi.fn() as any,
-    })),
-    stopTask: vi.fn(async (id: string) => {
+    create: vi.fn(),
+    resume: vi.fn(async () => session),
+    tryResumeByTaskId: vi.fn(async () => session),
+    delete: vi.fn(async () => {}),
+    deleteByTaskId: vi.fn(async (id: string) => {
       stopCalls.push(id);
     }),
-    listContainersForTask: async () => [
-      {
-        id: "row-x",
-        dockerId: "docker-x",
-        parentId: null,
-        rootTaskId: "task",
-        depth: 0,
-        image: "img",
-        runtime: "runc",
-        labels: {
-          "cogmo.managed": "true",
-          "cogmo.instance": instanceId,
-          "cogmo.root_task": "task",
-          "cogmo.parent": "",
-          "cogmo.depth": "0",
-        },
-        resourceLimits: RESOURCE_LIMITS,
-        status: "running",
-        exitCode: null,
-        ttlExpiresAt: new Date(Date.now() + 60_000),
-        startedAt: new Date(),
-        exitedAt: null,
-        instanceId,
-        createdAt: new Date(),
-      },
-    ],
-    inspectContainer: async () => ({ status: "running", runtime: "runc" }),
+    serializeState: (state) => LocalDockerSessionStateSchema.parse(state),
+    deserializeState: (payload) => LocalDockerSessionStateSchema.parse(payload),
     shutdown: async () => {},
   };
   return { sandbox, stopCalls };
 }
 
-function makeDeps(args: { sandbox: Sandbox; backend: CodingBackend }): CodingOrchestratorDeps {
+function makeDeps(args: {
+  sandbox: SandboxClient<LocalDockerSessionState>;
+  backend: CodingBackend;
+}): CodingOrchestratorDeps {
   return {
     runInTx: tx,
     store,

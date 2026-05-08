@@ -52,7 +52,12 @@ import { HostRunner as McpHostRunner } from "./mcp/client/runner.js";
 import { McpRegistryImpl } from "./mcp/registry.js";
 import { DrizzleMcpStore } from "./mcp/store/index.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
-import { CogmoSocketProxy, LocalInProcessSandbox, type Sandbox } from "./sandbox/index.js";
+import {
+  CogmoSocketProxy,
+  LocalDockerSandboxClient,
+  type LocalDockerSessionState,
+  type SandboxClient,
+} from "./sandbox/index.js";
 import { createSandboxReaper } from "./sandbox/reaper.js";
 import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
@@ -122,7 +127,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
 
   // Sandbox is opt-in via SANDBOX_RUNTIME — coding-delegation features fail
   // with a clear error when the env var is unset. No silent fallback.
-  let sandbox: Sandbox | null = null;
+  let sandbox: SandboxClient<LocalDockerSessionState> | null = null;
   let sandboxInstanceId: string | null = null;
   let sandboxDocker: Docker | null = null;
   if (env.SANDBOX_RUNTIME) {
@@ -139,7 +144,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
       hostDockerSocket: env.SANDBOX_HOST_DOCKER_SOCKET,
     });
-    sandbox = await LocalInProcessSandbox.create({
+    sandbox = await LocalDockerSandboxClient.create({
       docker,
       store: sandboxStore,
       runInTx: tx,

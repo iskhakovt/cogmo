@@ -36,11 +36,13 @@ import { GenericContainer, type StartedTestContainer, Wait } from "testcontainer
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import type { StepRun } from "../../inngest/index.js";
-import type {
-  ExecHandle,
-  Sandbox,
-  TaskContainerHandle,
-  TaskContainerSpec,
+import {
+  type ExecStreamingHandle,
+  type LocalDockerSessionState,
+  LocalDockerSessionStateSchema,
+  type SandboxClient,
+  type SandboxSession,
+  type SessionSpec,
 } from "../../sandbox/index.js";
 import {
   type GitHubIdentity,
@@ -216,24 +218,35 @@ const HOST_ASKPASS_BASE = mkdtempSync(join(tmpdir(), "cogmo-int-askpass-"));
  * signing-key path valid.
  */
 function fakeSandbox(opts: { worktreePath: string }): {
-  sandbox: Sandbox;
-  createCalls: TaskContainerSpec[];
+  sandbox: SandboxClient<LocalDockerSessionState>;
+  createCalls: SessionSpec[];
   stopCalls: string[];
 } {
-  const createCalls: TaskContainerSpec[] = [];
+  const createCalls: SessionSpec[] = [];
   const stopCalls: string[] = [];
-  let lastSpec: TaskContainerSpec | null = null;
+  let lastSpec: SessionSpec | null = null;
 
   function rewrite(s: string, hostDir: string, containerDir: string): string {
     return s.split(containerDir).join(hostDir);
   }
 
-  const handle = (spec: TaskContainerSpec): TaskContainerHandle => ({
-    containerRowId: "fake-row",
-    dockerId: `fake-docker-${spec.rootTaskId}`,
-    exec: async (cmd, execOpts) => {
-      const hostDir = spec.askpassMount?.hostDir;
-      const containerDir = spec.askpassMount?.containerDir;
+  const handle = (spec: SessionSpec): SandboxSession<LocalDockerSessionState> => ({
+    state: {
+      type: "local-docker",
+      taskId: spec.taskId,
+      containerRowId: "fake-row",
+      dockerId: `fake-docker-${spec.taskId}`,
+    },
+    exec: async () => ({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+      wallTimeSeconds: 0,
+      truncated: false,
+    }),
+    execStreaming: async (cmd, execOpts) => {
+      const hostDir = spec.askpass?.hostDir;
+      const containerDir = spec.askpass?.containerDir;
       const cwd =
         execOpts?.workingDir === "/workspace"
           ? opts.worktreePath
@@ -262,10 +275,11 @@ function fakeSandbox(opts: { worktreePath: string }): {
 
       const stdoutStream = streamFromBuffer(Buffer.from(stdout));
       const stderrStream = streamFromBuffer(Buffer.from(stderr));
-      const result: ExecHandle = {
+      const result: ExecStreamingHandle = {
         stdout: stdoutStream,
         stderr: stderrStream,
         wait: async () => ({ exitCode }),
+        dispose: async () => {},
       };
       return result;
     },
@@ -273,10 +287,18 @@ function fakeSandbox(opts: { worktreePath: string }): {
 
   return {
     sandbox: {
+      backendId: "fake",
+      capabilities: {
+        siblingContainers: "host-proxy",
+        hostBindMount: true,
+        customImage: true,
+        volumes: "docker",
+        workingTreeTransport: "bind-mount",
+      },
       healthCheck: async () => ({ ok: true, runtime: "runc" }),
       reconcileCrashedInstances: async () => ({ orphansReaped: 0 }),
       ensureImagePresent: vi.fn(async () => {}),
-      createTaskContainer: vi.fn(async (spec) => {
+      create: vi.fn(async (spec) => {
         createCalls.push(spec);
         lastSpec = spec;
         // The askpass helper script's body embeds the *container* path
@@ -284,25 +306,25 @@ function fakeSandbox(opts: { worktreePath: string }): {
         // the host path. Rewrite the helper file on disk so `cat` reads
         // the actual file. Same-shell-quoting kept by the rewrite — the
         // helper just contains the literal path under single quotes.
-        if (spec.askpassMount) {
-          const helperPath = `${spec.askpassMount.hostDir}/helper`;
+        if (spec.askpass) {
+          const helperPath = `${spec.askpass.hostDir}/helper`;
           const original = readFileSync(helperPath, "utf8");
-          const rewritten = original
-            .split(spec.askpassMount.containerDir)
-            .join(spec.askpassMount.hostDir);
+          const rewritten = original.split(spec.askpass.containerDir).join(spec.askpass.hostDir);
           writeFileSync(helperPath, rewritten, { mode: 0o700 });
         }
         return handle(spec);
       }),
-      getTaskContainer: vi.fn(async () => {
-        if (!lastSpec) throw new Error("getTaskContainer called before create");
+      resume: vi.fn(async () => {
+        if (!lastSpec) throw new Error("resume called before create");
         return handle(lastSpec);
       }),
-      stopTask: vi.fn(async (taskId) => {
+      tryResumeByTaskId: vi.fn(async () => null),
+      delete: vi.fn(async () => {}),
+      deleteByTaskId: vi.fn(async (taskId) => {
         stopCalls.push(taskId);
       }),
-      listContainersForTask: async () => [],
-      inspectContainer: async () => ({ status: "running", runtime: "runc" }),
+      serializeState: (state) => LocalDockerSessionStateSchema.parse(state),
+      deserializeState: (payload) => LocalDockerSessionStateSchema.parse(payload),
       shutdown: async () => {},
     },
     createCalls,

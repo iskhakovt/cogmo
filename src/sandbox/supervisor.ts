@@ -5,16 +5,19 @@ import { logger } from "../logger.js";
 import { cleanupAskpass } from "./askpass.js";
 import { taskSliceName } from "./cgroup-parent.js";
 import type {
-  ExecHandle,
   ExecOptions,
-  InspectResult,
-  Sandbox,
-  TaskContainerHandle,
-  TaskContainerSpec,
+  ExecResult,
+  ExecStreamingHandle,
+  LocalDockerSessionState,
+  SandboxCapabilities,
+  SandboxClient,
+  SandboxSession,
+  SessionSpec,
 } from "./index.js";
+import { LocalDockerSessionStateSchema } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import { assertRuntimeAvailable, dockerRuntimeName, type SandboxRuntime } from "./runtime.js";
-import type { ContainerRow, SandboxStore } from "./store/index.js";
+import type { SandboxStore } from "./store/index.js";
 import type { ContainerLabels } from "./types.js";
 
 const log = logger.child({ component: "sandbox" });
@@ -25,6 +28,17 @@ export const LABEL_INSTANCE = "cogmo.instance";
 export const LABEL_ROOT_TASK = "cogmo.root_task";
 export const LABEL_PARENT = "cogmo.parent";
 export const LABEL_DEPTH = "cogmo.depth";
+
+/** Buffered-exec output cap per stream. Configurable via env later if needed. */
+const EXEC_BUFFER_LIMIT_BYTES = 1024 * 1024;
+
+/** Thrown by `dispose()` to settle the exit promise via the stream `'error'` channel. */
+class DisposedError extends Error {
+  constructor() {
+    super("execStreaming dispose called");
+    this.name = "DisposedError";
+  }
+}
 
 interface CreateOptions {
   docker: Docker;
@@ -38,30 +52,38 @@ interface CreateOptions {
    * per-task Unix socket bind-mounted at `/var/run/docker.sock`; child
    * container creation from inside the task (testcontainers, `docker
    * compose`, buildx) flows through the proxy so labels + runtime + cgroup
-   * parent are injected automatically. When omitted, no socket is mounted
-   * and child container creation from inside the task fails (intentional —
-   * slice 1's plan-only path doesn't spawn children).
+   * parent are injected automatically.
    */
   proxy?: CogmoSocketProxy;
   /**
    * Optional host root for per-task `GIT_ASKPASS` material. When set,
-   * `stopTask` calls `cleanupAskpass({ baseDir, rootTaskId })` in the
+   * `delete` calls `cleanupAskpass({ baseDir, taskId })` in the
    * `try/finally` — even tasks that never provisioned askpass material
-   * (e.g. plan-only tasks) get a no-op recursive remove on a non-existent
-   * directory, which is harmless. Provisioning itself happens in the
-   * orchestrator before `createTaskContainer`.
+   * get a no-op recursive remove on a non-existent directory.
    */
   askpassBaseDir?: string;
 }
 
+const CAPABILITIES: SandboxCapabilities = {
+  siblingContainers: "host-proxy",
+  hostBindMount: true,
+  customImage: true,
+  volumes: "docker",
+  workingTreeTransport: "bind-mount",
+};
+
+const HOME_VOLUME_TARGET = "/home/vscode";
+
 /**
- * P1 sandbox: proxy and reaper deferred to slices 3+. This impl only wires
- * `createTaskContainer` (sibling-against-host-daemon, sysbox by default,
- * labelled, bind-mounted) and `stopTask` (cascade kill+remove). Crash
- * recovery is opt-in (call `reconcileCrashedInstances(currentInstanceId)`
- * at boot — kills containers labelled with a different `cogmo.instance`).
+ * Local-Docker backend. Spawns task containers as siblings on the host
+ * Docker daemon with `HostConfig.Runtime = "sysbox-runc"` by default.
+ * Slice-3 features (proxy, cgroup parent, askpass) wired in optionally;
+ * the reaper runs as a separate Inngest cron, not on this client.
  */
-export class LocalInProcessSandbox implements Sandbox {
+export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessionState> {
+  readonly backendId = "local-docker";
+  readonly capabilities = CAPABILITIES;
+
   #docker: Docker;
   #store: SandboxStore;
   #runInTx: Transactor;
@@ -80,9 +102,9 @@ export class LocalInProcessSandbox implements Sandbox {
     if (opts.askpassBaseDir) this.#askpassBaseDir = opts.askpassBaseDir;
   }
 
-  static async create(opts: CreateOptions): Promise<LocalInProcessSandbox> {
+  static async create(opts: CreateOptions): Promise<LocalDockerSandboxClient> {
     await assertRuntimeAvailable(opts.docker, opts.runtime);
-    return new LocalInProcessSandbox(opts);
+    return new LocalDockerSandboxClient(opts);
   }
 
   async healthCheck(): Promise<{ ok: true; runtime: string }> {
@@ -101,9 +123,6 @@ export class LocalInProcessSandbox implements Sandbox {
       await this.#docker.getImage(image).inspect();
       return;
     } catch (err) {
-      // Treat "not found" as the only condition we recover from. Anything
-      // else (daemon unreachable, permission denied) should propagate so the
-      // caller fails fast instead of waiting on a pull that won't succeed.
       const statusCode = (err as { statusCode?: number }).statusCode;
       if (statusCode !== 404) throw err;
     }
@@ -146,36 +165,33 @@ export class LocalInProcessSandbox implements Sandbox {
     return { orphansReaped: reaped };
   }
 
-  async createTaskContainer(spec: TaskContainerSpec): Promise<TaskContainerHandle> {
+  async create(spec: SessionSpec): Promise<SandboxSession<LocalDockerSessionState>> {
     const runtime: "sysbox-runc" | "runc" = spec.allowPrivilegedRunc
       ? "runc"
       : (dockerRuntimeName(this.#runtime) as "sysbox-runc" | "runc");
     const labels: ContainerLabels = {
       [LABEL_MANAGED]: "true",
       [LABEL_INSTANCE]: this.#instanceId,
-      [LABEL_ROOT_TASK]: spec.rootTaskId,
+      [LABEL_ROOT_TASK]: spec.taskId,
       [LABEL_PARENT]: "",
       [LABEL_DEPTH]: "0",
     };
 
-    // Slice 3.0h: every container in the task tree gets pinned under a
-    // shared systemd slice. Docker creates the slice on demand when the
-    // first container references it; the proxy injects the same slice
-    // name on every child create so siblings land in the same subtree.
-    // Per-leaf limits (NanoCpus / Memory / PidsLimit) cap the task
-    // container directly; aggregate-budget enforcement at the slice
-    // level is deferred — see `cgroup-parent.ts` for rationale.
-    const cgroupParent = taskSliceName(spec.rootTaskId);
+    // Every container in the task tree gets pinned under a shared systemd
+    // slice. Docker creates the slice on demand; the proxy injects the
+    // same slice name on every child create so siblings land in the same
+    // subtree. Per-leaf limits (NanoCpus / Memory / PidsLimit) cap the
+    // task container directly; aggregate-budget enforcement at the slice
+    // level is deferred.
+    const cgroupParent = taskSliceName(spec.taskId);
 
     // Pre-allocate the proxy socket so the task container can mount it at
     // `/var/run/docker.sock` from the moment it starts. Parent docker id
     // isn't known yet — register with a placeholder, then upsert below
-    // after `createContainer` returns. Bare scope is enough for any
-    // pre-start child create requests (there shouldn't be any, but the
-    // proxy is up regardless).
+    // after `createContainer` returns.
     const proxySocketPath = this.#proxy
       ? await this.#proxy.registerTask({
-          taskId: spec.rootTaskId,
+          taskId: spec.taskId,
           parentContainerRowId: "",
           parentDockerId: "",
           parentDepth: 0,
@@ -186,51 +202,46 @@ export class LocalInProcessSandbox implements Sandbox {
       : null;
 
     const binds: string[] = [];
-    if (spec.worktreePath) {
-      binds.push(`${spec.worktreePath}:/workspace`);
+    if (spec.worktree) {
+      binds.push(`${spec.worktree.hostPath}:/workspace`);
     }
     if (proxySocketPath) {
       binds.push(`${proxySocketPath}:/var/run/docker.sock`);
     }
-    if (spec.askpassMount) {
-      // Read-only — the in-container helper only `cat`s the secret file;
-      // no process inside the container has any reason to write here, and
-      // the supervisor regenerates the directory on retry rather than
-      // expecting in-container edits to persist.
-      binds.push(`${spec.askpassMount.hostDir}:${spec.askpassMount.containerDir}:ro`);
+    if (spec.askpass) {
+      // Read-only — the in-container helper only `cat`s the secret file.
+      binds.push(`${spec.askpass.hostDir}:${spec.askpass.containerDir}:ro`);
     }
 
-    // Home volume mounted at /home/vscode — coding-delegation contract: task
-    // images run as user `vscode` (devbase inherits this from
-    // mcr.microsoft.com/devcontainers/base:ubuntu-24.04). Skills tier-2 omits
-    // the home volume entirely because the `recycle` isolation contract
-    // forbids any state surviving the task. When slice 4 grows custom
-    // devcontainer support, the mount target needs to become image-declared.
-    const mounts: Docker.MountSettings[] = spec.homeVolumeName
-      ? [{ Type: "volume", Source: spec.homeVolumeName, Target: "/home/vscode" }]
+    // Home volume mounted at /home/vscode — coding-delegation contract:
+    // task images run as user `vscode` (devbase inherits this from
+    // mcr.microsoft.com/devcontainers/base:ubuntu-24.04). Skills tier-2
+    // omits the home volume entirely. When custom devcontainer support
+    // grows, the mount target needs to become image-declared.
+    const mounts: Docker.MountSettings[] = spec.homeVolume
+      ? [{ Type: "volume", Source: spec.homeVolume.volumeName, Target: HOME_VOLUME_TARGET }]
       : [];
 
     let container: Docker.Container;
     try {
       container = await this.#docker.createContainer({
         Image: spec.image,
-        // Hold the container open so we can `exec` claude/codex/python into
-        // it on demand. The CLI runs as a transient exec rather than as PID 1.
+        // Hold the container open so we can `exec` claude/codex/python
+        // into it on demand. The CLI runs as a transient exec rather
+        // than as PID 1.
         Entrypoint: ["/bin/sleep"],
         Cmd: ["infinity"],
         Tty: false,
         OpenStdin: false,
-        // WorkingDir defaults to /workspace when a worktree is bound; falls
-        // back to the image's own default when omitted (skills tier-2 lands
-        // here — the runner's stdin/stdout protocol doesn't depend on cwd).
-        ...(spec.worktreePath && { WorkingDir: "/workspace" }),
+        // WorkingDir defaults to /workspace when a worktree is bound;
+        // falls back to the image's own default when omitted.
+        ...(spec.worktree && { WorkingDir: "/workspace" }),
         Labels: labels,
         HostConfig: {
           Runtime: runtime,
           CgroupParent: cgroupParent,
           Binds: binds,
           Mounts: mounts,
-          // Resource caps. NanoCpus uses billionths of a CPU.
           NanoCpus: Math.round(spec.resourceLimits.cpus * 1_000_000_000),
           Memory: spec.resourceLimits.memory_bytes,
           PidsLimit: spec.resourceLimits.pids,
@@ -238,10 +249,8 @@ export class LocalInProcessSandbox implements Sandbox {
         },
       });
     } catch (err) {
-      // Roll the proxy socket back so a failed retry doesn't see a dangling
-      // registration. unregisterTask is idempotent.
       if (this.#proxy) {
-        await this.#proxy.unregisterTask(spec.rootTaskId).catch(() => {});
+        await this.#proxy.unregisterTask(spec.taskId).catch(() => {});
       }
       throw err;
     }
@@ -250,23 +259,20 @@ export class LocalInProcessSandbox implements Sandbox {
       this.#store.insertContainer(tx, {
         dockerId: container.id,
         parentId: null,
-        rootTaskId: spec.rootTaskId,
+        rootTaskId: spec.taskId,
         depth: 0,
         image: spec.image,
         runtime,
         labels,
         resourceLimits: spec.resourceLimits,
-        ttlExpiresAt: spec.ttl.expiresAt,
+        ttlExpiresAt: spec.expiresAt,
         instanceId: this.#instanceId,
       }),
     );
 
-    // Now that the parent docker id is known, upsert the proxy scope so
-    // child container creates from inside the task get the right
-    // `cogmo.parent` label injected.
     if (this.#proxy) {
       await this.#proxy.registerTask({
-        taskId: spec.rootTaskId,
+        taskId: spec.taskId,
         parentContainerRowId: containerRow.id,
         parentDockerId: container.id,
         parentDepth: 0,
@@ -286,8 +292,6 @@ export class LocalInProcessSandbox implements Sandbox {
         }),
       );
     } catch (err) {
-      // Roll back DB state if start fails — the row is gone but the unstarted
-      // container should be removed too so we don't leak.
       log.error({ err, dockerId: container.id }, "container start failed, removing");
       await this.#runInTx((tx) =>
         this.#store.updateContainerStatus(tx, {
@@ -302,34 +306,73 @@ export class LocalInProcessSandbox implements Sandbox {
         /* best effort */
       });
       if (this.#proxy) {
-        await this.#proxy.unregisterTask(spec.rootTaskId).catch(() => {});
+        await this.#proxy.unregisterTask(spec.taskId).catch(() => {});
       }
       throw err;
     }
 
-    return {
+    return this.#wrapSession({
+      type: "local-docker",
+      taskId: spec.taskId,
       containerRowId: containerRow.id,
       dockerId: container.id,
-      exec: (cmd, opts) => this.#exec(container.id, cmd, opts),
-    };
+    });
   }
 
-  async getTaskContainer(dockerId: string): Promise<TaskContainerHandle> {
-    // Verifies the container is still present on the daemon — bare construction
-    // would silently produce a handle whose exec calls would 404.
-    await this.#docker.getContainer(dockerId).inspect();
-    const row = await this.#runInTx((tx) => this.#store.getContainerByDockerId(tx, dockerId));
-    if (!row) throw new Error(`getTaskContainer: no DB row for docker id ${dockerId}`);
-    return {
-      containerRowId: row.id,
-      dockerId,
-      exec: (cmd, opts) => this.#exec(dockerId, cmd, opts),
-    };
+  async resume(state: LocalDockerSessionState): Promise<SandboxSession<LocalDockerSessionState>> {
+    // Verifies the container is still present on the daemon — bare
+    // construction would silently produce a session whose exec calls
+    // would 404.
+    await this.#docker.getContainer(state.dockerId).inspect();
+    const row = await this.#runInTx((tx) => this.#store.getContainerByDockerId(tx, state.dockerId));
+    if (!row) {
+      throw new Error(`resume: no DB row for docker id ${state.dockerId}`);
+    }
+    return this.#wrapSession(state);
   }
 
-  async stopTask(rootTaskId: string): Promise<void> {
-    const rows = await this.#runInTx((tx) => this.#store.listContainersForTask(tx, rootTaskId));
-    // Cascade order: deepest first, so a parent isn't reaped while a child still depends on it.
+  async tryResumeByTaskId(taskId: string): Promise<SandboxSession<LocalDockerSessionState> | null> {
+    const rows = await this.#runInTx((tx) => this.#store.listContainersForTask(tx, taskId));
+    if (rows.length === 0) return null;
+    // Filter to depth=0 — the contract is "root session", not "any
+    // descendant". Children (testcontainers, docker compose siblings)
+    // share `rootTaskId` for cascade-reap purposes; a task that
+    // spawned them must not resume into one of them.
+    // `listContainersForTask` returns DESC depth so iterate filtered.
+    for (const row of rows) {
+      if (row.depth !== 0) continue;
+      // Skip rows the supervisor already marked terminal — the
+      // container won't be coming back. `starting` stays in scope
+      // because rows are inserted in that state before Docker reports
+      // running; a fast follow-up could find it mid-bring-up.
+      if (row.status !== "running" && row.status !== "starting") continue;
+      try {
+        const inspected = await this.#docker.getContainer(row.dockerId).inspect();
+        if (inspected.State.Status !== "running") continue;
+        return this.#wrapSession({
+          type: "local-docker",
+          taskId,
+          containerRowId: row.id,
+          dockerId: row.dockerId,
+        });
+      } catch (err) {
+        // 404 = container gone (reaper got it); skip to the next
+        // candidate or fall through to "no live session".
+        const statusCode = (err as { statusCode?: number }).statusCode;
+        if (statusCode !== 404) throw err;
+      }
+    }
+    return null;
+  }
+
+  async delete(session: SandboxSession<LocalDockerSessionState>): Promise<void> {
+    await this.deleteByTaskId(session.state.taskId);
+  }
+
+  async deleteByTaskId(taskId: string): Promise<void> {
+    const rows = await this.#runInTx((tx) => this.#store.listContainersForTask(tx, taskId));
+    // Cascade order: deepest first, so a parent isn't reaped while a
+    // child still depends on it.
     const ordered = [...rows].sort((a, b) => b.depth - a.depth);
     try {
       for (const row of ordered) {
@@ -347,32 +390,28 @@ export class LocalInProcessSandbox implements Sandbox {
       // Tear down the per-task proxy socket regardless of whether the
       // cascade reap succeeded — leaving the socket file around (and the
       // listener bound) leaks resources across crashes. Idempotent: safe
-      // when no proxy is configured or when the task was never registered.
+      // when no proxy is configured or when the task was never
+      // registered.
       if (this.#proxy) {
-        await this.#proxy.unregisterTask(rootTaskId).catch((err: unknown) => {
-          log.warn({ err, taskId: rootTaskId }, "proxy unregisterTask failed during stopTask");
+        await this.#proxy.unregisterTask(taskId).catch((err: unknown) => {
+          log.warn({ err, taskId }, "proxy unregisterTask failed during delete");
         });
       }
       // Wipe per-task askpass material. Idempotent — a missing directory
-      // (no provisioning happened, or already cleaned up by a previous
-      // stopTask call on retry) is a no-op. Failure is logged inside
-      // `cleanupAskpass`; we never throw out of the finally.
+      // is a no-op. Failure is logged inside `cleanupAskpass`; we never
+      // throw out of the finally.
       if (this.#askpassBaseDir) {
-        cleanupAskpass({ baseDir: this.#askpassBaseDir, rootTaskId });
+        cleanupAskpass({ baseDir: this.#askpassBaseDir, rootTaskId: taskId });
       }
     }
   }
 
-  async listContainersForTask(rootTaskId: string): Promise<readonly ContainerRow[]> {
-    return this.#runInTx((tx) => this.#store.listContainersForTask(tx, rootTaskId));
+  serializeState(state: LocalDockerSessionState): Record<string, unknown> {
+    return LocalDockerSessionStateSchema.parse(state);
   }
 
-  async inspectContainer(dockerId: string): Promise<InspectResult> {
-    const inspected = await this.#docker.getContainer(dockerId).inspect();
-    return {
-      status: inspected.State.Status,
-      runtime: inspected.HostConfig.Runtime ?? "runc",
-    };
+  deserializeState(payload: Record<string, unknown>): LocalDockerSessionState {
+    return LocalDockerSessionStateSchema.parse(payload);
   }
 
   async shutdown(): Promise<void> {
@@ -386,67 +425,13 @@ export class LocalInProcessSandbox implements Sandbox {
     }
   }
 
-  async #exec(
-    dockerId: string,
-    cmd: readonly string[],
-    opts: ExecOptions = {},
-  ): Promise<ExecHandle> {
-    const container = this.#docker.getContainer(dockerId);
-    const env = opts.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined;
-    const exec = await container.exec({
-      Cmd: [...cmd],
-      AttachStdout: true,
-      AttachStderr: true,
-      AttachStdin: opts.attachStdin === true,
-      Tty: false,
-      WorkingDir: opts.workingDir,
-      User: opts.user,
-      Env: env,
-    });
-    const stream = await exec.start({
-      hijack: true,
-      stdin: opts.attachStdin === true,
-    });
-
-    const stdout = new PassThrough();
-    const stderr = new PassThrough();
-    this.#docker.modem.demuxStream(stream, stdout, stderr);
-
-    // Capture the exit eagerly — listeners attached after `'end'` already
-    // fired wouldn't trigger, which deadlocks any caller that reads stdout
-    // before calling wait().
-    const exitPromise = new Promise<{ exitCode: number }>((resolve, reject) => {
-      stream.on("end", async () => {
-        stdout.end();
-        stderr.end();
-        try {
-          const info = await exec.inspect();
-          resolve({ exitCode: info.ExitCode ?? 0 });
-        } catch (err) {
-          reject(err as Error);
-        }
-      });
-      stream.on("error", (err: Error) => {
-        stdout.destroy(err);
-        stderr.destroy(err);
-        reject(err);
-      });
-    });
-    // Suppress Node's unhandled-rejection process crash if the caller never
-    // awaits wait() (e.g. exec started but caller bailed before processing
-    // events). The error stays observable through wait() and through the
-    // destroyed stdout/stderr streams.
-    exitPromise.catch(() => {});
-
-    const handle: ExecHandle = {
-      stdout: stdout as Readable,
-      stderr: stderr as Readable,
-      wait: () => exitPromise,
+  #wrapSession(state: LocalDockerSessionState): SandboxSession<LocalDockerSessionState> {
+    const docker = this.#docker;
+    return {
+      state,
+      exec: (cmd, opts) => execBuffered(docker, state.dockerId, cmd, opts),
+      execStreaming: (cmd, opts) => execStreaming(docker, state.dockerId, cmd, opts),
     };
-    // dockerode's hijacked exec stream is bidirectional and structurally a
-    // Writable, but @types/dockerode types it as a generic Duplex.
-    if (opts.attachStdin === true) handle.stdin = stream as unknown as Writable;
-    return handle;
   }
 
   async #killAndRemove(dockerId: string): Promise<void> {
@@ -468,7 +453,170 @@ export class LocalInProcessSandbox implements Sandbox {
 }
 
 /**
+ * Run a command and buffer the output. Caps stdout / stderr at
+ * `EXEC_BUFFER_LIMIT_BYTES` per stream; consumers expecting more use
+ * `execStreaming` instead.
+ */
+async function execBuffered(
+  docker: Docker,
+  dockerId: string,
+  cmd: readonly string[],
+  opts: ExecOptions = {},
+): Promise<ExecResult> {
+  const start = Date.now();
+  const handle = await execStreaming(docker, dockerId, cmd, opts);
+  const stdoutBuf = new BoundedBuffer(EXEC_BUFFER_LIMIT_BYTES);
+  const stderrBuf = new BoundedBuffer(EXEC_BUFFER_LIMIT_BYTES);
+  handle.stdout.on("data", (chunk: Buffer) => stdoutBuf.push(chunk));
+  handle.stderr.on("data", (chunk: Buffer) => stderrBuf.push(chunk));
+  const { exitCode } = await handle.wait();
+  const truncated = stdoutBuf.truncated || stderrBuf.truncated;
+  return {
+    stdout: stdoutBuf.toString(),
+    stderr: stderrBuf.toString(),
+    exitCode,
+    wallTimeSeconds: (Date.now() - start) / 1000,
+    truncated,
+  };
+}
+
+/**
+ * Byte-cap buffer for buffered exec output. The cap is applied at the
+ * byte level, so a chunk that ends mid-character is truncated at the
+ * byte boundary — `toString("utf8")` then renders the trailing partial
+ * sequence as a U+FFFD replacement character. The output is already
+ * marked `truncated` by that point and the user-visible signal is the
+ * marker, not the exact tail bytes; cleaning the boundary would mean
+ * walking back the cut to the previous valid UTF-8 lead byte. Not
+ * worth the complexity for a debug-shape buffer.
+ */
+class BoundedBuffer {
+  #chunks: Buffer[] = [];
+  #size = 0;
+  #limit: number;
+  truncated = false;
+
+  constructor(limit: number) {
+    this.#limit = limit;
+  }
+
+  push(chunk: Buffer): void {
+    if (this.#size >= this.#limit) {
+      this.truncated = true;
+      return;
+    }
+    const remaining = this.#limit - this.#size;
+    if (chunk.length <= remaining) {
+      this.#chunks.push(chunk);
+      this.#size += chunk.length;
+      return;
+    }
+    this.#chunks.push(chunk.subarray(0, remaining));
+    this.#size = this.#limit;
+    this.truncated = true;
+  }
+
+  toString(): string {
+    return Buffer.concat(this.#chunks).toString("utf8");
+  }
+}
+
+async function execStreaming(
+  docker: Docker,
+  dockerId: string,
+  cmd: readonly string[],
+  opts: ExecOptions = {},
+): Promise<ExecStreamingHandle> {
+  const container = docker.getContainer(dockerId);
+  const env = opts.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined;
+  const exec = await container.exec({
+    Cmd: [...cmd],
+    AttachStdout: true,
+    AttachStderr: true,
+    AttachStdin: opts.attachStdin === true,
+    Tty: false,
+    WorkingDir: opts.workingDir,
+    User: opts.user,
+    Env: env,
+  });
+  const stream = await exec.start({
+    hijack: true,
+    stdin: opts.attachStdin === true,
+  });
+
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  docker.modem.demuxStream(stream, stdout, stderr);
+
+  // Capture the exit eagerly — listeners attached after `'end'` already
+  // fired wouldn't trigger, which deadlocks any caller that reads stdout
+  // before calling wait().
+  const exitPromise = new Promise<{ exitCode: number }>((resolve, reject) => {
+    stream.on("end", async () => {
+      stdout.end();
+      stderr.end();
+      try {
+        const info = await exec.inspect();
+        resolve({ exitCode: info.ExitCode ?? 0 });
+      } catch (err) {
+        reject(err as Error);
+      }
+    });
+    stream.on("error", (err: Error) => {
+      if (err instanceof DisposedError) {
+        // Intentional teardown via `dispose()` — close downstream
+        // streams peacefully so consumers see EOF, not an error. The
+        // upstream socket is already gone by the time we get here.
+        stdout.end();
+        stderr.end();
+      } else {
+        // Real upstream error — forward so consumers reading the
+        // demuxed PassThroughs see the same failure.
+        stdout.destroy(err);
+        stderr.destroy(err);
+      }
+      reject(err);
+    });
+  });
+  // Suppress Node's unhandled-rejection process crash if the caller
+  // never awaits wait() (e.g. exec started but caller bailed before
+  // processing events). The error stays observable through wait() and
+  // through the destroyed stdout/stderr streams.
+  exitPromise.catch(() => {});
+
+  let disposed = false;
+  const dispose = async (): Promise<void> => {
+    if (disposed) return;
+    disposed = true;
+    // Closing the hijacked stream causes the daemon to reap the exec
+    // process. Docker's exec API doesn't expose a direct kill, but
+    // socket close is the documented teardown path. Pass an error so
+    // the stream's `'error'` handler fires and `exitPromise` settles —
+    // a bare `destroy()` would emit only `'close'`, leaving the promise
+    // pending and `dispose()` awaiting forever.
+    stream.destroy(new DisposedError());
+    // Wait for the exit channel to settle (success or error) — keeps
+    // disposers idempotent and prevents callers seeing pending Promises.
+    await exitPromise.catch(() => {
+      /* errors during dispose are expected — caller already gave up */
+    });
+  };
+
+  const handle: ExecStreamingHandle = {
+    stdout: stdout as Readable,
+    stderr: stderr as Readable,
+    wait: () => exitPromise,
+    dispose,
+  };
+  // dockerode's hijacked exec stream is bidirectional and structurally a
+  // Writable, but @types/dockerode types it as a generic Duplex.
+  if (opts.attachStdin === true) handle.stdin = stream as unknown as Writable;
+  return handle;
+}
+
+/**
  * Factory shorthand. Same shape as the other module factories
  * (`startTelegramAdapter`, `createSecretsStore`, etc.).
  */
-export const createSandbox: typeof LocalInProcessSandbox.create = LocalInProcessSandbox.create;
+export const createSandboxClient: typeof LocalDockerSandboxClient.create =
+  LocalDockerSandboxClient.create;

@@ -1,6 +1,10 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import type { ExecHandle, TaskContainerHandle } from "../../sandbox/index.js";
+import type {
+  ExecStreamingHandle,
+  LocalDockerSessionState,
+  SandboxSession,
+} from "../../sandbox/index.js";
 import type { CodingEvent } from "./backend.js";
 import { ClaudeCodeBackend } from "./claude.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
@@ -14,11 +18,11 @@ function fakeContainer(
   fixture: string,
   exitCode = 0,
 ): {
-  container: TaskContainerHandle;
+  container: SandboxSession<LocalDockerSessionState>;
   stdinChunks: string[];
 } {
   const stdinChunks: string[] = [];
-  const exec = vi.fn(async (): Promise<ExecHandle> => {
+  const execStreaming = vi.fn(async (): Promise<ExecStreamingHandle> => {
     const stdout = new PassThrough();
     const stderr = new PassThrough();
     const stdin: Writable = new PassThrough();
@@ -37,13 +41,25 @@ function fakeContainer(
       stdout: stdout as Readable,
       stderr: stderr as Readable,
       wait: async () => ({ exitCode }),
+      dispose: async () => {},
     };
   });
   return {
     container: {
-      containerRowId: "c",
-      dockerId: "d",
-      exec,
+      state: {
+        type: "local-docker",
+        taskId: "t",
+        containerRowId: "c",
+        dockerId: "d",
+      },
+      exec: vi.fn(async () => ({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+        wallTimeSeconds: 0,
+        truncated: false,
+      })),
+      execStreaming,
     },
     stdinChunks,
   };
@@ -149,7 +165,7 @@ describe("ClaudeCodeBackend.plan", () => {
     const backend = new ClaudeCodeBackend();
     await collect(backend.plan({ task, repo, container }));
 
-    const exec = container.exec as ReturnType<typeof vi.fn>;
+    const exec = container.execStreaming as ReturnType<typeof vi.fn>;
     expect(exec).toHaveBeenCalledTimes(1);
     const [cmd, opts] = exec.mock.calls[0];
     expect(cmd[0]).toBe("claude");
@@ -300,7 +316,7 @@ describe("ClaudeCodeBackend.execute", () => {
     const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
     await collect(handle.events);
 
-    const exec = container.exec as ReturnType<typeof vi.fn>;
+    const exec = container.execStreaming as ReturnType<typeof vi.fn>;
     expect(exec).toHaveBeenCalledTimes(1);
     const [cmd] = exec.mock.calls[0];
     expect(cmd[0]).toBe("claude");

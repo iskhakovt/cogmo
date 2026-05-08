@@ -8,7 +8,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../db/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { LocalInProcessSandbox } from "./index.js";
+import { LocalDockerSandboxClient } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import type { TaskScope } from "./proxy/types.js";
 import { DrizzleSandboxStore } from "./store/index.js";
@@ -100,13 +100,14 @@ function fakeProxy(): {
   };
 }
 
-describe("LocalInProcessSandbox — proxy wiring", () => {
+describe("LocalDockerSandboxClient — proxy wiring", () => {
   it("registers the proxy with placeholder, then upserts the parent docker id", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, calls } = fakeDocker({ dockerId: "docker-task-xyz" });
     const { proxy, registers } = fakeProxy();
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
-    const sandbox = await LocalInProcessSandbox.create({
+    const sandbox = await LocalDockerSandboxClient.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
       runInTx: tx,
@@ -116,16 +117,15 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     });
 
     const taskId = "019d0000-0000-7000-8000-000000000aaa";
-    const handle = await sandbox.createTaskContainer({
-      rootTaskId: taskId,
-      worktreePath: "/tmp/wt",
-      homeVolumeName: "vol-1",
+    const handle = await sandbox.create({
+      taskId,
+      worktree: { hostPath: "/tmp/wt" },
+      homeVolume: { volumeName: "vol-1" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
-    expect(handle.dockerId).toBe("docker-task-xyz");
+    expect(handle.state.dockerId).toBe("docker-task-xyz");
 
     // Two register calls: pre-create placeholder, post-create upsert.
     expect(registers).toHaveLength(2);
@@ -160,7 +160,8 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     const { docker } = fakeDocker({ dockerId: "docker-x" });
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const { proxy, unregisters } = fakeProxy();
-    const sandbox = await LocalInProcessSandbox.create({
+    const sandbox = await LocalDockerSandboxClient.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
       runInTx: tx,
@@ -169,16 +170,15 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
       proxy,
     });
 
-    await sandbox.createTaskContainer({
-      rootTaskId: "019d0000-0000-7000-8000-000000000bbb",
-      worktreePath: "/tmp/wt",
-      homeVolumeName: "vol-2",
+    await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-000000000bbb",
+      worktree: { hostPath: "/tmp/wt" },
+      homeVolume: { volumeName: "vol-2" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
-    await sandbox.stopTask("019d0000-0000-7000-8000-000000000bbb");
+    await sandbox.deleteByTaskId("019d0000-0000-7000-8000-000000000bbb");
     expect(unregisters).toEqual(["019d0000-0000-7000-8000-000000000bbb"]);
   });
 
@@ -190,7 +190,8 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
       throw new Error("daemon refused");
     });
     const { proxy, registers, unregisters } = fakeProxy();
-    const sandbox = await LocalInProcessSandbox.create({
+    const sandbox = await LocalDockerSandboxClient.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
       runInTx: tx,
@@ -200,14 +201,13 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     });
 
     await expect(
-      sandbox.createTaskContainer({
-        rootTaskId: "019d0000-0000-7000-8000-000000000ccc",
-        worktreePath: "/tmp/wt",
-        homeVolumeName: "vol-3",
+      sandbox.create({
+        taskId: "019d0000-0000-7000-8000-000000000ccc",
+        worktree: { hostPath: "/tmp/wt" },
+        homeVolume: { volumeName: "vol-3" },
         image: "alpine",
         resourceLimits: RESOURCE_LIMITS,
-        ttl: { expiresAt: new Date(Date.now() + 60_000) },
-        allowPrivilegedRunc: false,
+        expiresAt: new Date(Date.now() + 60_000),
       }),
     ).rejects.toThrow("daemon refused");
 
@@ -220,7 +220,8 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     const { docker } = fakeDocker({ dockerId: "docker-fail-start", failStart: true });
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const { proxy, registers, unregisters } = fakeProxy();
-    const sandbox = await LocalInProcessSandbox.create({
+    const sandbox = await LocalDockerSandboxClient.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
       runInTx: tx,
@@ -230,14 +231,13 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     });
 
     await expect(
-      sandbox.createTaskContainer({
-        rootTaskId: "019d0000-0000-7000-8000-000000000ddd",
-        worktreePath: "/tmp/wt",
-        homeVolumeName: "vol-4",
+      sandbox.create({
+        taskId: "019d0000-0000-7000-8000-000000000ddd",
+        worktree: { hostPath: "/tmp/wt" },
+        homeVolume: { volumeName: "vol-4" },
         image: "alpine",
         resourceLimits: RESOURCE_LIMITS,
-        ttl: { expiresAt: new Date(Date.now() + 60_000) },
-        allowPrivilegedRunc: false,
+        expiresAt: new Date(Date.now() + 60_000),
       }),
     ).rejects.toThrow("boom");
 
@@ -252,7 +252,8 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, calls } = fakeDocker({ dockerId: "docker-no-proxy" });
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
-    const sandbox = await LocalInProcessSandbox.create({
+    const sandbox = await LocalDockerSandboxClient.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
       runInTx: tx,
@@ -261,14 +262,13 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
       // proxy intentionally omitted
     });
 
-    await sandbox.createTaskContainer({
-      rootTaskId: "019d0000-0000-7000-8000-000000000eee",
-      worktreePath: "/tmp/wt",
-      homeVolumeName: "vol-5",
+    await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-000000000eee",
+      worktree: { hostPath: "/tmp/wt" },
+      homeVolume: { volumeName: "vol-5" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
 
     const binds = calls.create[0].HostConfig?.Binds ?? [];
@@ -280,7 +280,8 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker, calls } = fakeDocker({ dockerId: "docker-askpass" });
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
-    const sandbox = await LocalInProcessSandbox.create({
+    const sandbox = await LocalDockerSandboxClient.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
       runInTx: tx,
@@ -288,15 +289,14 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
       instanceId: inst.id,
     });
 
-    await sandbox.createTaskContainer({
-      rootTaskId: "019d0000-0000-7000-8000-000000000fff",
-      worktreePath: "/tmp/wt",
-      homeVolumeName: "vol-ap",
+    await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-000000000fff",
+      worktree: { hostPath: "/tmp/wt" },
+      homeVolume: { volumeName: "vol-ap" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
-      askpassMount: {
+      expiresAt: new Date(Date.now() + 60_000),
+      askpass: {
         hostDir: "/run/cogmo/askpass/019d0000-0000-7000-8000-000000000fff",
         containerDir: "/.cogmo-askpass",
       },
@@ -321,7 +321,8 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-stopAskpass" });
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
-    const sandbox = await LocalInProcessSandbox.create({
+    const sandbox = await LocalDockerSandboxClient.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
       runInTx: tx,
@@ -330,18 +331,17 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
       askpassBaseDir: baseDir,
     });
 
-    await sandbox.createTaskContainer({
-      rootTaskId: "019d0000-0000-7000-8000-000000abcdef",
-      worktreePath: "/tmp/wt",
-      homeVolumeName: "vol-stop-askpass",
+    await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-000000abcdef",
+      worktree: { hostPath: "/tmp/wt" },
+      homeVolume: { volumeName: "vol-stop-askpass" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
     expect(existsSync(taskDir)).toBe(true);
 
-    await sandbox.stopTask("019d0000-0000-7000-8000-000000abcdef");
+    await sandbox.deleteByTaskId("019d0000-0000-7000-8000-000000abcdef");
     expect(existsSync(taskDir)).toBe(false);
 
     rmSync(baseDir, { recursive: true, force: true });
@@ -383,7 +383,8 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
       getContainer: () => ({ inspect, kill, remove }),
       info: vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } })),
     };
-    const sandbox = await LocalInProcessSandbox.create({
+    const sandbox = await LocalDockerSandboxClient.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
       runInTx: tx,
@@ -392,20 +393,19 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
       askpassBaseDir: baseDir,
     });
 
-    await sandbox.createTaskContainer({
-      rootTaskId: taskId,
-      worktreePath: "/tmp/wt",
-      homeVolumeName: "vol-killfail",
+    await sandbox.create({
+      taskId,
+      worktree: { hostPath: "/tmp/wt" },
+      homeVolume: { volumeName: "vol-killfail" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
     expect(existsSync(taskDir)).toBe(true);
 
     // The thrown kill error escapes stopTask (the finally re-raises after
     // running cleanup), but the askpass dir must already be gone by then.
-    await expect(sandbox.stopTask(taskId)).rejects.toThrow("daemon i/o error");
+    await expect(sandbox.deleteByTaskId(taskId)).rejects.toThrow("daemon i/o error");
     expect(kill).toHaveBeenCalled();
     expect(existsSync(taskDir)).toBe(false);
 
@@ -416,7 +416,8 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker({ dockerId: "docker-noaskpass" });
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
-    const sandbox = await LocalInProcessSandbox.create({
+    const sandbox = await LocalDockerSandboxClient.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
       runInTx: tx,
@@ -424,17 +425,16 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
       instanceId: inst.id,
     });
 
-    await sandbox.createTaskContainer({
-      rootTaskId: "019d0000-0000-7000-8000-0000000fffff",
-      worktreePath: "/tmp/wt",
-      homeVolumeName: "vol-no-askpass",
+    await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-0000000fffff",
+      worktree: { hostPath: "/tmp/wt" },
+      homeVolume: { volumeName: "vol-no-askpass" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
-      ttl: { expiresAt: new Date(Date.now() + 60_000) },
-      allowPrivilegedRunc: false,
+      expiresAt: new Date(Date.now() + 60_000),
     });
     // Just shouldn't throw — there's nothing on disk to clean.
-    await sandbox.stopTask("019d0000-0000-7000-8000-0000000fffff");
+    await sandbox.deleteByTaskId("019d0000-0000-7000-8000-0000000fffff");
   });
 
   it("shutdown closes the proxy", async () => {
@@ -442,7 +442,8 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     const { docker } = fakeDocker();
     docker.info = vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } }));
     const { proxy } = fakeProxy();
-    const sandbox = await LocalInProcessSandbox.create({
+    const sandbox = await LocalDockerSandboxClient.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
       docker: docker as any,
       store,
       runInTx: tx,
@@ -452,5 +453,75 @@ describe("LocalInProcessSandbox — proxy wiring", () => {
     });
     await sandbox.shutdown();
     expect(proxy.close).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
+  /**
+   * Regression test for the dispose-hang bug: a bare `stream.destroy()`
+   * emits only `'close'`, neither `'end'` nor `'error'`. The exit
+   * promise listens on the latter two; if dispose closes the stream
+   * without an error, the promise never settles and `dispose()` waits
+   * forever. Fix: pass an error so the `'error'` handler fires.
+   */
+  it("resolves promptly when called on a stream that won't end naturally", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+
+    // Hijacked stream that never emits 'end' or 'error' on its own —
+    // mimics a long-running exec that's still attached to the daemon.
+    const { PassThrough } = await import("node:stream");
+    const hijack = new PassThrough();
+    const execObj = {
+      start: vi.fn(async () => hijack),
+      inspect: vi.fn(async () => ({ ExitCode: 137 })),
+    };
+    const containerObj = {
+      exec: vi.fn(async () => execObj),
+      inspect: vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} })),
+      kill: vi.fn(),
+      remove: vi.fn(),
+    };
+    const docker = {
+      info: vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } })),
+      createContainer: vi.fn(async () => ({
+        id: "docker-dispose",
+        start: vi.fn(),
+        remove: vi.fn(),
+        inspect: vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} })),
+      })),
+      getContainer: vi.fn(() => containerObj),
+      listContainers: vi.fn(async () => []),
+      // demuxStream is normally dockerode's frame parser — bypass it
+      // since we're not feeding real Docker frames.
+      modem: { demuxStream: vi.fn() },
+    };
+    const sandbox = await LocalDockerSandboxClient.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
+      docker: docker as any,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    const session = await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-00000000d150",
+      image: "alpine",
+      resourceLimits: RESOURCE_LIMITS,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const handle = await session.execStreaming(["sleep", "infinity"]);
+
+    // Race dispose against a short timeout. Pre-fix this race was lost
+    // (dispose hung); post-fix it resolves in milliseconds.
+    const TIMEOUT_MS = 500;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const timeout = new Promise<"timeout">((resolve) => {
+      timeoutHandle = setTimeout(() => resolve("timeout"), TIMEOUT_MS);
+    });
+    const winner = await Promise.race([handle.dispose().then(() => "done" as const), timeout]);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+
+    expect(winner).toBe("done");
   });
 });

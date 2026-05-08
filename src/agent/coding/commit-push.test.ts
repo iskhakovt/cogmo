@@ -1,6 +1,11 @@
 import { PassThrough, type Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import type { ExecHandle, ExecOptions, TaskContainerHandle } from "../../sandbox/index.js";
+import type {
+  ExecOptions,
+  ExecStreamingHandle,
+  LocalDockerSessionState,
+  SandboxSession,
+} from "../../sandbox/index.js";
 import { runCommitAndPush } from "./commit-push.js";
 
 interface FakeExecResult {
@@ -9,7 +14,7 @@ interface FakeExecResult {
   exitCode?: number;
 }
 
-function fakeExec(result: FakeExecResult): ExecHandle {
+function fakeExec(result: FakeExecResult): ExecStreamingHandle {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   if (result.stdout) stdout.write(result.stdout);
@@ -20,6 +25,7 @@ function fakeExec(result: FakeExecResult): ExecHandle {
     stdout: stdout as Readable,
     stderr: stderr as Readable,
     wait: vi.fn(async () => ({ exitCode: result.exitCode ?? 0 })),
+    dispose: vi.fn(async () => {}),
   };
 }
 
@@ -38,7 +44,7 @@ function fakeContainer(script: Record<string, FakeExecResult | FakeExecResult[]>
   const calls: RecordedCall[] = [];
   const cursors: Record<string, number> = {};
 
-  const exec = vi.fn(async (cmd: ReadonlyArray<string>, opts?: ExecOptions) => {
+  const execStreaming = vi.fn(async (cmd: ReadonlyArray<string>, opts?: ExecOptions) => {
     calls.push({ args: cmd, workingDir: opts?.workingDir, env: opts?.env });
     if (cmd[0] !== "git") {
       throw new Error(`unexpected exec: ${cmd.join(" ")}`);
@@ -63,7 +69,10 @@ function fakeContainer(script: Record<string, FakeExecResult | FakeExecResult[]>
   });
 
   return {
-    container: { exec } as unknown as Pick<TaskContainerHandle, "exec">,
+    container: { execStreaming } as unknown as Pick<
+      SandboxSession<LocalDockerSessionState>,
+      "execStreaming"
+    >,
     calls,
   };
 }
