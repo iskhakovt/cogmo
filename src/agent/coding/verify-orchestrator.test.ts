@@ -156,6 +156,9 @@ let secrets: FakeSecretsStore;
 beforeEach(() => {
   secrets = new FakeSecretsStore();
   secrets.set(gitHubIdentitySecretName("default"), serializeGitHubIdentity(VALID_IDENTITY));
+  // Subscription auth: verify-orchestrator now demands the OAuth token
+  // before it'll create a container (see auth.ts → loadCodingSandboxEnv).
+  secrets.set("claude_code_oauth_token", "sk-test-claude-code-oauth-token");
 });
 
 async function seedTask(opts?: {
@@ -330,6 +333,60 @@ describe("runCodingVerify", () => {
     if (result.status === "failed") {
       expect(result.failureReason).toMatch(/not configured/i);
     }
+    expect(deps.sandbox.create).not.toHaveBeenCalled();
+  });
+
+  it("threads CLAUDE_CODE_OAUTH_TOKEN into sandbox.create env", async () => {
+    // Pins the wiring contract: the OAuth token from the secrets store
+    // lands on `SessionSpec.env` so the supervisor injects it as the
+    // container's process env. See design/coding-delegation.md →
+    // Subscription Auth.
+    const handle = fakeContainerHandle(successScript);
+    const deps = makeDeps(handle);
+    deps.octokitFactory = fakeOctokitFactory(
+      vi.fn(async () => ({
+        data: { html_url: "https://github.com/user/cogmo/pull/1", number: 1 },
+      })),
+    );
+    const inngest = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Pick<
+      import("inngest").Inngest,
+      "send"
+    >;
+
+    const { taskId } = await seedTask();
+    await runCodingVerify({ taskId, deps, stepRun, inngest });
+
+    const createCall = (deps.sandbox.create as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(createCall?.env).toEqual({
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-test-claude-code-oauth-token",
+    });
+  });
+
+  it("missing CLAUDE_CODE_OAUTH_TOKEN → status=failed before container creation", async () => {
+    // Removes only the OAuth secret — GitHub identity stays so the
+    // identity-resolution gate doesn't short-circuit first. The auth
+    // helper's error message must surface as the task's failureReason.
+    secrets = new FakeSecretsStore();
+    secrets.set(gitHubIdentitySecretName("default"), serializeGitHubIdentity(VALID_IDENTITY));
+
+    const handle = fakeContainerHandle(successScript);
+    const deps = makeDeps(handle);
+    deps.secretsStore = secrets as unknown as SecretsStore;
+    const inngest = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Pick<
+      import("inngest").Inngest,
+      "send"
+    >;
+
+    const { taskId } = await seedTask();
+    const result = await runCodingVerify({ taskId, deps, stepRun, inngest });
+
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.failureReason).toMatch(/claude_code_oauth_token/);
+    }
+    // OAuth check runs as a fail-fast gate alongside identity resolution
+    // (see verify-orchestrator.ts), so we never spin up a container or
+    // provision askpass on a missing token.
     expect(deps.sandbox.create).not.toHaveBeenCalled();
   });
 
