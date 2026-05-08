@@ -181,7 +181,7 @@ describe("DaytonaSandboxSession.exec", () => {
     const b = await session.execStreaming(["echo", "b"]);
     await Promise.all([a.wait(), b.wait()]);
 
-    const createSessionMock = proc.createSession as unknown as ReturnType<typeof vi.fn>;
+    const createSessionMock = vi.mocked(proc.createSession);
     const sids = createSessionMock.mock.calls.map((c) => c[0]);
     expect(sids).toHaveLength(2);
     expect(sids[0]).not.toBe(sids[1]);
