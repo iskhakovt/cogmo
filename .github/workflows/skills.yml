@@ -62,9 +62,3 @@ jobs:
             cwd://${{ steps.meta.outputs.bake-file }}
           targets: skills
           push: ${{ github.event_name != 'pull_request' }}
-          # Attestations live on production builds, not on the test-time
-          # `--load` build in sysbox-e2e — multi-platform manifest lists
-          # can't be loaded into the local Docker daemon. Same reason
-          # devbase.yml and publish.yml set them here, not in bake.hcl.
-          provenance: mode=max
-          sbom: true

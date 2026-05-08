@@ -15,6 +15,15 @@ variable "REGISTRY" {
   default = "ghcr.io/iskhakovt"
 }
 
+// Provenance + SBOM produce extra entries in an OCI manifest list. The
+// Docker daemon's `--load` exporter cannot import manifest lists, so the
+// build→test path in sysbox-e2e disables attestations for the local-load
+// build by exporting `WITH_ATTEST=false`. The publish workflows leave the
+// default in place and ship full supply-chain attestations.
+variable "WITH_ATTEST" {
+  default = "true"
+}
+
 // Default group builds every image — useful for local "build everything"
 // runs (`docker buildx bake`). CI workflows always pass `--targets <one>` to
 // build exactly the image whose paths changed.
@@ -29,6 +38,10 @@ target "docker-metadata-action" {}
 
 target "_common" {
   platforms = ["linux/amd64"]
+  attest = WITH_ATTEST == "true" ? [
+    "type=provenance,mode=max",
+    "type=sbom",
+  ] : []
 }
 
 target "cogmo" {

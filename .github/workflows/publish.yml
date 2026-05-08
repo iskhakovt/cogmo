@@ -52,7 +52,5 @@ jobs:
             cwd://${{ steps.meta.outputs.bake-file }}
           targets: cogmo
           push: true
-          provenance: mode=max
-          sbom: true
           set: |
             cogmo.args.VERSION=${{ steps.version.outputs.version }}
