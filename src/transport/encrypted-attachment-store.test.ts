@@ -121,19 +121,35 @@ describe("wrapAttachmentStoreWithEncryption", () => {
     const wrapped = wrapAttachmentStoreWithEncryption(store, key);
 
     const plaintext = Buffer.from("the quick brown fox");
-    await wrapped.upload(plaintext, "text/plain", "generated");
+    await wrapped.upload(plaintext, "image/jpeg", "generated");
 
     expect(uploads).toHaveLength(1);
     const written = uploads[0];
     expect(written).toBeDefined();
     if (!written) throw new Error("unreachable");
-    expect(written.mediaType).toBe("text/plain");
+    // The wrapper neutralizes the caller's media type — bucket sees
+    // an opaque blob, not "image/jpeg" with ciphertext underneath.
+    expect(written.mediaType).toBe("application/octet-stream");
     expect(written.prefix).toBe("generated");
-    // The inner store must not see the plaintext anywhere in its bytes.
     expect(written.data.includes(plaintext)).toBe(false);
-    // It must look like a v1 blob (magic + version=1).
     expect(written.data.subarray(0, 4).equals(MAGIC)).toBe(true);
     expect(written.data.readUInt16BE(4)).toBe(1);
+  });
+
+  it("pins inner-store media type to application/octet-stream regardless of caller value", async () => {
+    const key = testKey();
+    const { store, uploads } = fakeStore();
+    const wrapped = wrapAttachmentStoreWithEncryption(store, key);
+
+    await wrapped.upload(Buffer.from("a"), "image/png");
+    await wrapped.upload(Buffer.from("b"), "audio/ogg");
+    await wrapped.upload(Buffer.from("c"), "application/pdf");
+
+    expect(uploads.map((u) => u.mediaType)).toEqual([
+      "application/octet-stream",
+      "application/octet-stream",
+      "application/octet-stream",
+    ]);
   });
 
   it("round-trips upload → download through the inner store", async () => {

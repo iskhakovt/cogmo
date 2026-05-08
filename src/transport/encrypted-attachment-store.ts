@@ -52,15 +52,31 @@ const VERSION_V1 = 1;
  * Wrap an `AttachmentStore` so bytes are encrypted before reaching the
  * underlying storage and decrypted on read. The wrapper preserves the
  * `AttachmentStore` interface — callers above the boundary are unaware.
+ *
+ * On upload the wrapper pins the inner store's media type to
+ * `application/octet-stream` regardless of the caller's value. That
+ * neutralizes two metadata leaks the storage provider would otherwise
+ * see: the `Content-Type` header on the S3 object (would have been
+ * `image/jpeg` etc., advertising the original file type even though
+ * the body is opaque) and the file extension in the path (the
+ * `mediaTypeToExt` helper resolves `application/octet-stream` to
+ * `.bin`). Matches `rclone crypt`'s convention of `.bin` extensions on
+ * the underlying remote when name-encryption is off — same rationale,
+ * "prevents the cloud provider attempting to interpret file content."
+ *
+ * Consumers that need the original media type get it from the
+ * persisted message metadata (`messages.content`,
+ * `inbound_messages.content`), never from the bucket — so this
+ * neutralization is invisible above the `AttachmentStore` boundary.
  */
 export function wrapAttachmentStoreWithEncryption(
   inner: AttachmentStore,
   key: Uint8Array,
 ): AttachmentStore {
   return {
-    async upload(data: Buffer, mediaType: string, prefix?: string): Promise<string> {
+    async upload(data: Buffer, _mediaType: string, prefix?: string): Promise<string> {
       const encrypted = encryptBuffer(data, key);
-      return inner.upload(encrypted, mediaType, prefix);
+      return inner.upload(encrypted, "application/octet-stream", prefix);
     },
 
     async download(path: string): Promise<Buffer> {
