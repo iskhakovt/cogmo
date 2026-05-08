@@ -123,7 +123,7 @@ export async function persistNonInteractive(
 ): Promise<void> {
   const { answers, telegramBotUsername, githubLogin, githubUserId } = validated;
 
-  const { userId } = await seedDefaults(deps.agentStore, deps.transportStore);
+  const { userId } = await seedDefaults(deps.runInTx, deps.agentStore, deps.transportStore);
 
   await persistProvider(deps, answers);
 
@@ -298,9 +298,9 @@ async function persistProvider(deps: PersistDeps, answers: NonInteractiveAnswers
   // Idempotent: re-running with the same provider name replaces the old row.
   // Model_providers cascade-deletes via the FK. The interactive wizard lets
   // the user choose Keep/Add/Replace; non-interactive converges by replacing.
-  const existing = await deps.agentStore.listProviders();
+  const existing = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
   for (const prov of existing.filter((p) => p.name === providerName)) {
-    await deps.agentStore.deleteProvider(prov.id);
+    await deps.runInTx((tx) => deps.agentStore.deleteProvider(tx, prov.id));
   }
 
   const { id: secretId } = await deps.secretsStore.putSecret({
@@ -315,24 +315,28 @@ async function persistProvider(deps: PersistDeps, answers: NonInteractiveAnswers
     attrs.promptCaching = true;
   }
 
-  const { id: providerId } = await deps.agentStore.createProvider({
-    name: providerName,
-    type: adapterType,
-    ...(baseUrl && { baseUrl }),
-    secretId,
-    attrs,
-  });
+  const { id: providerId } = await deps.runInTx((tx) =>
+    deps.agentStore.createProvider(tx, {
+      name: providerName,
+      type: adapterType,
+      ...(baseUrl && { baseUrl }),
+      secretId,
+      attrs,
+    }),
+  );
 
-  const defaultProfile = await deps.agentStore.getDefaultProfile();
-  if (!defaultProfile) return;
-  const profile = await deps.runInTx((tx) => deps.agentStore.getProfile(tx, defaultProfile.id));
-  if (!profile) return;
-  const nextPosition = await deps.agentStore.getNextModelProviderPosition(profile.model);
-  await deps.agentStore.addModelProvider({
-    model: profile.model,
-    providerId,
-    position: nextPosition,
-    userSelectable: true,
+  await deps.runInTx(async (tx) => {
+    const defaultProfile = await deps.agentStore.getDefaultProfile(tx);
+    if (!defaultProfile) return;
+    const profile = await deps.agentStore.getProfile(tx, defaultProfile.id);
+    if (!profile) return;
+    const nextPosition = await deps.agentStore.getNextModelProviderPosition(tx, profile.model);
+    await deps.agentStore.addModelProvider(tx, {
+      model: profile.model,
+      providerId,
+      position: nextPosition,
+      userSelectable: true,
+    });
   });
 }
 
@@ -349,12 +353,12 @@ async function persistTelegram(
     throw new Error("persistTelegram called without token + allowedUsers");
   }
 
-  const existing = await deps.transportStore.getChannelByType("telegram");
+  const existing = await deps.runInTx((tx) => deps.transportStore.getChannelByType(tx, "telegram"));
   if (existing) {
     // Non-interactive replaces existing — the caller is expected to have
     // used --reset channels if they wanted a clean slate, but re-running
     // with the same config should still converge.
-    await deps.transportStore.removeChannel(existing.id);
+    await deps.runInTx((tx) => deps.transportStore.removeChannel(tx, existing.id));
   }
 
   const tokenSecretName = "telegram_bot_token";
@@ -365,20 +369,24 @@ async function persistTelegram(
   });
   await deps.secretsStore.markValidated(tokenSecretName);
 
-  const { id: channelId } = await deps.transportStore.createChannel({
-    type: "telegram",
-    credentials: { tokenSecretName },
-    identityMode: "mapped",
-  });
+  const { id: channelId } = await deps.runInTx((tx) =>
+    deps.transportStore.createChannel(tx, {
+      type: "telegram",
+      credentials: { tokenSecretName },
+      identityMode: "mapped",
+    }),
+  );
 
-  await seedChannelRules(deps.agentStore, "telegram");
+  await seedChannelRules(deps.runInTx, deps.agentStore, "telegram");
 
   for (const telegramUserId of allowed) {
-    await deps.transportStore.createIdentity({
-      userId,
-      channelId,
-      platformHandle: telegramUserId,
-    });
+    await deps.runInTx((tx) =>
+      deps.transportStore.createIdentity(tx, {
+        userId,
+        channelId,
+        platformHandle: telegramUserId,
+      }),
+    );
   }
 }
 

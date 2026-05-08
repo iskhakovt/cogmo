@@ -431,6 +431,7 @@ export function createTransport(deps: {
   const {
     channelId,
     defaultProfileId,
+    runInTx,
     transportStore,
     agentStore,
     codingStore,
@@ -447,14 +448,18 @@ export function createTransport(deps: {
 
   return {
     async resolveSession(platformAddress) {
-      const session = await transportStore.resolveSession(channelId, platformAddress);
+      const session = await runInTx((tx) =>
+        transportStore.resolveSession(tx, channelId, platformAddress),
+      );
       if (!session) return null;
 
       // Safety net: expire stale sessions missed by idle timer
       if (idleTimeoutMs > 0) {
-        const lastActivity = await agentStore.getLastMessageTime(session.conversationId);
+        const lastActivity = await runInTx((tx) =>
+          agentStore.getLastMessageTime(tx, session.conversationId),
+        );
         if (lastActivity && Date.now() - lastActivity.getTime() > idleTimeoutMs) {
-          await transportStore.closeSession(session.id);
+          await runInTx((tx) => transportStore.closeSession(tx, session.id));
           logger.warn(
             { sessionId: session.id, conversationId: session.conversationId },
             "session idle-expired via safety net (idle timer may have failed)",
@@ -470,89 +475,100 @@ export function createTransport(deps: {
       // Identity resolution: check user_identities for this channel.
       // Wildcard identities (direct channel) accept everyone.
       // Explicit identities (Telegram with allowlist) reject unknown handles.
-      const identity = await transportStore.resolveUser(channelId, platformUserHandle);
-      if (!identity) {
-        return err({ code: "identity_rejected" as const });
-      }
-      const conv = await agentStore.createConversation({
-        userId: identity.userId,
-        profileId: opts.profileId ?? defaultProfileId,
-        isPrivate: opts.isPrivate,
+      return runInTx(async (tx) => {
+        const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+        if (!identity) {
+          return err({ code: "identity_rejected" as const });
+        }
+        const conv = await agentStore.createConversation(tx, {
+          userId: identity.userId,
+          profileId: opts.profileId ?? defaultProfileId,
+          isPrivate: opts.isPrivate,
+        });
+        const params = {
+          channelId,
+          platformAddress,
+          conversationId: conv.id,
+          status: "active" as const,
+          receive: "routed" as const,
+        };
+        const { id } = await transportStore.createSession(tx, params);
+        return ok({ id, ...params });
       });
-      const params = {
-        channelId,
-        platformAddress,
-        conversationId: conv.id,
-        status: "active" as const,
-        receive: "routed" as const,
-      };
-      const { id } = await transportStore.createSession(params);
-      return ok({ id, ...params });
     },
 
     async closeSession(sessionId) {
-      await transportStore.closeSession(sessionId);
+      await runInTx((tx) => transportStore.closeSession(tx, sessionId));
     },
 
     async resumeConversation(platformAddress, platformUserHandle, target) {
-      const identity = await transportStore.resolveUser(channelId, platformUserHandle);
-      if (!identity) return err({ code: "identity_rejected" as const });
+      return runInTx(async (tx) => {
+        const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
 
-      // Resolve target to a conversationId
-      let conversationId: string;
-      if ("conversationId" in target) {
-        conversationId = target.conversationId;
-      } else {
-        const row = await agentStore.findConversationByAlias(identity.userId, target.alias);
-        if (!row) return err({ code: "conversation_not_found" as const });
-        conversationId = row.conversationId;
-      }
+        // Resolve target to a conversationId
+        let conversationId: string;
+        if ("conversationId" in target) {
+          conversationId = target.conversationId;
+        } else {
+          const row = await agentStore.findConversationByAlias(tx, identity.userId, target.alias);
+          if (!row) return err({ code: "conversation_not_found" as const });
+          conversationId = row.conversationId;
+        }
 
-      // Verify ownership + privacy
-      const conv = await agentStore.getConversation(conversationId);
-      if (!conv) return err({ code: "conversation_not_found" as const });
-      if (conv.userId !== identity.userId) {
-        return err({
-          code: "access_denied" as const,
-          reason: "conversation not owned by caller",
-        });
-      }
-      if (!conv.isPrivate) {
-        return err({
-          code: "access_denied" as const,
-          reason: "cannot resume non-private conversation",
-        });
-      }
+        // Verify ownership + privacy
+        const conv = await agentStore.getConversation(tx, conversationId);
+        if (!conv) return err({ code: "conversation_not_found" as const });
+        if (conv.userId !== identity.userId) {
+          return err({
+            code: "access_denied" as const,
+            reason: "conversation not owned by caller",
+          });
+        }
+        if (!conv.isPrivate) {
+          return err({
+            code: "access_denied" as const,
+            reason: "cannot resume non-private conversation",
+          });
+        }
 
-      // Atomic close-old + open-new in one transaction, with the "what's active" lookup
-      // happening INSIDE the tx so no concurrent createSession / swapSession on this address
-      // can slip between resolve and swap. Failure of the insert rolls back the close.
-      const newParams = {
-        conversationId,
-        status: "active" as const,
-        receive: "routed" as const,
-      };
-      const { id } = await transportStore.swapSession(channelId, platformAddress, newParams);
-      return ok({ id, channelId, platformAddress, ...newParams });
+        // Atomic close-old + open-new in one transaction, with the "what's active" lookup
+        // happening INSIDE the tx so no concurrent createSession / swapSession on this address
+        // can slip between resolve and swap. Failure of the insert rolls back the close.
+        const newParams = {
+          conversationId,
+          status: "active" as const,
+          receive: "routed" as const,
+        };
+        const { id } = await transportStore.swapSession(tx, channelId, platformAddress, newParams);
+        return ok({ id, channelId, platformAddress, ...newParams });
+      });
     },
 
     async emit(sessionId, content, platformTs) {
-      const session = await transportStore.getSession(sessionId);
-      if (!session) {
+      const inbound = await runInTx(async (tx) => {
+        const session = await transportStore.getSession(tx, sessionId);
+        if (!session) {
+          return null;
+        }
+
+        const inbound = await transportStore.persistInbound(tx, {
+          channelSessionId: sessionId,
+          conversationId: session.conversationId,
+          content,
+          platformTs,
+        });
+        return { conversationId: session.conversationId, inboundId: inbound.id };
+      });
+
+      if (!inbound) {
         return err({ code: "session_not_found" as const, sessionId });
       }
 
-      const inbound = await transportStore.persistInbound({
-        channelSessionId: sessionId,
-        conversationId: session.conversationId,
-        content,
-        platformTs,
-      });
-
       await inngest.send(
         inboundArrived.create({
-          conversationId: session.conversationId,
-          inboundMessageId: inbound.id,
+          conversationId: inbound.conversationId,
+          inboundMessageId: inbound.inboundId,
         }),
       );
 
@@ -565,203 +581,223 @@ export function createTransport(deps: {
 
     conversations: {
       async list(platformUserHandle) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
-        if (!identity) return err({ code: "identity_rejected" as const });
-        return ok(await agentStore.listConversationsForUser(identity.userId));
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          return ok(await agentStore.listConversationsForUser(tx, identity.userId));
+        });
       },
 
       async getCurrent(platformUserHandle, platformAddress) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
-        if (!identity) return err({ code: "identity_rejected" as const });
-        const session = await transportStore.resolveSession(channelId, platformAddress);
-        if (!session) return ok(null);
-        const conv = await agentStore.getConversation(session.conversationId);
-        if (!conv || conv.userId !== identity.userId) return ok(null);
-        const profile = await deps.runInTx((tx) => agentStore.getProfile(tx, conv.profileId));
-        if (!profile) return err({ code: "profile_not_found" as const });
-        return ok({
-          conversationId: conv.id,
-          profileId: conv.profileId,
-          profileName: profile.name,
-          model: profile.model,
-          voiceMode: conv.voiceMode,
-          profileVoiceMode: profile.voiceMode,
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          const session = await transportStore.resolveSession(tx, channelId, platformAddress);
+          if (!session) return ok(null);
+          const conv = await agentStore.getConversation(tx, session.conversationId);
+          if (!conv || conv.userId !== identity.userId) return ok(null);
+          const profile = await agentStore.getProfile(tx, conv.profileId);
+          if (!profile) return err({ code: "profile_not_found" as const });
+          return ok({
+            conversationId: conv.id,
+            profileId: conv.profileId,
+            profileName: profile.name,
+            model: profile.model,
+            voiceMode: conv.voiceMode,
+            profileVoiceMode: profile.voiceMode,
+          });
         });
       },
 
       async setAlias(platformUserHandle, conversationId, alias) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
-        if (!identity) return err({ code: "identity_rejected" as const });
-        const conv = await agentStore.getConversation(conversationId);
-        if (!conv) return err({ code: "conversation_not_found" as const });
-        if (conv.userId !== identity.userId) {
-          return err({
-            code: "access_denied" as const,
-            reason: "conversation not owned by caller",
-          });
-        }
-        if (!conv.isPrivate) {
-          return err({
-            code: "access_denied" as const,
-            reason: "aliases are not allowed on non-private conversations",
-          });
-        }
-        try {
-          await agentStore.setAlias(identity.userId, conversationId, alias);
-          return ok(undefined);
-        } catch (e) {
-          if (e instanceof UniqueViolationError) return err({ code: "alias_taken" as const });
-          throw e;
-        }
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          const conv = await agentStore.getConversation(tx, conversationId);
+          if (!conv) return err({ code: "conversation_not_found" as const });
+          if (conv.userId !== identity.userId) {
+            return err({
+              code: "access_denied" as const,
+              reason: "conversation not owned by caller",
+            });
+          }
+          if (!conv.isPrivate) {
+            return err({
+              code: "access_denied" as const,
+              reason: "aliases are not allowed on non-private conversations",
+            });
+          }
+          try {
+            await agentStore.setAlias(tx, identity.userId, conversationId, alias);
+            return ok(undefined);
+          } catch (e) {
+            if (e instanceof UniqueViolationError) return err({ code: "alias_taken" as const });
+            throw e;
+          }
+        });
       },
 
       async setProfile(platformUserHandle, conversationId, profileId) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
-        if (!identity) return err({ code: "identity_rejected" as const });
-        const conv = await agentStore.getConversation(conversationId);
-        if (!conv) return err({ code: "conversation_not_found" as const });
-        if (conv.userId !== identity.userId) {
-          return err({
-            code: "access_denied" as const,
-            reason: "conversation not owned by caller",
-          });
-        }
-        // Profile must be visible to the caller (org OR their own).
-        const owner = await agentStore.getProfileOwner(profileId);
-        if (!owner) return err({ code: "profile_not_found" as const });
-        if (owner.userId !== null && owner.userId !== identity.userId) {
-          return err({
-            code: "access_denied" as const,
-            reason: "profile not visible to caller",
-          });
-        }
-        await agentStore.setConversationProfile(conversationId, profileId);
-        return ok(undefined);
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          const conv = await agentStore.getConversation(tx, conversationId);
+          if (!conv) return err({ code: "conversation_not_found" as const });
+          if (conv.userId !== identity.userId) {
+            return err({
+              code: "access_denied" as const,
+              reason: "conversation not owned by caller",
+            });
+          }
+          // Profile must be visible to the caller (org OR their own).
+          const owner = await agentStore.getProfileOwner(tx, profileId);
+          if (!owner) return err({ code: "profile_not_found" as const });
+          if (owner.userId !== null && owner.userId !== identity.userId) {
+            return err({
+              code: "access_denied" as const,
+              reason: "profile not visible to caller",
+            });
+          }
+          await agentStore.setConversationProfile(tx, conversationId, profileId);
+          return ok(undefined);
+        });
       },
 
       async repair(platformUserHandle, conversationId) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
-        if (!identity) return err({ code: "identity_rejected" as const });
-        const conv = await agentStore.getConversation(conversationId);
-        if (!conv) return err({ code: "conversation_not_found" as const });
-        if (conv.userId !== identity.userId) {
-          return err({
-            code: "access_denied" as const,
-            reason: "conversation not owned by caller",
-          });
-        }
-        const wasErrored = conv.status === "errored";
-        // Idempotent: skip the write when already active. Saves a row update
-        // and lets the command surface "already active" cleanly.
-        if (wasErrored) {
-          await agentStore.setConversationStatus(conversationId, "active");
-        }
-        return ok({ wasErrored });
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          const conv = await agentStore.getConversation(tx, conversationId);
+          if (!conv) return err({ code: "conversation_not_found" as const });
+          if (conv.userId !== identity.userId) {
+            return err({
+              code: "access_denied" as const,
+              reason: "conversation not owned by caller",
+            });
+          }
+          const wasErrored = conv.status === "errored";
+          // Idempotent: skip the write when already active. Saves a row update
+          // and lets the command surface "already active" cleanly.
+          if (wasErrored) {
+            await agentStore.setConversationStatus(tx, conversationId, "active");
+          }
+          return ok({ wasErrored });
+        });
       },
 
       async setVoiceMode(platformUserHandle, conversationId, mode) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
-        if (!identity) return err({ code: "identity_rejected" as const });
-        const conv = await agentStore.getConversation(conversationId);
-        if (!conv) return err({ code: "conversation_not_found" as const });
-        if (conv.userId !== identity.userId) {
-          return err({
-            code: "access_denied" as const,
-            reason: "conversation not owned by caller",
-          });
-        }
-        await agentStore.setConversationVoiceMode(conversationId, mode);
-        return ok(undefined);
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          const conv = await agentStore.getConversation(tx, conversationId);
+          if (!conv) return err({ code: "conversation_not_found" as const });
+          if (conv.userId !== identity.userId) {
+            return err({
+              code: "access_denied" as const,
+              reason: "conversation not owned by caller",
+            });
+          }
+          await agentStore.setConversationVoiceMode(tx, conversationId, mode);
+          return ok(undefined);
+        });
       },
     },
 
     profiles: {
       async list(platformUserHandle) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
-        if (!identity) return err({ code: "identity_rejected" as const });
-        return ok(await agentStore.listProfiles(identity.userId));
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          return ok(await agentStore.listProfiles(tx, identity.userId));
+        });
       },
 
       async create(platformUserHandle, input) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
-        if (!identity) return err({ code: "identity_rejected" as const });
-        if (!(await agentStore.isModelUserSelectable(input.model))) {
-          return err({ code: "model_unavailable" as const, model: input.model });
-        }
-        try {
-          const created = await agentStore.createProfile({
-            userId: identity.userId,
-            name: input.name,
-            basePrompt: input.basePrompt,
-            model: input.model,
-            toolSet: input.toolSet,
-            ...(input.memoryScope !== undefined && { memoryScope: input.memoryScope }),
-          });
-          return ok(created);
-        } catch (e) {
-          if (e instanceof UniqueViolationError)
-            return err({ code: "profile_name_taken" as const });
-          throw e;
-        }
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          if (!(await agentStore.isModelUserSelectable(tx, input.model))) {
+            return err({ code: "model_unavailable" as const, model: input.model });
+          }
+          try {
+            const created = await agentStore.createProfile(tx, {
+              userId: identity.userId,
+              name: input.name,
+              basePrompt: input.basePrompt,
+              model: input.model,
+              toolSet: input.toolSet,
+              ...(input.memoryScope !== undefined && { memoryScope: input.memoryScope }),
+            });
+            return ok(created);
+          } catch (e) {
+            if (e instanceof UniqueViolationError)
+              return err({ code: "profile_name_taken" as const });
+            throw e;
+          }
+        });
       },
 
       async update(platformUserHandle, profileId, changes) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
-        if (!identity) return err({ code: "identity_rejected" as const });
-        const owner = await agentStore.getProfileOwner(profileId);
-        if (!owner) return err({ code: "profile_not_found" as const });
-        if (owner.userId === null) {
-          return err({
-            code: "access_denied" as const,
-            reason: "org profiles are read-only via Transport",
-          });
-        }
-        if (owner.userId !== identity.userId) {
-          return err({ code: "access_denied" as const, reason: "profile not owned by caller" });
-        }
-        if (
-          changes.model !== undefined &&
-          !(await agentStore.isModelUserSelectable(changes.model))
-        ) {
-          return err({ code: "model_unavailable" as const, model: changes.model });
-        }
-        try {
-          const updated = await agentStore.updateProfile(profileId, changes);
-          return ok(updated);
-        } catch (e) {
-          if (e instanceof UniqueViolationError)
-            return err({ code: "profile_name_taken" as const });
-          throw e;
-        }
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          const owner = await agentStore.getProfileOwner(tx, profileId);
+          if (!owner) return err({ code: "profile_not_found" as const });
+          if (owner.userId === null) {
+            return err({
+              code: "access_denied" as const,
+              reason: "org profiles are read-only via Transport",
+            });
+          }
+          if (owner.userId !== identity.userId) {
+            return err({ code: "access_denied" as const, reason: "profile not owned by caller" });
+          }
+          if (
+            changes.model !== undefined &&
+            !(await agentStore.isModelUserSelectable(tx, changes.model))
+          ) {
+            return err({ code: "model_unavailable" as const, model: changes.model });
+          }
+          try {
+            const updated = await agentStore.updateProfile(tx, profileId, changes);
+            return ok(updated);
+          } catch (e) {
+            if (e instanceof UniqueViolationError)
+              return err({ code: "profile_name_taken" as const });
+            throw e;
+          }
+        });
       },
 
       async delete(platformUserHandle, profileId) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
-        if (!identity) return err({ code: "identity_rejected" as const });
-        const owner = await agentStore.getProfileOwner(profileId);
-        if (!owner) return err({ code: "profile_not_found" as const });
-        if (owner.userId === null) {
-          return err({
-            code: "access_denied" as const,
-            reason: "org profiles cannot be deleted via Transport",
-          });
-        }
-        if (owner.userId !== identity.userId) {
-          return err({ code: "access_denied" as const, reason: "profile not owned by caller" });
-        }
-        try {
-          await agentStore.deleteProfile(profileId);
-          return ok(undefined);
-        } catch (e) {
-          if (e instanceof ProfileInUseError) return err({ code: "profile_in_use" as const });
-          throw e;
-        }
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          const owner = await agentStore.getProfileOwner(tx, profileId);
+          if (!owner) return err({ code: "profile_not_found" as const });
+          if (owner.userId === null) {
+            return err({
+              code: "access_denied" as const,
+              reason: "org profiles cannot be deleted via Transport",
+            });
+          }
+          if (owner.userId !== identity.userId) {
+            return err({ code: "access_denied" as const, reason: "profile not owned by caller" });
+          }
+          try {
+            await agentStore.deleteProfile(tx, profileId);
+            return ok(undefined);
+          } catch (e) {
+            if (e instanceof ProfileInUseError) return err({ code: "profile_in_use" as const });
+            throw e;
+          }
+        });
       },
     },
 
     models: {
       async list() {
-        return agentStore.listDistinctUserSelectableModels();
+        return runInTx((tx) => agentStore.listDistinctUserSelectableModels(tx));
       },
     },
 
@@ -1079,7 +1115,9 @@ export function createTransport(deps: {
         return mcpRegistry?.toolBudget() ?? 0;
       },
       async addServer(platformUserHandle, spec) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        const identity = await runInTx((tx) =>
+          transportStore.resolveUser(tx, channelId, platformUserHandle),
+        );
         if (!identity) return err({ code: "identity_rejected" as const });
         if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         // Validate the config blob before any DB write so a malformed paste
@@ -1108,7 +1146,9 @@ export function createTransport(deps: {
       },
 
       async removeServer(platformUserHandle, serverId) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        const identity = await runInTx((tx) =>
+          transportStore.resolveUser(tx, channelId, platformUserHandle),
+        );
         if (!identity) return err({ code: "identity_rejected" as const });
         if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         await mcpRegistry.removeServer(serverId);
@@ -1116,7 +1156,9 @@ export function createTransport(deps: {
       },
 
       async listServers(platformUserHandle) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        const identity = await runInTx((tx) =>
+          transportStore.resolveUser(tx, channelId, platformUserHandle),
+        );
         if (!identity) return err({ code: "identity_rejected" as const });
         if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const servers = await mcpRegistry.listServers();
@@ -1124,7 +1166,9 @@ export function createTransport(deps: {
       },
 
       async approveServer(platformUserHandle, serverId) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        const identity = await runInTx((tx) =>
+          transportStore.resolveUser(tx, channelId, platformUserHandle),
+        );
         if (!identity) return err({ code: "identity_rejected" as const });
         if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         try {
@@ -1144,7 +1188,9 @@ export function createTransport(deps: {
       },
 
       async approveTool(platformUserHandle, serverId, toolName) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        const identity = await runInTx((tx) =>
+          transportStore.resolveUser(tx, channelId, platformUserHandle),
+        );
         if (!identity) return err({ code: "identity_rejected" as const });
         if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const updated = await mcpRegistry.approveTool(serverId, toolName);
@@ -1153,7 +1199,9 @@ export function createTransport(deps: {
       },
 
       async rejectTool(platformUserHandle, serverId, toolName) {
-        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        const identity = await runInTx((tx) =>
+          transportStore.resolveUser(tx, channelId, platformUserHandle),
+        );
         if (!identity) return err({ code: "identity_rejected" as const });
         if (!mcpRegistry) return err({ code: "mcp_disabled" as const });
         const updated = await mcpRegistry.rejectTool(serverId, toolName);
@@ -1183,19 +1231,22 @@ export function createTransport(deps: {
     if (!codingStore) return err({ code: "sandbox_disabled" as const });
     const task = await codingStore.getTask(taskId);
     if (!task) return err({ code: "task_not_found" as const, taskId });
-    if (!task.conversationId) {
+    const taskConversationId = task.conversationId;
+    if (!taskConversationId) {
       // Automated triggers (evolution, signal_pipeline) have no
       // conversation owner — there's no Telegram callback path for them
       // either, so this branch is defensive.
       return err({ code: "operation_not_permitted" as const });
     }
-    const conv = await agentStore.getConversation(task.conversationId);
-    if (!conv) return err({ code: "conversation_not_found" as const });
-    const tapper = await transportStore.resolveUser(channelId, tapperPlatformHandle);
-    if (!tapper || tapper.userId !== conv.userId) {
-      return err({ code: "identity_rejected" as const });
-    }
-    return ok(undefined);
+    return runInTx(async (tx) => {
+      const conv = await agentStore.getConversation(tx, taskConversationId);
+      if (!conv) return err({ code: "conversation_not_found" as const });
+      const tapper = await transportStore.resolveUser(tx, channelId, tapperPlatformHandle);
+      if (!tapper || tapper.userId !== conv.userId) {
+        return err({ code: "identity_rejected" as const });
+      }
+      return ok(undefined);
+    });
   }
 
   /**
@@ -1213,7 +1264,9 @@ export function createTransport(deps: {
   async function checkSkillsTapper(
     tapperPlatformHandle: string,
   ): Promise<Result<void, TransportError>> {
-    const tapper = await transportStore.resolveUser(channelId, tapperPlatformHandle);
+    const tapper = await runInTx((tx) =>
+      transportStore.resolveUser(tx, channelId, tapperPlatformHandle),
+    );
     if (!tapper) {
       return err({ code: "identity_rejected" as const });
     }

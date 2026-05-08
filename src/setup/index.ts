@@ -70,8 +70,8 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     logger.info("migrations applied");
 
     const tx = transactor(db);
-    const agentStore = new DrizzleAgentStore(tx);
-    const transportStore = new DrizzleTransportStore(tx);
+    const agentStore = new DrizzleAgentStore();
+    const transportStore = new DrizzleTransportStore();
     const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
     const secretsStore = new DrizzleSecretsStore(tx, encryptionKey);
 

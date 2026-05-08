@@ -763,7 +763,8 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [];
   if (deps.codingProgress) {
-    const { inngest, codingStore, transportStore, streamingRegistry } = deps.codingProgress;
+    const { inngest, runInTx, codingStore, transportStore, streamingRegistry } =
+      deps.codingProgress;
     const channelId = deps.channelId;
     functions.push(
       inngest.createFunction(
@@ -776,10 +777,11 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         async ({ event }) => {
           const taskId = event.data.taskId;
           const task = await codingStore.getTask(taskId);
-          if (!task?.conversationId) return { skipped: "no conversation" };
+          const taskConversationId = task?.conversationId;
+          if (!taskConversationId) return { skipped: "no conversation" };
 
-          const sessions = await transportStore.getActiveSessionsForConversation(
-            task.conversationId,
+          const sessions = await runInTx((tx) =>
+            transportStore.getActiveSessionsForConversation(tx, taskConversationId),
           );
           const tgSession = sessions.find((s) => s.channelId === channelId);
           if (!tgSession) return { skipped: "no telegram session for this conversation" };
@@ -817,10 +819,11 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         async ({ event }) => {
           const { taskId, requestId, tool } = event.data;
           const task = await codingStore.getTask(taskId);
-          if (!task?.conversationId) return { skipped: "no conversation" };
+          const taskConversationId = task?.conversationId;
+          if (!taskConversationId) return { skipped: "no conversation" };
 
-          const sessions = await transportStore.getActiveSessionsForConversation(
-            task.conversationId,
+          const sessions = await runInTx((tx) =>
+            transportStore.getActiveSessionsForConversation(tx, taskConversationId),
           );
           const tgSession = sessions.find((s) => s.channelId === channelId);
           if (!tgSession) return { skipped: "no telegram session for this conversation" };
@@ -848,7 +851,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   // already returned with status=pending_approval; the keyboard tap routes
   // straight to transport.skills.approveDeploy/denyDeploy.
   if (deps.skillsApproval) {
-    const { inngest, skillStore, transportStore } = deps.skillsApproval;
+    const { inngest, runInTx, skillStore, transportStore } = deps.skillsApproval;
     const channelId = deps.channelId;
     functions.push(
       inngest.createFunction(
@@ -861,6 +864,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
           postSkillsApprovalKeyboard({
             event: event.data,
             channelId,
+            runInTx,
             skillStore,
             transportStore,
             sendMessage: (chatId, text, opts) => bot.api.sendMessage(chatId, text, opts),

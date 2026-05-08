@@ -7,6 +7,7 @@
  */
 
 import { z } from "zod";
+import type { Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
 import { logger } from "../../logger.js";
@@ -65,6 +66,7 @@ Identify groups of semantically equivalent rules and produce merged versions.`;
 export interface ConsolidationDeps {
   provider: LlmProvider;
   model: string;
+  runInTx: Transactor;
   store: Pick<AgentStore, "getCorrections" | "replaceRules">;
 }
 
@@ -77,7 +79,7 @@ export async function consolidateRules(
   profileId: string,
   deps: ConsolidationDeps,
 ): Promise<ConsolidationResult> {
-  const allRules = await deps.store.getCorrections(profileId);
+  const allRules = await deps.runInTx((tx) => deps.store.getCorrections(tx, profileId));
   const rules = allRules.filter((r) => r.active);
 
   if (rules.length < 2) {
@@ -117,16 +119,18 @@ export async function consolidateRules(
 
     const totalObservations = originals.reduce((sum, r) => sum + r.observationCount, 0);
 
-    await deps.store.replaceRules({
-      oldIds: group.originalIds,
-      newRule: {
-        rule: group.mergedRule,
-        category: group.category,
-        profileId: null,
-        priority: 100,
-        observationCount: totalObservations,
-      },
-    });
+    await deps.runInTx((tx) =>
+      deps.store.replaceRules(tx, {
+        oldIds: group.originalIds,
+        newRule: {
+          rule: group.mergedRule,
+          category: group.category,
+          profileId: null,
+          priority: 100,
+          observationCount: totalObservations,
+        },
+      }),
+    );
 
     mergedGroups++;
     rulesRemoved += group.originalIds.length - 1; // each group replaces N rules with 1

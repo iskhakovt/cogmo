@@ -283,6 +283,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       channelId: "ch-1",
       defaultUserId: ownerUserId,
       defaultProfileId: "profile-1",
+      runInTx: ((cb) => cb({} as never)) as never,
       transportStore: mockTransportStore({
         resolveUser: vi.fn().mockResolvedValue({ userId: ownerUserId }),
       }),
@@ -424,6 +425,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       channelId: "ch-1",
       defaultUserId: "owner",
       defaultProfileId: "p",
+      runInTx: ((cb) => cb({} as never)) as never,
       transportStore: mockTransportStore({
         resolveUser: vi.fn().mockResolvedValue({ userId: "different-user" }),
       }),

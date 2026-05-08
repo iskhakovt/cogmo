@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Transactor } from "../../db/index.js";
 import type { Message } from "../../llm/types.js";
 import { mockProvider } from "../../test/factories.js";
 import {
@@ -6,6 +7,9 @@ import {
   extractCorrections,
   formatTranscript,
 } from "./extract-corrections.js";
+
+const FAKE_TX = { __mockTx: true } as never;
+const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 // --- formatTranscript tests ---
 
@@ -102,6 +106,7 @@ function mockExtractionDeps(
   return {
     provider,
     model: "test-model",
+    runInTx: fakeRunInTx,
     store: {
       getCorrections: vi.fn().mockResolvedValue([]),
       upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
@@ -158,7 +163,7 @@ describe("extractCorrections", () => {
     const result = await extractCorrections(sampleHistory, "profile-1", deps);
 
     expect(result.extracted).toBe(1);
-    expect(deps.store.upsertCorrection).toHaveBeenCalledWith({
+    expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
       rule: "Use fetch_url for weather lookups",
       category: "domain",
       profileId: null,
@@ -181,7 +186,7 @@ describe("extractCorrections", () => {
     const result = await extractCorrections(sampleHistory, "profile-1", deps);
 
     expect(result.reinforced).toBe(1);
-    expect(deps.store.upsertCorrection).toHaveBeenCalledWith({
+    expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
       rule: "Use fetch_url for weather",
       category: "domain",
       profileId: null,

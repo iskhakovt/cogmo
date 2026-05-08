@@ -75,7 +75,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
   const adapters: Adapter[] = [];
   const adapterMap = new Map<string, AdapterEntry>();
 
-  const channels = await transportStore.getAllChannels();
+  const channels = await deps.runInTx((tx) => transportStore.getAllChannels(tx));
 
   for (const channel of channels) {
     const mod = adaptersByType.get(channel.type);
@@ -119,6 +119,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
         deps.codingStreamingRegistry && {
           codingProgress: {
             inngest: deps.inngest,
+            runInTx: deps.runInTx,
             codingStore: deps.codingStore,
             transportStore: deps.transportStore,
             streamingRegistry: deps.codingStreamingRegistry,
@@ -127,6 +128,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       ...(deps.skillStore && {
         skillsApproval: {
           inngest: deps.inngest,
+          runInTx: deps.runInTx,
           skillStore: deps.skillStore,
           transportStore: deps.transportStore,
         },

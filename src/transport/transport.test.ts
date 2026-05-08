@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import type { Transactor } from "../db/index.js";
 import type { inboundArrived } from "../inngest/events.js";
 import { mockAgentStore, mockTransportStore } from "../test/factories.js";
 import { createTransport } from "./transport.js";
+
+const FAKE_TX = { __mockTx: true } as never;
+const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 function setup(overrides?: {
   transportStore?: ReturnType<typeof mockTransportStore>;
@@ -20,6 +24,7 @@ function setup(overrides?: {
     channelId: "ch-1",
     defaultUserId: "user-1",
     defaultProfileId: "profile-1",
+    runInTx: fakeRunInTx,
     transportStore,
     agentStore,
     inngest,
@@ -36,7 +41,11 @@ describe("createTransport", () => {
     it("delegates to transportStore with scoped channelId", async () => {
       const { transport, transportStore } = setup();
       await transport.resolveSession("addr-1");
-      expect(transportStore.resolveSession).toHaveBeenCalledWith("ch-1", "addr-1");
+      expect(transportStore.resolveSession).toHaveBeenCalledWith(
+        expect.anything(),
+        "ch-1",
+        "addr-1",
+      );
     });
   });
 
@@ -46,12 +55,13 @@ describe("createTransport", () => {
 
       const session = await transport.createConversation("addr-1", "handle-1", { isPrivate: true });
 
-      expect(agentStore.createConversation).toHaveBeenCalledWith({
+      expect(agentStore.createConversation).toHaveBeenCalledWith(expect.anything(), {
         userId: "user-1",
         profileId: "profile-1",
         isPrivate: true,
       });
       expect(transportStore.createSession).toHaveBeenCalledWith(
+        expect.anything(),
         expect.objectContaining({
           channelId: "ch-1",
           platformAddress: "addr-1",
@@ -90,7 +100,7 @@ describe("createTransport", () => {
 
       await transport.createConversation("addr-1", "handle-1", { isPrivate: true });
 
-      expect(ts.resolveUser).toHaveBeenCalledWith("ch-1", "handle-1");
+      expect(ts.resolveUser).toHaveBeenCalledWith(expect.anything(), "ch-1", "handle-1");
     });
   });
 
@@ -98,7 +108,7 @@ describe("createTransport", () => {
     it("delegates to transportStore", async () => {
       const { transport, transportStore } = setup();
       await transport.closeSession("session-1");
-      expect(transportStore.closeSession).toHaveBeenCalledWith("session-1");
+      expect(transportStore.closeSession).toHaveBeenCalledWith(expect.anything(), "session-1");
     });
   });
 
@@ -118,7 +128,7 @@ describe("createTransport", () => {
 
       await transport.emit("session-1", "hello", new Date("2026-01-01"));
 
-      expect(ts.persistInbound).toHaveBeenCalledWith({
+      expect(ts.persistInbound).toHaveBeenCalledWith(expect.anything(), {
         channelSessionId: "session-1",
         conversationId: "conv-1",
         content: "hello",
@@ -168,7 +178,7 @@ describe("createTransport", () => {
 
       const result = await transport.resolveSession("addr-1");
       expect(result).toBeNull();
-      expect(ts.closeSession).toHaveBeenCalledWith("session-1");
+      expect(ts.closeSession).toHaveBeenCalledWith(expect.anything(), "session-1");
     });
 
     it("returns session when within timeout", async () => {
@@ -237,8 +247,12 @@ describe("createTransport", () => {
 
       const res = await transport.resumeConversation("addr-1", "handle-1", { alias: "work" });
       expect(res.isOk()).toBe(true);
-      expect(agentStore.findConversationByAlias).toHaveBeenCalledWith("user-1", "work");
-      expect(transportStore.swapSession).toHaveBeenCalledWith("ch-1", "addr-1", {
+      expect(agentStore.findConversationByAlias).toHaveBeenCalledWith(
+        expect.anything(),
+        "user-1",
+        "work",
+      );
+      expect(transportStore.swapSession).toHaveBeenCalledWith(expect.anything(), "ch-1", "addr-1", {
         conversationId: "conv-1",
         status: "active",
         receive: "routed",
@@ -369,7 +383,7 @@ describe("createTransport", () => {
       const { transport } = setup({ agentStore });
       const res = await transport.conversations.setProfile("handle", "c1", "p-org");
       expect(res.isOk()).toBe(true);
-      expect(setConversationProfile).toHaveBeenCalledWith("c1", "p-org");
+      expect(setConversationProfile).toHaveBeenCalledWith(expect.anything(), "c1", "p-org");
     });
 
     it("rejects switching to another user's profile", async () => {
@@ -440,7 +454,7 @@ describe("createTransport", () => {
       const { transport } = setup({ agentStore });
       const res = await transport.conversations.repair("handle", "c1");
       expect(res._unsafeUnwrap()).toEqual({ wasErrored: true });
-      expect(setConversationStatus).toHaveBeenCalledWith("c1", "active");
+      expect(setConversationStatus).toHaveBeenCalledWith(expect.anything(), "c1", "active");
     });
 
     it("is idempotent on already-active conversations and skips the write", async () => {
@@ -516,7 +530,7 @@ describe("createTransport", () => {
       const { transport } = setup({ agentStore });
       const res = await transport.conversations.setVoiceMode("handle", "c1", "always");
       expect(res.isOk()).toBe(true);
-      expect(setConversationVoiceMode).toHaveBeenCalledWith("c1", "always");
+      expect(setConversationVoiceMode).toHaveBeenCalledWith(expect.anything(), "c1", "always");
     });
 
     it("clears the override when called with null", async () => {
@@ -535,7 +549,7 @@ describe("createTransport", () => {
       const { transport } = setup({ agentStore });
       const res = await transport.conversations.setVoiceMode("handle", "c1", null);
       expect(res.isOk()).toBe(true);
-      expect(setConversationVoiceMode).toHaveBeenCalledWith("c1", null);
+      expect(setConversationVoiceMode).toHaveBeenCalledWith(expect.anything(), "c1", null);
     });
   });
 
@@ -593,7 +607,9 @@ describe("createTransport", () => {
       });
       const { transport } = setup({ agentStore });
       await transport.profiles.update("handle", "p-mine", { memoryScope: null });
-      expect(updateProfile).toHaveBeenCalledWith("p-mine", { memoryScope: null });
+      expect(updateProfile).toHaveBeenCalledWith(expect.anything(), "p-mine", {
+        memoryScope: null,
+      });
     });
 
     it("forwards a non-null memoryScope to agentStore.updateProfile verbatim", async () => {
@@ -608,7 +624,7 @@ describe("createTransport", () => {
         trust: ["first-party" as const],
       };
       await transport.profiles.update("handle", "p-mine", { memoryScope });
-      expect(updateProfile).toHaveBeenCalledWith("p-mine", { memoryScope });
+      expect(updateProfile).toHaveBeenCalledWith(expect.anything(), "p-mine", { memoryScope });
     });
   });
 
@@ -670,7 +686,10 @@ describe("createTransport", () => {
         toolSet: [],
         memoryScope,
       });
-      expect(createProfile).toHaveBeenCalledWith(expect.objectContaining({ memoryScope }));
+      expect(createProfile).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ memoryScope }),
+      );
     });
 
     it("omits memoryScope from createProfile params when not supplied (store applies its own default)", async () => {
@@ -719,6 +738,7 @@ describe("createTransport", () => {
         channelId: "ch-1",
         defaultUserId: "user-1",
         defaultProfileId: "profile-1",
+        runInTx: fakeRunInTx,
         transportStore,
         agentStore,
         codingStore: codingStore as Parameters<typeof createTransport>[0]["codingStore"],
@@ -1018,6 +1038,7 @@ describe("createTransport", () => {
         channelId: "ch-1",
         defaultUserId: ownerUserId,
         defaultProfileId: "profile-1",
+        runInTx: fakeRunInTx,
         transportStore,
         agentStore,
         codingStore: codingStore as Parameters<typeof createTransport>[0]["codingStore"],
