@@ -99,6 +99,23 @@ export class HindsightMemoryProvider implements MemoryProvider {
     this.#maxQueryTokens = options?.maxQueryTokens ?? DEFAULT_MAX_QUERY_TOKENS;
   }
 
+  /**
+   * Read the running server's reported version (`GET /version` →
+   * `api_version`). Used at boot to enforce the `cogmo.hindsightCompat`
+   * range from package.json. Bypasses `withRetry` — the boot-time check
+   * wants a fast yes/no, and a flaky-Hindsight-at-boot signal is more
+   * useful than a 10-second backoff that hides the network problem.
+   */
+  async getServerVersion(): Promise<string> {
+    const res = await sdk.getVersion({ client: this.#sdkClient });
+    if (res.error !== undefined || !res.data) {
+      const status = res.response?.status ?? "?";
+      const detail = res.error !== undefined ? JSON.stringify(res.error) : "no body";
+      throw new Error(`hindsight /version failed: ${status} ${detail}`);
+    }
+    return res.data.api_version;
+  }
+
   async retain(bankId: string, content: string, options?: RetainOptions): Promise<void> {
     // async: true returns immediately; Hindsight processes the 3-phase pipeline
     // (chunk → extract → consolidate) in the background. Memories become
