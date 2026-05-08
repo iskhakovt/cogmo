@@ -54,6 +54,14 @@ export interface SessionSpec {
    * honors the flag; backends without sysbox ignore it.
    */
   allowPrivilegedRunc?: boolean;
+  /**
+   * Process-level env injected at container create time. Used today by
+   * coding-delegation to pass `CLAUDE_CODE_OAUTH_TOKEN` (sourced from the
+   * encrypted secrets table) into the Claude Code subprocess — see
+   * design/coding-delegation.md → Subscription Auth. Values land in the
+   * container's process env only; nothing is written to the home volume.
+   */
+  env?: Readonly<Record<string, string>>;
 }
 
 export interface ExecOptions {
@@ -120,7 +128,6 @@ export interface SandboxCapabilities {
 /**
  * Discriminator for serialized session state. Each backend gets its own
  * literal; the variant is the entry point Zod uses to dispatch parsing.
- * Phase 2 ships only the local-docker variant — Daytona joins in Phase 3.
  */
 export const LocalDockerSessionStateSchema = z.object({
   type: z.literal("local-docker"),
@@ -130,9 +137,18 @@ export const LocalDockerSessionStateSchema = z.object({
 });
 export type LocalDockerSessionState = z.infer<typeof LocalDockerSessionStateSchema>;
 
+export const DaytonaSessionStateSchema = z.object({
+  type: z.literal("daytona"),
+  taskId: z.string().min(1),
+  /** Daytona's primary key for the sandbox. Stable across stop/start cycles. */
+  sandboxId: z.string().min(1),
+});
+export type DaytonaSessionState = z.infer<typeof DaytonaSessionStateSchema>;
+
 /** All backends' state variants — discriminated union by `type`. */
 export const SandboxSessionStateSchema = z.discriminatedUnion("type", [
   LocalDockerSessionStateSchema,
+  DaytonaSessionStateSchema,
 ]);
 export type SandboxSessionState = z.infer<typeof SandboxSessionStateSchema>;
 

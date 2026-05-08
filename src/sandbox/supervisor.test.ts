@@ -438,6 +438,58 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     await sandbox.deleteByTaskId("019d0000-0000-7000-8000-0000000fffff");
   });
 
+  it("threads spec.env into HostConfig.Env on the create call", async () => {
+    // Pins the contract for coding-delegation's CLAUDE_CODE_OAUTH_TOKEN
+    // injection: the orchestrator hands us env, we lift it onto the
+    // container's process env, and nothing leaks onto the home volume or
+    // labels. KEY=VALUE encoding follows dockerode's array convention.
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, calls } = fakeDocker({ dockerId: "docker-env" });
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+    await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-000000000e10",
+      worktree: { hostPath: "/tmp/wt" },
+      homeVolume: { volumeName: "vol-env" },
+      image: "alpine",
+      resourceLimits: RESOURCE_LIMITS,
+      expiresAt: new Date(Date.now() + 60_000),
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "sk-test-123", FOO: "bar" },
+    });
+    const createSpec = calls.create[0] as DockerCreateCallArgs & { Env?: string[] };
+    expect(createSpec.Env).toEqual(["CLAUDE_CODE_OAUTH_TOKEN=sk-test-123", "FOO=bar"]);
+  });
+
+  it("omits HostConfig.Env entirely when spec.env is absent", async () => {
+    // Without an explicit env, dockerode's container should pick up the
+    // image's default env — we must NOT pass an empty array, which would
+    // override that.
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, calls } = fakeDocker({ dockerId: "docker-no-env" });
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+    await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-000000000e11",
+      worktree: { hostPath: "/tmp/wt" },
+      homeVolume: { volumeName: "vol-no-env" },
+      image: "alpine",
+      resourceLimits: RESOURCE_LIMITS,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const createSpec = calls.create[0] as DockerCreateCallArgs & { Env?: string[] };
+    expect(createSpec.Env).toBeUndefined();
+  });
+
   it("shutdown closes the proxy", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker();

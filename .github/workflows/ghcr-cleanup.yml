@@ -1,0 +1,55 @@
+name: GHCR Cleanup
+
+# Weekly prune of old container manifests in ghcr.io. Without this, every
+# release accumulates three new tagged manifests (cogmo, cogmo-devbase,
+# cogmo-skills) and untagged child manifests for multi-arch + attestation
+# entries — the storage stays free-tier-shaped for a while but the package
+# UI and `imagetools inspect` output get noisy fast.
+
+on:
+  schedule:
+    # Sunday 04:00 UTC.
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Log what would be deleted without deleting (default: yes for manual runs)"
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  cleanup:
+    name: Prune old container versions
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ghcr-cleanup-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      packages: write
+    strategy:
+      # `dataaxiom/ghcr-cleanup-action` operates on one package per call,
+      # so loop over the three Cogmo-owned packages.
+      matrix:
+        package: [cogmo, cogmo-devbase, cogmo-skills]
+    steps:
+      - uses: dataaxiom/ghcr-cleanup-action@cd0cdb900b5dbf3a6f2cc869f0dbb0b8211f50c4 # v1.0.16
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          package: ${{ matrix.package }}
+          # Keep the 20 most recent tagged versions per package. Older
+          # tagged versions get pruned (the action never deletes the
+          # current `latest`-style floating tag if one exists).
+          keep-n-tagged: 20
+          # Prune untagged manifests older than 14 days. Multi-arch child
+          # manifests referenced by a kept manifest list are preserved
+          # automatically; the older-than filter only removes truly orphan
+          # entries (e.g. attestation manifests for deleted parents).
+          older-than: 14 days
+          delete-untagged: true
+          # Manual runs default to dry-run so a human can verify the
+          # would-delete log before flipping. Cron runs (where `inputs`
+          # is empty) actually delete. Free-tier ghcr deletes are
+          # permanent; the safety net is worth one extra YAML branch.
+          dry-run: ${{ inputs.dry_run || 'false' }}

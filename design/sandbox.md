@@ -101,17 +101,32 @@ type ExecResult = {
 };
 
 /**
- * Streaming exec handle. Yields lines as the command produces them; await
- * `wait()` for the exit code once the stream completes. Call `dispose()`
- * to kill a runaway exec — it sends SIGTERM (then SIGKILL after a short
- * grace period), closes the stream, and resolves once the backend has
- * confirmed teardown. Idempotent. Implicit on session `cleanup()`, but
- * the orchestrator may call it earlier (timeout, user cancel).
+ * Streaming exec handle. `stdout` / `stderr` are demultiplexed Node
+ * `Readable`s — backends produce them via the appropriate transport
+ * (dockerode demux for Local-Docker, session-logs WS + manual demux for
+ * Daytona). Awaiting `wait()` resolves with the exit code once the
+ * backend reports the process finished.
+ *
+ * `dispose()` aborts the exec by tearing down the backend's transport
+ * (Docker exec API has no direct kill — closing the hijacked socket
+ * lets the daemon reap the process; Daytona's only kill primitive is
+ * `deleteSession`). It does NOT send signals; backends that grow
+ * signal support may upgrade the implementation but not the contract.
+ * Idempotent. After `dispose()`, the streams emit EOF (no error on
+ * `stdout` / `stderr`) and `wait()` rejects with `DisposedError` —
+ * callers racing dispose against natural exit must check for that.
+ *
+ * Consumers wanting line semantics do their own line splitter
+ * (`split2` etc.) on the `Readable`s — backends emit per-chunk, not
+ * per-line.
  */
-type ExecStreamingHandle = AsyncIterable<{ stream: "stdout" | "stderr"; line: string }> & {
+interface ExecStreamingHandle {
+  stdin?: Writable;
+  stdout: Readable;
+  stderr: Readable;
   wait(): Promise<{ exitCode: number }>;
   dispose(): Promise<void>;
-};
+}
 ```
 
 ### Discriminated options and state
@@ -144,7 +159,7 @@ Hard transport differences (how working-tree material moves into the sandbox) li
 | Userns isolation | sysbox (default) | provider-owned |
 | Cogmo cgroup parent | yes | n/a |
 | Cogmo Docker proxy | yes | n/a |
-| `ensureImagePresent` | dockerode inspect + pull | registry-reachability check |
+| `ensureImagePresent` | dockerode inspect + pull | no-op (Daytona builds + snapshots on first `create()`; no separate probe in the SDK) |
 | Buffered exec | dockerode | `executeCommand` |
 | Streaming exec | dockerode demux | session-logs WebSocket + `stdbuf` |
 | `resume(state)` | container-id inspect | sandbox-id rehydrate |
@@ -439,7 +454,11 @@ The Daytona backend runs task sandboxes on Daytona's managed cloud (default) or 
 
 API-key auth. The key is stored as `daytona_api_key` in the encrypted `secrets` table per [infrastructure.md](infrastructure.md) → Secrets — the same path LLM provider keys, channel tokens, and the GitHub PAT take. The setup wizard prompts for it on first run; non-interactive bootstrap accepts a `COGMO_DAYTONA_API_KEY` (with `_FILE` variant) which is migrated into the secrets table on first boot and not consulted thereafter.
 
-Base URL is configuration, not credential — `DaytonaSandboxClientOptions.apiUrl` carries the value (`undefined` = Daytona Cloud), populated at startup. The choice is deployment-time; Cogmo doesn't switch between cloud and self-hosted at runtime.
+Base URL is configuration, not credential — `DaytonaSandboxClientOptions.apiUrl` carries the value (`undefined` = Daytona Cloud), populated at startup. Override via `DAYTONA_API_URL` env. The choice is deployment-time; Cogmo doesn't switch between cloud and self-hosted at runtime.
+
+#### Keepalive
+
+Daytona's default `autoStopInterval` reaps idle sandboxes after 15 minutes. Coding tasks stream model output for tens of minutes with arbitrary inter-token latency, which Daytona reads as "idle." The client starts a `refreshActivity()` ticker per live sandbox, firing every 5 minutes, to reset the auto-stop countdown. The ticker stops on `delete(session)` / `deleteByTaskId(taskId)` / `shutdown()`. `setInterval` handles are `unref()`'d so the Node process can exit cleanly when nothing else holds the loop open.
 
 ### Working-tree transport — git as transport
 
@@ -466,7 +485,14 @@ An orchestrator crash between step 1 (push) and step 6 (delete) leaves an orphan
 
 The Daytona PTY path is wrong for `claude` — TTY mode triggers the CLI's interactive output (color codes, spinners) per claude-code's `isatty(stdout)` check, corrupting NDJSON parsing, and PTY collapses stdout/stderr into a single channel.
 
-The fitting path is the non-PTY session-logs WebSocket: `executeSessionCommand({ runAsync: true })` returns a command id, then `getSessionCommandLogs(sessionId, commandId, onStdout, onStderr)` opens a WS with separated stdout/stderr callbacks. The streaming wrapper exposes the same `AsyncIterable<{ stream, line }>` shape the Local-Docker backend produces via dockerode demux — downstream code is backend-agnostic.
+The fitting path is the non-PTY session-logs WebSocket: `executeSessionCommand({ runAsync: true })` returns a command id, then `getSessionCommandLogs(sessionId, commandId, onStdout, onStderr)` opens a WS with separated stdout/stderr callbacks. The streaming wrapper exposes the same `Readable`-stream shape the Local-Docker backend produces via dockerode demux — downstream code is backend-agnostic.
+
+WS reality the wrapper hides:
+
+- **Callbacks are per-chunk, not per-line.** Consumers wanting lines do their own splitter (`split2` etc.) on the returned `Readable`.
+- **Exit code arrives separately.** The WS closes when the command exits; the wrapper then fetches `getSessionCommand(sessionId, commandId)` to read the exit code.
+- **No per-command kill.** `dispose()` calls `deleteSession(sessionId)`, which tears down everything in that session. To keep dispose semantics clean, the wrapper allocates **one Daytona session per `execStreaming()` call**.
+- **No WS heartbeat.** The wrapper relies on the client's per-sandbox `refreshActivity()` ticker (see Authentication & deployment) to keep the sandbox alive across long execs.
 
 `claude` is wrapped by `stdbuf -oL -eL` inside the sandbox to defeat its block-buffering bug ([anthropics/claude-code#25670](https://github.com/anthropics/claude-code/issues/25670)). `stdbuf` is in coreutils on every reasonable base image. If a future image lacks it, fall back to `script -qfc 'claude …' /dev/null`.
 
@@ -476,13 +502,30 @@ Fallback if the WS proves flaky on a long task: HTTP-poll the same logs endpoint
 
 The image declared in `SessionSpec.image` is referenced via Daytona's `Image.base("registry/path:tag")` — no Dockerfile rebuild on Daytona's side. Cogmo-owned images (`cogmo/devbase` for coding-delegation) are published to a registry Daytona can pull from (Docker Hub or GHCR); third-party images (e.g. `python:3.14-slim` for skills tier-2) come straight from their published location.
 
+**Initially public-registry only.** The Daytona TS SDK does not expose a private-registry-credential API; private registries are added via the Daytona Dashboard → Registries panel before referencing the image. Cogmo-owned images publish to a public namespace (GHCR public) until that gap closes upstream or a deployer explicitly opts into the dashboard flow.
+
+`ensureImagePresent` is a no-op on this backend — Daytona's builder pulls + snapshots the image on first `create()`, and there is no "is this image reachable" probe in the SDK that doesn't pay the build cost itself. First-task latency on a fresh image is 2–5 minutes; subsequent tasks reuse the cached snapshot.
+
 ### Secret material
 
-Per-task askpass material (PAT + SSH signing key) is uploaded via `fs.uploadFiles()` with `0600` perms at sandbox-create time, written into `/.cogmo-askpass/`. Sandbox destruction wipes them — no separate cleanup step. Same path layout as the Local-Docker bind-mount, so the in-container helper script is identical across backends.
+Per-task askpass material (PAT + SSH signing key) is uploaded via `fs.uploadFiles()` (the bulk endpoint — never serial `uploadFile`, see [daytonaio/daytona issue tracker](https://github.com/daytonaio/daytona/issues) and the [hermes-agent perf report](https://github.com/NousResearch/hermes-agent/issues/7362) showing 5 min → < 2 s for typical worktrees). Permissions are set in a follow-up `fs.setFilePermissions()` call (the upload endpoint takes no mode), targeting `0600` on the PAT + signing key, `0700` on the parent directory. Sandbox destruction wipes them — no separate cleanup step. Same path layout (`/.cogmo-askpass/`) as the Local-Docker bind-mount so the in-container helper script is identical across backends.
+
+### Git auth
+
+The Daytona TS SDK's `sandbox.git.clone() / push()` convenience methods accept **HTTPS + username/password only** — the GitHub PAT goes in the `password` slot. SSH is not exposed at the SDK layer.
+
+The slice-4 askpass design works as-is on Daytona because the two auth concerns split cleanly:
+
+- **Push auth (HTTPS + PAT)** — `sandbox.git.push()` directly.
+- **Commit signing (SSH key)** — already shells out via `git -c gpg.format=ssh -c user.signingkey=<path> commit -S` regardless of backend, so the SDK-level limitation never bites.
+
+Any future SSH-clone path (private repo without a PAT, mirror over `git@`) shells out via `process.executeCommand` with `GIT_SSH_COMMAND` set — same workaround the local-Docker backend uses internally for `git push`.
 
 ### Out of scope for this backend
 
 The Daytona backend does not run the Cogmo Docker socket proxy, the systemd cgroup parent, or the host-side reaper. Daytona owns sandbox isolation and lifecycle. Sibling containers spawned from inside the sandbox (testcontainers, `docker compose`) are visible only to Daytona, not to Cogmo's audit log — capability flag `siblingContainers: 'sandbox-internal'` advertises this. The Local-Docker backend's `containers` / `networks` / `volumes` / `cogmo_instances` tables are not used by the Daytona backend.
+
+`ResourceLimits.pids` is silently ignored — Daytona's `Resources` shape has only `cpu` / `gpu` / `memory` / `disk` fields, no per-sandbox process-count cap. If pid-cap is load-bearing for a workload (fork-bomb defence inside the sandbox), set up cgroup limits via `process.executeCommand` after `create()` instead.
 
 ### Crash recovery
 

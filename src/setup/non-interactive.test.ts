@@ -289,6 +289,21 @@ describe("runNonInteractive", () => {
     );
   });
 
+  it("persists COGMO_CLAUDE_CODE_OAUTH_TOKEN as the claude_code_oauth_token secret", async () => {
+    const v = validators();
+    await runNonInteractive({
+      runInTx: tx,
+      agentStore,
+      transportStore,
+      secretsStore,
+      env: baseEnv({ COGMO_CLAUDE_CODE_OAUTH_TOKEN: "sk-test-claude-oauth-token-1234" }),
+      validators: v,
+    });
+
+    const stored = await tx((trx) => secretsStore.getSecret(trx, "claude_code_oauth_token"));
+    expect(stored).toBe("sk-test-claude-oauth-token-1234");
+  });
+
   it("persists the Tavily key when supplied and validated", async () => {
     const v = validators();
     await runNonInteractive({

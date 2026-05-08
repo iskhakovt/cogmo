@@ -2,6 +2,31 @@ import { createEnv } from "@t3-oss/env-core";
 import { z } from "zod";
 import { resolveEnvFile } from "./secrets/env-file.js";
 
+/**
+ * Default Cogmo-baked image references. Two cases:
+ *
+ *   - **Inside the cogmo container** (`process.env.VERSION` is set by the
+ *     app `Dockerfile`'s `ENV VERSION=$VERSION` build arg): pull the
+ *     matched-version image. `cogmo:1.46.0` always pairs with
+ *     `cogmo-devbase:1.46.0` and `cogmo-skills:1.46.0`.
+ *   - **Outside the container** (local `pnpm dev` / scripts / tests):
+ *     pull `:latest`. `publish.yml` pushes a floating `:latest` alongside
+ *     each release semver, so a fresh checkout works without a local
+ *     image build. Devs iterating on the Dockerfiles override via the
+ *     `COGMO_{DEVBASE,SKILLS}_IMAGE` env vars (e.g.
+ *     `COGMO_SKILLS_IMAGE=cogmo-skills:dev` after a local
+ *     `docker buildx bake --load skills`).
+ *
+ * `||` (not `??`) so an empty `VERSION=` falls back to `:latest` instead
+ * of yielding a tag-less image.
+ */
+export function defaultDevbaseImage(): string {
+  return `ghcr.io/iskhakovt/cogmo-devbase:${process.env.VERSION || "latest"}`;
+}
+export function defaultSkillsImage(): string {
+  return `ghcr.io/iskhakovt/cogmo-skills:${process.env.VERSION || "latest"}`;
+}
+
 // Apply _FILE convention for Docker secrets before Zod validation.
 // Only specific vars support this — not a global wrapper.
 const resolved: Record<string, string | undefined> = { ...process.env };
@@ -65,14 +90,40 @@ export const env = createEnv({
     /** Short git SHA, set at build time via Dockerfile `ARG GIT_SHA`. Optional. */
     GIT_SHA: z.string().optional(),
     /**
+     * Selects which sandbox backend the factory wires up. `local-docker`
+     * needs `SANDBOX_RUNTIME` set; `daytona` needs `daytona_api_key`
+     * in the encrypted `secrets` table. Default `local-docker` matches
+     * the historical opt-in-via-`SANDBOX_RUNTIME` behaviour: leaving
+     * `SANDBOX_RUNTIME` unset still disables the sandbox module.
+     */
+    SANDBOX_BACKEND: z.enum(["local-docker", "daytona"]).default("local-docker"),
+    /**
      * OCI runtime for sandbox containers. Optional — when unset, the sandbox
      * module does not initialize (coding-delegation features fail with a
      * clear error on first use). No silent fallback to `runc` — explicit
      * configuration only. Prod = `sysbox`; dev/CI integration = `runc`.
+     * Only consulted when `SANDBOX_BACKEND=local-docker`.
      */
     SANDBOX_RUNTIME: z.enum(["sysbox", "runc"]).optional(),
-    /** Default base image for task containers when a repo has no `.devcontainer/`. */
-    COGMO_DEVBASE_IMAGE: z.string().default("ghcr.io/iskhakovt/cogmo-devbase:slice1"),
+    /**
+     * Daytona Cloud / self-hosted API base URL. Default = Daytona Cloud
+     * (`https://app.daytona.io/api`). Only consulted when
+     * `SANDBOX_BACKEND=daytona`.
+     */
+    DAYTONA_API_URL: z.string().url().optional(),
+    /**
+     * Daytona organization id. Only needed when the API key is scoped
+     * to multiple orgs and the default isn't the right one.
+     */
+    DAYTONA_ORGANIZATION_ID: z.string().optional(),
+    /**
+     * Default base image for task containers when a repo has no `.devcontainer/`.
+     * Computed from `process.env.VERSION` — see `defaultDevbaseImage`.
+     * Override with the env var at deploy time to roll back to a specific build.
+     */
+    COGMO_DEVBASE_IMAGE: z.string().default(defaultDevbaseImage()),
+    /** Base image for tier-2 (sysbox) skill workers. Same model as devbase. */
+    COGMO_SKILLS_IMAGE: z.string().default(defaultSkillsImage()),
     /** Host root for git clones registered via `/repo add`. */
     COGMO_REPOS_DIR: z.string().default("/var/lib/cogmo/repos"),
     /** Host root for per-task git worktrees. */

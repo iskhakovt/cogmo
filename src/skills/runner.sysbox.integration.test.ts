@@ -34,7 +34,8 @@ const noopFiles = {
 
 /**
  * End-to-end tier-2 worker test against a real sysbox container running
- * `python:3.14-slim`. Validates:
+ * `cogmo-skills:test` (loaded into the local Docker daemon by the
+ * sysbox-e2e workflow's `bake --load` step before tests run). Validates:
  *
  *   - Image pull on first call (`ensureImagePresent`).
  *   - Container creation without worktree/home (skills tier-2 contract).
@@ -48,7 +49,12 @@ const noopFiles = {
  */
 
 const SHOULD_RUN = process.env.SANDBOX_RUNTIME === "sysbox";
-const PYTHON_IMAGE = "python:3.14-slim";
+// Local test image. The sysbox-e2e workflow runs `bake --load` with
+// `VERSION=test`, which writes this tag into the local Docker daemon
+// before the test starts. The runner's `ensureImagePresent` then inspects
+// it locally — no registry round-trip. Local-dev convention to mirror CI:
+//   VERSION=test docker buildx bake --load skills
+const SKILLS_IMAGE = "ghcr.io/iskhakovt/cogmo-skills:test";
 
 let tx: Transactor;
 let close: () => Promise<void>;
@@ -66,10 +72,16 @@ beforeAll(async () => {
   skillStore = new DrizzleSkillStore();
   docker = new Docker();
 
-  const stream = await docker.pull(PYTHON_IMAGE);
-  await new Promise<void>((resolve, reject) => {
-    docker.modem.followProgress(stream, (err) => (err ? reject(err) : resolve()));
-  });
+  // Fail loudly if the dev forgot to bake the image first. CI's sysbox-e2e
+  // workflow does this for free; locally it's an explicit step that the
+  // runner's deep `image not found` doesn't surface clearly.
+  try {
+    await docker.getImage(SKILLS_IMAGE).inspect();
+  } catch {
+    throw new Error(
+      `${SKILLS_IMAGE} not loaded into local Docker. Run \`VERSION=test docker buildx bake --load skills\` before \`pnpm test:integration\`.`,
+    );
+  }
 
   const instance = await tx((trx) =>
     agentStore.insertInstance(trx, { host: hostname(), pid: process.pid }),
@@ -136,7 +148,7 @@ inputs:
 `;
 
 describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)", () => {
-  it("invokes a tier-2 skill end-to-end against python:3.14-slim", async () => {
+  it("invokes a tier-2 skill end-to-end against cogmo-skills:test", async () => {
     const runner = await SkillRunnerImpl.create({
       runInTx: tx,
       store: skillStore,
@@ -144,6 +156,7 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
       secretsStore: stubSecrets(),
       files: noopFiles,
       sandbox,
+      tier2Image: SKILLS_IMAGE,
       user: { id: "u-1", timezone: "UTC" },
       memoryBankId: "bank-1",
     });
@@ -169,6 +182,7 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
       secretsStore: stubSecrets(),
       files: noopFiles,
       sandbox,
+      tier2Image: SKILLS_IMAGE,
       user: { id: "u-1", timezone: "UTC" },
       memoryBankId: "bank-1",
     });

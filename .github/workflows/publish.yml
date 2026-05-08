@@ -1,5 +1,13 @@
 name: Publish
 
+# Release-time build of all three Cogmo-owned container images at the same
+# semver. Called from `ci.yml`'s `publish` job after semantic-release cuts a
+# new git tag, so `dunamai` resolves to a clean `MAJOR.MINOR.PATCH` here.
+#
+# Defaults from `docker-bake.hcl` are correct for production: cogmo builds
+# multi-arch (`linux/amd64` + `linux/arm64`), devbase + skills stay single-
+# arch (sysbox amd64-only). Attestations on. Per-platform GHA cache scopes.
+
 on:
   workflow_call:
   workflow_dispatch:
@@ -9,12 +17,11 @@ permissions: {}
 
 jobs:
   docker:
-    name: Build & Push Image
+    name: Build & Push Images
     runs-on: ubuntu-latest
     concurrency:
-      group: publish-image
+      group: publish-images
       cancel-in-progress: false
-    # Keep in sync with the calling job in ci.yml.
     permissions:
       contents: read
       packages: write
@@ -34,23 +41,55 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # One `metadata-action` call per image. Each emits a per-target
+      # bake-file with `tags` (semver + `latest`) and the standard OCI
+      # labels (`org.opencontainers.image.{source,revision,version,
+      # created,licenses,…}`). bake-action layers all three on top of
+      # `docker-bake.hcl`, populating the empty `*-meta` stubs.
       - uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
-        id: meta
+        id: meta-cogmo
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
+          bake-target: cogmo-meta
+
+      - uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        id: meta-devbase
+        with:
+          images: ghcr.io/${{ github.repository }}-devbase
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
+          bake-target: devbase-meta
+
+      - uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        id: meta-skills
+        with:
+          images: ghcr.io/${{ github.repository }}-skills
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
+          bake-target: skills-meta
+
+      # binfmt_misc + QEMU for arm64-on-amd64 emulation. ubuntu-latest does
+      # not pre-register QEMU, and setup-buildx-action doesn't either —
+      # without this, the first arm64 RUN step fails with "exec format error".
+      - uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
 
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
-      - uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+      - uses: docker/bake-action@a66e1c87e2eca0503c343edf1d208c716d54b8a8 # v7.1.0
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         with:
-          context: .
+          source: .
+          files: |
+            ./docker-bake.hcl
+            cwd://${{ steps.meta-cogmo.outputs.bake-file }}
+            cwd://${{ steps.meta-devbase.outputs.bake-file }}
+            cwd://${{ steps.meta-skills.outputs.bake-file }}
+          # Default group → cogmo + devbase + skills.
+          targets: default
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ steps.version.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: true
-          sbom: true
