@@ -1,6 +1,6 @@
 import { PassThrough, type Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ExecHandle } from "../../sandbox/index.js";
+import type { ExecStreamingHandle } from "../../sandbox/index.js";
 import type { ExecuteStreamHandle } from "./orchestrator.js";
 import { OUTPUT_CAP_BYTES, runVerifyStreaming, TIMEOUT_EXIT_CODE } from "./verify.js";
 
@@ -16,7 +16,7 @@ interface FakeExecOpts {
   hang?: boolean;
 }
 
-function fakeExec(opts: FakeExecOpts = {}): ExecHandle {
+function fakeExec(opts: FakeExecOpts = {}): ExecStreamingHandle {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
 
@@ -55,12 +55,13 @@ function fakeExec(opts: FakeExecOpts = {}): ExecHandle {
     stdout: stdout as Readable,
     stderr: stderr as Readable,
     wait,
+    dispose: vi.fn(async () => {}),
   };
 }
 
 function fakeContainer(opts: FakeExecOpts = {}) {
   return {
-    exec: vi.fn(async () => fakeExec(opts)),
+    execStreaming: vi.fn(async () => fakeExec(opts)),
   };
 }
 
@@ -138,7 +139,7 @@ describe("runVerifyStreaming", () => {
       verifyCommand: "pnpm test && pnpm lint",
       timeoutSeconds: 60,
     });
-    expect(container.exec).toHaveBeenCalledWith(["bash", "-lc", "pnpm test && pnpm lint"]);
+    expect(container.execStreaming).toHaveBeenCalledWith(["bash", "-lc", "pnpm test && pnpm lint"]);
   });
 
   it("truncates captured output at OUTPUT_CAP_BYTES with a marker", async () => {

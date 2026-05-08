@@ -1,4 +1,4 @@
-import type { TaskContainerHandle } from "../../sandbox/index.js";
+import type { SandboxSession } from "../../sandbox/index.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 
 /**
@@ -32,7 +32,13 @@ export interface BackendUsage {
 export interface BackendCallContext {
   task: CodingTaskRow;
   repo: CodingRepoRow;
-  container: TaskContainerHandle;
+  /**
+   * Backend-agnostic — the CLI runners (claude, codex) only need
+   * `execStreaming`, not the discriminated session state. Typing this
+   * as the un-narrowed `SandboxSession` keeps coding helpers reusable
+   * across local-Docker and any future managed backend.
+   */
+  container: SandboxSession;
 }
 
 /**
