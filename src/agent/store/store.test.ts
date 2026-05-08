@@ -107,6 +107,7 @@ describe("DrizzleAgentStore", () => {
         voiceMode: "auto",
         toolSet: ["memory_recall"],
         memoryScope: null,
+        profileClass: null,
       });
     });
 
@@ -208,6 +209,123 @@ describe("DrizzleAgentStore", () => {
           }),
         ),
       ).rejects.toThrow();
+    });
+  });
+
+  describe("profile classes", () => {
+    async function seedClassed(): Promise<{ userId: string; profileId: string }> {
+      const userId = await seedUser();
+      const profile = await tx((trx) =>
+        store.createProfile(trx, {
+          userId,
+          name: "intimate",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      return { userId, profileId: profile.id };
+    }
+
+    it("creates a class and lists it", async () => {
+      const { userId } = await seedClassed();
+      const created = await tx((trx) =>
+        store.createProfileClass(trx, {
+          userId,
+          name: "intimate",
+          description: "for emotional / relationship topics",
+        }),
+      );
+      expect(created.name).toBe("intimate");
+      const list = await tx((trx) => store.listProfileClasses(trx, userId));
+      expect(list).toHaveLength(1);
+      expect(list[0]?.description).toBe("for emotional / relationship topics");
+    });
+
+    it("rejects duplicate class name within the same user", async () => {
+      const { userId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "first" }),
+      );
+      await expect(
+        tx((trx) =>
+          store.createProfileClass(trx, { userId, name: "intimate", description: "second" }),
+        ),
+      ).rejects.toThrow();
+    });
+
+    it("setProfileClass attaches a registered class", async () => {
+      const { userId, profileId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
+      const profile = await tx((trx) => store.getProfile(trx, profileId));
+      expect(profile?.profileClass).toBe("intimate");
+    });
+
+    it("setProfileClass with null clears the class", async () => {
+      const { userId, profileId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
+      await tx((trx) => store.setProfileClass(trx, profileId, null));
+      const profile = await tx((trx) => store.getProfile(trx, profileId));
+      expect(profile?.profileClass).toBeNull();
+    });
+
+    it("setProfileClass throws UnknownProfileClassError for an unregistered class", async () => {
+      const { profileId } = await seedClassed();
+      await expect(
+        tx((trx) => store.setProfileClass(trx, profileId, "no-such-class")),
+      ).rejects.toThrow(/unknown profile class/);
+    });
+
+    it("setProfileClass on an org profile (userId=null) rejects any non-null class", async () => {
+      // Create an org profile (userId=null).
+      const orgProfile = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: null,
+          name: "org",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await expect(
+        tx((trx) => store.setProfileClass(trx, orgProfile.id, "anything")),
+      ).rejects.toThrow(/unknown profile class/);
+    });
+
+    it("deleteProfileClass throws ProfileClassInUseError when a profile references the class", async () => {
+      const { userId, profileId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
+      await expect(tx((trx) => store.deleteProfileClass(trx, userId, "intimate"))).rejects.toThrow(
+        /profile class in use/,
+      );
+    });
+
+    it("deleteProfileClass succeeds after the references are cleared", async () => {
+      const { userId, profileId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
+      await tx((trx) => store.setProfileClass(trx, profileId, null));
+      const result = await tx((trx) => store.deleteProfileClass(trx, userId, "intimate"));
+      expect(result.deleted).toBe(true);
+      const list = await tx((trx) => store.listProfileClasses(trx, userId));
+      expect(list).toHaveLength(0);
+    });
+
+    it("deleteProfileClass returns deleted:false for an unknown name (idempotent)", async () => {
+      const { userId } = await seedClassed();
+      const result = await tx((trx) => store.deleteProfileClass(trx, userId, "no-such"));
+      expect(result.deleted).toBe(false);
     });
   });
 
@@ -1961,6 +2079,7 @@ describe("DrizzleAgentStore", () => {
       const { id } = await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "homelab IP is 10.0.10.10",
           source: "live_retain",
         }),
@@ -1975,8 +2094,149 @@ describe("DrizzleAgentStore", () => {
         content: "homelab IP is 10.0.10.10",
         context: null,
         source: "live_retain",
+        profileClass: null,
       });
       expect(rows[0]!.createdAt).toBeInstanceOf(Date);
+    });
+
+    it("getPendingMemories surfaces the staging profile's CURRENT class via JOIN", async () => {
+      // Regression for the speaker-isolation leak: rows staged by
+      // profile A must drain with A's class, not the class of whichever
+      // conversation triggered the Observer fire. The JOIN reads the
+      // profile's current class so a class rename re-flows pending rows
+      // without a backfill.
+      const userId = await seedUser();
+      // Seed a class and a profile bound to it.
+      await tx((trx) =>
+        store.createProfileClass(trx, {
+          userId,
+          name: "intimate",
+          description: "for emotional / relationship topics",
+        }),
+      );
+      const profile = await tx((trx) =>
+        store.createProfile(trx, {
+          userId,
+          name: "intimate-profile",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profile.id, "intimate"));
+
+      // Stage a pending row tied to that profile.
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          profileId: profile.id,
+          content: "we made up after the argument",
+          source: "live_retain",
+        }),
+      );
+      // And another with no profile lineage (migration-style).
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          profileId: null,
+          content: "wife's birthday is March 15",
+          source: "migration",
+        }),
+      );
+
+      const rows = await tx((trx) => store.getPendingMemories(trx, userId));
+      expect(rows).toHaveLength(2);
+      const intimate = rows.find((r) => r.content === "we made up after the argument");
+      const legacy = rows.find((r) => r.content === "wife's birthday is March 15");
+      expect(intimate?.profileClass).toBe("intimate");
+      expect(legacy?.profileClass).toBeNull();
+    });
+
+    it("getPendingMemories scopes the profile JOIN by user_id — no cross-user class contamination", async () => {
+      // Defence in depth: if a `pending_memories.profile_id` ever
+      // points at a profile owned by a different user (manual SQL,
+      // future bug, restored backup), the JOIN must NOT surface that
+      // user's `profile_class`. The composite predicate
+      // (profiles.id = pm.profile_id AND profiles.user_id = pm.user_id)
+      // makes such rows fall through to the LEFT JOIN's NULL on the
+      // class dimension.
+      const userA = await seedUser();
+      const userB = await seedUser();
+      // Create a class + profile under userB.
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId: userB, name: "intimate", description: "x" }),
+      );
+      const profileB = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: userB,
+          name: "p",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profileB.id, "intimate"));
+      // Stage a pending row for userA but maliciously pointing at userB's profile.
+      // This shape can't arise via the supported store API, but we simulate
+      // it via a raw insert to test the JOIN's defence.
+      await db.execute(sql`
+        INSERT INTO pending_memories (user_id, profile_id, content, source)
+        VALUES (${userA}::uuid, ${profileB.id}::uuid, 'cross-user payload', 'live_retain')
+      `);
+
+      const rows = await tx((trx) => store.getPendingMemories(trx, userA));
+      expect(rows).toHaveLength(1);
+      // Class MUST NOT leak across the user boundary even though the
+      // profile_id points at a real (other-user) profile with a class.
+      expect(rows[0]?.profileClass).toBeNull();
+    });
+
+    it("getPendingMemories surfaces the staging profile's CURRENT class — re-flows on reassignment", async () => {
+      // Documents the JOIN's read-current-class semantic: the pending
+      // row stores `profile_id`, NOT a snapshot of `profile_class`. So
+      // changing the profile's class (via setProfileClass) before the
+      // drain runs means the row picks up the new class label on its
+      // next read — no backfill of pending rows needed when the user
+      // reorganises which profile belongs to which class.
+      const userId = await seedUser();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "general", description: "y" }),
+      );
+      const profile = await tx((trx) =>
+        store.createProfile(trx, {
+          userId,
+          name: "p",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profile.id, "intimate"));
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          profileId: profile.id,
+          content: "fact staged under intimate",
+          source: "live_retain",
+        }),
+      );
+      const before = await tx((trx) => store.getPendingMemories(trx, userId));
+      expect(before[0]?.profileClass).toBe("intimate");
+
+      // Reassign the profile to a different class — the pending row's
+      // profile_id is unchanged, but the JOIN now resolves to "general".
+      await tx((trx) => store.setProfileClass(trx, profile.id, "general"));
+      const after = await tx((trx) => store.getPendingMemories(trx, userId));
+      expect(after[0]?.profileClass).toBe("general");
+
+      // Clearing the class on the profile drops the row to untagged on
+      // the class dimension — drain stamps no profile_class:* tag.
+      await tx((trx) => store.setProfileClass(trx, profile.id, null));
+      const cleared = await tx((trx) => store.getPendingMemories(trx, userId));
+      expect(cleared[0]?.profileClass).toBeNull();
     });
 
     it("preserves optional context", async () => {
@@ -1985,6 +2245,7 @@ describe("DrizzleAgentStore", () => {
       await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "wife's birthday is March 15",
           context: "while planning a gift",
           source: "live_retain",
@@ -2001,6 +2262,7 @@ describe("DrizzleAgentStore", () => {
       const { id: first } = await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "first",
           source: "live_retain",
         }),
@@ -2010,6 +2272,7 @@ describe("DrizzleAgentStore", () => {
       const { id: second } = await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "second",
           source: "migration",
         }),
@@ -2026,6 +2289,7 @@ describe("DrizzleAgentStore", () => {
         await tx((trx) =>
           store.stagePendingMemory(trx, {
             userId,
+            profileId: null,
             content: `fact ${i}`,
             source: "live_retain",
           }),
@@ -2048,6 +2312,7 @@ describe("DrizzleAgentStore", () => {
       await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId: userA,
+          profileId: null,
           content: "A's fact",
           source: "live_retain",
         }),
@@ -2055,6 +2320,7 @@ describe("DrizzleAgentStore", () => {
       await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId: userB,
+          profileId: null,
           content: "B's fact",
           source: "live_retain",
         }),
@@ -2074,6 +2340,7 @@ describe("DrizzleAgentStore", () => {
       const a = await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "fact A",
           source: "live_retain",
         }),
@@ -2081,6 +2348,7 @@ describe("DrizzleAgentStore", () => {
       const b = await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "fact B",
           source: "live_retain",
         }),
@@ -2098,6 +2366,7 @@ describe("DrizzleAgentStore", () => {
       await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "fact",
           source: "live_retain",
         }),
@@ -2143,6 +2412,7 @@ describe("DrizzleAgentStore", () => {
         tx((trx) =>
           store.stagePendingMemory(trx, {
             userId,
+            profileId: null,
             content: "fact",
             source: "bogus" as any,
           }),

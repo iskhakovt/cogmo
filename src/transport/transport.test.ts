@@ -868,6 +868,181 @@ describe("createTransport", () => {
     });
   });
 
+  describe("profiles.setClass", () => {
+    it("rejects org-profile classing with access_denied", async () => {
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: null }),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.setClass("handle", "p-org", "intimate");
+      expect(res._unsafeUnwrapErr()).toMatchObject({
+        code: "access_denied",
+        reason: expect.stringContaining("org profiles"),
+      });
+    });
+
+    it("rejects another user's profile with access_denied", async () => {
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-2" }),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.setClass("handle", "p-theirs", "intimate");
+      expect(res._unsafeUnwrapErr()).toMatchObject({ code: "access_denied" });
+    });
+
+    it("returns identity_rejected when resolveUser returns null", async () => {
+      const transportStore = mockTransportStore({
+        resolveUser: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ transportStore });
+      const res = await transport.profiles.setClass("handle", "p-1", "intimate");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    });
+
+    it("returns profile_not_found when getProfileOwner returns undefined", async () => {
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue(undefined),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.setClass("handle", "p-missing", "intimate");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_not_found" });
+    });
+
+    it("maps UnknownProfileClassError to unknown_profile_class with the offending name", async () => {
+      const { UnknownProfileClassError } = await import("../agent/store/errors.js");
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        setProfileClass: vi.fn().mockRejectedValue(new UnknownProfileClassError("nope")),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.setClass("handle", "p-mine", "nope");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "unknown_profile_class", name: "nope" });
+    });
+
+    it("forwards className=null (clear) to agentStore.setProfileClass verbatim", async () => {
+      const setProfileClass = vi.fn().mockResolvedValue(undefined);
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        setProfileClass,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.setClass("handle", "p-mine", null);
+      expect(res.isOk()).toBe(true);
+      expect(setProfileClass).toHaveBeenCalledWith(expect.anything(), "p-mine", null);
+    });
+
+    it("happy path forwards a non-null className", async () => {
+      const setProfileClass = vi.fn().mockResolvedValue(undefined);
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        setProfileClass,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.setClass("handle", "p-mine", "intimate");
+      expect(res.isOk()).toBe(true);
+      expect(setProfileClass).toHaveBeenCalledWith(expect.anything(), "p-mine", "intimate");
+    });
+  });
+
+  describe("profileClasses", () => {
+    it("list returns identity_rejected when resolveUser returns null", async () => {
+      const transportStore = mockTransportStore({
+        resolveUser: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ transportStore });
+      const res = await transport.profileClasses.list("handle");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    });
+
+    it("list scopes to the resolved userId", async () => {
+      const listProfileClasses = vi.fn().mockResolvedValue([
+        {
+          id: "c-1",
+          userId: "user-1",
+          name: "intimate",
+          description: "for emotional / relationship topics",
+          createdAt: new Date("2026-04-16T12:00:00Z"),
+        },
+      ]);
+      const agentStore = mockAgentStore({ listProfileClasses });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profileClasses.list("handle");
+      expect(res._unsafeUnwrap()).toHaveLength(1);
+      expect(listProfileClasses).toHaveBeenCalledWith(expect.anything(), "user-1");
+    });
+
+    it("create maps UniqueViolationError to profile_class_name_taken", async () => {
+      const { UniqueViolationError } = await import("../agent/store/errors.js");
+      const agentStore = mockAgentStore({
+        createProfileClass: vi
+          .fn()
+          .mockRejectedValue(new UniqueViolationError("uq_profile_classes_user_name")),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profileClasses.create("handle", {
+        name: "intimate",
+        description: "x",
+      });
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "profile_class_name_taken",
+        name: "intimate",
+      });
+    });
+
+    it("create happy path forwards name + description", async () => {
+      const createProfileClass = vi.fn().mockResolvedValue({
+        id: "c-1",
+        userId: "user-1",
+        name: "intimate",
+        description: "for emotional / relationship topics",
+        createdAt: new Date("2026-04-16T12:00:00Z"),
+      });
+      const agentStore = mockAgentStore({ createProfileClass });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profileClasses.create("handle", {
+        name: "intimate",
+        description: "for emotional / relationship topics",
+      });
+      expect(res._unsafeUnwrap().name).toBe("intimate");
+      expect(createProfileClass).toHaveBeenCalledWith(expect.anything(), {
+        userId: "user-1",
+        name: "intimate",
+        description: "for emotional / relationship topics",
+      });
+    });
+
+    it("delete returns profile_class_not_found when no row matches", async () => {
+      const agentStore = mockAgentStore({
+        deleteProfileClass: vi.fn().mockResolvedValue({ deleted: false }),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profileClasses.delete("handle", "no-such");
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "profile_class_not_found",
+        name: "no-such",
+      });
+    });
+
+    it("delete maps ProfileClassInUseError to profile_class_in_use with refCount", async () => {
+      const { ProfileClassInUseError } = await import("../agent/store/errors.js");
+      const agentStore = mockAgentStore({
+        deleteProfileClass: vi.fn().mockRejectedValue(new ProfileClassInUseError(2)),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profileClasses.delete("handle", "intimate");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_class_in_use", profileRefs: 2 });
+    });
+
+    it("delete happy path returns ok with deleted:true", async () => {
+      const deleteProfileClass = vi.fn().mockResolvedValue({ deleted: true });
+      const agentStore = mockAgentStore({ deleteProfileClass });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profileClasses.delete("handle", "intimate");
+      expect(res.isOk()).toBe(true);
+      expect(deleteProfileClass).toHaveBeenCalledWith(expect.anything(), "user-1", "intimate");
+    });
+  });
+
   describe("models.list", () => {
     it("delegates to agentStore.listDistinctUserSelectableModels", async () => {
       const agentStore = mockAgentStore({

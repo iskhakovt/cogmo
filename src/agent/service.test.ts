@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MemoryProvider } from "../memory/provider.js";
+import { expectDefined } from "../test/assertions.js";
 import type { Service } from "./service.js";
 import { createService } from "./service.js";
 import type { ProfileMemoryScope } from "./store/schema.js";
@@ -266,5 +267,90 @@ describe("createService — stageRetain", () => {
     await svc.memory.stageRetain("a fact");
 
     expect(memory.retain).not.toHaveBeenCalled();
+  });
+});
+
+describe("createService — speaker-isolation (profileClasses)", () => {
+  it("emits a third any_strict leaf when scope.profileClasses is set", async () => {
+    const memory = mockMemory();
+    const scope: ProfileMemoryScope = {
+      compartments: ["personal"],
+      trust: ["first-party"],
+      profileClasses: ["intimate"],
+    };
+    const svc = createService(memory, "user-123", scope, stubFiles, stubCoreMemory, stubStage);
+
+    await svc.memory.recall("query");
+
+    expect(memory.recall).toHaveBeenCalledWith("user-123", "query", {
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:personal"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+            { tags: ["profile_class:intimate"], match: "any_strict" },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("ORs multiple profileClasses within the leaf (any_strict)", async () => {
+    const memory = mockMemory();
+    const scope: ProfileMemoryScope = {
+      compartments: ["personal"],
+      trust: ["first-party"],
+      profileClasses: ["intimate", "general"],
+    };
+    const svc = createService(memory, "user-123", scope, stubFiles, stubCoreMemory, stubStage);
+
+    await svc.memory.recall("query");
+
+    const call = vi.mocked(memory.recall).mock.calls[0];
+    const tagGroups = call?.[2]?.tagGroups ?? [];
+    const top = expectDefined(tagGroups[0]);
+    if (!("and" in top)) throw new Error("expected top-level AND group");
+    expect(top.and).toContainEqual({
+      tags: ["profile_class:intimate", "profile_class:general"],
+      match: "any_strict",
+    });
+  });
+
+  it("omits the class leaf entirely when profileClasses is undefined (back-compat)", async () => {
+    const memory = mockMemory();
+    const scope: ProfileMemoryScope = {
+      compartments: ["personal"],
+      trust: ["first-party"],
+    };
+    const svc = createService(memory, "user-123", scope, stubFiles, stubCoreMemory, stubStage);
+
+    await svc.memory.recall("query");
+
+    const call = vi.mocked(memory.recall).mock.calls[0];
+    const tagGroups = call?.[2]?.tagGroups ?? [];
+    const top = expectDefined(tagGroups[0]);
+    if (!("and" in top)) throw new Error("expected top-level AND group");
+    // No leaf with profile_class:* tags.
+    for (const leaf of top.and) {
+      if ("tags" in leaf) {
+        for (const t of leaf.tags) {
+          expect(t.startsWith("profile_class:")).toBe(false);
+        }
+      }
+    }
+  });
+
+  it("retain stays unscoped on the speaker dimension too — writes are never gated", async () => {
+    const memory = mockMemory();
+    const scope: ProfileMemoryScope = {
+      compartments: ["personal"],
+      trust: ["first-party"],
+      profileClasses: ["intimate"],
+    };
+    const svc = createService(memory, "user-123", scope, stubFiles, stubCoreMemory, stubStage);
+
+    await svc.memory.retain("a fact");
+
+    expect(memory.retain).toHaveBeenCalledWith("user-123", "a fact", undefined);
   });
 });

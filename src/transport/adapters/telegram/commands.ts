@@ -55,13 +55,22 @@ const USAGE = {
   resume: "Usage: /resume <alias>",
   name: "Usage: /name <alias>  (or /name -  to clear)",
   profile:
-    "Usage: /profile [list|switch <name>|new <name>|edit <name>|delete <name>|scope <name> [clear|compartments=… trust=…]]\n" +
+    "Usage: /profile [list|switch <name>|new <name>|edit <name>|delete <name>|scope <name> [clear|compartments=… trust=… [classes=…]]|class <name> <class|clear>]\n" +
     "  /profile scope <name>                                   → show current scope\n" +
     "  /profile scope <name> clear                             → unrestricted (recall all)\n" +
     "  /profile scope <name> compartments=work,technical trust=first-party\n" +
-    "                                                          → set (both keys required)\n" +
-    "  Compartments: personal, work, health, financial, technical\n" +
+    "                                                          → set (compartments + trust required; classes optional)\n" +
+    "  /profile scope <name> compartments=… trust=… classes=intimate\n" +
+    "                                                          → also restrict on speaker dimension\n" +
+    "  /profile class <name> <classname>                       → assign profile to a class\n" +
+    "  /profile class <name> clear                             → unclass the profile\n" +
+    "  Compartments: personal, work, health, financial, technical, misc\n" +
     "  Trust:        first-party, any",
+  classes:
+    "Usage: /classes [list|add <name> <description>|rm <name>]\n" +
+    "  /classes                          → list registered profile classes\n" +
+    "  /classes add intimate <desc>      → register a new class for /profile class to reference\n" +
+    "  /classes rm intimate              → remove a class (must not be assigned to any profile)",
   model: "Usage: /model [<model>]",
   repo:
     "Usage: /repo [list|add [<name> <local_path> <remote_url>]|remove <name>]\n" +
@@ -206,8 +215,61 @@ export async function handleProfile(
       const { name, scopeTokens } = splitScopeArgs(rest);
       return replyProfileScope(transport, ctx, handle, name, scopeTokens);
     }
+    case "class": {
+      // Same multi-word-name handling as `scope`: the last token is the
+      // class name (or "clear"); everything before is the profile name.
+      // Profiles literally named `clear` are unaddressable here too.
+      if (rest.length < 2) {
+        await ctx.reply(USAGE.profile);
+        return;
+      }
+      const last = rest[rest.length - 1] ?? "";
+      const name = rest.slice(0, -1).join(" ");
+      return replyProfileClass(transport, ctx, handle, name, last);
+    }
     default:
       await ctx.reply(USAGE.profile);
+  }
+}
+
+export async function handleClasses(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const handle = String(ctx.from.id);
+  const trimmed = (ctx.match ?? "").trim();
+  if (!trimmed) {
+    return replyClassesList(transport, ctx, handle);
+  }
+  const [sub, ...rest] = trimmed.split(/\s+/).filter(Boolean);
+  switch (sub) {
+    case "list":
+      return replyClassesList(transport, ctx, handle);
+    case "add": {
+      // Add takes a name (single token) plus a free-form description (rest).
+      // Empty description is rejected at the Transport boundary by the
+      // store's NOT NULL on `description`; we surface that with a clearer
+      // message here.
+      const name = rest[0]?.trim();
+      const description = rest.slice(1).join(" ").trim();
+      if (!name || !description) {
+        await ctx.reply(USAGE.classes);
+        return;
+      }
+      return replyClassesAdd(transport, ctx, handle, name, description);
+    }
+    case "rm":
+    case "remove":
+    case "delete": {
+      const name = rest.join(" ").trim();
+      if (!name) {
+        await ctx.reply(USAGE.classes);
+        return;
+      }
+      return replyClassesDelete(transport, ctx, handle, name);
+    }
+    default:
+      await ctx.reply(USAGE.classes);
   }
 }
 
@@ -791,13 +853,13 @@ export function parseScopeSpec(tokens: ReadonlyArray<string>): ScopeSpec {
   if (trimmed.length === 0) return { kind: "show" };
   if (trimmed.length === 1 && trimmed[0]?.toLowerCase() === "clear") return { kind: "clear" };
 
-  const collected: { compartments?: string[]; trust?: string[] } = {};
+  const collected: { compartments?: string[]; trust?: string[]; profileClasses?: string[] } = {};
   for (const token of trimmed) {
     const eq = token.indexOf("=");
     if (eq <= 0) {
       return {
         kind: "error",
-        message: `Bad token "${token}". Expected compartments=… or trust=… (or "clear" alone).`,
+        message: `Bad token "${token}". Expected compartments=…, trust=…, or classes=… (or "clear" alone).`,
       };
     }
     const key = token.slice(0, eq).toLowerCase();
@@ -806,6 +868,10 @@ export function parseScopeSpec(tokens: ReadonlyArray<string>): ScopeSpec {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
+    // The DB / Zod schema field is `profileClasses`; the user-facing token
+    // is `classes=` because the type-it-into-Telegram form benefits from
+    // brevity. Translate at the parser boundary so the two layers can
+    // evolve independently.
     if (key === "compartments" || key === "trust") {
       if (collected[key] !== undefined) {
         return {
@@ -814,10 +880,18 @@ export function parseScopeSpec(tokens: ReadonlyArray<string>): ScopeSpec {
         };
       }
       collected[key] = values;
+    } else if (key === "classes") {
+      if (collected.profileClasses !== undefined) {
+        return {
+          kind: "error",
+          message: `Key "classes" repeated. Combine values into a single comma-separated list.`,
+        };
+      }
+      collected.profileClasses = values;
     } else {
       return {
         kind: "error",
-        message: `Unknown key "${key}". Expected compartments or trust.`,
+        message: `Unknown key "${key}". Expected compartments, trust, or classes.`,
       };
     }
   }
@@ -885,6 +959,123 @@ async function replyProfileScope(
     return;
   }
   await ctx.reply(`Scope for "${profile.name}" updated: ${formatScope(newScope)}`);
+}
+
+// ── /profile class + /classes ─────────────────────────────────────────
+
+async function replyProfileClass(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+  name: string,
+  classOrClear: string,
+): Promise<void> {
+  if (!name) {
+    await ctx.reply(USAGE.profile);
+    return;
+  }
+  const resolved = await resolveProfileByName(transport, handle, name);
+  if (resolved.kind === "error") {
+    await ctx.reply(errorMessage(resolved.error));
+    return;
+  }
+  if (resolved.kind === "none") {
+    await ctx.reply(`No profile named "${name}".`);
+    return;
+  }
+  if (resolved.kind === "ambiguous") {
+    await ctx.reply(ambiguityMessage(name, resolved.matches));
+    return;
+  }
+  const profile = resolved.profile;
+  const className = classOrClear.toLowerCase() === "clear" ? null : classOrClear;
+  const res = await transport.profiles.setClass(handle, profile.id, className);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  if (className === null) {
+    await ctx.reply(`Class for "${profile.name}" cleared. Future memories will be untagged.`);
+  } else {
+    await ctx.reply(
+      `Class for "${profile.name}" set to "${className}". Takes effect on the next Observer fire.`,
+    );
+  }
+}
+
+async function replyClassesList(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+): Promise<void> {
+  const res = await transport.profileClasses.list(handle);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  if (res.value.length === 0) {
+    await ctx.reply(
+      "No profile classes registered. Use /classes add <name> <description> to create one.",
+    );
+    return;
+  }
+  const lines = res.value.map((c) => `• ${c.name} — ${c.description}`);
+  await ctx.reply(`Profile classes:\n${lines.join("\n")}`);
+}
+
+/**
+ * Names that collide with `/profile class <name> …` parser sentinels —
+ * any class named "clear" is creatable but unaddressable here because
+ * `replyProfileClass` interprets `clear` as the clear-action. Reject
+ * up front so the user sees an actionable error instead of creating
+ * a class they can't assign via Telegram.
+ *
+ * The reserve lives at the Telegram boundary (not Transport / store)
+ * because "clear" is a string-parser ambiguity specific to this
+ * adapter — a future REST adapter taking `{className: null}` for the
+ * clear case has no such conflict, and pushing the reserve down would
+ * over-constrain it. A direct `Transport.profileClasses.create` caller
+ * (Direct adapter, scripts) can still create a class named `clear`;
+ * it just won't be addressable via `/profile class … clear` until the
+ * Telegram parser learns a different sentinel.
+ */
+const RESERVED_CLASS_NAMES = new Set(["clear"]);
+
+async function replyClassesAdd(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+  name: string,
+  description: string,
+): Promise<void> {
+  if (RESERVED_CLASS_NAMES.has(name.toLowerCase())) {
+    await ctx.reply(
+      `"${name}" is reserved (used by /profile class <name> clear). Pick a different class name.`,
+    );
+    return;
+  }
+  const res = await transport.profileClasses.create(handle, { name, description });
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  await ctx.reply(
+    `Registered class "${res.value.name}". Assign it with /profile class <profile> ${res.value.name}.`,
+  );
+}
+
+async function replyClassesDelete(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+  name: string,
+): Promise<void> {
+  const res = await transport.profileClasses.delete(handle, name);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  await ctx.reply(`Class "${name}" removed.`);
 }
 
 // ── /repo ─────────────────────────────────────────────────────────────
@@ -1240,6 +1431,14 @@ function errorMessage(err: TransportError): string {
       return `Tool "${err.toolName}" not found on server ${shortenId(err.serverId)}.`;
     case "mcp_connection_failed":
       return `MCP connection failed: ${err.reason}`;
+    case "profile_class_in_use":
+      return `Class is referenced by ${err.profileRefs} profile(s). Clear /profile class first.`;
+    case "profile_class_not_found":
+      return `No profile class named "${err.name}". Use /classes to list.`;
+    case "profile_class_name_taken":
+      return `A profile class named "${err.name}" already exists.`;
+    case "unknown_profile_class":
+      return `Unknown profile class "${err.name}". Register it with /classes add first.`;
   }
 }
 

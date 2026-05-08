@@ -21,6 +21,7 @@ function profile(overrides: Partial<Profile> = {}): Profile {
     voiceMode: "auto",
     toolSet: [],
     memoryScope: null,
+    profileClass: null,
     ...overrides,
   };
 }

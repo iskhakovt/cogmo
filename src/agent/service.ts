@@ -189,9 +189,16 @@ function applyScopeToReflect(
  * `any_strict` excludes untagged memories (so legacy un-compartmented
  * rows aren't accidentally exposed) and ORs within the dimension.
  * The caller wraps these in an AND group.
+ *
+ * The `profileClasses` leaf is only emitted when the scope set it; an
+ * absent `profileClasses` means "no scoping on the speaker dimension"
+ * and recall isn't filtered by class. Once set, the same `any_strict`
+ * semantic excludes memories that have no `profile_class:*` tag —
+ * pre-feature memories need a backfill (or the user must scope the
+ * profile in a way that doesn't include the class dimension at all).
  */
 function buildScopeLeaves(scope: ProfileMemoryScope): TagGroup[] {
-  return [
+  const leaves: TagGroup[] = [
     {
       tags: scope.compartments.map((c) => `compartment:${c}`),
       match: "any_strict",
@@ -201,4 +208,11 @@ function buildScopeLeaves(scope: ProfileMemoryScope): TagGroup[] {
       match: "any_strict",
     },
   ];
+  if (scope.profileClasses !== undefined && scope.profileClasses.length > 0) {
+    leaves.push({
+      tags: scope.profileClasses.map((c) => `profile_class:${c}`),
+      match: "any_strict",
+    });
+  }
+  return leaves;
 }
