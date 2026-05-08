@@ -9,6 +9,10 @@
  */
 
 import { err, ok, type Result } from "neverthrow";
+import {
+  CLAUDE_CODE_OAUTH_TOKEN_SECRET,
+  CLAUDE_CODE_OAUTH_TOKEN_SECRET_DESCRIPTION,
+} from "../agent/coding/auth.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ProviderAttrs } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
@@ -159,6 +163,17 @@ export async function persistNonInteractive(
     generatedSshPublicKey = await persistGitHubIdentity(deps, answers, githubLogin, githubUserId);
   }
 
+  if (answers.claudeCodeOauthToken) {
+    const token = answers.claudeCodeOauthToken;
+    await deps.runInTx((tx) =>
+      deps.secretsStore.putSecret(tx, {
+        name: CLAUDE_CODE_OAUTH_TOKEN_SECRET,
+        plaintext: token,
+        description: CLAUDE_CODE_OAUTH_TOKEN_SECRET_DESCRIPTION,
+      }),
+    );
+  }
+
   logger.info(
     {
       provider: answers.llmProviderType,
@@ -167,6 +182,7 @@ export async function persistNonInteractive(
       fal: Boolean(answers.falApiKey),
       github: Boolean(answers.githubPat),
       githubGeneratedSshKey: Boolean(generatedSshPublicKey),
+      claudeCodeOauth: Boolean(answers.claudeCodeOauthToken),
     },
     "non-interactive setup complete",
   );

@@ -16,6 +16,7 @@ import type {
 } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { loadCodingSandboxEnv } from "./auth.js";
 import type { CodingBackend, PermissionResponse } from "./backend.js";
 import { shortenRequestId } from "./permission-keyboard.js";
 import * as policy from "./policy.js";
@@ -228,6 +229,16 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     const sessionState = await stepRun("create-container", async () => {
       // biome-ignore lint/style/noNonNullAssertion: guarded by the throw above
       const wt = assignment!;
+      // Resolve subscription auth before the docker call so a missing
+      // secret throws here (cheap) rather than letting the container come
+      // up and `claude -p` hang on a browser-OAuth prompt. Skipped when
+      // the orchestrator is wired without a secrets store (unit tests).
+      const sandboxEnv = deps.secretsStore
+        ? await runInTx((tx) =>
+            // biome-ignore lint/style/noNonNullAssertion: guarded by the ternary above
+            loadCodingSandboxEnv(tx, deps.secretsStore!),
+          )
+        : undefined;
       const session = await sandbox.create({
         taskId,
         worktree: { hostPath: wt.worktreePath },
@@ -236,6 +247,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         resourceLimits: defaultResourceLimits,
         expiresAt: new Date(Date.now() + taskTtlMs),
         allowPrivilegedRunc: task.allowPrivilegedRunc,
+        ...(sandboxEnv && { env: sandboxEnv }),
       });
       // Mark created BEFORE the DB write so a failed setTaskContainerId
       // still triggers cleanup via the outer catch (the container exists
@@ -541,6 +553,12 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         return existing.state;
       }
 
+      const sandboxEnv = deps.secretsStore
+        ? await runInTx((tx) =>
+            // biome-ignore lint/style/noNonNullAssertion: guarded by the ternary above
+            loadCodingSandboxEnv(tx, deps.secretsStore!),
+          )
+        : undefined;
       const session = await sandbox.create({
         taskId,
         worktree: { hostPath: worktreeAssignment.worktreePath },
@@ -549,6 +567,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         resourceLimits: defaultResourceLimits,
         expiresAt: new Date(Date.now() + taskTtlMs),
         allowPrivilegedRunc: task.allowPrivilegedRunc,
+        ...(sandboxEnv && { env: sandboxEnv }),
       });
       containerCreated = true;
       await runInTx((tx) => store.setTaskContainerId(tx, taskId, session.state.containerRowId));

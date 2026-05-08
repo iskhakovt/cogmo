@@ -222,6 +222,11 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       ? [{ Type: "volume", Source: spec.homeVolume.volumeName, Target: HOME_VOLUME_TARGET }]
       : [];
 
+    // Process-level env (e.g. `CLAUDE_CODE_OAUTH_TOKEN` for the Claude Code
+    // backend). Lives on the container's process env only — never written to
+    // the home volume, never persisted on the container row.
+    const envList = spec.env ? Object.entries(spec.env).map(([k, v]) => `${k}=${v}`) : undefined;
+
     let container: Docker.Container;
     try {
       container = await this.#docker.createContainer({
@@ -236,6 +241,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         // WorkingDir defaults to /workspace when a worktree is bound;
         // falls back to the image's own default when omitted.
         ...(spec.worktree && { WorkingDir: "/workspace" }),
+        ...(envList && { Env: envList }),
         Labels: labels,
         HostConfig: {
           Runtime: runtime,

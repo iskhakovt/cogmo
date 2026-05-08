@@ -38,6 +38,7 @@ import {
   resolveGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { loadCodingSandboxEnv } from "./auth.js";
 import { runCommitAndPush } from "./commit-push.js";
 import { parseRemoteUrl, runOpenDraftPr } from "./draft-pr.js";
 import { type ExecuteStreamHandle, NULL_EXECUTE_STREAM } from "./orchestrator.js";
@@ -223,6 +224,10 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     // /.cogmo-askpass. The execute orchestrator already tore the previous
     // container down, so this is always a fresh handle.
     const sessionState = await stepRun("create-container", async () => {
+      // Verify still uses `claude` (and Codex in future) inside the sandbox,
+      // so the same subscription-auth env applies — see
+      // design/coding-delegation.md → Subscription Auth.
+      const sandboxEnv = await runInTx((tx) => loadCodingSandboxEnv(tx, deps.secretsStore));
       const session = await sandbox.create({
         taskId,
         worktree: { hostPath: worktreeAssignment.worktreePath },
@@ -232,6 +237,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         expiresAt: new Date(Date.now() + deps.taskTtlMs),
         allowPrivilegedRunc: task.allowPrivilegedRunc,
         askpass: { hostDir: askpass.hostDir, containerDir: askpass.containerDir },
+        env: sandboxEnv,
       });
       containerCreated = true;
       return session.state;

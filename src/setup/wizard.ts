@@ -8,6 +8,10 @@
  */
 
 import * as p from "@clack/prompts";
+import {
+  CLAUDE_CODE_OAUTH_TOKEN_SECRET,
+  CLAUDE_CODE_OAUTH_TOKEN_SECRET_DESCRIPTION,
+} from "../agent/coding/auth.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ProviderAttrs } from "../agent/store/schema.js";
 import { type Transactor, transactor } from "../db/transactor.js";
@@ -575,6 +579,61 @@ async function collectAndStorePat(deps: WizardDeps, existing: GitHubIdentity): P
   p.log.success("GitHub PAT rotated.");
 }
 
+async function stepConfigureClaudeCodeAuth(deps: WizardDeps): Promise<void> {
+  const existing = await deps.runInTx((tx) =>
+    deps.secretsStore.getSecretMeta(tx, CLAUDE_CODE_OAUTH_TOKEN_SECRET),
+  );
+
+  if (existing) {
+    const action = await p.select({
+      message: "Claude Code subscription token is already configured. What would you like to do?",
+      options: [
+        { value: "keep", label: "Keep current token" },
+        { value: "replace", label: "Replace (rotate)" },
+      ],
+    });
+    cancelGuard(action);
+    if (action === "keep") return;
+  } else {
+    const proceed = await p.confirm({
+      message: "Configure Claude Code subscription auth for the coding-delegation pipeline?",
+      initialValue: false,
+    });
+    if (!cancelGuard(proceed)) return;
+  }
+
+  p.note(
+    [
+      "1. On a machine with a browser, run: claude setup-token",
+      "2. Complete the OAuth flow when the browser opens.",
+      "3. Copy the token printed to the terminal (valid for 1 year).",
+      "",
+      "Requires a Claude Pro, Max, Team, or Enterprise plan.",
+    ].join("\n"),
+    "Where to get a Claude Code OAuth token",
+  );
+
+  const token = cancelGuard(
+    await p.password({
+      message: "Paste your Claude Code OAuth token:",
+      validate: (v) => {
+        if (!v || v.length < 20) return "Token looks too short";
+        return undefined;
+      },
+    }),
+  );
+
+  await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: CLAUDE_CODE_OAUTH_TOKEN_SECRET,
+      plaintext: token,
+      description: CLAUDE_CODE_OAUTH_TOKEN_SECRET_DESCRIPTION,
+    }),
+  );
+
+  p.log.success("Claude Code OAuth token stored.");
+}
+
 async function stepValidateHindsight(): Promise<void> {
   const s = p.spinner();
   s.start("Checking Hindsight memory server...");
@@ -669,9 +728,12 @@ export async function runWizard(deps: {
   // Step 5: GitHub identity for the coding-delegation pipeline (optional)
   await stepConfigureGitHubIdentity(wizardDeps);
 
-  // Step 6: Hindsight check
+  // Step 6: Claude Code subscription auth for the coding-delegation pipeline (optional)
+  await stepConfigureClaudeCodeAuth(wizardDeps);
+
+  // Step 7: Hindsight check
   await stepValidateHindsight();
 
-  // Step 7: Summary + next-steps
+  // Step 8: Summary + next-steps
   await stepSummary(wizardDeps, botUsername);
 }

@@ -13,6 +13,7 @@ import {
   type SandboxSession,
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
+import type { SecretsStore } from "../../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
@@ -111,14 +112,19 @@ interface FakeContainerOpts {
 
 interface FakeSandboxResult {
   sandbox: SandboxClient<LocalDockerSessionState>;
-  createCalls: { taskId: string; image: string; worktreePath: string | undefined }[];
+  createCalls: {
+    taskId: string;
+    image: string;
+    worktreePath: string | undefined;
+    env: Readonly<Record<string, string>> | undefined;
+  }[];
   stopCalls: string[];
   /** When non-null, `tryResumeByTaskId` returns a session derived from this state. */
   setExistingSession: (state: LocalDockerSessionState | null) => void;
 }
 
 function fakeSandbox(opts: FakeContainerOpts = {}): FakeSandboxResult {
-  const createCalls: { taskId: string; image: string; worktreePath: string | undefined }[] = [];
+  const createCalls: FakeSandboxResult["createCalls"] = [];
   const stopCalls: string[] = [];
 
   let lastSessionState: LocalDockerSessionState | null = null;
@@ -155,6 +161,7 @@ function fakeSandbox(opts: FakeContainerOpts = {}): FakeSandboxResult {
         taskId: spec.taskId,
         image: spec.image,
         worktreePath: spec.worktree?.hostPath,
+        env: spec.env,
       });
       // Insert a real `containers` row so coding_tasks.container_id FK is
       // satisfied. Uses the per-test instanceId seeded in beforeEach.
@@ -343,6 +350,52 @@ describe("runCodingTask", () => {
     expect(planStream.finalized).toEqual(["## Plan\n1. Do X\n"]);
     expect(planStream.failed).toEqual([]);
     expect(stopCalls).toEqual([]);
+    // No secretsStore wired ⇒ no auth env threaded. The supervisor unit
+    // test pins what happens with env present; this test pins the absent
+    // path so adding a `secretsStore` to the deps interface doesn't
+    // silently change the env shape on tests that omit it.
+    expect(createCalls[0].env).toBeUndefined();
+  });
+
+  it("threads CLAUDE_CODE_OAUTH_TOKEN from secretsStore into sandbox.create env", async () => {
+    // Pins the contract: when a secretsStore is wired and the OAuth
+    // secret is present, it lands on `SessionSpec.env`. See
+    // design/coding-delegation.md → Subscription Auth.
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, createCalls } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-AUTH" },
+      { kind: "plan_ready", plan: "## Plan\n" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+    const fakeSecrets = {
+      getSecret: async (_tx: unknown, name: string) =>
+        name === "claude_code_oauth_token" ? "sk-test-oauth" : undefined,
+    } as unknown as SecretsStore;
+    const deps = makeDeps({ sandbox, backend, secretsStore: fakeSecrets });
+
+    const result = await runCodingTask({ taskId: task.id, deps, stepRun });
+    expect(result.status).toBe("awaiting_approval");
+    expect(createCalls[0].env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: "sk-test-oauth" });
+  });
+
+  it("missing CLAUDE_CODE_OAUTH_TOKEN with secretsStore wired → status=failed before container", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, createCalls } = fakeSandbox();
+    const backend = backendYielding([]);
+    const fakeSecrets = {
+      getSecret: async (_tx: unknown, _name: string) => undefined,
+    } as unknown as SecretsStore;
+    const deps = makeDeps({ sandbox, backend, secretsStore: fakeSecrets });
+
+    const result = await runCodingTask({ taskId: task.id, deps, stepRun });
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.failureReason).toMatch(/claude_code_oauth_token/);
+    }
+    expect(createCalls).toHaveLength(0);
   });
 
   it("automated trigger (evolution) auto-advances to executing", async () => {

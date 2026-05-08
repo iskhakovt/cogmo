@@ -26,8 +26,8 @@ Scope explicitly *not* in this doc: writing code inline in the agent's own respo
 
 | Backend | Invocation (shape) | Auth |
 |-|-|-|
-| Claude Code | `claude -p --output-format stream-json --include-partial-messages --input-format stream-json --permission-mode {plan,acceptEdits} [--resume <sid>] [--session-id <uuid>]` | User's Max/Pro subscription via existing login |
-| Codex CLI | `codex exec resume <sid> --json` (or `codex exec resume --last --json`) — `resume` is a subcommand and must precede `--json` | User's ChatGPT Plus/Pro login |
+| Claude Code | `claude -p --output-format stream-json --include-partial-messages --input-format stream-json --permission-mode {plan,acceptEdits} [--resume <sid>] [--session-id <uuid>]` | User's Max/Pro subscription via long-lived OAuth token, see [Subscription Auth](#subscription-auth-proposed) |
+| Codex CLI | `codex exec resume <sid> --json` (or `codex exec resume --last --json`) — `resume` is a subcommand and must precede `--json` | User's ChatGPT Plus/Pro login (file-mount path TBD, see [Subscription Auth → Codex parallel](#subscription-auth-proposed)) |
 
 Flag set is illustrative — pin and verify against the exact `claude` / `codex` versions baked into `cogmo/devbase`. Both CLIs evolve their flags quickly; the `CodingBackend` impl treats the argv vector as a versioned contract keyed on the image tag.
 
@@ -36,6 +36,32 @@ The Agent SDK explicitly requires API keys and **cannot use subscription auth** 
 Output is parsed as JSONL. Both CLIs emit structured events (`system/init`, `stream_event` with `text_delta`, tool-use, `turn.completed` with tokens). Cogmo streams these as progress updates to Telegram.
 
 `session_id` is captured on the first event and persisted in `coding_tasks.session_id`. Resume uses `--resume <sid>` (Claude) or the `resume` subcommand (Codex) — carries full conversation state across Cogmo restarts or multi-turn task flows.
+
+### Subscription Auth `[proposed]`
+
+The *Execution Model* table claims "User's Max/Pro subscription". This subsection specifies how that subscription reaches the per-task container, since the host's `~/.claude/` is *not* shared with the sandbox (per-task home volume is fresh and ephemeral, see [Isolation → What persists vs what's ephemeral](#what-persists-vs-whats-ephemeral)).
+
+**`CLAUDE_CODE_OAUTH_TOKEN` env var, sourced from the encrypted secrets table.** Anthropic's official headless path ([authentication docs](https://code.claude.com/docs/en/authentication) → *Generate a long-lived token*).
+
+| Step | Where |
+|-|-|
+| User runs `claude setup-token` once on a machine with a browser | Claude.ai OAuth flow, prints a 1-year token to stdout. The CLI does *not* persist it — copy required. |
+| User pastes the token into Cogmo's setup wizard | Stored as `claude_code_oauth_token` in the encrypted `secrets` table ([infrastructure.md](infrastructure.md) → Secrets). Setup is re-runnable, so re-pasting is the rotation path. |
+| Non-interactive bootstrap path | `COGMO_CLAUDE_CODE_OAUTH_TOKEN` (and `_FILE` variant) migrates into the secrets table on first boot, same pattern as `daytona_api_key` and the GitHub PAT. Not consulted thereafter. |
+| Orchestrator reads at `create-container` step | `secretsStore.get("claude_code_oauth_token")`. Threaded into `sandbox.create()` via a new `env` field on `LocalSandboxSpec`. |
+| Supervisor injects on container create | `Docker.createContainer({ ..., Env: [\`CLAUDE_CODE_OAUTH_TOKEN=${token}\`] })`. The token lives only in the container's process env — never lands on the home volume, never gets `docker cp`'d in. |
+
+**Why not bind-mount `~/.claude/`.** The host login pair (`access_token` + `refresh_token` in `~/.claude/.credentials.json`) mutates on refresh. A container would either race with the host on refresh writes or fail to refresh in non-interactive mode entirely ([anthropics/claude-code#28827](https://github.com/anthropics/claude-code/issues/28827)). On macOS the host stores credentials in Keychain, not as a file — bind-mount isn't even possible. The long-lived token sidesteps both problems.
+
+**Why not `apiKeyHelper`.** Pattern is strictly more flexible (vault-fetched short-lived tokens, same shape as the *Git/Registry Credentials → Vault socket* P2 proposal in this doc), but adds an in-container helper script and a host-side credential server for no immediate gain when the alternative is one env var with a 1-year TTL. Defer to P2 alongside the GitHub-App migration, where short-lived helper auth applies uniformly across git, gh, and Claude.
+
+**Why not `ANTHROPIC_API_KEY`.** Bills against Console (API), not the user's Max/Pro subscription — defeats the entire premise of *Execution Model*. It also wins precedence over `CLAUDE_CODE_OAUTH_TOKEN` if both are set ([authentication docs](https://code.claude.com/docs/en/authentication) → *Authentication precedence*), so Cogmo must never set `ANTHROPIC_API_KEY` on the coding container's env, even by accident from the host shell.
+
+**Token rotation.** 1-year TTL. The setup wizard records `created_at` on the secret row; `/status` surfaces a warning ~30 days before expiry. Re-running the wizard's auth step replaces the secret. Token expiry at runtime surfaces as `claude -p` exiting with an auth failure on the next task — recorded into `coding_tasks.failure_reason` as a new `claude_auth_failed` discriminator alongside the existing `auth_failed` (push-PAT-specific, defined in *Flow → push step*) and `branch_conflict` arms.
+
+**Codex parallel.** Out of scope for slice 2. Codex CLI does not currently have a headless-token equivalent of `claude setup-token`; the Codex auth path will likely require seeding `~/.codex/auth.json` into the per-task home volume from a value held in the secrets table — same "freshly seeded per task, never bind-mounted" discipline. Tracked as a P2 follow-up; design slot reserved here so the secrets-table key namespace stays consistent (`codex_auth_json` alongside `claude_code_oauth_token`).
+
+**Bare mode caveat.** `claude --bare` does not read `CLAUDE_CODE_OAUTH_TOKEN` ([authentication docs](https://code.claude.com/docs/en/authentication)). Cogmo invokes `claude -p` (full mode), not `--bare`, so this works as written. If a future invocation moves to bare, the auth path must change to `apiKeyHelper`.
 
 ## Backend Interface `[confirmed]` (slice 2 — `plan()` + `execute()`; `resume()` is implicit via `execute(ctx, sessionId)`)
 
