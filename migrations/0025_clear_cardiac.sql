@@ -1,0 +1,1 @@
+ALTER TABLE "profiles" ADD CONSTRAINT "fk_profiles_profile_class" FOREIGN KEY ("user_id","profile_class") REFERENCES "public"."profile_classes"("user_id","name") ON DELETE restrict ON UPDATE no action;

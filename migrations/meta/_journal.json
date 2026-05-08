@@ -176,6 +176,13 @@
       "when": 1778270278464,
       "tag": "0024_gifted_black_bolt",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1778277657817,
+      "tag": "0025_clear_cardiac",
+      "breakpoints": true
     }
   ]
 }

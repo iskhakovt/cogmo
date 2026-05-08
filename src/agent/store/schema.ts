@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   boolean,
   check,
+  foreignKey,
   index,
   integer,
   pgEnum,
@@ -175,13 +176,33 @@ export const profiles = pgTable(
     /**
      * Profile class — speaker-isolation label. NULL = unclassed (Observer
      * emits no `profile_class:*` tag for this profile's conversations).
-     * Validated at the store boundary against `profile_classes` for the
-     * profile's user; org profiles (`user_id IS NULL`) cannot be classed.
+     * Validated against `profile_classes` for the profile's user via the
+     * composite FK below; org profiles (`user_id IS NULL`) bypass the FK
+     * check (MATCH SIMPLE) and so are rejected at the store boundary
+     * (`setProfileClass`) instead.
      */
     profileClass: text("profile_class"),
     createdAt: ts(),
   },
-  (t) => [unique("uq_profiles_user_name").on(t.userId, t.name).nullsNotDistinct()],
+  (t) => [
+    unique("uq_profiles_user_name").on(t.userId, t.name).nullsNotDistinct(),
+    /**
+     * Composite FK enforcing that any non-null `(user_id, profile_class)`
+     * pair on a profile references an existing row in `profile_classes`.
+     * `ON DELETE RESTRICT`: deleting a class while any profile still
+     * references it fails atomically at the DB layer. Replaces the
+     * earlier check-then-write pattern in the store, which raced under
+     * concurrent setProfileClass / deleteProfileClass. MATCH SIMPLE
+     * (the default): when either column is NULL the constraint is not
+     * checked, so org profiles (user_id IS NULL) bypass it — that gap
+     * is closed at the store boundary.
+     */
+    foreignKey({
+      columns: [t.userId, t.profileClass],
+      foreignColumns: [profileClasses.userId, profileClasses.name],
+      name: "fk_profiles_profile_class",
+    }).onDelete("restrict"),
+  ],
 );
 
 export const conversations = pgTable(

@@ -8,6 +8,7 @@ import type { AutoRecallMode } from "../recall-gate.js";
 import {
   ProfileClassInUseError,
   ProfileInUseError,
+  translateForeignKeyViolation,
   translateUniqueViolation,
   UnknownProfileClassError,
 } from "./errors.js";
@@ -998,23 +999,33 @@ export class DrizzleAgentStore implements AgentStore {
     userId: string,
     name: string,
   ): Promise<{ deleted: boolean }> {
-    // Count + delete in one tx: a concurrent setProfileClass(profileId, name)
-    // could otherwise win the race between our count and delete and leave a
-    // dangling reference. The composite (user_id, profile_class) match is
-    // safe under READ COMMITTED for our single-user model.
+    // Atomicity comes from the composite FK on `profiles(user_id, profile_class)`
+    // with ON DELETE RESTRICT — the DELETE fails at the DB level if any
+    // profile still references this class, even when a concurrent
+    // setProfileClass slipped its UPDATE in after our count. The count
+    // below is informational only; a stale value is harmless because the
+    // FK is the authoritative check.
     const refRows = await tx
       .select({ value: count() })
       .from(profiles)
       .where(and(eq(profiles.userId, userId), eq(profiles.profileClass, name)));
     const refCount = refRows[0]?.value ?? 0;
-    if (refCount > 0) {
-      throw new ProfileClassInUseError(refCount);
-    }
-    const deleted = await tx
-      .delete(profileClasses)
-      .where(and(eq(profileClasses.userId, userId), eq(profileClasses.name, name)))
-      .returning({ id: profileClasses.id });
-    return { deleted: deleted.length > 0 };
+    return translateForeignKeyViolation(
+      async () => {
+        const deleted = await tx
+          .delete(profileClasses)
+          .where(and(eq(profileClasses.userId, userId), eq(profileClasses.name, name)))
+          .returning({ id: profileClasses.id });
+        return { deleted: deleted.length > 0 };
+      },
+      {
+        constraintName: "fk_profiles_profile_class",
+        // refCount may be 0 here (the violating UPDATE landed AFTER we
+        // counted) — that's fine; the message is informational and the
+        // important fact is "in use right now", which the FK confirmed.
+        rethrow: () => new ProfileClassInUseError(Math.max(refCount, 1)),
+      },
+    );
   }
 
   async setProfileClass(
@@ -1026,24 +1037,36 @@ export class DrizzleAgentStore implements AgentStore {
       await tx.update(profiles).set({ profileClass: null }).where(eq(profiles.id, profileId));
       return;
     }
-    // Validate the class exists for the profile's user. Org profiles
-    // (user_id IS NULL) have no per-user registry to consult, so any class
-    // name is unknown by definition — the join below produces zero rows
-    // and we surface UnknownProfileClassError. This matches the schema
-    // comment on `profiles.profile_class`.
-    const matched = await tx
-      .select({ id: profileClasses.id })
+    // Composite FK with MATCH SIMPLE skips its check when either column is
+    // NULL — so for org profiles (user_id IS NULL) the FK would silently
+    // allow any class name. Reject org-profile classing here so the
+    // contract holds for that path too.
+    const owner = await tx
+      .select({ userId: profiles.userId })
       .from(profiles)
-      .innerJoin(
-        profileClasses,
-        and(eq(profileClasses.userId, profiles.userId), eq(profileClasses.name, className)),
-      )
       .where(eq(profiles.id, profileId))
       .limit(1);
-    if (matched.length === 0) {
+    const found = owner[0];
+    if (!found || found.userId === null) {
       throw new UnknownProfileClassError(className);
     }
-    await tx.update(profiles).set({ profileClass: className }).where(eq(profiles.id, profileId));
+    // For non-org profiles, the FK is the authoritative check: an unknown
+    // class name surfaces as a 23503 on `fk_profiles_profile_class`.
+    // Concurrent deleteProfileClass landing between this UPDATE and
+    // commit fails the same way, so stale-snapshot races can't leave a
+    // dangling pointer.
+    await translateForeignKeyViolation(
+      async () => {
+        await tx
+          .update(profiles)
+          .set({ profileClass: className })
+          .where(eq(profiles.id, profileId));
+      },
+      {
+        constraintName: "fk_profiles_profile_class",
+        rethrow: () => new UnknownProfileClassError(className),
+      },
+    );
   }
 
   async getMessage(
