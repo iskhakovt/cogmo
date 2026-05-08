@@ -355,10 +355,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return deps.runInTx((tx) => agentStore.getHistory(tx, conversationId));
       });
 
-      const _channelTypes = await step.run("resolve-channel-types", async () => {
-        return deps.runInTx((tx) => transportStore.getActiveChannelTypes(tx, conversationId));
-      });
-
       // Open delivery handles early — needed to resolve voice mode
       // (`canDeliverVoice` reflects which active sessions implement
       // `sendVoice`). Side effect is benign: the streaming adapter just
