@@ -59,6 +59,32 @@ export function decrypt(key: Uint8Array, ciphertext: Uint8Array, nonce: Uint8Arr
   return new TextDecoder().decode(plaintext);
 }
 
+/**
+ * Encrypt raw bytes with AES-256-GCM. Same primitive as `encrypt`, but
+ * skips the UTF-8 round-trip — for binary payloads (file attachments,
+ * etc.) where the input is already a byte buffer.
+ */
+export function encryptBytes(
+  key: Uint8Array,
+  plaintext: Uint8Array,
+): { ciphertext: Uint8Array; nonce: Uint8Array } {
+  const nonce = randomBytes(NONCE_LENGTH);
+  const ciphertext = gcm(key, nonce).encrypt(plaintext);
+  return { ciphertext, nonce };
+}
+
+/**
+ * Decrypt raw bytes with AES-256-GCM. Throws on tag mismatch — see
+ * `decrypt` for the same all-or-nothing guarantee.
+ */
+export function decryptBytes(
+  key: Uint8Array,
+  ciphertext: Uint8Array,
+  nonce: Uint8Array,
+): Uint8Array {
+  return gcm(key, nonce).decrypt(ciphertext);
+}
+
 /** Parse a base64-encoded master key into raw bytes. */
 export function parseMasterKey(base64: string): Uint8Array {
   const bytes = Buffer.from(base64, "base64");
