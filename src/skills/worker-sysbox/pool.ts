@@ -64,9 +64,6 @@ export interface SysboxWorkerPoolOptions {
 
   /** Test seam — replace the wall clock. */
   now?: () => number;
-
-  /** Optional prefix for `workerId`. Defaults to `skills-worker`. */
-  workerIdPrefix?: string;
 }
 
 /**
@@ -170,7 +167,6 @@ export class SysboxWorkerPool {
   #setInterval: (cb: () => void, ms: number) => unknown;
   #clearInterval: (handle: unknown) => void;
   #now: () => number;
-  #workerIdPrefix: string;
   #sweepHandle: unknown = null;
   /**
    * In-flight `#spawnOne` promises. Tracked as a count for `#acquire`'s
@@ -218,7 +214,6 @@ export class SysboxWorkerPool {
       opts.clearInterval ??
       ((h: unknown): void => clearInterval(h as ReturnType<typeof setInterval>));
     this.#now = opts.now ?? Date.now;
-    this.#workerIdPrefix = opts.workerIdPrefix ?? "skills-worker";
 
     if (opts.min < 0 || opts.max < 1 || opts.max < opts.min) {
       throw new Error(
@@ -367,7 +362,12 @@ export class SysboxWorkerPool {
   async #runSpawn(): Promise<WorkerHandle> {
     this.#pendingSpawns += 1;
     try {
-      const workerId = `${this.#workerIdPrefix}-${randomUUID().slice(0, 8)}`;
+      // workerId doubles as the sandbox `taskId`, which the cgroup-parent
+      // helper validates as a UUID (defence-in-depth — the id is forwarded
+      // into `HostConfig.CgroupParent`'s systemd unit name). Plain
+      // `randomUUID()` so logs / lineage labels carry a real id, and the
+      // sandbox layer accepts it without fixing up the slice name.
+      const workerId = randomUUID();
       const expiresAt = new Date(this.#now() + this.#opts.recycleAfterMs + REAPER_BACKSTOP_MS);
       const w = await this.#createWorker({
         workerId,
