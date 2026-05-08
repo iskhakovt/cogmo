@@ -45,6 +45,7 @@ beforeAll(async () => {
 
 afterEach(async () => {
   await truncateAll(db);
+  vi.unstubAllEnvs();
 });
 
 afterAll(async () => {
@@ -322,31 +323,18 @@ describe("runNonInteractive", () => {
   });
 
   it("forwards DAYTONA_API_URL / DAYTONA_ORGANIZATION_ID to the validator", async () => {
+    vi.stubEnv("DAYTONA_API_URL", "https://daytona.example.com/api");
+    vi.stubEnv("DAYTONA_ORGANIZATION_ID", "org-7");
+
     const v = validators();
-    const previous = {
-      url: process.env.DAYTONA_API_URL,
-      orgId: process.env.DAYTONA_ORGANIZATION_ID,
-    };
-    process.env.DAYTONA_API_URL = "https://daytona.example.com/api";
-    process.env.DAYTONA_ORGANIZATION_ID = "org-7";
-    try {
-      await runNonInteractive({
-        runInTx: tx,
-        agentStore,
-        transportStore,
-        secretsStore,
-        env: baseEnv({ COGMO_DAYTONA_API_KEY: "dtn_test_api_key_abcdef0123456789" }),
-        validators: v,
-      });
-    } finally {
-      // Vitest workers leak env mutations across tests in the same file;
-      // restore even on failure so a downstream case doesn't silently
-      // hit a phantom URL.
-      if (previous.url === undefined) delete process.env.DAYTONA_API_URL;
-      else process.env.DAYTONA_API_URL = previous.url;
-      if (previous.orgId === undefined) delete process.env.DAYTONA_ORGANIZATION_ID;
-      else process.env.DAYTONA_ORGANIZATION_ID = previous.orgId;
-    }
+    await runNonInteractive({
+      runInTx: tx,
+      agentStore,
+      transportStore,
+      secretsStore,
+      env: baseEnv({ COGMO_DAYTONA_API_KEY: "dtn_test_api_key_abcdef0123456789" }),
+      validators: v,
+    });
 
     expect(v.daytonaApiKey).toHaveBeenCalledWith("dtn_test_api_key_abcdef0123456789", {
       apiUrl: "https://daytona.example.com/api",

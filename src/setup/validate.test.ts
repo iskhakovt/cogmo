@@ -219,6 +219,22 @@ describe("validateDaytonaApiKey", () => {
     expect(result.error).toContain("ECONNREFUSED");
   });
 
+  it("surfaces DaytonaRateLimitError via the base-class arm so retries during setup are obvious", async () => {
+    const { DaytonaRateLimitError } = await import("@daytonaio/sdk");
+    daytonaListMock.mockRejectedValue(new DaytonaRateLimitError("Rate limit exceeded (60/min)"));
+    const result = await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe("Daytona API error: Rate limit exceeded (60/min)");
+  });
+
+  it("surfaces an arbitrary DaytonaError subclass via the base-class arm", async () => {
+    const { DaytonaTimeoutError } = await import("@daytonaio/sdk");
+    daytonaListMock.mockRejectedValue(new DaytonaTimeoutError("request timed out"));
+    const result = await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe("Daytona API error: request timed out");
+  });
+
   it("forwards apiUrl + organizationId to the Daytona constructor", async () => {
     daytonaListMock.mockResolvedValue([]);
     await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789", {

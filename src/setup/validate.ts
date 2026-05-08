@@ -11,7 +11,9 @@ import {
   DaytonaAuthenticationError,
   DaytonaAuthorizationError,
   DaytonaConnectionError,
+  DaytonaError,
 } from "@daytonaio/sdk";
+import { daytonaHealthProbe } from "../sandbox/daytona/probe.js";
 
 export interface ValidationResult {
   valid: boolean;
@@ -166,10 +168,14 @@ export interface DaytonaProbeOpts {
 }
 
 /**
- * Validate a Daytona API key by listing one sandbox. Mirrors the
- * `healthCheck` probe in `DaytonaSandboxClient` so the wizard fails on the
- * exact same call that bootstrap would. The list call is cheap (page size
- * 1) and works against an empty account.
+ * Validate a Daytona API key by running the same `daytonaHealthProbe`
+ * `DaytonaSandboxClient.healthCheck` uses, so the wizard fails on
+ * whatever bootstrap will. Each typed `DaytonaError` subclass gets its
+ * own actionable message; the base-class arm catches the rest
+ * (`DaytonaRateLimitError`, `DaytonaTimeoutError`, `DaytonaConflictError`,
+ * `DaytonaValidationError`, `DaytonaNotFoundError`) so a rate-limit hit
+ * during repeated `cogmo setup` runs surfaces the SDK message instead
+ * of the generic "Unexpected error" arm.
  */
 export async function validateDaytonaApiKey(
   apiKey: string,
@@ -179,8 +185,7 @@ export async function validateDaytonaApiKey(
     const config: ConstructorParameters<typeof Daytona>[0] = { apiKey };
     if (opts.apiUrl) config.apiUrl = opts.apiUrl;
     if (opts.organizationId) config.organizationId = opts.organizationId;
-    const daytona = new Daytona(config);
-    await daytona.list({}, 1, 1);
+    await daytonaHealthProbe(new Daytona(config));
     return { valid: true };
   } catch (err) {
     if (err instanceof DaytonaAuthenticationError) {
@@ -197,6 +202,9 @@ export async function validateDaytonaApiKey(
     }
     if (err instanceof DaytonaConnectionError) {
       return { valid: false, error: `Connection failed: ${err.message}` };
+    }
+    if (err instanceof DaytonaError) {
+      return { valid: false, error: `Daytona API error: ${err.message}` };
     }
     return { valid: false, error: `Unexpected error: ${(err as Error).message}` };
   }
