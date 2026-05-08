@@ -812,6 +812,254 @@ describe("handleClasses", () => {
     });
     expect(ctx.reply.mock.calls[0]?.[0]).toContain('Registered class "intimate"');
   });
+
+  it("/classes add with no args replies with usage", async () => {
+    const transport = transportWith();
+    const ctx = mkCtx("add");
+    await handleClasses(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /classes");
+  });
+
+  it("/classes add with name but missing description replies with usage", async () => {
+    const create = vi.fn();
+    const transport = transportWith({ profileClasses: { create } });
+    const ctx = mkCtx("add intimate");
+    await handleClasses(transport, ctx);
+    expect(create).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /classes");
+  });
+
+  it("/classes add surfaces profile_class_name_taken from Transport", async () => {
+    const create = vi
+      .fn()
+      .mockResolvedValue(err({ code: "profile_class_name_taken", name: "intimate" }));
+    const transport = transportWith({ profileClasses: { create } });
+    const ctx = mkCtx("add intimate desc");
+    await handleClasses(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain('"intimate" already exists');
+  });
+
+  it("bare /classes lists registered classes", async () => {
+    const list = vi.fn().mockResolvedValue(
+      ok([
+        {
+          id: "c-1",
+          userId: "u-1",
+          name: "intimate",
+          description: "for emotional / relationship topics",
+          createdAt: new Date("2026-04-16T12:00:00Z"),
+        },
+        {
+          id: "c-2",
+          userId: "u-1",
+          name: "general",
+          description: "default for assistant-style profiles",
+          createdAt: new Date("2026-04-16T12:00:00Z"),
+        },
+      ]),
+    );
+    const transport = transportWith({ profileClasses: { list } });
+    const ctx = mkCtx();
+    await handleClasses(transport, ctx);
+    expect(list).toHaveBeenCalledWith("1");
+    const reply = ctx.reply.mock.calls[0]?.[0];
+    expect(reply).toContain("intimate");
+    expect(reply).toContain("for emotional / relationship topics");
+    expect(reply).toContain("general");
+  });
+
+  it("explicit /classes list uses the same path", async () => {
+    const list = vi.fn().mockResolvedValue(ok([]));
+    const transport = transportWith({ profileClasses: { list } });
+    const ctx = mkCtx("list");
+    await handleClasses(transport, ctx);
+    expect(list).toHaveBeenCalled();
+  });
+
+  it("bare /classes with empty registry replies with the bootstrap hint", async () => {
+    const list = vi.fn().mockResolvedValue(ok([]));
+    const transport = transportWith({ profileClasses: { list } });
+    const ctx = mkCtx();
+    await handleClasses(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("/classes add");
+  });
+
+  it("bare /classes surfaces identity_rejected via errorMessage", async () => {
+    const list = vi.fn().mockResolvedValue(err({ code: "identity_rejected" }));
+    const transport = transportWith({ profileClasses: { list } });
+    const ctx = mkCtx();
+    await handleClasses(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("not authorized");
+  });
+
+  it("/classes rm <name> calls profileClasses.delete", async () => {
+    const del = vi.fn().mockResolvedValue(ok(undefined));
+    const transport = transportWith({ profileClasses: { delete: del } });
+    const ctx = mkCtx("rm intimate");
+    await handleClasses(transport, ctx);
+    expect(del).toHaveBeenCalledWith("1", "intimate");
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain('"intimate" removed');
+  });
+
+  it("/classes remove and /classes delete both alias to rm", async () => {
+    const del = vi.fn().mockResolvedValue(ok(undefined));
+    const transport = transportWith({ profileClasses: { delete: del } });
+    await handleClasses(transport, mkCtx("remove intimate"));
+    await handleClasses(transport, mkCtx("delete intimate"));
+    expect(del).toHaveBeenCalledTimes(2);
+  });
+
+  it("/classes rm with no args replies with usage", async () => {
+    const transport = transportWith();
+    const ctx = mkCtx("rm");
+    await handleClasses(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /classes");
+  });
+
+  it("/classes rm surfaces profile_class_in_use", async () => {
+    const del = vi.fn().mockResolvedValue(err({ code: "profile_class_in_use", profileRefs: 2 }));
+    const transport = transportWith({ profileClasses: { delete: del } });
+    const ctx = mkCtx("rm intimate");
+    await handleClasses(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("2 profile(s)");
+  });
+
+  it("/classes rm surfaces profile_class_not_found", async () => {
+    const del = vi
+      .fn()
+      .mockResolvedValue(err({ code: "profile_class_not_found", name: "no-such" }));
+    const transport = transportWith({ profileClasses: { delete: del } });
+    const ctx = mkCtx("rm no-such");
+    await handleClasses(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain('No profile class named "no-such"');
+  });
+
+  it("unknown subcommand replies with usage", async () => {
+    const transport = transportWith();
+    const ctx = mkCtx("frobnicate");
+    await handleClasses(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /classes");
+  });
+});
+
+describe("/profile class subcommand", () => {
+  function makeProfile(profileClass: string | null = null): Profile {
+    return {
+      id: "p1",
+      userId: "u",
+      name: "personal",
+      basePrompt: "",
+      model: "claude-sonnet-4-6",
+      summarizationModel: null,
+      extractionModel: null,
+      autoRecall: "heuristic",
+      voiceMode: "auto",
+      toolSet: [],
+      memoryScope: null,
+      profileClass,
+    };
+  }
+
+  it("happy path: /profile class <name> <classname> calls profiles.setClass", async () => {
+    const setClass = vi.fn().mockResolvedValue(ok(undefined));
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile()])),
+        setClass,
+      },
+    });
+    const ctx = mkCtx("class personal intimate");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(setClass).toHaveBeenCalledWith("1", "p1", "intimate");
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain('Class for "personal" set to "intimate"');
+  });
+
+  it("/profile class <name> clear forwards null to setClass", async () => {
+    const setClass = vi.fn().mockResolvedValue(ok(undefined));
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile("intimate")])),
+        setClass,
+      },
+    });
+    const ctx = mkCtx("class personal clear");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(setClass).toHaveBeenCalledWith("1", "p1", null);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain('Class for "personal" cleared');
+  });
+
+  it("/profile class CLEAR is case-insensitive on the sentinel", async () => {
+    const setClass = vi.fn().mockResolvedValue(ok(undefined));
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile("intimate")])),
+        setClass,
+      },
+    });
+    const ctx = mkCtx("class personal CLEAR");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(setClass).toHaveBeenCalledWith("1", "p1", null);
+  });
+
+  it("/profile class with too few args replies with usage", async () => {
+    const setClass = vi.fn();
+    const transport = transportWith({ profiles: { setClass } });
+    const ctx = mkCtx("class");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(setClass).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /profile");
+  });
+
+  it("/profile class with one arg replies with usage (need profile + class/clear)", async () => {
+    const setClass = vi.fn();
+    const transport = transportWith({ profiles: { setClass } });
+    const ctx = mkCtx("class onlyname");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(setClass).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /profile");
+  });
+
+  it("/profile class on unknown profile name replies friendly", async () => {
+    const setClass = vi.fn();
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        setClass,
+      },
+    });
+    const ctx = mkCtx("class ghost intimate");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(setClass).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain('No profile named "ghost"');
+  });
+
+  it("/profile class supports multi-word profile names (split takes last token as class)", async () => {
+    const setClass = vi.fn().mockResolvedValue(ok(undefined));
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([{ ...makeProfile(), name: "my work" }])),
+        setClass,
+      },
+    });
+    const ctx = mkCtx("class my work intimate");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(setClass).toHaveBeenCalledWith("1", "p1", "intimate");
+  });
+
+  it("/profile class surfaces unknown_profile_class via errorMessage", async () => {
+    const setClass = vi
+      .fn()
+      .mockResolvedValue(err({ code: "unknown_profile_class", name: "nope" }));
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile()])),
+        setClass,
+      },
+    });
+    const ctx = mkCtx("class personal nope");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain('Unknown profile class "nope"');
+  });
 });
 
 describe("formatScope", () => {
