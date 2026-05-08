@@ -33,8 +33,9 @@ RUN corepack enable \
  && corepack prepare pnpm@10.27.0 --activate
 
 # Claude Code CLI — pinned. Version drift breaks the stream-json contract that
-# src/agent/coding/claude.ts depends on, so bump deliberately as part of an
-# image tag rev (slice1 → slice2 → ...), not via floating `latest`.
+# src/agent/coding/claude.ts depends on. Bump deliberately in the same PR
+# that bumps the parser, so the next cogmo release ships matched code +
+# image at the same semver. Never `latest`.
 ARG CLAUDE_CODE_VERSION=2.1.119
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude --version
