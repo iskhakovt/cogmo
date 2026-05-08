@@ -402,6 +402,12 @@ beforeEach(async () => {
     id: "1",
   };
   secrets.set(gitHubIdentitySecretName("default"), serializeGitHubIdentity(identity));
+  // Subscription auth: orchestrator demands the OAuth token before
+  // creating the container (see auth.ts → loadCodingSandboxEnv). Test
+  // value is opaque to the verify path — the orchestrator only forwards
+  // it as `CLAUDE_CODE_OAUTH_TOKEN` env, and verify never invokes
+  // `claude -p` (it runs the repo's verify_command + git, not the CLI).
+  secrets.set("claude_code_oauth_token", "sk-test-claude-code-oauth-token");
 
   // Fresh worktree per test — clone the fixture repo from Gitea via the
   // configured PAT so origin is set correctly and HEAD points at the
