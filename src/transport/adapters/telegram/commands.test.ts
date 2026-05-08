@@ -5,6 +5,7 @@ import { type DeepPartial, mockTransportDeep } from "../../../test/factories.js"
 import type { Transport } from "../../transport.js";
 import {
   formatScope,
+  handleClasses,
   handleEnd,
   handleMcp,
   handleModel,
@@ -771,6 +772,45 @@ describe("splitScopeArgs", () => {
 
   it("empty rest → empty name, empty spec", () => {
     expect(splitScopeArgs([])).toEqual({ name: "", scopeTokens: [] });
+  });
+});
+
+describe("handleClasses", () => {
+  it("rejects /classes add with reserved name 'clear' before calling Transport", async () => {
+    const create = vi.fn().mockResolvedValue(ok({} as never));
+    const transport = transportWith({ profileClasses: { create } });
+    const ctx = mkCtx("add clear something descriptive");
+    await handleClasses(transport, ctx);
+    expect(create).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain('"clear" is reserved');
+  });
+
+  it("rejects /classes add CLEAR (case-insensitive)", async () => {
+    const create = vi.fn().mockResolvedValue(ok({} as never));
+    const transport = transportWith({ profileClasses: { create } });
+    const ctx = mkCtx("add CLEAR description");
+    await handleClasses(transport, ctx);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("/classes add <name> <desc> with a normal name calls profileClasses.create", async () => {
+    const create = vi.fn().mockResolvedValue(
+      ok({
+        id: "c-1",
+        userId: "u-1",
+        name: "intimate",
+        description: "for emotional / relationship topics",
+        createdAt: new Date("2026-04-16T12:00:00Z"),
+      }),
+    );
+    const transport = transportWith({ profileClasses: { create } });
+    const ctx = mkCtx("add intimate for emotional / relationship topics");
+    await handleClasses(transport, ctx);
+    expect(create).toHaveBeenCalledWith("1", {
+      name: "intimate",
+      description: "for emotional / relationship topics",
+    });
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain('Registered class "intimate"');
   });
 });
 

@@ -1023,6 +1023,15 @@ async function replyClassesList(
   await ctx.reply(`Profile classes:\n${lines.join("\n")}`);
 }
 
+/**
+ * Names that collide with `/profile class <name> …` parser sentinels —
+ * any class named "clear" is creatable but unaddressable here because
+ * `replyProfileClass` interprets `clear` as the clear-action. Reject
+ * up front so the user sees an actionable error instead of creating
+ * a class they can't assign via Telegram.
+ */
+const RESERVED_CLASS_NAMES = new Set(["clear"]);
+
 async function replyClassesAdd(
   transport: Transport,
   ctx: TelegramCommandContext,
@@ -1030,6 +1039,12 @@ async function replyClassesAdd(
   name: string,
   description: string,
 ): Promise<void> {
+  if (RESERVED_CLASS_NAMES.has(name.toLowerCase())) {
+    await ctx.reply(
+      `"${name}" is reserved (used by /profile class <name> clear). Pick a different class name.`,
+    );
+    return;
+  }
   const res = await transport.profileClasses.create(handle, { name, description });
   if (res.isErr()) {
     await ctx.reply(errorMessage(res.error));
