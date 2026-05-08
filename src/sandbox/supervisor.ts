@@ -31,6 +31,14 @@ export const LABEL_DEPTH = "cogmo.depth";
 /** Buffered-exec output cap per stream. Configurable via env later if needed. */
 const EXEC_BUFFER_LIMIT_BYTES = 1024 * 1024;
 
+/** Thrown by `dispose()` to settle the exit promise via the stream `'error'` channel. */
+class DisposedError extends Error {
+  constructor() {
+    super("execStreaming dispose called");
+    this.name = "DisposedError";
+  }
+}
+
 interface CreateOptions {
   docker: Docker;
   store: SandboxStore;
@@ -526,8 +534,18 @@ async function execStreaming(
       }
     });
     stream.on("error", (err: Error) => {
-      stdout.destroy(err);
-      stderr.destroy(err);
+      if (err instanceof DisposedError) {
+        // Intentional teardown via `dispose()` — close downstream
+        // streams peacefully so consumers see EOF, not an error. The
+        // upstream socket is already gone by the time we get here.
+        stdout.end();
+        stderr.end();
+      } else {
+        // Real upstream error — forward so consumers reading the
+        // demuxed PassThroughs see the same failure.
+        stdout.destroy(err);
+        stderr.destroy(err);
+      }
       reject(err);
     });
   });
@@ -543,8 +561,11 @@ async function execStreaming(
     disposed = true;
     // Closing the hijacked stream causes the daemon to reap the exec
     // process. Docker's exec API doesn't expose a direct kill, but
-    // socket close is the documented teardown path.
-    stream.destroy();
+    // socket close is the documented teardown path. Pass an error so
+    // the stream's `'error'` handler fires and `exitPromise` settles —
+    // a bare `destroy()` would emit only `'close'`, leaving the promise
+    // pending and `dispose()` awaiting forever.
+    stream.destroy(new DisposedError());
     // Wait for the exit channel to settle (success or error) — keeps
     // disposers idempotent and prevents callers seeing pending Promises.
     await exitPromise.catch(() => {

@@ -1,11 +1,7 @@
 import type { Writable } from "node:stream";
 import { z } from "zod";
 import { logger } from "../../logger.js";
-import type {
-  ExecStreamingHandle,
-  LocalDockerSessionState,
-  SandboxSession,
-} from "../../sandbox/index.js";
+import type { ExecStreamingHandle, SandboxSession } from "../../sandbox/index.js";
 import type {
   BackendCallContext,
   BackendUsage,
@@ -191,7 +187,7 @@ export class ClaudeCodeBackend implements CodingBackend {
  */
 async function* runClaudePlan(
   binary: string,
-  container: SandboxSession<LocalDockerSessionState>,
+  container: SandboxSession,
   flags: readonly string[],
   prompt: string,
 ): AsyncIterable<CodingEvent> {
@@ -212,7 +208,7 @@ async function* runClaudePlan(
  */
 async function runClaudeExecute(
   binary: string,
-  container: SandboxSession<LocalDockerSessionState>,
+  container: SandboxSession,
   flags: readonly string[],
   prompt: string,
 ): Promise<CodingExecuteHandle> {

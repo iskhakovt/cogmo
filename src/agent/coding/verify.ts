@@ -19,7 +19,7 @@
  * the in-container process from here, which keeps the runner pure I/O.
  */
 
-import type { LocalDockerSessionState, SandboxSession } from "../../sandbox/index.js";
+import type { SandboxSession } from "../../sandbox/index.js";
 import type { ExecuteStreamHandle } from "./orchestrator.js";
 
 /** Cap for the persisted verify output (8 KiB). Streamed text is unaffected
@@ -30,7 +30,7 @@ export const OUTPUT_CAP_BYTES = 8 * 1024;
 export const TIMEOUT_EXIT_CODE = 124;
 
 export interface VerifyParams {
-  container: Pick<SandboxSession<LocalDockerSessionState>, "execStreaming">;
+  container: Pick<SandboxSession, "execStreaming">;
   /** `coding_repos.verify_command` — passed verbatim to `bash -lc`. */
   verifyCommand: string;
   /** `coding_repos.verify_timeout_seconds` — wall-clock cap. */

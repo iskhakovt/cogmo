@@ -445,3 +445,72 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     expect(proxy.close).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
+  /**
+   * Regression test for the dispose-hang bug: a bare `stream.destroy()`
+   * emits only `'close'`, neither `'end'` nor `'error'`. The exit
+   * promise listens on the latter two; if dispose closes the stream
+   * without an error, the promise never settles and `dispose()` waits
+   * forever. Fix: pass an error so the `'error'` handler fires.
+   */
+  it("resolves promptly when called on a stream that won't end naturally", async () => {
+    const inst = await store.insertInstance({ host: "h", pid: 1 });
+
+    // Hijacked stream that never emits 'end' or 'error' on its own —
+    // mimics a long-running exec that's still attached to the daemon.
+    const { PassThrough } = await import("node:stream");
+    const hijack = new PassThrough();
+    const execObj = {
+      start: vi.fn(async () => hijack),
+      inspect: vi.fn(async () => ({ ExitCode: 137 })),
+    };
+    const containerObj = {
+      exec: vi.fn(async () => execObj),
+      inspect: vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} })),
+      kill: vi.fn(),
+      remove: vi.fn(),
+    };
+    const docker = {
+      info: vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } })),
+      createContainer: vi.fn(async () => ({
+        id: "docker-dispose",
+        start: vi.fn(),
+        remove: vi.fn(),
+        inspect: vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} })),
+      })),
+      getContainer: vi.fn(() => containerObj),
+      listContainers: vi.fn(async () => []),
+      // demuxStream is normally dockerode's frame parser — bypass it
+      // since we're not feeding real Docker frames.
+      modem: { demuxStream: vi.fn() },
+    };
+    const sandbox = await LocalDockerSandboxClient.create({
+      // biome-ignore lint/suspicious/noExplicitAny: minimal dockerode stub
+      docker: docker as any,
+      store,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    const session = await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-00000000d150",
+      image: "alpine",
+      resourceLimits: RESOURCE_LIMITS,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const handle = await session.execStreaming(["sleep", "infinity"]);
+
+    // Race dispose against a short timeout. Pre-fix this race was lost
+    // (dispose hung); post-fix it resolves in milliseconds.
+    const TIMEOUT_MS = 500;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const timeout = new Promise<"timeout">((resolve) => {
+      timeoutHandle = setTimeout(() => resolve("timeout"), TIMEOUT_MS);
+    });
+    const winner = await Promise.race([handle.dispose().then(() => "done" as const), timeout]);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+
+    expect(winner).toBe("done");
+  });
+});

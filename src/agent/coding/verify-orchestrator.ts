@@ -400,9 +400,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   }
 }
 
-async function readHeadSha(
-  container: Pick<SandboxSession<LocalDockerSessionState>, "execStreaming">,
-): Promise<string> {
+async function readHeadSha(container: Pick<SandboxSession, "execStreaming">): Promise<string> {
   const handle = await container.execStreaming(["git", "rev-parse", "HEAD"], {
     workingDir: WORKTREE_DIR_IN_CONTAINER,
   });
