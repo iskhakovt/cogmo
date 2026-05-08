@@ -129,6 +129,52 @@ describe("DaytonaSandboxClient", () => {
       expect(call.autoStopInterval).toBe(1);
     });
 
+    it("threads spec.env into Daytona's `envVars` field (subscription token / etc.)", async () => {
+      // Mirrors the LocalDocker `HostConfig.Env` test in
+      // `supervisor.test.ts` (added in PR #174). Coding-delegation
+      // passes `CLAUDE_CODE_OAUTH_TOKEN` here so `claude -p` can
+      // authenticate against the user's Max/Pro subscription —
+      // the contract must match across backends.
+      daytonaCalls.create.mockResolvedValue(
+        fakeSandbox({ id: "sb-env", state: SandboxState.STARTED }),
+      );
+      const client = await makeClient();
+      await client.create({
+        ...BASE_SPEC,
+        env: { CLAUDE_CODE_OAUTH_TOKEN: "tok-abc", FOO: "bar" },
+      });
+      const call = daytonaCalls.create.mock.calls[0]?.[0] as {
+        envVars?: Record<string, string>;
+      };
+      expect(call.envVars).toEqual({
+        CLAUDE_CODE_OAUTH_TOKEN: "tok-abc",
+        FOO: "bar",
+      });
+    });
+
+    it("omits envVars entirely when spec.env is absent", async () => {
+      // Symmetric to LocalDocker's "omit HostConfig.Env when absent"
+      // invariant — empty/missing env should let the image's own env
+      // pass through, never get clobbered with `{}`.
+      daytonaCalls.create.mockResolvedValue(
+        fakeSandbox({ id: "sb-noenv", state: SandboxState.STARTED }),
+      );
+      const client = await makeClient();
+      await client.create(BASE_SPEC);
+      const call = daytonaCalls.create.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(call).not.toHaveProperty("envVars");
+    });
+
+    it("omits envVars when spec.env is an empty object", async () => {
+      daytonaCalls.create.mockResolvedValue(
+        fakeSandbox({ id: "sb-empty", state: SandboxState.STARTED }),
+      );
+      const client = await makeClient();
+      await client.create({ ...BASE_SPEC, env: {} });
+      const call = daytonaCalls.create.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(call).not.toHaveProperty("envVars");
+    });
+
     it("returns a session with type='daytona' state carrying the Daytona sandbox id", async () => {
       daytonaCalls.create.mockResolvedValue(
         fakeSandbox({ id: "sb-xyz", state: SandboxState.STARTED }),
