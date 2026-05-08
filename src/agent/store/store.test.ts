@@ -1295,6 +1295,64 @@ describe("DrizzleAgentStore", () => {
       // u2 searching for same alias should see nothing
       expect(await store.findConversationByAlias(u2, "shared")).toBeUndefined();
     });
+
+    it("getAliasForConversation returns the alias when set, null when cleared", async () => {
+      const { userId, conversationId } = await seedConversation();
+      expect(await store.getAliasForConversation(userId, conversationId)).toBeNull();
+      await store.setAlias(userId, conversationId, "work");
+      expect(await store.getAliasForConversation(userId, conversationId)).toBe("work");
+      await store.setAlias(userId, conversationId, null);
+      expect(await store.getAliasForConversation(userId, conversationId)).toBeNull();
+    });
+
+    it("getAliasForConversation scopes to user (other users see null)", async () => {
+      const u1 = await seedUser();
+      const u2 = await seedUser();
+      const profileId = await seedProfile();
+      const conv = (await store.createConversation({ userId: u1, profileId, isPrivate: true })).id;
+      await store.setAlias(u1, conv, "owned-by-u1");
+      expect(await store.getAliasForConversation(u2, conv)).toBeNull();
+      expect(await store.getAliasForConversation(u1, conv)).toBe("owned-by-u1");
+    });
+  });
+
+  describe("getConversationStats", () => {
+    it("returns createdAt + zero counts for a fresh conversation with no messages", async () => {
+      const { conversationId } = await seedConversation();
+      const stats = await store.getConversationStats(conversationId);
+      expect(stats).toBeDefined();
+      expect(stats?.messageCount).toBe(0);
+      expect(stats?.lastMessageAt).toBeNull();
+      expect(stats?.createdAt).toBeInstanceOf(Date);
+    });
+
+    it("counts messages and surfaces the most recent createdAt", async () => {
+      const { profileId, conversationId } = await seedConversation();
+      await store.insertMessage({
+        conversationId,
+        role: "user",
+        content: "hi",
+        profileId,
+        model: "claude-sonnet-4-6",
+        lastInboundMessageId: "00000000-0000-7000-8000-000000000001",
+      });
+      await store.insertMessage({
+        conversationId,
+        role: "assistant",
+        content: "hello back",
+        profileId,
+        model: "claude-sonnet-4-6",
+        lastInboundMessageId: "00000000-0000-7000-8000-000000000001",
+      });
+      const stats = await store.getConversationStats(conversationId);
+      expect(stats?.messageCount).toBe(2);
+      expect(stats?.lastMessageAt).toBeInstanceOf(Date);
+    });
+
+    it("returns undefined for a nonexistent conversation id", async () => {
+      const stats = await store.getConversationStats("00000000-0000-7000-8000-000000000999");
+      expect(stats).toBeUndefined();
+    });
   });
 
   describe("evolution: corrections", () => {

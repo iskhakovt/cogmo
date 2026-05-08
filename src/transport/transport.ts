@@ -3,10 +3,18 @@ import { isAbsolute, join } from "node:path";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { CodingStore } from "../agent/coding/store/index.js";
+import type { AutoRecallMode } from "../agent/recall-gate.js";
 import { ProfileInUseError, UniqueViolationError } from "../agent/store/errors.js";
-import type { AgentStore, ConversationSummary, Profile, VoiceMode } from "../agent/store/index.js";
+import type {
+  AgentStore,
+  ConversationStatus,
+  ConversationSummary,
+  Profile,
+  VoiceMode,
+} from "../agent/store/index.js";
 import type { ProfileMemoryScope, ToolSet } from "../agent/store/schema.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
+import { computeBudget } from "../llm/models.js";
 import { logger } from "../logger.js";
 import {
   type McpServer,
@@ -101,6 +109,48 @@ export interface CurrentConversation {
   profileVoiceMode: VoiceMode;
 }
 
+/**
+ * Snapshot of a conversation's state surfaced to channel adapters for
+ * `/status`. Aggregates conversation lifecycle stats, the active profile,
+ * the last LLM turn's persisted token counts (no live recount — see the
+ * design note on /status), steering rule visibility, and the MCP fan-out
+ * — all in a single Transport call so the renderer doesn't fan out itself.
+ *
+ * `lastTurn` is `null` until the first assistant row exists. `mcp` is `null`
+ * when the deployment has no MCP registry wired (`mcp_disabled` in other
+ * surfaces). `contextBudget` is `null` when the active model is not in the
+ * registry — defensive against operator-set models that haven't been
+ * registered (next inbound would fail anyway, but `/status` should still
+ * render).
+ */
+export interface ConversationStatusSummary {
+  conversationId: string;
+  alias: string | null;
+  status: ConversationStatus;
+  createdAt: Date;
+  lastMessageAt: Date | null;
+  messageCount: number;
+  profile: {
+    id: string;
+    name: string;
+    model: string;
+    toolCount: number;
+    autoRecall: AutoRecallMode;
+    memoryScope: ProfileMemoryScope | null;
+    voiceMode: VoiceMode;
+  };
+  /** Per-conversation override; null = follow profile default. */
+  voiceMode: VoiceMode | null;
+  lastTurn: { inputTokens: number | null; outputTokens: number } | null;
+  contextBudget: number | null;
+  steeringRulesCount: number;
+  mcp: {
+    enabledServers: number;
+    approvedTools: number;
+    toolBudget: number;
+  } | null;
+}
+
 export type TransportError =
   | { code: "session_not_found"; sessionId: string }
   | { code: "identity_rejected" }
@@ -176,6 +226,19 @@ export interface Transport {
       platformUserHandle: string,
       platformAddress: string,
     ): Promise<Result<CurrentConversation | null, TransportError>>;
+    /**
+     * Aggregate state for the current session's conversation — used by
+     * `/status`. Returns `ok(null)` when no active session exists for the
+     * address (same shape as `getCurrent`). Identity-checked against
+     * `user_identities`; ownership mismatch resolves to `ok(null)` rather
+     * than `access_denied` to mirror `getCurrent`'s "you have no current
+     * conversation" affordance. Reads persisted token counts only — no
+     * live LLM `countTokens` call.
+     */
+    summary(
+      platformUserHandle: string,
+      platformAddress: string,
+    ): Promise<Result<ConversationStatusSummary | null, TransportError>>;
     setAlias(
       platformUserHandle: string,
       conversationId: string,
@@ -584,6 +647,75 @@ export function createTransport(deps: {
           model: profile.model,
           voiceMode: conv.voiceMode,
           profileVoiceMode: profile.voiceMode,
+        });
+      },
+
+      async summary(platformUserHandle, platformAddress) {
+        const identity = await transportStore.resolveUser(channelId, platformUserHandle);
+        if (!identity) return err({ code: "identity_rejected" as const });
+        const session = await transportStore.resolveSession(channelId, platformAddress);
+        if (!session) return ok(null);
+        const conv = await agentStore.getConversation(session.conversationId);
+        if (!conv || conv.userId !== identity.userId) return ok(null);
+        const profile = await agentStore.getProfile(conv.profileId);
+        if (!profile) return err({ code: "profile_not_found" as const });
+
+        // Independent reads — fan out so /status doesn't pay six round-trips
+        // sequentially. Each query is cheap on its own; the user is waiting on
+        // the slowest one.
+        const [stats, alias, lastTurn, steeringRulesCount, mcpServers] = await Promise.all([
+          agentStore.getConversationStats(conv.id),
+          agentStore.getAliasForConversation(identity.userId, conv.id),
+          agentStore.getLastTokens(conv.id),
+          agentStore.countActiveRules(conv.profileId),
+          mcpRegistry ? mcpRegistry.listServers() : Promise.resolve(null),
+        ]);
+        if (!stats) return err({ code: "conversation_not_found" as const });
+
+        // computeBudget throws on unknown models — degrade to null so /status
+        // still renders. The next real inbound would fail anyway; surfacing
+        // that here would block status visibility on a misconfigured profile.
+        let contextBudget: number | null;
+        try {
+          contextBudget = computeBudget(profile.model);
+        } catch {
+          contextBudget = null;
+        }
+
+        const mcp =
+          mcpServers === null
+            ? null
+            : {
+                enabledServers: mcpServers.filter((s) => s.enabled).length,
+                approvedTools: mcpServers
+                  .filter((s) => s.enabled && s.approvalStatus === "approved")
+                  .reduce((sum, s) => sum + s.approvedToolCount, 0),
+                toolBudget: mcpRegistry?.toolBudget() ?? 0,
+              };
+
+        return ok({
+          conversationId: conv.id,
+          alias,
+          status: conv.status,
+          createdAt: stats.createdAt,
+          lastMessageAt: stats.lastMessageAt,
+          messageCount: stats.messageCount,
+          profile: {
+            id: profile.id,
+            name: profile.name,
+            model: profile.model,
+            toolCount: profile.toolSet.length,
+            autoRecall: profile.autoRecall,
+            memoryScope: profile.memoryScope,
+            voiceMode: profile.voiceMode,
+          },
+          voiceMode: conv.voiceMode,
+          // `getLastTokens` returns `undefined` when no assistant rows exist;
+          // normalize to null so the renderer only branches on one shape.
+          lastTurn: lastTurn ?? null,
+          contextBudget,
+          steeringRulesCount,
+          mcp,
         });
       },
 

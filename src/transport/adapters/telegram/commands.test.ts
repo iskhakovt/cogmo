@@ -16,6 +16,7 @@ import {
   handleResumeCallback,
   handleSessions,
   handleSkillsApprovalCallback,
+  handleStatus,
   handleVoice,
   parseScopeSpec,
   splitScopeArgs,
@@ -1569,6 +1570,69 @@ describe("handleVoice", () => {
     const transport = transportForVoice({ setVoiceMode });
     const ctx = mkCtx("always");
     await handleVoice(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("not authorized"));
+  });
+});
+
+describe("handleStatus", () => {
+  function transportWithSummary(value: unknown) {
+    return mockTransport({
+      conversations: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        getCurrent: vi.fn().mockResolvedValue(ok(null)),
+        summary: vi.fn().mockResolvedValue(value),
+        setAlias: vi.fn().mockResolvedValue(ok(undefined)),
+        setProfile: vi.fn().mockResolvedValue(ok(undefined)),
+        repair: vi.fn().mockResolvedValue(ok({ wasErrored: false })),
+        setVoiceMode: vi.fn().mockResolvedValue(ok(undefined)),
+      },
+    } as Partial<Transport>);
+  }
+
+  it("nudges the user to send a message when no active session", async () => {
+    const transport = transportWithSummary(ok(null));
+    const ctx = mkCtx();
+    await handleStatus(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("No active conversation"));
+  });
+
+  it("renders the summary on success", async () => {
+    const transport = transportWithSummary(
+      ok({
+        conversationId: "11111111-2222-3333-4444-555555556666",
+        alias: "work",
+        status: "active",
+        createdAt: new Date(),
+        lastMessageAt: new Date(),
+        messageCount: 4,
+        profile: {
+          id: "p1",
+          name: "main",
+          model: "claude-sonnet-4-6",
+          toolCount: 3,
+          autoRecall: "heuristic",
+          memoryScope: null,
+          voiceMode: "auto",
+        },
+        voiceMode: null,
+        lastTurn: { inputTokens: 1234, outputTokens: 56 },
+        contextBudget: 180_000,
+        steeringRulesCount: 1,
+        mcp: null,
+      }),
+    );
+    const ctx = mkCtx();
+    await handleStatus(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    expect(reply).toContain("work · status: active");
+    expect(reply).toContain("main · claude-sonnet-4-6");
+    expect(reply).toContain("steering: 1 rules");
+  });
+
+  it("propagates Transport errors with the same mapping as other commands", async () => {
+    const transport = transportWithSummary(err({ code: "identity_rejected" }));
+    const ctx = mkCtx();
+    await handleStatus(transport, ctx);
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("not authorized"));
   });
 });
