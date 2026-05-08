@@ -18,7 +18,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { HeadBucketCommand, type S3Client } from "@aws-sdk/client-s3";
 import { sql } from "drizzle-orm";
 import semver from "semver";
@@ -64,11 +64,12 @@ const PackageJsonSchema = z.object({
  * engineer can bump it from upstream releases without touching TS.
  */
 export function loadHindsightCompat(): HindsightCompat {
-  // Resolve relative to this module: `src/boot/checks.ts` (or
-  // `dist/boot/checks.js`) → `../../package.json`. Both layouts share
-  // the same depth.
-  const pkgUrl = new URL("../../package.json", import.meta.url);
-  const raw = readFileSync(fileURLToPath(pkgUrl), "utf-8");
+  // Read from cwd, not relative to `import.meta.url`. tsup bundles
+  // `src/boot/checks.ts` into a top-level chunk in `dist/`, so the
+  // src→pkg depth (`../../`) doesn't survive the build. Bootstrap
+  // already assumes cwd is the project root (cf. `./migrations` in
+  // `migrate(...)`); this stays consistent with that assumption.
+  const raw = readFileSync(resolve(process.cwd(), "package.json"), "utf-8");
   return PackageJsonSchema.parse(JSON.parse(raw)).cogmo.hindsightCompat;
 }
 
