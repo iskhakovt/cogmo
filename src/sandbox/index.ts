@@ -82,11 +82,20 @@ export interface ExecResult {
 /**
  * Streaming exec handle. `stdout` / `stderr` are demultiplexed Readables
  * (no inline framing). `wait()` resolves with the exit code once the
- * backend reports the process finished. `dispose()` kills a runaway exec
- * — SIGTERM, then SIGKILL after a short grace — and is idempotent. The
- * caller is responsible for either consuming `stdout`/`stderr` to EOF or
- * calling `dispose()`; otherwise the backend may hold the connection
- * open.
+ * backend reports the process finished.
+ *
+ * `dispose()` aborts the exec by tearing down the backend's transport
+ * (Docker exec API has no direct kill — closing the hijacked socket
+ * lets the daemon reap the process). It does NOT send signals; backends
+ * that grow signal support (e.g. a future Daytona impl with a kill
+ * endpoint) may upgrade the implementation but not the contract.
+ * Idempotent. After `dispose()` the streams emit EOF (no error on
+ * `stdout`/`stderr`) and `wait()` rejects with `DisposedError` —
+ * callers that race dispose against natural exit must check for that.
+ *
+ * The caller is responsible for either consuming `stdout`/`stderr` to
+ * EOF or calling `dispose()`; otherwise the backend may hold the
+ * connection open.
  */
 export interface ExecStreamingHandle {
   stdin?: Writable;
@@ -180,12 +189,16 @@ export interface SandboxClient<TState extends SandboxSessionState = SandboxSessi
   resume(state: TState): Promise<SandboxSession<TState>>;
 
   /**
-   * Discover the most-recently-created live session for `taskId`, or
-   * null when none is currently alive. Backend-native lookup: Local-
-   * Docker queries the `containers` table and inspects the daemon;
-   * managed backends query their provider-side API. Useful in the
-   * orchestrator's get-or-create-session path after an idle TTL where a
-   * prior session may or may not still exist.
+   * Discover the live root session (the depth-0 container the
+   * orchestrator originally created) for `taskId`, or null when none
+   * is currently alive. Backend-native lookup: Local-Docker queries
+   * the `containers` table for `depth=0` and inspects the daemon;
+   * managed backends query their provider-side API. Used in the
+   * orchestrator's get-or-create-session path after an idle TTL where
+   * a prior session may or may not still exist. Child containers
+   * spawned by the task (testcontainers etc.) are deliberately
+   * ignored — the orchestrator wants the root, not whatever the task
+   * spawned underneath it.
    */
   tryResumeByTaskId(taskId: string): Promise<SandboxSession<TState> | null>;
 
@@ -199,7 +212,15 @@ export interface SandboxClient<TState extends SandboxSessionState = SandboxSessi
    */
   deleteByTaskId(taskId: string): Promise<void>;
 
+  /**
+   * Encode `state` as a JSONB-shaped object that round-trips through
+   * Postgres + Inngest's step.run boundary. Output must satisfy
+   * `Record<string, unknown>` because Inngest serialises return values
+   * via `JSON.stringify` and the result lands in JSONB columns
+   * (see `coding_tasks.sandbox_session_state`-style fields).
+   */
   serializeState(state: TState): Record<string, unknown>;
+  /** Inverse of `serializeState`. Validates payload shape; throws on mismatch. */
   deserializeState(payload: Record<string, unknown>): TState;
 
   /** Release backend-level resources (close docker connections, listeners). */

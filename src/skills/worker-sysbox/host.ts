@@ -1,9 +1,5 @@
 import { logger } from "../../logger.js";
-import type {
-  LocalDockerSessionState,
-  ResourceLimits,
-  SandboxClient,
-} from "../../sandbox/index.js";
+import type { ResourceLimits, SandboxClient } from "../../sandbox/index.js";
 import { type CtxHandler, Dispatcher } from "../dispatcher.js";
 import type { TaskInvoke, TaskResult } from "../protocol.js";
 import { RUNNER_PY } from "./runner.py.js";
@@ -53,7 +49,7 @@ export interface RunOnSysboxContainerParams {
   resourceLimits?: Partial<ResourceLimits>;
   /** Container image — typically `python:3.14-slim` or a Cogmo-baked equivalent. */
   image: string;
-  sandbox: SandboxClient<LocalDockerSessionState>;
+  sandbox: SandboxClient;
   ctxHandler: CtxHandler;
 }
 

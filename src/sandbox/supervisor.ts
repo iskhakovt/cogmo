@@ -320,13 +320,16 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
   async tryResumeByTaskId(taskId: string): Promise<SandboxSession<LocalDockerSessionState> | null> {
     const rows = await this.#store.listContainersForTask(taskId);
     if (rows.length === 0) return null;
-    // Sorted DESC by depth (children first); for a single non-nested
-    // task this is just the depth-0 container. Pick the first that's
-    // still running according to Docker's view.
+    // Filter to depth=0 — the contract is "root session", not "any
+    // descendant". Children (testcontainers, docker compose siblings)
+    // share `rootTaskId` for cascade-reap purposes; a task that
+    // spawned them must not resume into one of them.
+    // `listContainersForTask` returns DESC depth so iterate filtered.
     for (const row of rows) {
-      // Skip rows the supervisor already marked terminal — it's a hint
-      // that the container won't be coming back. `starting` is included
-      // because the row is inserted in that state before Docker reports
+      if (row.depth !== 0) continue;
+      // Skip rows the supervisor already marked terminal — the
+      // container won't be coming back. `starting` stays in scope
+      // because rows are inserted in that state before Docker reports
       // running; a fast follow-up could find it mid-bring-up.
       if (row.status !== "running" && row.status !== "starting") continue;
       try {
@@ -461,6 +464,16 @@ async function execBuffered(
   };
 }
 
+/**
+ * Byte-cap buffer for buffered exec output. The cap is applied at the
+ * byte level, so a chunk that ends mid-character is truncated at the
+ * byte boundary — `toString("utf8")` then renders the trailing partial
+ * sequence as a U+FFFD replacement character. The output is already
+ * marked `truncated` by that point and the user-visible signal is the
+ * marker, not the exact tail bytes; cleaning the boundary would mean
+ * walking back the cut to the previous valid UTF-8 lead byte. Not
+ * worth the complexity for a debug-shape buffer.
+ */
 class BoundedBuffer {
   #chunks: Buffer[] = [];
   #size = 0;

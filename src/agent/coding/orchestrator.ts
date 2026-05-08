@@ -511,7 +511,16 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     // persistent home volume, so the recreate is transparent to Claude.
     const sessionState = await stepRun("get-or-create-container", async () => {
       const existing = await sandbox.tryResumeByTaskId(taskId);
-      if (existing) return existing.state;
+      if (existing) {
+        // Container already exists from a previous attempt that crashed
+        // mid-execute (or the reaper hasn't run yet). It still belongs
+        // to this task — failed-execute teardown should reap it the
+        // same as a freshly-created one. `deleteByTaskId` is
+        // idempotent so the catch-path call below is safe in either
+        // case.
+        containerCreated = true;
+        return existing.state;
+      }
 
       const session = await sandbox.create({
         taskId,
