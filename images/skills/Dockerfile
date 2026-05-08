@@ -10,7 +10,7 @@
 # for the future POSIX shim, common pip wheels once we know which actually
 # save cold-start time).
 
-FROM python:3.14-slim
+FROM mirror.gcr.io/library/python:3.14-slim@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033
 
 # Non-root user. Sysbox already maps the in-container root to a non-root
 # host uid via user namespaces, so this is defense in depth + parity with
