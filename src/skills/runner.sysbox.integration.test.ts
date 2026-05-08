@@ -133,6 +133,7 @@ inputs:
 describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)", () => {
   it("invokes a tier-2 skill end-to-end against python:3.14-slim", async () => {
     const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
       store: skillStore,
       memory: stubMemory(),
       secretsStore: stubSecrets(),
@@ -157,6 +158,7 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
 
   it("kills a tier-2 container that exceeds wall_clock_s", async () => {
     const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
       store: skillStore,
       memory: stubMemory(),
       secretsStore: stubSecrets(),
