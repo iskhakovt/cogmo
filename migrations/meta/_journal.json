@@ -173,22 +173,8 @@
     {
       "idx": 24,
       "version": "7",
-      "when": 1778270278464,
-      "tag": "0024_gifted_black_bolt",
-      "breakpoints": true
-    },
-    {
-      "idx": 25,
-      "version": "7",
-      "when": 1778277657817,
-      "tag": "0025_clear_cardiac",
-      "breakpoints": true
-    },
-    {
-      "idx": 26,
-      "version": "7",
-      "when": 1778277872935,
-      "tag": "0026_woozy_eternity",
+      "when": 1778281424831,
+      "tag": "0024_abandoned_cammi",
       "breakpoints": true
     }
   ]
