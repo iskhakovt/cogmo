@@ -90,12 +90,32 @@ export const env = createEnv({
     /** Short git SHA, set at build time via Dockerfile `ARG GIT_SHA`. Optional. */
     GIT_SHA: z.string().optional(),
     /**
+     * Selects which sandbox backend the factory wires up. `local-docker`
+     * needs `SANDBOX_RUNTIME` set; `daytona` needs `daytona_api_key`
+     * in the encrypted `secrets` table. Default `local-docker` matches
+     * the historical opt-in-via-`SANDBOX_RUNTIME` behaviour: leaving
+     * `SANDBOX_RUNTIME` unset still disables the sandbox module.
+     */
+    SANDBOX_BACKEND: z.enum(["local-docker", "daytona"]).default("local-docker"),
+    /**
      * OCI runtime for sandbox containers. Optional — when unset, the sandbox
      * module does not initialize (coding-delegation features fail with a
      * clear error on first use). No silent fallback to `runc` — explicit
      * configuration only. Prod = `sysbox`; dev/CI integration = `runc`.
+     * Only consulted when `SANDBOX_BACKEND=local-docker`.
      */
     SANDBOX_RUNTIME: z.enum(["sysbox", "runc"]).optional(),
+    /**
+     * Daytona Cloud / self-hosted API base URL. Default = Daytona Cloud
+     * (`https://app.daytona.io/api`). Only consulted when
+     * `SANDBOX_BACKEND=daytona`.
+     */
+    DAYTONA_API_URL: z.string().url().optional(),
+    /**
+     * Daytona organization id. Only needed when the API key is scoped
+     * to multiple orgs and the default isn't the right one.
+     */
+    DAYTONA_ORGANIZATION_ID: z.string().optional(),
     /**
      * Default base image for task containers when a repo has no `.devcontainer/`.
      * Computed from `process.env.VERSION` — see `defaultDevbaseImage`.
