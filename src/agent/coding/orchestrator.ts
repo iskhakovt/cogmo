@@ -540,25 +540,24 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       return { status: "skipped" };
     }
 
-    // Resolve subscription auth before the durable get-or-create-container
-    // step. Same fail-fast contract as the plan phase: missing secret
-    // surfaces here, not after a container comes up. Local-capture
-    // narrows the type and avoids `secretsStore!`.
     const secretsStore = deps.secretsStore;
-    let sandboxEnv: Record<string, string> | undefined;
-    if (secretsStore) {
-      const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
-      if (authResult.isErr()) {
-        throw new Error(authResult.error.message);
-      }
-      sandboxEnv = authResult.value;
-    }
 
     // Get-or-create the task container. The plan-phase container has an
     // idle TTL (CODING_TASK_IDLE_TTL_MINUTES); if approval took longer
     // than that, the reaper stopped it and we recreate. `claude --resume
     // <sid>` reloads the prior session from disk inside the container's
     // persistent home volume, so the recreate is transparent to Claude.
+    //
+    // Auth is fetched INSIDE the step, AFTER `tryResumeByTaskId`. Two
+    // reasons: (1) resume is auth-free — the existing container's env
+    // (including `CLAUDE_CODE_OAUTH_TOKEN`) was fixed at plan-phase
+    // create time and can't be updated without recreating, so a stale
+    // secret is irrelevant on resume; (2) if the secret was removed
+    // between plan and execute, we still want the catch-path
+    // `deleteByTaskId` to reap the alive plan-phase container —
+    // `containerCreated` must be set from the resume branch BEFORE we
+    // throw, otherwise the catch sees `containerCreated=false` and
+    // leaks the container until the idle-TTL reaper runs.
     const sessionState = await stepRun("get-or-create-container", async () => {
       const existing = await sandbox.tryResumeByTaskId(taskId);
       if (existing) {
@@ -570,6 +569,15 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         // case.
         containerCreated = true;
         return existing.state;
+      }
+
+      let sandboxEnv: Record<string, string> | undefined;
+      if (secretsStore) {
+        const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
+        if (authResult.isErr()) {
+          throw new Error(authResult.error.message);
+        }
+        sandboxEnv = authResult.value;
       }
 
       const session = await sandbox.create({

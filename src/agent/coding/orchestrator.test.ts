@@ -865,4 +865,82 @@ describe("runCodingExecute", () => {
       }),
     ).rejects.toThrow(/coding task not found/);
   });
+
+  it("resume path bypasses the OAuth check — secret removed post-plan still executes", async () => {
+    // Pins the contract that fixes the orphaned-container leak: when an
+    // existing container is found, we never recheck the OAuth secret. The
+    // env was baked into the container at plan-phase create time and
+    // can't be updated retroactively, so a stale or removed secret here
+    // is irrelevant. If we DID check, the throw would bypass
+    // `containerCreated = true` from the resume branch and the catch
+    // block would leak the live container until the idle-TTL reaper.
+    const repo = await seedRepo();
+    const { task, dockerId } = await seedExecutableTask(repo);
+    const { sandbox, createCalls, stopCalls, setExistingSession } = fakeSandbox();
+    setExistingSession({
+      type: "local-docker",
+      taskId: task.id,
+      containerRowId: "row-resume",
+      dockerId,
+    });
+    const stream = recordingExecuteStream();
+    const backend = executeBackendYielding([
+      { kind: "session_started", sessionId: "sess-from-plan" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+    const fakeSecrets = mock<SecretsStore>();
+    fakeSecrets.getSecret.mockResolvedValue(undefined);
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({
+        sandbox,
+        backend,
+        openExecuteStream: async () => stream.handle,
+        secretsStore: fakeSecrets,
+      }),
+      stepRun,
+      stepWaitForEvent: fakeStepWaitForEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result.status).toBe("pending_verify");
+    expect(createCalls).toHaveLength(0);
+    expect(stopCalls).toEqual([task.id]);
+    // OAuth check never ran.
+    expect(fakeSecrets.getSecret).not.toHaveBeenCalled();
+  });
+
+  it("create branch + missing OAuth → status=failed, no createCalls, no spurious deleteByTaskId", async () => {
+    // Pins the other half of the leak fix: when no container exists
+    // (reaper got it during long approval), the OAuth check runs INSIDE
+    // the step BEFORE `sandbox.create`, so the throw doesn't flip
+    // `containerCreated`. The catch path must NOT call `deleteByTaskId`
+    // since there's nothing to reap.
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox, createCalls, stopCalls } = fakeSandbox();
+    // tryResumeByTaskId returns null by default → forces create branch.
+    const fakeSecrets = mock<SecretsStore>();
+    fakeSecrets.getSecret.mockResolvedValue(undefined);
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({
+        sandbox,
+        backend: executeBackendYielding([]),
+        secretsStore: fakeSecrets,
+      }),
+      stepRun,
+      stepWaitForEvent: fakeStepWaitForEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.failureReason).toMatch(/claude_code_oauth_token/);
+    }
+    expect(createCalls).toHaveLength(0);
+    expect(stopCalls).toEqual([]);
+  });
 });
