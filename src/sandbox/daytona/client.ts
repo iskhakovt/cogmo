@@ -8,6 +8,7 @@ import {
   type SandboxSession,
   type SessionSpec,
 } from "../index.js";
+import { daytonaHealthProbe } from "./probe.js";
 import { DaytonaSandboxSession } from "./session.js";
 
 const log = logger.child({ component: "sandbox.daytona.client" });
@@ -87,9 +88,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
   }
 
   async healthCheck(): Promise<{ ok: true; runtime: string }> {
-    // Lightweight reachability probe — list 1 sandbox and discard. Any
-    // 4xx/5xx surfaces as a thrown `DaytonaError` from the SDK.
-    await this.#daytona.list({}, 1, 1);
+    await daytonaHealthProbe(this.#daytona);
     return { ok: true, runtime: "daytona" };
   }
 
