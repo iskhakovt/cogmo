@@ -2,8 +2,16 @@
  * Provider and channel validation helpers for the setup wizard.
  *
  * Each validator pings the provider's API to confirm the credential works.
- * Uses fetch() directly — no SDK imports, no side effects beyond the HTTP call.
+ * `fetch()` direct for HTTP-API providers; the Daytona check goes through
+ * the SDK because Daytona's REST surface isn't a documented stable contract.
  */
+
+import {
+  Daytona,
+  DaytonaAuthenticationError,
+  DaytonaAuthorizationError,
+  DaytonaConnectionError,
+} from "@daytonaio/sdk";
 
 export interface ValidationResult {
   valid: boolean;
@@ -147,6 +155,50 @@ export async function validateClaudeCodeOauthToken(token: string): Promise<Valid
     return { valid: false, error: `Unexpected response: ${res.status}` };
   } catch (err) {
     return { valid: false, error: `Connection failed: ${(err as Error).message}` };
+  }
+}
+
+export interface DaytonaProbeOpts {
+  /** Daytona Cloud URL when omitted (`https://app.daytona.io/api`). */
+  apiUrl?: string;
+  /** Required only when the API key spans multiple orgs. */
+  organizationId?: string;
+}
+
+/**
+ * Validate a Daytona API key by listing one sandbox. Mirrors the
+ * `healthCheck` probe in `DaytonaSandboxClient` so the wizard fails on the
+ * exact same call that bootstrap would. The list call is cheap (page size
+ * 1) and works against an empty account.
+ */
+export async function validateDaytonaApiKey(
+  apiKey: string,
+  opts: DaytonaProbeOpts = {},
+): Promise<ValidationResult> {
+  try {
+    const config: ConstructorParameters<typeof Daytona>[0] = { apiKey };
+    if (opts.apiUrl) config.apiUrl = opts.apiUrl;
+    if (opts.organizationId) config.organizationId = opts.organizationId;
+    const daytona = new Daytona(config);
+    await daytona.list({}, 1, 1);
+    return { valid: true };
+  } catch (err) {
+    if (err instanceof DaytonaAuthenticationError) {
+      return { valid: false, error: "API key rejected (401 Unauthorized)" };
+    }
+    if (err instanceof DaytonaAuthorizationError) {
+      // Not the same as 401 — the key authenticated but lacks scope or
+      // the org-id pin is wrong. Distinct message helps the operator
+      // pick between rotating the key vs setting `DAYTONA_ORGANIZATION_ID`.
+      return {
+        valid: false,
+        error: "API key rejected (403 Forbidden — wrong organization or insufficient scopes)",
+      };
+    }
+    if (err instanceof DaytonaConnectionError) {
+      return { valid: false, error: `Connection failed: ${err.message}` };
+    }
+    return { valid: false, error: `Unexpected error: ${(err as Error).message}` };
   }
 }
 

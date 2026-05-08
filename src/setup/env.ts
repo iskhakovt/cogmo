@@ -57,6 +57,11 @@ export const NonInteractiveAnswersSchema = z
      * coding sandbox as `CLAUDE_CODE_OAUTH_TOKEN`. Optional — omit when
      * the coding-delegation pipeline isn't being wired up. */
     claudeCodeOauthToken: z.string().min(20).optional(),
+    /** Daytona managed-sandbox API key. Required when `SANDBOX_BACKEND=daytona`;
+     * the runtime warns and disables the sandbox if missing. `DAYTONA_API_URL`
+     * and `DAYTONA_ORGANIZATION_ID` stay in the runtime env (they're plain
+     * config, not credentials) — surfaced here only as the encrypted secret. */
+    daytonaApiKey: z.string().min(20, { error: "Daytona API key looks too short" }).optional(),
   })
   .superRefine((v, ctx) => {
     if (v.llmProviderType === "custom" && !v.llmBaseUrl) {
@@ -95,6 +100,7 @@ const FILE_BACKED = [
   "COGMO_GITHUB_PAT",
   "COGMO_GITHUB_SSH_PRIVATE_KEY",
   "COGMO_CLAUDE_CODE_OAUTH_TOKEN",
+  "COGMO_DAYTONA_API_KEY",
 ] as const;
 
 /** Plain env var names (no `_FILE` variant, value used as-is). */
@@ -157,6 +163,7 @@ export function parseNonInteractiveEnv(
     githubPat: resolved.COGMO_GITHUB_PAT,
     githubSshPrivateKey: resolved.COGMO_GITHUB_SSH_PRIVATE_KEY,
     claudeCodeOauthToken: resolved.COGMO_CLAUDE_CODE_OAUTH_TOKEN,
+    daytonaApiKey: resolved.COGMO_DAYTONA_API_KEY,
   });
 
   if (!parsed.success) {
@@ -181,6 +188,7 @@ const FIELD_TO_ENV: Record<string, string> = {
   githubPat: "COGMO_GITHUB_PAT",
   githubSshPrivateKey: "COGMO_GITHUB_SSH_PRIVATE_KEY",
   claudeCodeOauthToken: "COGMO_CLAUDE_CODE_OAUTH_TOKEN",
+  daytonaApiKey: "COGMO_DAYTONA_API_KEY",
 };
 
 function fieldToEnv(field: unknown): string {

@@ -1,12 +1,36 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   validateAnthropicKey,
+  validateDaytonaApiKey,
   validateGitHubPat,
   validateHindsight,
   validateOpenAICompatibleKey,
   validateTavilyKey,
   validateTelegramToken,
 } from "./validate.js";
+
+// Daytona SDK mock — keep the real typed-error classes (the validator
+// branches on `instanceof DaytonaAuthenticationError` etc.) and stub
+// only the `Daytona` constructor so `.list()` is controllable per test.
+// `vi.hoisted` because `vi.mock` is hoisted to the top of the module:
+// state and class declared inline would be in the temporal dead zone
+// when the factory runs.
+const { daytonaListMock, daytonaConfigCalls } = vi.hoisted(() => ({
+  daytonaListMock: vi.fn(),
+  daytonaConfigCalls: [] as Array<unknown>,
+}));
+vi.mock("@daytonaio/sdk", async () => {
+  const actual = await vi.importActual<typeof import("@daytonaio/sdk")>("@daytonaio/sdk");
+  // `new Daytona(config)` must work, so the mock has to be constructible —
+  // a class fits, while `vi.fn().mockImplementation(() => obj)` does not.
+  class MockDaytona {
+    list = daytonaListMock;
+    constructor(config: unknown) {
+      daytonaConfigCalls.push(config);
+    }
+  }
+  return { ...actual, Daytona: MockDaytona };
+});
 
 function mockFetch(status: number, body?: unknown) {
   return vi.fn().mockResolvedValue({
@@ -156,6 +180,58 @@ describe("validateGitHubPat", () => {
     const result = await validateGitHubPat("pat");
     expect(result.valid).toBe(false);
     expect(result.error).toContain("ECONNREFUSED");
+  });
+});
+
+describe("validateDaytonaApiKey", () => {
+  afterEach(() => {
+    daytonaListMock.mockReset();
+    daytonaConfigCalls.length = 0;
+  });
+
+  it("returns valid on success", async () => {
+    daytonaListMock.mockResolvedValue([]);
+    const result = await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
+    expect(result.valid).toBe(true);
+  });
+
+  it("returns invalid on DaytonaAuthenticationError", async () => {
+    const { DaytonaAuthenticationError } = await import("@daytonaio/sdk");
+    daytonaListMock.mockRejectedValue(new DaytonaAuthenticationError("nope"));
+    const result = await validateDaytonaApiKey("bad_key_abcdef0123456789");
+    expect(result).toEqual({ valid: false, error: "API key rejected (401 Unauthorized)" });
+  });
+
+  it("returns invalid on DaytonaAuthorizationError naming the org pin", async () => {
+    const { DaytonaAuthorizationError } = await import("@daytonaio/sdk");
+    daytonaListMock.mockRejectedValue(new DaytonaAuthorizationError("forbidden"));
+    const result = await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
+    expect(result.valid).toBe(false);
+    expect(result.error).toMatch(/403/);
+    expect(result.error).toMatch(/organization/i);
+  });
+
+  it("returns invalid on connection failure", async () => {
+    const { DaytonaConnectionError } = await import("@daytonaio/sdk");
+    daytonaListMock.mockRejectedValue(new DaytonaConnectionError("ECONNREFUSED"));
+    const result = await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain("ECONNREFUSED");
+  });
+
+  it("forwards apiUrl + organizationId to the Daytona constructor", async () => {
+    daytonaListMock.mockResolvedValue([]);
+    await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789", {
+      apiUrl: "https://daytona.example.com/api",
+      organizationId: "org-7",
+    });
+    expect(daytonaConfigCalls).toEqual([
+      {
+        apiKey: "dtn_test_api_key_abcdef0123456789",
+        apiUrl: "https://daytona.example.com/api",
+        organizationId: "org-7",
+      },
+    ]);
   });
 });
 

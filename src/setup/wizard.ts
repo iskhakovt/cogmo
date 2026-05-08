@@ -15,6 +15,10 @@ import {
 import type { AgentStore } from "../agent/store/index.js";
 import type { ProviderAttrs } from "../agent/store/schema.js";
 import { type Transactor, transactor } from "../db/transactor.js";
+import {
+  DAYTONA_API_KEY_SECRET,
+  DAYTONA_API_KEY_SECRET_DESCRIPTION,
+} from "../sandbox/daytona/auth.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import {
   DEFAULT_GITHUB_IDENTITY_NAME,
@@ -28,8 +32,10 @@ import { DrizzleSecretsStore, type SecretsStore } from "../secrets/store/index.j
 import type { TransportStore } from "../transport/store/index.js";
 import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
+  type DaytonaProbeOpts,
   validateAnthropicKey,
   validateClaudeCodeOauthToken,
+  validateDaytonaApiKey,
   validateGitHubPat,
   validateHindsight,
   validateOpenAICompatibleKey,
@@ -652,6 +658,85 @@ async function stepConfigureClaudeCodeAuth(deps: WizardDeps): Promise<void> {
   p.log.success("Claude Code OAuth token stored.");
 }
 
+async function stepConfigureDaytona(deps: WizardDeps): Promise<void> {
+  const existing = await deps.runInTx((tx) =>
+    deps.secretsStore.getSecretMeta(tx, DAYTONA_API_KEY_SECRET),
+  );
+
+  if (existing) {
+    const action = await p.select({
+      message: "Daytona API key is already configured. What would you like to do?",
+      options: [
+        { value: "keep", label: "Keep current key" },
+        { value: "replace", label: "Replace (rotate)" },
+      ],
+    });
+    cancelGuard(action);
+    if (action === "keep") return;
+  } else {
+    const proceed = await p.confirm({
+      message:
+        "Configure Daytona managed sandbox? (optional — required only when SANDBOX_BACKEND=daytona)",
+      initialValue: false,
+    });
+    if (!cancelGuard(proceed)) return;
+  }
+
+  p.note(
+    [
+      "1. Sign in at https://app.daytona.io",
+      "2. Open Settings → API Keys → Create",
+      "3. Copy the key. Paste below.",
+      "",
+      "For self-hosted Daytona or a non-default org, set DAYTONA_API_URL /",
+      "DAYTONA_ORGANIZATION_ID in the runtime env before continuing — the",
+      "wizard validates the key against whichever endpoint those point at.",
+    ].join("\n"),
+    "Where to get a Daytona API key",
+  );
+
+  const rawKey = cancelGuard(
+    await p.password({
+      message: "Paste your Daytona API key:",
+      validate: (v) => {
+        if (!v || v.trim().length < 20) return "API key looks too short";
+        return undefined;
+      },
+    }),
+  );
+  const apiKey = rawKey.trim();
+
+  const probeOpts: DaytonaProbeOpts = {};
+  if (process.env.DAYTONA_API_URL) probeOpts.apiUrl = process.env.DAYTONA_API_URL;
+  if (process.env.DAYTONA_ORGANIZATION_ID) {
+    probeOpts.organizationId = process.env.DAYTONA_ORGANIZATION_ID;
+  }
+
+  const s = p.spinner();
+  s.start("Validating Daytona API key...");
+  const result = await validateDaytonaApiKey(apiKey, probeOpts);
+  if (result.valid) {
+    s.stop("API key validated.");
+  } else {
+    s.stop(`Validation failed: ${result.error}`);
+    const saveAnyway = await p.confirm({ message: "Save anyway?", initialValue: false });
+    if (!cancelGuard(saveAnyway)) return;
+  }
+
+  await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: DAYTONA_API_KEY_SECRET,
+      plaintext: apiKey,
+      description: DAYTONA_API_KEY_SECRET_DESCRIPTION,
+    }),
+  );
+  if (result.valid) {
+    await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, DAYTONA_API_KEY_SECRET));
+  }
+
+  p.log.success("Daytona API key stored.");
+}
+
 async function stepValidateHindsight(): Promise<void> {
   const s = p.spinner();
   s.start("Checking Hindsight memory server...");
@@ -749,9 +834,12 @@ export async function runWizard(deps: {
   // Step 6: Claude Code subscription auth for the coding-delegation pipeline (optional)
   await stepConfigureClaudeCodeAuth(wizardDeps);
 
-  // Step 7: Hindsight check
+  // Step 7: Daytona managed sandbox (optional — required when SANDBOX_BACKEND=daytona)
+  await stepConfigureDaytona(wizardDeps);
+
+  // Step 8: Hindsight check
   await stepValidateHindsight();
 
-  // Step 8: Summary + next-steps
+  // Step 9: Summary + next-steps
   await stepSummary(wizardDeps, botUsername);
 }
