@@ -30,7 +30,7 @@ const noopFiles = {
 
 /**
  * End-to-end tier-2 worker test against a real sysbox container running
- * `cogmo-skills:slice1` (loaded into the local Docker daemon by the
+ * `cogmo-skills:test` (loaded into the local Docker daemon by the
  * sysbox-e2e workflow's `bake --load` step before tests run). Validates:
  *
  *   - Image pull on first call (`ensureImagePresent`).
@@ -45,11 +45,12 @@ const noopFiles = {
  */
 
 const SHOULD_RUN = process.env.SANDBOX_RUNTIME === "sysbox";
-// Production image. The sysbox-e2e workflow `bake --load`s this tag into the
-// local Docker daemon before tests run, so the runner finds it locally and
-// `ensureImagePresent` is a no-op inspect. Local-dev convention: run
-// `docker buildx bake --load skills` first.
-const SKILLS_IMAGE = "ghcr.io/iskhakovt/cogmo-skills:slice1";
+// Local test image. The sysbox-e2e workflow runs `bake --load` with
+// `VERSION=test`, which writes this tag into the local Docker daemon
+// before the test starts. The runner's `ensureImagePresent` then inspects
+// it locally — no registry round-trip. Local-dev convention to mirror CI:
+//   VERSION=test docker buildx bake --load skills
+const SKILLS_IMAGE = "ghcr.io/iskhakovt/cogmo-skills:test";
 
 let tx: Transactor;
 let close: () => Promise<void>;
@@ -132,7 +133,7 @@ inputs:
 `;
 
 describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)", () => {
-  it("invokes a tier-2 skill end-to-end against cogmo-skills:slice1", async () => {
+  it("invokes a tier-2 skill end-to-end against cogmo-skills:test", async () => {
     const runner = await SkillRunnerImpl.create({
       runInTx: tx,
       store: skillStore,

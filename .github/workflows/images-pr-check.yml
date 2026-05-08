@@ -1,0 +1,47 @@
+name: Image PR Check
+
+# Verify-only build for all Cogmo-owned container images on PRs that touch
+# image-related paths. No push (release publishing happens in publish.yml).
+# Single-arch only: arm64 emulation via QEMU adds ~3-5 min per build, which
+# isn't worth paying on every PR. Production multi-arch build still runs at
+# release time. cogmo's cache-from/cache-to are explicitly overridden to the
+# amd64 scope so an amd64-only build doesn't write amd64 layers into the
+# arm64 cache scope (which would degrade the next prod build's arm64 cache
+# hits — see moby/buildkit#2758 + the comment in docker-bake.hcl).
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "images/**"
+      - "docker-bake.hcl"
+      - ".github/workflows/images-pr-check.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: images-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  bake:
+    name: Bake all images (verify)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - uses: docker/bake-action@a66e1c87e2eca0503c343edf1d208c716d54b8a8 # v7.1.0
+        with:
+          source: .
+          files: ./docker-bake.hcl
+          targets: default
+          push: false
+          set: |
+            cogmo.platform=linux/amd64
+            cogmo.cache-from=type=gha,scope=cogmo-amd64
+            cogmo.cache-to=type=gha,scope=cogmo-amd64,mode=max

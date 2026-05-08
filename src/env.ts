@@ -71,10 +71,20 @@ export const env = createEnv({
      * configuration only. Prod = `sysbox`; dev/CI integration = `runc`.
      */
     SANDBOX_RUNTIME: z.enum(["sysbox", "runc"]).optional(),
-    /** Default base image for task containers when a repo has no `.devcontainer/`. */
-    COGMO_DEVBASE_IMAGE: z.string().default("ghcr.io/iskhakovt/cogmo-devbase:slice1"),
-    /** Base image for tier-2 (sysbox) skill workers. */
-    COGMO_SKILLS_IMAGE: z.string().default("ghcr.io/iskhakovt/cogmo-skills:slice1"),
+    /**
+     * Default base image for task containers when a repo has no `.devcontainer/`.
+     * Pinned to the same version as the running cogmo binary (`process.env.VERSION`
+     * is set by the app `Dockerfile`'s `ENV VERSION=$VERSION` at build time;
+     * "dev" outside Docker). Override with the env var at deploy time to roll
+     * back to a specific image build.
+     */
+    COGMO_DEVBASE_IMAGE: z
+      .string()
+      .default(`ghcr.io/iskhakovt/cogmo-devbase:${process.env.VERSION ?? "dev"}`),
+    /** Base image for tier-2 (sysbox) skill workers. Same versioning model as devbase. */
+    COGMO_SKILLS_IMAGE: z
+      .string()
+      .default(`ghcr.io/iskhakovt/cogmo-skills:${process.env.VERSION ?? "dev"}`),
     /** Host root for git clones registered via `/repo add`. */
     COGMO_REPOS_DIR: z.string().default("/var/lib/cogmo/repos"),
     /** Host root for per-task git worktrees. */

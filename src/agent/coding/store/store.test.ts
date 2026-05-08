@@ -73,7 +73,7 @@ async function seedContainer(): Promise<string> {
       parentId: null,
       rootTaskId: "019d0000-0000-7000-8000-00000000abcd",
       depth: 0,
-      image: "cogmo/devbase:slice1",
+      image: "cogmo/devbase:test",
       runtime: "sysbox-runc",
       labels: labels(),
       resourceLimits: RESOURCE_LIMITS,

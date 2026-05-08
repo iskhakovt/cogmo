@@ -29,6 +29,11 @@ on:
       - "pnpm-lock.yaml"
   workflow_dispatch:
 
+# Note: paths include `images/skills/**` and `docker-bake.hcl` because the
+# bake step builds the skills image as part of the test setup. Image-only
+# changes (Dockerfile bumps, bake refactors) ALSO trigger images-pr-check.yml
+# in parallel; the two are independent and exercise different things.
+
 concurrency:
   group: sysbox-e2e-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -98,29 +103,27 @@ jobs:
 
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
-      # Bake `cogmo-skills` into the local daemon so the integration test runs
-      # against the artifact this commit would produce — not against
+      # Bake `cogmo-skills` into the local daemon so the integration test
+      # runs against the artifact this commit would produce — not against
       # `python:3.14-slim` from Docker Hub. `--load` keeps it unpushed (no
-      # registry pollution); `cache-from: type=gha,scope=skills` shares the
-      # cache populated by `skills.yml` on main, so steady-state cost is
-      # roughly a `docker pull`. Tag overridden to `:slice1` so it matches
-      # the production image the env var points at.
+      # registry pollution); `cache-from` shares the GHA cache populated by
+      # `publish.yml` on release, so steady-state cost is roughly a
+      # `docker pull`. `VERSION=test` tags the image as `cogmo-skills:test`
+      # (matched by the integration test's `SKILLS_IMAGE` constant).
       - name: Build cogmo-skills (load locally for tests)
         uses: docker/bake-action@a66e1c87e2eca0503c343edf1d208c716d54b8a8 # v7.1.0
         env:
+          VERSION: test
           # Disable provenance + SBOM attestations — they produce extra
           # entries in an OCI manifest list, which `--load` can't import.
-          # Production builds (skills.yml, devbase.yml, publish.yml) leave
-          # WITH_ATTEST at its default and ship full attestations.
+          # Release builds (publish.yml) leave `WITH_ATTEST` at its default
+          # and ship full supply-chain attestations.
           WITH_ATTEST: "false"
         with:
           source: .
           files: ./docker-bake.hcl
           targets: skills
           load: true
-          set: |
-            skills.tags=ghcr.io/iskhakovt/cogmo-skills:slice1
-            skills.cache-from=type=gha,scope=skills
 
       - name: Run sysbox-flavoured supervisor + skills tests
         env:

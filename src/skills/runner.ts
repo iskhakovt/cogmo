@@ -36,8 +36,10 @@ import { type RunOnWorkerResult, runOnWorker } from "./worker-wasm/host.js";
  * env.COGMO_SKILLS_IMAGE`, so this default only matters for tests that
  * construct a runner without an explicit image AND actually invoke a
  * tier-container skill (the integration test does the latter — it overrides).
+ * Mirrors `env.ts`'s version-aware default so the two stay in sync when
+ * the binary's `VERSION` is set.
  */
-const DEFAULT_TIER2_IMAGE = "ghcr.io/iskhakovt/cogmo-skills:slice1";
+const DEFAULT_TIER2_IMAGE = `ghcr.io/iskhakovt/cogmo-skills:${process.env.VERSION ?? "dev"}`;
 
 /**
  * Translate a manifest's `resources` block into the partial `ResourceLimits`

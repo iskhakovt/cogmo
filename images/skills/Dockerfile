@@ -1,13 +1,14 @@
-# cogmo/skills:slice1 — base task-container image for tier-2 (sysbox) skills.
+# cogmo-skills — base task-container image for tier-2 (sysbox) skills.
 #
-# Built and published from this directory by .github/workflows/skills.yml via
-# the `skills` target in `/docker-bake.hcl`. See `design/skills.md` →
-# "Tier 2 — Sysbox container" for the contract.
+# Built and published as the `skills` target of `/docker-bake.hcl` by
+# .github/workflows/publish.yml at every cogmo release. Tag tracks the
+# cogmo app version. See `design/skills.md` → "Tier 2 — Sysbox container"
+# for the contract.
 #
-# Slice 1 is intentionally minimal — just the Python runtime and a non-root
-# user. We own the pipeline + tag pinning; deps land here as real skills
-# demand them (s3fs-fuse for the future POSIX shim, common pip wheels once
-# we know which actually save cold-start time).
+# Today's image is intentionally minimal — Python runtime + non-root user.
+# We own the pipeline; deps land here as real skills demand them (s3fs-fuse
+# for the future POSIX shim, common pip wheels once we know which actually
+# save cold-start time).
 
 FROM python:3.14-slim
 
