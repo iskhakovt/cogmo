@@ -75,39 +75,42 @@ export function createCodingService(
         );
       }
 
-      // Admission check: cap concurrent tasks per repo. Slice 1 skipped
-      // this because the inline orchestrator ran synchronously inside the
-      // turn, so the LLM couldn't fan out parallel calls within one turn.
-      // Slice 2's async submit + durable orchestrator means multiple
-      // conversations (or repeated taps from the same one) could each
-      // trigger a task concurrently — guard before INSERT to avoid
-      // contended worktrees on the same repo.
-      const active = await deps.runInTx((tx) =>
-        deps.codingStore.countActiveTasksForRepo(tx, repo.id),
-      );
-      if (active >= repo.maxConcurrentTasks) {
-        return {
-          taskId: null,
-          status: "rejected",
-          reason:
-            `Repo "${repo.name}" already has ${active} active task(s) ` +
-            `(limit ${repo.maxConcurrentTasks}). Wait for one to finish or cancel it.`,
-        };
-      }
-
-      // Insert in `queued` status. Worktree assignment, container id,
-      // session id, etc. all stay null — the orchestrator's steps fill
-      // them in.
-      const task = await deps.runInTx((tx) =>
-        deps.codingStore.insertTask(tx, {
+      // Admission check + insert share one tx. The async submit +
+      // durable orchestrator means multiple conversations (or repeated
+      // taps from the same one) could each trigger a task concurrently;
+      // splitting count and insert across two transactions opened a
+      // window where each saw `active < limit` and both inserted,
+      // exceeding `maxConcurrentTasks`. Single tx narrows that window
+      // sharply (concurrent admissions still serialise on the
+      // underlying lock acquisition pattern under READ COMMITTED — at
+      // single-user scale the residual race is acceptable). If multi-
+      // tenant ever lands, lift to `SELECT ... FOR UPDATE` on the
+      // `coding_repos` row inside the count.
+      const admit = await deps.runInTx(async (tx) => {
+        const active = await deps.codingStore.countActiveTasksForRepo(tx, repo.id);
+        if (active >= repo.maxConcurrentTasks) {
+          return { kind: "rejected" as const, active };
+        }
+        const task = await deps.codingStore.insertTask(tx, {
           repoId: repo.id,
           conversationId,
           goal: input.goal,
           triggerSource: "user",
           backend: "claude",
           allowPrivilegedRunc: false,
-        }),
-      );
+        });
+        return { kind: "admitted" as const, task };
+      });
+      if (admit.kind === "rejected") {
+        return {
+          taskId: null,
+          status: "rejected",
+          reason:
+            `Repo "${repo.name}" already has ${admit.active} active task(s) ` +
+            `(limit ${repo.maxConcurrentTasks}). Wait for one to finish or cancel it.`,
+        };
+      }
+      const { task } = admit;
 
       // Hand off to the durable orchestrator. Once this event lands the
       // service has no further role — plan rendering, approval, execute,
