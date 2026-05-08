@@ -276,6 +276,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       if (a) {
         await stepRun("teardown-worktree", () =>
           safeTeardownWorktree({
+            runInTx,
             ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
             repo,
             taskId,
@@ -327,7 +328,8 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     ).catch(() => {});
     if (assignment) {
       await safeTeardownWorktree({
-        ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore, runInTx }),
+        runInTx,
+        ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
         repo,
         taskId,
         worktreeAssignment: assignment,
@@ -565,7 +567,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       );
       await stepRun("teardown-worktree", () =>
         safeTeardownWorktree({
-          ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore, runInTx }),
+          runInTx,
+          ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
           repo,
           taskId,
           worktreeAssignment,
@@ -642,7 +645,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
     ).catch(() => {});
     await safeTeardownWorktree({
-      ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore, runInTx }),
+      runInTx,
+      ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
       repo,
       taskId,
       worktreeAssignment,

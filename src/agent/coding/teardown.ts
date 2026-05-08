@@ -193,8 +193,9 @@ async function git(cwd: string, args: ReadonlyArray<string>): Promise<void> {
  * ref namespace make the operation idempotent regardless.
  */
 export async function safeTeardownWorktree(opts: {
+  /** Required — identity lookup decrypts a secret, which needs a tx. */
+  runInTx: Transactor;
   secretsStore?: SecretsStore;
-  runInTx?: Transactor;
   repo: CodingRepoRow;
   taskId: string;
   worktreeAssignment: { branch: string; worktreePath: string };
@@ -203,7 +204,7 @@ export async function safeTeardownWorktree(opts: {
 }): Promise<void> {
   try {
     let identity: GitHubIdentity | undefined = opts.identity;
-    if (!identity && opts.secretsStore && opts.runInTx) {
+    if (!identity && opts.secretsStore) {
       const secretsStore = opts.secretsStore;
       // resolveGitHubIdentity can throw on a DB-level failure
       // (`secretsStore.getSecret` underlying error) — keep it inside the
