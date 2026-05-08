@@ -1,5 +1,6 @@
 test/fixtures/recorded/* linguist-generated=true
 test/fixtures/fal/* linguist-generated=true
+test/fixtures/voice/* linguist-generated=true
 migrations/*.sql linguist-generated=true
 migrations/meta/*.json linguist-generated=true
 pnpm-lock.yaml linguist-generated=true
