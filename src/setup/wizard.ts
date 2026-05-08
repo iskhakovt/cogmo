@@ -10,7 +10,7 @@
 import * as p from "@clack/prompts";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ProviderAttrs } from "../agent/store/schema.js";
-import { transactor } from "../db/transactor.js";
+import { type Transactor, transactor } from "../db/transactor.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import {
   DEFAULT_GITHUB_IDENTITY_NAME,
@@ -48,6 +48,7 @@ function cancelGuard<T>(value: T | symbol): T {
 // --- Types ---
 
 interface WizardDeps {
+  runInTx: Transactor;
   agentStore: AgentStore;
   transportStore: TransportStore;
   secretsStore: SecretsStore;
@@ -100,13 +101,13 @@ const PROVIDER_HELP: Partial<Record<ProviderType, { url: string; path: string; k
 async function stepSeedDefaults(deps: WizardDeps): Promise<{ userId: string; profileId: string }> {
   const s = p.spinner();
   s.start("Checking default user and profile...");
-  const result = await seedDefaults(deps.agentStore, deps.transportStore);
+  const result = await seedDefaults(deps.runInTx, deps.agentStore, deps.transportStore);
   s.stop("Default user and profile ready.");
   return result;
 }
 
 async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
-  const existing = await deps.agentStore.listProviders();
+  const existing = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
 
   if (existing.length > 0) {
     const names = existing.map((p) => p.name).join(", ");
@@ -122,7 +123,7 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     if (action === "keep") return;
     if (action === "replace") {
       for (const prov of existing) {
-        await deps.agentStore.deleteProvider(prov.id);
+        await deps.runInTx((tx) => deps.agentStore.deleteProvider(tx, prov.id));
       }
     }
   }
@@ -190,13 +191,15 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
 
   // Store
   const providerName = providerType as string;
-  const { id: secretId } = await deps.secretsStore.putSecret({
-    name: `${providerName}_api_key`,
-    plaintext: apiKey,
-    description: `API key for ${providerName}`,
-  });
+  const { id: secretId } = await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: `${providerName}_api_key`,
+      plaintext: apiKey,
+      description: `API key for ${providerName}`,
+    }),
+  );
   if (result.valid) {
-    await deps.secretsStore.markValidated(`${providerName}_api_key`);
+    await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, `${providerName}_api_key`));
   }
 
   const attrs: ProviderAttrs = {};
@@ -204,29 +207,31 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     attrs.promptCaching = true;
   }
 
-  const { id: providerId } = await deps.agentStore.createProvider({
-    name: providerName,
-    type: adapterType,
-    ...(baseUrl && { baseUrl }),
-    secretId,
-    attrs,
-  });
+  const { id: providerId } = await deps.runInTx((tx) =>
+    deps.agentStore.createProvider(tx, {
+      name: providerName,
+      type: adapterType,
+      ...(baseUrl && { baseUrl }),
+      secretId,
+      attrs,
+    }),
+  );
 
   // Register this provider for the default profile's model.
   // Use next available position to avoid UNIQUE(model, position) collision.
-  const defaultProfile = await deps.agentStore.getDefaultProfile();
-  if (defaultProfile) {
-    const profile = await deps.agentStore.getProfile(defaultProfile.id);
-    if (profile) {
-      const nextPosition = await deps.agentStore.getNextModelProviderPosition(profile.model);
-      await deps.agentStore.addModelProvider({
-        model: profile.model,
-        providerId,
-        position: nextPosition,
-        userSelectable: true,
-      });
-    }
-  }
+  await deps.runInTx(async (tx) => {
+    const defaultProfile = await deps.agentStore.getDefaultProfile(tx);
+    if (!defaultProfile) return;
+    const profile = await deps.agentStore.getProfile(tx, defaultProfile.id);
+    if (!profile) return;
+    const nextPosition = await deps.agentStore.getNextModelProviderPosition(tx, profile.model);
+    await deps.agentStore.addModelProvider(tx, {
+      model: profile.model,
+      providerId,
+      position: nextPosition,
+      userSelectable: true,
+    });
+  });
 
   p.log.success(`Provider "${providerName}" configured for model routing.`);
 }
@@ -235,7 +240,7 @@ async function stepConfigureTelegram(
   deps: WizardDeps,
   userId: string,
 ): Promise<{ botUsername?: string }> {
-  const existing = await deps.transportStore.getChannelByType("telegram");
+  const existing = await deps.runInTx((tx) => deps.transportStore.getChannelByType(tx, "telegram"));
 
   if (existing) {
     const action = await p.select({
@@ -247,10 +252,10 @@ async function stepConfigureTelegram(
     });
     cancelGuard(action);
     if (action === "keep") {
-      await seedChannelRules(deps.agentStore, "telegram");
+      await seedChannelRules(deps.runInTx, deps.agentStore, "telegram");
       return {};
     }
-    await deps.transportStore.removeChannel(existing.id);
+    await deps.runInTx((tx) => deps.transportStore.removeChannel(tx, existing.id));
   } else {
     const add = await p.confirm({ message: "Add a Telegram channel? (optional)" });
     if (!cancelGuard(add)) return {};
@@ -286,21 +291,25 @@ async function stepConfigureTelegram(
   // Store bot token as an encrypted secret, reference by name in channel credentials.
   // The adapter resolves the secret at startup via the secrets store.
   const tokenSecretName = "telegram_bot_token";
-  await deps.secretsStore.putSecret({
-    name: tokenSecretName,
-    plaintext: token,
-    description: `Telegram bot token (@${result.meta?.botUsername})`,
-  });
-  await deps.secretsStore.markValidated(tokenSecretName);
+  await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: tokenSecretName,
+      plaintext: token,
+      description: `Telegram bot token (@${result.meta?.botUsername})`,
+    }),
+  );
+  await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, tokenSecretName));
 
-  const { id: channelId } = await deps.transportStore.createChannel({
-    type: "telegram",
-    credentials: { tokenSecretName },
-    identityMode: "mapped",
-  });
+  const { id: channelId } = await deps.runInTx((tx) =>
+    deps.transportStore.createChannel(tx, {
+      type: "telegram",
+      credentials: { tokenSecretName },
+      identityMode: "mapped",
+    }),
+  );
 
   // Seed default channel-scoped steering rules (idempotent)
-  await seedChannelRules(deps.agentStore, "telegram");
+  await seedChannelRules(deps.runInTx, deps.agentStore, "telegram");
 
   // Allowlist
   p.note(
@@ -328,11 +337,13 @@ async function stepConfigureTelegram(
     .filter(Boolean);
 
   for (const telegramUserId of userIds) {
-    await deps.transportStore.createIdentity({
-      userId,
-      channelId,
-      platformHandle: telegramUserId,
-    });
+    await deps.runInTx((tx) =>
+      deps.transportStore.createIdentity(tx, {
+        userId,
+        channelId,
+        platformHandle: telegramUserId,
+      }),
+    );
   }
 
   p.log.success(
@@ -355,12 +366,14 @@ async function stepConfigureOptionalTools(deps: WizardDeps): Promise<void> {
     s.start("Validating Tavily key...");
     const result = await validateTavilyKey(tavilyKey);
     if (result.valid) {
-      await deps.secretsStore.putSecret({
-        name: "tavily_api_key",
-        plaintext: tavilyKey,
-        description: "Tavily web search",
-      });
-      await deps.secretsStore.markValidated("tavily_api_key");
+      await deps.runInTx((tx) =>
+        deps.secretsStore.putSecret(tx, {
+          name: "tavily_api_key",
+          plaintext: tavilyKey,
+          description: "Tavily web search",
+        }),
+      );
+      await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, "tavily_api_key"));
       s.stop("Tavily key validated and saved.");
     } else {
       s.stop(`Tavily validation failed: ${result.error}`);
@@ -372,17 +385,21 @@ async function stepConfigureOptionalTools(deps: WizardDeps): Promise<void> {
   p.note("Get a key at https://fal.ai/dashboard/keys", "fal.ai image generation");
   const falKey = cancelGuard(await p.password({ message: "fal.ai API key (Enter to skip):" }));
   if (falKey) {
-    await deps.secretsStore.putSecret({
-      name: "fal_api_key",
-      plaintext: falKey,
-      description: "fal.ai image generation",
-    });
+    await deps.runInTx((tx) =>
+      deps.secretsStore.putSecret(tx, {
+        name: "fal_api_key",
+        plaintext: falKey,
+        description: "fal.ai image generation",
+      }),
+    );
     p.log.success("fal.ai key saved.");
   }
 }
 
 async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
-  const existing = await resolveGitHubIdentity(deps.secretsStore, DEFAULT_GITHUB_IDENTITY_NAME);
+  const existing = await deps.runInTx((tx) =>
+    resolveGitHubIdentity(tx, deps.secretsStore, DEFAULT_GITHUB_IDENTITY_NAME),
+  );
 
   if (existing.isOk()) {
     const ident = existing.value;
@@ -469,12 +486,16 @@ async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
     id: userId,
   };
 
-  await deps.secretsStore.putSecret({
-    name: gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME),
-    plaintext: serializeGitHubIdentity(identity),
-    description: `GitHub identity (@${login})`,
-  });
-  await deps.secretsStore.markValidated(gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME));
+  await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME),
+      plaintext: serializeGitHubIdentity(identity),
+      description: `GitHub identity (@${login})`,
+    }),
+  );
+  await deps.runInTx((tx) =>
+    deps.secretsStore.markValidated(tx, gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME)),
+  );
 
   p.note(
     [
@@ -541,12 +562,16 @@ async function collectAndStorePat(deps: WizardDeps, existing: GitHubIdentity): P
     id: userId,
   };
 
-  await deps.secretsStore.putSecret({
-    name: gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME),
-    plaintext: serializeGitHubIdentity(identity),
-    description: `GitHub identity (@${login})`,
-  });
-  await deps.secretsStore.markValidated(gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME));
+  await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME),
+      plaintext: serializeGitHubIdentity(identity),
+      description: `GitHub identity (@${login})`,
+    }),
+  );
+  await deps.runInTx((tx) =>
+    deps.secretsStore.markValidated(tx, gitHubIdentitySecretName(DEFAULT_GITHUB_IDENTITY_NAME)),
+  );
   p.log.success("GitHub PAT rotated.");
 }
 
@@ -565,9 +590,11 @@ async function stepValidateHindsight(): Promise<void> {
 }
 
 async function stepSummary(deps: WizardDeps, botUsername?: string): Promise<void> {
-  const providers = await deps.agentStore.listProviders();
-  const secrets = await deps.secretsStore.listSecrets();
-  const telegramChannel = await deps.transportStore.getChannelByType("telegram");
+  const providers = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
+  const secrets = await deps.runInTx((tx) => deps.secretsStore.listSecrets(tx));
+  const telegramChannel = await deps.runInTx((tx) =>
+    deps.transportStore.getChannelByType(tx, "telegram"),
+  );
 
   const lines: string[] = [];
   lines.push(`Providers: ${providers.map((p) => p.name).join(", ") || "none"}`);
@@ -607,9 +634,11 @@ export async function runWizard(deps: {
   masterKey: string;
 }): Promise<void> {
   const encryptionKey = deriveMasterKey(parseMasterKey(deps.masterKey), "cogmo/secrets-at-rest/v1");
-  const secretsStore = new DrizzleSecretsStore(transactor(deps.db), encryptionKey);
+  const tx = transactor(deps.db);
+  const secretsStore = new DrizzleSecretsStore(encryptionKey);
 
   const wizardDeps: WizardDeps = {
+    runInTx: tx,
     agentStore: deps.agentStore,
     transportStore: deps.transportStore,
     secretsStore,
@@ -624,7 +653,7 @@ export async function runWizard(deps: {
   let hasProvider = false;
   while (!hasProvider) {
     await stepConfigureProvider(wizardDeps);
-    const providers = await wizardDeps.agentStore.listProviders();
+    const providers = await wizardDeps.runInTx((tx) => wizardDeps.agentStore.listProviders(tx));
     hasProvider = providers.length > 0;
     if (!hasProvider) {
       p.log.warn("At least one LLM provider is required. Let's try again.");

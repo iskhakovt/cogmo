@@ -41,7 +41,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     await delivery.push(textDelta);
@@ -58,7 +62,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     await delivery.deliverBatch("full response");
@@ -80,7 +88,11 @@ describe("createDeliveryRouter", () => {
         .mockResolvedValue([session("s1", "ch-stream"), session("s2", "ch-batch")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     await delivery.push(textDelta);
@@ -98,7 +110,11 @@ describe("createDeliveryRouter", () => {
     const adapters = new Map();
     const transportStore = mockTransportStore();
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     // All methods are no-ops
@@ -121,7 +137,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1"), session("s2", "ch-2")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     await delivery.abort("LLM failed");
@@ -137,7 +157,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     await router.prepare(ctx({ runId: "run-abc" }));
 
     expect(streaming.openStream).toHaveBeenCalledWith("addr-s1", "run-abc");
@@ -149,7 +173,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-unknown")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     // No errors, just no-ops
@@ -160,11 +188,15 @@ describe("createDeliveryRouter", () => {
 
   it("passes routing params to getSourceSessions", async () => {
     const transportStore = mockTransportStore();
-    const router = createDeliveryRouter({ adapters: new Map(), transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters: new Map(),
+      transportStore,
+    });
 
     await router.prepare(ctx({ maxInboundId: "inb-5", prevCursor: "inb-2" }));
 
-    expect(transportStore.getSourceSessions).toHaveBeenCalledWith({
+    expect(transportStore.getSourceSessions).toHaveBeenCalledWith(expect.anything(), {
       conversationId: "conv-1",
       prevCursor: "inb-2",
       maxInboundId: "inb-5",
@@ -184,7 +216,11 @@ describe("createDeliveryRouter", () => {
       getReceiveAllSessions: vi.fn().mockResolvedValue([session("s2", "ch-batch", "all")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx({ isPrivate: true }));
 
     await delivery.push(textDelta);
@@ -205,7 +241,11 @@ describe("createDeliveryRouter", () => {
       getReceiveAllSessions: vi.fn().mockResolvedValue([session("s2", "ch-webui", "all")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx({ isPrivate: false }));
 
     await delivery.deliverBatch("response");
@@ -225,7 +265,11 @@ describe("createDeliveryRouter", () => {
       getReceiveAllSessions: vi.fn().mockResolvedValue([shared]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx({ isPrivate: true }));
 
     await delivery.deliverBatch("response");
@@ -242,7 +286,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     await delivery.deliverBatch("**rendered**");
@@ -261,7 +309,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     await delivery.deliverBatch("plain markdown");
@@ -276,7 +328,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     expect(delivery.hasBatchTargets()).toBe(false);
@@ -293,7 +349,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1"), session("s2", "ch-2")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     expect(delivery.hasBatchTargets()).toBe(true);
@@ -301,7 +361,11 @@ describe("createDeliveryRouter", () => {
 
   it("hasBatchTargets() returns false when there are no sessions at all", async () => {
     const transportStore = mockTransportStore();
-    const router = createDeliveryRouter({ adapters: new Map(), transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters: new Map(),
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     expect(delivery.hasBatchTargets()).toBe(false);
@@ -315,7 +379,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     const images = [{ data: Buffer.from([1, 2]), mediaType: "image/png" }];
@@ -335,7 +403,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     const images = [{ data: Buffer.from([1, 2]), mediaType: "image/png" }];
@@ -355,7 +427,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     await delivery.deliverBatch("plain text");
@@ -371,7 +447,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     const documents = [
@@ -393,7 +473,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     const documents = [
@@ -414,7 +498,11 @@ describe("createDeliveryRouter", () => {
       getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     const images = [{ data: Buffer.from([1, 2]), mediaType: "image/png" }];
@@ -438,7 +526,11 @@ describe("createDeliveryRouter", () => {
         getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
       });
 
-      const router = createDeliveryRouter({ adapters, transportStore });
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters,
+        transportStore,
+      });
       const delivery = await router.prepare(ctx());
 
       expect(delivery.canDeliverVoice()).toBe(false);
@@ -451,7 +543,11 @@ describe("createDeliveryRouter", () => {
         getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
       });
 
-      const router = createDeliveryRouter({ adapters, transportStore });
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters,
+        transportStore,
+      });
       const delivery = await router.prepare(ctx());
 
       expect(delivery.canDeliverVoice()).toBe(true);
@@ -472,7 +568,11 @@ describe("createDeliveryRouter", () => {
           .mockResolvedValue([session("s1", "ch-a"), session("s2", "ch-b"), session("s3", "ch-c")]),
       });
 
-      const router = createDeliveryRouter({ adapters, transportStore });
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters,
+        transportStore,
+      });
       const delivery = await router.prepare(ctx());
 
       const audio = { audio: Buffer.from([1, 2, 3]), mediaType: "audio/ogg" };
@@ -499,7 +599,11 @@ describe("createDeliveryRouter", () => {
         getSourceSessions: vi.fn().mockResolvedValue([session("s1", "ch-tg")]),
       });
 
-      const router = createDeliveryRouter({ adapters, transportStore });
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters,
+        transportStore,
+      });
       const delivery = await router.prepare(ctx());
 
       // Streaming side gets text events.
@@ -530,7 +634,11 @@ describe("createDeliveryRouter", () => {
           .mockResolvedValue([session("s1", "ch-fail"), session("s2", "ch-ok")]),
       });
 
-      const router = createDeliveryRouter({ adapters, transportStore });
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters,
+        transportStore,
+      });
       const delivery = await router.prepare(ctx());
 
       const audio = { audio: Buffer.from([]), mediaType: "audio/ogg" };
@@ -557,7 +665,11 @@ describe("createDeliveryRouter", () => {
           .mockResolvedValue([session("s1", "ch-1"), session("s2", "ch-2")]),
       });
 
-      const router = createDeliveryRouter({ adapters, transportStore });
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters,
+        transportStore,
+      });
       await router.notifyConversation("conv-1", "we hit an error");
 
       expect(batch1.deliver).toHaveBeenCalledWith("addr-s1", "we hit an error");
@@ -572,7 +684,11 @@ describe("createDeliveryRouter", () => {
         getActiveSessionsForConversation: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
       });
 
-      const router = createDeliveryRouter({ adapters, transportStore });
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters,
+        transportStore,
+      });
       await router.notifyConversation("conv-1", "**err**");
 
       expect(renderOutput).toHaveBeenCalledWith("**err**");
@@ -589,7 +705,11 @@ describe("createDeliveryRouter", () => {
         getActiveSessionsForConversation: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
       });
 
-      const router = createDeliveryRouter({ adapters, transportStore });
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters,
+        transportStore,
+      });
       // Should not throw — streaming-only adapters are skipped.
       await router.notifyConversation("conv-1", "we hit an error");
     });
@@ -607,7 +727,11 @@ describe("createDeliveryRouter", () => {
           .mockResolvedValue([session("s1", "ch-fail"), session("s2", "ch-ok")]),
       });
 
-      const router = createDeliveryRouter({ adapters, transportStore });
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters,
+        transportStore,
+      });
       await router.notifyConversation("conv-1", "we hit an error");
 
       expect(ok.deliver).toHaveBeenCalledWith("addr-s2", "we hit an error");
@@ -617,7 +741,11 @@ describe("createDeliveryRouter", () => {
       const transportStore = mockTransportStore({
         getActiveSessionsForConversation: vi.fn().mockResolvedValue([]),
       });
-      const router = createDeliveryRouter({ adapters: new Map(), transportStore });
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters: new Map(),
+        transportStore,
+      });
       await router.notifyConversation("conv-1", "we hit an error");
     });
   });
@@ -636,7 +764,11 @@ describe("createDeliveryRouter", () => {
         .mockResolvedValue([session("s1", "ch-tg"), session("s2", "ch-direct")]),
     });
 
-    const router = createDeliveryRouter({ adapters, transportStore });
+    const router = createDeliveryRouter({
+      runInTx: (cb) => cb({} as never),
+      adapters,
+      transportStore,
+    });
     const delivery = await router.prepare(ctx());
 
     await delivery.deliverBatch("**hi**");

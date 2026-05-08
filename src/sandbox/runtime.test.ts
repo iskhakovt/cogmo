@@ -4,7 +4,6 @@ import { assertRuntimeAvailable, dockerRuntimeName } from "./runtime.js";
 function fakeDocker(runtimes: Record<string, unknown>) {
   return {
     info: vi.fn().mockResolvedValue({ Runtimes: runtimes }),
-    // biome-ignore lint/suspicious/noExplicitAny: minimal mock for assertRuntimeAvailable
   } as any;
 }
 
@@ -39,7 +38,6 @@ describe("assertRuntimeAvailable", () => {
   it("propagates docker.info() failures", async () => {
     const docker = {
       info: vi.fn().mockRejectedValue(new Error("docker daemon unreachable")),
-      // biome-ignore lint/suspicious/noExplicitAny: minimal mock
     } as any;
     await expect(assertRuntimeAvailable(docker, "runc")).rejects.toThrow(/unreachable/);
   });

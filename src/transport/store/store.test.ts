@@ -13,8 +13,8 @@ let agentStore: DrizzleAgentStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleTransportStore(tx);
-  agentStore = new DrizzleAgentStore(tx);
+  store = new DrizzleTransportStore();
+  agentStore = new DrizzleAgentStore();
 });
 
 afterEach(async () => {
@@ -28,7 +28,9 @@ afterAll(async () => {
 // --- Helpers ---
 
 async function seedChannel(type = "direct"): Promise<string> {
-  return (await store.createChannel({ type, credentials: {}, identityMode: "fixed" })).id;
+  return (
+    await tx((trx) => store.createChannel(trx, { type, credentials: {}, identityMode: "fixed" }))
+  ).id;
 }
 
 let profileNameCounter = 0;
@@ -37,19 +39,21 @@ async function seedConversation(): Promise<{
   profileId: string;
   conversationId: string;
 }> {
-  const userId = (await agentStore.createUser()).id;
+  const userId = (await tx((trx) => agentStore.createUser(trx))).id;
   profileNameCounter += 1;
   const profileId = (
-    await agentStore.createProfile({
-      userId: null,
-      name: `test-${profileNameCounter}`,
-      basePrompt: "prompt",
-      model: "model",
-      toolSet: [],
-    })
+    await tx((trx) =>
+      agentStore.createProfile(trx, {
+        userId: null,
+        name: `test-${profileNameCounter}`,
+        basePrompt: "prompt",
+        model: "model",
+        toolSet: [],
+      }),
+    )
   ).id;
   const conversationId = (
-    await agentStore.createConversation({ userId, profileId, isPrivate: true })
+    await tx((trx) => agentStore.createConversation(trx, { userId, profileId, isPrivate: true }))
   ).id;
   return { userId, profileId, conversationId };
 }
@@ -60,13 +64,15 @@ async function seedSession(
   platformAddress = "addr-1",
 ): Promise<string> {
   return (
-    await store.createSession({
-      channelId,
-      platformAddress,
-      conversationId,
-      status: "active",
-      receive: "routed",
-    })
+    await tx((trx) =>
+      store.createSession(trx, {
+        channelId,
+        platformAddress,
+        conversationId,
+        status: "active",
+        receive: "routed",
+      }),
+    )
   ).id;
 }
 
@@ -78,7 +84,7 @@ describe("DrizzleTransportStore", () => {
       await seedChannel("direct");
       await seedChannel("telegram");
 
-      const all = await store.getAllChannels();
+      const all = await tx((trx) => store.getAllChannels(trx));
       expect(all).toHaveLength(2);
       expect(all.map((c) => c.type).sort()).toEqual(["direct", "telegram"]);
     });
@@ -86,13 +92,13 @@ describe("DrizzleTransportStore", () => {
     it("finds channel by type", async () => {
       await seedChannel("direct");
 
-      const found = await store.getChannelByType("direct");
+      const found = await tx((trx) => store.getChannelByType(trx, "direct"));
       expect(found).toBeDefined();
       expect(found?.identityMode).toBe("fixed");
     });
 
     it("returns null for unknown channel type", async () => {
-      expect(await store.getChannelByType("nonexistent")).toBeUndefined();
+      expect(await tx((trx) => store.getChannelByType(trx, "nonexistent"))).toBeUndefined();
     });
   });
 
@@ -102,7 +108,7 @@ describe("DrizzleTransportStore", () => {
       const { conversationId } = await seedConversation();
       const sessionId = await seedSession(channelId, conversationId, "user-123");
 
-      const session = await store.resolveSession(channelId, "user-123");
+      const session = await tx((trx) => store.resolveSession(trx, channelId, "user-123"));
       expect(session).toEqual({
         id: sessionId,
         channelId,
@@ -118,9 +124,9 @@ describe("DrizzleTransportStore", () => {
       const { conversationId } = await seedConversation();
       const sessionId = await seedSession(channelId, conversationId, "user-123");
 
-      await store.closeSession(sessionId);
+      await tx((trx) => store.closeSession(trx, sessionId));
 
-      expect(await store.resolveSession(channelId, "user-123")).toBeUndefined();
+      expect(await tx((trx) => store.resolveSession(trx, channelId, "user-123"))).toBeUndefined();
     });
 
     it("resolveSession ignores expired sessions", async () => {
@@ -138,7 +144,9 @@ describe("DrizzleTransportStore", () => {
         expiresAt: new Date("2020-01-01"),
       });
 
-      expect(await store.resolveSession(channelId, "user-expired")).toBeUndefined();
+      expect(
+        await tx((trx) => store.resolveSession(trx, channelId, "user-expired")),
+      ).toBeUndefined();
     });
 
     it("getSession returns by ID", async () => {
@@ -146,7 +154,7 @@ describe("DrizzleTransportStore", () => {
       const { conversationId } = await seedConversation();
       const sessionId = await seedSession(channelId, conversationId);
 
-      const session = await store.getSession(sessionId);
+      const session = await tx((trx) => store.getSession(trx, sessionId));
       expect(session?.id).toBe(sessionId);
       expect(session?.status).toBe("active");
     });
@@ -156,9 +164,9 @@ describe("DrizzleTransportStore", () => {
       const { conversationId } = await seedConversation();
       const sessionId = await seedSession(channelId, conversationId);
 
-      await store.closeSession(sessionId);
+      await tx((trx) => store.closeSession(trx, sessionId));
 
-      const session = await store.getSession(sessionId);
+      const session = await tx((trx) => store.getSession(trx, sessionId));
       expect(session?.status).toBe("closed");
     });
 
@@ -170,9 +178,9 @@ describe("DrizzleTransportStore", () => {
       await seedSession(channelId, conversationId, "addr-2");
 
       // Close one
-      await store.closeSession(id1);
+      await tx((trx) => store.closeSession(trx, id1));
 
-      const active = await store.getActiveSessionsForConversation(conversationId);
+      const active = await tx((trx) => store.getActiveSessionsForConversation(trx, conversationId));
       expect(active).toHaveLength(1);
       expect(active[0]?.platformAddress).toBe("addr-2");
     });
@@ -183,31 +191,37 @@ describe("DrizzleTransportStore", () => {
       const { conversationId: conv2 } = await seedConversation();
       const oldId = await seedSession(channelId, conversationId, "addr-swap");
 
-      const { id: newId } = await store.swapSession(channelId, "addr-swap", {
-        conversationId: conv2,
-        status: "active",
-        receive: "routed",
-      });
+      const { id: newId } = await tx((trx) =>
+        store.swapSession(trx, channelId, "addr-swap", {
+          conversationId: conv2,
+          status: "active",
+          receive: "routed",
+        }),
+      );
 
       expect(newId).not.toBe(oldId);
-      expect((await store.getSession(oldId))?.status).toBe("closed");
-      expect((await store.getSession(newId))?.status).toBe("active");
+      expect((await tx((trx) => store.getSession(trx, oldId)))?.status).toBe("closed");
+      expect((await tx((trx) => store.getSession(trx, newId)))?.status).toBe("active");
       // resolveSession returns the new one (most recent)
-      expect((await store.resolveSession(channelId, "addr-swap"))?.id).toBe(newId);
+      expect((await tx((trx) => store.resolveSession(trx, channelId, "addr-swap")))?.id).toBe(
+        newId,
+      );
     });
 
     it("swapSession works when no prior session exists on the address", async () => {
       const channelId = await seedChannel();
       const { conversationId } = await seedConversation();
 
-      const { id } = await store.swapSession(channelId, "fresh-addr", {
-        conversationId,
-        status: "active",
-        receive: "routed",
-      });
+      const { id } = await tx((trx) =>
+        store.swapSession(trx, channelId, "fresh-addr", {
+          conversationId,
+          status: "active",
+          receive: "routed",
+        }),
+      );
 
-      expect((await store.getSession(id))?.status).toBe("active");
-      expect((await store.resolveSession(channelId, "fresh-addr"))?.id).toBe(id);
+      expect((await tx((trx) => store.getSession(trx, id)))?.status).toBe("active");
+      expect((await tx((trx) => store.resolveSession(trx, channelId, "fresh-addr")))?.id).toBe(id);
     });
 
     it("swapSession does not touch sessions on other addresses", async () => {
@@ -215,13 +229,15 @@ describe("DrizzleTransportStore", () => {
       const { conversationId } = await seedConversation();
       const otherId = await seedSession(channelId, conversationId, "other-addr");
 
-      await store.swapSession(channelId, "addr-a", {
-        conversationId,
-        status: "active",
-        receive: "routed",
-      });
+      await tx((trx) =>
+        store.swapSession(trx, channelId, "addr-a", {
+          conversationId,
+          status: "active",
+          receive: "routed",
+        }),
+      );
 
-      expect((await store.getSession(otherId))?.status).toBe("active");
+      expect((await tx((trx) => store.getSession(trx, otherId)))?.status).toBe("active");
     });
   });
 
@@ -231,14 +247,16 @@ describe("DrizzleTransportStore", () => {
       const { conversationId } = await seedConversation();
       const sessionId = await seedSession(channelId, conversationId);
 
-      const { id } = await store.persistInbound({
-        channelSessionId: sessionId,
-        conversationId,
-        content: "Hello",
-        platformTs: new Date("2026-01-01T12:00:00Z"),
-      });
+      const { id } = await tx((trx) =>
+        store.persistInbound(trx, {
+          channelSessionId: sessionId,
+          conversationId,
+          content: "Hello",
+          platformTs: new Date("2026-01-01T12:00:00Z"),
+        }),
+      );
 
-      const unbatched = await store.getUnbatchedInbound(conversationId, null);
+      const unbatched = await tx((trx) => store.getUnbatchedInbound(trx, conversationId, null));
       expect(unbatched).toHaveLength(1);
       expect(unbatched[0]).toEqual({ id, content: "Hello" });
     });
@@ -249,29 +267,33 @@ describe("DrizzleTransportStore", () => {
       const sessionId = await seedSession(channelId, conversationId);
       const now = new Date();
 
-      const { id: first } = await store.persistInbound({
-        channelSessionId: sessionId,
-        conversationId,
-        content: "first",
-        platformTs: now,
-      });
+      const { id: first } = await tx((trx) =>
+        store.persistInbound(trx, {
+          channelSessionId: sessionId,
+          conversationId,
+          content: "first",
+          platformTs: now,
+        }),
+      );
       // UUIDv7 is time-ordered per millisecond — ensure distinct timestamps
       await new Promise((r) => setTimeout(r, 2));
-      await store.persistInbound({
-        channelSessionId: sessionId,
-        conversationId,
-        content: "second",
-        platformTs: now,
-      });
+      await tx((trx) =>
+        store.persistInbound(trx, {
+          channelSessionId: sessionId,
+          conversationId,
+          content: "second",
+          platformTs: now,
+        }),
+      );
 
-      const after = await store.getUnbatchedInbound(conversationId, first);
+      const after = await tx((trx) => store.getUnbatchedInbound(trx, conversationId, first));
       expect(after).toHaveLength(1);
       expect(after[0]?.content).toBe("second");
     });
 
     it("returns empty for no inbound messages", async () => {
       const { conversationId } = await seedConversation();
-      expect(await store.getUnbatchedInbound(conversationId, null)).toEqual([]);
+      expect(await tx((trx) => store.getUnbatchedInbound(trx, conversationId, null))).toEqual([]);
     });
   });
 
@@ -281,18 +303,22 @@ describe("DrizzleTransportStore", () => {
       const { conversationId } = await seedConversation();
       const sessionId = await seedSession(channelId, conversationId, "addr-1");
 
-      const { id: inboundId } = await store.persistInbound({
-        channelSessionId: sessionId,
-        conversationId,
-        content: "hello",
-        platformTs: new Date(),
-      });
+      const { id: inboundId } = await tx((trx) =>
+        store.persistInbound(trx, {
+          channelSessionId: sessionId,
+          conversationId,
+          content: "hello",
+          platformTs: new Date(),
+        }),
+      );
 
-      const result = await store.getSourceSessions({
-        conversationId,
-        prevCursor: null,
-        maxInboundId: inboundId,
-      });
+      const result = await tx((trx) =>
+        store.getSourceSessions(trx, {
+          conversationId,
+          prevCursor: null,
+          maxInboundId: inboundId,
+        }),
+      );
       expect(result).toHaveLength(1);
       expect(result[0]?.id).toBe(sessionId);
     });
@@ -313,18 +339,22 @@ describe("DrizzleTransportStore", () => {
         })
         .returning({ id: csTable.id });
 
-      const { id: inboundId } = await store.persistInbound({
-        channelSessionId: mutedSession!.id,
-        conversationId,
-        content: "hello",
-        platformTs: new Date(),
-      });
+      const { id: inboundId } = await tx((trx) =>
+        store.persistInbound(trx, {
+          channelSessionId: mutedSession!.id,
+          conversationId,
+          content: "hello",
+          platformTs: new Date(),
+        }),
+      );
 
-      const result = await store.getSourceSessions({
-        conversationId,
-        prevCursor: null,
-        maxInboundId: inboundId,
-      });
+      const result = await tx((trx) =>
+        store.getSourceSessions(trx, {
+          conversationId,
+          prevCursor: null,
+          maxInboundId: inboundId,
+        }),
+      );
       expect(result).toHaveLength(0);
     });
 
@@ -333,20 +363,24 @@ describe("DrizzleTransportStore", () => {
       const { conversationId } = await seedConversation();
       const sessionId = await seedSession(channelId, conversationId);
 
-      const { id: inboundId } = await store.persistInbound({
-        channelSessionId: sessionId,
-        conversationId,
-        content: "hello",
-        platformTs: new Date(),
-      });
+      const { id: inboundId } = await tx((trx) =>
+        store.persistInbound(trx, {
+          channelSessionId: sessionId,
+          conversationId,
+          content: "hello",
+          platformTs: new Date(),
+        }),
+      );
 
-      await store.closeSession(sessionId);
+      await tx((trx) => store.closeSession(trx, sessionId));
 
-      const result = await store.getSourceSessions({
-        conversationId,
-        prevCursor: null,
-        maxInboundId: inboundId,
-      });
+      const result = await tx((trx) =>
+        store.getSourceSessions(trx, {
+          conversationId,
+          prevCursor: null,
+          maxInboundId: inboundId,
+        }),
+      );
       expect(result).toHaveLength(0);
     });
 
@@ -367,18 +401,22 @@ describe("DrizzleTransportStore", () => {
         })
         .returning({ id: csTable.id });
 
-      const { id: inboundId } = await store.persistInbound({
-        channelSessionId: expiredSession!.id,
-        conversationId,
-        content: "hello",
-        platformTs: new Date(),
-      });
+      const { id: inboundId } = await tx((trx) =>
+        store.persistInbound(trx, {
+          channelSessionId: expiredSession!.id,
+          conversationId,
+          content: "hello",
+          platformTs: new Date(),
+        }),
+      );
 
-      const result = await store.getSourceSessions({
-        conversationId,
-        prevCursor: null,
-        maxInboundId: inboundId,
-      });
+      const result = await tx((trx) =>
+        store.getSourceSessions(trx, {
+          conversationId,
+          prevCursor: null,
+          maxInboundId: inboundId,
+        }),
+      );
       expect(result).toHaveLength(0);
     });
 
@@ -388,26 +426,32 @@ describe("DrizzleTransportStore", () => {
       const s1 = await seedSession(channelId, conversationId, "addr-1");
       const s2 = await seedSession(channelId, conversationId, "addr-2");
 
-      const { id: firstInbound } = await store.persistInbound({
-        channelSessionId: s1,
-        conversationId,
-        content: "first",
-        platformTs: new Date(),
-      });
+      const { id: firstInbound } = await tx((trx) =>
+        store.persistInbound(trx, {
+          channelSessionId: s1,
+          conversationId,
+          content: "first",
+          platformTs: new Date(),
+        }),
+      );
       await new Promise((r) => setTimeout(r, 2));
-      const { id: secondInbound } = await store.persistInbound({
-        channelSessionId: s2,
-        conversationId,
-        content: "second",
-        platformTs: new Date(),
-      });
+      const { id: secondInbound } = await tx((trx) =>
+        store.persistInbound(trx, {
+          channelSessionId: s2,
+          conversationId,
+          content: "second",
+          platformTs: new Date(),
+        }),
+      );
 
       // With prevCursor = firstInbound, only s2's message is in range
-      const result = await store.getSourceSessions({
-        conversationId,
-        prevCursor: firstInbound,
-        maxInboundId: secondInbound,
-      });
+      const result = await tx((trx) =>
+        store.getSourceSessions(trx, {
+          conversationId,
+          prevCursor: firstInbound,
+          maxInboundId: secondInbound,
+        }),
+      );
       expect(result).toHaveLength(1);
       expect(result[0]?.platformAddress).toBe("addr-2");
     });
@@ -417,25 +461,31 @@ describe("DrizzleTransportStore", () => {
       const { conversationId } = await seedConversation();
       const sessionId = await seedSession(channelId, conversationId);
 
-      await store.persistInbound({
-        channelSessionId: sessionId,
-        conversationId,
-        content: "first",
-        platformTs: new Date(),
-      });
+      await tx((trx) =>
+        store.persistInbound(trx, {
+          channelSessionId: sessionId,
+          conversationId,
+          content: "first",
+          platformTs: new Date(),
+        }),
+      );
       await new Promise((r) => setTimeout(r, 2));
-      const { id: lastInbound } = await store.persistInbound({
-        channelSessionId: sessionId,
-        conversationId,
-        content: "second",
-        platformTs: new Date(),
-      });
+      const { id: lastInbound } = await tx((trx) =>
+        store.persistInbound(trx, {
+          channelSessionId: sessionId,
+          conversationId,
+          content: "second",
+          platformTs: new Date(),
+        }),
+      );
 
-      const result = await store.getSourceSessions({
-        conversationId,
-        prevCursor: null,
-        maxInboundId: lastInbound,
-      });
+      const result = await tx((trx) =>
+        store.getSourceSessions(trx, {
+          conversationId,
+          prevCursor: null,
+          maxInboundId: lastInbound,
+        }),
+      );
       expect(result).toHaveLength(1);
     });
   });
@@ -461,7 +511,7 @@ describe("DrizzleTransportStore", () => {
         })
         .returning({ id: csTable.id });
 
-      const result = await store.getReceiveAllSessions(conversationId);
+      const result = await tx((trx) => store.getReceiveAllSessions(trx, conversationId));
       expect(result).toHaveLength(1);
       expect(result[0]?.id).toBe(allSession!.id);
     });
@@ -480,24 +530,24 @@ describe("DrizzleTransportStore", () => {
         expiresAt: new Date("2020-01-01"),
       });
 
-      const result = await store.getReceiveAllSessions(conversationId);
+      const result = await tx((trx) => store.getReceiveAllSessions(trx, conversationId));
       expect(result).toHaveLength(0);
     });
   });
 
   describe("identity resolution", () => {
     it("resolves wildcard identity", async () => {
-      const userId = (await agentStore.createUser()).id;
+      const userId = (await tx((trx) => agentStore.createUser(trx))).id;
       const channelId = await seedChannel();
 
-      await store.createWildcardIdentity({ userId, channelId });
+      await tx((trx) => store.createWildcardIdentity(trx, { userId, channelId }));
 
-      const resolved = await store.resolveUser(channelId, "any-handle");
+      const resolved = await tx((trx) => store.resolveUser(trx, channelId, "any-handle"));
       expect(resolved?.userId).toBe(userId);
     });
 
     it("resolves exact handle match", async () => {
-      const userId = (await agentStore.createUser()).id;
+      const userId = (await tx((trx) => agentStore.createUser(trx))).id;
       const channelId = await seedChannel();
 
       // Insert exact identity via raw db (store only exposes wildcard creation)
@@ -510,16 +560,16 @@ describe("DrizzleTransportStore", () => {
         autoCreated: false,
       });
 
-      const resolved = await store.resolveUser(channelId, "alice");
+      const resolved = await tx((trx) => store.resolveUser(trx, channelId, "alice"));
       expect(resolved?.userId).toBe(userId);
     });
 
     it("prefers wildcard over exact match", async () => {
-      const wildcardUser = (await agentStore.createUser()).id;
-      const exactUser = (await agentStore.createUser()).id;
+      const wildcardUser = (await tx((trx) => agentStore.createUser(trx))).id;
+      const exactUser = (await tx((trx) => agentStore.createUser(trx))).id;
       const channelId = await seedChannel();
 
-      await store.createWildcardIdentity({ userId: wildcardUser, channelId });
+      await tx((trx) => store.createWildcardIdentity(trx, { userId: wildcardUser, channelId }));
 
       const { userIdentities } = await import("./schema.js");
       await db.insert(userIdentities).values({
@@ -531,20 +581,20 @@ describe("DrizzleTransportStore", () => {
       });
 
       // Wildcard checked first in resolveUser implementation
-      const resolved = await store.resolveUser(channelId, "bob");
+      const resolved = await tx((trx) => store.resolveUser(trx, channelId, "bob"));
       expect(resolved?.userId).toBe(wildcardUser);
     });
 
     it("returns null when no identity matches", async () => {
       const channelId = await seedChannel();
-      expect(await store.resolveUser(channelId, "unknown")).toBeUndefined();
+      expect(await tx((trx) => store.resolveUser(trx, channelId, "unknown"))).toBeUndefined();
     });
   });
 
   describe("getVoiceMaxReplyChars", () => {
     it("returns null when the conversation has no active sessions", async () => {
       const { conversationId } = await seedConversation();
-      expect(await store.getVoiceMaxReplyChars(conversationId)).toBeNull();
+      expect(await tx((trx) => store.getVoiceMaxReplyChars(trx, conversationId))).toBeNull();
     });
 
     it("returns the default cap (700) for a single fresh channel", async () => {
@@ -552,7 +602,7 @@ describe("DrizzleTransportStore", () => {
       const { conversationId } = await seedConversation();
       await seedSession(channelId, conversationId);
 
-      expect(await store.getVoiceMaxReplyChars(conversationId)).toBe(700);
+      expect(await tx((trx) => store.getVoiceMaxReplyChars(trx, conversationId))).toBe(700);
     });
 
     it("takes the MIN cap across multiple active sessions on different channels", async () => {
@@ -566,7 +616,7 @@ describe("DrizzleTransportStore", () => {
       await seedSession(ch1, conversationId, "addr-1");
       await seedSession(ch2, conversationId, "addr-2");
 
-      expect(await store.getVoiceMaxReplyChars(conversationId)).toBe(300);
+      expect(await tx((trx) => store.getVoiceMaxReplyChars(trx, conversationId))).toBe(300);
     });
 
     it("ignores closed sessions when computing the cap", async () => {
@@ -577,12 +627,12 @@ describe("DrizzleTransportStore", () => {
       const { conversationId } = await seedConversation();
       const activeSessionId = await seedSession(ch1, conversationId, "addr-1");
       const closedSessionId = await seedSession(ch2, conversationId, "addr-2");
-      await store.closeSession(closedSessionId);
+      await tx((trx) => store.closeSession(trx, closedSessionId));
       // Active session id retained for clarity — only its channel's cap should drive the result.
       expect(activeSessionId).toBeDefined();
 
       // Only ch1 (1500) is active; ch2's tiny 100 is closed and excluded.
-      expect(await store.getVoiceMaxReplyChars(conversationId)).toBe(1500);
+      expect(await tx((trx) => store.getVoiceMaxReplyChars(trx, conversationId))).toBe(1500);
     });
   });
 });

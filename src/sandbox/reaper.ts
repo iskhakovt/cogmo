@@ -1,5 +1,6 @@
 import type Docker from "dockerode";
 import type { Inngest } from "inngest";
+import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { SandboxStore } from "./store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "./supervisor.js";
@@ -44,6 +45,7 @@ const log = logger.child({ component: "sandbox.reaper" });
 export interface ReaperDeps {
   docker: Docker;
   store: SandboxStore;
+  runInTx: Transactor;
   instanceId: string;
   /** Override for tests. Defaults to `() => new Date()`. */
   now?: () => Date;
@@ -70,7 +72,9 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
   const result: ReapResult = { ...ZERO_RESULT };
 
   // 1. TTL pass — containers
-  const ourContainers = await deps.store.listContainersForInstance(deps.instanceId);
+  const ourContainers = await deps.runInTx((tx) =>
+    deps.store.listContainersForInstance(tx, deps.instanceId),
+  );
   const expired = ourContainers
     .filter(
       (c) =>
@@ -81,11 +85,13 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
   for (const row of expired) {
     try {
       await killAndRemove(deps.docker, row.dockerId);
-      await deps.store.updateContainerStatus({
-        id: row.id,
-        status: "reaped",
-        exitedAt: now,
-      });
+      await deps.runInTx((tx) =>
+        deps.store.updateContainerStatus(tx, {
+          id: row.id,
+          status: "reaped",
+          exitedAt: now,
+        }),
+      );
       result.ttlReaped += 1;
     } catch (err) {
       log.warn({ err, dockerId: row.dockerId }, "reaper ttl pass: kill+remove failed");
@@ -109,10 +115,12 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
     log.warn({ err }, "reaper orphan pass: docker.listContainers failed");
   }
 
-  const liveInstanceIds = new Set((await deps.store.listLiveInstances()).map((i) => i.id));
+  const liveInstanceIds = new Set(
+    (await deps.runInTx((tx) => deps.store.listLiveInstances(tx))).map((i) => i.id),
+  );
   for (const c of dockerContainers) {
     const stamped = c.Labels?.[LABEL_INSTANCE];
-    const dbRow = await deps.store.getContainerByDockerId(c.Id);
+    const dbRow = await deps.runInTx((tx) => deps.store.getContainerByDockerId(tx, c.Id));
     // Orphan if: no instance label, label points at a dead instance,
     // OR no DB row exists at all (rare orphaned create).
     const isOrphan = !stamped || !liveInstanceIds.has(stamped) || !dbRow;
@@ -120,11 +128,13 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
     try {
       await killAndRemove(deps.docker, c.Id);
       if (dbRow && dbRow.status !== "reaped") {
-        await deps.store.updateContainerStatus({
-          id: dbRow.id,
-          status: "reaped",
-          exitedAt: now,
-        });
+        await deps.runInTx((tx) =>
+          deps.store.updateContainerStatus(tx, {
+            id: dbRow.id,
+            status: "reaped",
+            exitedAt: now,
+          }),
+        );
       }
       result.orphansReaped += 1;
     } catch (err) {
@@ -144,17 +154,21 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
       // sees the consistent state regardless.
       if (expired.some((e) => e.id === row.id)) continue;
       if (dockerIdSet.has(row.dockerId)) continue;
-      await deps.store.updateContainerStatus({
-        id: row.id,
-        status: "exited",
-        exitedAt: now,
-      });
+      await deps.runInTx((tx) =>
+        deps.store.updateContainerStatus(tx, {
+          id: row.id,
+          status: "exited",
+          exitedAt: now,
+        }),
+      );
       result.staleMarked += 1;
     }
   }
 
   // 4. Networks + volumes — TTL pass for the current instance
-  const ourNetworks = await deps.store.listNetworksForInstance(deps.instanceId);
+  const ourNetworks = await deps.runInTx((tx) =>
+    deps.store.listNetworksForInstance(tx, deps.instanceId),
+  );
   for (const net of ourNetworks) {
     if (net.status !== "created") continue;
     if (net.ttlExpiresAt.getTime() >= now.getTime()) continue;
@@ -165,14 +179,18 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
         .catch((err: { statusCode?: number }) => {
           if (err.statusCode !== 404) throw err;
         });
-      await deps.store.updateNetworkStatus({ id: net.id, status: "reaped" });
+      await deps.runInTx((tx) =>
+        deps.store.updateNetworkStatus(tx, { id: net.id, status: "reaped" }),
+      );
       result.networksReaped += 1;
     } catch (err) {
       log.warn({ err, dockerId: net.dockerId }, "reaper networks pass: remove failed");
     }
   }
 
-  const ourVolumes = await deps.store.listVolumesForInstance(deps.instanceId);
+  const ourVolumes = await deps.runInTx((tx) =>
+    deps.store.listVolumesForInstance(tx, deps.instanceId),
+  );
   for (const vol of ourVolumes) {
     if (vol.status !== "created") continue;
     if (vol.ttlExpiresAt.getTime() >= now.getTime()) continue;
@@ -183,7 +201,9 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
         .catch((err: { statusCode?: number }) => {
           if (err.statusCode !== 404) throw err;
         });
-      await deps.store.updateVolumeStatus({ id: vol.id, status: "reaped" });
+      await deps.runInTx((tx) =>
+        deps.store.updateVolumeStatus(tx, { id: vol.id, status: "reaped" }),
+      );
       result.volumesReaped += 1;
     } catch (err) {
       log.warn({ err, dockerId: vol.dockerId }, "reaper volumes pass: remove failed");

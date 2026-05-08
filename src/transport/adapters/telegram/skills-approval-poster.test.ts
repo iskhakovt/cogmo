@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import type { Transactor } from "../../../db/index.js";
 import type { SkillStore } from "../../../skills/store/index.js";
 import { mockTransportStore } from "../../../test/factories.js";
 import { postSkillsApprovalKeyboard } from "./skills-approval-poster.js";
+
+const FAKE_TX = { __mockTx: true } as never;
+const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 const PENDING_ID = "019d0000-0000-7000-8000-000000000001";
 const SKILL_ID = "019d0000-0000-7000-8000-0000000000ab";
@@ -53,6 +57,7 @@ describe("postSkillsApprovalKeyboard", () => {
         conversationId: CONV_ID,
       },
       channelId: "ch-telegram",
+      runInTx: fakeRunInTx,
       skillStore,
       transportStore,
       sendMessage,
@@ -97,6 +102,7 @@ describe("postSkillsApprovalKeyboard", () => {
         conversationId: CONV_ID,
       },
       channelId: "ch-telegram",
+      runInTx: fakeRunInTx,
       skillStore,
       transportStore,
       sendMessage,
@@ -131,6 +137,7 @@ describe("postSkillsApprovalKeyboard", () => {
         conversationId: CONV_ID,
       },
       channelId: "ch-telegram",
+      runInTx: fakeRunInTx,
       skillStore,
       transportStore,
       sendMessage,
@@ -168,6 +175,7 @@ describe("postSkillsApprovalKeyboard", () => {
         conversationId: CONV_ID,
       },
       channelId: "ch-telegram",
+      runInTx: fakeRunInTx,
       skillStore,
       transportStore,
       sendMessage,
@@ -208,6 +216,7 @@ describe("postSkillsApprovalKeyboard", () => {
         conversationId: CONV_ID,
       },
       channelId: "ch-telegram",
+      runInTx: fakeRunInTx,
       skillStore,
       transportStore,
       sendMessage,

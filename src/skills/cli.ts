@@ -18,9 +18,7 @@ export interface CliIo {
 }
 
 const CONSOLE_IO: CliIo = {
-  // biome-ignore lint/suspicious/noConsole: CLI output stream is the legitimate use of console.
   out: (line) => console.log(line),
-  // biome-ignore lint/suspicious/noConsole: CLI error stream.
   err: (line) => console.error(line),
 };
 

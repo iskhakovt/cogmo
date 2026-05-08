@@ -1,5 +1,6 @@
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import type Docker from "dockerode";
+import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import { cleanupAskpass } from "./askpass.js";
 import { taskSliceName } from "./cgroup-parent.js";
@@ -28,6 +29,7 @@ export const LABEL_DEPTH = "cogmo.depth";
 interface CreateOptions {
   docker: Docker;
   store: SandboxStore;
+  runInTx: Transactor;
   runtime: SandboxRuntime;
   /** The current Cogmo instance id. Stamped into every container's `cogmo.instance` label. */
   instanceId: string;
@@ -62,6 +64,7 @@ interface CreateOptions {
 export class LocalInProcessSandbox implements Sandbox {
   #docker: Docker;
   #store: SandboxStore;
+  #runInTx: Transactor;
   #runtime: SandboxRuntime;
   #instanceId: string;
   #proxy?: CogmoSocketProxy;
@@ -70,6 +73,7 @@ export class LocalInProcessSandbox implements Sandbox {
   private constructor(opts: CreateOptions) {
     this.#docker = opts.docker;
     this.#store = opts.store;
+    this.#runInTx = opts.runInTx;
     this.#runtime = opts.runtime;
     this.#instanceId = opts.instanceId;
     if (opts.proxy) this.#proxy = opts.proxy;
@@ -127,13 +131,15 @@ export class LocalInProcessSandbox implements Sandbox {
       if (stamped && stamped === currentInstanceId) continue;
       log.warn({ dockerId: c.Id, stampedInstance: stamped }, "reaping orphan container");
       await this.#killAndRemove(c.Id);
-      const row = await this.#store.getContainerByDockerId(c.Id);
+      const row = await this.#runInTx((tx) => this.#store.getContainerByDockerId(tx, c.Id));
       if (row) {
-        await this.#store.updateContainerStatus({
-          id: row.id,
-          status: "reaped",
-          exitedAt: new Date(),
-        });
+        await this.#runInTx((tx) =>
+          this.#store.updateContainerStatus(tx, {
+            id: row.id,
+            status: "reaped",
+            exitedAt: new Date(),
+          }),
+        );
       }
       reaped += 1;
     }
@@ -240,18 +246,20 @@ export class LocalInProcessSandbox implements Sandbox {
       throw err;
     }
 
-    const containerRow = await this.#store.insertContainer({
-      dockerId: container.id,
-      parentId: null,
-      rootTaskId: spec.rootTaskId,
-      depth: 0,
-      image: spec.image,
-      runtime,
-      labels,
-      resourceLimits: spec.resourceLimits,
-      ttlExpiresAt: spec.ttl.expiresAt,
-      instanceId: this.#instanceId,
-    });
+    const containerRow = await this.#runInTx((tx) =>
+      this.#store.insertContainer(tx, {
+        dockerId: container.id,
+        parentId: null,
+        rootTaskId: spec.rootTaskId,
+        depth: 0,
+        image: spec.image,
+        runtime,
+        labels,
+        resourceLimits: spec.resourceLimits,
+        ttlExpiresAt: spec.ttl.expiresAt,
+        instanceId: this.#instanceId,
+      }),
+    );
 
     // Now that the parent docker id is known, upsert the proxy scope so
     // child container creates from inside the task get the right
@@ -270,20 +278,26 @@ export class LocalInProcessSandbox implements Sandbox {
 
     try {
       await container.start();
-      await this.#store.updateContainerStatus({
-        id: containerRow.id,
-        status: "running",
-        startedAt: new Date(),
-      });
+      await this.#runInTx((tx) =>
+        this.#store.updateContainerStatus(tx, {
+          id: containerRow.id,
+          status: "running",
+          startedAt: new Date(),
+        }),
+      );
     } catch (err) {
       // Roll back DB state if start fails — the row is gone but the unstarted
       // container should be removed too so we don't leak.
       log.error({ err, dockerId: container.id }, "container start failed, removing");
-      await this.#store
-        .updateContainerStatus({ id: containerRow.id, status: "exited", exitedAt: new Date() })
-        .catch(() => {
-          /* best effort */
-        });
+      await this.#runInTx((tx) =>
+        this.#store.updateContainerStatus(tx, {
+          id: containerRow.id,
+          status: "exited",
+          exitedAt: new Date(),
+        }),
+      ).catch(() => {
+        /* best effort */
+      });
       await container.remove({ force: true }).catch(() => {
         /* best effort */
       });
@@ -304,7 +318,7 @@ export class LocalInProcessSandbox implements Sandbox {
     // Verifies the container is still present on the daemon — bare construction
     // would silently produce a handle whose exec calls would 404.
     await this.#docker.getContainer(dockerId).inspect();
-    const row = await this.#store.getContainerByDockerId(dockerId);
+    const row = await this.#runInTx((tx) => this.#store.getContainerByDockerId(tx, dockerId));
     if (!row) throw new Error(`getTaskContainer: no DB row for docker id ${dockerId}`);
     return {
       containerRowId: row.id,
@@ -314,18 +328,20 @@ export class LocalInProcessSandbox implements Sandbox {
   }
 
   async stopTask(rootTaskId: string): Promise<void> {
-    const rows = await this.#store.listContainersForTask(rootTaskId);
+    const rows = await this.#runInTx((tx) => this.#store.listContainersForTask(tx, rootTaskId));
     // Cascade order: deepest first, so a parent isn't reaped while a child still depends on it.
     const ordered = [...rows].sort((a, b) => b.depth - a.depth);
     try {
       for (const row of ordered) {
         if (row.status === "reaped") continue;
         await this.#killAndRemove(row.dockerId);
-        await this.#store.updateContainerStatus({
-          id: row.id,
-          status: "reaped",
-          exitedAt: new Date(),
-        });
+        await this.#runInTx((tx) =>
+          this.#store.updateContainerStatus(tx, {
+            id: row.id,
+            status: "reaped",
+            exitedAt: new Date(),
+          }),
+        );
       }
     } finally {
       // Tear down the per-task proxy socket regardless of whether the
@@ -348,7 +364,7 @@ export class LocalInProcessSandbox implements Sandbox {
   }
 
   async listContainersForTask(rootTaskId: string): Promise<readonly ContainerRow[]> {
-    return this.#store.listContainersForTask(rootTaskId);
+    return this.#runInTx((tx) => this.#store.listContainersForTask(tx, rootTaskId));
   }
 
   async inspectContainer(dockerId: string): Promise<InspectResult> {

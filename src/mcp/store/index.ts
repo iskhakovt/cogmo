@@ -1,6 +1,6 @@
 import { and, count, eq, sql } from "drizzle-orm";
 import { single } from "../../db/helpers.js";
-import type { Transactor } from "../../db/index.js";
+import type { Transaction } from "../../db/index.js";
 import {
   assertValidServerName,
   type McpServer,
@@ -17,51 +17,58 @@ import { mcpServers, mcpServerTools } from "./schema.js";
 
 export interface McpStore {
   /** Insert a new server. Throws on duplicate name or invalid name shape. */
-  addServer(spec: McpServerSpec): Promise<McpServer>;
+  addServer(tx: Transaction, spec: McpServerSpec): Promise<McpServer>;
 
   /** Delete a server by id. Cascades to tool pins. No-op if not found. */
-  removeServer(id: string): Promise<void>;
+  removeServer(tx: Transaction, id: string): Promise<void>;
 
   /** Get a server by id. */
-  getServerById(id: string): Promise<McpServer | undefined>;
+  getServerById(tx: Transaction, id: string): Promise<McpServer | undefined>;
 
   /** Get a server by unique name. */
-  getServerByName(name: string): Promise<McpServer | undefined>;
+  getServerByName(tx: Transaction, name: string): Promise<McpServer | undefined>;
 
   /** All servers, ordered by name. */
-  listServers(): Promise<readonly McpServer[]>;
+  listServers(tx: Transaction): Promise<readonly McpServer[]>;
 
   /**
    * All servers with tool counts. Heavier than `listServers` — runs an extra
    * aggregation per call. Used for `/mcp list` admin output, not the hot path.
    */
-  listServerStatuses(): Promise<readonly McpServerStatus[]>;
+  listServerStatuses(tx: Transaction): Promise<readonly McpServerStatus[]>;
 
   /** Enabled servers only, ordered by name. Hot path: called from resolveTools. */
-  listEnabledServers(): Promise<readonly McpServer[]>;
+  listEnabledServers(tx: Transaction): Promise<readonly McpServer[]>;
 
-  setEnabled(id: string, enabled: boolean): Promise<void>;
+  setEnabled(tx: Transaction, id: string, enabled: boolean): Promise<void>;
 
-  setServerApprovalStatus(id: string, status: McpServerApprovalStatus): Promise<void>;
+  setServerApprovalStatus(
+    tx: Transaction,
+    id: string,
+    status: McpServerApprovalStatus,
+  ): Promise<void>;
 
-  recordLastConnected(id: string, at: Date): Promise<void>;
+  recordLastConnected(tx: Transaction, id: string, at: Date): Promise<void>;
 
-  recordLastError(id: string, error: string): Promise<void>;
+  recordLastError(tx: Transaction, id: string, error: string): Promise<void>;
 
   /** Replace (or insert) a tool pin. The unique (server_id, tool_name) drives upsert. */
-  upsertToolPin(params: {
-    serverId: string;
-    toolName: string;
-    schemaHash: string;
-    schemaSnapshot: ToolSchemaSnapshot;
-    approvalStatus: McpToolApprovalStatus;
-  }): Promise<McpToolPin>;
+  upsertToolPin(
+    tx: Transaction,
+    params: {
+      serverId: string;
+      toolName: string;
+      schemaHash: string;
+      schemaSnapshot: ToolSchemaSnapshot;
+      approvalStatus: McpToolApprovalStatus;
+    },
+  ): Promise<McpToolPin>;
 
   /** All pins for a server, ordered by tool name. */
-  getToolPins(serverId: string): Promise<readonly McpToolPin[]>;
+  getToolPins(tx: Transaction, serverId: string): Promise<readonly McpToolPin[]>;
 
   /** All approved pins for a server, ordered by tool name. Hot path. */
-  getApprovedToolPins(serverId: string): Promise<readonly McpToolPin[]>;
+  getApprovedToolPins(tx: Transaction, serverId: string): Promise<readonly McpToolPin[]>;
 
   /**
    * Update a single pin's approval status. Returns `true` if the row existed
@@ -71,13 +78,14 @@ export interface McpStore {
    * `/mcp approve <name> <typo>` confirm to the operator with nothing changed.
    */
   setToolApproval(
+    tx: Transaction,
     serverId: string,
     toolName: string,
     status: McpToolApprovalStatus,
   ): Promise<boolean>;
 
   /** Remove a single pin (when a tool disappears from the server's listTools). */
-  deleteToolPin(serverId: string, toolName: string): Promise<void>;
+  deleteToolPin(tx: Transaction, serverId: string, toolName: string): Promise<void>;
 
   /**
    * Atomic counterpart to the per-row `upsertToolPin` / `deleteToolPin` /
@@ -92,270 +100,244 @@ export interface McpStore {
    * Used by `approveServer` so a crash partway through can't leave the
    * server `pending` while pins are partially synced (or vice versa).
    */
-  syncServerApproval(params: {
-    serverId: string;
-    snapshots: readonly {
-      toolName: string;
-      schemaHash: string;
-      schemaSnapshot: ToolSchemaSnapshot;
-    }[];
-  }): Promise<void>;
+  syncServerApproval(
+    tx: Transaction,
+    params: {
+      serverId: string;
+      snapshots: readonly {
+        toolName: string;
+        schemaHash: string;
+        schemaSnapshot: ToolSchemaSnapshot;
+      }[];
+    },
+  ): Promise<void>;
 }
 
 // --- Implementation ---
 
 export class DrizzleMcpStore implements McpStore {
-  #runInTx: Transactor;
-
-  constructor(runInTx: Transactor) {
-    this.#runInTx = runInTx;
-  }
-
-  async addServer(spec: McpServerSpec): Promise<McpServer> {
+  async addServer(tx: Transaction, spec: McpServerSpec): Promise<McpServer> {
     assertValidServerName(spec.name);
-    return this.#runInTx(async (tx) => {
-      const row = single(
-        await tx
-          .insert(mcpServers)
-          .values({
-            name: spec.name,
-            config: spec.config,
-            enabled: spec.enabled,
-            approvalStatus: "pending",
-          })
-          .returning(),
-      );
-      return rowToServer(row);
-    });
-  }
-
-  async removeServer(id: string): Promise<void> {
-    await this.#runInTx(async (tx) => {
-      await tx.delete(mcpServers).where(eq(mcpServers.id, id));
-    });
-  }
-
-  async getServerById(id: string): Promise<McpServer | undefined> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx.select().from(mcpServers).where(eq(mcpServers.id, id)).limit(1);
-      const row = rows[0];
-      return row ? rowToServer(row) : undefined;
-    });
-  }
-
-  async getServerByName(name: string): Promise<McpServer | undefined> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx.select().from(mcpServers).where(eq(mcpServers.name, name)).limit(1);
-      const row = rows[0];
-      return row ? rowToServer(row) : undefined;
-    });
-  }
-
-  async listServers(): Promise<readonly McpServer[]> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx.select().from(mcpServers).orderBy(mcpServers.name);
-      return rows.map(rowToServer);
-    });
-  }
-
-  async listServerStatuses(): Promise<readonly McpServerStatus[]> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select({
-          server: mcpServers,
-          toolCount: count(mcpServerTools.id),
-          approvedToolCount: sql<number>`count(*) filter (where ${mcpServerTools.approvalStatus} = 'approved')`,
-        })
-        .from(mcpServers)
-        .leftJoin(mcpServerTools, eq(mcpServerTools.serverId, mcpServers.id))
-        .groupBy(mcpServers.id)
-        .orderBy(mcpServers.name);
-      return rows.map((r) => ({
-        ...rowToServer(r.server),
-        toolCount: Number(r.toolCount),
-        approvedToolCount: Number(r.approvedToolCount),
-      }));
-    });
-  }
-
-  async listEnabledServers(): Promise<readonly McpServer[]> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select()
-        .from(mcpServers)
-        .where(eq(mcpServers.enabled, true))
-        .orderBy(mcpServers.name);
-      return rows.map(rowToServer);
-    });
-  }
-
-  async setEnabled(id: string, enabled: boolean): Promise<void> {
-    await this.#runInTx(async (tx) => {
-      await tx.update(mcpServers).set({ enabled }).where(eq(mcpServers.id, id));
-    });
-  }
-
-  async setServerApprovalStatus(id: string, status: McpServerApprovalStatus): Promise<void> {
-    await this.#runInTx(async (tx) => {
-      await tx.update(mcpServers).set({ approvalStatus: status }).where(eq(mcpServers.id, id));
-    });
-  }
-
-  async recordLastConnected(id: string, at: Date): Promise<void> {
-    await this.#runInTx(async (tx) => {
+    const row = single(
       await tx
-        .update(mcpServers)
-        .set({ lastConnectedAt: at, lastError: null })
-        .where(eq(mcpServers.id, id));
-    });
+        .insert(mcpServers)
+        .values({
+          name: spec.name,
+          config: spec.config,
+          enabled: spec.enabled,
+          approvalStatus: "pending",
+        })
+        .returning(),
+    );
+    return rowToServer(row);
   }
 
-  async recordLastError(id: string, error: string): Promise<void> {
-    await this.#runInTx(async (tx) => {
-      await tx.update(mcpServers).set({ lastError: error }).where(eq(mcpServers.id, id));
-    });
+  async removeServer(tx: Transaction, id: string): Promise<void> {
+    await tx.delete(mcpServers).where(eq(mcpServers.id, id));
   }
 
-  async upsertToolPin(params: {
-    serverId: string;
-    toolName: string;
-    schemaHash: string;
-    schemaSnapshot: ToolSchemaSnapshot;
-    approvalStatus: McpToolApprovalStatus;
-  }): Promise<McpToolPin> {
-    return this.#runInTx(async (tx) => {
-      const row = single(
-        await tx
-          .insert(mcpServerTools)
-          .values({
-            serverId: params.serverId,
-            toolName: params.toolName,
+  async getServerById(tx: Transaction, id: string): Promise<McpServer | undefined> {
+    const rows = await tx.select().from(mcpServers).where(eq(mcpServers.id, id)).limit(1);
+    const row = rows[0];
+    return row ? rowToServer(row) : undefined;
+  }
+
+  async getServerByName(tx: Transaction, name: string): Promise<McpServer | undefined> {
+    const rows = await tx.select().from(mcpServers).where(eq(mcpServers.name, name)).limit(1);
+    const row = rows[0];
+    return row ? rowToServer(row) : undefined;
+  }
+
+  async listServers(tx: Transaction): Promise<readonly McpServer[]> {
+    const rows = await tx.select().from(mcpServers).orderBy(mcpServers.name);
+    return rows.map(rowToServer);
+  }
+
+  async listServerStatuses(tx: Transaction): Promise<readonly McpServerStatus[]> {
+    const rows = await tx
+      .select({
+        server: mcpServers,
+        toolCount: count(mcpServerTools.id),
+        approvedToolCount: sql<number>`count(*) filter (where ${mcpServerTools.approvalStatus} = 'approved')`,
+      })
+      .from(mcpServers)
+      .leftJoin(mcpServerTools, eq(mcpServerTools.serverId, mcpServers.id))
+      .groupBy(mcpServers.id)
+      .orderBy(mcpServers.name);
+    return rows.map((r) => ({
+      ...rowToServer(r.server),
+      toolCount: Number(r.toolCount),
+      approvedToolCount: Number(r.approvedToolCount),
+    }));
+  }
+
+  async listEnabledServers(tx: Transaction): Promise<readonly McpServer[]> {
+    const rows = await tx
+      .select()
+      .from(mcpServers)
+      .where(eq(mcpServers.enabled, true))
+      .orderBy(mcpServers.name);
+    return rows.map(rowToServer);
+  }
+
+  async setEnabled(tx: Transaction, id: string, enabled: boolean): Promise<void> {
+    await tx.update(mcpServers).set({ enabled }).where(eq(mcpServers.id, id));
+  }
+
+  async setServerApprovalStatus(
+    tx: Transaction,
+    id: string,
+    status: McpServerApprovalStatus,
+  ): Promise<void> {
+    await tx.update(mcpServers).set({ approvalStatus: status }).where(eq(mcpServers.id, id));
+  }
+
+  async recordLastConnected(tx: Transaction, id: string, at: Date): Promise<void> {
+    await tx
+      .update(mcpServers)
+      .set({ lastConnectedAt: at, lastError: null })
+      .where(eq(mcpServers.id, id));
+  }
+
+  async recordLastError(tx: Transaction, id: string, error: string): Promise<void> {
+    await tx.update(mcpServers).set({ lastError: error }).where(eq(mcpServers.id, id));
+  }
+
+  async upsertToolPin(
+    tx: Transaction,
+    params: {
+      serverId: string;
+      toolName: string;
+      schemaHash: string;
+      schemaSnapshot: ToolSchemaSnapshot;
+      approvalStatus: McpToolApprovalStatus;
+    },
+  ): Promise<McpToolPin> {
+    const row = single(
+      await tx
+        .insert(mcpServerTools)
+        .values({
+          serverId: params.serverId,
+          toolName: params.toolName,
+          schemaHash: params.schemaHash,
+          schemaSnapshot: params.schemaSnapshot,
+          approvalStatus: params.approvalStatus,
+        })
+        .onConflictDoUpdate({
+          target: [mcpServerTools.serverId, mcpServerTools.toolName],
+          set: {
             schemaHash: params.schemaHash,
             schemaSnapshot: params.schemaSnapshot,
             approvalStatus: params.approvalStatus,
-          })
-          .onConflictDoUpdate({
-            target: [mcpServerTools.serverId, mcpServerTools.toolName],
-            set: {
-              schemaHash: params.schemaHash,
-              schemaSnapshot: params.schemaSnapshot,
-              approvalStatus: params.approvalStatus,
-            },
-          })
-          .returning(),
-      );
-      return rowToToolPin(row);
-    });
+          },
+        })
+        .returning(),
+    );
+    return rowToToolPin(row);
   }
 
-  async getToolPins(serverId: string): Promise<readonly McpToolPin[]> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select()
-        .from(mcpServerTools)
-        .where(eq(mcpServerTools.serverId, serverId))
-        .orderBy(mcpServerTools.toolName);
-      return rows.map(rowToToolPin);
-    });
+  async getToolPins(tx: Transaction, serverId: string): Promise<readonly McpToolPin[]> {
+    const rows = await tx
+      .select()
+      .from(mcpServerTools)
+      .where(eq(mcpServerTools.serverId, serverId))
+      .orderBy(mcpServerTools.toolName);
+    return rows.map(rowToToolPin);
   }
 
-  async getApprovedToolPins(serverId: string): Promise<readonly McpToolPin[]> {
-    return this.#runInTx(async (tx) => {
-      const rows = await tx
-        .select()
-        .from(mcpServerTools)
-        .where(
-          and(eq(mcpServerTools.serverId, serverId), eq(mcpServerTools.approvalStatus, "approved")),
-        )
-        .orderBy(mcpServerTools.toolName);
-      return rows.map(rowToToolPin);
-    });
+  async getApprovedToolPins(tx: Transaction, serverId: string): Promise<readonly McpToolPin[]> {
+    const rows = await tx
+      .select()
+      .from(mcpServerTools)
+      .where(
+        and(eq(mcpServerTools.serverId, serverId), eq(mcpServerTools.approvalStatus, "approved")),
+      )
+      .orderBy(mcpServerTools.toolName);
+    return rows.map(rowToToolPin);
   }
 
   async setToolApproval(
+    tx: Transaction,
     serverId: string,
     toolName: string,
     status: McpToolApprovalStatus,
   ): Promise<boolean> {
-    return this.#runInTx(async (tx) => {
-      const updated = await tx
-        .update(mcpServerTools)
-        .set({ approvalStatus: status })
-        .where(and(eq(mcpServerTools.serverId, serverId), eq(mcpServerTools.toolName, toolName)))
-        .returning({ id: mcpServerTools.id });
-      return updated.length > 0;
-    });
+    const updated = await tx
+      .update(mcpServerTools)
+      .set({ approvalStatus: status })
+      .where(and(eq(mcpServerTools.serverId, serverId), eq(mcpServerTools.toolName, toolName)))
+      .returning({ id: mcpServerTools.id });
+    return updated.length > 0;
   }
 
-  async deleteToolPin(serverId: string, toolName: string): Promise<void> {
-    await this.#runInTx(async (tx) => {
+  async deleteToolPin(tx: Transaction, serverId: string, toolName: string): Promise<void> {
+    await tx
+      .delete(mcpServerTools)
+      .where(and(eq(mcpServerTools.serverId, serverId), eq(mcpServerTools.toolName, toolName)));
+  }
+
+  async syncServerApproval(
+    tx: Transaction,
+    params: {
+      serverId: string;
+      snapshots: readonly {
+        toolName: string;
+        schemaHash: string;
+        schemaSnapshot: ToolSchemaSnapshot;
+      }[];
+    },
+  ): Promise<void> {
+    const existing = await tx
+      .select()
+      .from(mcpServerTools)
+      .where(eq(mcpServerTools.serverId, params.serverId));
+    const existingByName = new Map(existing.map((p) => [p.toolName, p]));
+    const incomingNames = new Set(params.snapshots.map((s) => s.toolName));
+
+    for (const snap of params.snapshots) {
+      const prev = existingByName.get(snap.toolName);
+      // Pinning rule: identical hash → preserve prior approval status; new
+      // or mutated → pending. The operator must explicitly re-approve a
+      // changed tool — we never silently transition pending → approved on
+      // schema drift.
+      const status: McpToolApprovalStatus =
+        prev && prev.schemaHash === snap.schemaHash ? prev.approvalStatus : "pending";
       await tx
-        .delete(mcpServerTools)
-        .where(and(eq(mcpServerTools.serverId, serverId), eq(mcpServerTools.toolName, toolName)));
-    });
-  }
-
-  async syncServerApproval(params: {
-    serverId: string;
-    snapshots: readonly {
-      toolName: string;
-      schemaHash: string;
-      schemaSnapshot: ToolSchemaSnapshot;
-    }[];
-  }): Promise<void> {
-    await this.#runInTx(async (tx) => {
-      const existing = await tx
-        .select()
-        .from(mcpServerTools)
-        .where(eq(mcpServerTools.serverId, params.serverId));
-      const existingByName = new Map(existing.map((p) => [p.toolName, p]));
-      const incomingNames = new Set(params.snapshots.map((s) => s.toolName));
-
-      for (const snap of params.snapshots) {
-        const prev = existingByName.get(snap.toolName);
-        // Pinning rule: identical hash → preserve prior approval status; new
-        // or mutated → pending. The operator must explicitly re-approve a
-        // changed tool — we never silently transition pending → approved on
-        // schema drift.
-        const status: McpToolApprovalStatus =
-          prev && prev.schemaHash === snap.schemaHash ? prev.approvalStatus : "pending";
-        await tx
-          .insert(mcpServerTools)
-          .values({
-            serverId: params.serverId,
-            toolName: snap.toolName,
+        .insert(mcpServerTools)
+        .values({
+          serverId: params.serverId,
+          toolName: snap.toolName,
+          schemaHash: snap.schemaHash,
+          schemaSnapshot: snap.schemaSnapshot,
+          approvalStatus: status,
+        })
+        .onConflictDoUpdate({
+          target: [mcpServerTools.serverId, mcpServerTools.toolName],
+          set: {
             schemaHash: snap.schemaHash,
             schemaSnapshot: snap.schemaSnapshot,
             approvalStatus: status,
-          })
-          .onConflictDoUpdate({
-            target: [mcpServerTools.serverId, mcpServerTools.toolName],
-            set: {
-              schemaHash: snap.schemaHash,
-              schemaSnapshot: snap.schemaSnapshot,
-              approvalStatus: status,
-            },
-          });
-      }
+          },
+        });
+    }
 
-      for (const pin of existing) {
-        if (!incomingNames.has(pin.toolName)) {
-          await tx
-            .delete(mcpServerTools)
-            .where(
-              and(
-                eq(mcpServerTools.serverId, params.serverId),
-                eq(mcpServerTools.toolName, pin.toolName),
-              ),
-            );
-        }
+    for (const pin of existing) {
+      if (!incomingNames.has(pin.toolName)) {
+        await tx
+          .delete(mcpServerTools)
+          .where(
+            and(
+              eq(mcpServerTools.serverId, params.serverId),
+              eq(mcpServerTools.toolName, pin.toolName),
+            ),
+          );
       }
+    }
 
-      await tx
-        .update(mcpServers)
-        .set({ approvalStatus: "approved" })
-        .where(eq(mcpServers.id, params.serverId));
-    });
+    await tx
+      .update(mcpServers)
+      .set({ approvalStatus: "approved" })
+      .where(eq(mcpServers.id, params.serverId));
   }
 }
 

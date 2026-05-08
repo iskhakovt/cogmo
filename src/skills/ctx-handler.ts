@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Service } from "../agent/service.js";
+import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -39,6 +40,7 @@ export interface DefaultCtxHandlerOptions {
   /** Memory bank id — typically the user's bank. */
   memoryBankId: string;
   secretsStore: SecretsStore;
+  runInTx: Transactor;
   memory: MemoryProvider;
   /**
    * The agent's per-user file workspace. Same surface the in-process
@@ -98,6 +100,7 @@ export class DefaultCtxHandler implements CtxHandler {
   #user: CtxUser;
   #memoryBankId: string;
   #secretsStore: SecretsStore;
+  #runInTx: Transactor;
   #memory: MemoryProvider;
   #files: Service["files"];
   #recordContextCall: DefaultCtxHandlerOptions["recordContextCall"];
@@ -110,6 +113,7 @@ export class DefaultCtxHandler implements CtxHandler {
     this.#user = opts.user;
     this.#memoryBankId = opts.memoryBankId;
     this.#secretsStore = opts.secretsStore;
+    this.#runInTx = opts.runInTx;
     this.#memory = opts.memory;
     this.#files = opts.files;
     this.#recordContextCall = opts.recordContextCall;
@@ -166,7 +170,7 @@ export class DefaultCtxHandler implements CtxHandler {
         `secret '${name}' is not declared in SKILL.md frontmatter`,
       );
     }
-    const value = await this.#secretsStore.getSecret(name);
+    const value = await this.#runInTx((tx) => this.#secretsStore.getSecret(tx, name));
     if (value === undefined) {
       await this.#audit("secrets.get", name, false, "secret_not_found");
       throw new CtxError("secret_not_found", `secret '${name}' is declared but not configured`);

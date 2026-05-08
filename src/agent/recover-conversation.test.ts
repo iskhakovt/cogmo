@@ -19,7 +19,7 @@ describe("createRecoverConversation", () => {
     const agentStore = mockAgentStore({
       getConversation: vi.fn().mockResolvedValue(undefined),
     });
-    const fn = createRecoverConversation({ agentStore }) as any;
+    const fn = createRecoverConversation({ runInTx: (cb) => cb({} as never), agentStore }) as any;
     const result = await fn.fn({ event: baseEvent, step: mockStep() });
     expect(result).toEqual({ status: "skipped", reason: "conversation_not_found" });
     expect(agentStore.setConversationStatus).not.toHaveBeenCalled();
@@ -35,7 +35,7 @@ describe("createRecoverConversation", () => {
         status: "errored",
       }),
     });
-    const fn = createRecoverConversation({ agentStore }) as any;
+    const fn = createRecoverConversation({ runInTx: (cb) => cb({} as never), agentStore }) as any;
     const result = await fn.fn({ event: baseEvent, step: mockStep() });
     expect(result).toEqual({ status: "skipped", reason: "already_errored" });
     expect(agentStore.setConversationStatus).not.toHaveBeenCalled();
@@ -43,10 +43,14 @@ describe("createRecoverConversation", () => {
 
   it("marks conversation errored on first failure", async () => {
     const agentStore = mockAgentStore();
-    const fn = createRecoverConversation({ agentStore }) as any;
+    const fn = createRecoverConversation({ runInTx: (cb) => cb({} as never), agentStore }) as any;
     const result = await fn.fn({ event: baseEvent, step: mockStep() });
     expect(result).toEqual({ status: "marked_errored" });
-    expect(agentStore.setConversationStatus).toHaveBeenCalledWith("conv-1", "errored");
+    expect(agentStore.setConversationStatus).toHaveBeenCalledWith(
+      expect.anything(),
+      "conv-1",
+      "errored",
+    );
   });
 
   // Pin the log-payload contract that the future evolution
@@ -56,7 +60,7 @@ describe("createRecoverConversation", () => {
   it("logs errorClass, causeClass, and errorMessage on the marker write", async () => {
     const warnSpy = vi.spyOn(logger, "warn");
     const agentStore = mockAgentStore();
-    const fn = createRecoverConversation({ agentStore }) as any;
+    const fn = createRecoverConversation({ runInTx: (cb) => cb({} as never), agentStore }) as any;
     await fn.fn({ event: baseEvent, step: mockStep() });
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({
