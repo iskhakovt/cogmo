@@ -54,12 +54,19 @@ export interface DrainPendingResult {
   byNetwork: Record<string, number>;
 }
 
-/** A pending row with its assigned classification — intentionally JSON-safe so it survives Inngest step memoization. */
+/**
+ * A pending row with its assigned classification — intentionally JSON-safe so
+ * it survives Inngest step memoization. `profileClass` is the staging
+ * profile's class (carried through from the pending row), so each row in a
+ * batch can be tagged with the right `profile_class:<class>` independently of
+ * what conversation triggered the drain.
+ */
 export interface ClassifiedRow {
   id: string;
   content: string;
   context: string | null;
   source: PendingMemorySource;
+  profileClass: string | null;
   tags: ClassifiedMemory;
 }
 
@@ -72,9 +79,14 @@ export interface ClassifyPendingResult {
  * Subset of `PendingMemory` the classifier actually reads. Declared
  * separately so callers can pass rows that have already been through
  * Inngest step memoization (where `createdAt` is a JSON string, not a
- * `Date`) — we don't use the timestamp here.
+ * `Date`) — we don't use the timestamp here. Includes `profileClass`
+ * so the post-classification retain step can stamp each row with the
+ * class of the profile that staged it.
  */
-export type ClassifierInput = Pick<PendingMemory, "id" | "content" | "context" | "source">;
+export type ClassifierInput = Pick<
+  PendingMemory,
+  "id" | "content" | "context" | "source" | "profileClass"
+>;
 
 /** Run the classifier prompt over a batch of pending rows. Single-row failures are skipped, not propagated. */
 export async function classifyPendingMemories(
@@ -96,19 +108,17 @@ export async function classifyPendingMemories(
  * staging origin so live retains and migrations stay distinguishable from
  * transcript extractions.
  *
- * `profileClass` is the conversation's active profile's `profile_class`
- * value (or `null` if unclassed). When non-null it's emitted as a
- * `profile_class:<class>` tag on every retained memory. The class is taken
- * from the conv's CURRENT profile at drain time — not from the original
- * staging context — because pending rows don't track which profile staged
- * them. For the live-retain path this matches the speaker who's still in
- * the conversation; for migration-staged rows it aligns the backfill with
- * the user's current speaker setup.
+ * Each row's `profile_class:<class>` tag (when present) is taken from
+ * `r.profileClass` — the staging profile's CURRENT class, captured by
+ * `getPendingMemories`'s LEFT JOIN. This is what makes the speaker
+ * isolation correct under multi-profile drains: a row staged by profile
+ * A retains its class even if the conversation that triggered Observer
+ * runs under profile B. Migration-sourced rows (and rows whose staging
+ * profile was deleted) have `profileClass: null` and stamp untagged on
+ * the class dimension — their absence from a class-scoped recall is the
+ * existing legacy semantic.
  */
-export function buildRetainItems(
-  rows: ReadonlyArray<ClassifiedRow>,
-  profileClass: string | null,
-): RetainBatchItem[] {
+export function buildRetainItems(rows: ReadonlyArray<ClassifiedRow>): RetainBatchItem[] {
   return rows.map((r) => ({
     content: r.content,
     ...(r.context !== null && { context: r.context }),
@@ -116,7 +126,7 @@ export function buildRetainItems(
       `network:${r.tags.network}`,
       `compartment:${r.tags.compartment}`,
       `trust:${r.tags.trust}`,
-      ...(profileClass !== null ? [`profile_class:${profileClass}`] : []),
+      ...(r.profileClass !== null ? [`profile_class:${r.profileClass}`] : []),
     ],
     metadata: { source: r.source },
     observationScopes: "per_tag" as const,
@@ -125,7 +135,6 @@ export function buildRetainItems(
 
 export async function drainPendingMemories(
   userId: string,
-  profileClass: string | null,
   deps: DrainPendingDeps,
 ): Promise<DrainPendingResult> {
   const pending = await deps.runInTx((tx) => deps.store.getPendingMemories(tx, userId));
@@ -144,7 +153,7 @@ export async function drainPendingMemories(
     return { drained: 0, byNetwork: {} };
   }
 
-  const items = buildRetainItems(successful, profileClass);
+  const items = buildRetainItems(successful);
   await deps.memory.retainBatch(userId, items);
   await deps.runInTx((tx) =>
     deps.store.deletePendingMemories(
@@ -173,6 +182,7 @@ async function classifyOne(p: ClassifierInput, deps: ClassifyDeps): Promise<Clas
       content: p.content,
       context: p.context,
       source: p.source,
+      profileClass: p.profileClass,
       tags: data,
     };
   } catch (err) {

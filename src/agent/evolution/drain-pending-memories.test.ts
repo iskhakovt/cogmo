@@ -18,6 +18,7 @@ function pending(overrides: Partial<PendingMemory> = {}): PendingMemory {
     content: "homelab IP is 10.0.10.10",
     context: null,
     source: "live_retain",
+    profileClass: null,
     createdAt: new Date("2026-05-06T10:00:00Z"),
     ...overrides,
   };
@@ -61,7 +62,7 @@ describe("drainPendingMemories", () => {
   it("returns zeros and skips work when nothing pending", async () => {
     const deps = mockDeps([], []);
 
-    const result = await drainPendingMemories("user-1", null, deps);
+    const result = await drainPendingMemories("user-1", deps);
 
     expect(result).toEqual({ drained: 0, byNetwork: {} });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
@@ -75,7 +76,7 @@ describe("drainPendingMemories", () => {
       { network: "world", compartment: "technical", trust: "first-party" },
     ]);
 
-    const result = await drainPendingMemories("user-1", null, deps);
+    const result = await drainPendingMemories("user-1", deps);
 
     expect(result.drained).toBe(1);
     expect(result.byNetwork).toEqual({ world: 1 });
@@ -98,7 +99,7 @@ describe("drainPendingMemories", () => {
       { network: "bank", compartment: "personal", trust: "first-party" },
     ]);
 
-    await drainPendingMemories("user-1", null, deps);
+    await drainPendingMemories("user-1", deps);
 
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       {
@@ -117,7 +118,7 @@ describe("drainPendingMemories", () => {
       { network: "world", compartment: "technical", trust: "first-party" },
     ]);
 
-    await drainPendingMemories("user-1", null, deps);
+    await drainPendingMemories("user-1", deps);
 
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       expect.objectContaining({ metadata: { source: "migration" } }),
@@ -133,9 +134,7 @@ describe("drainPendingMemories", () => {
       new Error("Hindsight unreachable"),
     );
 
-    await expect(drainPendingMemories("user-1", null, deps)).rejects.toThrow(
-      "Hindsight unreachable",
-    );
+    await expect(drainPendingMemories("user-1", deps)).rejects.toThrow("Hindsight unreachable");
     expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
   });
 
@@ -177,7 +176,7 @@ describe("drainPendingMemories", () => {
       },
     };
 
-    const result = await drainPendingMemories("user-1", null, deps);
+    const result = await drainPendingMemories("user-1", deps);
 
     expect(result.drained).toBe(1);
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
@@ -201,7 +200,7 @@ describe("drainPendingMemories", () => {
       },
     };
 
-    const result = await drainPendingMemories("user-1", null, deps);
+    const result = await drainPendingMemories("user-1", deps);
 
     expect(result).toEqual({ drained: 0, byNetwork: {} });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
@@ -216,13 +215,14 @@ describe("buildRetainItems", () => {
       content: "user prefers tea",
       context: null,
       source: "live_retain",
+      profileClass: null,
       tags: { network: "bank", compartment: "personal", trust: "first-party" },
       ...overrides,
     };
   }
 
-  it("appends profile_class:<class> when profileClass is non-null", () => {
-    const items = buildRetainItems([classified()], "intimate");
+  it("appends profile_class:<class> when row carries a non-null profileClass", () => {
+    const items = buildRetainItems([classified({ profileClass: "intimate" })]);
     expect(items[0]?.tags).toEqual([
       "network:bank",
       "compartment:personal",
@@ -231,18 +231,26 @@ describe("buildRetainItems", () => {
     ]);
   });
 
-  it("omits profile_class tag when profileClass is null", () => {
-    const items = buildRetainItems([classified()], null);
+  it("omits profile_class tag when row's profileClass is null", () => {
+    const items = buildRetainItems([classified()]);
     expect(items[0]?.tags).toEqual(["network:bank", "compartment:personal", "trust:first-party"]);
   });
 
-  it("stamps every row in a multi-row batch with the same class", () => {
-    const items = buildRetainItems(
-      [classified({ id: "pm-1" }), classified({ id: "pm-2", content: "lives in Berlin" })],
-      "general",
-    );
-    for (const item of items) {
-      expect(item.tags).toContain("profile_class:general");
-    }
+  it("stamps each row with its OWN class — speaker isolation under mixed batches", () => {
+    // Regression for the bug where a single drain batch containing rows
+    // staged by different profiles got tagged with the firing
+    // conversation's class, leaking across the speaker-isolation
+    // boundary. Each row's profileClass is now carried through from the
+    // pending row's snapshot.
+    const items = buildRetainItems([
+      classified({ id: "pm-intimate", profileClass: "intimate" }),
+      classified({ id: "pm-general", profileClass: "general" }),
+      classified({ id: "pm-untagged", profileClass: null }),
+    ]);
+    expect(items[0]?.tags).toContain("profile_class:intimate");
+    expect(items[0]?.tags).not.toContain("profile_class:general");
+    expect(items[1]?.tags).toContain("profile_class:general");
+    expect(items[1]?.tags).not.toContain("profile_class:intimate");
+    expect(items[2]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
   });
 });

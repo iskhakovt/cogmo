@@ -2079,6 +2079,7 @@ describe("DrizzleAgentStore", () => {
       const { id } = await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "homelab IP is 10.0.10.10",
           source: "live_retain",
         }),
@@ -2093,8 +2094,62 @@ describe("DrizzleAgentStore", () => {
         content: "homelab IP is 10.0.10.10",
         context: null,
         source: "live_retain",
+        profileClass: null,
       });
       expect(rows[0]!.createdAt).toBeInstanceOf(Date);
+    });
+
+    it("getPendingMemories surfaces the staging profile's CURRENT class via JOIN", async () => {
+      // Regression for the speaker-isolation leak: rows staged by
+      // profile A must drain with A's class, not the class of whichever
+      // conversation triggered the Observer fire. The JOIN reads the
+      // profile's current class so a class rename re-flows pending rows
+      // without a backfill.
+      const userId = await seedUser();
+      // Seed a class and a profile bound to it.
+      await tx((trx) =>
+        store.createProfileClass(trx, {
+          userId,
+          name: "intimate",
+          description: "for emotional / relationship topics",
+        }),
+      );
+      const profile = await tx((trx) =>
+        store.createProfile(trx, {
+          userId,
+          name: "intimate-profile",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profile.id, "intimate"));
+
+      // Stage a pending row tied to that profile.
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          profileId: profile.id,
+          content: "we made up after the argument",
+          source: "live_retain",
+        }),
+      );
+      // And another with no profile lineage (migration-style).
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          profileId: null,
+          content: "wife's birthday is March 15",
+          source: "migration",
+        }),
+      );
+
+      const rows = await tx((trx) => store.getPendingMemories(trx, userId));
+      expect(rows).toHaveLength(2);
+      const intimate = rows.find((r) => r.content === "we made up after the argument");
+      const legacy = rows.find((r) => r.content === "wife's birthday is March 15");
+      expect(intimate?.profileClass).toBe("intimate");
+      expect(legacy?.profileClass).toBeNull();
     });
 
     it("preserves optional context", async () => {
@@ -2103,6 +2158,7 @@ describe("DrizzleAgentStore", () => {
       await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "wife's birthday is March 15",
           context: "while planning a gift",
           source: "live_retain",
@@ -2119,6 +2175,7 @@ describe("DrizzleAgentStore", () => {
       const { id: first } = await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "first",
           source: "live_retain",
         }),
@@ -2128,6 +2185,7 @@ describe("DrizzleAgentStore", () => {
       const { id: second } = await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "second",
           source: "migration",
         }),
@@ -2144,6 +2202,7 @@ describe("DrizzleAgentStore", () => {
         await tx((trx) =>
           store.stagePendingMemory(trx, {
             userId,
+            profileId: null,
             content: `fact ${i}`,
             source: "live_retain",
           }),
@@ -2166,6 +2225,7 @@ describe("DrizzleAgentStore", () => {
       await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId: userA,
+          profileId: null,
           content: "A's fact",
           source: "live_retain",
         }),
@@ -2173,6 +2233,7 @@ describe("DrizzleAgentStore", () => {
       await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId: userB,
+          profileId: null,
           content: "B's fact",
           source: "live_retain",
         }),
@@ -2192,6 +2253,7 @@ describe("DrizzleAgentStore", () => {
       const a = await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "fact A",
           source: "live_retain",
         }),
@@ -2199,6 +2261,7 @@ describe("DrizzleAgentStore", () => {
       const b = await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "fact B",
           source: "live_retain",
         }),
@@ -2216,6 +2279,7 @@ describe("DrizzleAgentStore", () => {
       await tx((trx) =>
         store.stagePendingMemory(trx, {
           userId,
+          profileId: null,
           content: "fact",
           source: "live_retain",
         }),
@@ -2261,6 +2325,7 @@ describe("DrizzleAgentStore", () => {
         tx((trx) =>
           store.stagePendingMemory(trx, {
             userId,
+            profileId: null,
             content: "fact",
             source: "bogus" as any,
           }),

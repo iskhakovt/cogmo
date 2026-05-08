@@ -299,6 +299,16 @@ export const coreMemoryBlocks = pgTable(
  * Memory writes awaiting Observer classification before retention to
  * Hindsight. User-scoped (not conversation-scoped) so /reset doesn't
  * destroy pending rows; drain on any subsequent conversation/idle.
+ *
+ * `profile_id` snapshots the profile that staged the row so the drain
+ * can stamp the correct `profile_class:<class>` tag at retain time —
+ * without it, a row staged by profile A but drained by an idle on a
+ * profile B conversation would be tagged with B's class and leak across
+ * the speaker-isolation boundary. Nullable because migration-sourced
+ * rows (`source: "migration"`) and any pre-existing live retains have
+ * no staging-time profile lineage. `ON DELETE SET NULL` so deleting a
+ * profile doesn't cascade-destroy the user's pending writes — the row
+ * just loses its class lineage and drains untagged on that dimension.
  */
 export const pendingMemories = pgTable(
   "pending_memories",
@@ -307,6 +317,7 @@ export const pendingMemories = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id),
+    profileId: uuid("profile_id").references(() => profiles.id, { onDelete: "set null" }),
     content: text("content").notNull(),
     context: text("context"),
     source: pendingMemorySource("source").notNull(),

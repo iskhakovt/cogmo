@@ -167,10 +167,12 @@ export function createObserver(deps: ObserverDeps) {
         });
 
         if (classified.successful.length > 0) {
-          // Stamp pending rows with the conv's CURRENT profile class. Pending
-          // rows don't track the staging-time profile, so we use the live one
-          // — the speaker who's still in the conversation.
-          const items = buildRetainItems(classified.successful, profile.profileClass);
+          // Each row carries its own staging profile's class (denormalised
+          // by `getPendingMemories`'s LEFT JOIN). The drain stamps tags
+          // per row, so a batch that mixes rows staged by different
+          // profiles preserves each one's speaker-isolation boundary
+          // regardless of which conversation triggered this Observer fire.
+          const items = buildRetainItems(classified.successful);
           await step.run("retain-pending-memories", async () => {
             await deps.memory.retainBatch(conv.userId, items);
           });

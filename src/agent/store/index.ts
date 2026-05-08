@@ -49,12 +49,22 @@ export type VoiceMode = "auto" | "always" | "never";
 /** Mirrors the `pending_memory_source` PG enum. */
 export type PendingMemorySource = "live_retain" | "migration";
 
-/** A memory write awaiting Observer classification before retention to Hindsight. */
+/**
+ * A memory write awaiting Observer classification before retention to
+ * Hindsight. `profileClass` is denormalised onto the row at read time via
+ * a JOIN on `profiles` so the drain can stamp the correct
+ * `profile_class:<class>` tag without having to look up the profile per
+ * row (or worse, per-row group). `null` when either the staging profile
+ * was unclassed or the lineage isn't available — pre-feature live
+ * retains, migration backfill, or rows whose staging profile was deleted
+ * (`profile_id` SET NULL).
+ */
 export interface PendingMemory {
   id: string;
   content: string;
   context: string | null;
   source: PendingMemorySource;
+  profileClass: string | null;
   createdAt: Date;
 }
 
@@ -592,18 +602,30 @@ export interface AgentStore {
 
   // --- Pending memories (staging for Observer classification) ---
 
-  /** Insert a single row into the staging table. Returns the new row id. */
+  /**
+   * Insert a single row into the staging table. Returns the new row id.
+   *
+   * `profileId` snapshots which profile staged the row so the Observer
+   * drain stamps the correct `profile_class:<class>` tag at retain
+   * time. Pass `null` for non-conversational stages (the migration
+   * backfill loop) where there's no staging profile.
+   */
   stagePendingMemory(
     tx: Transaction,
     params: {
       userId: string;
+      profileId: string | null;
       content: string;
       context?: string;
       source: PendingMemorySource;
     },
   ): Promise<{ id: string }>;
 
-  /** Bulk insert via a single statement. Used by the migration script to stage thousands of rows in one round-trip. */
+  /**
+   * Bulk insert via a single statement. Used by the migration script to
+   * stage thousands of rows in one round-trip. `profileId` is null on
+   * every row — the migration script has no per-row profile lineage.
+   */
   bulkStagePendingMemories(
     tx: Transaction,
     rows: ReadonlyArray<{
@@ -1643,6 +1665,7 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     params: {
       userId: string;
+      profileId: string | null;
       content: string;
       context?: string;
       source: PendingMemorySource;
@@ -1653,6 +1676,7 @@ export class DrizzleAgentStore implements AgentStore {
         .insert(pendingMemories)
         .values({
           userId: params.userId,
+          profileId: params.profileId,
           content: params.content,
           context: params.context ?? null,
           source: params.source,
@@ -1672,12 +1696,15 @@ export class DrizzleAgentStore implements AgentStore {
   ): Promise<void> {
     if (rows.length === 0) return;
     // Postgres caps a single statement at 65,535 placeholders. Each row
-    // here binds 4 columns; chunking at 5,000 stays well under the cap
-    // (and atomicity is preserved by the surrounding transaction).
+    // binds 5 columns (profile_id is always null on this path — the
+    // migration script has no per-row profile lineage); chunking at 5,000
+    // stays well under the cap (and atomicity is preserved by the
+    // surrounding transaction).
     for (const chunk of R.chunk([...rows], 5000)) {
       await tx.insert(pendingMemories).values(
         chunk.map((r) => ({
           userId: r.userId,
+          profileId: null,
           content: r.content,
           context: r.context ?? null,
           source: r.source,
@@ -1691,15 +1718,24 @@ export class DrizzleAgentStore implements AgentStore {
     userId: string,
     limit?: number,
   ): Promise<ReadonlyArray<PendingMemory>> {
+    // LEFT JOIN onto profiles so we surface the staging profile's CURRENT
+    // class on each row at drain time. LEFT (not INNER) so rows whose
+    // profile was deleted (`profile_id` SET NULL) or never had one
+    // (migration backfill) still drain — they just stamp untagged on the
+    // class dimension. Reading the profile's current class (rather than
+    // a staging-time snapshot) means renaming a class re-flows all of
+    // the user's pending rows under the new name without a backfill.
     const base = tx
       .select({
         id: pendingMemories.id,
         content: pendingMemories.content,
         context: pendingMemories.context,
         source: pendingMemories.source,
+        profileClass: profiles.profileClass,
         createdAt: pendingMemories.createdAt,
       })
       .from(pendingMemories)
+      .leftJoin(profiles, eq(profiles.id, pendingMemories.profileId))
       .where(eq(pendingMemories.userId, userId))
       // Secondary sort by id breaks createdAt ties — bulk inserts share a
       // timestamp, but UUIDv7 ids are time-ordered, so the tiebreak preserves
