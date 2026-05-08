@@ -308,6 +308,23 @@ describe("wrapAttachmentStoreWithEncryption — plaintext passthrough on read", 
     expect(stored.includes(Buffer.from("new bytes"))).toBe(false);
   });
 
+  it("ciphertext written by the wrapper stays opaque when read directly through the bare inner store", async () => {
+    // Simulates the operational footgun: operator flips S3_CLIENT_ENCRYPT
+    // off after encrypting some files. Bare reads return raw ciphertext,
+    // not silently-decrypted plaintext — the encryption is real and
+    // persisted, not a wrapper-side illusion.
+    const key = testKey();
+    const { store } = fakeStore();
+    const wrapped = wrapAttachmentStoreWithEncryption(store, key);
+
+    const plaintext = Buffer.from("important plaintext");
+    const path = await wrapped.upload(plaintext, "text/plain");
+
+    const raw = await store.download(path);
+    expect(raw.includes(plaintext)).toBe(false);
+    expect(isEncrypted(raw)).toBe(true);
+  });
+
   it("a plaintext object that happens to start with the magic prefix surfaces as a download error, not silent garbage", async () => {
     // Astronomically unlikely for real-world content but the failure mode
     // matters: the GCM auth-tag check fires once the wrapper commits to
