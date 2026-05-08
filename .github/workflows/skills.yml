@@ -1,21 +1,21 @@
-name: Devbase Image
+name: Skills Image
 
 on:
   push:
     branches: [main]
     paths:
-      - "images/devbase/**"
+      - "images/skills/**"
       - "docker-bake.hcl"
-      - ".github/workflows/devbase.yml"
+      - ".github/workflows/skills.yml"
   pull_request:
     paths:
-      - "images/devbase/**"
+      - "images/skills/**"
       - "docker-bake.hcl"
-      - ".github/workflows/devbase.yml"
+      - ".github/workflows/skills.yml"
   workflow_dispatch:
 
 concurrency:
-  group: devbase-${{ github.ref }}
+  group: skills-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Deny-by-default; the build job grants what it needs.
@@ -43,9 +43,9 @@ jobs:
       - uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         id: meta
         with:
-          images: ghcr.io/${{ github.repository }}-devbase
-          # Slice tag is the durable handle the supervisor pins via
-          # COGMO_DEVBASE_IMAGE; sha tags exist for rollback to a specific
+          images: ghcr.io/${{ github.repository }}-skills
+          # Slice tag is the durable handle the runner pins via
+          # COGMO_SKILLS_IMAGE; sha tags exist for rollback to a specific
           # build of that slice.
           tags: |
             type=raw,value=slice1
@@ -60,5 +60,5 @@ jobs:
           files: |
             ./docker-bake.hcl
             cwd://${{ steps.meta.outputs.bake-file }}
-          targets: devbase
+          targets: skills
           push: ${{ github.event_name != 'pull_request' }}

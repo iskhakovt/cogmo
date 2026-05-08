@@ -30,7 +30,8 @@ const noopFiles = {
 
 /**
  * End-to-end tier-2 worker test against a real sysbox container running
- * `python:3.14-slim`. Validates:
+ * `cogmo-skills:slice1` (loaded into the local Docker daemon by the
+ * sysbox-e2e workflow's `bake --load` step before tests run). Validates:
  *
  *   - Image pull on first call (`ensureImagePresent`).
  *   - Container creation without worktree/home (skills tier-2 contract).
@@ -44,7 +45,11 @@ const noopFiles = {
  */
 
 const SHOULD_RUN = process.env.SANDBOX_RUNTIME === "sysbox";
-const PYTHON_IMAGE = "python:3.14-slim";
+// Production image. The sysbox-e2e workflow `bake --load`s this tag into the
+// local Docker daemon before tests run, so the runner finds it locally and
+// `ensureImagePresent` is a no-op inspect. Local-dev convention: run
+// `docker buildx bake --load skills` first.
+const SKILLS_IMAGE = "ghcr.io/iskhakovt/cogmo-skills:slice1";
 
 let tx: Transactor;
 let close: () => Promise<void>;
@@ -61,11 +66,6 @@ beforeAll(async () => {
   agentStore = new DrizzleSandboxStore(tx);
   skillStore = new DrizzleSkillStore(tx);
   docker = new Docker();
-
-  const stream = await docker.pull(PYTHON_IMAGE);
-  await new Promise<void>((resolve, reject) => {
-    docker.modem.followProgress(stream, (err) => (err ? reject(err) : resolve()));
-  });
 
   const instance = await agentStore.insertInstance({ host: hostname(), pid: process.pid });
   instanceId = instance.id;
@@ -129,13 +129,14 @@ inputs:
 `;
 
 describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)", () => {
-  it("invokes a tier-2 skill end-to-end against python:3.14-slim", async () => {
+  it("invokes a tier-2 skill end-to-end against cogmo-skills:slice1", async () => {
     const runner = await SkillRunnerImpl.create({
       store: skillStore,
       memory: stubMemory(),
       secretsStore: stubSecrets(),
       files: noopFiles,
       sandbox,
+      tier2Image: SKILLS_IMAGE,
       user: { id: "u-1", timezone: "UTC" },
       memoryBankId: "bank-1",
     });
@@ -160,6 +161,7 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
       secretsStore: stubSecrets(),
       files: noopFiles,
       sandbox,
+      tier2Image: SKILLS_IMAGE,
       user: { id: "u-1", timezone: "UTC" },
       memoryBankId: "bank-1",
     });

@@ -29,8 +29,14 @@ import type { ClassifierLog, SkillInputs, SkillManifest } from "./types.js";
 import { type RunOnSysboxContainerResult, runOnSysboxContainer } from "./worker-sysbox/host.js";
 import { type RunOnWorkerResult, runOnWorker } from "./worker-wasm/host.js";
 
-/** Default tier-2 container image. Pinned to the Python LTS train. */
-const DEFAULT_TIER2_IMAGE = "python:3.14-slim";
+/**
+ * Default tier-2 container image when the constructor doesn't override it.
+ * Production wiring (`src/index.ts`) always passes `tier2Image:
+ * env.COGMO_SKILLS_IMAGE`, so this default only matters for tests that
+ * construct a runner without an explicit image AND actually invoke a
+ * tier-container skill (the integration test does the latter — it overrides).
+ */
+const DEFAULT_TIER2_IMAGE = "ghcr.io/iskhakovt/cogmo-skills:slice1";
 
 /**
  * Translate a manifest's `resources` block into the partial `ResourceLimits`

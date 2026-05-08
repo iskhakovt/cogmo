@@ -73,6 +73,8 @@ export const env = createEnv({
     SANDBOX_RUNTIME: z.enum(["sysbox", "runc"]).optional(),
     /** Default base image for task containers when a repo has no `.devcontainer/`. */
     COGMO_DEVBASE_IMAGE: z.string().default("ghcr.io/iskhakovt/cogmo-devbase:slice1"),
+    /** Base image for tier-2 (sysbox) skill workers. */
+    COGMO_SKILLS_IMAGE: z.string().default("ghcr.io/iskhakovt/cogmo-skills:slice1"),
     /** Host root for git clones registered via `/repo add`. */
     COGMO_REPOS_DIR: z.string().default("/var/lib/cogmo/repos"),
     /** Host root for per-task git worktrees. */
