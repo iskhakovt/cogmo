@@ -1,3 +1,4 @@
+import { gcm } from "@noble/ciphers/aes.js";
 import { describe, expect, it, vi } from "vitest";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import type { AttachmentStore } from "./attachment-store.js";
@@ -111,6 +112,34 @@ describe("encryptBuffer / decryptBuffer", () => {
     expect(() => decryptBuffer(Buffer.from([0xc0, 0x6c, 0x6d, 0x6f]), testKey())).toThrow(
       /too short/,
     );
+  });
+
+  it("encrypts empty input — header + tag only, decrypts to empty", () => {
+    const key = testKey();
+    const blob = encryptBuffer(Buffer.alloc(0), key);
+    // 4 magic + 2 version + 12 nonce + 0 plaintext + 16 GCM tag = 34
+    expect(blob.length).toBe(34);
+    expect(decryptBuffer(blob, key).length).toBe(0);
+  });
+
+  it("locks the v1 wire format — golden fixture against accidental drift", () => {
+    // If someone reorders the magic bytes, flips version endianness, or
+    // changes the nonce offset, this test fails. The (key, nonce,
+    // plaintext) triple is fixed; the cipher comes from @noble/ciphers
+    // directly so we're locking the envelope, not re-asserting the cipher.
+    const key = new Uint8Array(32).fill(0x42);
+    const nonce = new Uint8Array(12).fill(0x13);
+    const plaintext = Buffer.from("test");
+    const cipher = gcm(key, nonce).encrypt(new Uint8Array(plaintext));
+
+    const blob = Buffer.concat([
+      Buffer.from([0xc0, 0x6c, 0x6d, 0x6f]), // magic
+      Buffer.from([0x00, 0x01]), // version=1, big-endian uint16
+      Buffer.from(nonce), // 12-byte nonce
+      Buffer.from(cipher), // ciphertext + 16-byte GCM tag
+    ]);
+
+    expect(decryptBuffer(blob, key).equals(plaintext)).toBe(true);
   });
 });
 
