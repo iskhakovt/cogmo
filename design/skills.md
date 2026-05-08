@@ -70,17 +70,6 @@ Skills execute in one of two sandboxes, chosen by skill metadata. No middle grou
 - Higher resource overhead (~100–300 MB per worker for Python + imports)
 - 1–2s cold start if not warm — addressed by the warm pool
 
-**Image:** `ghcr.io/iskhakovt/cogmo-skills:<version>`, built and published from `images/skills/Dockerfile` by the `publish.yml` workflow. Tag tracks the cogmo app's release version (match-parent), so `cogmo:1.46.0` always pulls `cogmo-skills:1.46.0`. The runtime resolves the tag from `env.COGMO_SKILLS_IMAGE`, defaulting to `cogmo-skills:${process.env.VERSION || "dev"}`.
-
-**Local development.** `cogmo-skills:dev` is never published to ghcr.io. To run tier-2 skills locally (`pnpm dev` with `SANDBOX_RUNTIME=sysbox`, or the sysbox integration test), bake the image into the local Docker daemon first:
-
-```sh
-docker buildx bake --load skills           # produces cogmo-skills:dev
-VERSION=test docker buildx bake --load skills  # produces cogmo-skills:test (matches sysbox-e2e CI)
-```
-
-Without that, the runner's `ensureImagePresent` returns a 404 from the registry. The integration test enforces the check with a clear error in its `beforeAll`.
-
 ### Why unify on sysbox (not plain runc) for tier 2
 
 Sysbox was selected for coding delegation because Claude Code needs Docker-in-Docker. Skills don't need DinD, so plain `runc` would work. But:
