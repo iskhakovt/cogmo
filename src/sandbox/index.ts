@@ -54,6 +54,14 @@ export interface SessionSpec {
    * honors the flag; backends without sysbox ignore it.
    */
   allowPrivilegedRunc?: boolean;
+  /**
+   * Process-level env injected at container create time. Used today by
+   * coding-delegation to pass `CLAUDE_CODE_OAUTH_TOKEN` (sourced from the
+   * encrypted secrets table) into the Claude Code subprocess — see
+   * design/coding-delegation.md → Subscription Auth. Values land in the
+   * container's process env only; nothing is written to the home volume.
+   */
+  env?: Readonly<Record<string, string>>;
 }
 
 export interface ExecOptions {

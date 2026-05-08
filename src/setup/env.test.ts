@@ -135,4 +135,25 @@ describe("parseNonInteractiveEnv", () => {
     if (r.isErr()) throw r.error;
     expect(r.value.githubSshPrivateKey).toContain("BEGIN OPENSSH PRIVATE KEY");
   });
+
+  it("accepts COGMO_CLAUDE_CODE_OAUTH_TOKEN and exposes it as `claudeCodeOauthToken`", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+      COGMO_CLAUDE_CODE_OAUTH_TOKEN: "sk-claude-code-token-xxxxxxxx",
+    });
+    if (r.isErr()) throw r.error;
+    expect(r.value.claudeCodeOauthToken).toBe("sk-claude-code-token-xxxxxxxx");
+  });
+
+  it("reads COGMO_CLAUDE_CODE_OAUTH_TOKEN from the _FILE variant", () => {
+    const path = tempFile("sk-claude-code-from-file-xxxxxx");
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+      COGMO_CLAUDE_CODE_OAUTH_TOKEN_FILE: path,
+    });
+    if (r.isErr()) throw r.error;
+    expect(r.value.claudeCodeOauthToken).toBe("sk-claude-code-from-file-xxxxxx");
+  });
 });

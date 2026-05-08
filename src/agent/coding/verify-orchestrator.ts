@@ -38,6 +38,7 @@ import {
   resolveGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { loadCodingSandboxEnv } from "./auth.js";
 import { runCommitAndPush } from "./commit-push.js";
 import { parseRemoteUrl, runOpenDraftPr } from "./draft-pr.js";
 import { type ExecuteStreamHandle, NULL_EXECUTE_STREAM } from "./orchestrator.js";
@@ -190,6 +191,15 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   }
   const identity: GitHubIdentity = identityResult.value;
 
+  // Same fail-fast contract for the Claude Code subscription token —
+  // resolved here (not inside the create-container step) so a missing
+  // secret doesn't waste an askpass provision on disk before surfacing.
+  const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
+  if (authResult.isErr()) {
+    return await failAndTeardown(authResult.error.message);
+  }
+  const sandboxEnv = authResult.value;
+
   let executeStream: ExecuteStreamHandle | null = null;
   let containerCreated = false;
   let askpassProvisioned = false;
@@ -232,6 +242,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         expiresAt: new Date(Date.now() + deps.taskTtlMs),
         allowPrivilegedRunc: task.allowPrivilegedRunc,
         askpass: { hostDir: askpass.hostDir, containerDir: askpass.containerDir },
+        env: sandboxEnv,
       });
       containerCreated = true;
       return session.state;

@@ -53,6 +53,10 @@ export const NonInteractiveAnswersSchema = z
      * `githubPat` is set, the runner generates a fresh keypair and prints
      * the public key for the operator to install on github.com. */
     githubSshPrivateKey: z.string().min(1).optional(),
+    /** Long-lived OAuth token from `claude setup-token`, injected into the
+     * coding sandbox as `CLAUDE_CODE_OAUTH_TOKEN`. Optional — omit when
+     * the coding-delegation pipeline isn't being wired up. */
+    claudeCodeOauthToken: z.string().min(20).optional(),
   })
   .superRefine((v, ctx) => {
     if (v.llmProviderType === "custom" && !v.llmBaseUrl) {
@@ -90,6 +94,7 @@ const FILE_BACKED = [
   "COGMO_FAL_API_KEY",
   "COGMO_GITHUB_PAT",
   "COGMO_GITHUB_SSH_PRIVATE_KEY",
+  "COGMO_CLAUDE_CODE_OAUTH_TOKEN",
 ] as const;
 
 /** Plain env var names (no `_FILE` variant, value used as-is). */
@@ -151,6 +156,7 @@ export function parseNonInteractiveEnv(
     falApiKey: resolved.COGMO_FAL_API_KEY,
     githubPat: resolved.COGMO_GITHUB_PAT,
     githubSshPrivateKey: resolved.COGMO_GITHUB_SSH_PRIVATE_KEY,
+    claudeCodeOauthToken: resolved.COGMO_CLAUDE_CODE_OAUTH_TOKEN,
   });
 
   if (!parsed.success) {
@@ -174,6 +180,7 @@ const FIELD_TO_ENV: Record<string, string> = {
   falApiKey: "COGMO_FAL_API_KEY",
   githubPat: "COGMO_GITHUB_PAT",
   githubSshPrivateKey: "COGMO_GITHUB_SSH_PRIVATE_KEY",
+  claudeCodeOauthToken: "COGMO_CLAUDE_CODE_OAUTH_TOKEN",
 };
 
 function fieldToEnv(field: unknown): string {
