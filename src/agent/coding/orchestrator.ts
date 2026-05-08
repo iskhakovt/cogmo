@@ -16,6 +16,7 @@ import type {
 } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { loadCodingSandboxEnv } from "./auth.js";
 import type { CodingBackend, PermissionResponse } from "./backend.js";
 import { shortenRequestId } from "./permission-keyboard.js";
 import * as policy from "./policy.js";
@@ -225,6 +226,21 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       throw new Error("allocate-worktree completed without setting worktreeAssignment");
     }
 
+    // Resolve subscription auth before the durable create-container step
+    // so a missing secret short-circuits without spinning up a worktree-
+    // bound container that `claude -p` would then hang on. Skipped when
+    // the orchestrator is wired without a secrets store (unit tests).
+    // Local-capture narrows the type and avoids `secretsStore!`.
+    const secretsStore = deps.secretsStore;
+    let sandboxEnv: Record<string, string> | undefined;
+    if (secretsStore) {
+      const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
+      if (authResult.isErr()) {
+        throw new Error(authResult.error.message);
+      }
+      sandboxEnv = authResult.value;
+    }
+
     const sessionState = await stepRun("create-container", async () => {
       // biome-ignore lint/style/noNonNullAssertion: guarded by the throw above
       const wt = assignment!;
@@ -236,6 +252,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         resourceLimits: defaultResourceLimits,
         expiresAt: new Date(Date.now() + taskTtlMs),
         allowPrivilegedRunc: task.allowPrivilegedRunc,
+        ...(sandboxEnv && { env: sandboxEnv }),
       });
       // Mark created BEFORE the DB write so a failed setTaskContainerId
       // still triggers cleanup via the outer catch (the container exists
@@ -523,11 +540,24 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       return { status: "skipped" };
     }
 
+    const secretsStore = deps.secretsStore;
+
     // Get-or-create the task container. The plan-phase container has an
     // idle TTL (CODING_TASK_IDLE_TTL_MINUTES); if approval took longer
     // than that, the reaper stopped it and we recreate. `claude --resume
     // <sid>` reloads the prior session from disk inside the container's
     // persistent home volume, so the recreate is transparent to Claude.
+    //
+    // Auth is fetched INSIDE the step, AFTER `tryResumeByTaskId`. Two
+    // reasons: (1) resume is auth-free — the existing container's env
+    // (including `CLAUDE_CODE_OAUTH_TOKEN`) was fixed at plan-phase
+    // create time and can't be updated without recreating, so a stale
+    // secret is irrelevant on resume; (2) if the secret was removed
+    // between plan and execute, we still want the catch-path
+    // `deleteByTaskId` to reap the alive plan-phase container —
+    // `containerCreated` must be set from the resume branch BEFORE we
+    // throw, otherwise the catch sees `containerCreated=false` and
+    // leaks the container until the idle-TTL reaper runs.
     const sessionState = await stepRun("get-or-create-container", async () => {
       const existing = await sandbox.tryResumeByTaskId(taskId);
       if (existing) {
@@ -541,6 +571,15 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         return existing.state;
       }
 
+      let sandboxEnv: Record<string, string> | undefined;
+      if (secretsStore) {
+        const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
+        if (authResult.isErr()) {
+          throw new Error(authResult.error.message);
+        }
+        sandboxEnv = authResult.value;
+      }
+
       const session = await sandbox.create({
         taskId,
         worktree: { hostPath: worktreeAssignment.worktreePath },
@@ -549,6 +588,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         resourceLimits: defaultResourceLimits,
         expiresAt: new Date(Date.now() + taskTtlMs),
         allowPrivilegedRunc: task.allowPrivilegedRunc,
+        ...(sandboxEnv && { env: sandboxEnv }),
       });
       containerCreated = true;
       await runInTx((tx) => store.setTaskContainerId(tx, taskId, session.state.containerRowId));
