@@ -1,0 +1,35 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: auto
+        threshold: 1%
+
+comment:
+  layout: "reach, diff, flags, files"
+  require_changes: true
+
+flag_management:
+  default_rules:
+    carryforward: true
+    statuses:
+      - type: project
+        target: auto
+        threshold: 1%
+      - type: patch
+        target: auto
+        threshold: 1%
+
+ignore:
+  - "src/test/**"
+  - "src/**/store/schema.ts"
+  - "src/**/types.ts"
+  - "src/inngest/events.ts"
+  - "migrations/**"
+  - "scripts/**"
+  - "dev/**"
+  - "test/**"

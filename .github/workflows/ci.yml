@@ -61,13 +61,13 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test --coverage
+      - run: pnpm test --coverage --coverage.reportsDirectory=coverage/unit
       - uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
         if: always()
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unit
-          files: coverage/lcov.info
+          files: coverage/unit/lcov.info
       - uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
         if: always()
         with:
@@ -97,9 +97,15 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - run: pnpm test:integration
+      - run: pnpm test:integration --coverage --coverage.reportsDirectory=coverage/integration
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
+      - uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: integration
+          files: coverage/integration/lcov.info
       - uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
         if: always()
         with:
