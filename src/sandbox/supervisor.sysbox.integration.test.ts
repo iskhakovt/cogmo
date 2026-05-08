@@ -102,7 +102,7 @@ describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only
 
     const handle = await sandbox.create({
       taskId,
-      worktree: { hostPath: workspaceTmp },
+      worktree: { type: "host-path", hostPath: workspaceTmp },
       homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
@@ -140,7 +140,7 @@ describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only
 
     const handle = await sandbox.create({
       taskId,
-      worktree: { hostPath: workspaceTmp },
+      worktree: { type: "host-path", hostPath: workspaceTmp },
       homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,

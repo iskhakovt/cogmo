@@ -135,7 +135,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
 
     const handle = await sandbox.create({
       taskId,
-      worktree: { hostPath: workspaceTmp },
+      worktree: { type: "host-path", hostPath: workspaceTmp },
       homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
@@ -172,7 +172,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
 
     const handle = await sandbox.create({
       taskId,
-      worktree: { hostPath: workspaceTmp },
+      worktree: { type: "host-path", hostPath: workspaceTmp },
       homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
@@ -197,7 +197,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
 
     const handle = await sandbox.create({
       taskId,
-      worktree: { hostPath: workspaceTmp },
+      worktree: { type: "host-path", hostPath: workspaceTmp },
       homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
@@ -222,7 +222,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
 
     const handle = await sandbox.create({
       taskId,
-      worktree: { hostPath: workspaceTmp },
+      worktree: { type: "host-path", hostPath: workspaceTmp },
       homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
@@ -243,7 +243,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
 
     await sandbox.create({
       taskId,
-      worktree: { hostPath: workspaceTmp },
+      worktree: { type: "host-path", hostPath: workspaceTmp },
       homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
@@ -263,7 +263,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
 
     const handle = await stale.create({
       taskId,
-      worktree: { hostPath: workspaceTmp },
+      worktree: { type: "host-path", hostPath: workspaceTmp },
       homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,
@@ -288,7 +288,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
 
     const handle = await sandbox.create({
       taskId,
-      worktree: { hostPath: workspaceTmp },
+      worktree: { type: "host-path", hostPath: workspaceTmp },
       homeVolume: { volumeName: homeVolume },
       image: TEST_IMAGE,
       resourceLimits: RESOURCE_LIMITS,

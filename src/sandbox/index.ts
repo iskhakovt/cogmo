@@ -8,10 +8,39 @@ export type { SandboxRuntime } from "./runtime.js";
 export type { ContainerRow, ContainerRuntime, ContainerStatus } from "./store/index.js";
 export type { ContainerLabels, ResourceLimits } from "./types.js";
 
-/** Working-tree material to materialize at session start. */
-export interface WorktreeSpec {
-  /** Local-Docker: host path bind-mounted at `/workspace`. */
+/**
+ * Working-tree material to materialize at session start.
+ *
+ * Discriminated by transport. The orchestrator picks the variant based on
+ * `SandboxClient.capabilities.workingTreeTransport`:
+ *
+ * - **`host-path`** — the host already has the working tree on disk
+ *   (`git worktree add`); the backend bind-mounts it at `/workspace`.
+ *   Local-Docker only.
+ * - **`git-remote`** — the working tree lives on a remote git endpoint;
+ *   the backend clones it inside the sandbox. Daytona only. The
+ *   orchestrator pushes the local mirror's current state to an ephemeral
+ *   `cogmo/run/<task-id>` branch on origin before calling `create()`,
+ *   then runs `git checkout -B cogmo/<idShort>` inside the sandbox after
+ *   create returns to land on the slice-4 feature branch the rest of the
+ *   pipeline expects.
+ */
+export type WorktreeSpec = HostPathWorktreeSpec | GitRemoteWorktreeSpec;
+
+export interface HostPathWorktreeSpec {
+  type: "host-path";
+  /** Host path bind-mounted at `/workspace`. */
   hostPath: string;
+}
+
+export interface GitRemoteWorktreeSpec {
+  type: "git-remote";
+  /** HTTPS clone URL — the GitHub remote the bot account's PAT can authenticate against. */
+  url: string;
+  /** Source branch to clone. Typically the orchestrator's just-pushed `cogmo/run/<task-id>`. */
+  branch: string;
+  /** HTTPS basic-auth credentials. Username is `x-access-token` for GitHub PATs. */
+  auth: { username: string; password: string };
 }
 
 /** Persistent per-task scratch volume mounted at the image's home dir. */

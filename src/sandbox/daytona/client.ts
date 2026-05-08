@@ -8,8 +8,17 @@ import {
   type SandboxSession,
   type SessionSpec,
 } from "../index.js";
+import { uploadAskpassToSandbox } from "./askpass-upload.js";
 import { daytonaHealthProbe } from "./probe.js";
 import { DaytonaSandboxSession } from "./session.js";
+
+/**
+ * Where the cloned worktree lives inside the sandbox. Matches the
+ * `/workspace` bind-mount target Local-Docker uses, so downstream code
+ * (`runCommitAndPush`, the verify orchestrator) can use the same path
+ * regardless of backend.
+ */
+const WORKTREE_PATH = "/workspace";
 
 const log = logger.child({ component: "sandbox.daytona.client" });
 
@@ -108,19 +117,13 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
   }
 
   async create(spec: SessionSpec): Promise<SandboxSession<DaytonaSessionState>> {
-    if (spec.worktree) {
-      // Phase 3b will accept `worktree: { type: "git-remote", ... }` and
-      // run `sandbox.git.clone()` inside `create()`. Until then, the
-      // orchestrator's host-path worktree path is rejected outright so
-      // a misconfiguration (`SANDBOX_BACKEND=daytona` with the coding
-      // pipeline) fails fast with a clear message.
+    if (spec.worktree && spec.worktree.type !== "git-remote") {
+      // Capability advertises `workingTreeTransport: "git-remote"`. The
+      // host-path variant only makes sense on Local-Docker; the
+      // orchestrator should have picked the right shape, so an arrival
+      // here is a wiring bug.
       throw new Error(
-        "DaytonaSandboxClient.create: SessionSpec.worktree is not supported in Phase 3a (coding-on-Daytona arrives in Phase 3b)",
-      );
-    }
-    if (spec.askpass) {
-      throw new Error(
-        "DaytonaSandboxClient.create: SessionSpec.askpass is not supported in Phase 3a",
+        `DaytonaSandboxClient.create: WorktreeSpec.type "${spec.worktree.type}" is not supported (capabilities advertise "git-remote")`,
       );
     }
     if (spec.homeVolume) {
@@ -152,6 +155,42 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
       // spread `envVars` when populated.
       ...(spec.env && Object.keys(spec.env).length > 0 && { envVars: { ...spec.env } }),
     });
+
+    // Post-create provisioning. If any step throws, tear down the freshly
+    // created sandbox before rethrowing so we don't leak provider
+    // resources — Daytona's per-sandbox billing makes orphaning expensive.
+    try {
+      if (spec.askpass) {
+        await uploadAskpassToSandbox({
+          sandbox: sdkSandbox,
+          hostDir: spec.askpass.hostDir,
+          containerDir: spec.askpass.containerDir,
+        });
+      }
+      if (spec.worktree?.type === "git-remote") {
+        const wt = spec.worktree;
+        await sdkSandbox.git.clone(
+          wt.url,
+          WORKTREE_PATH,
+          wt.branch,
+          undefined,
+          wt.auth.username,
+          wt.auth.password,
+        );
+      }
+    } catch (err) {
+      log.warn(
+        { err: (err as Error).message, sandboxId: sdkSandbox.id, taskId: spec.taskId },
+        "post-create provisioning failed — tearing down sandbox",
+      );
+      await sdkSandbox.delete().catch((teardownErr: Error) => {
+        log.warn(
+          { err: teardownErr.message, sandboxId: sdkSandbox.id },
+          "teardown after failed provisioning also failed",
+        );
+      });
+      throw err;
+    }
 
     return this.#wrap(sdkSandbox, spec.taskId, spec.expiresAt);
   }
