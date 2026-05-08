@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import { mockProvider } from "../../test/factories.js";
 import type { PendingMemory } from "../store/index.js";
-import { type DrainPendingDeps, drainPendingMemories } from "./drain-pending-memories.js";
+import {
+  buildRetainItems,
+  type ClassifiedRow,
+  type DrainPendingDeps,
+  drainPendingMemories,
+} from "./drain-pending-memories.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
@@ -56,7 +61,7 @@ describe("drainPendingMemories", () => {
   it("returns zeros and skips work when nothing pending", async () => {
     const deps = mockDeps([], []);
 
-    const result = await drainPendingMemories("user-1", deps);
+    const result = await drainPendingMemories("user-1", null, deps);
 
     expect(result).toEqual({ drained: 0, byNetwork: {} });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
@@ -70,7 +75,7 @@ describe("drainPendingMemories", () => {
       { network: "world", compartment: "technical", trust: "first-party" },
     ]);
 
-    const result = await drainPendingMemories("user-1", deps);
+    const result = await drainPendingMemories("user-1", null, deps);
 
     expect(result.drained).toBe(1);
     expect(result.byNetwork).toEqual({ world: 1 });
@@ -93,7 +98,7 @@ describe("drainPendingMemories", () => {
       { network: "bank", compartment: "personal", trust: "first-party" },
     ]);
 
-    await drainPendingMemories("user-1", deps);
+    await drainPendingMemories("user-1", null, deps);
 
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       {
@@ -112,7 +117,7 @@ describe("drainPendingMemories", () => {
       { network: "world", compartment: "technical", trust: "first-party" },
     ]);
 
-    await drainPendingMemories("user-1", deps);
+    await drainPendingMemories("user-1", null, deps);
 
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       expect.objectContaining({ metadata: { source: "migration" } }),
@@ -128,7 +133,9 @@ describe("drainPendingMemories", () => {
       new Error("Hindsight unreachable"),
     );
 
-    await expect(drainPendingMemories("user-1", deps)).rejects.toThrow("Hindsight unreachable");
+    await expect(drainPendingMemories("user-1", null, deps)).rejects.toThrow(
+      "Hindsight unreachable",
+    );
     expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
   });
 
@@ -170,7 +177,7 @@ describe("drainPendingMemories", () => {
       },
     };
 
-    const result = await drainPendingMemories("user-1", deps);
+    const result = await drainPendingMemories("user-1", null, deps);
 
     expect(result.drained).toBe(1);
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
@@ -194,10 +201,48 @@ describe("drainPendingMemories", () => {
       },
     };
 
-    const result = await drainPendingMemories("user-1", deps);
+    const result = await drainPendingMemories("user-1", null, deps);
 
     expect(result).toEqual({ drained: 0, byNetwork: {} });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
     expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
+  });
+});
+
+describe("buildRetainItems", () => {
+  function classified(overrides: Partial<ClassifiedRow> = {}): ClassifiedRow {
+    return {
+      id: "pm-1",
+      content: "user prefers tea",
+      context: null,
+      source: "live_retain",
+      tags: { network: "bank", compartment: "personal", trust: "first-party" },
+      ...overrides,
+    };
+  }
+
+  it("appends profile_class:<class> when profileClass is non-null", () => {
+    const items = buildRetainItems([classified()], "intimate");
+    expect(items[0]?.tags).toEqual([
+      "network:bank",
+      "compartment:personal",
+      "trust:first-party",
+      "profile_class:intimate",
+    ]);
+  });
+
+  it("omits profile_class tag when profileClass is null", () => {
+    const items = buildRetainItems([classified()], null);
+    expect(items[0]?.tags).toEqual(["network:bank", "compartment:personal", "trust:first-party"]);
+  });
+
+  it("stamps every row in a multi-row batch with the same class", () => {
+    const items = buildRetainItems(
+      [classified({ id: "pm-1" }), classified({ id: "pm-2", content: "lives in Berlin" })],
+      "general",
+    );
+    for (const item of items) {
+      expect(item.tags).toContain("profile_class:general");
+    }
   });
 });

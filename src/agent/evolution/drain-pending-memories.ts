@@ -91,8 +91,24 @@ export async function classifyPendingMemories(
   return { successful, byNetwork };
 }
 
-/** Map classified rows to `RetainBatchItem`s. `metadata.source` carries the staging origin so live retains and migrations stay distinguishable from transcript extractions. */
-export function buildRetainItems(rows: ReadonlyArray<ClassifiedRow>): RetainBatchItem[] {
+/**
+ * Map classified rows to `RetainBatchItem`s. `metadata.source` carries the
+ * staging origin so live retains and migrations stay distinguishable from
+ * transcript extractions.
+ *
+ * `profileClass` is the conversation's active profile's `profile_class`
+ * value (or `null` if unclassed). When non-null it's emitted as a
+ * `profile_class:<class>` tag on every retained memory. The class is taken
+ * from the conv's CURRENT profile at drain time — not from the original
+ * staging context — because pending rows don't track which profile staged
+ * them. For the live-retain path this matches the speaker who's still in
+ * the conversation; for migration-staged rows it aligns the backfill with
+ * the user's current speaker setup.
+ */
+export function buildRetainItems(
+  rows: ReadonlyArray<ClassifiedRow>,
+  profileClass: string | null,
+): RetainBatchItem[] {
   return rows.map((r) => ({
     content: r.content,
     ...(r.context !== null && { context: r.context }),
@@ -100,6 +116,7 @@ export function buildRetainItems(rows: ReadonlyArray<ClassifiedRow>): RetainBatc
       `network:${r.tags.network}`,
       `compartment:${r.tags.compartment}`,
       `trust:${r.tags.trust}`,
+      ...(profileClass !== null ? [`profile_class:${profileClass}`] : []),
     ],
     metadata: { source: r.source },
     observationScopes: "per_tag" as const,
@@ -108,6 +125,7 @@ export function buildRetainItems(rows: ReadonlyArray<ClassifiedRow>): RetainBatc
 
 export async function drainPendingMemories(
   userId: string,
+  profileClass: string | null,
   deps: DrainPendingDeps,
 ): Promise<DrainPendingResult> {
   const pending = await deps.runInTx((tx) => deps.store.getPendingMemories(tx, userId));
@@ -126,7 +144,7 @@ export async function drainPendingMemories(
     return { drained: 0, byNetwork: {} };
   }
 
-  const items = buildRetainItems(successful);
+  const items = buildRetainItems(successful, profileClass);
   await deps.memory.retainBatch(userId, items);
   await deps.runInTx((tx) =>
     deps.store.deletePendingMemories(

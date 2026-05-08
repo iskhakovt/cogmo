@@ -17,9 +17,9 @@ export const MemoryNetworkSchema = z
   );
 
 export const MemoryCompartmentSchema = z
-  .enum(["personal", "work", "health", "financial", "technical"])
+  .enum(["personal", "work", "health", "financial", "technical", "misc"])
   .describe(
-    "Domain compartment: personal (general life), work (employment/projects), health (medical/fitness), financial (money/accounts), technical (code/systems/infrastructure)",
+    "Domain compartment: personal (general life), work (employment/projects), health (medical/fitness), financial (money/accounts), technical (code/systems/infrastructure), misc (everything that fits none of the above)",
   );
 
 export const MemoryTrustSchema = z
@@ -99,7 +99,10 @@ const COMPARTMENT_DEFINITIONS = `- **personal**: general life — relationships,
   Examples: "Wise account number ends 4711", "files taxes in Germany", "has a Vanguard ISA"
 
 - **technical**: code, infrastructure, tools, systems, APIs, configs — the user's technical stack and personal/work projects' implementation details.
-  Examples: "homelab IP is 10.0.10.10", "uses pnpm not npm", "Postgres password rotated last week"`;
+  Examples: "homelab IP is 10.0.10.10", "uses pnpm not npm", "Postgres password rotated last week"
+
+- **misc**: an explicit "none of the above" bucket — facts that genuinely fit no other compartment. Use sparingly; prefer **personal** when the fact is broadly about the user's life. Never use **misc** as a tie-breaker between two real compartments.
+  Examples: "owns a 1972 Datsun 240Z", "has competed in Magic: The Gathering tournaments since 2004"`;
 
 const TRUST_DEFINITIONS = `- **first-party**: only profiles the user directly controls can access this. The default for anything the user told us in conversation. Health, financial, and most personal facts should be first-party.
 - **any**: safe for third-party plugins or untrusted automation to read. Use sparingly — only for facts that are obviously public or non-sensitive (e.g. "homelab uses Tailscale", "prefers Markdown over RST"). When in doubt, choose first-party.`;

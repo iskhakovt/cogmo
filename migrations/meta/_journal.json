@@ -169,6 +169,13 @@
       "when": 1778155681057,
       "tag": "0023_thin_the_leader",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1778270278464,
+      "tag": "0024_gifted_black_bolt",
+      "breakpoints": true
     }
   ]
 }

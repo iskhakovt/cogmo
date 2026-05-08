@@ -72,18 +72,23 @@ export const ToolSetSchema = z.array(z.string());
 export type ToolSet = z.infer<typeof ToolSetSchema>;
 
 /**
- * `profiles.memory_scope` — declares which compartment + trust tag combinations
- * a profile is allowed to recall from Hindsight. Null = no restriction (legacy
- * default; all memories visible). When set, both arrays must be non-empty —
- * a profile that allows zero compartments or zero trust tiers can recall
- * nothing, which is almost certainly a configuration mistake. The orchestrator
- * folds these into a `tag_groups` filter at recall/reflect time so that
- * only memories matching `compartment ∈ allowed AND trust ∈ allowed` are
- * returned.
+ * `profiles.memory_scope` — declares which compartment + trust + profile-class
+ * tag combinations a profile is allowed to recall from Hindsight. Null = no
+ * restriction (legacy default; all memories visible). When set, `compartments`
+ * and `trust` must be non-empty — a profile that allows zero of either can
+ * recall nothing, which is almost certainly a configuration mistake.
+ * `profileClasses` is independent: if present and non-empty, only memories
+ * tagged with one of the listed classes are recallable (speaker-driven
+ * isolation); if omitted, recall is unrestricted on the class dimension. The
+ * orchestrator folds these into a `tag_groups` filter at recall/reflect time
+ * so that only memories matching
+ * `compartment ∈ allowed AND trust ∈ allowed [AND profile_class ∈ allowed]`
+ * are returned.
  */
 export const ProfileMemoryScopeSchema = z.object({
   compartments: z.array(MemoryCompartmentSchema).min(1),
   trust: z.array(MemoryTrustSchema).min(1),
+  profileClasses: z.array(z.string().min(1)).min(1).optional(),
 });
 export type ProfileMemoryScope = z.infer<typeof ProfileMemoryScopeSchema>;
 
@@ -125,6 +130,29 @@ export const modelProviders = pgTable(
   ],
 );
 
+/**
+ * Per-user registry of named "profile classes" — labels emitted as
+ * `profile_class:<name>` tags by the Observer at retain time, then matched
+ * against `profiles.memory_scope.profileClasses` at recall time. Speaker-
+ * driven isolation: any number of profiles can share a class, classes
+ * outlive the profiles that reference them (so memory tags don't dangle
+ * when a profile is deleted and recreated). `description` is human-facing
+ * documentation only — the LLM classifier never reads it.
+ */
+export const profileClasses = pgTable(
+  "profile_classes",
+  {
+    id: pk(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    createdAt: ts(),
+  },
+  (t) => [unique("uq_profile_classes_user_name").on(t.userId, t.name)],
+);
+
 export const profiles = pgTable(
   "profiles",
   {
@@ -144,6 +172,13 @@ export const profiles = pgTable(
     voiceMode: voiceMode("voice_mode").notNull().default("auto"),
     toolSet: jsonbZod("tool_set", ToolSetSchema).notNull(),
     memoryScope: jsonbZod("memory_scope", ProfileMemoryScopeSchema), // null = no restriction
+    /**
+     * Profile class — speaker-isolation label. NULL = unclassed (Observer
+     * emits no `profile_class:*` tag for this profile's conversations).
+     * Validated at the store boundary against `profile_classes` for the
+     * profile's user; org profiles (`user_id IS NULL`) cannot be classed.
+     */
+    profileClass: text("profile_class"),
     createdAt: ts(),
   },
   (t) => [unique("uq_profiles_user_name").on(t.userId, t.name).nullsNotDistinct()],

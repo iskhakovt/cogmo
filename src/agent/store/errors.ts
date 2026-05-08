@@ -33,6 +33,32 @@ export class ProfileInUseError extends Error {
   }
 }
 
+/**
+ * Thrown by `deleteProfileClass` when at least one profile still references
+ * the class via `profiles.profile_class`. The caller must clear the
+ * references (or reassign the profiles to a different class) before the
+ * class can be deleted. Transport surfaces this as `profile_class_in_use`.
+ */
+export class ProfileClassInUseError extends Error {
+  constructor(public readonly profileRefs: number) {
+    super(`profile class in use: ${profileRefs} profile(s) reference it`);
+    this.name = "ProfileClassInUseError";
+  }
+}
+
+/**
+ * Thrown by `setProfileClass` and any other call that assigns a class name
+ * to a profile (or scopes a profile against a list of class names) when the
+ * referenced class is not registered for the profile's user. Transport
+ * surfaces this as `unknown_profile_class`.
+ */
+export class UnknownProfileClassError extends Error {
+  constructor(public readonly className: string) {
+    super(`unknown profile class: "${className}"`);
+    this.name = "UnknownProfileClassError";
+  }
+}
+
 interface PgUniqueViolation {
   code: "23505";
   constraint_name?: string;

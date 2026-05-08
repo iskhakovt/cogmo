@@ -34,10 +34,16 @@ export interface MemoryExtractionResult {
  * Extract facts from a conversation transcript and retain them to memory.
  *
  * Returns counts of what was extracted. Pure function — all I/O goes through deps.
+ *
+ * `profileClass` is the conversation's active profile's `profile_class`
+ * value (or `null` if unclassed). When non-null it's emitted as a
+ * `profile_class:<class>` tag on every retained memory, which the recall
+ * filter uses for speaker-driven isolation.
  */
 export async function extractMemories(
   history: ReadonlyArray<Message>,
   bankId: string,
+  profileClass: string | null,
   deps: MemoryExtractionDeps,
 ): Promise<MemoryExtractionResult> {
   const transcript = formatTranscript(history);
@@ -70,7 +76,12 @@ export async function extractMemories(
   const items: RetainBatchItem[] = data.memories.map((mem) => ({
     content: mem.fact,
     ...(mem.context !== undefined && { context: mem.context }),
-    tags: [`network:${mem.network}`, `compartment:${mem.compartment}`, `trust:${mem.trust}`],
+    tags: [
+      `network:${mem.network}`,
+      `compartment:${mem.compartment}`,
+      `trust:${mem.trust}`,
+      ...(profileClass !== null ? [`profile_class:${profileClass}`] : []),
+    ],
     metadata: { source: "conversation" },
     observationScopes: "per_tag" as const,
   }));

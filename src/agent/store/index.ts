@@ -5,7 +5,12 @@ import type { Transaction } from "../../db/index.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { truncate } from "../../util/string.js";
 import type { AutoRecallMode } from "../recall-gate.js";
-import { ProfileInUseError, translateUniqueViolation } from "./errors.js";
+import {
+  ProfileClassInUseError,
+  ProfileInUseError,
+  translateUniqueViolation,
+  UnknownProfileClassError,
+} from "./errors.js";
 import {
   aliases,
   conversations,
@@ -16,6 +21,7 @@ import {
   type ProfileMemoryScope,
   type ProviderAttrs,
   pendingMemories,
+  profileClasses,
   profiles,
   steeringRules,
   type ToolSet,
@@ -63,7 +69,9 @@ export interface Profile {
   /** Profile-level voice mode default; overridden per-conversation. */
   voiceMode: VoiceMode;
   toolSet: ToolSet;
-  memoryScope: ProfileMemoryScope | null; // null = no compartment/trust restriction
+  memoryScope: ProfileMemoryScope | null; // null = no compartment/trust/class restriction
+  /** Speaker-isolation label; null = unclassed (Observer emits no class tag). */
+  profileClass: string | null;
 }
 
 export interface ProfileUpdates {
@@ -76,6 +84,15 @@ export interface ProfileUpdates {
   voiceMode?: VoiceMode;
   toolSet?: ToolSet;
   memoryScope?: ProfileMemoryScope | null;
+}
+
+/** Per-user registry row for `profiles.profile_class`. */
+export interface ProfileClass {
+  id: string;
+  userId: string;
+  name: string;
+  description: string;
+  createdAt: Date;
 }
 
 export interface ConversationSummary {
@@ -281,6 +298,33 @@ export interface AgentStore {
    * profile as audit data — a profile that has ever been used in a turn stays undeletable.
    */
   deleteProfile(tx: Transaction, profileId: string): Promise<void>;
+
+  // --- Profile classes (speaker-isolation registry) ---
+
+  /** List the user's registered profile classes, ordered by name. */
+  listProfileClasses(tx: Transaction, userId: string): Promise<ReadonlyArray<ProfileClass>>;
+
+  /** Create a new profile class. Throws `UniqueViolationError` on (user_id, name) collision. */
+  createProfileClass(
+    tx: Transaction,
+    params: { userId: string; name: string; description: string },
+  ): Promise<ProfileClass>;
+
+  /**
+   * Delete a profile class by name. Throws `ProfileClassInUseError` if any
+   * of the user's profiles still reference it via `profile_class`. Returns
+   * `{ deleted: false }` if no row matches; `{ deleted: true }` on success.
+   */
+  deleteProfileClass(tx: Transaction, userId: string, name: string): Promise<{ deleted: boolean }>;
+
+  /**
+   * Set or clear a profile's `profile_class`. `className: null` clears it.
+   * When `className` is non-null, validates the class exists in the
+   * profile's user's registry and throws `UnknownProfileClassError`
+   * otherwise. Org profiles (`user_id IS NULL`) cannot be classed —
+   * passing `className !== null` for one throws `UnknownProfileClassError`.
+   */
+  setProfileClass(tx: Transaction, profileId: string, className: string | null): Promise<void>;
 
   /** Load a single message by ID. */
   getMessage(
@@ -769,6 +813,7 @@ export class DrizzleAgentStore implements AgentStore {
         voiceMode: profiles.voiceMode,
         toolSet: profiles.toolSet,
         memoryScope: profiles.memoryScope,
+        profileClass: profiles.profileClass,
       })
       .from(profiles)
       .where(eq(profiles.id, profileId))
@@ -811,6 +856,7 @@ export class DrizzleAgentStore implements AgentStore {
           voiceMode: profiles.voiceMode,
           toolSet: profiles.toolSet,
           memoryScope: profiles.memoryScope,
+          profileClass: profiles.profileClass,
         }),
       );
       return row as Profile;
@@ -831,6 +877,7 @@ export class DrizzleAgentStore implements AgentStore {
         voiceMode: profiles.voiceMode,
         toolSet: profiles.toolSet,
         memoryScope: profiles.memoryScope,
+        profileClass: profiles.profileClass,
       })
       .from(profiles)
       .where(or(isNull(profiles.userId), eq(profiles.userId, userId)))
@@ -872,6 +919,7 @@ export class DrizzleAgentStore implements AgentStore {
           voiceMode: profiles.voiceMode,
           toolSet: profiles.toolSet,
           memoryScope: profiles.memoryScope,
+          profileClass: profiles.profileClass,
         });
       return single(rows) as Profile;
     });
@@ -911,6 +959,91 @@ export class DrizzleAgentStore implements AgentStore {
       throw new ProfileInUseError(convCount, msgCount);
     }
     await tx.delete(profiles).where(eq(profiles.id, profileId));
+  }
+
+  async listProfileClasses(tx: Transaction, userId: string): Promise<ReadonlyArray<ProfileClass>> {
+    const rows = await tx
+      .select({
+        id: profileClasses.id,
+        userId: profileClasses.userId,
+        name: profileClasses.name,
+        description: profileClasses.description,
+        createdAt: profileClasses.createdAt,
+      })
+      .from(profileClasses)
+      .where(eq(profileClasses.userId, userId))
+      .orderBy(asc(profileClasses.name));
+    return rows;
+  }
+
+  async createProfileClass(
+    tx: Transaction,
+    params: { userId: string; name: string; description: string },
+  ): Promise<ProfileClass> {
+    return translateUniqueViolation(async () => {
+      return single(
+        await tx.insert(profileClasses).values(params).returning({
+          id: profileClasses.id,
+          userId: profileClasses.userId,
+          name: profileClasses.name,
+          description: profileClasses.description,
+          createdAt: profileClasses.createdAt,
+        }),
+      );
+    });
+  }
+
+  async deleteProfileClass(
+    tx: Transaction,
+    userId: string,
+    name: string,
+  ): Promise<{ deleted: boolean }> {
+    // Count + delete in one tx: a concurrent setProfileClass(profileId, name)
+    // could otherwise win the race between our count and delete and leave a
+    // dangling reference. The composite (user_id, profile_class) match is
+    // safe under READ COMMITTED for our single-user model.
+    const refRows = await tx
+      .select({ value: count() })
+      .from(profiles)
+      .where(and(eq(profiles.userId, userId), eq(profiles.profileClass, name)));
+    const refCount = refRows[0]?.value ?? 0;
+    if (refCount > 0) {
+      throw new ProfileClassInUseError(refCount);
+    }
+    const deleted = await tx
+      .delete(profileClasses)
+      .where(and(eq(profileClasses.userId, userId), eq(profileClasses.name, name)))
+      .returning({ id: profileClasses.id });
+    return { deleted: deleted.length > 0 };
+  }
+
+  async setProfileClass(
+    tx: Transaction,
+    profileId: string,
+    className: string | null,
+  ): Promise<void> {
+    if (className === null) {
+      await tx.update(profiles).set({ profileClass: null }).where(eq(profiles.id, profileId));
+      return;
+    }
+    // Validate the class exists for the profile's user. Org profiles
+    // (user_id IS NULL) have no per-user registry to consult, so any class
+    // name is unknown by definition — the join below produces zero rows
+    // and we surface UnknownProfileClassError. This matches the schema
+    // comment on `profiles.profile_class`.
+    const matched = await tx
+      .select({ id: profileClasses.id })
+      .from(profiles)
+      .innerJoin(
+        profileClasses,
+        and(eq(profileClasses.userId, profiles.userId), eq(profileClasses.name, className)),
+      )
+      .where(eq(profiles.id, profileId))
+      .limit(1);
+    if (matched.length === 0) {
+      throw new UnknownProfileClassError(className);
+    }
+    await tx.update(profiles).set({ profileClass: className }).where(eq(profiles.id, profileId));
   }
 
   async getMessage(

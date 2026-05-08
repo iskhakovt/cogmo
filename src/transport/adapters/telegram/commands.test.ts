@@ -359,7 +359,10 @@ describe("handleProfile", () => {
   });
 
   describe("scope subcommand", () => {
-    function makeProfile(memoryScope: Profile["memoryScope"] = null): Profile {
+    function makeProfile(
+      memoryScope: Profile["memoryScope"] = null,
+      profileClass: Profile["profileClass"] = null,
+    ): Profile {
       return {
         id: "p1",
         userId: "u",
@@ -372,6 +375,7 @@ describe("handleProfile", () => {
         voiceMode: "auto",
         toolSet: [],
         memoryScope,
+        profileClass,
       };
     }
 
@@ -669,6 +673,45 @@ describe("parseScopeSpec", () => {
       expect(r.message).toContain('Key "compartments" repeated');
       expect(r.message).toContain("comma-separated");
     }
+  });
+
+  it("accepts classes=… as a third optional dimension", () => {
+    const r = parseScopeSpec(["compartments=personal", "trust=first-party", "classes=intimate"]);
+    expect(r).toEqual({
+      kind: "set",
+      scope: {
+        compartments: ["personal"],
+        trust: ["first-party"],
+        profileClasses: ["intimate"],
+      },
+    });
+  });
+
+  it("accepts multiple comma-separated values in classes=…", () => {
+    const r = parseScopeSpec([
+      "compartments=personal",
+      "trust=first-party",
+      "classes=intimate,general",
+    ]);
+    if (r.kind !== "set") throw new Error(`expected set, got ${r.kind}`);
+    expect(r.scope.profileClasses).toEqual(["intimate", "general"]);
+  });
+
+  it("rejects empty classes=… (Zod min(1) on the array)", () => {
+    const r = parseScopeSpec(["compartments=personal", "trust=first-party", "classes="]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain("Invalid scope");
+  });
+
+  it("rejects classes= repeated", () => {
+    const r = parseScopeSpec([
+      "compartments=personal",
+      "trust=first-party",
+      "classes=intimate",
+      "classes=general",
+    ]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain('Key "classes" repeated');
   });
 });
 

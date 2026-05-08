@@ -134,9 +134,11 @@ export function createObserver(deps: ObserverDeps) {
           )
         : null;
 
-      // Phase 2: extract facts from the transcript into long-term memory
+      // Phase 2: extract facts from the transcript into long-term memory.
+      // `profile.profileClass` (when non-null) becomes a `profile_class:<class>`
+      // tag on every retained memory, supporting speaker-driven isolation.
       const memoryResult = await step.run("extract-memories", async () => {
-        return extractMemories(history, conv.userId, {
+        return extractMemories(history, conv.userId, profile.profileClass, {
           provider,
           model,
           memory: deps.memory,
@@ -165,7 +167,10 @@ export function createObserver(deps: ObserverDeps) {
         });
 
         if (classified.successful.length > 0) {
-          const items = buildRetainItems(classified.successful);
+          // Stamp pending rows with the conv's CURRENT profile class. Pending
+          // rows don't track the staging-time profile, so we use the live one
+          // — the speaker who's still in the conversation.
+          const items = buildRetainItems(classified.successful, profile.profileClass);
           await step.run("retain-pending-memories", async () => {
             await deps.memory.retainBatch(conv.userId, items);
           });

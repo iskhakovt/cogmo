@@ -29,6 +29,7 @@ function mkProfile(overrides: Partial<Profile> & { id: string; name: string }): 
     voiceMode: "auto",
     toolSet: [],
     memoryScope: null,
+    profileClass: null,
     ...overrides,
   };
 }
@@ -114,6 +115,36 @@ describe("renderProfileList", () => {
     // from the show-reply view.
     expect(rendered.text).toContain(
       "• work (you, claude-sonnet-4-6) [compartments: work, technical / trust: first-party]",
+    );
+  });
+
+  it("annotates profiles with a profileClass set; unclassed render unchanged", () => {
+    const profiles = [
+      mkProfile({ id: "p1", name: "assistant", userId: "u1" }),
+      mkProfile({ id: "p2", name: "intimate", userId: "u1", profileClass: "intimate" }),
+    ];
+    const rendered = renderProfileList(profiles);
+    expect(rendered.text).toContain("• assistant (you, claude-sonnet-4-6)");
+    expect(rendered.text).not.toMatch(/assistant.*\[class=/);
+    expect(rendered.text).toContain("• intimate (you, claude-sonnet-4-6) [class=intimate]");
+  });
+
+  it("renders classes in formatScope when scope.profileClasses is set", () => {
+    const profiles = [
+      mkProfile({
+        id: "p1",
+        name: "isolated",
+        userId: "u1",
+        memoryScope: {
+          compartments: ["personal"],
+          trust: ["first-party"],
+          profileClasses: ["intimate"],
+        },
+      }),
+    ];
+    const rendered = renderProfileList(profiles);
+    expect(rendered.text).toContain(
+      "[compartments: personal / trust: first-party / classes: intimate]",
     );
   });
 

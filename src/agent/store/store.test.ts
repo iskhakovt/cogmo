@@ -107,6 +107,7 @@ describe("DrizzleAgentStore", () => {
         voiceMode: "auto",
         toolSet: ["memory_recall"],
         memoryScope: null,
+        profileClass: null,
       });
     });
 
@@ -208,6 +209,123 @@ describe("DrizzleAgentStore", () => {
           }),
         ),
       ).rejects.toThrow();
+    });
+  });
+
+  describe("profile classes", () => {
+    async function seedClassed(): Promise<{ userId: string; profileId: string }> {
+      const userId = await seedUser();
+      const profile = await tx((trx) =>
+        store.createProfile(trx, {
+          userId,
+          name: "intimate",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      return { userId, profileId: profile.id };
+    }
+
+    it("creates a class and lists it", async () => {
+      const { userId } = await seedClassed();
+      const created = await tx((trx) =>
+        store.createProfileClass(trx, {
+          userId,
+          name: "intimate",
+          description: "for emotional / relationship topics",
+        }),
+      );
+      expect(created.name).toBe("intimate");
+      const list = await tx((trx) => store.listProfileClasses(trx, userId));
+      expect(list).toHaveLength(1);
+      expect(list[0]?.description).toBe("for emotional / relationship topics");
+    });
+
+    it("rejects duplicate class name within the same user", async () => {
+      const { userId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "first" }),
+      );
+      await expect(
+        tx((trx) =>
+          store.createProfileClass(trx, { userId, name: "intimate", description: "second" }),
+        ),
+      ).rejects.toThrow();
+    });
+
+    it("setProfileClass attaches a registered class", async () => {
+      const { userId, profileId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
+      const profile = await tx((trx) => store.getProfile(trx, profileId));
+      expect(profile?.profileClass).toBe("intimate");
+    });
+
+    it("setProfileClass with null clears the class", async () => {
+      const { userId, profileId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
+      await tx((trx) => store.setProfileClass(trx, profileId, null));
+      const profile = await tx((trx) => store.getProfile(trx, profileId));
+      expect(profile?.profileClass).toBeNull();
+    });
+
+    it("setProfileClass throws UnknownProfileClassError for an unregistered class", async () => {
+      const { profileId } = await seedClassed();
+      await expect(
+        tx((trx) => store.setProfileClass(trx, profileId, "no-such-class")),
+      ).rejects.toThrow(/unknown profile class/);
+    });
+
+    it("setProfileClass on an org profile (userId=null) rejects any non-null class", async () => {
+      // Create an org profile (userId=null).
+      const orgProfile = await tx((trx) =>
+        store.createProfile(trx, {
+          userId: null,
+          name: "org",
+          basePrompt: "p",
+          model: "m",
+          toolSet: [],
+        }),
+      );
+      await expect(
+        tx((trx) => store.setProfileClass(trx, orgProfile.id, "anything")),
+      ).rejects.toThrow(/unknown profile class/);
+    });
+
+    it("deleteProfileClass throws ProfileClassInUseError when a profile references the class", async () => {
+      const { userId, profileId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
+      await expect(tx((trx) => store.deleteProfileClass(trx, userId, "intimate"))).rejects.toThrow(
+        /profile class in use/,
+      );
+    });
+
+    it("deleteProfileClass succeeds after the references are cleared", async () => {
+      const { userId, profileId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
+      await tx((trx) => store.setProfileClass(trx, profileId, null));
+      const result = await tx((trx) => store.deleteProfileClass(trx, userId, "intimate"));
+      expect(result.deleted).toBe(true);
+      const list = await tx((trx) => store.listProfileClasses(trx, userId));
+      expect(list).toHaveLength(0);
+    });
+
+    it("deleteProfileClass returns deleted:false for an unknown name (idempotent)", async () => {
+      const { userId } = await seedClassed();
+      const result = await tx((trx) => store.deleteProfileClass(trx, userId, "no-such"));
+      expect(result.deleted).toBe(false);
     });
   });
 
