@@ -129,16 +129,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
   }
 
   async retainBatch(bankId: string, items: RetainBatchItem[]): Promise<void> {
-    // Single multi-item batch with async: false. Hindsight #1375
-    // silently drops everything past the first item under async: true
-    // with multi-item batches; per-item document_id doesn't rescue
-    // the async path. Synchronous mode preserves every item.
-    // Per-item document_id keeps each item distinguishable in the
-    // document graph and makes the eventual flip back to async: true
-    // (when #1375 closes) trivial. Cost: response latency scales with
-    // N (extraction + embedding + consolidation, sequentially), but
-    // retainBatch only runs inside an Inngest `step.run` on
-    // `conversation/idle` — the user doesn't wait.
+    // Per-item document_id keeps each item distinguishable in the document graph.
     const mapped: MemoryItemInput[] = items.map((item) => ({
       content: item.content,
       document_id: randomUUID(),
@@ -149,7 +140,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
         observation_scopes: item.observationScopes,
       }),
     }));
-    await withRetry(() => this.#client.retainBatch(bankId, mapped, { async: false }), {
+    await withRetry(() => this.#client.retainBatch(bankId, mapped, { async: true }), {
       context: `hindsight.retainBatch[${bankId}]`,
     });
   }
