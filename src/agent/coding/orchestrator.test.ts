@@ -296,7 +296,7 @@ function makeDeps(
   return {
     runInTx: tx,
     store,
-    devbaseImage: "cogmo/devbase:slice1-test",
+    devbaseImage: "cogmo/devbase:test",
     defaultResourceLimits: RESOURCE_LIMITS,
     taskTtlMs: 60_000,
     worktreesDir: join(baseDir, "worktrees"),
@@ -336,7 +336,7 @@ describe("runCodingTask", () => {
 
     expect(createCalls).toHaveLength(1);
     expect(createCalls[0].taskId).toBe(task.id);
-    expect(createCalls[0].image).toBe("cogmo/devbase:slice1-test");
+    expect(createCalls[0].image).toBe("cogmo/devbase:test");
     // Worktree path is derived in the orchestrator's allocate-worktree step:
     // ${worktreesDir}/<repo.name>/<id-short>. Assert the structural contract,
     // not a literal path (the id-short is whatever UUIDv7 the DB generated).
@@ -642,7 +642,7 @@ async function seedExecutableTask(
       parentId: null,
       rootTaskId: task.id,
       depth: 0,
-      image: "cogmo/devbase:slice2-test",
+      image: "cogmo/devbase:test-2",
       runtime: "runc",
       labels: {
         "cogmo.managed": "true",

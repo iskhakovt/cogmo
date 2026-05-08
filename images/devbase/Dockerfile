@@ -1,16 +1,18 @@
-# cogmo/devbase:slice1 — base task-container image for coding-delegation.
+# cogmo-devbase — base task-container image for coding-delegation.
 #
-# Built and published from this directory by .github/workflows/devbase.yml.
-# See design/coding-delegation.md → "Base Image" for the full contract.
+# Built and published as the `devbase` target of `/docker-bake.hcl` by
+# .github/workflows/publish.yml at every cogmo release. Tag tracks the
+# cogmo app version, so `cogmo:1.46.0` always pairs with
+# `cogmo-devbase:1.46.0`. See design/coding-delegation.md → "Base Image"
+# for the full contract.
 #
-# Slice 1 ships only what plan-only Claude Code flows need:
+# Today's image ships what plan-only Claude Code flows need:
 #   - Node 24 + pnpm + git + gh + ripgrep + fd + jq + curl
 #   - @anthropic-ai/claude-code (pinned)
 #   - Non-root user `vscode` (UID 1000) inherited from the devcontainers base.
 #
 # Codex CLI, Python 3.12 + uv, Go/Rust toolchains, and docker-outside-of-docker
-# are deferred to slices that need them (verify commands in slice 4, polyglot
-# repos later).
+# are deferred to whenever real verify commands need them.
 
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
@@ -31,8 +33,9 @@ RUN corepack enable \
  && corepack prepare pnpm@10.27.0 --activate
 
 # Claude Code CLI — pinned. Version drift breaks the stream-json contract that
-# src/agent/coding/claude.ts depends on, so bump deliberately as part of an
-# image tag rev (slice1 → slice2 → ...), not via floating `latest`.
+# src/agent/coding/claude.ts depends on. Bump deliberately in the same PR
+# that bumps the parser, so the next cogmo release ships matched code +
+# image at the same semver. Never `latest`.
 ARG CLAUDE_CODE_VERSION=2.1.119
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude --version

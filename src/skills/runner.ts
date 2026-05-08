@@ -1,6 +1,7 @@
 import { Ajv, type ValidateFunction } from "ajv";
 import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
+import { defaultSkillsImage } from "../env.js";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SandboxClient } from "../sandbox/index.js";
@@ -30,8 +31,15 @@ import type { ClassifierLog, SkillInputs, SkillManifest } from "./types.js";
 import { type RunOnSysboxContainerResult, runOnSysboxContainer } from "./worker-sysbox/host.js";
 import { type RunOnWorkerResult, runOnWorker } from "./worker-wasm/host.js";
 
-/** Default tier-2 container image. Pinned to the Python LTS train. */
-const DEFAULT_TIER2_IMAGE = "python:3.14-slim";
+/**
+ * Default tier-2 container image when the constructor doesn't override it.
+ * Production wiring (`src/index.ts`) always passes `tier2Image:
+ * env.COGMO_SKILLS_IMAGE`, so this default only matters for tests that
+ * construct a runner without an explicit image AND actually invoke a
+ * tier-container skill (the integration test does the latter — it overrides).
+ * Shares the helper with `env.ts` so the two never drift.
+ */
+const DEFAULT_TIER2_IMAGE = defaultSkillsImage();
 
 /**
  * Translate a manifest's `resources` block into the partial `ResourceLimits`
