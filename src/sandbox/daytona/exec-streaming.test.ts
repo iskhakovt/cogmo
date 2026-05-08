@@ -350,17 +350,13 @@ describe("startExecStreaming", () => {
   });
 
   it("retries deleteSession on the next call when the first attempt failed", async () => {
-    // The cleanup contract is "best-effort, never throws, retries on
-    // the next caller". A transient daemon error on natural-exit
-    // cleanup must NOT prevent a follow-up `dispose()` from firing
-    // its own `deleteSession` — otherwise the upstream session
-    // orphans.
+    // Sequential-call retry: natural-exit cleanup fails, dispose
+    // fires its own attempt that succeeds.
     const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
     let attempt = 0;
     (proc.deleteSession as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => {
       attempt += 1;
       if (attempt === 1) throw new Error("transient daemon error");
-      // 2nd attempt succeeds.
     });
 
     const handle = await startExecStreaming({
@@ -370,13 +366,66 @@ describe("startExecStreaming", () => {
       opts: {},
     });
     await handle.wait();
-    // Allow the natural-exit cleanup attempt (which fails) to settle.
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(proc.deleteSession).toHaveBeenCalledTimes(1);
 
-    // Dispose retries — `cleanedUp` was never set on the failed
-    // first attempt.
     await handle.dispose();
+    expect(proc.deleteSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("concurrent callers don't return without retrying when the first attempt fails", async () => {
+    // The leak scenario: dispose() fires deleteSession (caller A);
+    // while A is in flight, the WS rejects for an unrelated reason
+    // (idle timeout, server blip), triggering the WS-error cleanup
+    // path (caller B). B awaits A's `inFlight`. A fails. Without
+    // the retry-on-failure loop, B returns — session leaks. The
+    // loop has B fall through and fire its own attempt.
+    const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
+    const attempts: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
+    (proc.deleteSession as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      return new Promise<void>((resolve, reject) => {
+        attempts.push({ resolve, reject });
+      });
+    });
+
+    // Hold the WS open so we orchestrate the race manually.
+    let rejectWs: ((err: Error) => void) | undefined;
+    (proc.getSessionCommandLogs as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectWs = reject;
+        }),
+    );
+
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["sleep", "infinity"],
+      opts: {},
+    });
+    // Suppress the (eventual) wait() rejection — we don't await it.
+    handle.wait().catch(() => undefined);
+
+    // dispose() fires cleanupSession (caller A).
+    const disposeP = handle.dispose();
+    await vi.waitUntil(() => attempts.length === 1, { timeout: 200 });
+
+    // While A is in flight, the WS rejects — the WS-error path
+    // chains its own cleanupSession call (caller B). B enters the
+    // `while (inFlight)` loop, awaiting A.
+    rejectWs?.(new Error("ws dropped"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // A fails.
+    attempts[0]?.reject(new Error("transient delete failure"));
+
+    // Without the retry loop, B would return here without firing a
+    // second deleteSession. With the loop, B falls through and fires
+    // its own attempt → attempts.length becomes 2.
+    await vi.waitUntil(() => attempts.length === 2, { timeout: 500 });
+    attempts[1]?.resolve();
+
+    await disposeP;
     expect(proc.deleteSession).toHaveBeenCalledTimes(2);
   });
 });

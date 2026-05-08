@@ -73,38 +73,37 @@ export async function startExecStreaming(args: {
 
   // Idempotent session teardown. Called from every termination path —
   // natural WS close (success), WS error (real upstream failure), and
-  // explicit `dispose()`. Without it, sessions leak per `execStreaming`
-  // call: Daytona quotas + per-org sandbox-session limits would bite
-  // the deployer eventually.
+  // explicit `dispose()`. Without it, sessions leak per
+  // `execStreaming` call.
   //
-  // `cleanedUp` flips ONLY after `deleteSession` resolves successfully.
-  // A failed delete (transient network, daemon hiccup) leaves the
-  // flag false so a subsequent caller (typically `dispose()` after a
-  // failed natural-exit cleanup) retries. `inFlight` guards against
-  // a concurrent caller firing a duplicate `deleteSession` while
-  // another is mid-await — they all observe the same outcome.
+  // `cleanedUp` flips ONLY after `deleteSession` resolves
+  // successfully. A failed delete leaves the flag false. The
+  // `while (inFlight)` waits for any other caller's attempt; if that
+  // attempt failed, control falls through and the current caller
+  // fires its own. Each caller attempts at most once, but callers
+  // chain so the last one in always retries on persistent failure —
+  // closes the leak window where N concurrent callers all queue
+  // behind one failing attempt and return without trying.
   let cleanedUp = false;
   let inFlight: Promise<void> | null = null;
   const cleanupSession = async (): Promise<void> => {
     if (cleanedUp) return;
-    if (inFlight) {
-      // Wait for the in-flight attempt; swallow its error so callers
-      // get a consistent "best-effort, never throws" contract.
+    while (inFlight) {
+      // `.catch` swallows so a failed in-flight doesn't reject our
+      // own promise — we re-check `cleanedUp` and decide whether to
+      // retry below.
       await inFlight.catch(() => undefined);
-      return;
+      if (cleanedUp) return;
+      // Race protection: if another caller raced into this branch
+      // between the await and now and started a new in-flight, loop
+      // and wait on theirs too.
     }
     inFlight = (async () => {
       try {
         await daytonaProcess.deleteSession(sessionId);
         cleanedUp = true;
       } catch (err) {
-        log.warn(
-          { err: (err as Error).message, sessionId },
-          "deleteSession during cleanup failed (next caller will retry)",
-        );
-        // Don't rethrow — every caller in the codebase awaits this
-        // for side effect, not value. The `cleanedUp` flag stays
-        // false so the next call retries.
+        log.warn({ err: (err as Error).message, sessionId }, "deleteSession during cleanup failed");
       } finally {
         inFlight = null;
       }
