@@ -14,6 +14,7 @@
  */
 
 import { NonRetriableError } from "inngest";
+import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
 import { conversationIdle } from "../../inngest/events.js";
 import { type LlmProviderResolver, ProviderConfigError } from "../../llm/resolver.js";
@@ -36,6 +37,7 @@ const MIN_MESSAGES_FOR_EXTRACTION = 4; // 2 turns minimum
 const PENDING_DRAIN_BATCH_SIZE = 100;
 
 export interface ObserverDeps {
+  runInTx: Transactor;
   agentStore: AgentStore;
   /**
    * Per-fire provider lookup. The extraction model is read from the
@@ -63,7 +65,7 @@ export function createObserver(deps: ObserverDeps) {
       const { conversationId } = event.data;
 
       const conv = await step.run("load-conversation", async () => {
-        return agentStore.getConversation(conversationId);
+        return deps.runInTx((tx) => agentStore.getConversation(tx, conversationId));
       });
       if (!conv) {
         logger.warn({ conversationId }, "observer: conversation not found");
@@ -75,7 +77,7 @@ export function createObserver(deps: ObserverDeps) {
       // extraction on that model too. `extractionModel` overrides the
       // chat model when set; otherwise the chat model is reused.
       const profile = await step.run("load-profile", async () => {
-        return agentStore.getProfile(conv.profileId);
+        return deps.runInTx((tx) => agentStore.getProfile(tx, conv.profileId));
       });
       if (!profile) {
         logger.warn({ conversationId, profileId: conv.profileId }, "observer: profile not found");
@@ -84,7 +86,7 @@ export function createObserver(deps: ObserverDeps) {
       const model = profile.extractionModel ?? profile.model;
 
       const history = await step.run("load-history", async () => {
-        return agentStore.getHistory(conversationId);
+        return deps.runInTx((tx) => agentStore.getHistory(tx, conversationId));
       });
 
       if (history.length < MIN_MESSAGES_FOR_EXTRACTION) {
@@ -116,13 +118,19 @@ export function createObserver(deps: ObserverDeps) {
         return extractCorrections(history, conv.profileId, {
           provider,
           model,
+          runInTx: deps.runInTx,
           store: agentStore,
         });
       });
 
       const consolidation = result.consolidationNeeded
         ? await step.run("consolidate-rules", () =>
-            consolidateRules(conv.profileId, { provider, model, store: agentStore }),
+            consolidateRules(conv.profileId, {
+              provider,
+              model,
+              runInTx: deps.runInTx,
+              store: agentStore,
+            }),
           )
         : null;
 
@@ -141,7 +149,9 @@ export function createObserver(deps: ObserverDeps) {
       // failure after a successful retain re-runs only the delete on
       // retry, not the LLM classifier or the retainBatch write.
       const pending = await step.run("load-pending-memories", async () => {
-        return agentStore.getPendingMemories(conv.userId, PENDING_DRAIN_BATCH_SIZE);
+        return deps.runInTx((tx) =>
+          agentStore.getPendingMemories(tx, conv.userId, PENDING_DRAIN_BATCH_SIZE),
+        );
       });
 
       let drainResult: { drained: number; byNetwork: Record<string, number> } = {
@@ -160,7 +170,12 @@ export function createObserver(deps: ObserverDeps) {
             await deps.memory.retainBatch(conv.userId, items);
           });
           await step.run("delete-pending-memories", async () => {
-            await agentStore.deletePendingMemories(classified.successful.map((c) => c.id));
+            await deps.runInTx((tx) =>
+              agentStore.deletePendingMemories(
+                tx,
+                classified.successful.map((c) => c.id),
+              ),
+            );
           });
           drainResult = {
             drained: classified.successful.length,

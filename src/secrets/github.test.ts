@@ -22,13 +22,15 @@ const VALID: GitHubIdentity = {
 
 class FakeLookup implements GitHubIdentitySecretsLookup {
   #values = new Map<string, string>();
-  async getSecret(name: string): Promise<string | undefined> {
+  async getSecret(_tx: unknown, name: string): Promise<string | undefined> {
     return this.#values.get(name);
   }
   set(name: string, value: string): void {
     this.#values.set(name, value);
   }
 }
+
+const FAKE_TX = { __mockTx: true } as never;
 
 describe("gitHubIdentitySecretName", () => {
   it("namespaces the identity under the github_identity prefix", () => {
@@ -184,14 +186,14 @@ describe("resolveGitHubIdentity", () => {
     const lookup = new FakeLookup();
     lookup.set("github_identity:default", JSON.stringify(VALID));
 
-    const result = await resolveGitHubIdentity(lookup, "default");
+    const result = await resolveGitHubIdentity(FAKE_TX, lookup, "default");
     expect(result.isOk()).toBe(true);
     expect(result._unsafeUnwrap()).toEqual(VALID);
   });
 
   it("returns `missing` when the identity is not installed", async () => {
     const lookup = new FakeLookup();
-    const result = await resolveGitHubIdentity(lookup, "default");
+    const result = await resolveGitHubIdentity(FAKE_TX, lookup, "default");
     expect(result.isErr()).toBe(true);
     const error = result._unsafeUnwrapErr();
     expect(error.code).toBe("missing");
@@ -201,7 +203,7 @@ describe("resolveGitHubIdentity", () => {
   it("returns `malformed_json` when the stored secret is not JSON", async () => {
     const lookup = new FakeLookup();
     lookup.set("github_identity:default", "this is not json {");
-    const result = await resolveGitHubIdentity(lookup, "default");
+    const result = await resolveGitHubIdentity(FAKE_TX, lookup, "default");
     expect(result.isErr()).toBe(true);
     expect(result._unsafeUnwrapErr().code).toBe("malformed_json");
   });
@@ -209,7 +211,7 @@ describe("resolveGitHubIdentity", () => {
   it("returns `schema_mismatch` when JSON is well-formed but the shape is wrong", async () => {
     const lookup = new FakeLookup();
     lookup.set("github_identity:default", JSON.stringify({ pat: "x", sshPrivateKey: "" }));
-    const result = await resolveGitHubIdentity(lookup, "default");
+    const result = await resolveGitHubIdentity(FAKE_TX, lookup, "default");
     expect(result.isErr()).toBe(true);
     const error = result._unsafeUnwrapErr();
     expect(error.code).toBe("schema_mismatch");
@@ -222,8 +224,8 @@ describe("resolveGitHubIdentity", () => {
     lookup.set("github_identity:default", JSON.stringify(VALID));
     lookup.set("github_identity:acme", JSON.stringify(acme));
 
-    const def = await resolveGitHubIdentity(lookup, "default");
-    const ac = await resolveGitHubIdentity(lookup, "acme");
+    const def = await resolveGitHubIdentity(FAKE_TX, lookup, "default");
+    const ac = await resolveGitHubIdentity(FAKE_TX, lookup, "acme");
     expect(def._unsafeUnwrap().pat).toBe(VALID.pat);
     expect(ac._unsafeUnwrap().pat).toBe(acme.pat);
   });
@@ -236,8 +238,12 @@ describe("resolveGitHubIdentityForRepo", () => {
     lookup.set("github_identity:default", JSON.stringify(VALID));
     lookup.set("github_identity:acme-bot", JSON.stringify(acme));
 
-    const defaultRepo = await resolveGitHubIdentityForRepo(lookup, { identityName: "default" });
-    const acmeRepo = await resolveGitHubIdentityForRepo(lookup, { identityName: "acme-bot" });
+    const defaultRepo = await resolveGitHubIdentityForRepo(FAKE_TX, lookup, {
+      identityName: "default",
+    });
+    const acmeRepo = await resolveGitHubIdentityForRepo(FAKE_TX, lookup, {
+      identityName: "acme-bot",
+    });
 
     expect(defaultRepo._unsafeUnwrap().pat).toBe(VALID.pat);
     expect(acmeRepo._unsafeUnwrap().pat).toBe(acme.pat);
@@ -250,7 +256,7 @@ describe("resolveGitHubIdentityForRepo", () => {
     // rather than silently authoring PRs under the wrong account.
     const lookup = new FakeLookup();
     lookup.set("github_identity:default", JSON.stringify(VALID));
-    const result = await resolveGitHubIdentityForRepo(lookup, { identityName: "missing" });
+    const result = await resolveGitHubIdentityForRepo(FAKE_TX, lookup, { identityName: "missing" });
     expect(result.isErr()).toBe(true);
     const error = result._unsafeUnwrapErr();
     expect(error.code).toBe("missing");

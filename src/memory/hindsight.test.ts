@@ -81,10 +81,6 @@ describe("HindsightMemoryProvider", () => {
       },
     ]);
 
-    // Single multi-item batch with async:false — Hindsight #1375
-    // silently drops items past the first when async:true is used
-    // with a multi-item batch. Each item still gets its own
-    // document_id so the document boundary is preserved.
     expect(mockRetainBatch).toHaveBeenCalledTimes(1);
     expect(mockRetainBatch).toHaveBeenCalledWith(
       "bank-1",
@@ -103,7 +99,7 @@ describe("HindsightMemoryProvider", () => {
           observation_scopes: "per_tag",
         },
       ],
-      { async: false },
+      { async: true },
     );
     const items = mockRetainBatch.mock.calls[0]?.[1] as Array<{ document_id: string }>;
     expect(items[0]?.document_id).not.toBe(items[1]?.document_id);

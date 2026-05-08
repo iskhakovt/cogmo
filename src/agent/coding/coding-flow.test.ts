@@ -31,7 +31,6 @@ import { type CodingStreamEvent, CodingStreamingRegistry } from "./streaming-reg
 
 const execFileP = promisify(execFile);
 
-// biome-ignore lint/suspicious/noExplicitAny: stepRun shim mirrors Inngest's signature
 const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
 const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
 
@@ -46,8 +45,8 @@ let instanceId: string;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleCodingStore(tx);
-  sandboxStore = new DrizzleSandboxStore(tx);
+  store = new DrizzleCodingStore();
+  sandboxStore = new DrizzleSandboxStore();
 
   baseDir = mkdtempSync(join(tmpdir(), "cogmo-flow-test-"));
   repoPath = join(baseDir, "repo");
@@ -62,7 +61,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await truncateAll(db);
-  instanceId = (await sandboxStore.insertInstance({ host: "test", pid: 1 })).id;
+  instanceId = (await tx((trx) => sandboxStore.insertInstance(trx, { host: "test", pid: 1 }))).id;
 });
 
 afterAll(async () => {
@@ -138,25 +137,27 @@ function fakeSandbox(): {
     ensureImagePresent: vi.fn(async () => {}),
     create: vi.fn(async (spec) => {
       createCalls.push(spec.taskId);
-      const row = await sandboxStore.insertContainer({
-        dockerId: `docker-${Math.random().toString(36).slice(2)}`,
-        parentId: null,
-        rootTaskId: spec.taskId,
-        depth: 0,
-        image: spec.image,
-        runtime: "runc",
-        labels: {
-          "cogmo.managed": "true",
-          "cogmo.instance": instanceId,
-          "cogmo.root_task": spec.taskId,
-          "cogmo.parent": "",
-          "cogmo.depth": "0",
-        },
-        resourceLimits: spec.resourceLimits,
-        ttlExpiresAt: spec.expiresAt,
-        instanceId,
-      });
-      await sandboxStore.updateContainerStatus({ id: row.id, status: "running" });
+      const row = await tx((trx) =>
+        sandboxStore.insertContainer(trx, {
+          dockerId: `docker-${Math.random().toString(36).slice(2)}`,
+          parentId: null,
+          rootTaskId: spec.taskId,
+          depth: 0,
+          image: spec.image,
+          runtime: "runc",
+          labels: {
+            "cogmo.managed": "true",
+            "cogmo.instance": instanceId,
+            "cogmo.root_task": spec.taskId,
+            "cogmo.parent": "",
+            "cogmo.depth": "0",
+          },
+          resourceLimits: spec.resourceLimits,
+          ttlExpiresAt: spec.expiresAt,
+          instanceId,
+        }),
+      );
+      await tx((trx) => sandboxStore.updateContainerStatus(trx, { id: row.id, status: "running" }));
       liveContainerDockerIds.add(row.dockerId);
       lastSessionState = {
         type: "local-docker",
@@ -190,18 +191,20 @@ function fakeSandbox(): {
 describe("coding flow — plan → approve → execute → pending_verify", () => {
   it("end-to-end: delegate submits, plan posts, approve fires execute, status reaches pending_verify", async () => {
     // ── Setup ──────────────────────────────────────────────────────────
-    const _repo = await store.insertRepo({
-      name: "cogmo",
-      localPath: repoPath,
-      defaultBranch: "main",
-      remoteUrl: "git@github.com:user/cogmo.git",
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 100_000,
-      taskWallTimeSeconds: 600,
-      maxConcurrentTasks: 1,
-    });
+    const _repo = await tx((trx) =>
+      store.insertRepo(trx, {
+        name: "cogmo",
+        localPath: repoPath,
+        defaultBranch: "main",
+        remoteUrl: "git@github.com:user/cogmo.git",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 600,
+        maxConcurrentTasks: 1,
+      }),
+    );
 
     const conversationId = "019d0000-0000-7000-8000-000000000001";
     const ownerUserId = "user-owner";
@@ -217,8 +220,8 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     const inngestSend = vi.fn().mockResolvedValue({ ids: ["evt-start"] });
     const service = createCodingService(
       {
+        runInTx: tx,
         codingStore: store,
-        // biome-ignore lint/suspicious/noExplicitAny: minimal Inngest stub
         inngest: { send: inngestSend } as any,
         sandboxAvailable: true,
       },
@@ -276,6 +279,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     const planResult = await runCodingTask({
       taskId,
       deps: {
+        runInTx: tx,
         store,
         sandbox,
         backend,
@@ -291,7 +295,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     expect(planResult.status).toBe("awaiting_approval");
     expect(planResult.plan).toBe("## Plan\n1. Edit foo.ts\n");
 
-    const afterPlan = await store.getTask(taskId);
+    const afterPlan = await tx((trx) => store.getTask(trx, taskId));
     expect(afterPlan?.status).toBe("awaiting_approval");
     expect(afterPlan?.sessionId).toBe("sess-from-plan");
     expect(afterPlan?.plan).toBe("## Plan\n1. Edit foo.ts\n");
@@ -308,6 +312,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       channelId: "ch-1",
       defaultUserId: ownerUserId,
       defaultProfileId: "profile-1",
+      runInTx: tx,
       transportStore: mockTransportStore({
         resolveUser: vi.fn().mockResolvedValue({ userId: ownerUserId }),
       }),
@@ -320,11 +325,8 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         }),
       }),
       codingStore: store,
-      // biome-ignore lint/suspicious/noExplicitAny: minimal Inngest stub
       inngest: { send: transportInngestSend } as any,
-      // biome-ignore lint/suspicious/noExplicitAny: not exercised
       inboundArrived: { create: vi.fn() } as any,
-      // biome-ignore lint/suspicious/noExplicitAny: not exercised
       attachments: {} as any,
       idleTimeoutMs: 0,
     });
@@ -338,7 +340,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       }),
     );
 
-    const afterApprove = await store.getTask(taskId);
+    const afterApprove = await tx((trx) => store.getTask(trx, taskId));
     expect(afterApprove?.planApprovedAt).toBeInstanceOf(Date);
     expect(afterApprove?.status).toBe("awaiting_approval"); // unchanged until execute starts
 
@@ -368,6 +370,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     const executeResult = await runCodingExecute({
       taskId,
       deps: {
+        runInTx: tx,
         store,
         sandbox,
         backend,
@@ -378,14 +381,13 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         openExecuteStream: async () => executeStream,
       },
       stepRun,
-      // biome-ignore lint/suspicious/noExplicitAny: test shim — never awaited
       stepWaitForEvent: (async () => null) as any,
       inngest: { send: vi.fn().mockResolvedValue(undefined) },
     });
 
     expect(executeResult.status).toBe("pending_verify");
 
-    const afterExecute = await store.getTask(taskId);
+    const afterExecute = await tx((trx) => store.getTask(trx, taskId));
     expect(afterExecute?.status).toBe("pending_verify");
     expect(afterExecute?.resourceUsage).toEqual({
       tokens_input: 250,
@@ -420,35 +422,40 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
   });
 
   it("approve from a different user is rejected; task stays awaiting_approval, no event emitted", async () => {
-    const repo = await store.insertRepo({
-      name: "cogmo",
-      localPath: repoPath,
-      defaultBranch: "main",
-      remoteUrl: "git@github.com:user/cogmo.git",
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 100_000,
-      taskWallTimeSeconds: 600,
-      maxConcurrentTasks: 1,
-    });
+    const repo = await tx((trx) =>
+      store.insertRepo(trx, {
+        name: "cogmo",
+        localPath: repoPath,
+        defaultBranch: "main",
+        remoteUrl: "git@github.com:user/cogmo.git",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 600,
+        maxConcurrentTasks: 1,
+      }),
+    );
 
     const conversationId = "019d0000-0000-7000-8000-000000000002";
-    const task = await store.insertTask({
-      repoId: repo.id,
-      conversationId,
-      goal: "g",
-      triggerSource: "user",
-      backend: "claude",
-      allowPrivilegedRunc: false,
-    });
-    await store.updateTaskStatus({ id: task.id, status: "awaiting_approval" });
+    const task = await tx((trx) =>
+      store.insertTask(trx, {
+        repoId: repo.id,
+        conversationId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      }),
+    );
+    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "awaiting_approval" }));
 
     const transportInngestSend = vi.fn();
     const transport = createTransport({
       channelId: "ch-1",
       defaultUserId: "owner",
       defaultProfileId: "p",
+      runInTx: tx,
       transportStore: mockTransportStore({
         resolveUser: vi.fn().mockResolvedValue({ userId: "different-user" }),
       }),
@@ -461,11 +468,8 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         }),
       }),
       codingStore: store,
-      // biome-ignore lint/suspicious/noExplicitAny: minimal Inngest stub
       inngest: { send: transportInngestSend } as any,
-      // biome-ignore lint/suspicious/noExplicitAny: not exercised
       inboundArrived: { create: vi.fn() } as any,
-      // biome-ignore lint/suspicious/noExplicitAny: not exercised
       attachments: {} as any,
       idleTimeoutMs: 0,
     });
@@ -474,7 +478,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
     expect(transportInngestSend).not.toHaveBeenCalled();
 
-    const reloaded = await store.getTask(task.id);
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.planApprovedAt).toBeNull();
     expect(reloaded?.status).toBe("awaiting_approval");
   });

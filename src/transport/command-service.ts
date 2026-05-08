@@ -1,3 +1,4 @@
+import type { Transactor } from "../db/index.js";
 import type { TransportStore } from "./store/index.js";
 
 /**
@@ -10,13 +11,18 @@ export interface CommandService {
   resetConversation(channelId: string, platformAddress: string): Promise<void>;
 }
 
-export function createCommandService(transportStore: TransportStore): CommandService {
+export function createCommandService(
+  runInTx: Transactor,
+  transportStore: TransportStore,
+): CommandService {
   return {
     async resetConversation(channelId, platformAddress) {
-      const session = await transportStore.resolveSession(channelId, platformAddress);
-      if (session) {
-        await transportStore.closeSession(session.id);
-      }
+      await runInTx(async (tx) => {
+        const session = await transportStore.resolveSession(tx, channelId, platformAddress);
+        if (session) {
+          await transportStore.closeSession(tx, session.id);
+        }
+      });
     },
   };
 }

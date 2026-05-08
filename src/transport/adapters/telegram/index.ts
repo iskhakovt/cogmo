@@ -46,6 +46,7 @@ import {
   handleResumeCallback,
   handleSessions,
   handleSkillsApprovalCallback,
+  handleStatus,
   handleVoice,
   type TelegramCommandContext,
 } from "./commands.js";
@@ -424,6 +425,9 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         "",
         "Voice:",
         "  /voice [auto|always|off|clear] — set per-conversation voice mode",
+        "",
+        "Status:",
+        "  /status — show conversation, profile, and context stats",
       ].join("\n"),
     );
   });
@@ -442,6 +446,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("mcp", (ctx) => handleMcp(transport, toCmdCtx(ctx)));
   bot.command("repair", (ctx) => handleRepair(transport, toCmdCtx(ctx)));
   bot.command("voice", (ctx) => handleVoice(transport, toCmdCtx(ctx)));
+  bot.command("status", (ctx) => handleStatus(transport, toCmdCtx(ctx)));
 
   // Mid-dialog abort for /profile new|edit and /repo add flows. Evaluate
   // both branches (no `||` short-circuit) so a hypothetical "both dialogs
@@ -747,6 +752,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       { command: "mcp", description: "Manage MCP integrations" },
       { command: "repair", description: "Clear errored status on a conversation" },
       { command: "voice", description: "Set voice mode (auto / always / off)" },
+      { command: "status", description: "Show conversation, profile, and context stats" },
       { command: "cancel", description: "Abort the current interactive dialog" },
       { command: "start", description: "Show help" },
     ])
@@ -763,7 +769,8 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [];
   if (deps.codingProgress) {
-    const { inngest, codingStore, transportStore, streamingRegistry } = deps.codingProgress;
+    const { inngest, codingStore, runInTx, transportStore, streamingRegistry } =
+      deps.codingProgress;
     const channelId = deps.channelId;
     functions.push(
       inngest.createFunction(
@@ -775,11 +782,12 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         },
         async ({ event }) => {
           const taskId = event.data.taskId;
-          const task = await codingStore.getTask(taskId);
-          if (!task?.conversationId) return { skipped: "no conversation" };
+          const task = await runInTx((tx) => codingStore.getTask(tx, taskId));
+          const taskConversationId = task?.conversationId;
+          if (!taskConversationId) return { skipped: "no conversation" };
 
-          const sessions = await transportStore.getActiveSessionsForConversation(
-            task.conversationId,
+          const sessions = await runInTx((tx) =>
+            transportStore.getActiveSessionsForConversation(tx, taskConversationId),
           );
           const tgSession = sessions.find((s) => s.channelId === channelId);
           if (!tgSession) return { skipped: "no telegram session for this conversation" };
@@ -816,11 +824,12 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         },
         async ({ event }) => {
           const { taskId, requestId, tool } = event.data;
-          const task = await codingStore.getTask(taskId);
-          if (!task?.conversationId) return { skipped: "no conversation" };
+          const task = await runInTx((tx) => codingStore.getTask(tx, taskId));
+          const taskConversationId = task?.conversationId;
+          if (!taskConversationId) return { skipped: "no conversation" };
 
-          const sessions = await transportStore.getActiveSessionsForConversation(
-            task.conversationId,
+          const sessions = await runInTx((tx) =>
+            transportStore.getActiveSessionsForConversation(tx, taskConversationId),
           );
           const tgSession = sessions.find((s) => s.channelId === channelId);
           if (!tgSession) return { skipped: "no telegram session for this conversation" };
@@ -848,7 +857,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   // already returned with status=pending_approval; the keyboard tap routes
   // straight to transport.skills.approveDeploy/denyDeploy.
   if (deps.skillsApproval) {
-    const { inngest, skillStore, transportStore } = deps.skillsApproval;
+    const { inngest, skillStore, runInTx, transportStore } = deps.skillsApproval;
     const channelId = deps.channelId;
     functions.push(
       inngest.createFunction(
@@ -861,6 +870,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
           postSkillsApprovalKeyboard({
             event: event.data,
             channelId,
+            runInTx,
             skillStore,
             transportStore,
             sendMessage: (chatId, text, opts) => bot.api.sendMessage(chatId, text, opts),

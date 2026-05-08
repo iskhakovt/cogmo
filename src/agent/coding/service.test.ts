@@ -12,7 +12,7 @@ let store: DrizzleCodingStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleCodingStore(tx);
+  store = new DrizzleCodingStore();
 });
 
 afterEach(async () => {
@@ -30,18 +30,20 @@ function fakeInngest(): Pick<Inngest, "send"> & { send: ReturnType<typeof vi.fn>
 }
 
 async function seedRepo(name = "cogmo", maxConcurrentTasks = 1): Promise<string> {
-  const row = await store.insertRepo({
-    name,
-    localPath: `/var/lib/cogmo/repos/${name}`,
-    defaultBranch: "main",
-    remoteUrl: `git@github.com:user/${name}.git`,
-    devcontainer: null,
-    allowedBackends: ["claude"],
-    verifyCommand: "pnpm test",
-    taskTokenBudget: 200_000,
-    taskWallTimeSeconds: 1800,
-    maxConcurrentTasks,
-  });
+  const row = await tx((trx) =>
+    store.insertRepo(trx, {
+      name,
+      localPath: `/var/lib/cogmo/repos/${name}`,
+      defaultBranch: "main",
+      remoteUrl: `git@github.com:user/${name}.git`,
+      devcontainer: null,
+      allowedBackends: ["claude"],
+      verifyCommand: "pnpm test",
+      taskTokenBudget: 200_000,
+      taskWallTimeSeconds: 1800,
+      maxConcurrentTasks,
+    }),
+  );
   return row.id;
 }
 
@@ -50,7 +52,12 @@ describe("createCodingService", () => {
     const repoId = await seedRepo("cogmo");
     const inngest = fakeInngest();
     const service = createCodingService(
-      { codingStore: store, inngest: inngest as unknown as Inngest, sandboxAvailable: true },
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: true,
+      },
       conversationId,
     );
 
@@ -60,7 +67,7 @@ describe("createCodingService", () => {
     if (result.status !== "queued") throw new Error("type guard");
     expect(result.taskId).toMatch(/^[0-9a-f-]{36}$/);
 
-    const inserted = await store.getTask(result.taskId);
+    const inserted = await tx((trx) => store.getTask(trx, result.taskId));
     expect(inserted?.repoId).toBe(repoId);
     expect(inserted?.conversationId).toBe(conversationId);
     expect(inserted?.status).toBe("queued");
@@ -76,7 +83,12 @@ describe("createCodingService", () => {
     await seedRepo("cogmo");
     const inngest = fakeInngest();
     const service = createCodingService(
-      { codingStore: store, inngest: inngest as unknown as Inngest, sandboxAvailable: false },
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: false,
+      },
       conversationId,
     );
 
@@ -89,7 +101,12 @@ describe("createCodingService", () => {
   it("throws when the repo is not registered", async () => {
     const inngest = fakeInngest();
     const service = createCodingService(
-      { codingStore: store, inngest: inngest as unknown as Inngest, sandboxAvailable: true },
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: true,
+      },
       conversationId,
     );
 
@@ -102,17 +119,24 @@ describe("createCodingService", () => {
   it("rejects when the repo has reached its concurrency cap", async () => {
     const repoId = await seedRepo("cogmo", 1);
     // Seed one already-active task via the store so countActiveTasksForRepo returns 1.
-    await store.insertTask({
-      repoId,
-      goal: "g",
-      triggerSource: "user",
-      backend: "claude",
-      allowPrivilegedRunc: false,
-    });
+    await tx((trx) =>
+      store.insertTask(trx, {
+        repoId,
+        goal: "g",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      }),
+    );
 
     const inngest = fakeInngest();
     const service = createCodingService(
-      { codingStore: store, inngest: inngest as unknown as Inngest, sandboxAvailable: true },
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: true,
+      },
       conversationId,
     );
 
@@ -131,7 +155,12 @@ describe("createCodingService", () => {
     const sendErr = new Error("inngest gateway unreachable");
     const inngest = { send: vi.fn().mockRejectedValue(sendErr) };
     const service = createCodingService(
-      { codingStore: store, inngest: inngest as unknown as Inngest, sandboxAvailable: true },
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: true,
+      },
       conversationId,
     );
 
@@ -142,7 +171,7 @@ describe("createCodingService", () => {
     // Without the cleanup, the task would sit in `queued` forever and
     // count against maxConcurrentTasks. Verify the row was marked failed
     // so the admission slot frees up.
-    const tasks = await store.listTasksForConversation(conversationId);
+    const tasks = await tx((trx) => store.listTasksForConversation(trx, conversationId));
     expect(tasks).toHaveLength(1);
     expect(tasks[0]?.status).toBe("failed");
     expect(tasks[0]?.failureReason).toMatch(/inngest gateway unreachable/);
@@ -150,17 +179,24 @@ describe("createCodingService", () => {
 
   it("admits a second task when the cap allows it", async () => {
     const repoId = await seedRepo("cogmo", 2);
-    await store.insertTask({
-      repoId,
-      goal: "first",
-      triggerSource: "user",
-      backend: "claude",
-      allowPrivilegedRunc: false,
-    });
+    await tx((trx) =>
+      store.insertTask(trx, {
+        repoId,
+        goal: "first",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      }),
+    );
 
     const inngest = fakeInngest();
     const service = createCodingService(
-      { codingStore: store, inngest: inngest as unknown as Inngest, sandboxAvailable: true },
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: true,
+      },
       conversationId,
     );
 

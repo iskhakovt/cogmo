@@ -1,5 +1,6 @@
 import { Ajv, type ValidateFunction } from "ajv";
 import type { Service } from "../agent/service.js";
+import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SandboxClient } from "../sandbox/index.js";
@@ -154,6 +155,7 @@ export interface RegisterForTestsParams {
 
 export interface SkillRunnerOptions {
   store: SkillStore;
+  runInTx: Transactor;
   secretsStore: SecretsStore;
   memory: MemoryProvider;
   /** File workspace passed to ctx.files.* — same surface as the agent's file tools. */
@@ -200,6 +202,7 @@ interface SkillSourceCacheEntry {
 
 export class SkillRunnerImpl implements SkillRunner {
   #store: SkillStore;
+  #runInTx: Transactor;
   #secretsStore: SecretsStore;
   #memory: MemoryProvider;
   #files: Service["files"];
@@ -220,6 +223,7 @@ export class SkillRunnerImpl implements SkillRunner {
 
   private constructor(opts: SkillRunnerOptions) {
     this.#store = opts.store;
+    this.#runInTx = opts.runInTx;
     this.#secretsStore = opts.secretsStore;
     this.#memory = opts.memory;
     this.#files = opts.files;
@@ -319,21 +323,23 @@ export class SkillRunnerImpl implements SkillRunner {
 
     const classifierLog = classifyManifest(manifest);
 
-    const result = await this.#store.executeRegister({
-      name: manifest.name,
-      tier: manifest.tier,
-      riskTier: classifierLog.risk_tier,
-      effects: manifest.effects,
-      schedule: manifest.schedule ?? null,
-      branchTipSha: branchSha,
-      inputs: manifest.inputs,
-      outputs: manifest.outputs ?? null,
-      classifierLog,
-      applyFilesystem: async () => {
-        await updateRef(repoPath, "refs/heads/main", branchSha, mainSha ?? ZERO_SHA);
-        await deleteRef(repoPath, `refs/heads/${opts.branch}`);
-      },
-    });
+    const result = await this.#runInTx((tx) =>
+      this.#store.executeRegister(tx, {
+        name: manifest.name,
+        tier: manifest.tier,
+        riskTier: classifierLog.risk_tier,
+        effects: manifest.effects,
+        schedule: manifest.schedule ?? null,
+        branchTipSha: branchSha,
+        inputs: manifest.inputs,
+        outputs: manifest.outputs ?? null,
+        classifierLog,
+        applyFilesystem: async () => {
+          await updateRef(repoPath, "refs/heads/main", branchSha, mainSha ?? ZERO_SHA);
+          await deleteRef(repoPath, `refs/heads/${opts.branch}`);
+        },
+      }),
+    );
 
     return this.#registerResultToRpc({
       name: manifest.name,
@@ -348,7 +354,7 @@ export class SkillRunnerImpl implements SkillRunner {
   async approveDeploy(opts: { pendingId: string; approvedBy?: string }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("approveDeploy");
 
-    const deploy = await this.#store.getDeployById(opts.pendingId);
+    const deploy = await this.#runInTx((tx) => this.#store.getDeployById(tx, opts.pendingId));
     if (!deploy) {
       return rejectedResult("", `deploy_not_found: ${opts.pendingId}`);
     }
@@ -356,7 +362,7 @@ export class SkillRunnerImpl implements SkillRunner {
       return rejectedResult(deploy.gitSha, `deploy_not_pending: status is '${deploy.status}'`);
     }
 
-    const skill = await this.#store.getSkillById(deploy.skillId);
+    const skill = await this.#runInTx((tx) => this.#store.getSkillById(tx, deploy.skillId));
     if (!skill) {
       return rejectedResult(deploy.gitSha, "skill_not_found");
     }
@@ -416,22 +422,24 @@ export class SkillRunnerImpl implements SkillRunner {
       };
     }
 
-    const result = await this.#store.executeApprove({
-      pendingId: opts.pendingId,
-      approvedBy: opts.approvedBy ?? null,
-      tier: manifest.tier,
-      // Preserve the deploy row's classified tier (which is what the user
-      // approved). Re-classifying here could promote an `approve` deploy to a
-      // different tier mid-flow, which would be confusing.
-      riskTier: deploy.riskTier,
-      effects: manifest.effects,
-      schedule: manifest.schedule ?? null,
-      inputs: manifest.inputs,
-      outputs: manifest.outputs ?? null,
-      applyFilesystem: async () => {
-        await updateRef(repoPath, "refs/heads/main", deploy.gitSha, mainSha ?? ZERO_SHA);
-      },
-    });
+    const result = await this.#runInTx((tx) =>
+      this.#store.executeApprove(tx, {
+        pendingId: opts.pendingId,
+        approvedBy: opts.approvedBy ?? null,
+        tier: manifest.tier,
+        // Preserve the deploy row's classified tier (which is what the user
+        // approved). Re-classifying here could promote an `approve` deploy to a
+        // different tier mid-flow, which would be confusing.
+        riskTier: deploy.riskTier,
+        effects: manifest.effects,
+        schedule: manifest.schedule ?? null,
+        inputs: manifest.inputs,
+        outputs: manifest.outputs ?? null,
+        applyFilesystem: async () => {
+          await updateRef(repoPath, "refs/heads/main", deploy.gitSha, mainSha ?? ZERO_SHA);
+        },
+      }),
+    );
 
     if (result.kind === "live") {
       // Warm the source cache with the just-approved manifest so the next
@@ -459,10 +467,12 @@ export class SkillRunnerImpl implements SkillRunner {
     // log line for now; promote to a column once a real consumer needs to
     // query it.
     log.info({ pendingId: opts.pendingId, reason: opts.reason ?? null }, "denying skill deploy");
-    await this.#store.denyPendingDeploy({
-      pendingId: opts.pendingId,
-      reason: opts.reason ?? null,
-    });
+    await this.#runInTx((tx) =>
+      this.#store.denyPendingDeploy(tx, {
+        pendingId: opts.pendingId,
+        reason: opts.reason ?? null,
+      }),
+    );
   }
 
   async rollback(opts: { name: string; toGitSha: string }): Promise<RegisterResult> {
@@ -531,23 +541,25 @@ export class SkillRunnerImpl implements SkillRunner {
 
     const mainSha = await getMainSha(repoPath);
 
-    const result = await this.#store.executeRollback({
-      name: opts.name,
-      toGitSha: targetSha,
-      tier: manifest.tier,
-      riskTier: classifierLog.risk_tier,
-      effects: manifest.effects,
-      schedule: manifest.schedule ?? null,
-      inputs: manifest.inputs,
-      outputs: manifest.outputs ?? null,
-      classifierLog,
-      applyFilesystem: async () => {
-        // Rollback rewrites main backward — pre-receive hook would normally
-        // reject this, but `update-ref` bypasses hooks by design (see
-        // bootstrapSkillsRepo). Pass `mainSha` as expectedOldSha for CAS.
-        await updateRef(repoPath, "refs/heads/main", targetSha, mainSha ?? ZERO_SHA);
-      },
-    });
+    const result = await this.#runInTx((tx) =>
+      this.#store.executeRollback(tx, {
+        name: opts.name,
+        toGitSha: targetSha,
+        tier: manifest.tier,
+        riskTier: classifierLog.risk_tier,
+        effects: manifest.effects,
+        schedule: manifest.schedule ?? null,
+        inputs: manifest.inputs,
+        outputs: manifest.outputs ?? null,
+        classifierLog,
+        applyFilesystem: async () => {
+          // Rollback rewrites main backward — pre-receive hook would normally
+          // reject this, but `update-ref` bypasses hooks by design (see
+          // bootstrapSkillsRepo). Pass `mainSha` as expectedOldSha for CAS.
+          await updateRef(repoPath, "refs/heads/main", targetSha, mainSha ?? ZERO_SHA);
+        },
+      }),
+    );
 
     // Warm the source cache with the rolled-back manifest+body so the next
     // invoke or listToolDefs read doesn't re-fetch from git.
@@ -580,7 +592,7 @@ export class SkillRunnerImpl implements SkillRunner {
   }
 
   async deregister(opts: { name: string }): Promise<void> {
-    const skill = await this.#store.getSkillByName(opts.name);
+    const skill = await this.#runInTx((tx) => this.#store.getSkillByName(tx, opts.name));
     if (!skill) {
       throw new Error(`skill not found: ${opts.name}`);
     }
@@ -588,13 +600,13 @@ export class SkillRunnerImpl implements SkillRunner {
     // trail in skill_deploys and skill_runs. A future hard-delete RPC could
     // exist, but at personal scale soft-disable covers the use case (revoke
     // an unsafe skill, retain the history).
-    await this.#store.setSkillDisabled({ id: skill.id, disabled: true });
+    await this.#runInTx((tx) => this.#store.setSkillDisabled(tx, { id: skill.id, disabled: true }));
   }
 
   // --- Read paths ---
 
   async list(): Promise<readonly SkillSummary[]> {
-    const rows = await this.#store.listEnabledSkills();
+    const rows = await this.#runInTx((tx) => this.#store.listEnabledSkills(tx));
     return rows.map((r) => ({
       name: r.name,
       tier: r.tier,
@@ -605,7 +617,7 @@ export class SkillRunnerImpl implements SkillRunner {
   }
 
   async listToolDefs(): Promise<readonly SkillToolDef[]> {
-    const rows = await this.#store.listEnabledSkills();
+    const rows = await this.#runInTx((tx) => this.#store.listEnabledSkills(tx));
     const defs: SkillToolDef[] = [];
     for (const row of rows) {
       try {
@@ -637,7 +649,7 @@ export class SkillRunnerImpl implements SkillRunner {
     inputs: unknown;
     trigger?: SkillRunTrigger;
   }): Promise<SkillRunResult> {
-    const skill = await this.#store.getSkillByName(opts.name);
+    const skill = await this.#runInTx((tx) => this.#store.getSkillByName(tx, opts.name));
     if (!skill) {
       throw new Error(`skill not found: ${opts.name}`);
     }
@@ -663,11 +675,13 @@ export class SkillRunnerImpl implements SkillRunner {
       );
     }
 
-    const run = await this.#store.insertRun({
-      skillId: skill.id,
-      trigger: opts.trigger ?? "manual",
-      inputs: opts.inputs,
-    });
+    const run = await this.#runInTx((tx) =>
+      this.#store.insertRun(tx, {
+        skillId: skill.id,
+        trigger: opts.trigger ?? "manual",
+        inputs: opts.inputs,
+      }),
+    );
 
     log.info(
       { runId: run.id, skillName: opts.name, tier: skill.tier, trigger: opts.trigger ?? "manual" },
@@ -680,9 +694,10 @@ export class SkillRunnerImpl implements SkillRunner {
       user: this.#user,
       memoryBankId: this.#memoryBankId,
       secretsStore: this.#secretsStore,
+      runInTx: this.#runInTx,
       memory: this.#memory,
       files: this.#files,
-      recordContextCall: (call) => this.#store.recordContextCall(call),
+      recordContextCall: (call) => this.#runInTx((tx) => this.#store.recordContextCall(tx, call)),
     });
 
     const wallClockS = cached.manifest.resources?.wall_clock_s;
@@ -737,31 +752,37 @@ export class SkillRunnerImpl implements SkillRunner {
     if (result.ok) {
       const outputsValidationErr = this.#validateOutput(cached, result.output, opts.name);
       if (outputsValidationErr !== null) {
-        await this.#store.updateRunResult({
-          id: run.id,
-          status: "error",
-          output: null,
-          error: outputsValidationErr,
-          finishedAt,
-        });
+        await this.#runInTx((tx) =>
+          this.#store.updateRunResult(tx, {
+            id: run.id,
+            status: "error",
+            output: null,
+            error: outputsValidationErr,
+            finishedAt,
+          }),
+        );
         return { runId: run.id, status: "error", error: outputsValidationErr };
       }
-      await this.#store.updateRunResult({
-        id: run.id,
-        status: "success",
-        output: result.output ?? null,
-        error: null,
-        finishedAt,
-      });
+      await this.#runInTx((tx) =>
+        this.#store.updateRunResult(tx, {
+          id: run.id,
+          status: "success",
+          output: result.output ?? null,
+          error: null,
+          finishedAt,
+        }),
+      );
       return { runId: run.id, status: "success", output: result.output };
     }
-    await this.#store.updateRunResult({
-      id: run.id,
-      status: "error",
-      output: null,
-      error: result.error ?? "unknown_error",
-      finishedAt,
-    });
+    await this.#runInTx((tx) =>
+      this.#store.updateRunResult(tx, {
+        id: run.id,
+        status: "error",
+        output: null,
+        error: result.error ?? "unknown_error",
+        finishedAt,
+      }),
+    );
     return {
       runId: run.id,
       status: "error",
@@ -801,7 +822,7 @@ export class SkillRunnerImpl implements SkillRunner {
       outputs: manifest.outputs ?? null,
     };
 
-    const row = await this.#store.insertSkill(insertParams);
+    const row = await this.#runInTx((tx) => this.#store.insertSkill(tx, insertParams));
     // Test-only fixed classifier log — bypasses the real classifier so tests
     // that don't care about risk-tier promotion can seed a skill cleanly.
     const testClassifierLog: ClassifierLog = {
@@ -812,14 +833,16 @@ export class SkillRunnerImpl implements SkillRunner {
       declared_secrets: [],
       validation_errors: [],
     };
-    await this.#store.insertDeploy({
-      skillId: row.id,
-      gitSha,
-      priorGitSha: null,
-      riskTier: "auto",
-      status: "live",
-      classifierLog: testClassifierLog,
-    });
+    await this.#runInTx((tx) =>
+      this.#store.insertDeploy(tx, {
+        skillId: row.id,
+        gitSha,
+        priorGitSha: null,
+        riskTier: "auto",
+        status: "live",
+        classifierLog: testClassifierLog,
+      }),
+    );
 
     const inputsValidator = this.#compileInputsValidator(manifest, params.name);
     this.#sourceCache.set(cacheKey(manifest.name, gitSha), {

@@ -22,6 +22,7 @@ import type { RepoDialogs } from "./repo-dialog.js";
 import {
   formatScope,
   type InlineButton,
+  renderConversationStatus,
   renderModelList,
   renderProfileList,
   renderSessionsList,
@@ -569,6 +570,28 @@ export async function handleVoice(
   }
   const label = mode === null ? "cleared (following profile default)" : mode;
   await ctx.reply(`Voice mode: ${label}`);
+}
+
+/**
+ * `/status` — show the active conversation's profile, last-turn token use,
+ * steering rules, and MCP fan-out at a glance. Read-only, no LLM call.
+ */
+export async function handleStatus(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const handle = String(ctx.from.id);
+  const addr = String(ctx.chat.id);
+  const res = await transport.conversations.summary(handle, addr);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  if (!res.value) {
+    await ctx.reply("No active conversation yet — send a message first.");
+    return;
+  }
+  await ctx.reply(renderConversationStatus(res.value));
 }
 
 export async function handleNew(transport: Transport, ctx: TelegramCommandContext): Promise<void> {

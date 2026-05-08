@@ -99,6 +99,23 @@ export class HindsightMemoryProvider implements MemoryProvider {
     this.#maxQueryTokens = options?.maxQueryTokens ?? DEFAULT_MAX_QUERY_TOKENS;
   }
 
+  /**
+   * Read the running server's reported version (`GET /version` →
+   * `api_version`). Used at boot to enforce the `cogmo.hindsightCompat`
+   * range from package.json. Bypasses `withRetry` — the boot-time check
+   * wants a fast yes/no, and a flaky-Hindsight-at-boot signal is more
+   * useful than a 10-second backoff that hides the network problem.
+   */
+  async getServerVersion(): Promise<string> {
+    const res = await sdk.getVersion({ client: this.#sdkClient });
+    if (res.error !== undefined || !res.data) {
+      const status = res.response?.status ?? "?";
+      const detail = res.error !== undefined ? JSON.stringify(res.error) : "no body";
+      throw new Error(`hindsight /version failed: ${status} ${detail}`);
+    }
+    return res.data.api_version;
+  }
+
   async retain(bankId: string, content: string, options?: RetainOptions): Promise<void> {
     // async: true returns immediately; Hindsight processes the 3-phase pipeline
     // (chunk → extract → consolidate) in the background. Memories become
@@ -129,16 +146,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
   }
 
   async retainBatch(bankId: string, items: RetainBatchItem[]): Promise<void> {
-    // Single multi-item batch with async: false. Hindsight #1375
-    // silently drops everything past the first item under async: true
-    // with multi-item batches; per-item document_id doesn't rescue
-    // the async path. Synchronous mode preserves every item.
-    // Per-item document_id keeps each item distinguishable in the
-    // document graph and makes the eventual flip back to async: true
-    // (when #1375 closes) trivial. Cost: response latency scales with
-    // N (extraction + embedding + consolidation, sequentially), but
-    // retainBatch only runs inside an Inngest `step.run` on
-    // `conversation/idle` — the user doesn't wait.
+    // Per-item document_id keeps each item distinguishable in the document graph.
     const mapped: MemoryItemInput[] = items.map((item) => ({
       content: item.content,
       document_id: randomUUID(),
@@ -149,7 +157,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
         observation_scopes: item.observationScopes,
       }),
     }));
-    await withRetry(() => this.#client.retainBatch(bankId, mapped, { async: false }), {
+    await withRetry(() => this.#client.retainBatch(bankId, mapped, { async: true }), {
       context: `hindsight.retainBatch[${bankId}]`,
     });
   }

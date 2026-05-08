@@ -50,13 +50,13 @@ let instanceId: string;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleCodingStore(tx);
-  sandboxStore = new DrizzleSandboxStore(tx);
+  store = new DrizzleCodingStore();
+  sandboxStore = new DrizzleSandboxStore();
   baseDir = mkdtempSync(join(tmpdir(), "cogmo-tool-gate-test-"));
 });
 
 beforeEach(async () => {
-  const inst = await sandboxStore.insertInstance({ host: "h", pid: 1 });
+  const inst = await tx((trx) => sandboxStore.insertInstance(trx, { host: "h", pid: 1 }));
   instanceId = inst.id;
 });
 
@@ -75,40 +75,47 @@ const RESOURCE_LIMITS: ResourceLimits = {
   pids: 64,
 };
 
-// biome-ignore lint/suspicious/noExplicitAny: test shim
 const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any;
 
 async function seedRepoAndTask(): Promise<{ repo: CodingRepoRow; task: CodingTaskRow }> {
-  const repo = await store.insertRepo({
-    name: `repo-${Math.random().toString(36).slice(2)}`,
-    localPath: `${baseDir}/repo`,
-    defaultBranch: "main",
-    remoteUrl: "git@example.com:x.git",
-    devcontainer: null,
-    allowedBackends: ["claude"],
-    verifyCommand: "true",
-    taskTokenBudget: 100_000,
-    taskWallTimeSeconds: 60,
-    maxConcurrentTasks: 1,
-  });
-  const task = await store.insertTask({
-    repoId: repo.id,
-    goal: "test",
-    triggerSource: "user",
-    backend: "claude",
-    allowPrivilegedRunc: false,
-  });
-  await store.setTaskSessionId(task.id, "sess-x");
-  await store.setTaskWorktreeAssignment(task.id, {
-    branch: "cogmo/x",
-    worktreePath: `${baseDir}/wt`,
-  });
-  await store.updateTaskStatus({
-    id: task.id,
-    status: "awaiting_approval",
-    planApprovedAt: new Date(),
-  });
-  const reloaded = (await store.getTask(task.id)) as CodingTaskRow;
+  const repo = await tx((trx) =>
+    store.insertRepo(trx, {
+      name: `repo-${Math.random().toString(36).slice(2)}`,
+      localPath: `${baseDir}/repo`,
+      defaultBranch: "main",
+      remoteUrl: "git@example.com:x.git",
+      devcontainer: null,
+      allowedBackends: ["claude"],
+      verifyCommand: "true",
+      taskTokenBudget: 100_000,
+      taskWallTimeSeconds: 60,
+      maxConcurrentTasks: 1,
+    }),
+  );
+  const task = await tx((trx) =>
+    store.insertTask(trx, {
+      repoId: repo.id,
+      goal: "test",
+      triggerSource: "user",
+      backend: "claude",
+      allowPrivilegedRunc: false,
+    }),
+  );
+  await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-x"));
+  await tx((trx) =>
+    store.setTaskWorktreeAssignment(trx, task.id, {
+      branch: "cogmo/x",
+      worktreePath: `${baseDir}/wt`,
+    }),
+  );
+  await tx((trx) =>
+    store.updateTaskStatus(trx, {
+      id: task.id,
+      status: "awaiting_approval",
+      planApprovedAt: new Date(),
+    }),
+  );
+  const reloaded = (await tx((trx) => store.getTask(trx, task.id))) as CodingTaskRow;
   return { repo, task: reloaded };
 }
 
@@ -194,6 +201,7 @@ function makeDeps(args: {
   backend: CodingBackend;
 }): CodingOrchestratorDeps {
   return {
+    runInTx: tx,
     store,
     sandbox: args.sandbox,
     backend: args.backend,
@@ -239,7 +247,7 @@ describe("tool gate wiring", () => {
       { requestId: "req_read_1", response: { behavior: "allow" } },
     ]);
     // Decision logged for audit (scope=once).
-    const log = await store.listToolDecisionsForTask(task.id);
+    const log = await tx((trx) => store.listToolDecisionsForTask(trx, task.id));
     expect(log).toHaveLength(1);
     expect(log[0]?.decision).toBe("allow");
     expect(log[0]?.scope).toBe("once");
@@ -249,13 +257,15 @@ describe("tool gate wiring", () => {
   it("replays a task-scoped decision-log entry without prompting", async () => {
     const { task } = await seedRepoAndTask();
     // User previously granted "Allow for task" on git push.
-    await store.insertToolDecision({
-      taskId: task.id,
-      tool: "Bash",
-      pattern: "Bash(git push *)",
-      decision: "allow",
-      scope: "task",
-    });
+    await tx((trx) =>
+      store.insertToolDecision(trx, {
+        taskId: task.id,
+        tool: "Bash",
+        pattern: "Bash(git push *)",
+        decision: "allow",
+        scope: "task",
+      }),
+    );
 
     const { sandbox } = fakeSandbox();
     const { backend, handle } = fakeBackend([
@@ -286,7 +296,7 @@ describe("tool gate wiring", () => {
     expect(stepWaitForEvent).not.toHaveBeenCalled();
     expect(handle.responses[0]?.response).toEqual({ behavior: "allow" });
     // Log unchanged (only the seeded task row remains).
-    const log = await store.listToolDecisionsForTask(task.id);
+    const log = await tx((trx) => store.listToolDecisionsForTask(trx, task.id));
     expect(log).toHaveLength(1);
     expect(log[0]?.scope).toBe("task");
   });
@@ -339,7 +349,7 @@ describe("tool gate wiring", () => {
     // CLI got allow.
     expect(handle.responses[0]?.response).toEqual({ behavior: "allow" });
     // Decision persisted with scope=task.
-    const log = await store.listToolDecisionsForTask(task.id);
+    const log = await tx((trx) => store.listToolDecisionsForTask(trx, task.id));
     expect(log).toHaveLength(1);
     expect(log[0]?.decision).toBe("allow");
     expect(log[0]?.scope).toBe("task");
@@ -379,7 +389,7 @@ describe("tool gate wiring", () => {
     });
 
     expect(handle.responses[0]?.response.behavior).toBe("deny");
-    const log = await store.listToolDecisionsForTask(task.id);
+    const log = await tx((trx) => store.listToolDecisionsForTask(trx, task.id));
     expect(log[0]?.decision).toBe("deny");
     expect(log[0]?.scope).toBe("once");
   });
@@ -408,7 +418,7 @@ describe("tool gate wiring", () => {
     });
 
     expect(handle.responses[0]?.response.behavior).toBe("deny");
-    const log = await store.listToolDecisionsForTask(task.id);
+    const log = await tx((trx) => store.listToolDecisionsForTask(trx, task.id));
     expect(log[0]?.decision).toBe("deny");
   });
 
@@ -439,7 +449,6 @@ describe("tool gate wiring", () => {
             throw new Error("synthetic DB failure");
           };
         }
-        // biome-ignore lint/suspicious/noExplicitAny: proxy passthrough
         const value = (target as any)[prop];
         // Bind methods to the underlying target so calls through the
         // Proxy resolve `#db` etc. against the real store, not the Proxy.
@@ -483,7 +492,6 @@ describe("tool gate wiring", () => {
             throw new Error("synthetic audit-log failure");
           };
         }
-        // biome-ignore lint/suspicious/noExplicitAny: proxy passthrough
         const value = (target as any)[prop];
         return typeof value === "function" ? value.bind(target) : value;
       },
@@ -550,7 +558,7 @@ describe("tool gate wiring", () => {
     expect(handle.responses[0]?.response.behavior).toBe("allow");
     expect(handle.responses[1]?.response.behavior).toBe("deny");
 
-    const log = await store.listToolDecisionsForTask(task.id);
+    const log = await tx((trx) => store.listToolDecisionsForTask(trx, task.id));
     expect(log.map((r) => `${r.pattern}/${r.decision}/${r.scope}`)).toEqual([
       "Bash(git push *)/allow/task",
       "Bash(npm publish *)/deny/once",

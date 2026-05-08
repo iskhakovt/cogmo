@@ -110,6 +110,12 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     setConversationProfile: vi.fn().mockResolvedValue(undefined),
     setAlias: vi.fn().mockResolvedValue(undefined),
     findConversationByAlias: vi.fn().mockResolvedValue(null),
+    getAliasForConversation: vi.fn().mockResolvedValue(null),
+    getConversationStats: vi.fn().mockResolvedValue({
+      createdAt: new Date("2026-04-16T12:00:00Z"),
+      messageCount: 0,
+      lastMessageAt: null,
+    }),
     listDistinctUserSelectableModels: vi.fn().mockResolvedValue([]),
     isModelUserSelectable: vi.fn().mockResolvedValue(true),
     ...overrides,
@@ -171,6 +177,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
     conversations: {
       list: vi.fn().mockResolvedValue(ok([])),
       getCurrent: vi.fn().mockResolvedValue(ok(null)),
+      summary: vi.fn().mockResolvedValue(ok(null)),
       setAlias: vi.fn().mockResolvedValue(ok(undefined)),
       setProfile: vi.fn().mockResolvedValue(ok(undefined)),
       repair: vi.fn().mockResolvedValue(ok({ wasErrored: false })),

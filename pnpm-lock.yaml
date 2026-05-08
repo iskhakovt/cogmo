@@ -138,6 +138,9 @@ importers:
       remeda:
         specifier: ^2.33.7
         version: 2.33.7
+      semver:
+        specifier: ^7.7.4
+        version: 7.7.4
       split2:
         specifier: 4.2.0
         version: 4.2.0
@@ -181,6 +184,9 @@ importers:
       '@types/picomatch':
         specifier: ^4.0.3
         version: 4.0.3
+      '@types/semver':
+        specifier: ^7.7.1
+        version: 7.7.1
       '@types/split2':
         specifier: 4.2.3
         version: 4.2.3
@@ -2298,6 +2304,9 @@ packages:
 
   '@types/picomatch@4.0.3':
     resolution: {integrity: sha512-iG0T6+nYJ9FAPmx9SsUlnwcq1ZVRuCXcVEvWnntoPlrOpwtSTKNDC9uVAxTsC3PUvJ+99n4RpAcNgBbHX3JSnQ==}
+
+  '@types/semver@7.7.1':
+    resolution: {integrity: sha512-FmgJfu+MOcQ370SD0ev7EI8TlCAfKYU+B4m5T3yXc1CiRN94g/SZPtsCkk506aUDtlMnFZvasDwHHUcZUEaYuA==}
 
   '@types/split2@4.2.3':
     resolution: {integrity: sha512-59OXIlfUsi2k++H6CHgUQKEb2HKRokUA39HY1i1dS8/AIcqVjtAAFdf8u+HxTWK/4FUHMJQlKSZ4I6irCBJ1Zw==}
@@ -6846,6 +6855,8 @@ snapshots:
       pg-types: 2.2.0
 
   '@types/picomatch@4.0.3': {}
+
+  '@types/semver@7.7.1': {}
 
   '@types/split2@4.2.3':
     dependencies:

@@ -16,6 +16,7 @@
  * to take effect.
  */
 import type { AgentStore } from "../agent/store/index.js";
+import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { FallbackLlmProvider } from "./fallback.js";
@@ -41,6 +42,7 @@ export class ProviderConfigError extends Error {
 }
 
 export interface DbResolverDeps {
+  runInTx: Transactor;
   agentStore: AgentStore;
   secretsStore: SecretsStore;
 }
@@ -72,7 +74,7 @@ export function createDbProviderResolver(deps: DbResolverDeps): LlmProviderResol
 }
 
 async function buildProvider(model: string, deps: DbResolverDeps): Promise<LlmProvider> {
-  const rows = await deps.agentStore.listProvidersForModel(model);
+  const rows = await deps.runInTx((tx) => deps.agentStore.listProvidersForModel(tx, model));
   if (rows.length === 0) {
     throw new ProviderConfigError(
       `No provider configured for model "${model}". Run \`cogmo setup\` to configure one.`,
@@ -92,7 +94,7 @@ async function buildProvider(model: string, deps: DbResolverDeps): Promise<LlmPr
 type ProviderRow = Awaited<ReturnType<AgentStore["listProvidersForModel"]>>[number];
 
 async function buildAdapter(row: ProviderRow, deps: DbResolverDeps): Promise<LlmProvider> {
-  const apiKey = await deps.secretsStore.getSecretById(row.secretId);
+  const apiKey = await deps.runInTx((tx) => deps.secretsStore.getSecretById(tx, row.secretId));
   if (!apiKey) {
     throw new ProviderConfigError(
       `Secret for provider "${row.name}" not found. Re-run \`cogmo setup\` to reconfigure.`,

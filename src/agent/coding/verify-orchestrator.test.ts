@@ -29,7 +29,6 @@ import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { type CodingBackend, DrizzleCodingStore } from "./store/index.js";
 import { runCodingVerify, type VerifyOrchestratorDeps } from "./verify-orchestrator.js";
 
-// biome-ignore lint/suspicious/noExplicitAny: minimal shim mirroring step.run's signature
 const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
 
 const VALID_IDENTITY: GitHubIdentity = {
@@ -42,7 +41,7 @@ const VALID_IDENTITY: GitHubIdentity = {
 
 class FakeSecretsStore {
   #values = new Map<string, string>();
-  async getSecret(name: string): Promise<string | undefined> {
+  async getSecret(_tx: unknown, name: string): Promise<string | undefined> {
     return this.#values.get(name);
   }
   set(name: string, value: string): void {
@@ -141,7 +140,7 @@ let store: DrizzleCodingStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
-  store = new DrizzleCodingStore(tx);
+  store = new DrizzleCodingStore();
 });
 
 afterAll(async () => {
@@ -163,39 +162,46 @@ async function seedTask(opts?: {
   remoteUrl?: string;
   status?: "pending_verify" | "queued";
 }): Promise<{ taskId: string; repoId: string }> {
-  const repo = await store.insertRepo({
-    name: "fixture",
-    localPath: "/tmp/repo",
-    defaultBranch: "main",
-    remoteUrl: opts?.remoteUrl ?? "https://github.com/user/cogmo.git",
-    devcontainer: null,
-    allowedBackends: ["claude"] as ReadonlyArray<CodingBackend>,
-    verifyCommand: "pnpm test",
-    taskTokenBudget: 200_000,
-    taskWallTimeSeconds: 1800,
-    maxConcurrentTasks: 1,
-  });
+  const repo = await tx((trx) =>
+    store.insertRepo(trx, {
+      name: "fixture",
+      localPath: "/tmp/repo",
+      defaultBranch: "main",
+      remoteUrl: opts?.remoteUrl ?? "https://github.com/user/cogmo.git",
+      devcontainer: null,
+      allowedBackends: ["claude"] as ReadonlyArray<CodingBackend>,
+      verifyCommand: "pnpm test",
+      taskTokenBudget: 200_000,
+      taskWallTimeSeconds: 1800,
+      maxConcurrentTasks: 1,
+    }),
+  );
 
-  const task = await store.insertTask({
-    repoId: repo.id,
-    goal: "fix the thing",
-    triggerSource: "user",
-    backend: "claude",
-    allowPrivilegedRunc: false,
-  });
-  await store.setTaskWorktreeAssignment(task.id, {
-    branch: "cogmo/abc12345",
-    worktreePath: "/tmp/worktrees/abc12345",
-  });
-  await store.setTaskPlan(task.id, "1. step\n2. step");
+  const task = await tx((trx) =>
+    store.insertTask(trx, {
+      repoId: repo.id,
+      goal: "fix the thing",
+      triggerSource: "user",
+      backend: "claude",
+      allowPrivilegedRunc: false,
+    }),
+  );
+  await tx((trx) =>
+    store.setTaskWorktreeAssignment(trx, task.id, {
+      branch: "cogmo/abc12345",
+      worktreePath: "/tmp/worktrees/abc12345",
+    }),
+  );
+  await tx((trx) => store.setTaskPlan(trx, task.id, "1. step\n2. step"));
   if (opts?.status !== "queued") {
-    await store.updateTaskStatus({ id: task.id, status: "pending_verify" });
+    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "pending_verify" }));
   }
   return { taskId: task.id, repoId: repo.id };
 }
 
 function makeDeps(handle: SandboxSession<LocalDockerSessionState>): VerifyOrchestratorDeps {
   return {
+    runInTx: tx,
     store,
     sandbox: fakeSandbox(handle),
     secretsStore: secrets as unknown as SecretsStore,
@@ -248,7 +254,7 @@ describe("runCodingVerify", () => {
       "coding/task/pr-opened",
     ]);
 
-    const reloaded = await store.getTask(taskId);
+    const reloaded = await tx((trx) => store.getTask(trx, taskId));
     expect(reloaded?.status).toBe("pr_open");
     expect(reloaded?.prMetadata).toEqual({
       url: "https://github.com/user/cogmo/pull/42",
@@ -359,7 +365,7 @@ describe("runCodingVerify", () => {
     expect(result.status).toBe("skipped");
     expect(deps.sandbox.create).not.toHaveBeenCalled();
 
-    const reloaded = await store.getTask(taskId);
+    const reloaded = await tx((trx) => store.getTask(trx, taskId));
     expect(reloaded?.status).toBe("queued");
   });
 

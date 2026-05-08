@@ -44,7 +44,7 @@ const homeVolumes: string[] = [];
 beforeAll(async () => {
   if (!SHOULD_RUN) return;
   ({ tx, close } = await createTestDatabase());
-  store = new DrizzleSandboxStore(tx);
+  store = new DrizzleSandboxStore();
   docker = new Docker();
   workspaceTmp = mkdtempSync(join(tmpdir(), "cogmo-sysbox-it-"));
 
@@ -84,10 +84,13 @@ function uniqueName(prefix: string): string {
 
 describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only)", () => {
   it("creates a sysbox-runc container and inspects with the right runtime", async () => {
-    const inst = await store.insertInstance({ host: "test-host", pid: process.pid });
+    const inst = await tx((trx) =>
+      store.insertInstance(trx, { host: "test-host", pid: process.pid }),
+    );
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
+      runInTx: tx,
       runtime: "sysbox",
       instanceId: inst.id,
     });
@@ -119,10 +122,13 @@ describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only
     // subuid range). We verify by running `id -u` inside (returns 0) and
     // separately reading the rootfs ownership from the host (would be uid 0
     // under runc, remapped under sysbox).
-    const inst = await store.insertInstance({ host: "test-host", pid: process.pid });
+    const inst = await tx((trx) =>
+      store.insertInstance(trx, { host: "test-host", pid: process.pid }),
+    );
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
+      runInTx: tx,
       runtime: "sysbox",
       instanceId: inst.id,
     });

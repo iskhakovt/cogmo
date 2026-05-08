@@ -42,7 +42,7 @@ const testFileInstanceIds: string[] = [];
 
 beforeAll(async () => {
   ({ tx, close } = await createTestDatabase());
-  store = new DrizzleSandboxStore(tx);
+  store = new DrizzleSandboxStore();
   docker = new Docker();
   workspaceTmp = mkdtempSync(join(tmpdir(), "cogmo-sandbox-it-"));
   writeFileSync(join(workspaceTmp, "marker.txt"), "hello-from-host");
@@ -94,11 +94,14 @@ afterAll(async () => {
 });
 
 async function bootSandbox(): Promise<{ sandbox: LocalDockerSandboxClient; instanceId: string }> {
-  const inst = await store.insertInstance({ host: "test-host", pid: process.pid });
+  const inst = await tx((trx) =>
+    store.insertInstance(trx, { host: "test-host", pid: process.pid }),
+  );
   testFileInstanceIds.push(inst.id);
   const sandbox = await LocalDockerSandboxClient.create({
     docker,
     store,
+    runInTx: tx,
     runtime: RUNTIME,
     instanceId: inst.id,
   });
@@ -154,7 +157,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
     expect(inspected.HostConfig.PidsLimit).toBe(64);
 
     // Cogmo-side verification.
-    const row = await store.getContainerByDockerId(handle.state.dockerId);
+    const row = await tx((trx) => store.getContainerByDockerId(trx, handle.state.dockerId));
     expect(row?.status).toBe("running");
     expect(row?.startedAt).toBeInstanceOf(Date);
 
@@ -228,7 +231,7 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
     await sandbox.deleteByTaskId(taskId);
 
     await expect(docker.getContainer(handle.state.dockerId).inspect()).rejects.toThrow();
-    const row = await store.getContainerByDockerId(handle.state.dockerId);
+    const row = await tx((trx) => store.getContainerByDockerId(trx, handle.state.dockerId));
     expect(row?.status).toBe("reaped");
   });
 
@@ -266,14 +269,14 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
     });
-    await store.closeInstance(staleId);
+    await tx((trx) => store.closeInstance(trx, staleId));
 
     const { sandbox: current, instanceId: currentId } = await bootSandbox();
     const result = await current.reconcileCrashedInstances(currentId);
     expect(result.orphansReaped).toBeGreaterThanOrEqual(1);
 
     await expect(docker.getContainer(handle.state.dockerId).inspect()).rejects.toThrow();
-    const row = await store.getContainerByDockerId(handle.state.dockerId);
+    const row = await tx((trx) => store.getContainerByDockerId(trx, handle.state.dockerId));
     expect(row?.status).toBe("reaped");
   });
 

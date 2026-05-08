@@ -1,5 +1,6 @@
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { McpServerConfig, McpValueSource } from "../config.js";
 
@@ -14,13 +15,14 @@ import type { McpServerConfig, McpValueSource } from "../config.js";
 export async function createTransport(
   config: McpServerConfig,
   secrets: SecretsStore,
+  runInTx: Transactor,
 ): Promise<Transport> {
   switch (config.transport) {
     case "stdio":
       return new StdioClientTransport({
         command: config.command,
         args: config.args,
-        env: await resolveVarMap(config.env, secrets),
+        env: await resolveVarMap(config.env, secrets, runInTx),
         // Pipe stderr so we can forward it to the structured log instead of
         // letting MCP server diagnostics leak into the parent process's stderr.
         stderr: "pipe",
@@ -36,10 +38,11 @@ export async function createTransport(
 async function resolveVarMap(
   vars: Record<string, McpValueSource>,
   secrets: SecretsStore,
+  runInTx: Transactor,
 ): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const [key, source] of Object.entries(vars)) {
-    out[key] = await resolveValue(key, source, secrets);
+    out[key] = await resolveValue(key, source, secrets, runInTx);
   }
   return out;
 }
@@ -48,9 +51,10 @@ async function resolveValue(
   key: string,
   source: McpValueSource,
   secrets: SecretsStore,
+  runInTx: Transactor,
 ): Promise<string> {
   if (source.kind === "literal") return source.value;
-  const secret = await secrets.getSecret(source.name);
+  const secret = await runInTx((tx) => secrets.getSecret(tx, source.name));
   if (secret === undefined) {
     throw new Error(
       `MCP secret reference for env/header ${JSON.stringify(key)} not found in secrets store: ${JSON.stringify(source.name)}`,

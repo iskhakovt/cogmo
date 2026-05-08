@@ -1,4 +1,5 @@
 import { NonRetriableError } from "inngest";
+import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import { conversationErrored, inboundReady, responseReady } from "../inngest/events.js";
 import { isRetriableProviderError } from "../llm/fallback.js";
@@ -20,6 +21,7 @@ import { resolveVoiceMode } from "../voice/mode.js";
 import type { SttProvider, TtsProvider } from "../voice/types.js";
 import type { CodingService } from "./coding/service.js";
 import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
+import { loadConversationContext } from "./conversation/load-conversation-context.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
@@ -31,6 +33,7 @@ import type { AgentStore } from "./store/index.js";
 import type { ToolRegistry } from "./tools.js";
 
 export interface HandleMessageDeps {
+  runInTx: Transactor;
   agentStore: AgentStore;
   transportStore: TransportStore;
   /**
@@ -192,7 +195,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // ──── DURABLE: load context + entry guards ────
 
       const conv = await step.run("load-conversation", async () => {
-        return agentStore.getConversation(conversationId);
+        return deps.runInTx((tx) => agentStore.getConversation(tx, conversationId));
       });
       if (!conv) throw new Error(`Conversation not found: ${conversationId}`);
 
@@ -211,7 +214,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const { userId, profileId } = conv;
 
       const lastAssistant = await step.run("last-assistant", async () => {
-        return agentStore.getLastAssistantMessage(conversationId);
+        return deps.runInTx((tx) => agentStore.getLastAssistantMessage(tx, conversationId));
       });
 
       // Turn snapshot — read profile + model once at turn-start and stamp them on
@@ -223,7 +226,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // for prefix summarization.
       // See design/transport/overview.md → Profile and Model Stamping.
       const snapshot = await step.run("load-turn-snapshot", async () => {
-        const p = await agentStore.getProfile(profileId);
+        const p = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
         if (!p) throw new Error(`Profile not found: ${profileId}`);
         return {
           profileId,
@@ -253,9 +256,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       }
 
       const inboundMessages = await step.run("load-inbound", async () => {
-        return transportStore.getUnbatchedInbound(
-          conversationId,
-          lastAssistant?.lastInboundMessageId ?? null,
+        return deps.runInTx((tx) =>
+          transportStore.getUnbatchedInbound(
+            tx,
+            conversationId,
+            lastAssistant?.lastInboundMessageId ?? null,
+          ),
         );
       });
 
@@ -333,22 +339,20 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         .join("\n");
 
       await step.run("create-user-message", async () => {
-        await agentStore.insertMessage({
-          conversationId,
-          role: "user",
-          content: userContentText,
-          profileId: snapshot.profileId,
-          model: snapshot.model,
-          lastInboundMessageId: maxInboundId,
-        });
+        await deps.runInTx((tx) =>
+          agentStore.insertMessage(tx, {
+            conversationId,
+            role: "user",
+            content: userContentText,
+            profileId: snapshot.profileId,
+            model: snapshot.model,
+            lastInboundMessageId: maxInboundId,
+          }),
+        );
       });
 
       const history = await step.run("load-history", async () => {
-        return agentStore.getHistory(conversationId);
-      });
-
-      const channelTypes = await step.run("resolve-channel-types", async () => {
-        return transportStore.getActiveChannelTypes(conversationId);
+        return deps.runInTx((tx) => agentStore.getHistory(tx, conversationId));
       });
 
       // Open delivery handles early — needed to resolve voice mode
@@ -369,7 +373,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // gates: adapter capability, TTS provider configured, conversation
       // override (NULL = follow profile default), profile mode, modality of
       // the most recent inbound. See design/voice.md.
-      const profileForVoice = await agentStore.getProfile(profileId);
+      const profileForVoice = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
       const voiceModeForTurn = resolveVoiceMode({
         adapterSupportsVoice: delivery.canDeliverVoice(),
         voiceConfigPresent: deps.ttsProvider !== undefined && deps.voiceConfig !== undefined,
@@ -387,9 +391,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       });
 
       const systemPrompt = await step.run("assemble-prompt", async () => {
-        return promptSource.assemble(agentStore, {
-          profileId,
-          channelTypes,
+        const ctx = await loadConversationContext(
+          { runInTx: deps.runInTx, agentStore, transportStore },
+          { conversationId, profileId },
+        );
+        return promptSource.assemble({
+          profile: ctx.profile,
+          rules: ctx.rules,
           voiceMode: voiceModeForTurn,
         });
       });
@@ -446,8 +454,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // recall call goes through the same `memoryScope` ACL filter every other
       // memory operation does.
       const coreMemoryService: Service["coreMemory"] = {
-        get: () => agentStore.getCoreMemoryBlocks(userId),
-        update: (key, content) => agentStore.upsertCoreMemoryBlock({ userId, key, content }),
+        get: () => deps.runInTx((tx) => agentStore.getCoreMemoryBlocks(tx, userId)),
+        update: (key, content) =>
+          deps.runInTx((tx) => agentStore.upsertCoreMemoryBlock(tx, { userId, key, content })),
       };
 
       const codingService = deps.codingServiceFactory?.(conversationId);
@@ -465,12 +474,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         fileService,
         coreMemoryService,
         async (content, opts) => {
-          await agentStore.stagePendingMemory({
-            userId,
-            content,
-            ...(opts?.context !== undefined && { context: opts.context }),
-            source: "live_retain",
-          });
+          await deps.runInTx((tx) =>
+            agentStore.stagePendingMemory(tx, {
+              userId,
+              content,
+              ...(opts?.context !== undefined && { context: opts.context }),
+              source: "live_retain",
+            }),
+          );
         },
         codingService,
         skillsService,
@@ -568,7 +579,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       });
       const toolDefs = turnTools.definitions();
 
-      const lastTokens = await agentStore.getLastTokens(conversationId);
+      const lastTokens = await deps.runInTx((tx) => agentStore.getLastTokens(tx, conversationId));
       const skip = shouldSkipCounting(
         lastTokens?.inputTokens ?? null,
         lastTokens?.outputTokens ?? null,
@@ -667,15 +678,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // ──── DURABLE: persist all new messages (tool turns + final assistant) ────
 
       const assistantMsg = await step.run("persist-new-messages", async () => {
-        return agentStore.insertMessages({
-          conversationId,
-          messages: result.newMessages,
-          profileId: snapshot.profileId,
-          model: snapshot.model,
-          lastInboundMessageId: maxInboundId,
-          lastMessageInputTokens: result.usage.inputTokens,
-          lastMessageOutputTokens: result.usage.outputTokens,
-        });
+        return deps.runInTx((tx) =>
+          agentStore.insertMessages(tx, {
+            conversationId,
+            messages: result.newMessages,
+            profileId: snapshot.profileId,
+            model: snapshot.model,
+            lastInboundMessageId: maxInboundId,
+            lastMessageInputTokens: result.usage.inputTokens,
+            lastMessageOutputTokens: result.usage.outputTokens,
+          }),
+        );
       });
 
       // ──── DURABLE: batch delivery ────
@@ -782,7 +795,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         result.text.length > 0
       ) {
         await step.run("voice-delivery", async () => {
-          const cap = await transportStore.getVoiceMaxReplyChars(conversationId);
+          const cap = await deps.runInTx((tx) =>
+            transportStore.getVoiceMaxReplyChars(tx, conversationId),
+          );
           const effectiveCap = cap ?? 700;
           if (result.text.length > effectiveCap) {
             logger.info(

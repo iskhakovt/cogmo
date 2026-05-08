@@ -67,6 +67,7 @@ afterEach(() => {
 
 function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
   return {
+    runInTx: (cb) => cb({} as never),
     agentStore: mockAgentStore(),
     transportStore: mockTransportStore(),
     resolveProvider: mockResolver(),

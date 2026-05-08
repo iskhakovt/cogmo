@@ -1,5 +1,6 @@
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Inngest } from "inngest";
+import type { Transactor } from "../../db/index.js";
 import {
   codingTaskPermissionDecision,
   codingTaskPermissionRequested,
@@ -70,6 +71,7 @@ export const NULL_EXECUTE_STREAM: ExecuteStreamHandle = {
 };
 
 export interface CodingOrchestratorDeps {
+  runInTx: Transactor;
   store: CodingStore;
   sandbox: SandboxClient<LocalDockerSessionState>;
   backend: CodingBackend;
@@ -148,13 +150,21 @@ interface RunParams {
  */
 export async function runCodingTask(params: RunParams): Promise<CodingOrchestratorResult> {
   const { taskId, deps, stepRun } = params;
-  const { store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs, worktreesDir } =
-    deps;
+  const {
+    runInTx,
+    store,
+    sandbox,
+    backend,
+    devbaseImage,
+    defaultResourceLimits,
+    taskTtlMs,
+    worktreesDir,
+  } = deps;
   const openPlanStream = deps.openPlanStream ?? (async () => NULL_PLAN_STREAM);
 
-  const task = await store.getTask(taskId);
+  const task = await runInTx((tx) => store.getTask(tx, taskId));
   if (!task) throw new Error(`coding task not found: ${taskId}`);
-  const repo = await store.getRepoById(task.repoId);
+  const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
   let containerCreated = false;
@@ -168,7 +178,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   let planStream: PlanStreamHandle | null = null;
   try {
     await stepRun("set-status-planning", () =>
-      store.updateTaskStatus({ id: taskId, status: "planning" }),
+      runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "planning" })),
     );
 
     await stepRun("allocate-worktree", async () => {
@@ -197,11 +207,12 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
             `worktree path escape: repo.name="${repo.name}" produced path outside worktreesDir`,
           );
         }
-        assignment = {
+        const next = {
           branch: `cogmo/${idShort}`,
           worktreePath: candidatePath,
         };
-        await store.setTaskWorktreeAssignment(taskId, assignment);
+        assignment = next;
+        await runInTx((tx) => store.setTaskWorktreeAssignment(tx, taskId, next));
       }
       await allocateWorktree({
         repoPath: repo.localPath,
@@ -230,7 +241,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       // still triggers cleanup via the outer catch (the container exists
       // on Docker side regardless of whether we recorded it).
       containerCreated = true;
-      await store.setTaskContainerId(taskId, session.state.containerRowId);
+      await runInTx((tx) => store.setTaskContainerId(tx, taskId, session.state.containerRowId));
       return session.state;
     });
 
@@ -248,7 +259,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // but a future prompt change that reads any other lifecycle field
     // (e.g. container metadata) would silently see stale nulls. The
     // single point-read is cheap; the footgun isn't worth saving it.
-    const planTask = (await store.getTask(taskId)) ?? task;
+    const planTask = (await runInTx((tx) => store.getTask(tx, taskId))) ?? task;
     const result = await runPlanStreaming({
       task: planTask,
       repo,
@@ -256,17 +267,21 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       backend,
       planStream,
       store,
+      runInTx,
     });
 
     if (result.isError || !result.plan) {
       const reason = result.failureReason ?? "plan phase produced no plan";
       await stepRun("set-status-failed", () =>
-        store.updateTaskStatus({ id: taskId, status: "failed", failureReason: reason }),
+        runInTx((tx) =>
+          store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
+        ),
       );
       const a = assignment;
       if (a) {
         await stepRun("teardown-worktree", () =>
           safeTeardownWorktree({
+            runInTx,
             ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
             repo,
             taskId,
@@ -284,7 +299,9 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       return { status: "failed", failureReason: reason };
     }
 
-    await stepRun("persist-plan", () => store.setTaskPlan(taskId, result.plan ?? ""));
+    await stepRun("persist-plan", () =>
+      runInTx((tx) => store.setTaskPlan(tx, taskId, result.plan ?? "")),
+    );
 
     // For automated triggers (evolution, signal_pipeline) we'd auto-advance
     // straight to executing. Slice 1 only handles the user trigger path —
@@ -292,7 +309,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     const nextStatus: CodingOrchestratorResult["status"] =
       task.triggerSource === "user" ? "awaiting_approval" : "executing";
     await stepRun("set-status-awaiting", () =>
-      store.updateTaskStatus({ id: taskId, status: nextStatus }),
+      runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: nextStatus })),
     );
     // Same wrap as the failure-path notification above — once status is
     // committed, a subscriber error must not regress the task to failed.
@@ -311,11 +328,12 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // from mid-stream — see the createFunction comment), so wrapping in
     // `stepRun` here would just add observability noise without any
     // exactly-once benefit. Revisit if retries ever become non-zero.
-    await store
-      .updateTaskStatus({ id: taskId, status: "failed", failureReason: reason })
-      .catch(() => {});
+    await runInTx((tx) =>
+      store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
+    ).catch(() => {});
     if (assignment) {
       await safeTeardownWorktree({
+        runInTx,
         ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
         repo,
         taskId,
@@ -339,6 +357,7 @@ interface PlanStreamingParams {
   backend: CodingBackend;
   planStream: PlanStreamHandle;
   store: CodingStore;
+  runInTx: Transactor;
 }
 
 interface PlanStreamingResult {
@@ -353,7 +372,7 @@ interface PlanStreamingResult {
  * resume path (slice 2) has it.
  */
 async function runPlanStreaming(params: PlanStreamingParams): Promise<PlanStreamingResult> {
-  const { task, repo, container, backend, planStream, store } = params;
+  const { task, repo, container, backend, planStream, store, runInTx } = params;
   let plan = "";
   let isError = false;
   let failureReason: string | undefined;
@@ -361,7 +380,7 @@ async function runPlanStreaming(params: PlanStreamingParams): Promise<PlanStream
   for await (const event of backend.plan({ task, repo, container })) {
     switch (event.kind) {
       case "session_started":
-        await store.setTaskSessionId(task.id, event.sessionId);
+        await runInTx((tx) => store.setTaskSessionId(tx, task.id, event.sessionId));
         break;
       case "text_delta":
         await planStream.appendText(event.text);
@@ -456,12 +475,12 @@ interface ExecuteRunParams {
  */
 export async function runCodingExecute(params: ExecuteRunParams): Promise<CodingExecuteResult> {
   const { taskId, deps, stepRun, stepWaitForEvent, inngest } = params;
-  const { store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs } = deps;
+  const { runInTx, store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
 
-  const task = await store.getTask(taskId);
+  const task = await runInTx((tx) => store.getTask(tx, taskId));
   if (!task) throw new Error(`coding task not found: ${taskId}`);
-  const repo = await store.getRepoById(task.repoId);
+  const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
   if (!task.planApprovedAt) {
@@ -494,7 +513,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     // conditional UPDATE pre-empts the bug for slice 3+'s
     // cancel-during-execute path at zero cost.
     const transition = await stepRun("set-status-executing", () =>
-      store.transitionTaskStatus(taskId, "awaiting_approval", "executing"),
+      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "awaiting_approval", "executing")),
     );
     if (transition.kind !== "transitioned") {
       log.info(
@@ -532,7 +551,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         allowPrivilegedRunc: task.allowPrivilegedRunc,
       });
       containerCreated = true;
-      await store.setTaskContainerId(taskId, session.state.containerRowId);
+      await runInTx((tx) => store.setTaskContainerId(tx, taskId, session.state.containerRowId));
       return session.state;
     });
 
@@ -548,6 +567,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       executeStream,
       sessionId,
       store,
+      runInTx,
       stepWaitForEvent,
       inngest,
     });
@@ -555,10 +575,13 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     if (result.isError) {
       const reason = result.failureReason ?? "execute phase failed";
       await stepRun("set-status-failed", () =>
-        store.updateTaskStatus({ id: taskId, status: "failed", failureReason: reason }),
+        runInTx((tx) =>
+          store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
+        ),
       );
       await stepRun("teardown-worktree", () =>
         safeTeardownWorktree({
+          runInTx,
           ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
           repo,
           taskId,
@@ -592,12 +615,14 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       if (result.usage.outputTokens != null) usage.tokens_output = result.usage.outputTokens;
       if (result.usage.costUsd != null) usage.cost_usd = result.usage.costUsd;
       if (Object.keys(usage).length > 0) {
-        await stepRun("persist-usage", () => store.setTaskResourceUsage(taskId, usage));
+        await stepRun("persist-usage", () =>
+          runInTx((tx) => store.setTaskResourceUsage(tx, taskId, usage)),
+        );
       }
     }
 
     await stepRun("set-status-pending-verify", () =>
-      store.updateTaskStatus({ id: taskId, status: "pending_verify" }),
+      runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "pending_verify" })),
     );
     await stepRun("teardown", () => sandbox.deleteByTaskId(taskId).catch(() => {}));
     // Hand off to the slice 4.0h verify orchestrator. The dedicated function
@@ -630,10 +655,11 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   } catch (err) {
     const reason = (err as Error).message;
     log.error({ err, taskId }, "coding execute failed");
-    await store
-      .updateTaskStatus({ id: taskId, status: "failed", failureReason: reason })
-      .catch(() => {});
+    await runInTx((tx) =>
+      store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
+    ).catch(() => {});
     await safeTeardownWorktree({
+      runInTx,
       ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
       repo,
       taskId,
@@ -655,6 +681,7 @@ interface ExecuteStreamingParams {
   executeStream: ExecuteStreamHandle;
   sessionId: string;
   store: CodingStore;
+  runInTx: Transactor;
   stepWaitForEvent: StepWaitForEvent;
   inngest: Pick<Inngest, "send">;
 }
@@ -677,6 +704,7 @@ async function runExecuteStreaming(
     executeStream,
     sessionId,
     store,
+    runInTx,
     stepWaitForEvent,
     inngest,
   } = params;
@@ -708,6 +736,7 @@ async function runExecuteStreaming(
           tool: event.tool,
           input: (event.input ?? {}) as Record<string, unknown>,
           store,
+          runInTx,
           stepWaitForEvent,
           inngest,
         });
@@ -737,6 +766,7 @@ interface HandlePermissionRequestParams {
   tool: string;
   input: Record<string, unknown>;
   store: CodingStore;
+  runInTx: Transactor;
   stepWaitForEvent: StepWaitForEvent;
   inngest: Pick<Inngest, "send">;
 }
@@ -769,12 +799,12 @@ interface HandlePermissionRequestParams {
 async function handlePermissionRequest(
   params: HandlePermissionRequestParams,
 ): Promise<PermissionResponse> {
-  const { taskId, requestId, tool, input, store, stepWaitForEvent, inngest } = params;
+  const { taskId, requestId, tool, input, store, runInTx, stepWaitForEvent, inngest } = params;
   const call = { tool, input };
   const pattern = canonicalPattern(call);
 
   // 1. Decision log replay — task-scoped patterns the user already approved.
-  const logRows = await store.listToolDecisionsForTask(taskId);
+  const logRows = await runInTx((tx) => store.listToolDecisionsForTask(tx, taskId));
   const replayed = replayDecisionLog(call, logRows);
   if (replayed) {
     log.info(
@@ -791,12 +821,12 @@ async function handlePermissionRequest(
       { taskId, requestId, tool, pattern, reason: result.reason },
       "tool gate: policy allow",
     );
-    await persistDecision(store, taskId, tool, pattern, "allow", "once");
+    await persistDecision(store, runInTx, taskId, tool, pattern, "allow", "once");
     return { behavior: "allow" };
   }
   if (result.decision === "deny") {
     log.info({ taskId, requestId, tool, pattern, reason: result.reason }, "tool gate: policy deny");
-    await persistDecision(store, taskId, tool, pattern, "deny", "once");
+    await persistDecision(store, runInTx, taskId, tool, pattern, "deny", "once");
     return { behavior: "deny", message: result.reason };
   }
 
@@ -822,14 +852,14 @@ async function handlePermissionRequest(
   });
   if (!decisionEvent) {
     log.warn({ taskId, requestId, tool }, "tool gate: prompt timed out (7d) — denying");
-    await persistDecision(store, taskId, tool, pattern, "deny", "once");
+    await persistDecision(store, runInTx, taskId, tool, pattern, "deny", "once");
     return { behavior: "deny", message: "permission prompt timed out" };
   }
 
   const data = decisionEvent.data as { decision: ToolDecision; scope: "once" | "task" };
   // Persist what the user chose. `task` scope means future matching
   // requests in this task auto-apply; `once` is audit-only.
-  await persistDecision(store, taskId, tool, pattern, data.decision, data.scope);
+  await persistDecision(store, runInTx, taskId, tool, pattern, data.decision, data.scope);
 
   log.info(
     { taskId, requestId, tool, pattern, decision: data.decision, scope: data.scope },
@@ -842,6 +872,7 @@ async function handlePermissionRequest(
 
 async function persistDecision(
   store: CodingStore,
+  runInTx: Transactor,
   taskId: string,
   tool: string,
   pattern: string,
@@ -849,7 +880,7 @@ async function persistDecision(
   scope: "once" | "task",
 ): Promise<void> {
   try {
-    await store.insertToolDecision({ taskId, tool, pattern, decision, scope });
+    await runInTx((tx) => store.insertToolDecision(tx, { taskId, tool, pattern, decision, scope }));
   } catch (err) {
     log.warn({ err, taskId, pattern, decision, scope }, "tool gate: insertToolDecision failed");
     // `task` scope is behaviour-changing: future matching requests are
