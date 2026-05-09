@@ -11,6 +11,23 @@ describe("CorrectionExtractionSchema", () => {
           reasoning: "User asked for shorter responses",
           matchedExistingRuleId: null,
           action: "new",
+          channelType: null,
+        },
+      ],
+    };
+    expect(CorrectionExtractionSchema.parse(input)).toEqual(input);
+  });
+
+  it("parses new correction with explicit channelType", () => {
+    const input = {
+      corrections: [
+        {
+          rule: "Avoid markdown headings",
+          category: "style",
+          reasoning: "Preference scoped to chat medium",
+          matchedExistingRuleId: null,
+          action: "new",
+          channelType: "telegram",
         },
       ],
     };
@@ -46,6 +63,7 @@ describe("CorrectionExtractionSchema", () => {
           reasoning: "test",
           matchedExistingRuleId: null,
           action: "new",
+          channelType: null,
         },
       ],
     };
@@ -54,6 +72,21 @@ describe("CorrectionExtractionSchema", () => {
 
   it("rejects missing required fields", () => {
     const input = { corrections: [{ rule: "test" }] };
+    expect(() => CorrectionExtractionSchema.parse(input)).toThrow();
+  });
+
+  it("rejects new correction missing channelType", () => {
+    const input = {
+      corrections: [
+        {
+          rule: "test",
+          category: "style",
+          reasoning: "test",
+          matchedExistingRuleId: null,
+          action: "new",
+        },
+      ],
+    };
     expect(() => CorrectionExtractionSchema.parse(input)).toThrow();
   });
 
@@ -90,25 +123,57 @@ describe("CorrectionExtractionSchema", () => {
 
 describe("buildExtractionPrompt", () => {
   it("includes existing rules when provided", () => {
-    const prompt = buildExtractionPrompt([
-      { id: "r1", rule: "Be concise", category: "style" },
-      { id: "r2", rule: "Use tables", category: "style" },
-    ]);
+    const prompt = buildExtractionPrompt(
+      [
+        { id: "r1", rule: "Be concise", category: "style", channelType: null },
+        { id: "r2", rule: "Use tables", category: "style", channelType: null },
+      ],
+      [],
+    );
     expect(prompt).toContain("[r1]");
     expect(prompt).toContain("Be concise");
     expect(prompt).toContain("[r2]");
     expect(prompt).toContain("reinforce");
   });
 
+  it("renders channel scope alongside each existing rule", () => {
+    const prompt = buildExtractionPrompt(
+      [
+        { id: "r1", rule: "Be concise", category: "style", channelType: null },
+        {
+          id: "r2",
+          rule: "No long voice notes",
+          category: "style",
+          channelType: "telegram",
+        },
+      ],
+      ["telegram"],
+    );
+    expect(prompt).toContain("[r1] (style, all channels) Be concise");
+    expect(prompt).toContain("[r2] (style, channel:telegram) No long voice notes");
+  });
+
   it("handles empty existing rules", () => {
-    const prompt = buildExtractionPrompt([]);
+    const prompt = buildExtractionPrompt([], []);
     expect(prompt).toContain("No existing rules");
     expect(prompt).not.toContain("reinforce");
   });
 
   it("includes tool misuse guidance", () => {
-    const prompt = buildExtractionPrompt([]);
+    const prompt = buildExtractionPrompt([], []);
     expect(prompt).toContain("Tool misuse");
     expect(prompt).toContain("[Tool:");
+  });
+
+  it("lists active channel types and instructs the LLM how to scope new rules", () => {
+    const prompt = buildExtractionPrompt([], ["telegram", "direct"]);
+    expect(prompt).toContain("`telegram`");
+    expect(prompt).toContain("`direct`");
+    expect(prompt).toContain("Default to `null` when in doubt");
+  });
+
+  it("falls back to a no-channels message when no active channel types resolved", () => {
+    const prompt = buildExtractionPrompt([], []);
+    expect(prompt).toContain("No active channels were resolved");
   });
 });

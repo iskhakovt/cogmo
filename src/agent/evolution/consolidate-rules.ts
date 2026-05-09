@@ -80,7 +80,12 @@ export async function consolidateRules(
   deps: ConsolidationDeps,
 ): Promise<ConsolidationResult> {
   const allRules = await deps.runInTx((tx) => deps.store.getCorrections(tx, profileId));
-  const rules = allRules.filter((r) => r.active);
+  // Only consolidate global rules (channelType=null). A Telegram-only
+  // rule ("avoid markdown headings here") and a global rule ("be
+  // concise") may share wording but are conceptually distinct, and
+  // `replaceRules` always emits the merged row as global — merging
+  // across scopes would silently drop channel_type.
+  const rules = allRules.filter((r) => r.active && r.channelType === null);
 
   if (rules.length < 2) {
     return { mergedGroups: 0, rulesRemoved: 0 };
