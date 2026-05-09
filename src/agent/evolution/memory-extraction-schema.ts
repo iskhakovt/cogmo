@@ -32,6 +32,17 @@ export const CORE_COMPARTMENTS = [
 export type CoreMemoryCompartment = (typeof CORE_COMPARTMENTS)[number];
 
 /**
+ * True when `name` is one of the curated core compartment values. Lifted
+ * out of the various call sites that were doing `(CORE_COMPARTMENTS as
+ * ReadonlyArray<string>).includes(name)` so the tuple-widening cast lives
+ * in exactly one place. Callers: store-side reserved-name guard, profile-
+ * scope validation, and the Telegram custom-marker renderer.
+ */
+export function isCoreCompartment(name: string): boolean {
+  return (CORE_COMPARTMENTS as ReadonlyArray<string>).includes(name);
+}
+
+/**
  * Loose schema for compartment values stored on profile memory scopes and
  * Hindsight tags. The set of valid values is dynamic per user (core ∪ that
  * user's `custom_compartments` rows); validation against the user's actual

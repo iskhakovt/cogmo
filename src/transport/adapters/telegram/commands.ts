@@ -9,6 +9,7 @@
 import { actionToDecision } from "../../../agent/coding/permission-keyboard.js";
 import {
   CORE_COMPARTMENTS,
+  isCoreCompartment,
   MemoryTrustSchema,
 } from "../../../agent/evolution/memory-extraction-schema.js";
 import type { Profile } from "../../../agent/store/index.js";
@@ -993,18 +994,11 @@ async function replyProfileScope(
     return;
   }
 
-  // The scope rendered in the reply is either the current `profile.memoryScope`
-  // (show) or the about-to-be-written value (clear → null, set → spec.scope).
-  // We only need the custom-compartments list to mark non-core values — for an
-  // unrestricted scope or one whose compartments are all in `CORE_COMPARTMENTS`,
-  // the legend would never fire, so skip the fetch entirely. Saves a DB round-
-  // trip in the common case (most profiles have null or all-core scopes).
+  // Skip the customs fetch when the rendered scope is null or all-core —
+  // the `* = custom` legend never fires for those, so the roundtrip is wasted.
   const renderedScope: ProfileMemoryScope | null =
     spec.kind === "show" ? profile.memoryScope : spec.kind === "clear" ? null : spec.scope;
-  const needsCustoms =
-    renderedScope?.compartments.some(
-      (c) => !(CORE_COMPARTMENTS as ReadonlyArray<string>).includes(c),
-    ) ?? false;
+  const needsCustoms = renderedScope?.compartments.some((c) => !isCoreCompartment(c)) ?? false;
 
   let customs: ReadonlySet<string> | undefined;
   if (needsCustoms) {

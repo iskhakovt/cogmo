@@ -501,14 +501,12 @@ describe("handleProfile", () => {
       });
       const ctx = mkCtx("scope personal");
       await handleProfile(transport, ctx, mkDialogs());
-      // Common-case optimization — `null` scope has no compartments to
-      // mark, so the customs fetch is skipped entirely. Confirms the
-      // gemini-flagged extra DB roundtrip is avoided in the dominant
-      // case (unrestricted profiles).
+      // Optimisation: a null scope has no compartments to mark, so
+      // skip the customs fetch entirely.
       expect(compartmentsList).not.toHaveBeenCalled();
     });
 
-    it("show: skips the customs-list fetch when every compartment is core", async () => {
+    it("show: skips the customs-list fetch when every compartment is core, renders without `*`", async () => {
       const compartmentsList = vi.fn().mockResolvedValue(ok([]));
       const transport = transportWith({
         profiles: {
@@ -529,6 +527,11 @@ describe("handleProfile", () => {
       const ctx = mkCtx("scope personal");
       await handleProfile(transport, ctx, mkDialogs());
       expect(compartmentsList).not.toHaveBeenCalled();
+      // Belt-and-braces: a regression that drops the `*` on a custom
+      // compartment can't sneak through here either — all-core scopes
+      // never get marked, so the rendered string contains no `*`.
+      const reply = ctx.reply.mock.calls[0]?.[0];
+      expect(reply).not.toContain("*");
     });
 
     it("set: skips the customs-list fetch when the new scope is all-core", async () => {

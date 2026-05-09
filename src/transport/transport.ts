@@ -3,7 +3,7 @@ import { isAbsolute, join } from "node:path";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { CodingStore } from "../agent/coding/store/index.js";
-import { CORE_COMPARTMENTS } from "../agent/evolution/memory-extraction-schema.js";
+import { isCoreCompartment } from "../agent/evolution/memory-extraction-schema.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
 import {
   CustomCompartmentCapExceededError,
@@ -1664,9 +1664,9 @@ async function findUnknownCompartmentImpl(
   compartments: ReadonlyArray<string>,
 ): Promise<string | null> {
   const customs = await agentStore.listCustomCompartments(tx, userId);
-  const allowed = new Set<string>([...CORE_COMPARTMENTS, ...customs.map((c) => c.name)]);
+  const customNames = new Set(customs.map((c) => c.name));
   for (const c of compartments) {
-    if (!allowed.has(c)) return c;
+    if (!isCoreCompartment(c) && !customNames.has(c)) return c;
   }
   return null;
 }

@@ -86,6 +86,18 @@ export function renderProfileList(
  * the canonical compartment value. Omit `customCompartments` (or pass
  * empty) on call sites that don't have it loaded; the output stays
  * unmarked rather than misleading.
+ *
+ * Stale-reference caveat: a scope referencing a since-deleted custom
+ * (e.g. `compartments: music` after `/compartments rm music`) renders
+ * bare — the value isn't in `CORE_COMPARTMENTS` *and* isn't in the
+ * loaded customs set, so it gets no `*`. A reader could infer "core"
+ * when the value is actually orphaned. New profile writes can't create
+ * this state (`findUnknownCompartmentImpl` rejects unknown values on
+ * create/update), but pre-existing scopes survive deletion of the
+ * compartment they reference (forward-only delete by design — see
+ * `Transport.compartments.delete`). Acceptable at single-user scale;
+ * promote to a follow-up if multi-user or longer-lived scopes make
+ * orphaned references common enough to confuse readers.
  */
 export function formatScope(
   scope: ProfileMemoryScope | null,
