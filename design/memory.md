@@ -59,7 +59,7 @@ Caller-supplied `tags` / `tagsMatch` and `tagGroups` are folded into the same AN
 **Tagging strategy:**
 - **Observer assigns** compartment and trust tags during post-conversation extraction (same path as network classification — see `extract-memories.ts` and `drain-pending-memories.ts`).
 - **Default:** untagged memories are excluded from scoped recalls (`any_strict` semantics). Profiles with `memoryScope: null` see them.
-- **Migration backfill** through `scripts/migrate-memories.ts` ensures every pre-existing memory is reclassified through the same Observer prompt.
+- **Migration backfill** through `cogmo migrate-memories <bankId>` ensures every pre-existing memory is reclassified through the same Observer prompt. A complementary `cogmo backfill profile-class --tag=<a,b>` stamps `profile_class:*` tags onto existing memories without re-classifying anything else — used to opt an existing deployment into class-scoped recall without classifier drift on already-correct compartment / trust labels.
 
 **Relationship to networks:** Networks classify *what kind of knowledge* (world/bank/opinion/observation). Compartments classify *what domain*. Trust classifies *who can access*. All three are just tags — independent, combinable, filtered by the same mechanism. A memory can be `network:world` + `compartment:work` + `trust:any` (a public work fact any plugin can see).
 
