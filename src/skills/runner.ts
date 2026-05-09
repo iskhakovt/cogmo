@@ -72,6 +72,16 @@ const log = logger.child({ component: "skills.runner" });
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 
+function rowToSummary(r: SkillRow): SkillSummary {
+  return {
+    name: r.name,
+    tier: r.tier,
+    riskTier: r.riskTier,
+    disabled: r.disabled,
+    gitSha: r.gitSha,
+  };
+}
+
 export interface RegisterResult {
   name: string;
   riskTier: SkillRiskTier;
@@ -122,6 +132,32 @@ export interface SkillToolDef {
 }
 
 /**
+ * Failure reasons for {@link SkillRunner.enable}. Exposed as a discriminated
+ * union (rather than thrown errors) because the call sites — Telegram
+ * adapter, CLI — render each case with a different user-facing message and
+ * we want exhaustiveness checking instead of string parsing.
+ */
+export type EnableFailureReason = "not_found" | "no_live_deploy";
+
+export type EnableResult =
+  | { kind: "enabled"; name: string; gitSha: string }
+  | { kind: "already_enabled"; name: string; gitSha: string }
+  | { kind: "rejected"; name: string; reason: EnableFailureReason };
+
+/**
+ * Mirror of {@link EnableResult} for {@link SkillRunner.deregister}.
+ * Returning a discriminated union (rather than throwing on "not found")
+ * lets transport adapters map cases without string-matching the error
+ * message — a fragile coupling to the runner's wording. Only `not_found`
+ * is a domain failure today; DB / infrastructure errors still throw.
+ */
+export type DeregisterFailureReason = "not_found";
+
+export type DeregisterResult =
+  | { kind: "deregistered"; name: string }
+  | { kind: "rejected"; name: string; reason: DeregisterFailureReason };
+
+/**
  * Public contract for the skills runtime. P3.3 fills in the deployment-pipeline
  * RPCs (`register` / `approveDeploy` / `denyDeploy` / `rollback` / `deregister`)
  * around the P3.1 invocation loop. The interface is the boundary the CLI, agent
@@ -132,9 +168,28 @@ export interface SkillRunner {
   approveDeploy(opts: { pendingId: string; approvedBy?: string }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
   rollback(opts: { name: string; toGitSha: string }): Promise<RegisterResult>;
-  deregister(opts: { name: string }): Promise<void>;
+  /**
+   * Soft-disable a skill. Idempotent on already-disabled rows (returns
+   * `kind: "deregistered"` either way — soft-disable already supports
+   * the no-op case at the store layer). See {@link DeregisterResult}.
+   */
+  deregister(opts: { name: string }): Promise<DeregisterResult>;
+  /**
+   * Re-activate a soft-disabled skill. Refuses if the skill was never live
+   * at its current `gitSha` (denied-on-first-deploy case) — re-enabling
+   * would otherwise smuggle un-approved code past the approval gate.
+   * Idempotent: enabling an already-enabled skill returns `already_enabled`
+   * rather than erroring. See {@link EnableResult}.
+   */
+  enable(opts: { name: string }): Promise<EnableResult>;
 
   list(): Promise<readonly SkillSummary[]>;
+  /**
+   * Like {@link list} but includes disabled skills too. Used by operator-
+   * facing surfaces (`/skills` in Telegram) where a previously-disabled
+   * row needs to be visible so the operator can `enable` it back.
+   */
+  listAll(): Promise<readonly SkillSummary[]>;
   /**
    * Like {@link list} but loads the per-skill manifest from git so each entry
    * carries the description + input JSON Schema needed for LLM tool
@@ -659,29 +714,65 @@ export class SkillRunnerImpl implements SkillRunner {
     return rejectedResult(targetSha, result.kind === "rejected" ? result.reason : result.kind);
   }
 
-  async deregister(opts: { name: string }): Promise<void> {
-    const skill = await this.#runInTx((tx) => this.#store.getSkillByName(tx, opts.name));
-    if (!skill) {
-      throw new Error(`skill not found: ${opts.name}`);
-    }
-    // Soft-disable rather than physically deleting — preserves the audit
-    // trail in skill_deploys and skill_runs. A future hard-delete RPC could
-    // exist, but at personal scale soft-disable covers the use case (revoke
-    // an unsafe skill, retain the history).
-    await this.#runInTx((tx) => this.#store.setSkillDisabled(tx, { id: skill.id, disabled: true }));
+  async deregister(opts: { name: string }): Promise<DeregisterResult> {
+    return this.#runInTx(async (tx) => {
+      const skill = await this.#store.getSkillByName(tx, opts.name);
+      if (!skill) {
+        return { kind: "rejected", name: opts.name, reason: "not_found" } as const;
+      }
+      // Soft-disable rather than physically deleting — preserves the audit
+      // trail in skill_deploys and skill_runs. A future hard-delete RPC could
+      // exist, but at personal scale soft-disable covers the use case (revoke
+      // an unsafe skill, retain the history). `setSkillDisabled` is
+      // idempotent at the store layer, so calling deregister on an
+      // already-disabled row is a SQL no-op and returns `deregistered`.
+      await this.#store.setSkillDisabled(tx, { id: skill.id, disabled: true });
+      return { kind: "deregistered", name: skill.name } as const;
+    });
+  }
+
+  async enable(opts: { name: string }): Promise<EnableResult> {
+    return this.#runInTx(async (tx) => {
+      const skill = await this.#store.getSkillByName(tx, opts.name);
+      if (!skill) {
+        return { kind: "rejected", name: opts.name, reason: "not_found" } as const;
+      }
+      if (!skill.disabled) {
+        return {
+          kind: "already_enabled",
+          name: skill.name,
+          gitSha: skill.gitSha,
+        } as const;
+      }
+      // Approval-gate guard: a `disabled=true` row with no matching live
+      // deploy means the current sha was either denied at first registration
+      // or has otherwise never been signed off. Flipping disabled=false
+      // here would activate that code with no human review — the same hole
+      // a `/disable foo` → `/enable foo` cycle would open if /disable
+      // weren't already gated to live skills upstream. Refuse, force the
+      // operator through `register` again.
+      const hasLive = await this.#store.hasLiveDeployForSkill(tx, {
+        skillId: skill.id,
+        gitSha: skill.gitSha,
+      });
+      if (!hasLive) {
+        return { kind: "rejected", name: skill.name, reason: "no_live_deploy" } as const;
+      }
+      await this.#store.setSkillDisabled(tx, { id: skill.id, disabled: false });
+      return { kind: "enabled", name: skill.name, gitSha: skill.gitSha } as const;
+    });
   }
 
   // --- Read paths ---
 
   async list(): Promise<readonly SkillSummary[]> {
     const rows = await this.#runInTx((tx) => this.#store.listEnabledSkills(tx));
-    return rows.map((r) => ({
-      name: r.name,
-      tier: r.tier,
-      riskTier: r.riskTier,
-      disabled: r.disabled,
-      gitSha: r.gitSha,
-    }));
+    return rows.map(rowToSummary);
+  }
+
+  async listAll(): Promise<readonly SkillSummary[]> {
+    const rows = await this.#runInTx((tx) => this.#store.listAllSkills(tx));
+    return rows.map(rowToSummary);
   }
 
   async listToolDefs(): Promise<readonly SkillToolDef[]> {

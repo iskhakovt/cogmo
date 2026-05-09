@@ -91,6 +91,8 @@ const USAGE = {
     "  /mcp approve <name> <tool>     → flip a single tool to approved (visible to the agent)\n" +
     "  /mcp reject <name> <tool>      → mark tool rejected (hidden from the agent)",
   repair: "Usage: /repair  (or /repair <alias|uuid>  to target a specific conversation)",
+  disable: "Usage: /disable <name>",
+  enable: "Usage: /enable <name>",
 };
 
 // ---- Public handlers ----
@@ -1465,6 +1467,89 @@ export async function handleMcp(transport: Transport, ctx: TelegramCommandContex
   }
 }
 
+// ── /skills, /disable, /enable ────────────────────────────────────────
+
+/**
+ * `/skills` — list all skills (enabled + disabled), sorted by name. The
+ * disabled marker is the whole point: an operator who deregistered a
+ * skill needs to see it here to remember the name before `/enable`.
+ */
+export async function handleSkills(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const handle = String(ctx.from.id);
+  const res = await transport.skills.list(handle);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  if (res.value.length === 0) {
+    await ctx.reply(
+      "No skills registered. Use `cogmo skills register <branch>` from the CLI or the agent's `register_skill` tool.",
+    );
+    return;
+  }
+  // Compact one-line-per-skill rendering. `gitSha` shortened to 7 chars
+  // for readability; the full sha is rarely useful at the chat surface.
+  const lines = res.value.map((s) => {
+    const marker = s.disabled ? " (disabled)" : "";
+    return `${s.name} [${s.tier}/${s.riskTier}] @ ${s.gitSha.slice(0, 7)}${marker}`;
+  });
+  await ctx.reply(`Skills:\n${lines.join("\n")}`);
+}
+
+/**
+ * `/disable <name>` — soft-disable a skill. Hides it from the LLM tool
+ * list and any cron-driven invocations on the next refresh. Audit trail
+ * preserved; `/enable <name>` undoes it.
+ */
+export async function handleDisable(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const name = ctx.match?.trim();
+  if (!name) {
+    await ctx.reply(USAGE.disable);
+    return;
+  }
+  const handle = String(ctx.from.id);
+  const res = await transport.skills.disable(handle, name);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  await ctx.reply(`Skill "${res.value.name}" disabled.`);
+}
+
+/**
+ * `/enable <name>` — re-activate a previously-disabled skill. Idempotent
+ * on already-enabled rows. Refused for skills whose current sha was
+ * never live (denied-on-first-deploy guard); operator must re-register
+ * the source through the approval flow instead.
+ */
+export async function handleEnable(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const name = ctx.match?.trim();
+  if (!name) {
+    await ctx.reply(USAGE.enable);
+    return;
+  }
+  const handle = String(ctx.from.id);
+  const res = await transport.skills.enable(handle, name);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  if (res.value.alreadyEnabled) {
+    await ctx.reply(`Skill "${res.value.name}" is already enabled.`);
+  } else {
+    await ctx.reply(`Skill "${res.value.name}" enabled.`);
+  }
+}
+
 function errorMessage(err: TransportError): string {
   switch (err.code) {
     case "identity_rejected":
@@ -1513,6 +1598,10 @@ function errorMessage(err: TransportError): string {
       return `Task already finished (status: ${err.status}).`;
     case "skills_disabled":
       return "Skills runtime is unavailable — bootstrap missing skillRunner wiring.";
+    case "skill_not_found":
+      return `No skill named "${err.name}". Use /skills to list.`;
+    case "skill_no_live_deploy":
+      return `Skill "${err.name}" has no live deploy at its current sha — re-register the source via the agent or \`cogmo skills register\` first.`;
     case "skill_deploy_not_found":
       return `Skill deploy ${shortenId(err.pendingId)} not found.`;
     case "skill_deploy_not_pending":

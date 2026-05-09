@@ -204,6 +204,25 @@ export interface SkillStore {
   getSkillById(tx: Transaction, id: string): Promise<SkillRow | undefined>;
   /** Live (non-disabled) rows, ordered by name for stable tool-list output. */
   listEnabledSkills(tx: Transaction): Promise<readonly SkillRow[]>;
+  /**
+   * All rows including disabled, ordered by name. Backs the operator-facing
+   * `/skills` list where seeing previously-disabled entries is the whole
+   * point (you can't `/enable foo` if you've forgotten the name). Tool-list
+   * paths still use {@link listEnabledSkills}.
+   */
+  listAllSkills(tx: Transaction): Promise<readonly SkillRow[]>;
+  /**
+   * True iff at least one `skill_deploys` row exists with the given
+   * `(skill_id, git_sha)` and `status = 'live'`. Used by `enable` to gate
+   * re-activation: a never-approved-then-denied first deploy leaves the
+   * skills row at `disabled=true` with the rejected sha; `/enable foo`
+   * without this check would smuggle code past the approval gate.
+   * Rolled-back skills still pass (the prior live row remains).
+   */
+  hasLiveDeployForSkill(
+    tx: Transaction,
+    params: { skillId: string; gitSha: string },
+  ): Promise<boolean>;
   updateSkillSha(tx: Transaction, params: { id: string; gitSha: string }): Promise<void>;
   setSkillDisabled(tx: Transaction, params: { id: string; disabled: boolean }): Promise<void>;
   /** P3.3: atomic register flow — see {@link ExecuteRegisterParams}. */
@@ -281,6 +300,28 @@ export class DrizzleSkillStore implements SkillStore {
 
   async listEnabledSkills(tx: Transaction): Promise<readonly SkillRow[]> {
     return tx.select().from(skills).where(eq(skills.disabled, false)).orderBy(asc(skills.name));
+  }
+
+  async listAllSkills(tx: Transaction): Promise<readonly SkillRow[]> {
+    return tx.select().from(skills).orderBy(asc(skills.name));
+  }
+
+  async hasLiveDeployForSkill(
+    tx: Transaction,
+    params: { skillId: string; gitSha: string },
+  ): Promise<boolean> {
+    const rows = await tx
+      .select({ id: skillDeploys.id })
+      .from(skillDeploys)
+      .where(
+        and(
+          eq(skillDeploys.skillId, params.skillId),
+          eq(skillDeploys.gitSha, params.gitSha),
+          eq(skillDeploys.status, "live"),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
   }
 
   async updateSkillSha(tx: Transaction, params: { id: string; gitSha: string }): Promise<void> {
