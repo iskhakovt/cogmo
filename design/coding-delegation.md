@@ -2,8 +2,6 @@
 
 Cogmo delegates heavy coding tasks to Claude Code and Codex CLI, leveraging the user's existing Max/Pro/Plus subscriptions as the execution backend. Telegram is the control plane. Cogmo handles planning, gating, progress reporting, and review; the CLIs do the actual work.
 
-> *Sandbox API names below (`Sandbox.createTaskContainer`, `Sandbox.stopTask`, `LocalInProcessSandbox`, etc.) reflect the current code. The canonical interface contract is [sandbox.md](sandbox.md) → Backend Architecture, where `SandboxClient` / `SandboxSession` is the in-flight refactor target. Names in this doc will be updated when the refactor lands.*
-
 ## Purpose `[proposed]`
 
 Enable flows like:
@@ -206,7 +204,7 @@ coding_tasks (
   trigger_source          coding_trigger_source NOT NULL,         -- determines gating (plan approval path)
   trigger_ref             TEXT,                                   -- optional pointer into the originating subsystem (evolution proposal id, signal batch id)
   backend                 coding_backend NOT NULL,
-  worktree_assignment     JSONB,                                  -- WorktreeAssignmentSchema = { branch, worktreePath }; null until allocate-worktree step runs. Atomic by Zod-on-read-and-write — no half-allocated state.
+  worktree_assignment     JSONB,                                  -- WorktreeAssignmentSchema — discriminated union: {type:"host-path",branch,worktreePath} (bind-mount) | {type:"git-remote",branch} (git clones inside the sandbox). Null until allocate-worktree runs. Atomic by Zod-on-read-and-write — no half-allocated state.
   session_id              TEXT,                                   -- CLI session for resume
   container_id            UUID REFERENCES containers(id),         -- sandbox.md
   allow_privileged_runc   BOOLEAN NOT NULL,                       -- compat escape hatch; explicit at insert (no default)
@@ -271,7 +269,7 @@ Owned by `src/agent/store/` (fits the existing agent domain — tasks are agent 
 
 | Trigger | When | Teardown path |
 |-|-|-|
-| Terminal task status (`pr_open`, `failed`, `cancelled`) | Short grace period for log flush (default 120s, `CODING_TASK_GRACE_SECONDS`) | Orchestrator calls `sandbox.stopTask(id)` → root-task cascade |
+| Terminal task status (`pr_open`, `failed`, `cancelled`) | Short grace period for log flush (default 120s, `CODING_TASK_GRACE_SECONDS`) | Orchestrator calls `sandbox.deleteByTaskId(id)` → root-task cascade |
 | Idle TTL | No CLI activity for `CODING_TASK_IDLE_TTL` (default 20 min) | Sandbox reaper TTL pass. `session_id` preserved in DB. |
 | Cogmo restart | Boot reconcile | Sandbox crash-recovery pass ([sandbox.md](sandbox.md) → Crash Recovery) |
 | LRU eviction under resource pressure | Disk / RAM threshold crossed | Oldest idle task containers first; active tasks protected |
@@ -296,15 +294,25 @@ Resume after full teardown replays this in reverse: `git worktree add <path> <br
 
 **S3 / remote object storage is opt-in, not default.** The motivating scenario — "my laptop died, I want the task back" — is already covered by remote refs for every case except the no-remote bootstrap. Deferred to a later remote-sandbox story.
 
+### Run-branch cleanup `[confirmed]`
+
+The git-remote transport pushes a `cogmo/run/<task-id>` ref to the remote at `allocate-worktree` time so the sandbox can clone it. Once the task reaches a terminal status (`pr_open` for success, `failed` for any failure path), that ref is dead weight on the remote. Cleanup follows a hybrid event-driven primary + cron safety-net pattern; full design lives in [sandbox.md → Daytona Backend → Orphan branch cleanup](sandbox.md#orphan-branch-cleanup-confirmed). At a glance: `cleanup-run-branch.ts` subscribes to `coding/task/pr-opened` and `coding/task/failed` and deletes immediately; `cleanup-orphan-run-branches.ts` runs weekly and sweeps anything missed.
+
+The slice-4 PR namespace `cogmo/<idShort>` (different from `cogmo/run/*`) stays untouched — GitHub's `delete_branch_on_merge` setting cleans it up on merge, and the WIP-ref cron above prunes `refs/cogmo-wip/<task-id>` independently.
+
+### Why GitHub identities load OUTSIDE `step.run`
+
+Inngest persists every `step.run` return value into its state store. A `step.run` body that resolves a `github_identity:<name>` secret and returns the bundle would persist the PAT + SSH private key into Inngest's database. The orchestrator avoids this by calling `loadIdentity` directly (no step wrapper) at the top of plan / execute / verify, and by resolving auth INSIDE step bodies (where consumed by `buildWorktreeSpec` → `sandbox.create`) but never returning it. This is enforced by inline comments at every load site and by the cleanup-cron's parallel design — `cleanup-orphan-run-branches.ts` loads identity inline and only the per-ref `step.run` return values (no PAT) reach the state store.
+
 ### Resume procedure `[confirmed]`
 
 "Resume" never means "same container" — it means *same state, fresh shell*. Slice 2 ships the in-task variant (plan-phase container reaped before approval; execute recreates):
 
 1. Look up `coding_tasks` row by id. If `status` is terminal and the user didn't explicitly ask to re-open, treat as a new task instead.
-2. Reuse-or-create check: `sandbox.listContainersForTask(taskId)` finds any live container row; `sandbox.inspectContainer(dockerId)` verifies it's still `running` according to Docker. If yes, derive a fresh handle via `sandbox.getTaskContainer(dockerId)` and skip step 3.
-3. `sandbox.createTaskContainer(spec)` with the same `worktree_path`, `repo_id`, and cache volumes. Fresh container, same mounts. Insert a new `containers` row; update `coding_tasks.container_id`.
-4. (Slice 4+ for cross-task resume) Re-inject git credentials from the vault (short-lived, per-task).
-5. `backend.execute(ctx, sessionId)` → `claude -p --resume <session_id> --permission-mode acceptEdits` (or Codex equivalent). CLI rehydrates its conversation from its session file in the per-task home volume.
+2. Reuse-or-create check: `sandbox.tryResumeByTaskId(taskId)` returns the live root session for the task or null. The local-Docker backend implements this by querying its `containers` table for `depth=0` rows and inspecting Docker; managed backends query their provider-side API. A non-null return means the prior session is still alive and the orchestrator skips step 3.
+3. `sandbox.create(spec)` with the worktree spec the orchestrator's `allocate-worktree` step persisted (host-path or git-remote — see below). Fresh sandbox, same per-task lineage label. Local-Docker inserts a new `containers` row and stamps `coding_tasks.container_id`; managed backends leave the column null and rely on the sandbox's task-id label.
+4. Re-attach a session handle on the orchestrator side via `sandbox.resume(sessionState)` — handles aren't JSON-serializable so they can't cross step boundaries; the state is.
+5. `backend.execute(ctx, sessionId)` → `claude -p --resume <session_id> --permission-mode acceptEdits` (or Codex equivalent). CLI rehydrates its conversation from its session file in the per-task home volume (Local-Docker named volume; Daytona auto-persists FS across stop/start).
 
 Cost: ~1–3s container start under sysbox plus cache-volume mount when the recreate path is taken. Acceptable because reuse is the common case (default 20-minute idle TTL covers most approve-tap intervals).
 
@@ -389,8 +397,10 @@ Lands as part of P2 phase 12 (automated self-modification surface). Without it, 
 Cogmo orchestrator
   1. Resolve repo (keyword match or ask)
   2. Insert coding_tasks row, status='queued'
-  3. Allocate git worktree on host: git worktree add <path> -b cogmo/<id-short>
-  4. sandbox.createTaskContainer → task container up with worktree mounted, git creds injected
+  3. Allocate working tree per `sandbox.capabilities.workingTreeTransport`:
+     - bind-mount: git worktree add <path> -b cogmo/<id-short>
+     - git-remote: pushTaskBranchToRemote pushes default-branch tip to cogmo/run/<task-id>
+  4. sandbox.create({worktree, ...}) → task container up; askpass mounted (Local-Docker) or uploaded (Daytona)
         │
         ▼
 ClaudeCodeBackend.plan()
@@ -430,16 +440,23 @@ Same pattern as `handle-message` ([crash-recovery.md](crash-recovery.md)) — du
 
 | Step | Kind | Notes |
 |-|-|-|
-| `allocate-worktree` | `step.run` | Idempotent reconcile: (1) if the host path already exists and `git -C <path> rev-parse --is-inside-work-tree` succeeds and HEAD resolves to `cogmo/<id-short>`, adopt it and return. (2) If the branch `cogmo/<id-short>` already exists without a worktree, `git worktree add <path> cogmo/<id-short>`. (3) Otherwise, `git worktree add -b cogmo/<id-short> <path>`. Handles crashes between `worktree add` and the DB insert without the raw `add` failing on "path/branch already exists". |
-| `create-container` | `step.run` | `sandbox.createTaskContainer`; on retry, reuses existing container row if still healthy |
+| `allocate-worktree` | `step.run` | Branches on `sandbox.capabilities.workingTreeTransport`. **bind-mount:** idempotent host worktree reconcile — `git -C <path> rev-parse --is-inside-work-tree` adoption check, `git worktree add` with the branch already present, or `git worktree add -b`. **git-remote:** persists `{type:"git-remote", branch:"cogmo/<idShort>"}`, calls `pushTaskBranchToRemote` (`src/agent/coding/git-as-transport.ts`) which fetches `origin/<defaultBranch>` and force-pushes it to `cogmo/run/<task-id>` on the remote under one askpass helper. Identity is loaded inline from the secrets table — NOT inside `step.run` — so the PAT + SSH key never become a step return value. |
+| `create-container` | `step.run` | Returns just `sessionState` (the discriminated `SandboxSessionState` blob). `sandbox.create()` builds the right `WorktreeSpec` variant via `buildWorktreeSpec`: bind-mount → `host-path` pointing at the host worktree; git-remote → `git-remote` pointing at `cogmo/run/<task-id>` with HTTPS basic-auth (`x-access-token`:`<pat>`). The Daytona SDK's `sandbox.git.clone()` materializes the run-branch inside the sandbox. Auth resolution happens INSIDE the step body — the PAT is consumed by `buildWorktreeSpec` and never returned, so Inngest doesn't persist it. |
 | *plan streaming* | non-durable | Spawns `claude -p --permission-mode plan`, streams JSONL to Telegram. Not wrapped in `step.run` — can't replay a stream. On retry, re-invoked with `--resume <sid>` so it continues the same session instead of replanning from scratch |
+| `persist-container-id` | `step.run` (local-docker only) | Stamps `coding_tasks.container_id` with the local-Docker FK target. Skipped on managed backends (column stays null; lineage carried by sandbox-side task-id labels). Split out of `create-container` so a DB-write failure doesn't lose the container — `containerCreated` flag is set OUTSIDE the create step (Inngest replay safety) and the catch path's `deleteByTaskId` reaps via the task-id label regardless of whether the FK row was inserted. |
+| `checkout-feature-branch` | `step.run` (git-remote only) | Post-clone `git checkout -B cogmo/<idShort>` inside the sandbox so `runCommitAndPush(branch="cogmo/<idShort>")` works unchanged. Idempotent: `checkout -B` resets the branch to current HEAD if it already exists. Skipped on bind-mount (the worktree is already on the right branch from `allocate-worktree`). |
 | `persist-plan` | `step.run` | Writes `coding_tasks.plan`, status `awaiting_approval` |
 | `wait-for-approval` | `step.waitForEvent` | Hours-to-days acceptable; Inngest durably parks the run |
+| `try-resume` | `step.run` (execute) | Calls `sandbox.tryResumeByTaskId` and returns the state or null. A non-null return means the execute orchestrator skips the create-fresh branch entirely — no fresh clone, no checkout, no auth resolution. |
 | *execute streaming* | non-durable | Same pattern as plan streaming — `--resume <sid>`, permission responses over stdin |
+| `emit-cli-done` | `step.run` | Hand-off to the verify orchestrator via `coding/task/cli-done` event. Emitted after the durable `pending_verify` transition. |
 | `verify` | `step.run` | Single post-hoc execution of `<coding_repos.verify_command>` inside the container (via `bash -lc`). **No retry loop in this step.** Iterating on failure was the CLI's job during the execute phase per *Prompt Construction → Self-verify clause*; this step exists only to confirm the CLI's "done" claim. Pass → proceed to push + PR; fail → mark task failed with the verify output. Budget caps (`task_token_budget`, `task_wall_time_seconds`) enforce termination of the execute phase upstream; this step is bounded by `coding_repos.verify_timeout_seconds`. |
-| `push` | `step.run` | `git push origin cogmo/<id-short>` via slice 4.0f's `runCommitAndPush`. Non-fast-forward / rejected → `branch_conflict`; PAT auth fail → `auth_failed`; both surface as task failure with discriminated reason, no force push. |
+| `push` | `step.run` | `git push origin cogmo/<idShort>` via slice 4.0f's `runCommitAndPush`. Non-fast-forward / rejected → `branch_conflict`; PAT auth fail → `auth_failed`; both surface as task failure with discriminated reason, no force push. Backend-agnostic: `runCommitAndPush` shells out via `execStreaming` inside the sandbox, so the same code path serves bind-mount and git-remote. |
 | `create-pr` | `step.run` | `octokit.pulls.create({draft:true})` via slice 4.0g. Captured into `coding_tasks.pr_metadata` (atomic JSONB blob). Idempotent: 422 "already exists" surfaces as `validation_failed` with the existing PR's number in the message. |
-| `teardown` | `try/finally` | `sandbox.stopTask(id)` cascades container kill + clears the per-task askpass dir (slice 4.0d). Runs whether the orchestrator path succeeded or threw. WIP-ref push deferred to a follow-up (todo `p3`). |
+| `fetch-feature-branch` | `step.run` (git-remote only) | After PR open, host-side `fetchFeatureBranch` updates `refs/remotes/origin/cogmo/<idShort>` in the local mirror so the host's commit graph reflects the sandbox's push. Best-effort — origin is the source of truth. Skipped on bind-mount (the host worktree IS the source of truth). |
+| `emit-task-failed` | `step.run` | On any failure path in plan / execute / verify, emits `coding/task/failed` so cleanup subscribers (run-branch deletion, future telemetry) hook in without polling the row. |
+| `teardown-worktree` | `step.run` (host-path assignments only) | `safeTeardownWorktree` runs `git worktree remove` on clean, `git add -A && commit && force-push HEAD:refs/cogmo-wip/<task-id>` on dirty/unpushed. git-remote assignments have no host worktree — the helper early-returns. |
+| `teardown` | `try/finally` | `sandbox.deleteByTaskId(taskId)` cascades sandbox kill + clears the per-task askpass dir (slice 4.0d). Runs whether the orchestrator path succeeded or threw. The catch-path catch always calls `deleteByTaskId` when `containerCreated` is true — flag is set OUTSIDE the create step body so it survives Inngest replay. |
 
 **Slice 4.0h orchestrator function.** The verify → push → PR sequence runs in its own Inngest function (`coding-task-verify`), triggered by `coding/task/cli-done` which the execute orchestrator emits after the durable `pending_verify` transition. The hand-off pattern keeps each function's retry policy independent and lets the execute container be torn down cleanly before verify spins up a fresh one with the askpass mount bound. Fires `coding/task/verify-complete`, `coding/task/pushed`, and `coding/task/pr-opened` events for observability + Telegram delivery.
 
@@ -525,7 +542,7 @@ Two viable patterns, each with real costs:
 
 **P1 decision: ship pattern A.** Pair it with short-lived PATs (fine-grained, per-repo, quarterly rotation on the bot account) and aggressive teardown. Revisit vault socket in P2 alongside the GitHub App migration, when we'll have installation tokens that auto-expire in 1 hour and benefit most from no-disk storage.
 
-**Slice 4.0d wiring (concrete shape).** The orchestrator provisions a per-task askpass directory before `createTaskContainer`:
+**Slice 4.0d wiring (concrete shape).** The orchestrator provisions a per-task askpass directory before `sandbox.create`:
 
 ```
 ${SANDBOX_ASKPASS_DIR}/<rootTaskId>/
@@ -535,7 +552,7 @@ ${SANDBOX_ASKPASS_DIR}/<rootTaskId>/
   signing-key.pub  0644  — corresponding `ssh-ed25519 ...` line
 ```
 
-The directory is bind-mounted **read-only** at `/.cogmo-askpass/` inside the container. `provisionAskpass` returns env vars to thread into `exec` — `GIT_ASKPASS=/.cogmo-askpass/helper` and `GIT_TERMINAL_PROMPT=0`; commit signing happens via `git -c gpg.format=ssh -c user.signingkey=/.cogmo-askpass/signing-key` (env vars don't drive the signing path). `LocalInProcessSandbox.stopTask` calls `cleanupAskpass` in its `try/finally`, idempotent under retries and a no-op when the directory was never provisioned. See `src/sandbox/askpass.ts`.
+The directory is bind-mounted **read-only** at `/.cogmo-askpass/` inside the container (Local-Docker) or uploaded via `fs.uploadFiles` then mode-set with `fs.setFilePermissions` (Daytona — same path layout, same modes). `provisionAskpass` returns env vars to thread into `exec` — `GIT_ASKPASS=/.cogmo-askpass/helper` and `GIT_TERMINAL_PROMPT=0`; commit signing happens via `git -c gpg.format=ssh -c user.signingkey=/.cogmo-askpass/signing-key` (env vars don't drive the signing path). The sandbox client's `deleteByTaskId` calls `cleanupAskpass` in its `try/finally`, idempotent under retries and a no-op when the directory was never provisioned. See `src/sandbox/askpass.ts` and `src/sandbox/daytona/askpass-upload.ts`.
 
 ## Repo Registry `[confirmed]`
 

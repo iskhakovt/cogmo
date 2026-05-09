@@ -2,7 +2,7 @@
 
 Sandbox infrastructure. Any Cogmo feature needing isolated execution uses this module. Active consumers: coding-delegation tasks (worktree-bearing, long-lived, see [coding-delegation.md](coding-delegation.md)) and skills tier-2 (worktree-less, ephemeral Python subprocess workers, see [skills.md](skills.md)). Future consumers include untrusted MCP servers and one-off tool sandboxes.
 
-## Purpose `[proposed]`
+## Purpose `[confirmed]`
 
 Run arbitrary commands and downstream tooling in isolated environments. Two backend families share one abstraction:
 
@@ -19,7 +19,7 @@ Compatibility with existing tooling — testcontainers, `docker compose`, `docke
 
 A unified policy plane across both backend families is a non-goal. Policy lives where it can be enforced — Cogmo's Docker proxy on local, the provider's sandbox boundary on managed.
 
-## Backend Architecture `[proposed]`
+## Backend Architecture `[confirmed]`
 
 ### Two interfaces
 
@@ -30,6 +30,17 @@ interface SandboxClient<TState> {
   readonly backendId: string;
   readonly capabilities: SandboxCapabilities;
 
+  /** Verify the backend is reachable + configured. Throws on misconfig. */
+  healthCheck(): Promise<{ ok: true; runtime: string }>;
+
+  /**
+   * Boot-time reconciliation: kill any sessions tagged with a different
+   * `cogmo.instance` than the current run. Runs once at startup; the
+   * per-minute `reaper` keeps things tidy after that. No-op on managed
+   * backends until they grow an orphan-reconcile pass of their own.
+   */
+  reconcileCrashedInstances(currentInstanceId: string): Promise<{ orphansReaped: number }>;
+
   /**
    * Ensure `image` is reachable from the backend (locally cached on
    * Local-Docker, registry-reachable on Daytona). Idempotent and cheap
@@ -38,11 +49,32 @@ interface SandboxClient<TState> {
    */
   ensureImagePresent(image: string): Promise<void>;
 
-  create(spec: SessionSpec): Promise<SandboxSession>;
-  resume(state: TState): Promise<SandboxSession>;
-  delete(session: SandboxSession): Promise<void>;
+  create(spec: SessionSpec): Promise<SandboxSession<TState>>;
+  resume(state: TState): Promise<SandboxSession<TState>>;
+
+  /**
+   * Discover the live root session (depth-0 container created by the
+   * orchestrator) for `taskId`, or null when none is currently alive.
+   * Used in the orchestrator's get-or-create path after an idle TTL
+   * where a prior session may or may not still exist.
+   */
+  tryResumeByTaskId(taskId: string): Promise<SandboxSession<TState> | null>;
+
+  /** Tear down the session and its underlying sandbox (cascade). Idempotent. */
+  delete(session: SandboxSession<TState>): Promise<void>;
+
+  /**
+   * Tear down every session whose state was created with the given
+   * `taskId`, regardless of whether the orchestrator still holds a
+   * handle. Used by failure cascades and the reaper. Idempotent.
+   */
+  deleteByTaskId(taskId: string): Promise<void>;
+
   serializeState(state: TState): Record<string, unknown>;
   deserializeState(payload: Record<string, unknown>): TState;
+
+  /** Release backend-level resources (close docker connections, listeners). */
+  shutdown(): Promise<void>;
 }
 
 interface SessionSpec {
@@ -444,17 +476,21 @@ Configured via environment:
 
 tRPC's HTTP client accepts a custom `fetch`, so the Unix-socket case is wired via undici's `Agent({ socketPath })`. No code difference between transports beyond the URL.
 
-## Daytona Backend `[proposed]`
+## Daytona Backend `[confirmed]` / `[proposed]` for real-traffic load behavior
 
 The Daytona backend runs task sandboxes on Daytona's managed cloud (default) or self-hosted Daytona instance. Daytona owns sandbox isolation and lifecycle. Cogmo drives via the [Daytona TypeScript SDK](https://www.daytona.io/docs/typescript-sdk/daytona/).
 
-**Status:** Designed against the SDK docs; **not yet exercised at Cogmo's expected concurrency or log volume.** The streaming-exec WebSocket path in particular (`getSessionCommandLogs`) is the load-bearing piece that needs real-traffic validation before this section moves to `[confirmed]`. Specific unknowns: WS keepalive behaviour over multi-minute idle stretches, log-buffer behaviour during transient disconnect, and whether `executeSessionCommand({ runAsync: true })` honours per-command timeouts the way buffered `executeCommand` does.
+**Two phases shipped:** Phase 3a (PR #173) lifted skills tier-2 onto Daytona — worktree-less, ephemeral, ephemeral askpass-less. Phase 3b (PRs #183 / #192 / #196) wired coding-delegation through the `git-remote` working-tree transport: orchestrator force-pushes a `cogmo/run/<task-id>` ref, the SDK's `git.clone` rehydrates it inside the sandbox, askpass material is uploaded via `fs.uploadFiles`. Both flows share the same `SandboxClient` interface; consumers branch on `capabilities.workingTreeTransport`.
+
+**Status:** Production-ready for skills tier-2 and the coding-delegation `git-remote` flow against a single user's traffic. The streaming-exec WebSocket path (`getSessionCommandLogs`) and the `refreshActivity()` keepalive are `[proposed]` until real traffic exercises multi-minute idle stretches and transient WS disconnects — the unknowns called out below stay until Phase 3c integration testing closes them.
 
 ### Authentication & deployment
 
 API-key auth. The key is stored as `daytona_api_key` in the encrypted `secrets` table per [infrastructure.md](infrastructure.md) → Secrets — the same path LLM provider keys, channel tokens, and the GitHub PAT take. The setup wizard prompts for it on first run; non-interactive bootstrap accepts a `COGMO_DAYTONA_API_KEY` (with `_FILE` variant) which is migrated into the secrets table on first boot and not consulted thereafter.
 
 Base URL is configuration, not credential — `DaytonaSandboxClientOptions.apiUrl` carries the value (`undefined` = Daytona Cloud), populated at startup. Override via `DAYTONA_API_URL` env. The choice is deployment-time; Cogmo doesn't switch between cloud and self-hosted at runtime.
+
+`DaytonaSandboxClientOptions.organizationId` is similarly deployment-time — populated from `DAYTONA_ORGANIZATION_ID` env. Required when the API key has multi-org access; Daytona returns 403 on `list({}, 1, 1)` if the org isn't pinned.
 
 #### Keepalive
 
@@ -477,9 +513,17 @@ Per-task lifecycle (worktree-bearing sessions):
 
 Why git: native delta compression on push/fetch (matters for repos > 100MB), no inbound network requirement (managed sandboxes don't accept inbound ssh — rules out rsync), no bespoke tar/upload code, and slice 4 already pushes a result branch — the Daytona path adds the start-state push, nothing else.
 
-#### Orphan branch cleanup
+#### Orphan branch cleanup `[confirmed]`
 
-An orchestrator crash between step 1 (push) and step 6 (delete) leaves an orphan `cogmo/run/<task-id>` branch on the remote. Acceptable failure mode for personal scale, but it accumulates if nothing prunes. Reconcile pattern: weekly cron iterates `cogmo/run/*` refs and deletes any whose corresponding `coding_tasks` row is terminal (`pr_open`, `failed`, `cancelled`) and older than 7 days. Mirrors the `refs/cogmo-wip/<task-id>` retention pattern in [coding-delegation.md](coding-delegation.md) → Worktree persistence — same ref namespace discipline, same cron job. Per-PR webhook for minute-level cleanup is a P3 follow-up.
+Cleanup follows the **hybrid event-driven primary + cron safety-net** pattern dominant across Renovate, Dependabot, GitHub-native, and the off-the-shelf stale-branch-action ecosystem. Two Inngest functions, both in `src/agent/coding/`:
+
+1. **Event-driven primary** (`cleanup-run-branch.ts`). Subscribes to `coding/task/pr-opened` and `coding/task/failed` (idempotency keyed on `event.data.taskId` so simultaneous fires from both events for the same task collapse to one execution). Resolves the GitHub identity, derives `ref = heads/${runBranchFor(taskId)}`, calls `octokit.git.deleteRef`. Default Inngest retries (3) handle transient 5xx and secondary rate-limit; 404 + 422 are swallowed (already-deleted is idempotent success); 409 (protected branch) and other statuses propagate. Identity is loaded inline (NOT inside `step.run`) so the PAT + SSH private key never become a step return value — Inngest persists step returns into its state store, and we don't want credentials there. This catches 99% of cases immediately.
+
+2. **Weekly cron safety-net** (`cleanup-orphan-run-branches.ts`). Cron `0 4 * * 0` — Sunday 04:00 UTC, `retries: 2` so a transient list-repos / sendEvent failure doesn't lose the entire week's sweep. Lists managed coding repos, fans out via `step.sendEvent` (one `coding/run-branch-sweep/repo` event per repo) to a per-repo handler with its own retry lane and `concurrency: { limit: 2 }` to bound GitHub-token pressure. The per-repo handler walks `cogmo/run/*` refs via `octokit.paginate(octokit.git.listMatchingRefs, ...)` (so >100-ref repos still get fully swept), batch-loads the matching `coding_tasks` rows via `getTasksByIds`, and force-deletes refs whose task is **terminal AND >7 days old OR has no row at all**. Non-terminal tasks are never swept regardless of age — stuck approvals belong to the user. Per-delete failures `continue` the loop with an `errors++` counter so one bad ref doesn't block the rest of the week's sweep.
+
+The 7-day retention applies only to the cron's stale criterion. The event-driven path deletes immediately on terminal status. New events introduced for this design: `coding/task/failed` (emits from every failure path in plan + execute + verify), `coding/run-branch-sweep/repo` (cron fan-out).
+
+The slice-4 PR namespace `cogmo/<idShort>` (different namespace from `cogmo/run/*`) stays untouched until the user merges/closes — GitHub's repo-level `delete_branch_on_merge` setting handles those for free. The cron's prefix filter `heads/cogmo/run/` matches only the run-branch namespace, so PR branches are out of scope by construction.
 
 ### Streaming exec
 
@@ -529,9 +573,18 @@ The Daytona backend does not run the Cogmo Docker socket proxy, the systemd cgro
 
 ### Crash recovery
 
-`SandboxSessionState` for the Daytona backend stores `{ type: "daytona", sandboxId, sessionId }`. On orchestrator restart mid-task, `client.resume(state)` re-attaches to the existing sandbox via the Daytona API. If the sandbox was reaped (TTL exceeded, manual delete, provider-side eviction), `resume()` fails fast and the orchestrator marks the task failed.
+`SandboxSessionState` for the Daytona backend stores `{ type: "daytona", taskId, sandboxId }`. On orchestrator restart mid-task, `client.resume(state)` re-attaches to the existing sandbox via the Daytona API. If the sandbox was reaped (TTL exceeded, manual delete, provider-side eviction), `resume()` fails fast and the orchestrator marks the task failed.
 
-## Module Structure `[proposed]`
+### Deferred / Phase 3c
+
+- **Real-Daytona integration test** (gated on `DAYTONA_API_KEY`), mirroring `runner.sysbox.integration.test.ts`. Exercises one full skills tier-2 invocation + one coding-delegation `git-remote` flow against a live Daytona Cloud sandbox so the SDK mocks can't lie about WS demuxing or session-cleanup behaviour.
+- **Bootstrap-level integration coverage** for the Daytona path through `bootstrap()` — typecheck-only validation today.
+- **Edge-case unit gaps:** `buildShellCommand` with empty `env: {}`, `getSessionCommand` failure post-WS-resolve, concurrent `tryResumeByTaskId` for the same taskId.
+- **Daytona reaper / orphan reconcile.** `reconcileCrashedInstances` is a no-op today (Daytona auto-persists/auto-archives are the provider's job); a Cogmo-side audit pass that lists sandboxes labelled `cogmo.instance != current` and either resumes or deletes them would catch stale state from crashed retries.
+- **Cost dashboarding.** Wire Daytona usage stats into `coding_tasks.resource_usage` JSONB so post-hoc spend analysis works on managed runs the same as local.
+- **Cogmo-baked Daytona base image.** Bake `stdbuf` (`claude` block-buffering defeat) and other Cogmo-side deps so first-task latency drops from 2-5 min (Daytona builds + snapshots `cogmo/devbase`) to ~30s (snapshot already exists). Blocked on Daytona TS SDK exposing private-registry credential management — currently dashboard-only.
+
+## Module Structure `[confirmed]`
 
 ```text
 src/sandbox/
