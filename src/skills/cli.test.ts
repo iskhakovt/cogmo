@@ -236,13 +236,23 @@ describe("runSkillsCli", () => {
       expect(code).toBe(0);
     });
 
-    it("`deregister <name>` calls runner.deregister", async () => {
+    it("`deregister <name>` calls runner.deregister and surfaces the disabled status", async () => {
       const io = makeIo();
-      const deregister = vi.fn().mockResolvedValue(undefined);
+      const deregister = vi.fn().mockResolvedValue({ kind: "deregistered", name: "echo" });
       const code = await runSkillsCli(["deregister", "echo"], makeRunner({ deregister }), io);
       expect(deregister).toHaveBeenCalledWith({ name: "echo" });
       expect(code).toBe(0);
       expect(io.stdout.join("\n")).toContain('"status": "disabled"');
+    });
+
+    it("`deregister <name>` exits 1 on rejected:not_found", async () => {
+      const io = makeIo();
+      const deregister = vi
+        .fn()
+        .mockResolvedValue({ kind: "rejected", name: "ghost", reason: "not_found" });
+      const code = await runSkillsCli(["deregister", "ghost"], makeRunner({ deregister }), io);
+      expect(code).toBe(1);
+      expect(io.stderr.join("\n")).toContain("skill not found: ghost");
     });
   });
 
