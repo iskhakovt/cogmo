@@ -806,6 +806,7 @@ export async function bootstrapRuntime(
   const observer = createObserver({
     runInTx: core.runInTx,
     agentStore: core.agentStore,
+    transportStore: core.transportStore,
     resolveProvider: core.resolveProvider,
     memory: core.memory,
   });

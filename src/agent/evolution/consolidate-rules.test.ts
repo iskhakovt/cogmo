@@ -25,14 +25,29 @@ function mockConsolidationDeps(
     runInTx: fakeRunInTx,
     store: {
       getCorrections: vi.fn().mockResolvedValue([
-        { id: "r1", rule: "Be concise", category: "style", active: true, observationCount: 3 },
-        { id: "r2", rule: "Keep it short", category: "style", active: true, observationCount: 2 },
+        {
+          id: "r1",
+          rule: "Be concise",
+          category: "style",
+          active: true,
+          observationCount: 3,
+          channelType: null,
+        },
+        {
+          id: "r2",
+          rule: "Keep it short",
+          category: "style",
+          active: true,
+          observationCount: 2,
+          channelType: null,
+        },
         {
           id: "r3",
           rule: "Use tables for data",
           category: "domain",
           active: true,
           observationCount: 4,
+          channelType: null,
         },
       ]),
       replaceRules: vi.fn().mockResolvedValue({ id: "new-rule-1" }),
@@ -83,11 +98,16 @@ describe("consolidateRules", () => {
     const deps = mockConsolidationDeps(
       { groups: [] },
       {
-        getCorrections: vi
-          .fn()
-          .mockResolvedValue([
-            { id: "r1", rule: "Only one", category: "style", active: true, observationCount: 1 },
-          ]),
+        getCorrections: vi.fn().mockResolvedValue([
+          {
+            id: "r1",
+            rule: "Only one",
+            category: "style",
+            active: true,
+            observationCount: 1,
+            channelType: null,
+          },
+        ]),
       },
     );
 
@@ -116,13 +136,61 @@ describe("consolidateRules", () => {
     expect(deps.store.replaceRules).not.toHaveBeenCalled();
   });
 
+  it("excludes channel-scoped rules from consolidation", async () => {
+    // Channel-scoped rules and global rules can share wording but are
+    // conceptually distinct. `replaceRules` only emits global merged
+    // rows, so consolidation must not see channel-scoped rules at all.
+    const deps = mockConsolidationDeps(
+      { groups: [] },
+      {
+        getCorrections: vi.fn().mockResolvedValue([
+          {
+            id: "r1",
+            rule: "Be concise",
+            category: "style",
+            active: true,
+            observationCount: 3,
+            channelType: "telegram",
+          },
+          {
+            id: "r2",
+            rule: "Keep it short",
+            category: "style",
+            active: true,
+            observationCount: 2,
+            channelType: "direct",
+          },
+        ]),
+      },
+    );
+
+    const result = await consolidateRules("profile-1", deps);
+
+    expect(result.mergedGroups).toBe(0);
+    expect(deps.provider.chat).not.toHaveBeenCalled();
+  });
+
   it("skips only inactive rules before consolidating", async () => {
     const deps = mockConsolidationDeps(
       { groups: [] },
       {
         getCorrections: vi.fn().mockResolvedValue([
-          { id: "r1", rule: "Active", category: "style", active: true, observationCount: 2 },
-          { id: "r2", rule: "Learning", category: "style", active: false, observationCount: 1 },
+          {
+            id: "r1",
+            rule: "Active",
+            category: "style",
+            active: true,
+            observationCount: 2,
+            channelType: null,
+          },
+          {
+            id: "r2",
+            rule: "Learning",
+            category: "style",
+            active: false,
+            observationCount: 1,
+            channelType: null,
+          },
         ]),
       },
     );

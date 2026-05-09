@@ -643,6 +643,7 @@ export interface AgentStore {
       category: string;
       active: boolean;
       observationCount: number;
+      channelType: string | null;
     }>
   >;
 
@@ -1691,6 +1692,7 @@ export class DrizzleAgentStore implements AgentStore {
       category: string;
       active: boolean;
       observationCount: number;
+      channelType: string | null;
     }>
   > {
     return tx
@@ -1700,6 +1702,7 @@ export class DrizzleAgentStore implements AgentStore {
         category: steeringRules.category,
         active: steeringRules.active,
         observationCount: steeringRules.observationCount,
+        channelType: steeringRules.channelType,
       })
       .from(steeringRules)
       .where(

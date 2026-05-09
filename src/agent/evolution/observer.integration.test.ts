@@ -17,6 +17,7 @@
  * on Cogmo's logic and removes a fixture-record step from the test loop.
  */
 
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from "vitest";
@@ -25,13 +26,16 @@ import type { LlmProvider } from "../../llm/provider.js";
 import type { ChatParams, ChatStreamResult, LlmResponse } from "../../llm/types.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
 import { expectDefined } from "../../test/assertions.js";
+import { DrizzleTransportStore } from "../../transport/store/index.js";
+import { channelSessions, channels } from "../../transport/store/schema.js";
 import { DrizzleAgentStore } from "../store/index.js";
-import { conversations, messages, profiles } from "../store/schema.js";
+import { conversations, messages, profiles, steeringRules } from "../store/schema.js";
 import { type ObserverStepHarness, runObserver } from "./observer.js";
 
 let db: Database;
 let pgClient: postgres.Sql;
 let store: DrizzleAgentStore;
+let transportStore: DrizzleTransportStore;
 let userId: string;
 
 beforeAll(async () => {
@@ -39,6 +43,7 @@ beforeAll(async () => {
   pgClient = postgres(databaseUrl);
   db = drizzle(pgClient);
   store = new DrizzleAgentStore();
+  transportStore = new DrizzleTransportStore();
   // Reuse the seeded default user so FK-constrained inserts
   // (custom_compartments, pending_memories) accept our writes.
   userId = inject("defaultUserId");
@@ -50,10 +55,21 @@ afterAll(async () => {
 
 beforeEach(async () => {
   // Clean DB state per-test so assertion counts don't drift. Order
-  // matters for FKs: messages → conversations → test profiles →
-  // profile_classes. Test profiles are matched by name prefix to
-  // avoid touching the seeded default profile. pending_memories and
-  // custom_compartments are independent.
+  // matters for FKs: channel_sessions → messages → steering_rules →
+  // conversations → test profiles → profile_classes; test channels
+  // (marked via the `_test` credentials sentinel) come last to dodge
+  // the channel_sessions FK. Test profiles / channels are matched by
+  // name / credentials marker to avoid touching seeded fixtures.
+  // pending_memories and custom_compartments are independent.
+  await pgClient.unsafe(
+    `DELETE FROM channel_sessions
+     WHERE conversation_id IN (
+       SELECT id FROM conversations WHERE user_id = $1 AND profile_id IN (
+         SELECT id FROM profiles WHERE name LIKE 'it-profile-%'
+       )
+     )`,
+    [userId],
+  );
   await pgClient.unsafe(
     `DELETE FROM messages
      WHERE conversation_id IN (
@@ -63,6 +79,10 @@ beforeEach(async () => {
      )`,
     [userId],
   );
+  // Correction/evolution steering rules accumulate across tests via
+  // extractCorrections; manually-seeded rules (source='manual') stay
+  // untouched. Wide enough not to leak per-test state into the next.
+  await pgClient.unsafe(`DELETE FROM steering_rules WHERE source IN ('correction', 'evolution')`);
   await pgClient.unsafe(
     `DELETE FROM conversations
      WHERE user_id = $1 AND profile_id IN (
@@ -74,6 +94,7 @@ beforeEach(async () => {
   await pgClient.unsafe(`DELETE FROM profile_classes WHERE user_id = $1`, [userId]);
   await pgClient.unsafe(`DELETE FROM custom_compartments WHERE user_id = $1`, [userId]);
   await pgClient.unsafe(`DELETE FROM pending_memories WHERE user_id = $1`, [userId]);
+  await pgClient.unsafe(`DELETE FROM channels WHERE credentials @> '{"_test": true}'::jsonb`);
 });
 
 // --- Test helpers ---
@@ -92,6 +113,35 @@ const fakeStep: ObserverStepHarness = {
 // to `db.transaction`, which yields the Drizzle Transaction type the
 // store methods expect.
 const fakeRunInTx: import("../../db/index.js").Transactor = (cb) => db.transaction((tx) => cb(tx));
+
+/**
+ * Insert a test channel of the given type and an active session linking
+ * it to the conversation. Used to drive the Observer's
+ * `getActiveChannelTypes` step under real PG. The channel is marked via
+ * a `_test: true` credentials sentinel so beforeEach can clean it up
+ * without touching seeded fixtures.
+ */
+async function seedActiveChannelSession(
+  conversationId: string,
+  channelType: string,
+): Promise<void> {
+  const inserted = await db
+    .insert(channels)
+    .values({
+      type: channelType,
+      credentials: { _test: true, type: channelType },
+      identityMode: "fixed",
+    })
+    .returning({ id: channels.id });
+  const channelId = expectDefined(inserted[0], "inserted channel row").id;
+  await db.insert(channelSessions).values({
+    channelId,
+    platformAddress: `addr-${channelType}-${conversationId.slice(0, 8)}`,
+    conversationId,
+    status: "active",
+    receive: "all",
+  });
+}
 
 /**
  * Seed a profile + conversation + N messages, returning the conversation
@@ -243,6 +293,7 @@ describe("runObserver — real PG + recording memory mock", () => {
       {
         runInTx: fakeRunInTx,
         agentStore: store,
+        transportStore,
         resolveProvider: () => Promise.resolve(stub.provider),
         memory: recorder.memory,
       },
@@ -267,6 +318,7 @@ describe("runObserver — real PG + recording memory mock", () => {
     const result = await runObserver({ data: { conversationId } }, fakeStep, {
       runInTx: fakeRunInTx,
       agentStore: store,
+      transportStore,
       resolveProvider: () => Promise.resolve(stub.provider),
       memory: recorder.memory,
     });
@@ -292,6 +344,7 @@ describe("runObserver — real PG + recording memory mock", () => {
     const result = await runObserver({ data: { conversationId } }, fakeStep, {
       runInTx: fakeRunInTx,
       agentStore: store,
+      transportStore,
       resolveProvider: () => Promise.resolve(stub.provider),
       memory: recorder.memory,
     });
@@ -342,6 +395,7 @@ describe("runObserver — real PG + recording memory mock", () => {
     const result = await runObserver({ data: { conversationId } }, fakeStep, {
       runInTx: fakeRunInTx,
       agentStore: store,
+      transportStore,
       resolveProvider: () => Promise.resolve(stub.provider),
       memory: recorder.memory,
     });
@@ -372,6 +426,7 @@ describe("runObserver — real PG + recording memory mock", () => {
     const result = await runObserver({ data: { conversationId } }, fakeStep, {
       runInTx: fakeRunInTx,
       agentStore: store,
+      transportStore,
       resolveProvider: () => Promise.resolve(stub.provider),
       memory: recorder.memory,
     });
@@ -413,6 +468,7 @@ describe("runObserver — real PG + recording memory mock", () => {
     const result = await runObserver({ data: { conversationId } }, fakeStep, {
       runInTx: fakeRunInTx,
       agentStore: store,
+      transportStore,
       resolveProvider: () => Promise.resolve(stub.provider),
       memory: recorder.memory,
     });
@@ -443,6 +499,7 @@ describe("runObserver — real PG + recording memory mock", () => {
     const result = await runObserver({ data: { conversationId } }, fakeStep, {
       runInTx: fakeRunInTx,
       agentStore: store,
+      transportStore,
       resolveProvider: () => Promise.resolve(stub.provider),
       memory: recorder.memory,
     });
@@ -510,6 +567,7 @@ describe("runObserver — real PG + recording memory mock", () => {
     const result = await runObserver({ data: { conversationId } }, fakeStep, {
       runInTx: fakeRunInTx,
       agentStore: store,
+      transportStore,
       resolveProvider: () => Promise.resolve(stub.provider),
       memory: recorder.memory,
     });
@@ -567,6 +625,7 @@ describe("runObserver — real PG + recording memory mock", () => {
     const result = await runObserver({ data: { conversationId } }, fakeStep, {
       runInTx: fakeRunInTx,
       agentStore: store,
+      transportStore,
       resolveProvider: () => Promise.resolve(provider),
       memory: recorder.memory,
     });
@@ -582,5 +641,88 @@ describe("runObserver — real PG + recording memory mock", () => {
       [userId],
     );
     expect(remaining[0]?.count).toBe("1");
+  });
+
+  it("scopes a 'new' correction to the active channel and stamps channel_type on the steering_rules row", async () => {
+    // End-to-end channel-scoping path — mirrors the unit test for
+    // extractCorrections but validates the wiring chain
+    // (transport.getActiveChannelTypes → prompt → upsertCorrection
+    // → steering_rules.channel_type) under real PG.
+    const { conversationId } = await seedConversation({ messageCount: 4 });
+    await seedActiveChannelSession(conversationId, "telegram");
+
+    const provider: LlmProvider = {
+      name: "stub",
+      async chat(params: ChatParams): Promise<LlmResponse> {
+        const sys = params.system ?? "";
+        if (sys.includes("behavioral correction extractor")) {
+          // Assert the prompt actually saw the channel context — the
+          // load-active-channel-types step must run before the
+          // extractor.
+          expect(sys).toContain("`telegram`");
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  corrections: [
+                    {
+                      rule: "Avoid markdown headings in chat replies",
+                      category: "style",
+                      reasoning: "Telegram-specific formatting preference",
+                      matchedExistingRuleId: null,
+                      action: "new",
+                      channelType: "telegram",
+                    },
+                  ],
+                }),
+              },
+            ],
+            stopReason: "end_turn",
+            model: params.model,
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        }
+        if (sys.includes("memory extraction engine")) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({ memories: [] }) }],
+            stopReason: "end_turn",
+            model: params.model,
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        }
+        throw new Error(`stub: unexpected prompt: "${sys.slice(0, 60)}"`);
+      },
+      chatStream(): ChatStreamResult {
+        throw new Error("not used");
+      },
+      async countTokens(): Promise<number> {
+        return 0;
+      },
+    };
+    const recorder = buildRecordingMemory();
+
+    const result = await runObserver({ data: { conversationId } }, fakeStep, {
+      runInTx: fakeRunInTx,
+      agentStore: store,
+      transportStore,
+      resolveProvider: () => Promise.resolve(provider),
+      memory: recorder.memory,
+    });
+
+    if (result.status !== "processed") throw new Error("expected processed");
+    expect(result.corrections.extracted).toBe(1);
+
+    const rows = await db
+      .select({
+        rule: steeringRules.rule,
+        channelType: steeringRules.channelType,
+        source: steeringRules.source,
+      })
+      .from(steeringRules)
+      .where(eq(steeringRules.source, "correction"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.channelType).toBe("telegram");
+    expect(rows[0]?.rule).toBe("Avoid markdown headings in chat replies");
   });
 });

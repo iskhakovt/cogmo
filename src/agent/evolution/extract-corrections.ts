@@ -27,6 +27,13 @@ export interface ExtractionDeps {
   model: string;
   runInTx: Transactor;
   store: Pick<AgentStore, "getCorrections" | "upsertCorrection" | "countActiveRules">;
+  /**
+   * Distinct channel types active for the conversation when this Observer
+   * fired. Threaded into the extraction prompt and used to validate the
+   * LLM's `channelType` choice — anything outside the active set is
+   * coerced to null (global) with a warning.
+   */
+  activeChannelTypes: ReadonlyArray<string>;
 }
 
 export interface ExtractionResult {
@@ -62,7 +69,7 @@ export async function extractCorrections(
   }
 
   const existingRules = await deps.runInTx((tx) => deps.store.getCorrections(tx, profileId));
-  const systemPrompt = buildExtractionPrompt(existingRules);
+  const systemPrompt = buildExtractionPrompt(existingRules, deps.activeChannelTypes);
 
   const { data } = await chatTyped({
     provider: deps.provider,
@@ -78,6 +85,8 @@ export async function extractCorrections(
   let contradictions = 0;
   let promoted = 0;
 
+  const activeChannelSet = new Set(deps.activeChannelTypes);
+
   for (const correction of data.corrections) {
     if (correction.action === "contradiction") {
       logger.info(
@@ -92,7 +101,11 @@ export async function extractCorrections(
       continue;
     }
 
-    const result = await applyCorrection(correction, deps.runInTx, deps.store);
+    const channelType =
+      correction.action === "new"
+        ? coerceChannelType(correction.channelType, activeChannelSet, correction.rule)
+        : null;
+    const result = await applyCorrection(correction, channelType, deps.runInTx, deps.store);
     if (correction.action === "new") extracted++;
     if (correction.action === "reinforce") reinforced++;
     if (result.promoted) promoted++;
@@ -111,6 +124,7 @@ export async function extractCorrections(
 
 async function applyCorrection(
   correction: CorrectionItem,
+  channelType: string | null,
   runInTx: Transactor,
   store: Pick<AgentStore, "upsertCorrection">,
 ): Promise<{ promoted: boolean }> {
@@ -119,11 +133,33 @@ async function applyCorrection(
       rule: correction.rule,
       category: correction.category,
       profileId: null, // global — industry standard for personal assistants
+      channelType,
       ...(correction.matchedExistingRuleId != null && {
         existingRuleId: correction.matchedExistingRuleId,
       }),
     }),
   );
+}
+
+/**
+ * Validate the LLM's `channelType` choice against the active channel set.
+ * The prompt constrains the LLM to active channels, but a hallucinated
+ * value would silently land a rule under a channel that never matches at
+ * lookup time — so anything outside the active set falls back to null
+ * (global) with a warning, and the rule still applies.
+ */
+function coerceChannelType(
+  raw: string | null,
+  activeChannelSet: ReadonlySet<string>,
+  rule: string,
+): string | null {
+  if (raw === null) return null;
+  if (activeChannelSet.has(raw)) return raw;
+  logger.warn(
+    { rule, channelType: raw, activeChannels: [...activeChannelSet] },
+    "extraction: LLM emitted channelType not in active channel set — falling back to global",
+  );
+  return null;
 }
 
 // --- Transcript formatting ---
