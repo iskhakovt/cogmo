@@ -183,6 +183,13 @@
       "when": 1778345014322,
       "tag": "0025_neat_mystique",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1778354159237,
+      "tag": "0026_backfill_worktree_assignment_type",
+      "breakpoints": true
     }
   ]
 }
