@@ -7,6 +7,7 @@
  */
 
 import * as R from "remeda";
+import type { z } from "zod";
 import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
 import type { Message } from "../../llm/types.js";
@@ -14,15 +15,21 @@ import { logger } from "../../logger.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
 import { formatTranscript } from "./extract-corrections.js";
 import {
-  MEMORY_EXTRACTION_PROMPT,
-  type MemoryExtraction,
-  MemoryExtractionSchema,
+  buildMemoryExtractionPrompt,
+  buildMemoryExtractionSchema,
+  type CompartmentDefinition,
 } from "./memory-extraction-schema.js";
 
 export interface MemoryExtractionDeps {
   provider: LlmProvider;
   model: string;
   memory: Pick<MemoryProvider, "retainBatch">;
+  /**
+   * The user's `custom_compartments` rows at fire time. Templated into the
+   * extraction prompt and locked into the structured-output schema so the
+   * LLM picks exactly from `core ∪ customs`. Empty array = core-only.
+   */
+  customCompartments: ReadonlyArray<CompartmentDefinition>;
 }
 
 export interface MemoryExtractionResult {
@@ -53,14 +60,16 @@ export async function extractMemories(
     return { extracted: 0, byNetwork: {} };
   }
 
-  let data: MemoryExtraction;
+  const customNames = deps.customCompartments.map((c) => c.name);
+  const schema = buildMemoryExtractionSchema(customNames);
+  let data: z.infer<typeof schema>;
   try {
     ({ data } = await chatTyped({
       provider: deps.provider,
       model: deps.model,
-      system: MEMORY_EXTRACTION_PROMPT,
+      system: buildMemoryExtractionPrompt(deps.customCompartments),
       messages: [{ role: "user", content: transcript }],
-      schema: MemoryExtractionSchema,
+      schema,
       name: "memory-extraction",
     }));
   } catch (err) {

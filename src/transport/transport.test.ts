@@ -989,6 +989,24 @@ describe("createTransport", () => {
       });
     });
 
+    it("create maps InvalidNameError to profile_class_name_invalid", async () => {
+      const { InvalidNameError } = await import("../agent/store/errors.js");
+      const agentStore = mockAgentStore({
+        createProfileClass: vi
+          .fn()
+          .mockRejectedValue(new InvalidNameError("Mixed Case", "profile_class")),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profileClasses.create("handle", {
+        name: "Mixed Case",
+        description: "x",
+      });
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "profile_class_name_invalid",
+        name: "Mixed Case",
+      });
+    });
+
     it("create happy path forwards name + description", async () => {
       const createProfileClass = vi.fn().mockResolvedValue({
         id: "c-1",
@@ -1040,6 +1058,175 @@ describe("createTransport", () => {
       const res = await transport.profileClasses.delete("handle", "intimate");
       expect(res.isOk()).toBe(true);
       expect(deleteProfileClass).toHaveBeenCalledWith(expect.anything(), "user-1", "intimate");
+    });
+  });
+
+  describe("compartments", () => {
+    it("list scopes to the resolved userId", async () => {
+      const listCustomCompartments = vi.fn().mockResolvedValue([
+        {
+          id: "cc-1",
+          userId: "user-1",
+          name: "dnd",
+          description: "campaign notes",
+          createdAt: new Date("2026-05-09T12:00:00Z"),
+        },
+      ]);
+      const agentStore = mockAgentStore({ listCustomCompartments });
+      const { transport } = setup({ agentStore });
+      const res = await transport.compartments.list("handle");
+      expect(res._unsafeUnwrap()).toHaveLength(1);
+      expect(listCustomCompartments).toHaveBeenCalledWith(expect.anything(), "user-1");
+    });
+
+    it("create maps InvalidNameError to compartment_name_invalid", async () => {
+      const { InvalidNameError } = await import("../agent/store/errors.js");
+      const agentStore = mockAgentStore({
+        createCustomCompartment: vi
+          .fn()
+          .mockRejectedValue(new InvalidNameError("Bad Name", "compartment")),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.compartments.create("handle", {
+        name: "Bad Name",
+        description: "x",
+      });
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "compartment_name_invalid",
+        name: "Bad Name",
+      });
+    });
+
+    it("create maps reserved-name error to compartment_name_reserved", async () => {
+      const { ReservedCompartmentNameError } = await import("../agent/store/errors.js");
+      const agentStore = mockAgentStore({
+        createCustomCompartment: vi
+          .fn()
+          .mockRejectedValue(new ReservedCompartmentNameError("personal")),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.compartments.create("handle", {
+        name: "personal",
+        description: "x",
+      });
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "compartment_name_reserved",
+        name: "personal",
+      });
+    });
+
+    it("create maps cap-exceeded error to compartment_cap_exceeded", async () => {
+      const { CustomCompartmentCapExceededError } = await import("../agent/store/errors.js");
+      const agentStore = mockAgentStore({
+        createCustomCompartment: vi
+          .fn()
+          .mockRejectedValue(new CustomCompartmentCapExceededError(10, 10)),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.compartments.create("handle", {
+        name: "overflow",
+        description: "x",
+      });
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "compartment_cap_exceeded",
+        limit: 10,
+        current: 10,
+      });
+    });
+
+    it("create maps UniqueViolationError to compartment_name_taken", async () => {
+      const { UniqueViolationError } = await import("../agent/store/errors.js");
+      const agentStore = mockAgentStore({
+        createCustomCompartment: vi
+          .fn()
+          .mockRejectedValue(new UniqueViolationError("uq_custom_compartments_user_name")),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.compartments.create("handle", {
+        name: "dnd",
+        description: "x",
+      });
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "compartment_name_taken", name: "dnd" });
+    });
+
+    it("delete returns compartment_not_found when no row matches", async () => {
+      const agentStore = mockAgentStore({
+        deleteCustomCompartment: vi.fn().mockResolvedValue({ deleted: false }),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.compartments.delete("handle", "no-such");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "compartment_not_found", name: "no-such" });
+    });
+
+    it("delete happy path returns ok and forwards (userId, name)", async () => {
+      const deleteCustomCompartment = vi.fn().mockResolvedValue({ deleted: true });
+      const agentStore = mockAgentStore({ deleteCustomCompartment });
+      const { transport } = setup({ agentStore });
+      const res = await transport.compartments.delete("handle", "dnd");
+      expect(res.isOk()).toBe(true);
+      expect(deleteCustomCompartment).toHaveBeenCalledWith(expect.anything(), "user-1", "dnd");
+    });
+  });
+
+  describe("profiles.update memoryScope validation", () => {
+    it("rejects an unknown compartment value with compartment_unknown", async () => {
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        listCustomCompartments: vi.fn().mockResolvedValue([
+          {
+            id: "cc-1",
+            userId: "user-1",
+            name: "dnd",
+            description: "x",
+            createdAt: new Date(),
+          },
+        ]),
+        updateProfile: vi.fn(),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update("handle", "p1", {
+        memoryScope: { compartments: ["work", "music"], trust: ["first-party"] },
+      });
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "compartment_unknown", name: "music" });
+      expect(agentStore.updateProfile).not.toHaveBeenCalled();
+    });
+
+    it("accepts core + custom compartment values", async () => {
+      const updateProfile = vi.fn().mockResolvedValue({
+        id: "p1",
+        userId: "user-1",
+        name: "test",
+        basePrompt: "",
+        model: "claude-sonnet-4-6",
+        summarizationModel: null,
+        extractionModel: null,
+        autoRecall: "heuristic",
+        voiceMode: "auto",
+        toolSet: [],
+        memoryScope: { compartments: ["work", "dnd"], trust: ["first-party"] },
+        profileClass: null,
+      });
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        listCustomCompartments: vi.fn().mockResolvedValue([
+          {
+            id: "cc-1",
+            userId: "user-1",
+            name: "dnd",
+            description: "x",
+            createdAt: new Date(),
+          },
+        ]),
+        updateProfile,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update("handle", "p1", {
+        memoryScope: { compartments: ["work", "dnd"], trust: ["first-party"] },
+      });
+      expect(res.isOk()).toBe(true);
+      expect(updateProfile).toHaveBeenCalledWith(expect.anything(), "p1", {
+        memoryScope: { compartments: ["work", "dnd"], trust: ["first-party"] },
+      });
     });
   });
 
