@@ -254,6 +254,18 @@ describe("DrizzleAgentStore", () => {
       ).rejects.toThrow();
     });
 
+    it("rejects class names that don't match the canonical shape", async () => {
+      const { userId } = await seedClassed();
+      // Same canonical-name regex enforced for profile classes — keeps
+      // the merged "label registry" surface uniform with compartments.
+      await expect(
+        tx((trx) => store.createProfileClass(trx, { userId, name: "Intimate", description: "x" })),
+      ).rejects.toThrow(/invalid profile_class name/);
+      await expect(
+        tx((trx) => store.createProfileClass(trx, { userId, name: "two words", description: "x" })),
+      ).rejects.toThrow(/invalid profile_class name/);
+    });
+
     it("setProfileClass attaches a registered class", async () => {
       const { userId, profileId } = await seedClassed();
       await tx((trx) =>
@@ -326,6 +338,124 @@ describe("DrizzleAgentStore", () => {
       const { userId } = await seedClassed();
       const result = await tx((trx) => store.deleteProfileClass(trx, userId, "no-such"));
       expect(result.deleted).toBe(false);
+    });
+  });
+
+  describe("custom compartments", () => {
+    it("creates and lists, ordered by name", async () => {
+      const userId = await seedUser();
+      await tx((trx) =>
+        store.createCustomCompartment(trx, { userId, name: "music", description: "music notes" }),
+      );
+      await tx((trx) =>
+        store.createCustomCompartment(trx, { userId, name: "dnd", description: "dnd campaign" }),
+      );
+      const list = await tx((trx) => store.listCustomCompartments(trx, userId));
+      expect(list.map((c) => c.name)).toEqual(["dnd", "music"]);
+    });
+
+    it("rejects names that don't match the canonical shape", async () => {
+      const userId = await seedUser();
+      // Uppercase, leading non-letter, special chars, too long, whitespace,
+      // empty. Trailing hyphens / underscores are intentionally accepted —
+      // the regex permits anything from the [a-z0-9_-] class after the
+      // leading letter, so `dnd-` is valid (matches `compartment:dnd-` as a
+      // tag value, even if it reads oddly).
+      const badNames = ["Work", "1campaign", "dnd!", "x".repeat(33), "two words", "", "-leading"];
+      for (const name of badNames) {
+        await expect(
+          tx((trx) => store.createCustomCompartment(trx, { userId, name, description: "x" })),
+        ).rejects.toThrow(/invalid compartment name/);
+      }
+    });
+
+    it("accepts canonical-shape names (lowercase + digits + - / _)", async () => {
+      const userId = await seedUser();
+      const ok = ["dnd", "music-prod", "side_project", "campaign1", "a"];
+      for (const name of ok) {
+        await tx((trx) => store.createCustomCompartment(trx, { userId, name, description: "x" }));
+      }
+      const list = await tx((trx) => store.listCustomCompartments(trx, userId));
+      expect(list.map((c) => c.name).sort()).toEqual([...ok].sort());
+    });
+
+    it("rejects core-compartment names as reserved", async () => {
+      const userId = await seedUser();
+      await expect(
+        tx((trx) =>
+          store.createCustomCompartment(trx, {
+            userId,
+            name: "personal",
+            description: "shadow",
+          }),
+        ),
+      ).rejects.toThrow(/reserved/);
+      await expect(
+        tx((trx) =>
+          store.createCustomCompartment(trx, {
+            userId,
+            name: "misc",
+            description: "shadow",
+          }),
+        ),
+      ).rejects.toThrow(/reserved/);
+    });
+
+    it("rejects duplicates within the same user", async () => {
+      const userId = await seedUser();
+      await tx((trx) =>
+        store.createCustomCompartment(trx, { userId, name: "dnd", description: "first" }),
+      );
+      await expect(
+        tx((trx) =>
+          store.createCustomCompartment(trx, { userId, name: "dnd", description: "second" }),
+        ),
+      ).rejects.toThrow();
+    });
+
+    it("enforces the per-user cap and reports current count on overflow", async () => {
+      const userId = await seedUser();
+      for (let i = 0; i < 10; i++) {
+        await tx((trx) =>
+          store.createCustomCompartment(trx, {
+            userId,
+            name: `c${i}`,
+            description: `desc-${i}`,
+          }),
+        );
+      }
+      await expect(
+        tx((trx) =>
+          store.createCustomCompartment(trx, {
+            userId,
+            name: "overflow",
+            description: "x",
+          }),
+        ),
+      ).rejects.toThrow(/cap exceeded: 10\/10/);
+    });
+
+    it("delete is forward-only and idempotent on unknown names", async () => {
+      const userId = await seedUser();
+      await tx((trx) =>
+        store.createCustomCompartment(trx, { userId, name: "dnd", description: "x" }),
+      );
+      const r1 = await tx((trx) => store.deleteCustomCompartment(trx, userId, "dnd"));
+      expect(r1.deleted).toBe(true);
+      const r2 = await tx((trx) => store.deleteCustomCompartment(trx, userId, "dnd"));
+      expect(r2.deleted).toBe(false);
+    });
+
+    it("scopes by user — one user's compartments are not visible to another", async () => {
+      const u1 = await seedUser();
+      const u2 = await seedUser();
+      await tx((trx) =>
+        store.createCustomCompartment(trx, { userId: u1, name: "dnd", description: "x" }),
+      );
+      const list1 = await tx((trx) => store.listCustomCompartments(trx, u1));
+      const list2 = await tx((trx) => store.listCustomCompartments(trx, u2));
+      expect(list1.map((c) => c.name)).toEqual(["dnd"]);
+      expect(list2).toHaveLength(0);
     });
   });
 

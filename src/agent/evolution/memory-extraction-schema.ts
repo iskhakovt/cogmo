@@ -16,11 +16,53 @@ export const MemoryNetworkSchema = z
     "Memory network: world (external facts), bank (personal facts/preferences), opinion (agent's assessments), observation (behavioral patterns)",
   );
 
+/**
+ * Curated, in-code compartment values. Always recallable / always classifiable;
+ * any per-user `custom_compartments` rows extend this set at runtime via
+ * `buildCompartmentSchema`. Reserved against custom redefinition.
+ */
+export const CORE_COMPARTMENTS = [
+  "personal",
+  "work",
+  "health",
+  "financial",
+  "technical",
+  "misc",
+] as const;
+export type CoreMemoryCompartment = (typeof CORE_COMPARTMENTS)[number];
+
+/**
+ * Loose schema for compartment values stored on profile memory scopes and
+ * Hindsight tags. The set of valid values is dynamic per user (core ∪ that
+ * user's `custom_compartments` rows); validation against the user's actual
+ * registry happens at the store boundary on profile create/update — same
+ * pattern as `profile_class` (see `src/agent/store/schema.ts:84`). The
+ * classifier uses `buildCompartmentSchema(customs)` to lock the LLM to
+ * exactly the legal set for the current fire.
+ */
 export const MemoryCompartmentSchema = z
-  .enum(["personal", "work", "health", "financial", "technical", "misc"])
+  .string()
+  .min(1)
   .describe(
-    "Domain compartment: personal (general life), work (employment/projects), health (medical/fitness), financial (money/accounts), technical (code/systems/infrastructure), misc (everything that fits none of the above)",
+    "Domain compartment: core values are personal (general life), work (employment/projects), health (medical/fitness), financial (money/accounts), technical (code/systems/infrastructure), misc (everything that fits none of the above). Per-user custom compartments may extend this set.",
   );
+
+/**
+ * Build a strict z.enum union of `[...CORE_COMPARTMENTS, ...customNames]` for
+ * structured-output classification. Caller passes the user's
+ * `custom_compartments` names; an empty array yields just the core enum.
+ * Custom names are trusted by this point — the store rejects reserved /
+ * over-capacity rows at insert time, so this builder doesn't re-validate.
+ *
+ * Returns `ZodType<string>` rather than a strict literal-union type because
+ * the value array is built at runtime — TS can't infer literal types for a
+ * dynamic spread. The runtime guarantee (LLM picks from the set, parse
+ * fails otherwise) is what we need; consumers then store as `string`.
+ */
+export function buildCompartmentSchema(customNames: ReadonlyArray<string>): z.ZodType<string> {
+  const values = [...CORE_COMPARTMENTS, ...customNames];
+  return z.enum(values);
+}
 
 export const MemoryTrustSchema = z
   .enum(["first-party", "any"])
@@ -67,6 +109,46 @@ export type ExtractedMemory = z.infer<typeof ExtractedMemorySchema>;
 export type MemoryExtraction = z.infer<typeof MemoryExtractionSchema>;
 export type ClassifiedMemory = z.infer<typeof ClassifiedMemorySchema>;
 
+/**
+ * Per-fire builders that produce the strict classifier schemas (compartment
+ * field locked to `[...CORE, ...customs]`). Use these when calling
+ * `chatTyped` so the LLM's structured output is bounded by the user's
+ * actual compartment registry. The static `MemoryExtractionSchema` /
+ * `ClassifiedMemorySchema` exports stay loose (compartment is `string`)
+ * for non-classifier consumers (storage shapes, type imports).
+ */
+export function buildExtractedMemorySchema(customNames: ReadonlyArray<string>) {
+  const compartment = buildCompartmentSchema(customNames);
+  return z.object({
+    fact: z
+      .string()
+      .trim()
+      .min(1)
+      .describe("The fact or information to remember — clear, standalone, context-free"),
+    network: MemoryNetworkSchema,
+    compartment,
+    trust: MemoryTrustSchema,
+    context: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe("Optional: when or why this was learned, for temporal context"),
+  });
+}
+
+export function buildMemoryExtractionSchema(customNames: ReadonlyArray<string>) {
+  return z.object({ memories: z.array(buildExtractedMemorySchema(customNames)) });
+}
+
+export function buildClassifiedMemorySchema(customNames: ReadonlyArray<string>) {
+  return z.object({
+    network: MemoryNetworkSchema,
+    compartment: buildCompartmentSchema(customNames),
+    trust: MemoryTrustSchema,
+  });
+}
+
 // --- Shared taxonomy definitions ---
 //
 // The three classification axes are described once and templated into
@@ -86,7 +168,7 @@ const NETWORK_DEFINITIONS = `- **world**: External facts about the world, system
 - **observation**: Behavioral patterns the agent has noticed — recurring behaviors, timing patterns, contextual preferences.
   Examples: "usually asks about homelab on weekends", "prefers short responses in the morning"`;
 
-const COMPARTMENT_DEFINITIONS = `- **personal**: general life — relationships, habits, hobbies, daily preferences, household, family. Default for facts that don't clearly belong elsewhere.
+const CORE_COMPARTMENT_DEFINITIONS = `- **personal**: general life — relationships, habits, hobbies, daily preferences, household, family. Default for facts that don't clearly belong elsewhere.
   Examples: "wife's birthday is March 15", "prefers tea over coffee", "lives in Berlin"
 
 - **work**: employment, projects, colleagues, clients, professional commitments — anything tied to the user's job or paid work.
@@ -107,29 +189,32 @@ const COMPARTMENT_DEFINITIONS = `- **personal**: general life — relationships,
 const TRUST_DEFINITIONS = `- **first-party**: only profiles the user directly controls can access this. The default for anything the user told us in conversation. Health, financial, and most personal facts should be first-party.
 - **any**: safe for third-party plugins or untrusted automation to read. Use sparingly — only for facts that are obviously public or non-sensitive (e.g. "homelab uses Tailscale", "prefers Markdown over RST"). When in doubt, choose first-party.`;
 
+/** A custom compartment row, for prompt-templating purposes. */
+export interface CompartmentDefinition {
+  name: string;
+  description: string;
+}
+
+/**
+ * Render compartment definitions for the classifier prompt. Core values are
+ * always present; per-user customs are appended in the order supplied.
+ * Custom descriptions are dropped into the prompt verbatim — operators
+ * authoring `/compartments add` give the LLM its instruction sheet.
+ *
+ * Operators are nudged toward "use core when applicable" by appending a
+ * one-line preference rule when customs are present. Without it, an
+ * over-eager classifier may pick a custom over `personal` for a borderline
+ * fact and silently shift the user's bank's compartment distribution.
+ */
+export function buildCompartmentDefinitions(customs: ReadonlyArray<CompartmentDefinition>): string {
+  if (customs.length === 0) return CORE_COMPARTMENT_DEFINITIONS;
+  const customLines = customs.map((c) => `- **${c.name}**: ${c.description}`).join("\n");
+  return `${CORE_COMPARTMENT_DEFINITIONS}\n\nCustom compartments (configured for this user):\n${customLines}\n\nWhen a fact fits both a core and a custom compartment, pick the custom — it's there because the user wants those facts isolated.`;
+}
+
 // --- Prompts ---
 
-export const MEMORY_EXTRACTION_PROMPT = `You are a memory extraction engine. Your job is to analyze a conversation transcript between a user and an AI assistant, and extract facts worth storing in long-term memory. For each fact, assign three independent classifications: network, compartment, and trust tier.
-
-## Memory Networks (what kind of knowledge)
-
-Classify each fact into exactly one network:
-
-${NETWORK_DEFINITIONS}
-
-## Compartments (what domain)
-
-Classify each fact into exactly one compartment. Compartments isolate domains so a profile scoped to "work" never sees a personal-life fact.
-
-${COMPARTMENT_DEFINITIONS}
-
-## Trust Tier (who can access)
-
-Classify each fact into exactly one tier:
-
-${TRUST_DEFINITIONS}
-
-## Rules for Extraction
+const EXTRACTION_RULES = `## Rules for Extraction
 
 - **Source reliability**: Only extract facts explicitly stated by the user, confirmed by the user, or grounded in tool output. Do not extract unsupported assistant guesses, suggestions, or summaries — the assistant may be wrong.
 - **Extract standalone facts**: Each fact should be understandable without the conversation context. "Project X deadline is March 15" not "the deadline is in two weeks".
@@ -155,7 +240,44 @@ ${TRUST_DEFINITIONS}
 
 Analyze the transcript below and extract facts worth remembering.`;
 
-export const PENDING_CLASSIFICATION_PROMPT = `You are classifying a single fact for storage in long-term memory. The fact has already been chosen for retention — do not decide whether to keep it. Assign three independent classifications: network, compartment, and trust tier.
+/**
+ * Build the extraction system prompt for an Observer fire. Customs are
+ * templated into the compartment section verbatim; pass `[]` for the
+ * core-only version.
+ */
+export function buildMemoryExtractionPrompt(customs: ReadonlyArray<CompartmentDefinition>): string {
+  return `You are a memory extraction engine. Your job is to analyze a conversation transcript between a user and an AI assistant, and extract facts worth storing in long-term memory. For each fact, assign three independent classifications: network, compartment, and trust tier.
+
+## Memory Networks (what kind of knowledge)
+
+Classify each fact into exactly one network:
+
+${NETWORK_DEFINITIONS}
+
+## Compartments (what domain)
+
+Classify each fact into exactly one compartment. Compartments isolate domains so a profile scoped to "work" never sees a personal-life fact.
+
+${buildCompartmentDefinitions(customs)}
+
+## Trust Tier (who can access)
+
+Classify each fact into exactly one tier:
+
+${TRUST_DEFINITIONS}
+
+${EXTRACTION_RULES}`;
+}
+
+/**
+ * Build the classification system prompt for a pending-memory drain. Same
+ * shape as `buildMemoryExtractionPrompt` but tuned for single-fact
+ * classification (no extraction-rules section).
+ */
+export function buildPendingClassificationPrompt(
+  customs: ReadonlyArray<CompartmentDefinition>,
+): string {
+  return `You are classifying a single fact for storage in long-term memory. The fact has already been chosen for retention — do not decide whether to keep it. Assign three independent classifications: network, compartment, and trust tier.
 
 ## Memory Networks (what kind of knowledge)
 
@@ -163,7 +285,7 @@ ${NETWORK_DEFINITIONS}
 
 ## Compartments (what domain)
 
-${COMPARTMENT_DEFINITIONS}
+${buildCompartmentDefinitions(customs)}
 
 ## Trust Tier (who can access)
 
@@ -172,3 +294,4 @@ ${TRUST_DEFINITIONS}
 When in doubt on trust, choose first-party. When in doubt on compartment, choose personal.
 
 Output only the JSON classification.`;
+}
