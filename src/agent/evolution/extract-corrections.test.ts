@@ -144,7 +144,8 @@ describe("extractCorrections", () => {
       reinforced: 0,
       contradictions: 0,
       promoted: 0,
-      crossScopeReinforcementsSkipped: 0,
+      outOfScopeReinforcementsSkipped: 0,
+      unknownRuleReinforcementsSkipped: 0,
       consolidationNeeded: false,
     });
     expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
@@ -428,7 +429,8 @@ describe("extractCorrections", () => {
     const result = await extractCorrections(sampleHistory, "profile-1", deps);
 
     expect(result.reinforced).toBe(1);
-    expect(result.crossScopeReinforcementsSkipped).toBe(0);
+    expect(result.outOfScopeReinforcementsSkipped).toBe(0);
+    expect(result.unknownRuleReinforcementsSkipped).toBe(0);
     expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
       rule: "Be concise",
       category: "style",
@@ -469,7 +471,8 @@ describe("extractCorrections", () => {
     const result = await extractCorrections(sampleHistory, "profile-1", deps);
 
     expect(result.reinforced).toBe(1);
-    expect(result.crossScopeReinforcementsSkipped).toBe(0);
+    expect(result.outOfScopeReinforcementsSkipped).toBe(0);
+    expect(result.unknownRuleReinforcementsSkipped).toBe(0);
     expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
       rule: "Avoid markdown headings",
       category: "style",
@@ -510,7 +513,8 @@ describe("extractCorrections", () => {
     const result = await extractCorrections(sampleHistory, "profile-1", deps);
 
     expect(result.reinforced).toBe(0);
-    expect(result.crossScopeReinforcementsSkipped).toBe(1);
+    expect(result.outOfScopeReinforcementsSkipped).toBe(1);
+    expect(result.unknownRuleReinforcementsSkipped).toBe(0);
     expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
   });
 
@@ -536,7 +540,8 @@ describe("extractCorrections", () => {
     const result = await extractCorrections(sampleHistory, "profile-1", deps);
 
     expect(result.reinforced).toBe(0);
-    expect(result.crossScopeReinforcementsSkipped).toBe(1);
+    expect(result.outOfScopeReinforcementsSkipped).toBe(0);
+    expect(result.unknownRuleReinforcementsSkipped).toBe(1);
     expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
   });
 
@@ -604,7 +609,8 @@ describe("extractCorrections", () => {
       reinforced: 0,
       contradictions: 0,
       promoted: 0,
-      crossScopeReinforcementsSkipped: 0,
+      outOfScopeReinforcementsSkipped: 0,
+      unknownRuleReinforcementsSkipped: 0,
       consolidationNeeded: false,
     });
     // chatTyped should not have been called
