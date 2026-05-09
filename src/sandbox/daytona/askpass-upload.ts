@@ -1,18 +1,10 @@
 /**
- * Upload the per-task askpass bundle into a freshly-created Daytona
- * sandbox. Mirrors the host-side layout `provisionAskpass` writes
- * (`src/sandbox/askpass.ts`) so the in-container view (helper / pat /
- * signing-key / signing-key.pub at `/.cogmo-askpass/`) is identical to
- * what Local-Docker delivers via bind mount — `runCommitAndPush` and
- * the `GIT_ASKPASS` helper need no awareness of which transport got
- * the files there.
- *
- * Permissions matter: `ssh-keygen -Y sign` refuses to load a private
- * key file with a mode broader than 0o600, and the helper has to be
- * executable. `fs.setFilePermissions` is best-effort across SDK
- * versions (some return-shapes silently no-op); when in doubt, the
- * upload itself is the contract — perms can be re-applied via `chmod`
- * inside the sandbox at first use.
+ * Upload the per-task askpass bundle into a Daytona sandbox at the same
+ * `/.cogmo-askpass/` layout `provisionAskpass` writes on the host, so
+ * `runCommitAndPush` and the `GIT_ASKPASS` helper see identical files
+ * regardless of transport. Modes match what `ssh-keygen -Y sign` and
+ * the helper script require — 0o600 on the signing key is the strict
+ * one (the rest only matter for execution / readability).
  */
 
 import { readFileSync } from "node:fs";

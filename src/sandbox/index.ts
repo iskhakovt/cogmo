@@ -9,21 +9,12 @@ export type { ContainerRow, ContainerRuntime, ContainerStatus } from "./store/in
 export type { ContainerLabels, ResourceLimits } from "./types.js";
 
 /**
- * Working-tree material to materialize at session start.
- *
- * Discriminated by transport. The orchestrator picks the variant based on
- * `SandboxClient.capabilities.workingTreeTransport`:
- *
- * - **`host-path`** — the host already has the working tree on disk
- *   (`git worktree add`); the backend bind-mounts it at `/workspace`.
- *   Local-Docker only.
- * - **`git-remote`** — the working tree lives on a remote git endpoint;
- *   the backend clones it inside the sandbox. Daytona only. The
- *   orchestrator pushes the local mirror's current state to an ephemeral
- *   `cogmo/run/<task-id>` branch on origin before calling `create()`,
- *   then runs `git checkout -B cogmo/<idShort>` inside the sandbox after
- *   create returns to land on the slice-4 feature branch the rest of the
- *   pipeline expects.
+ * Working-tree material to materialize at session start. Discriminated
+ * by transport — consumers pick the variant based on
+ * `SandboxClient.capabilities.workingTreeTransport`. `host-path` carries
+ * a host filesystem path the backend bind-mounts at `/workspace`;
+ * `git-remote` carries a clone URL + branch + auth the backend clones
+ * inside the sandbox.
  */
 export type WorktreeSpec = HostPathWorktreeSpec | GitRemoteWorktreeSpec;
 

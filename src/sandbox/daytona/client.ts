@@ -159,6 +159,12 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     // Post-create provisioning. If any step throws, tear down the freshly
     // created sandbox before rethrowing so we don't leak provider
     // resources — Daytona's per-sandbox billing makes orphaning expensive.
+    //
+    // Order: askpass upload runs before clone. The two are independent on
+    // SDK 0.173.0 (clone takes auth via positional args, not via the
+    // helper), but the upload is bytes-small and clone is the long pole;
+    // failing fast on the cheap step avoids paying clone time when auth
+    // is misconfigured.
     try {
       if (spec.askpass) {
         await uploadAskpassToSandbox({
@@ -179,14 +185,18 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
         );
       }
     } catch (err) {
-      log.warn(
+      // log.error rather than warn — a billable sandbox is being torn
+      // down, so this should surface in alerting.
+      log.error(
         { err: (err as Error).message, sandboxId: sdkSandbox.id, taskId: spec.taskId },
         "post-create provisioning failed — tearing down sandbox",
       );
       await sdkSandbox.delete().catch((teardownErr: Error) => {
-        log.warn(
+        // The original failure already pinned a billable resource;
+        // failure to tear it down means it stays pinned.
+        log.error(
           { err: teardownErr.message, sandboxId: sdkSandbox.id },
-          "teardown after failed provisioning also failed",
+          "teardown after failed provisioning also failed — sandbox may be orphaned",
         );
       });
       throw err;

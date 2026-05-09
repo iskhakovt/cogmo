@@ -278,6 +278,92 @@ describe("DaytonaSandboxClient", () => {
       expect(sb.__spies.delete).toHaveBeenCalledTimes(1);
     });
 
+    it("rolls back when fs.setFilePermissions fails mid-upload", async () => {
+      const sb = fakeSandbox({ id: "sb-perm-fail", state: SandboxState.STARTED });
+      sb.__spies.fsSetFilePermissions.mockRejectedValue(new Error("perm denied"));
+      daytonaCalls.create.mockResolvedValue(sb);
+
+      const hostDir = mkdtempSync(join(tmpdir(), "cogmo-perm-fail-"));
+      try {
+        writeFileSync(join(hostDir, "helper"), "#!/bin/sh\nexec /bin/cat /tmp/pat\n");
+        writeFileSync(join(hostDir, "pat"), "ghp_x");
+        writeFileSync(join(hostDir, "signing-key"), "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n");
+        writeFileSync(join(hostDir, "signing-key.pub"), "ssh-ed25519 AAAA... cogmo-bot\n");
+
+        const client = await makeClient();
+        await expect(
+          client.create({
+            ...BASE_SPEC,
+            askpass: { hostDir, containerDir: "/.cogmo-askpass" },
+          }),
+        ).rejects.toThrow(/perm denied/);
+        // 600 on signing-key is non-negotiable for ssh-keygen -Y sign;
+        // a setFilePermissions failure is the same provisioning hazard
+        // as a clone failure and rolls back identically.
+        expect(sb.__spies.delete).toHaveBeenCalledTimes(1);
+      } finally {
+        rmSync(hostDir, { recursive: true, force: true });
+      }
+    });
+
+    it("provisions both askpass and git-remote when both are set", async () => {
+      const sb = fakeSandbox({ id: "sb-both", state: SandboxState.STARTED });
+      daytonaCalls.create.mockResolvedValue(sb);
+
+      const hostDir = mkdtempSync(join(tmpdir(), "cogmo-both-"));
+      try {
+        writeFileSync(join(hostDir, "helper"), "#!/bin/sh\nexec /bin/cat /tmp/pat\n");
+        writeFileSync(join(hostDir, "pat"), "ghp_combined");
+        writeFileSync(join(hostDir, "signing-key"), "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n");
+        writeFileSync(join(hostDir, "signing-key.pub"), "ssh-ed25519 AAAA... cogmo-bot\n");
+
+        const client = await makeClient();
+        const session = await client.create({
+          ...BASE_SPEC,
+          worktree: {
+            type: "git-remote",
+            url: "https://github.com/cogmo/example.git",
+            branch: "cogmo/run/combined",
+            auth: { username: "x-access-token", password: "ghp_combined" },
+          },
+          askpass: { hostDir, containerDir: "/.cogmo-askpass" },
+        });
+
+        // Production shape (3b.2 coding pipeline) sets both — this
+        // catches a regression that would otherwise only surface end-to-end.
+        expect(sb.__spies.fsUploadFiles).toHaveBeenCalledTimes(1);
+        expect(sb.__spies.gitClone).toHaveBeenCalledTimes(1);
+        expect(sb.__spies.delete).not.toHaveBeenCalled();
+        expect(session.state.sandboxId).toBe("sb-both");
+      } finally {
+        rmSync(hostDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not propagate teardown errors during rollback — original cause survives", async () => {
+      const sb = fakeSandbox({ id: "sb-tear-fail", state: SandboxState.STARTED });
+      sb.__spies.gitClone.mockRejectedValue(new Error("clone forbidden"));
+      sb.__spies.delete.mockRejectedValue(new Error("teardown 503"));
+      daytonaCalls.create.mockResolvedValue(sb);
+      const client = await makeClient();
+
+      // Caller sees the ROOT cause (clone forbidden), not the teardown
+      // failure — otherwise an alert chain triggered by "teardown 503"
+      // would mask the original auth misconfig that started it.
+      await expect(
+        client.create({
+          ...BASE_SPEC,
+          worktree: {
+            type: "git-remote",
+            url: "https://github.com/cogmo/example.git",
+            branch: "cogmo/run/x",
+            auth: { username: "x-access-token", password: "bad" },
+          },
+        }),
+      ).rejects.toThrow(/clone forbidden/);
+      expect(sb.__spies.delete).toHaveBeenCalledTimes(1);
+    });
+
     it.each([
       [
         "host-path worktree",
