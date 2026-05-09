@@ -5,8 +5,6 @@ These tests pin the JSON-RPC bridge and result-shape contracts in
 isolation — fake stdin/stdout streams, no fork, no docker.
 """
 
-from __future__ import annotations
-
 import io
 import json
 from typing import Any

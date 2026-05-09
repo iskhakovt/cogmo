@@ -6,8 +6,6 @@ these tests pin the building blocks: pidfd-based wait, SIGKILL+reap,
 and child entry point.
 """
 
-from __future__ import annotations
-
 import io
 import json
 import os

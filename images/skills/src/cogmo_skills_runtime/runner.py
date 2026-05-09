@@ -10,8 +10,6 @@ Multiple `ctx_call`s may be in flight from the user's coroutine at the
 same time; the bridge correlates host replies by `id`.
 """
 
-from __future__ import annotations
-
 import asyncio
 import inspect
 import json

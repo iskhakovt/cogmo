@@ -29,8 +29,6 @@ don't support `Py_mod_multiple_interpreters`, async bridge is
 hand-rolled, no production adopters). Revisit at 3.16+.
 """
 
-from __future__ import annotations
-
 import asyncio
 import errno
 import json
