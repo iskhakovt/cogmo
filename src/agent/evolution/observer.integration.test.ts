@@ -50,17 +50,28 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Run the cleanup one last time so leftover state from the file's
+  // final test (notably the `_test: true` Telegram channel created
+  // by `seedActiveChannelSession`) doesn't poison the shared DB for
+  // later integration files. `cli.integration.test.ts` and
+  // `pipeline.integration.test.ts` both call `bootstrap()` which
+  // iterates every channel row through `startChannels`; a leftover
+  // Telegram channel with a non-bot-token credentials blob throws
+  // "Empty token!" on adapter setup.
+  await cleanupTestState();
   await pgClient.end();
 });
 
-beforeEach(async () => {
-  // Clean DB state per-test so assertion counts don't drift. Order
-  // matters for FKs: channel_sessions → messages → steering_rules →
-  // conversations → test profiles → profile_classes; test channels
-  // (marked via the `_test` credentials sentinel) come last to dodge
-  // the channel_sessions FK. Test profiles / channels are matched by
-  // name / credentials marker to avoid touching seeded fixtures.
-  // pending_memories and custom_compartments are independent.
+beforeEach(cleanupTestState);
+
+// Clean DB state per-test so assertion counts don't drift. Order
+// matters for FKs: channel_sessions → messages → steering_rules →
+// conversations → test profiles → profile_classes; test channels
+// (marked via the `_test` credentials sentinel) come last to dodge
+// the channel_sessions FK. Test profiles / channels are matched by
+// name / credentials marker to avoid touching seeded fixtures.
+// pending_memories and custom_compartments are independent.
+async function cleanupTestState(): Promise<void> {
   await pgClient.unsafe(
     `DELETE FROM channel_sessions
      WHERE conversation_id IN (
@@ -95,7 +106,7 @@ beforeEach(async () => {
   await pgClient.unsafe(`DELETE FROM custom_compartments WHERE user_id = $1`, [userId]);
   await pgClient.unsafe(`DELETE FROM pending_memories WHERE user_id = $1`, [userId]);
   await pgClient.unsafe(`DELETE FROM channels WHERE credentials @> '{"_test": true}'::jsonb`);
-});
+}
 
 // --- Test helpers ---
 
