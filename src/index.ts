@@ -153,7 +153,7 @@ export interface SandboxDeps {
   sandboxDocker: Docker | null;
 }
 
-const NO_SANDBOX: SandboxDeps = {
+export const NO_SANDBOX: SandboxDeps = {
   sandbox: null,
   codingSandbox: null,
   sandboxInstanceId: null,

@@ -37,19 +37,14 @@ async function dispatch(cmd: string): Promise<number> {
     }
     case "skills": {
       const { runSkillsCli } = await import("./skills/cli.js");
-      const { bootstrapCore, bootstrapSkillRunner } = await import("./index.js");
+      const { bootstrapCore, bootstrapSkillRunner, NO_SANDBOX } = await import("./index.js");
       // CLI mode: skip bootstrapSandbox (no instance row, no
       // reconcileCrashedInstances). Tier-2 skill execution requires the
       // sandbox and will throw at call time; tier-1 skills + every admin
       // subcommand (list / register / approve / deny / rollback /
       // deregister) run fine.
       const core = await bootstrapCore();
-      const { skillRunner } = await bootstrapSkillRunner(core, {
-        sandbox: null,
-        codingSandbox: null,
-        sandboxInstanceId: null,
-        sandboxDocker: null,
-      });
+      const { skillRunner } = await bootstrapSkillRunner(core, NO_SANDBOX);
       return runSkillsCli(process.argv.slice(3), skillRunner);
     }
     case "migrate-memories":
