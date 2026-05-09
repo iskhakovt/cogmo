@@ -485,6 +485,7 @@ async function seedTask(opts?: {
 
   await tx((trx) =>
     store.setTaskWorktreeAssignment(trx, task.id, {
+      type: "host-path",
       branch,
       worktreePath,
     }),

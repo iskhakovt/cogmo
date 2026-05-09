@@ -56,12 +56,7 @@ import { DrizzleMcpStore } from "./mcp/store/index.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
 import { DAYTONA_API_KEY_SECRET } from "./sandbox/daytona/auth.js";
 import { createSandboxBackend } from "./sandbox/factory.js";
-import {
-  CogmoSocketProxy,
-  LocalDockerSandboxClient,
-  type LocalDockerSessionState,
-  type SandboxClient,
-} from "./sandbox/index.js";
+import { CogmoSocketProxy, type SandboxClient } from "./sandbox/index.js";
 import { createSandboxReaper } from "./sandbox/reaper.js";
 import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
@@ -164,7 +159,14 @@ export interface CoreDeps {
  */
 export interface SandboxDeps {
   sandbox: SandboxClient | null;
-  codingSandbox: SandboxClient<LocalDockerSessionState> | null;
+  /**
+   * Same handle as `sandbox` when local-docker is the active backend,
+   * otherwise null. Coding orchestrators take the wide `SandboxClient`
+   * type but only register when this is non-null — until Phase 3b.2.B
+   * wires the git-as-transport path, the local-docker backend is the
+   * only one with the host-bind-mount + askpass surface they require.
+   */
+  codingSandbox: SandboxClient | null;
   sandboxInstanceId: string | null;
   sandboxDocker: Docker | null;
 }
@@ -369,10 +371,11 @@ export async function bootstrapSandbox(core: CoreDeps): Promise<SandboxDeps> {
   //   - `SANDBOX_BACKEND=daytona` requires `daytona_api_key` in the
   //     encrypted secrets table; missing = sandbox disabled.
   // Phase 3a only supports skills tier-2 on Daytona; coding-delegation
-  // requires the local-docker backend until Phase 3b ships
-  // git-as-transport. `codingSandbox` is the narrowed handle the coding
-  // orchestrator wires against; `sandbox` is the wide handle the skills
-  // runner takes.
+  // requires the local-docker backend until Phase 3b.2.B wires the
+  // git-as-transport path. `codingSandbox` is the same handle as
+  // `sandbox` when local-docker is the active backend, otherwise null —
+  // the coding orchestrators' registration gate is the only knob the
+  // wider type doesn't capture, so we keep an explicit reference.
   if (env.SANDBOX_BACKEND === "local-docker") {
     if (!env.SANDBOX_RUNTIME) {
       logger.info(
@@ -398,9 +401,7 @@ export async function bootstrapSandbox(core: CoreDeps): Promise<SandboxDeps> {
       proxy,
       askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
     });
-    // `instanceof` narrowing — only the local-Docker class implements
-    // the LocalDocker-typed interface that coding orchestrators need.
-    const codingSandbox = localDocker instanceof LocalDockerSandboxClient ? localDocker : null;
+    const codingSandbox = localDocker;
     const { orphansReaped } = await localDocker.reconcileCrashedInstances(instance.id);
     if (orphansReaped > 0) {
       logger.warn({ orphansReaped }, "reaped orphan containers from prior instance(s)");
