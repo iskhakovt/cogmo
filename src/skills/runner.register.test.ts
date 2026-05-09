@@ -189,7 +189,10 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     expect(result.status).toBe("live");
     expect(result.name).toBe("echo");
     expect(result.gitSha).toBe(sha);
-    expect(result.riskTier).toBe("notify");
+    // ECHO body has no detectable side effects + manifest declares no
+    // effects → AST classifier promotes to auto. Pre-AST stub
+    // returned `notify` here because auto was unreachable.
+    expect(result.riskTier).toBe("auto");
 
     // main now points at the branch tip.
     expect(await getMainSha(repo.bare)).toBe(sha);
@@ -622,6 +625,58 @@ effects:
       expect(skill?.disabled).toBe(false);
       // Manifest-derived columns projected from the approved sha.
       expect(skill?.effects).toEqual(["sends_message"]);
+    });
+  });
+
+  describe("safety: AST classifier rejects manifest-vs-code drift", () => {
+    it("body imports smtplib + manifest declares no effects → register rejected with validation error", async () => {
+      const runner = await makeRunner();
+      // Body uses smtplib without `sends_email` declared → the AST
+      // classifier's UX gate fires. Deploy should be rejected before
+      // main is advanced or any skills row is written.
+      const offendingBody = `
+import smtplib
+async def run(inputs, ctx):
+    return {"echo": inputs["x"] + 1}
+`;
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: offendingBody,
+      });
+      const before = await getMainSha(repo.bare);
+      const result = await runner.register({ branch: "skill/echo" });
+
+      expect(result.status).toBe("rejected");
+      expect(result.errors?.[0]).toMatch(/undeclared effect 'sends_email'/);
+      expect(result.errors?.[0]).toMatch(/smtplib/);
+      // No advance, no skills row.
+      expect(await getMainSha(repo.bare)).toBe(before);
+      expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+    });
+
+    it("body declares + uses sends_email → lands as pending_approval (no validation error, approve-tier)", async () => {
+      const runner = await makeRunner();
+      const okManifest = ECHO_MANIFEST.replace(
+        "name: echo\n",
+        "name: echo\neffects:\n  - sends_email\n",
+      );
+      const okBody = `
+import smtplib
+async def run(inputs, ctx):
+    smtplib.SMTP("localhost").sendmail("a", "b", "c")
+    return {"echo": inputs["x"] + 1}
+`;
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: okManifest,
+        body: okBody,
+      });
+      const result = await runner.register({ branch: "skill/echo" });
+      expect(result.status).toBe("pending_approval");
+      expect(result.riskTier).toBe("approve");
     });
   });
 

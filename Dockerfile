@@ -9,6 +9,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
 COPY tsconfig.json tsup.config.ts ./
 COPY src/ src/
 COPY migrations/ migrations/
+COPY vendor/ vendor/
 RUN pnpm build
 RUN pnpm --filter cogmo deploy --prod /deploy
 
