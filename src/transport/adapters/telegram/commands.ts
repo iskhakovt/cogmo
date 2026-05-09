@@ -988,12 +988,26 @@ async function replyProfileScope(
   const profile = resolved.profile;
 
   const spec = parseScopeSpec(scopeTokens);
-  if (spec.kind === "show") {
-    await ctx.reply(`Scope for "${profile.name}": ${formatScope(profile.memoryScope)}`);
-    return;
-  }
   if (spec.kind === "error") {
     await ctx.reply(spec.message);
+    return;
+  }
+
+  // Load the user's custom compartments once so both the show and set
+  // branches can mark which compartments are custom in the rendered
+  // scope. `compartments.list` is identity-checked (same handle that
+  // resolved the profile above), so a Result error here means the
+  // identity was rejected mid-flow — bail rather than silently dropping
+  // the legend.
+  const customsRes = await transport.compartments.list(handle);
+  if (customsRes.isErr()) {
+    await ctx.reply(errorMessage(customsRes.error));
+    return;
+  }
+  const customs = new Set(customsRes.value.map((c) => c.name));
+
+  if (spec.kind === "show") {
+    await ctx.reply(`Scope for "${profile.name}": ${formatScope(profile.memoryScope, customs)}`);
     return;
   }
 
@@ -1003,7 +1017,7 @@ async function replyProfileScope(
     await ctx.reply(errorMessage(update.error));
     return;
   }
-  await ctx.reply(`Scope for "${profile.name}" updated: ${formatScope(newScope)}`);
+  await ctx.reply(`Scope for "${profile.name}" updated: ${formatScope(newScope, customs)}`);
 }
 
 // ── /profile class + /classes ─────────────────────────────────────────

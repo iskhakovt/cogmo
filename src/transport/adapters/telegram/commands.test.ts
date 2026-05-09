@@ -418,6 +418,76 @@ describe("handleProfile", () => {
       );
     });
 
+    it("show: marks custom compartments with `*` and appends the legend", async () => {
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              makeProfile({
+                compartments: ["work", "dnd"],
+                trust: ["first-party"],
+              }),
+            ]),
+          ),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update: vi.fn().mockResolvedValue(ok({} as never)),
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+        compartments: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              {
+                id: "cc-1",
+                userId: "u-1",
+                name: "dnd",
+                description: "tabletop campaign notes",
+                createdAt: new Date("2026-05-09T12:00:00Z"),
+              },
+            ]),
+          ),
+        },
+      });
+      const ctx = mkCtx("scope personal");
+      await handleProfile(transport, ctx, mkDialogs());
+      const reply = ctx.reply.mock.calls[0]?.[0];
+      expect(reply).toContain("compartments: work, dnd*");
+      expect(reply).toContain("(* = custom)");
+    });
+
+    it("set: confirmation echoes the legend when the new scope contains a custom compartment", async () => {
+      const set: Profile["memoryScope"] = {
+        compartments: ["dnd"],
+        trust: ["first-party"],
+      };
+      const update = vi.fn().mockResolvedValue(ok(makeProfile(set)));
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+        compartments: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              {
+                id: "cc-1",
+                userId: "u-1",
+                name: "dnd",
+                description: "x",
+                createdAt: new Date("2026-05-09T12:00:00Z"),
+              },
+            ]),
+          ),
+        },
+      });
+      const ctx = mkCtx("scope personal compartments=dnd trust=first-party");
+      await handleProfile(transport, ctx, mkDialogs());
+      const confirmation = ctx.reply.mock.calls[0]?.[0];
+      expect(confirmation).toContain("dnd*");
+      expect(confirmation).toContain("(* = custom)");
+    });
+
     it("clear → calls update with memoryScope: null and confirms", async () => {
       const update = vi.fn().mockResolvedValue(ok(makeProfile(null)));
       const transport = transportWith({
@@ -1298,6 +1368,33 @@ describe("formatScope", () => {
     expect(formatScope({ compartments: ["work", "technical"], trust: ["first-party"] })).toBe(
       "compartments: work, technical / trust: first-party",
     );
+  });
+
+  it("marks custom compartments with `*` and appends a legend when any custom appears", () => {
+    expect(
+      formatScope(
+        { compartments: ["work", "dnd", "technical", "music"], trust: ["first-party"] },
+        new Set(["dnd", "music"]),
+      ),
+    ).toBe("compartments: work, dnd*, technical, music* / trust: first-party (* = custom)");
+  });
+
+  it("omits the legend when no compartment is custom (all-core scopes stay clean)", () => {
+    expect(
+      formatScope(
+        { compartments: ["work", "technical"], trust: ["first-party"] },
+        new Set(["dnd"]),
+      ),
+    ).toBe("compartments: work, technical / trust: first-party");
+  });
+
+  it("an empty / missing customs set leaves output unmarked (default for callers that don't load customs)", () => {
+    // Same input, no second arg → no asterisks, no legend. Lets call
+    // sites that don't have the customs loaded (currently /profile list
+    // and /status) keep emitting bare scope strings without leaking
+    // misleading "no customs exist" through a stale empty Set.
+    const out = formatScope({ compartments: ["work", "dnd"], trust: ["first-party"] });
+    expect(out).not.toContain("*");
   });
 });
 

@@ -78,17 +78,35 @@ export function renderProfileList(
  * Canonical render for a profile's memory scope. Used both by the
  * `/profile scope` show-reply (commands.ts) and the `/profile list`
  * annotation above. Single source of truth so the two views can't drift.
+ *
+ * When `customCompartments` is supplied (the user's `custom_compartments`
+ * names), each compartment that's a custom value gets a trailing `*` and
+ * a `(* = custom)` legend is appended — gives the operator a visual cue
+ * that the registry-extension mechanism actually fired without changing
+ * the canonical compartment value. Omit `customCompartments` (or pass
+ * empty) on call sites that don't have it loaded; the output stays
+ * unmarked rather than misleading.
  */
-export function formatScope(scope: ProfileMemoryScope | null): string {
+export function formatScope(
+  scope: ProfileMemoryScope | null,
+  customCompartments?: ReadonlySet<string>,
+): string {
   if (scope === null) return "unrestricted (recalls all memories)";
+  let sawCustom = false;
+  const renderedCompartments = scope.compartments.map((c) => {
+    const isCustom = customCompartments?.has(c) ?? false;
+    if (isCustom) sawCustom = true;
+    return isCustom ? `${c}*` : c;
+  });
   const parts = [
-    `compartments: ${scope.compartments.join(", ")}`,
+    `compartments: ${renderedCompartments.join(", ")}`,
     `trust: ${scope.trust.join(", ")}`,
   ];
   if (scope.profileClasses !== undefined && scope.profileClasses.length > 0) {
     parts.push(`classes: ${scope.profileClasses.join(", ")}`);
   }
-  return parts.join(" / ");
+  const main = parts.join(" / ");
+  return sawCustom ? `${main} (* = custom)` : main;
 }
 
 export function renderModelList(
