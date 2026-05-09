@@ -292,6 +292,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         openPlanStream: async () => planStream,
       },
       stepRun,
+      inngest: { send: vi.fn().mockResolvedValue(undefined) },
     });
 
     expect(planResult.status).toBe("awaiting_approval");
