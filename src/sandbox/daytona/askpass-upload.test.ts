@@ -80,14 +80,18 @@ describe("uploadAskpassToSandbox", () => {
       path: args[0] as string,
       mode: (args[1] as { mode: string }).mode,
     }));
-    expect(modes).toEqual([
-      { path: "/.cogmo-askpass/helper", mode: "755" },
-      { path: "/.cogmo-askpass/pat", mode: "644" },
-      // 600 is non-negotiable — ssh-keygen -Y sign refuses to load a
-      // private key with broader permissions.
-      { path: "/.cogmo-askpass/signing-key", mode: "600" },
-      { path: "/.cogmo-askpass/signing-key.pub", mode: "644" },
-    ]);
+    // Order-independent — the four chmods race in parallel.
+    expect(modes).toHaveLength(4);
+    expect(modes).toEqual(
+      expect.arrayContaining([
+        { path: "/.cogmo-askpass/helper", mode: "755" },
+        { path: "/.cogmo-askpass/pat", mode: "644" },
+        // 600 is non-negotiable — ssh-keygen -Y sign refuses to load a
+        // private key with broader permissions.
+        { path: "/.cogmo-askpass/signing-key", mode: "600" },
+        { path: "/.cogmo-askpass/signing-key.pub", mode: "644" },
+      ]),
+    );
   });
 
   it("propagates upload failures (caller rolls back the sandbox)", async () => {

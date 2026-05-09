@@ -37,7 +37,16 @@ export async function uploadAskpassToSandbox(args: {
 
   await sandbox.fs.uploadFiles(uploads);
 
-  for (const { name, mode } of ASKPASS_FILES) {
-    await sandbox.fs.setFilePermissions(join(containerDir, name), { mode });
-  }
+  // Independent network calls — fan out and let them race. `allSettled`
+  // (rather than `Promise.all`) so a sibling rejection doesn't surface
+  // as an unhandled rejection while we wait for the others to land;
+  // the caller's rollback runs against a quiesced sandbox instead of
+  // chasing in-flight ops.
+  const results = await Promise.allSettled(
+    ASKPASS_FILES.map(({ name, mode }) =>
+      sandbox.fs.setFilePermissions(join(containerDir, name), { mode }),
+    ),
+  );
+  const failure = results.find((r) => r.status === "rejected");
+  if (failure?.status === "rejected") throw failure.reason;
 }
