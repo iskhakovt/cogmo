@@ -38,7 +38,12 @@ const log = logger.child({ component: "coding.cleanup-orphan-run-branches" });
 const RETENTION_DAYS = 7;
 const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
-/** `refs/heads/cogmo/run/<task-id>` prefix used by `git.listMatchingRefs`. */
+/**
+ * Prefix used by `git.listMatchingRefs` (relative to `refs/`) and by
+ * `git.deleteRef` (same convention). The API returns full names of the
+ * form `refs/heads/cogmo/run/<task-id>`; both endpoints want the same
+ * `heads/cogmo/run/<task-id>` shape on input.
+ */
 const RUN_BRANCH_REF_PREFIX = "heads/cogmo/run/";
 
 export interface CleanupOrphanRunBranchesDeps {
@@ -118,42 +123,59 @@ export async function sweepRepo(
     return { repoId, deleted: 0, skipped: 0, errors: 0 };
   }
 
-  const identity = await stepRun("load-identity", async () => {
-    const result = await deps.runInTx((tx) =>
-      resolveGitHubIdentity(tx, deps.secretsStore, repo.identityName),
-    );
-    if (result.isErr()) {
-      throw new Error(describeResolveIdentityError(result.error));
-    }
-    return result.value;
-  });
+  // Identity contains the PAT + SSH private key — Inngest persists every
+  // `step.run` return value into its state store, so loading identity
+  // INSIDE `step.run` would leak the bundle. Inline DB read instead;
+  // `resolveGitHubIdentity` is idempotent and the cron's only output is
+  // the count, not the identity itself.
+  const identityResult = await deps.runInTx((tx) =>
+    resolveGitHubIdentity(tx, deps.secretsStore, repo.identityName),
+  );
+  if (identityResult.isErr()) {
+    throw new Error(describeResolveIdentityError(identityResult.error));
+  }
+  const identity = identityResult.value;
 
   const octokit = deps.octokitFactory?.(identity.pat) ?? new Octokit({ auth: identity.pat });
 
-  // `listMatchingRefs` returns up to 100 refs per page. Personal scale
-  // never approaches that; if it does, switch to `octokit.paginate`.
+  // `octokit.paginate` walks all pages — defensive against repos with
+  // >30 (or >100) orphan run-branches that would otherwise be partially
+  // swept and leak over time.
   const refs = await stepRun("list-run-refs", async () => {
-    const { data } = await octokit.git.listMatchingRefs({
+    const all = await octokit.paginate(octokit.git.listMatchingRefs, {
       owner: remote.owner,
       repo: remote.repo,
       ref: RUN_BRANCH_REF_PREFIX,
+      per_page: 100,
     });
-    return data.map((r) => ({
-      // Strip the leading `refs/heads/` so we only carry the suffix; the
-      // task id is what matters.
-      ref: r.ref.replace(/^refs\/heads\//, ""),
+    return all.map((r) => ({
+      // `git.deleteRef` wants the ref relative to `refs/` (e.g.
+      // `heads/cogmo/run/<id>`), NOT relative to `refs/heads/`. Strip
+      // only the `refs/` prefix so the round-trip is symmetric.
+      ref: r.ref.replace(/^refs\//, ""),
     }));
   });
+
+  if (refs.length === 0) {
+    return { repoId, deleted: 0, skipped: 0, errors: 0 };
+  }
+
+  // Batch task lookup — one query for every ref. Avoids N round-trips
+  // through Inngest's executor and stays well under any per-function
+  // step-count cap. Map by id for O(1) lookup in the loop below.
+  const taskIds = refs.map((r) => r.ref.replace(/^heads\/cogmo\/run\//, ""));
+  const tasks = await stepRun("load-tasks", () =>
+    deps.runInTx((tx) => deps.store.getTasksByIds(tx, taskIds)),
+  );
+  const tasksById = new Map(tasks.map((t) => [t.id, t] as const));
 
   let deleted = 0;
   let skipped = 0;
   let errors = 0;
 
   for (const { ref } of refs) {
-    const taskId = ref.replace(/^cogmo\/run\//, "");
-    const task = await stepRun(`load-task-${taskId}`, () =>
-      deps.runInTx((tx) => deps.store.getTask(tx, taskId)),
-    );
+    const taskId = ref.replace(/^heads\/cogmo\/run\//, "");
+    const task = tasksById.get(taskId);
 
     // Stale criterion: task row is terminal AND created >7 days ago, OR
     // there is no task row at all (deleted, or this ref came from a

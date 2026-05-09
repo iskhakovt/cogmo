@@ -329,10 +329,6 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         allowPrivilegedRunc: task.allowPrivilegedRunc,
         ...(sandboxEnv && { env: sandboxEnv }),
       });
-      // Mark created BEFORE the DB write so a failed setTaskContainerId
-      // still triggers cleanup via the outer catch (the container exists
-      // on Docker side regardless of whether we recorded it).
-      containerCreated = true;
       if (isLocalDockerSessionState(session.state)) {
         // `containers` is the local-docker FK target; managed backends
         // (Daytona) leave the column null and rely on the sandbox's own
@@ -345,6 +341,12 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       }
       return session.state;
     });
+    // Set OUTSIDE the step body — Inngest replays skip step bodies and
+    // load the checkpointed return value, so a flag set inside the body
+    // wouldn't survive a worker restart between this step and the next.
+    // The outer-line assignment re-runs on every replay until a later
+    // step boundary checkpoints.
+    containerCreated = true;
 
     // Re-attach a session handle on this side of the step boundary —
     // handles can't cross step.run because they aren't
@@ -734,7 +736,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         // same as a freshly-created one. `deleteByTaskId` is
         // idempotent so the catch-path call below is safe in either
         // case.
-        containerCreated = true;
         return existing.state;
       }
 
@@ -765,7 +766,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         allowPrivilegedRunc: task.allowPrivilegedRunc,
         ...(sandboxEnv && { env: sandboxEnv }),
       });
-      containerCreated = true;
       if (isLocalDockerSessionState(session.state)) {
         const localState = session.state;
         await runInTx((tx) => store.setTaskContainerId(tx, taskId, localState.containerRowId));
@@ -775,6 +775,11 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       }
       return session.state;
     });
+    // Set OUTSIDE the step body so the flag survives Inngest replay —
+    // step bodies are skipped on resume and only the checkpointed return
+    // value is loaded, so an inside-the-body assignment would reset to
+    // `false` and the catch path would skip the `deleteByTaskId` cleanup.
+    containerCreated = true;
 
     const container = await sandbox.resume(sessionState);
 

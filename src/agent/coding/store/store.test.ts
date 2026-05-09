@@ -214,6 +214,37 @@ describe("DrizzleCodingStore", () => {
       expect(row.prMetadata).toBeNull();
     });
 
+    it("getTasksByIds batch-loads existing rows and silently drops unknown ids", async () => {
+      const repoId = await seedRepo();
+      const t1 = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "a",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      const t2 = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "b",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      const rows = await tx((trx) =>
+        store.getTasksByIds(trx, [t1.id, "019d0000-0000-7000-8000-000000000abc", t2.id]),
+      );
+      expect(rows.map((r) => r.id).sort()).toEqual([t1.id, t2.id].sort());
+    });
+
+    it("getTasksByIds with empty input returns empty array (no SQL roundtrip)", async () => {
+      const rows = await tx((trx) => store.getTasksByIds(trx, []));
+      expect(rows).toEqual([]);
+    });
+
     it("setTaskWorktreeAssignment persists branch + worktreePath atomically as JSONB", async () => {
       const repoId = await seedRepo();
       const t = await tx((trx) =>

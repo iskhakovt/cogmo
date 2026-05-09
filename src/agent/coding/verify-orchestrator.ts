@@ -257,12 +257,17 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         askpass: { hostDir: askpass.hostDir, containerDir: askpass.containerDir },
         env: sandboxEnv,
       });
-      containerCreated = true;
       if (sandbox.capabilities.workingTreeTransport === "git-remote") {
         await checkoutFeatureBranchInSandbox(session, worktreeAssignment.branch);
       }
       return session.state;
     });
+    // Set OUTSIDE the step body so the flag survives Inngest replay —
+    // step bodies are skipped on resume and only the checkpointed return
+    // value is loaded, so an inside-the-body assignment would reset to
+    // `false` and the finally block would skip the `deleteByTaskId`
+    // cleanup, leaking the container.
+    containerCreated = true;
     const container: SandboxSession = await sandbox.resume(sessionState);
 
     executeStream = await openExecuteStream(taskId);

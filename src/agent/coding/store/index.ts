@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, ne } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, ne } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
 import type { DevcontainerSpec, PrMetadata, ResourceUsage, WorktreeAssignment } from "../types.js";
@@ -169,6 +169,13 @@ export interface CodingStore {
   ): Promise<readonly CodingTaskRow[]>;
 
   getTask(tx: Transaction, id: string): Promise<CodingTaskRow | undefined>;
+
+  /**
+   * Batch lookup — returns rows for the subset of `ids` that exist. Used by
+   * the orphan-run-branch sweep to avoid N round-trips for N refs. Empty
+   * input returns an empty array (no SQL).
+   */
+  getTasksByIds(tx: Transaction, ids: ReadonlyArray<string>): Promise<readonly CodingTaskRow[]>;
 
   /**
    * Persist the worktree assignment derived by the orchestrator's
@@ -447,6 +454,17 @@ export class DrizzleCodingStore implements CodingStore {
   async getTask(tx: Transaction, id: string): Promise<CodingTaskRow | undefined> {
     const rows = await tx.select().from(codingTasks).where(eq(codingTasks.id, id)).limit(1);
     return rows[0];
+  }
+
+  async getTasksByIds(
+    tx: Transaction,
+    ids: ReadonlyArray<string>,
+  ): Promise<readonly CodingTaskRow[]> {
+    if (ids.length === 0) return [];
+    return await tx
+      .select()
+      .from(codingTasks)
+      .where(inArray(codingTasks.id, [...ids]));
   }
 
   async updateTaskStatus(

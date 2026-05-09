@@ -87,17 +87,25 @@ function fakeSecretsStore(): SecretsStore {
 interface OctokitFake {
   listMatchingRefs: ReturnType<typeof vi.fn>;
   deleteRef: ReturnType<typeof vi.fn>;
+  paginate: ReturnType<typeof vi.fn>;
 }
 
 function fakeOctokit(refs: string[]): { factory: () => unknown; calls: OctokitFake } {
+  const refData = refs.map((ref) => ({ ref }));
   const calls: OctokitFake = {
-    listMatchingRefs: vi.fn(async () => ({
-      data: refs.map((ref) => ({ ref })),
-    })),
+    listMatchingRefs: vi.fn(async () => ({ data: refData })),
     deleteRef: vi.fn(async () => ({ status: 204 })),
+    // `octokit.paginate(method, params)` walks all pages and returns the
+    // flat array. The fake's `listMatchingRefs` returns a single page so
+    // paginate just unwraps `data`.
+    paginate: vi.fn(async () => refData),
   };
   return {
-    factory: () => ({ git: calls }) as never,
+    factory: () =>
+      ({
+        git: { listMatchingRefs: calls.listMatchingRefs, deleteRef: calls.deleteRef },
+        paginate: calls.paginate,
+      }) as never,
     calls,
   };
 }
@@ -130,7 +138,7 @@ describe("sweepRepo", () => {
     expect(oct.calls.deleteRef.mock.calls[0]?.[0]).toEqual({
       owner: "owner",
       repo: "example",
-      ref: `cogmo/run/${oldTask.id}`,
+      ref: `heads/cogmo/run/${oldTask.id}`,
     });
   });
 
