@@ -54,7 +54,11 @@ export function renderSessionsList(
 
 export function renderProfileList(
   profiles: ReadonlyArray<Profile>,
-  opts: { currentProfileId?: string | undefined } = {},
+  opts: {
+    currentProfileId?: string | undefined;
+    customCompartments?: ReadonlySet<string>;
+    restrictedClasses?: ReadonlySet<string>;
+  } = {},
 ): RenderedList {
   if (profiles.length === 0) {
     return { text: "No profiles available." };
@@ -65,10 +69,16 @@ export function renderProfileList(
     // Memory scope is null for most profiles (unrestricted) — only annotate
     // when set, so the common case stays compact. Wraps the canonical
     // `formatScope` form so list and show views never drift in sync.
-    const scope = p.memoryScope ? ` [${formatScope(p.memoryScope)}]` : "";
+    const scope = p.memoryScope
+      ? ` [${formatScope(p.memoryScope, opts.customCompartments, opts.restrictedClasses)}]`
+      : "";
     // Profile class is null for unclassed profiles — surface only when set
-    // so unclassed deployments don't see clutter.
-    const klass = p.profileClass ? ` [class=${p.profileClass}]` : "";
+    // so unclassed deployments don't see clutter. Restricted classes get a
+    // trailing marker so the operator can see at a glance which speaker
+    // labels are gated.
+    const klassRestricted =
+      p.profileClass && (opts.restrictedClasses?.has(p.profileClass) ?? false);
+    const klass = p.profileClass ? ` [class=${p.profileClass}${klassRestricted ? "*" : ""}]` : "";
     return `• ${p.name} (${owner}, ${p.model})${scope}${klass}${current}`;
   });
   return { text: lines.join("\n") };
@@ -102,9 +112,11 @@ export function renderProfileList(
 export function formatScope(
   scope: ProfileMemoryScope | null,
   customCompartments?: ReadonlySet<string>,
+  restrictedClasses?: ReadonlySet<string>,
 ): string {
   if (scope === null) return "unrestricted (recalls all memories)";
   let sawCustom = false;
+  let sawRestricted = false;
   const renderedCompartments = scope.compartments.map((c) => {
     const isCustom = customCompartments?.has(c) ?? false;
     if (isCustom) sawCustom = true;
@@ -115,10 +127,18 @@ export function formatScope(
     `trust: ${scope.trust.join(", ")}`,
   ];
   if (scope.profileClasses !== undefined && scope.profileClasses.length > 0) {
-    parts.push(`classes: ${scope.profileClasses.join(", ")}`);
+    const renderedClasses = scope.profileClasses.map((c) => {
+      const isRestricted = restrictedClasses?.has(c) ?? false;
+      if (isRestricted) sawRestricted = true;
+      return isRestricted ? `${c}!` : c;
+    });
+    parts.push(`classes: ${renderedClasses.join(", ")}`);
   }
   const main = parts.join(" / ");
-  return sawCustom ? `${main} (* = custom)` : main;
+  const legends: string[] = [];
+  if (sawCustom) legends.push("* = custom");
+  if (sawRestricted) legends.push("! = restricted");
+  return legends.length > 0 ? `${main} (${legends.join("; ")})` : main;
 }
 
 export function renderModelList(

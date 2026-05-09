@@ -339,6 +339,62 @@ describe("DrizzleAgentStore", () => {
       const result = await tx((trx) => store.deleteProfileClass(trx, userId, "no-such"));
       expect(result.deleted).toBe(false);
     });
+
+    it("createProfileClass defaults restricted=false; listProfileClasses surfaces it", async () => {
+      const { userId } = await seedClassed();
+      const created = await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      expect(created.restricted).toBe(false);
+      const list = await tx((trx) => store.listProfileClasses(trx, userId));
+      expect(list[0]?.restricted).toBe(false);
+    });
+
+    it("setProfileClassRestricted flips the flag and is idempotent", async () => {
+      const { userId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      const first = await tx((trx) =>
+        store.setProfileClassRestricted(trx, userId, "intimate", true),
+      );
+      expect(first.updated).toBe(true);
+      const after = await tx((trx) => store.listProfileClasses(trx, userId));
+      expect(after[0]?.restricted).toBe(true);
+      // Re-flipping to the same value is a no-op success — idempotent.
+      const second = await tx((trx) =>
+        store.setProfileClassRestricted(trx, userId, "intimate", true),
+      );
+      expect(second.updated).toBe(true);
+      const off = await tx((trx) =>
+        store.setProfileClassRestricted(trx, userId, "intimate", false),
+      );
+      expect(off.updated).toBe(true);
+      const final = await tx((trx) => store.listProfileClasses(trx, userId));
+      expect(final[0]?.restricted).toBe(false);
+    });
+
+    it("setProfileClassRestricted returns updated:false for an unknown name", async () => {
+      const { userId } = await seedClassed();
+      const result = await tx((trx) =>
+        store.setProfileClassRestricted(trx, userId, "no-such", true),
+      );
+      expect(result.updated).toBe(false);
+    });
+
+    it("setProfileClassRestricted is independent of in-use status — restricting an attached class works", async () => {
+      const { userId, profileId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
+      const result = await tx((trx) =>
+        store.setProfileClassRestricted(trx, userId, "intimate", true),
+      );
+      expect(result.updated).toBe(true);
+      const list = await tx((trx) => store.listProfileClasses(trx, userId));
+      expect(list[0]?.restricted).toBe(true);
+    });
   });
 
   describe("custom compartments", () => {

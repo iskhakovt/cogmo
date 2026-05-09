@@ -2056,4 +2056,132 @@ describe("createHandleMessage", () => {
       maxTokens: 2000,
     });
   });
+
+  it("auto-recall folds restricted classes into a NOT leaf, with the speaker's own class auto-included", async () => {
+    // End-to-end wiring proof: handle-message loads the user's
+    // profile_classes registry, filters down to the restricted set,
+    // and passes it (alongside the profile's profile_class) into
+    // createService. The Service then composes a NOT leaf for any
+    // restricted class the profile hasn't opted into. We observe the
+    // resulting tag_groups by inspecting memory.recall's args.
+    const memory = mockMemoryProvider();
+    const listProfileClasses = vi.fn().mockResolvedValue([
+      {
+        id: "c-1",
+        userId: "user-1",
+        name: "intimate",
+        description: "x",
+        restricted: true,
+        createdAt: new Date("2026-04-16T12:00:00Z"),
+      },
+      {
+        id: "c-2",
+        userId: "user-1",
+        name: "secret",
+        description: "y",
+        restricted: true,
+        createdAt: new Date("2026-04-16T12:00:00Z"),
+      },
+      {
+        id: "c-3",
+        userId: "user-1",
+        name: "general",
+        description: "z",
+        restricted: false,
+        createdAt: new Date("2026-04-16T12:00:00Z"),
+      },
+    ]);
+    const deps = mockDeps({
+      memory,
+      agentStore: mockAgentStore({
+        listProfileClasses,
+        getProfile: vi.fn().mockResolvedValue({
+          id: "profile-1",
+          userId: "user-1",
+          name: "private",
+          basePrompt: "test",
+          model: "claude-sonnet-4-6",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "always" as const,
+          toolSet: [],
+          memoryScope: null,
+          profileClass: "intimate",
+        }),
+      }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    // Registry was loaded keyed on the conversation user (not the
+    // profile's userId — they coincide here, but the wiring should pass
+    // the conversation user even for org-owned profiles).
+    expect(listProfileClasses).toHaveBeenCalledWith(expect.anything(), "user-1");
+
+    // The recall request carries a NOT leaf for `secret` only:
+    // - `intimate` is restricted but auto-included as the speaker's class
+    // - `secret` is restricted and not in any opt-in set → excluded
+    // - `general` is unrestricted → never appears in the NOT leaf
+    expect(memory.recall).toHaveBeenCalled();
+    const recallCall = vi.mocked(memory.recall).mock.calls[0];
+    const opts = recallCall?.[2];
+    expect(opts).toMatchObject({
+      tagGroups: [
+        {
+          and: [{ not: { tags: ["profile_class:secret"], match: "any" } }],
+        },
+      ],
+      maxTokens: 2000,
+    });
+  });
+
+  it("no NOT leaf when no profile classes are flagged restricted (today-fast-path preserved)", async () => {
+    // Belt-and-braces: a deployment without any restricted classes must
+    // see exactly the pre-feature recall payload — no tagGroups at all
+    // when memoryScope is null. Catches a regression where the wiring
+    // emits an empty NOT leaf or a stray AND wrapper.
+    const memory = mockMemoryProvider();
+    const deps = mockDeps({
+      memory,
+      agentStore: mockAgentStore({
+        listProfileClasses: vi.fn().mockResolvedValue([
+          {
+            id: "c-1",
+            userId: "user-1",
+            name: "general",
+            description: "z",
+            restricted: false,
+            createdAt: new Date("2026-04-16T12:00:00Z"),
+          },
+        ]),
+        getProfile: vi.fn().mockResolvedValue({
+          id: "profile-1",
+          userId: "user-1",
+          name: "assistant",
+          basePrompt: "test",
+          model: "claude-sonnet-4-6",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "always" as const,
+          toolSet: [],
+          memoryScope: null,
+          profileClass: "general",
+        }),
+      }),
+    });
+
+    await (createHandleMessage(deps) as any).fn({
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(memory.recall).toHaveBeenCalledWith("user-1", expect.any(String), {
+      maxTokens: 2000,
+    });
+  });
 });

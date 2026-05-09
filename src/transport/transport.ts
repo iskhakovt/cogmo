@@ -354,6 +354,17 @@ export interface Transport {
       input: { name: string; description: string },
     ): Promise<Result<ProfileClass, TransportError>>;
     delete(platformUserHandle: string, name: string): Promise<Result<void, TransportError>>;
+    /**
+     * Flip the `restricted` flag on a class. Independent of whether any
+     * profile currently references the class — marking restricted while
+     * in use is the common case (a class becoming sensitive after the
+     * fact). `profile_class_not_found` when no row matches the name.
+     */
+    setRestricted(
+      platformUserHandle: string,
+      name: string,
+      restricted: boolean,
+    ): Promise<Result<void, TransportError>>;
   };
 
   /**
@@ -1139,6 +1150,23 @@ export function createTransport(deps: {
             }
             throw e;
           }
+        });
+      },
+
+      async setRestricted(platformUserHandle, name, restricted) {
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          const result = await agentStore.setProfileClassRestricted(
+            tx,
+            identity.userId,
+            name,
+            restricted,
+          );
+          if (!result.updated) {
+            return err({ code: "profile_class_not_found" as const, name });
+          }
+          return ok(undefined);
         });
       },
     },

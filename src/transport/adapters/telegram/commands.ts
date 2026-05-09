@@ -70,10 +70,12 @@ const USAGE = {
     `  Compartments: ${CORE_LIST}\n` +
     "  Trust:        first-party, any",
   classes:
-    "Usage: /classes [list|add <name> <description>|rm <name>]\n" +
+    "Usage: /classes [list|add <name> <description>|rm <name>|restrict <name>|unrestrict <name>]\n" +
     "  /classes                          → list registered profile classes\n" +
     "  /classes add intimate <desc>      → register a new class for /profile class to reference\n" +
-    "  /classes rm intimate              → remove a class (must not be assigned to any profile)",
+    "  /classes rm intimate              → remove a class (must not be assigned to any profile)\n" +
+    "  /classes restrict intimate        → mark a class as restricted (recall fails closed unless opted in)\n" +
+    "  /classes unrestrict intimate      → clear the restricted flag",
   compartments:
     "Usage: /compartments [list|add <name> <description>|rm <name>]\n" +
     "  /compartments                     → list registered custom compartments\n" +
@@ -278,6 +280,15 @@ export async function handleClasses(
         return;
       }
       return replyClassesDelete(transport, ctx, handle, name);
+    }
+    case "restrict":
+    case "unrestrict": {
+      const name = rest.join(" ").trim();
+      if (!name) {
+        await ctx.reply(USAGE.classes);
+        return;
+      }
+      return replyClassesSetRestricted(transport, ctx, handle, name, sub === "restrict");
     }
     default:
       await ctx.reply(USAGE.classes);
@@ -763,7 +774,21 @@ async function replyProfileList(
   }
   const current = await transport.conversations.getCurrent(handle, addr);
   const currentProfileId = current.isOk() && current.value ? current.value.profileId : undefined;
-  const rendered = renderProfileList(list.value, { currentProfileId });
+  // Load the per-user registries so list rendering can annotate custom
+  // compartments (`*`) and restricted classes (`!`). Both are best-effort:
+  // a list error degrades to "render without legend markers" rather than
+  // failing the whole `/profile list` reply.
+  const customsRes = await transport.compartments.list(handle);
+  const customs = customsRes.isOk() ? new Set(customsRes.value.map((c) => c.name)) : undefined;
+  const classesRes = await transport.profileClasses.list(handle);
+  const restrictedClasses = classesRes.isOk()
+    ? new Set(classesRes.value.filter((c) => c.restricted).map((c) => c.name))
+    : undefined;
+  const rendered = renderProfileList(list.value, {
+    currentProfileId,
+    ...(customs !== undefined && { customCompartments: customs }),
+    ...(restrictedClasses !== undefined && { restrictedClasses }),
+  });
   await ctx.reply(rendered.text);
 }
 
@@ -997,10 +1022,14 @@ async function replyProfileScope(
   }
 
   // Skip the customs fetch when the rendered scope is null or all-core —
-  // the `* = custom` legend never fires for those, so the roundtrip is wasted.
+  // the `* = custom` legend never fires for those, so the roundtrip is
+  // wasted. Same for restricted classes: only fetch when the scope sets
+  // `profileClasses`, since the `! = restricted` legend can't fire otherwise.
   const renderedScope: ProfileMemoryScope | null =
     spec.kind === "show" ? profile.memoryScope : spec.kind === "clear" ? null : spec.scope;
   const needsCustoms = renderedScope?.compartments.some((c) => !isCoreCompartment(c)) ?? false;
+  const needsRestricted =
+    renderedScope?.profileClasses !== undefined && renderedScope.profileClasses.length > 0;
 
   let customs: ReadonlySet<string> | undefined;
   if (needsCustoms) {
@@ -1012,8 +1041,20 @@ async function replyProfileScope(
     customs = new Set(customsRes.value.map((c) => c.name));
   }
 
+  let restricted: ReadonlySet<string> | undefined;
+  if (needsRestricted) {
+    const classesRes = await transport.profileClasses.list(handle);
+    if (classesRes.isErr()) {
+      await ctx.reply(errorMessage(classesRes.error));
+      return;
+    }
+    restricted = new Set(classesRes.value.filter((c) => c.restricted).map((c) => c.name));
+  }
+
   if (spec.kind === "show") {
-    await ctx.reply(`Scope for "${profile.name}": ${formatScope(profile.memoryScope, customs)}`);
+    await ctx.reply(
+      `Scope for "${profile.name}": ${formatScope(profile.memoryScope, customs, restricted)}`,
+    );
     return;
   }
 
@@ -1023,7 +1064,9 @@ async function replyProfileScope(
     await ctx.reply(errorMessage(update.error));
     return;
   }
-  await ctx.reply(`Scope for "${profile.name}" updated: ${formatScope(newScope, customs)}`);
+  await ctx.reply(
+    `Scope for "${profile.name}" updated: ${formatScope(newScope, customs, restricted)}`,
+  );
 }
 
 // ── /profile class + /classes ─────────────────────────────────────────
@@ -1084,8 +1127,39 @@ async function replyClassesList(
     );
     return;
   }
-  const lines = res.value.map((c) => `• ${c.name} — ${c.description}`);
-  await ctx.reply(`Profile classes:\n${lines.join("\n")}`);
+  let sawRestricted = false;
+  const lines = res.value.map((c) => {
+    if (c.restricted) sawRestricted = true;
+    const marker = c.restricted ? " (restricted)" : "";
+    return `• ${c.name}${marker} — ${c.description}`;
+  });
+  const legend = sawRestricted
+    ? "\n\n(restricted) — readers must opt in via /profile scope … classes=… or speak as the class."
+    : "";
+  await ctx.reply(`Profile classes:\n${lines.join("\n")}${legend}`);
+}
+
+async function replyClassesSetRestricted(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+  name: string,
+  restricted: boolean,
+): Promise<void> {
+  const res = await transport.profileClasses.setRestricted(handle, name, restricted);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  if (restricted) {
+    await ctx.reply(
+      `Class "${name}" marked restricted. Readers without an explicit opt-in (or that don't speak as "${name}") won't see its memories.`,
+    );
+  } else {
+    await ctx.reply(
+      `Class "${name}" no longer restricted. Recall returns to open-by-default for this class.`,
+    );
+  }
 }
 
 /**

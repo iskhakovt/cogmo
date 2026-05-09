@@ -247,6 +247,103 @@ describe("handleProfile", () => {
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("assistant"));
   });
 
+  it("/profile list loads compartments + profileClasses registries and annotates restricted profile classes", async () => {
+    const compartmentsList = vi.fn().mockResolvedValue(ok([]));
+    const profileClassesList = vi.fn().mockResolvedValue(
+      ok([
+        {
+          id: "c-1",
+          userId: "u-1",
+          name: "intimate",
+          description: "x",
+          restricted: true,
+          createdAt: new Date("2026-04-16T12:00:00Z"),
+        },
+        {
+          id: "c-2",
+          userId: "u-1",
+          name: "general",
+          description: "y",
+          restricted: false,
+          createdAt: new Date("2026-04-16T12:00:00Z"),
+        },
+      ]),
+    );
+    const profileBase: Omit<Profile, "id" | "name" | "profileClass"> = {
+      userId: "u-1",
+      basePrompt: "",
+      model: "m",
+      summarizationModel: null,
+      extractionModel: null,
+      autoRecall: "heuristic",
+      voiceMode: "auto",
+      toolSet: [],
+      memoryScope: null,
+    };
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            { id: "p1", name: "assistant", profileClass: "general", ...profileBase },
+            { id: "p2", name: "private", profileClass: "intimate", ...profileBase },
+          ]),
+        ),
+      },
+      compartments: { list: compartmentsList },
+      profileClasses: { list: profileClassesList },
+    });
+    const ctx = mkCtx("");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(compartmentsList).toHaveBeenCalled();
+    expect(profileClassesList).toHaveBeenCalled();
+    const reply = ctx.reply.mock.calls[0]?.[0];
+    // Restricted class gets the trailing `*` marker; unrestricted stays bare.
+    expect(reply).toContain("[class=intimate*]");
+    expect(reply).toContain("[class=general]");
+    expect(reply).not.toContain("[class=general*]");
+  });
+
+  it("/profile list degrades gracefully when the profileClasses registry list errors", async () => {
+    // Best-effort: a registry-list error must not abort the whole reply
+    // — the profile list itself is what the user asked for, the
+    // restricted markers are decoration. The handler renders without
+    // markers rather than surfacing the registry error.
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            {
+              id: "p1",
+              userId: "u-1",
+              name: "private",
+              basePrompt: "",
+              model: "m",
+              summarizationModel: null,
+              extractionModel: null,
+              autoRecall: "heuristic",
+              voiceMode: "auto",
+              toolSet: [],
+              memoryScope: null,
+              profileClass: "intimate",
+            },
+          ]),
+        ),
+      },
+      profileClasses: {
+        list: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
+      },
+    });
+    const ctx = mkCtx("");
+    await handleProfile(transport, ctx, mkDialogs());
+    const reply = ctx.reply.mock.calls[0]?.[0];
+    // Class still rendered (the profile data has it), just without the
+    // restricted marker since we couldn't load the registry.
+    expect(reply).toContain("[class=intimate]");
+    expect(reply).not.toContain("[class=intimate*]");
+    // Crucially, no error message — the user gets their list back.
+    expect(reply).not.toContain("not authorized");
+  });
+
   it("switches profile by name", async () => {
     const setProfile = vi.fn().mockResolvedValue(ok(undefined));
     const transport = transportWith({
@@ -608,6 +705,127 @@ describe("handleProfile", () => {
           delete: vi.fn().mockResolvedValue(ok(undefined)),
         },
         compartments: {
+          list: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
+        },
+      });
+      const ctx = mkCtx("scope personal");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("not authorized"));
+    });
+
+    it("show: skips the profileClasses-list fetch when the scope sets no classes", async () => {
+      const profileClassesList = vi.fn().mockResolvedValue(ok([]));
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              makeProfile({
+                compartments: ["work"],
+                trust: ["first-party"],
+              }),
+            ]),
+          ),
+        },
+        profileClasses: { list: profileClassesList },
+      });
+      const ctx = mkCtx("scope personal");
+      await handleProfile(transport, ctx, mkDialogs());
+      // No `classes:` segment in the rendered scope → no point loading the
+      // restricted-class registry; the `! = restricted` legend can't fire.
+      expect(profileClassesList).not.toHaveBeenCalled();
+    });
+
+    it("show: fetches profileClasses when scope.profileClasses is set and marks restricted classes with `!`", async () => {
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              makeProfile({
+                compartments: ["personal"],
+                trust: ["first-party"],
+                profileClasses: ["intimate", "general"],
+              }),
+            ]),
+          ),
+        },
+        profileClasses: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              {
+                id: "c-1",
+                userId: "u-1",
+                name: "intimate",
+                description: "x",
+                restricted: true,
+                createdAt: new Date("2026-04-16T12:00:00Z"),
+              },
+              {
+                id: "c-2",
+                userId: "u-1",
+                name: "general",
+                description: "y",
+                restricted: false,
+                createdAt: new Date("2026-04-16T12:00:00Z"),
+              },
+            ]),
+          ),
+        },
+      });
+      const ctx = mkCtx("scope personal");
+      await handleProfile(transport, ctx, mkDialogs());
+      const reply = ctx.reply.mock.calls[0]?.[0];
+      expect(reply).toContain("classes: intimate!, general");
+      expect(reply).toContain("(! = restricted)");
+    });
+
+    it("set: confirmation echoes restricted markers when the new scope contains a restricted class", async () => {
+      const set: Profile["memoryScope"] = {
+        compartments: ["personal"],
+        trust: ["first-party"],
+        profileClasses: ["intimate"],
+      };
+      const update = vi.fn().mockResolvedValue(ok(makeProfile(set)));
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          update,
+        },
+        profileClasses: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              {
+                id: "c-1",
+                userId: "u-1",
+                name: "intimate",
+                description: "x",
+                restricted: true,
+                createdAt: new Date("2026-04-16T12:00:00Z"),
+              },
+            ]),
+          ),
+        },
+      });
+      const ctx = mkCtx("scope personal compartments=personal trust=first-party classes=intimate");
+      await handleProfile(transport, ctx, mkDialogs());
+      const confirmation = ctx.reply.mock.calls[0]?.[0];
+      expect(confirmation).toContain("intimate!");
+      expect(confirmation).toContain("(! = restricted)");
+    });
+
+    it("show: surfaces a profileClasses-list error when fetching is necessary", async () => {
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              makeProfile({
+                compartments: ["personal"],
+                trust: ["first-party"],
+                profileClasses: ["intimate"],
+              }),
+            ]),
+          ),
+        },
+        profileClasses: {
           list: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
         },
       });
@@ -1066,6 +1284,7 @@ describe("handleClasses", () => {
           userId: "u-1",
           name: "intimate",
           description: "for emotional / relationship topics",
+          restricted: false,
           createdAt: new Date("2026-04-16T12:00:00Z"),
         },
         {
@@ -1073,6 +1292,7 @@ describe("handleClasses", () => {
           userId: "u-1",
           name: "general",
           description: "default for assistant-style profiles",
+          restricted: false,
           createdAt: new Date("2026-04-16T12:00:00Z"),
         },
       ]),
@@ -1085,6 +1305,38 @@ describe("handleClasses", () => {
     expect(reply).toContain("intimate");
     expect(reply).toContain("for emotional / relationship topics");
     expect(reply).toContain("general");
+    // No restricted classes → no `(restricted)` marker, no legend.
+    expect(reply).not.toContain("(restricted)");
+  });
+
+  it("/classes list annotates restricted classes and appends a legend", async () => {
+    const list = vi.fn().mockResolvedValue(
+      ok([
+        {
+          id: "c-1",
+          userId: "u-1",
+          name: "intimate",
+          description: "for emotional / relationship topics",
+          restricted: true,
+          createdAt: new Date("2026-04-16T12:00:00Z"),
+        },
+        {
+          id: "c-2",
+          userId: "u-1",
+          name: "general",
+          description: "default for assistant-style profiles",
+          restricted: false,
+          createdAt: new Date("2026-04-16T12:00:00Z"),
+        },
+      ]),
+    );
+    const transport = transportWith({ profileClasses: { list } });
+    const ctx = mkCtx();
+    await handleClasses(transport, ctx);
+    const reply = ctx.reply.mock.calls[0]?.[0] as string;
+    expect(reply).toMatch(/intimate \(restricted\)/);
+    expect(reply).not.toMatch(/general \(restricted\)/);
+    expect(reply).toContain("readers must opt in");
   });
 
   it("explicit /classes list uses the same path", async () => {
@@ -1158,6 +1410,41 @@ describe("handleClasses", () => {
     const ctx = mkCtx("frobnicate");
     await handleClasses(transport, ctx);
     expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /classes");
+  });
+
+  it("/classes restrict <name> calls profileClasses.setRestricted with true", async () => {
+    const setRestricted = vi.fn().mockResolvedValue(ok(undefined));
+    const transport = transportWith({ profileClasses: { setRestricted } });
+    const ctx = mkCtx("restrict intimate");
+    await handleClasses(transport, ctx);
+    expect(setRestricted).toHaveBeenCalledWith("1", "intimate", true);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("marked restricted");
+  });
+
+  it("/classes unrestrict <name> calls profileClasses.setRestricted with false", async () => {
+    const setRestricted = vi.fn().mockResolvedValue(ok(undefined));
+    const transport = transportWith({ profileClasses: { setRestricted } });
+    const ctx = mkCtx("unrestrict intimate");
+    await handleClasses(transport, ctx);
+    expect(setRestricted).toHaveBeenCalledWith("1", "intimate", false);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("no longer restricted");
+  });
+
+  it("/classes restrict with no name replies with usage", async () => {
+    const transport = transportWith();
+    const ctx = mkCtx("restrict");
+    await handleClasses(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /classes");
+  });
+
+  it("/classes restrict surfaces profile_class_not_found", async () => {
+    const setRestricted = vi
+      .fn()
+      .mockResolvedValue(err({ code: "profile_class_not_found", name: "no-such" }));
+    const transport = transportWith({ profileClasses: { setRestricted } });
+    const ctx = mkCtx("restrict no-such");
+    await handleClasses(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain('No profile class named "no-such"');
   });
 });
 
@@ -1523,6 +1810,43 @@ describe("formatScope", () => {
     // misleading "no customs exist" through a stale empty Set.
     const out = formatScope({ compartments: ["work", "dnd"], trust: ["first-party"] });
     expect(out).not.toContain("*");
+  });
+
+  it("marks restricted classes with `!` and appends a legend when any restricted appears", () => {
+    expect(
+      formatScope(
+        {
+          compartments: ["personal"],
+          trust: ["first-party"],
+          profileClasses: ["intimate", "general"],
+        },
+        undefined,
+        new Set(["intimate"]),
+      ),
+    ).toBe(
+      "compartments: personal / trust: first-party / classes: intimate!, general (! = restricted)",
+    );
+  });
+
+  it("combines * (custom) and ! (restricted) legends when both apply", () => {
+    expect(
+      formatScope(
+        { compartments: ["work", "dnd"], trust: ["first-party"], profileClasses: ["intimate"] },
+        new Set(["dnd"]),
+        new Set(["intimate"]),
+      ),
+    ).toBe(
+      "compartments: work, dnd* / trust: first-party / classes: intimate! (* = custom; ! = restricted)",
+    );
+  });
+
+  it("a missing restrictedClasses set leaves classes unmarked", () => {
+    const out = formatScope({
+      compartments: ["personal"],
+      trust: ["first-party"],
+      profileClasses: ["intimate"],
+    });
+    expect(out).not.toContain("!");
   });
 });
 

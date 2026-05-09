@@ -151,6 +151,38 @@ describe("renderProfileList", () => {
   it("handles empty list", () => {
     expect(renderProfileList([]).text).toContain("No profiles");
   });
+
+  it("annotates profileClass with `*` when the class is restricted", () => {
+    const profiles = [
+      mkProfile({ id: "p1", name: "assistant", userId: "u1", profileClass: "general" }),
+      mkProfile({ id: "p2", name: "private", userId: "u1", profileClass: "intimate" }),
+    ];
+    const rendered = renderProfileList(profiles, {
+      restrictedClasses: new Set(["intimate"]),
+    });
+    expect(rendered.text).toContain("[class=general]");
+    expect(rendered.text).toContain("[class=intimate*]");
+  });
+
+  it("propagates restrictedClasses into formatScope so scope.profileClasses are marked", () => {
+    const profiles = [
+      mkProfile({
+        id: "p1",
+        name: "isolated",
+        userId: "u1",
+        memoryScope: {
+          compartments: ["personal"],
+          trust: ["first-party"],
+          profileClasses: ["intimate"],
+        },
+      }),
+    ];
+    const rendered = renderProfileList(profiles, {
+      restrictedClasses: new Set(["intimate"]),
+    });
+    expect(rendered.text).toContain("classes: intimate!");
+    expect(rendered.text).toContain("(! = restricted)");
+  });
 });
 
 describe("renderConversationStatus", () => {
