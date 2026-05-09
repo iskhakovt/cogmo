@@ -195,9 +195,3 @@ jobs:
           name: E2E Test Results
           path: test-results/junit.xml
           reporter: java-junit
-
-# Release + publish live in `release.yml` and run on `workflow_dispatch`
-# only. Trigger via Actions UI or `gh workflow run release.yml --ref main`.
-# CI on main remains the source of truth for "main is shippable" — the
-# release workflow gates on it and pauses on a `production` Environment
-# approval.
