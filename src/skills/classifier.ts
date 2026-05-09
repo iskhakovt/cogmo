@@ -1,51 +1,70 @@
-import type { ClassifierLog, SkillEffect, SkillManifest } from "./types.js";
+import { logger } from "../logger.js";
+import { AST_CLASSIFIER_VERSION, classifyWithAst } from "./ast-classifier.js";
+import { APPROVE_GATING_EFFECTS, APPROVE_SECRETS_THRESHOLD } from "./ast-rules.js";
+import type { ClassifierLog, SkillManifest } from "./types.js";
 
 /**
- * P3.3 first-slice classifier — deterministic, declaration-only. The full
- * version with AST-lint detection of undeclared effects (`subprocess`,
- * `os.remove`, destructive SDK methods) lands in a follow-up; this version
- * trusts what the manifest declares and routes accordingly.
+ * Skills risk classifier. Two paths:
  *
- * Tier assignment based on declared fields (`design/skills.md` → Risk tiering):
+ *   - **Primary** — `classifyWithAst(manifest, body)` walks the
+ *     Python source via tree-sitter, detects undeclared effects, and
+ *     promotes/rejects based on what the body actually does. See
+ *     `ast-classifier.ts` for the threat model and rule mechanics.
  *
- * - **`approve`** when the manifest declares any destructive / external /
- *   financial effect, OR when `tier: container` (sysbox isolation isn't a
- *   substitute for human review of side effects), OR when the skill declares
- *   3+ secrets (broad permissions). These need explicit user signoff via the
- *   Telegram approval flow before main is advanced.
- * - **`notify`** for everything else. Keeps fast iteration on harmless skills
- *   while a one-line "added skill X" notification lets the user `/disable X`
- *   if it shows up unexpectedly.
- * - **`auto`** is intentionally unreachable until static analysis can *prove*
- *   a skill is read-only with no network reach. Declaring `effects: []`
- *   doesn't prove the body doesn't `httpx.post(...)`. Reserved for the
- *   AST-lint slice.
+ *   - **Fallback** — declaration-only stub that consults
+ *     `manifest.effects` / `tier` / `secrets` count, no AST involved.
+ *     Fires when the AST path throws (parser load failure, walk
+ *     panic, missing wasm at runtime). Surfaces a structured log line
+ *     with `event: classifier_fallback` so an operator can spot the
+ *     degradation; the deploy still completes with the conservative
+ *     stub tier.
  *
- * `classifier_version` is bumped here so old deploy rows in `skill_deploys`
- * can be distinguished from rows the AST-lint version writes.
+ * Public entry is `classifyManifest(manifest, body)` — async because
+ * the AST parser load is async. Tests that don't exercise body AST
+ * may pass an empty body; the AST path will run, find nothing, and
+ * return the same tier the declaration-only path would.
+ */
+
+const log = logger.child({ component: "skills.classifier" });
+
+/**
+ * Stub classifier version. Used by the fallback path only. The AST
+ * path stamps `AST_CLASSIFIER_VERSION` (`ast-1`) so audit-log
+ * consumers can tell the two apart.
  */
 export const STUB_CLASSIFIER_VERSION = "stub-2-effect-aware";
 
 /**
- * Effects that force the `approve` tier. Mirrors `design/skills.md`'s
- * destructive / external-messaging / financial / host-mutation set. Anything
- * in this set means a misbehaving skill could send messages, delete external
- * resources, move money, write to the host filesystem, or shell out —
- * outcomes the user wants to gate explicitly.
+ * Re-exported so `register` / `__registerForTests` (and any other
+ * non-AST writers of `classifier_log`) can stamp a known constant
+ * without depending on the AST module.
  */
-const APPROVE_GATING_EFFECTS: ReadonlySet<SkillEffect> = new Set<SkillEffect>([
-  "deletes_external",
-  "sends_email",
-  "sends_message",
-  "posts_public",
-  "financial",
-  "spawns_subprocess",
-  "writes_filesystem",
-]);
+export { AST_CLASSIFIER_VERSION };
 
-const APPROVE_SECRETS_THRESHOLD = 3;
+export async function classifyManifest(
+  manifest: SkillManifest,
+  body: string,
+): Promise<ClassifierLog> {
+  try {
+    return await classifyWithAst(manifest, body);
+  } catch (err) {
+    log.warn(
+      { event: "classifier_fallback", err, skillName: manifest.name },
+      "ast classifier threw; falling back to declaration-only stub",
+    );
+    return classifyManifestStub(manifest);
+  }
+}
 
-export function classifyManifest(manifest: SkillManifest): ClassifierLog {
+/**
+ * Declaration-only fallback. Same shape as the AST path's output but
+ * with `classifier_version: STUB_CLASSIFIER_VERSION` and
+ * `detected_effects: []`. Auto-tier is unreachable here on purpose —
+ * the stub can't *prove* a skill is read-only, only the AST path can.
+ *
+ * Exported for tests that want to exercise the fallback explicitly.
+ */
+export function classifyManifestStub(manifest: SkillManifest): ClassifierLog {
   const declaredSecrets = manifest.secrets.map((s) => (typeof s === "string" ? s : s.name));
 
   const hasApproveEffect = manifest.effects.some((e) => APPROVE_GATING_EFFECTS.has(e));
