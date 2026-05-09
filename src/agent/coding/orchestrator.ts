@@ -9,10 +9,10 @@ import {
 } from "../../inngest/events.js";
 import type { StepRun, StepWaitForEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
-import type {
-  LocalDockerSessionState,
-  SandboxClient,
-  SandboxSession,
+import {
+  isLocalDockerSessionState,
+  type SandboxClient,
+  type SandboxSession,
 } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
@@ -74,7 +74,7 @@ export const NULL_EXECUTE_STREAM: ExecuteStreamHandle = {
 export interface CodingOrchestratorDeps {
   runInTx: Transactor;
   store: CodingStore;
-  sandbox: SandboxClient<LocalDockerSessionState>;
+  sandbox: SandboxClient;
   backend: CodingBackend;
   /**
    * Resolves `github_identity:<name>` rows for the failure-cascade WIP
@@ -209,11 +209,17 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
           );
         }
         const next = {
+          type: "host-path" as const,
           branch: `cogmo/${idShort}`,
           worktreePath: candidatePath,
         };
         assignment = next;
         await runInTx((tx) => store.setTaskWorktreeAssignment(tx, taskId, next));
+      }
+      if (assignment.type !== "host-path") {
+        throw new Error(
+          `local-docker backend requires host-path worktree assignment, got ${assignment.type}`,
+        );
       }
       await allocateWorktree({
         repoPath: repo.localPath,
@@ -225,8 +231,16 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     if (!assignment) {
       throw new Error("allocate-worktree completed without setting worktreeAssignment");
     }
+    if (assignment.type !== "host-path") {
+      // Plan/execute path under local-Docker. Daytona variant lands in
+      // 3b.2.B; this guard keeps the type system honest until then.
+      throw new Error(
+        `plan orchestrator currently requires host-path worktree, got ${assignment.type}`,
+      );
+    }
     // Capture the narrowed value in a const so the closure below sees the
-    // non-null type — TS doesn't carry `let` narrowing across closures.
+    // non-null + host-path type — TS doesn't carry `let` narrowing across
+    // closures.
     const wt = assignment;
 
     // Resolve subscription auth before the durable create-container step
@@ -259,7 +273,13 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       // still triggers cleanup via the outer catch (the container exists
       // on Docker side regardless of whether we recorded it).
       containerCreated = true;
-      await runInTx((tx) => store.setTaskContainerId(tx, taskId, session.state.containerRowId));
+      if (isLocalDockerSessionState(session.state)) {
+        // `containers` is the local-docker FK target; managed backends
+        // (Daytona) leave the column null and rely on the sandbox's own
+        // task-id label for lineage tracking.
+        const localState = session.state;
+        await runInTx((tx) => store.setTaskContainerId(tx, taskId, localState.containerRowId));
+      }
       return session.state;
     });
 
@@ -371,7 +391,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
 interface PlanStreamingParams {
   task: CodingTaskRow;
   repo: CodingRepoRow;
-  container: SandboxSession<LocalDockerSessionState>;
+  container: SandboxSession;
   backend: CodingBackend;
   planStream: PlanStreamHandle;
   store: CodingStore;
@@ -517,6 +537,11 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   if (!task.worktreeAssignment) {
     throw new Error(`coding task ${taskId} has no worktree_assignment`);
   }
+  if (task.worktreeAssignment.type !== "host-path") {
+    throw new Error(
+      `execute orchestrator currently requires host-path worktree, got ${task.worktreeAssignment.type}`,
+    );
+  }
 
   const sessionId = task.sessionId;
   const worktreeAssignment = task.worktreeAssignment;
@@ -592,7 +617,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         ...(sandboxEnv && { env: sandboxEnv }),
       });
       containerCreated = true;
-      await runInTx((tx) => store.setTaskContainerId(tx, taskId, session.state.containerRowId));
+      if (isLocalDockerSessionState(session.state)) {
+        const localState = session.state;
+        await runInTx((tx) => store.setTaskContainerId(tx, taskId, localState.containerRowId));
+      }
       return session.state;
     });
 
@@ -717,7 +745,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
 interface ExecuteStreamingParams {
   task: CodingTaskRow;
   repo: CodingRepoRow;
-  container: SandboxSession<LocalDockerSessionState>;
+  container: SandboxSession;
   backend: CodingBackend;
   executeStream: ExecuteStreamHandle;
   sessionId: string;

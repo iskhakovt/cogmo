@@ -358,7 +358,10 @@ describe("runCodingTask", () => {
     // 12 hex chars, dashes stripped — covers the full 48-bit UUIDv7 timestamp
     // ms portion to avoid prefix collisions on rapid-fire task creation.
     expect(reloaded?.worktreeAssignment?.branch).toMatch(/^cogmo\/[a-f0-9]{12}$/);
-    expect(reloaded?.worktreeAssignment?.worktreePath).toBe(create0.worktreePath);
+    expect(reloaded?.worktreeAssignment?.type).toBe("host-path");
+    if (reloaded?.worktreeAssignment?.type === "host-path") {
+      expect(reloaded.worktreeAssignment.worktreePath).toBe(create0.worktreePath);
+    }
 
     expect(planStream.text).toEqual(["## Plan\n", "1. Do X\n"]);
     expect(planStream.finalized).toEqual(["## Plan\n1. Do X\n"]);
@@ -634,6 +637,7 @@ async function seedExecutableTask(
   );
   await tx((trx) =>
     store.setTaskWorktreeAssignment(trx, task.id, {
+      type: "host-path",
       branch: "cogmo/abc",
       worktreePath: join(baseDir, "worktrees", "cogmo", "abc"),
     }),
@@ -830,6 +834,7 @@ describe("runCodingExecute", () => {
     await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-x"));
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
+        type: "host-path",
         branch: "cogmo/x",
         worktreePath: join(baseDir, "wt"),
       }),
@@ -856,6 +861,7 @@ describe("runCodingExecute", () => {
     const task = await seedTask(repo);
     await tx((trx) =>
       store.setTaskWorktreeAssignment(trx, task.id, {
+        type: "host-path",
         branch: "cogmo/x",
         worktreePath: join(baseDir, "wt"),
       }),

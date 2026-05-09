@@ -47,7 +47,7 @@ let close: () => Promise<void>;
 let store: DrizzleCodingStore;
 let sandboxStore: DrizzleSandboxStore;
 let baseDir: string;
-let instanceId: string;
+let _instanceId: string;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
@@ -58,7 +58,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   const inst = await tx((trx) => sandboxStore.insertInstance(trx, { host: "h", pid: 1 }));
-  instanceId = inst.id;
+  _instanceId = inst.id;
 });
 
 afterEach(async () => {
@@ -105,6 +105,7 @@ async function seedRepoAndTask(): Promise<{ repo: CodingRepoRow; task: CodingTas
   await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-x"));
   await tx((trx) =>
     store.setTaskWorktreeAssignment(trx, task.id, {
+      type: "host-path",
       branch: "cogmo/x",
       worktreePath: `${baseDir}/wt`,
     }),

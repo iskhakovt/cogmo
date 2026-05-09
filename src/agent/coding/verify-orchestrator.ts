@@ -26,11 +26,7 @@ import { codingTaskCliDone } from "../../inngest/events.js";
 import type { StepRun } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import { cleanupAskpass, provisionAskpass } from "../../sandbox/askpass.js";
-import type {
-  LocalDockerSessionState,
-  SandboxClient,
-  SandboxSession,
-} from "../../sandbox/index.js";
+import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import {
   describeResolveIdentityError,
@@ -70,7 +66,7 @@ function commitAuthorFor(identity: GitHubIdentity): { name: string; email: strin
 export interface VerifyOrchestratorDeps {
   runInTx: Transactor;
   store: CodingStore;
-  sandbox: SandboxClient<LocalDockerSessionState>;
+  sandbox: SandboxClient;
   /** Resolves `github_identity:<name>` rows. */
   secretsStore: SecretsStore;
   /** Host root for per-task askpass material (slice 4.0d). */
@@ -147,6 +143,11 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   }
   if (!task.worktreeAssignment) {
     throw new Error(`coding task ${taskId} has no worktree_assignment`);
+  }
+  if (task.worktreeAssignment.type !== "host-path") {
+    throw new Error(
+      `verify orchestrator currently requires host-path worktree, got ${task.worktreeAssignment.type}`,
+    );
   }
   const worktreeAssignment = task.worktreeAssignment;
 
@@ -247,7 +248,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       containerCreated = true;
       return session.state;
     });
-    const container: SandboxSession<LocalDockerSessionState> = await sandbox.resume(sessionState);
+    const container: SandboxSession = await sandbox.resume(sessionState);
 
     executeStream = await openExecuteStream(taskId);
 

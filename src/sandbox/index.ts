@@ -173,6 +173,18 @@ export const SandboxSessionStateSchema = z.discriminatedUnion("type", [
 export type SandboxSessionState = z.infer<typeof SandboxSessionStateSchema>;
 
 /**
+ * Narrow a session state to its local-docker variant. Backend-aware
+ * orchestrator paths (e.g. `setTaskContainerId`, which writes a FK into
+ * the local-docker `containers` table) gate on this so they no-op on
+ * managed backends without persisting a non-existent FK target.
+ */
+export function isLocalDockerSessionState(
+  state: SandboxSessionState,
+): state is LocalDockerSessionState {
+  return state.type === "local-docker";
+}
+
+/**
  * One running task environment. Owns the underlying container/sandbox
  * lifetime; teardown goes through `SandboxClient.delete(session)` rather
  * than a method on the session itself (see [design/sandbox.md] →

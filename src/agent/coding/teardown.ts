@@ -40,6 +40,7 @@ import {
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { CodingRepoRow } from "./store/index.js";
+import type { HostPathWorktreeAssignment, WorktreeAssignment } from "./types.js";
 import { removeWorktree } from "./worktree.js";
 
 const execFileP = promisify(execFile);
@@ -198,10 +199,21 @@ export async function safeTeardownWorktree(opts: {
   secretsStore?: SecretsStore;
   repo: CodingRepoRow;
   taskId: string;
-  worktreeAssignment: { branch: string; worktreePath: string };
+  worktreeAssignment: WorktreeAssignment;
   /** Optional pre-resolved identity — if supplied, secretsStore is ignored. */
   identity?: GitHubIdentity;
 }): Promise<void> {
+  if (opts.worktreeAssignment.type !== "host-path") {
+    // git-remote assignments have no host worktree to tear down — the
+    // sandbox owns the only checkout, and the run-branch on origin is
+    // garbage-collected by the orphan-run-branch cron.
+    log.info(
+      { taskId: opts.taskId, type: opts.worktreeAssignment.type },
+      "teardown-worktree: no host worktree for transport — skipping",
+    );
+    return;
+  }
+  const assignment: HostPathWorktreeAssignment = opts.worktreeAssignment;
   try {
     let identity: GitHubIdentity | undefined = opts.identity;
     if (!identity && opts.secretsStore) {
@@ -224,8 +236,8 @@ export async function safeTeardownWorktree(opts: {
     }
     const r = await teardownWorktree({
       repoPath: opts.repo.localPath,
-      worktreePath: opts.worktreeAssignment.worktreePath,
-      branch: opts.worktreeAssignment.branch,
+      worktreePath: assignment.worktreePath,
+      branch: assignment.branch,
       taskId: opts.taskId,
       ...(identity !== undefined && { identity }),
     });

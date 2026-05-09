@@ -31,7 +31,11 @@ function task(overrides: Partial<CodingTaskRow> = {}): CodingTaskRow {
     triggerSource: "user",
     triggerRef: null,
     backend: "claude",
-    worktreeAssignment: { branch: "cogmo/abc123", worktreePath: "/worktrees/abc123" },
+    worktreeAssignment: {
+      type: "host-path",
+      branch: "cogmo/abc123",
+      worktreePath: "/worktrees/abc123",
+    },
     sessionId: null,
     containerId: null,
     allowPrivilegedRunc: false,

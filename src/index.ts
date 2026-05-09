@@ -55,12 +55,7 @@ import { DrizzleMcpStore } from "./mcp/store/index.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
 import { DAYTONA_API_KEY_SECRET } from "./sandbox/daytona/auth.js";
 import { createSandboxBackend } from "./sandbox/factory.js";
-import {
-  CogmoSocketProxy,
-  LocalDockerSandboxClient,
-  type LocalDockerSessionState,
-  type SandboxClient,
-} from "./sandbox/index.js";
+import { CogmoSocketProxy, type SandboxClient } from "./sandbox/index.js";
 import { createSandboxReaper } from "./sandbox/reaper.js";
 import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
@@ -161,12 +156,13 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   //   - `SANDBOX_BACKEND=daytona` requires `daytona_api_key` in the
   //     encrypted secrets table; missing = sandbox disabled.
   // Phase 3a only supports skills tier-2 on Daytona; coding-delegation
-  // requires the local-docker backend until Phase 3b ships
-  // git-as-transport. `codingSandbox` is the narrowed handle the coding
-  // orchestrator wires against; `sandbox` is the wide handle the skills
-  // runner takes.
+  // requires the local-docker backend until Phase 3b.2.B wires the
+  // git-as-transport path. `codingSandbox` is the same handle as
+  // `sandbox` when local-docker is the active backend, otherwise null —
+  // gating the coding orchestrators' registration is the only knob the
+  // wider type doesn't capture, so we keep an explicit reference.
   let sandbox: SandboxClient | null = null;
-  let codingSandbox: SandboxClient<LocalDockerSessionState> | null = null;
+  let codingSandbox: SandboxClient | null = null;
   let sandboxInstanceId: string | null = null;
   let sandboxDocker: Docker | null = null;
   if (opts.skipSandbox) {
@@ -198,9 +194,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
         askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
       });
       sandbox = localDocker;
-      // `instanceof` narrowing — only the local-Docker class implements
-      // the LocalDocker-typed interface that coding orchestrators need.
-      if (localDocker instanceof LocalDockerSandboxClient) codingSandbox = localDocker;
+      codingSandbox = localDocker;
       const { orphansReaped } = await sandbox.reconcileCrashedInstances(instance.id);
       if (orphansReaped > 0) {
         logger.warn({ orphansReaped }, "reaped orphan containers from prior instance(s)");
