@@ -688,7 +688,7 @@ def run(inputs: dict, ctx) -> dict:
 | `ctx.memory.remember(content, ...)` | Persist memory |
 | `ctx.attachments.upload(data, media_type)` | Upload to `AttachmentStore`, return path |
 | `ctx.attachments.download(path)` | Fetch bytes |
-| `ctx.files.read(path)` | Read UTF-8 text from per-user workspace (see [File workspace](#file-workspace-proposed)) |
+| `ctx.files.read(path)` | Read UTF-8 text from per-user workspace (see [File workspace](#file-workspace-confirmed)) |
 | `ctx.files.write(path, content)` | Create or overwrite workspace file |
 | `ctx.files.list(prefix=None)` | List workspace entries |
 | `ctx.llm.complete(prompt, model=...)` | LLM call via Cogmo's provider routing (cost-tracked, provider-fallback, prompt-cache aware) |
@@ -708,7 +708,7 @@ Every RPC: validates against the skill's manifest (allowlists, permission scopes
 | `ctx.skills.invoke(other_skill, ...)` | No inter-skill composition in v1 (see below). |
 | `ctx.schedule(when, event)` | Scheduling handled externally via Inngest cron declared in `SKILL.md`. |
 
-### File workspace `[proposed]`
+### File workspace `[confirmed]`
 
 Skills share files across invocations through a per-user workspace exposed as `ctx.files`. This is the v1 mechanism for skill-to-skill state — one skill writes `notes/draft.md`, the next polishes it. Backed by the same S3-backed `service.files` store the agent's in-process `read_file` / `write_file` / `list_files` tools use, so the LLM and skills see one workspace.
 
@@ -716,37 +716,75 @@ Skills share files across invocations through a per-user workspace exposed as `c
 
 | Store | Use when | Properties |
 |-|-|-|
-| `ctx.files` | Named, mutable, listable text — notes, drafts, CSV, summaries | Logical paths, S3-backed, per-user prefix, eventually consistent |
+| `ctx.files` | Named, mutable, listable text — notes, drafts, CSV, summaries | Logical paths, S3-backed, per-user prefix; strong consistency at task boundaries (private substrate within a task) |
 | `ctx.attachments` | Binary blobs, write-once outputs — PNG, PDF | Opaque path token, no listing, immutable once uploaded |
 
-**RPC contract.** Defined in TS once on `Service["files"]`, mirrored to Python over the existing skill RPC channel:
+**Two access paths.** A skill reaches workspace files two ways, with the same ACL boundary underneath:
+
+| Path | Surface | When skills use it |
+|-|-|-|
+| **POSIX** | stdlib `open("/files/notes.md")`, `pathlib`, `pandas.read_csv`, `os.listdir` | Default. Anything that takes a path. ~95% of skill code. |
+| **RPC** | `await ctx.files.read(path)` / `write(path, content)` / `list(prefix=None)` | Live writes that need cross-task visibility, or large blobs that shouldn't be staged at task start. |
+
+The RPC surface (`Service["files"]` mirrored to Python) is unchanged from prior iterations:
 
 | Method | Returns |
 |-|-|
 | `ctx.files.read(path)` | `str` — raises `FileNotFound` if missing |
 | `ctx.files.write(path, content)` | `None` — creates or overwrites |
 | `ctx.files.list(prefix=None)` | `list[FileEntry]` with `path`, `size`, `last_modified` |
+| `ctx.files.delete(path)` | `None` — idempotent; no error if the path is already absent |
 
-Paths are logical (`notes/meeting.md`). The host enforces ACL — a skill cannot escape its user's prefix. Reads cap at 100KB (matches `read_file`); writes have no explicit cap today (bounded by S3 object limits).
+Paths are logical (`notes/meeting.md`). The host enforces ACL — a skill cannot escape its user's prefix. The 100 KB read cap on `ctx.files.read` (matching the agent's `read_file` tool) is an LLM-output guardrail — its job is preventing a 50 MB string from landing in a tool result the LLM will then re-include in its context. POSIX `open()` does NOT inherit this cap and is bounded only by the substrate (Pyodide MEMFS by worker memory, sysbox tmpfs by mount size, Daytona Volume by quota); skills that need to materialise a large file end-to-end should use POSIX. Writes have no explicit cap on either path (bounded by S3 object limits).
 
-**Per-tier POSIX shim.** Most Python libraries take a path, not bytes — `pandas.read_csv`, `pathlib.Path.read_text`, stdlib `open()`. Each tier mounts the workspace at `/files` so existing libraries work unchanged:
+#### Per-tier POSIX shim — stage + reconcile
 
-| Tier | Mount mechanism |
-|-|-|
-| Sysbox container | `s3fs-fuse` (or `rclone mount`) at `/files`, scoped to the user's S3 prefix via per-task credentials. Same approach E2B and Daytona take ([E2B](https://e2b.dev/docs/sandbox/connect-bucket), [Daytona Volumes](https://www.daytona.io/docs/en/volumes/)). |
-| Pyodide WASM | Custom Emscripten FS at `/files`, proxying `read/readdir/write/stat` to the JS host via `SharedArrayBuffer` + `Atomics.wait`. The JupyterLite DriveFS pattern ([JupyterLite kernel FS](https://jupyterlite.readthedocs.io/en/stable/howto/content/python.html)). |
+Each tier exposes the workspace at `/files` via a private substrate populated at task start and reconciled to S3 at task end. The host owns the staging loop; the skill is unaware.
+
+For each tier, "stage in" is `Service["files"].list(userPrefix)` to enumerate entries, then `Service["files"].read(path)` per entry to fetch content, then a substrate-specific write. The host records a `path → sha256(content)` map of the staged set. "Reconcile out" walks the substrate, computes the same map, and diffs:
+
+- **Path in substrate, not in stage-in** → new file, push via `Service["files"].write`.
+- **Path in both, hash differs** → modified, push via `Service["files"].write`.
+- **Path in both, hash matches** → unchanged, skip (no S3 round-trip).
+- **Path in stage-in, not in substrate** → deleted by the skill (`os.remove`, `pathlib.Path.unlink`), push deletion via `Service["files"].delete`.
+
+Hashing on content (not mtime / size) avoids re-uploading large files the skill only `open()`-ed for read, and works uniformly across MEMFS (no real mtime), tmpfs, and Daytona Volumes. Hashes are computed once at stage-in (we have the bytes anyway) and once at reconcile (we have to read the substrate to write S3 anyway).
+
+| Tier | Substrate | Stage in (substrate write) | Reconcile out (substrate read) |
+|-|-|-|-|
+| WASM (Pyodide) | Pyodide MEMFS | `pyodide.FS.writeFile(path, content)` per entry | Walk `pyodide.FS`, read changed paths via `pyodide.FS.readFile` |
+| Sysbox local Docker | Host tmpfs bind-mounted at `/files` | `node:fs.writeFile(tmpfsPath, content)` per entry, before container start | Walk the host tmpfs after container stop, read changed paths via `node:fs.readFile` |
+| Daytona remote | Daytona Volume + per-user `subpath` mounted at `/files` | `sandbox.fs.uploadFile(Buffer.from(content), path)` per entry | `sandbox.fs.listFiles` + `sandbox.fs.downloadFile` for changed paths |
+
+The orchestration loop is one host-side function parameterised by a small `TierFs` interface (`stage(spec)` / `reconcile(spec)`); only the substrate adapter differs across tiers.
 
 `/files` is a deliberate choice — `/workspace` is already the bind-mount for coding-delegation worktrees ([coding-delegation.md](coding-delegation.md)). Two distinct workspaces, two distinct paths.
 
-**Why both RPC and POSIX.** Pure RPC loses every Python library that takes a path. Pure FUSE has no clean WASM story (Pyodide's FS hooks are still synchronous; see JSPI note below). The hybrid gives POSIX ergonomics in both tiers behind one ACL-enforcing service. A skill written for one tier runs unchanged on the other. This matches Anthropic's own code-execution tool — real container FS inside, RPC at the boundary ([Anthropic code execution](https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool)).
+**Why staging instead of FUSE / SAB everywhere.** The original [proposed] design called for `s3fs-fuse` in sysbox and a SharedArrayBuffer-backed Emscripten FS in Pyodide. Research (2026-05) ruled out one of those tiers entirely and made the others not worth their cost:
 
-**Semantics.** Object-storage-with-paths, not POSIX:
+- **Daytona forces staging.** Daytona's sandbox runtime blocks `/dev/fuse` device creation (Sysbox limitation, [nestybox/sysbox](https://github.com/nestybox/sysbox/blob/master/docs/user-guide/limitations.md)); EPERM at mount time. We can't run any FUSE binary inside a Daytona sandbox. Daytona Volumes are the supported path, mounted by the control plane and populated host-side via `sandbox.fs.*` ([Daytona Volumes](https://www.daytona.io/docs/en/volumes)).
+- **`s3fs-fuse` is fragile.** [#2156 OOM in container](https://github.com/s3fs-fuse/s3fs-fuse/issues/2156); [#607 random writes rewrite the entire object](https://github.com/s3fs-fuse/s3fs-fuse/issues/607); recurring memory-leak class bugs across releases. `goofys` is effectively unmaintained (no meaningful release since 2022).
+- **`rclone mount --vfs-cache-mode full` is the credible "live" choice** but still costs `CAP_SYS_ADMIN` + `/dev/fuse` + AppArmor unconfined inside the sysbox container, and requires vending STS credentials into the container — a security regression vs. host-owned creds today. Adds a binary + sidecar process to manage.
+- **WASM SAB + DriveFS** (the JupyterLite pattern via [pyodide-kernel#114](https://github.com/jupyterlite/pyodide-kernel/pull/114)) works today but needs a third worker thread (host / fs-proxy / pyodide), a hand-rolled SAB protocol, chunked reads for results larger than the SAB slot, and an Emscripten errno mapping table. Buys live S3 visibility mid-task — which we don't need at our scale.
+- **Once one tier is forced into staging, paying for two architectures is unjustified at personal scale.** Stage+reconcile is one orchestration flow, one ACL boundary (`Service["files"]`), no creds in any sandbox, no kernel-privilege escalation, no SAB plumbing.
 
-- Strongly consistent reads and lists — a successful write is visible to subsequent `read` and `list` calls immediately on every supported backend (AWS S3 since Dec 2020, MinIO distributed/standalone, Cloudflare R2).
-- No file locking — last writer wins. Skills coordinating on the same file should pass state through return values or `ctx.memory`, not file races.
-- `write` is "create or overwrite" — no append, no partial updates. Read-modify-write is racy and the caller owns the consequences.
+**Why both RPC and POSIX.** POSIX gives every Python path-based library full ergonomics — stdlib `open()`, `pathlib`, `pandas.read_csv` all just work. RPC is the live escape hatch: writes via `await ctx.files.write` go straight to S3 through the host service, visible immediately to the next task and any concurrent task using the RPC. Skills that want cross-task coordination, large-blob streaming, or "I just need to append one line to a 200 MB file" use the RPC; everything else uses `open()`. Both paths are gated by the same `reads_filesystem` / `writes_filesystem` effects in `SKILL.md` — one ACL boundary, two transports.
 
-**JSPI tracking.** Pyodide's filesystem layer is still on synchronous Emscripten FS hooks even after partial JSPI adoption in 0.27.7+ (`asyncio.run`, sync-style `requests.get`). [Pyodide #5720](https://github.com/pyodide/pyodide/discussions/5720) tracks moving FS to JSPI. When that lands and Safari ships JSPI (still pending as of 2026-05), the WASM tier can drop the SAB plumbing and `await` the JS host directly. The RPC contract is unchanged either way — only the Emscripten FS implementation swaps.
+#### Semantics
+
+- **Within a task:** stdlib write-then-read works exactly as POSIX expects — both ops hit the same private substrate. POSIX and RPC are isolated within a task: a POSIX write lands in the substrate and is invisible to a subsequent `await ctx.files.read` (which reads S3); an RPC write lands in S3 and is invisible to a subsequent stdlib `open()` (which reads the substrate). Skills should pick one path per file and stick with it for the duration of the task.
+- **Deletion:** stdlib `os.remove` / `pathlib.Path.unlink` removes the path from the substrate; reconcile sees "in stage-in but not in substrate" and deletes the S3 object. `ctx.files.delete(path)` does the same via the RPC path, immediately, bypassing reconcile. Skills that delete a file then write to the same path within the same task get expected POSIX semantics (delete-then-write yields a write — the delete never reaches S3 because reconcile only sees the final substrate state).
+- **Across tasks (sequential):** task A reconciles before task B's stage-in begins, so task B sees task A's POSIX writes and deletions. S3 strong read-after-write consistency makes this exact, not eventual — the boundary is the consistency point.
+- **Across tasks (concurrent):** each task gets its own private substrate. Task B does not see task A's POSIX writes or deletions until A reconciles. If both modify the same path, last-reconcile-wins on the S3 mirror — and that includes the delete-vs-write case (a delete from one task can erase the other's write, or vice versa). Documented; mitigated by (a) the orchestrator's per-user concurrency throttle on most flows, and (b) the RPC escape hatch (`ctx.files.write` / `ctx.files.delete`) for skills that genuinely need live cross-task visibility.
+- **Stage-in cost** is `O(workspace size)` per task — every task lists the user prefix and reads each entry into the substrate. At single-user / ~200 tasks/day with mostly small text files (~tens of KB each), this is well below the per-task latency budget. The workspace is bounded by skill discipline; once it crosses a few hundred MB total, partition by prefix (one stage-in scopes to the prefix the skill declares it touches) or move large blobs to RPC-only access. Not a v1 concern.
+- **No file locking** — `ctx.files.write` is "create or overwrite", no append, no partial updates. Read-modify-write is racy and the caller owns the consequences. Skills coordinating on the same file should pass state through return values or `ctx.memory`, not file races.
+- **Strongly consistent S3 reads** on AWS (since Dec 2020), MinIO distributed/standalone, and Cloudflare R2 — a reconciled write is visible to the next task's stage-in immediately.
+
+#### Future paths
+
+- **JSPI in Pyodide.** Pyodide's filesystem hooks remain synchronous in 0.28.x; [#5720](https://github.com/pyodide/pyodide/discussions/5720) tracks moving FS to JSPI. When that lands AND Node ships JSPI default-on, the WASM tier could swap MEMFS staging for an async-FS adapter that resolves stdlib `open()` directly through `Service["files"]`. The `TierFs` interface is the swap point — skill code never changes.
+- **Live mount opt-in.** If a class of skills materially needs live S3 visibility within a task (long-running cron skills observing a directory written by ad-hoc skills), the sysbox tier could grow a second `TierFs` implementation backed by `rclone mount` behind a manifest opt-in (`live_filesystem: true`). WASM and Daytona keep staging — they have no FUSE option.
+- **Conflict detection at reconcile.** Cheap to add later: if a path's S3 etag changed since stage-in *and* the task wrote it, surface a conflict event rather than silently overwriting. Not in v1 (single-user, low concurrency), trivial to layer on without architectural change.
 
 ### Inter-skill composition
 
