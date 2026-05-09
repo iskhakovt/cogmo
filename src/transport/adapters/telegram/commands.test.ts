@@ -488,6 +488,128 @@ describe("handleProfile", () => {
       expect(confirmation).toContain("(* = custom)");
     });
 
+    it("show: skips the customs-list fetch when the current scope is null (unrestricted)", async () => {
+      const compartmentsList = vi.fn().mockResolvedValue(ok([]));
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update: vi.fn().mockResolvedValue(ok({} as never)),
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+        compartments: { list: compartmentsList },
+      });
+      const ctx = mkCtx("scope personal");
+      await handleProfile(transport, ctx, mkDialogs());
+      // Common-case optimization — `null` scope has no compartments to
+      // mark, so the customs fetch is skipped entirely. Confirms the
+      // gemini-flagged extra DB roundtrip is avoided in the dominant
+      // case (unrestricted profiles).
+      expect(compartmentsList).not.toHaveBeenCalled();
+    });
+
+    it("show: skips the customs-list fetch when every compartment is core", async () => {
+      const compartmentsList = vi.fn().mockResolvedValue(ok([]));
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              makeProfile({
+                compartments: ["work", "technical"],
+                trust: ["first-party"],
+              }),
+            ]),
+          ),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update: vi.fn().mockResolvedValue(ok({} as never)),
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+        compartments: { list: compartmentsList },
+      });
+      const ctx = mkCtx("scope personal");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(compartmentsList).not.toHaveBeenCalled();
+    });
+
+    it("set: skips the customs-list fetch when the new scope is all-core", async () => {
+      const compartmentsList = vi.fn().mockResolvedValue(ok([]));
+      const update = vi.fn().mockResolvedValue(
+        ok(
+          makeProfile({
+            compartments: ["work"],
+            trust: ["first-party"],
+          }),
+        ),
+      );
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([makeProfile(null)])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update,
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+        compartments: { list: compartmentsList },
+      });
+      const ctx = mkCtx("scope personal compartments=work trust=first-party");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(compartmentsList).not.toHaveBeenCalled();
+      expect(update).toHaveBeenCalled();
+    });
+
+    it("clear: skips the customs-list fetch (target is null)", async () => {
+      const compartmentsList = vi.fn().mockResolvedValue(ok([]));
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              makeProfile({
+                compartments: ["work", "dnd"],
+                trust: ["first-party"],
+              }),
+            ]),
+          ),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update: vi.fn().mockResolvedValue(ok(makeProfile(null))),
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+        compartments: { list: compartmentsList },
+      });
+      const ctx = mkCtx("scope personal clear");
+      await handleProfile(transport, ctx, mkDialogs());
+      // Even though the profile has a custom in its current scope, we're
+      // clearing it — the rendered confirmation is the new scope (null),
+      // which has nothing to mark.
+      expect(compartmentsList).not.toHaveBeenCalled();
+    });
+
+    it("show: surfaces a customs-list error when fetching is necessary", async () => {
+      // Defensive path: the customs fetch is identity-checked and could
+      // theoretically return identity_rejected mid-flow (between the
+      // profile resolve and the list call). The handler should bail
+      // with the typed error rather than silently dropping the legend.
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(
+            ok([
+              makeProfile({
+                compartments: ["dnd"],
+                trust: ["first-party"],
+              }),
+            ]),
+          ),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update: vi.fn().mockResolvedValue(ok({} as never)),
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+        compartments: {
+          list: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
+        },
+      });
+      const ctx = mkCtx("scope personal");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("not authorized"));
+    });
+
     it("clear → calls update with memoryScope: null and confirms", async () => {
       const update = vi.fn().mockResolvedValue(ok(makeProfile(null)));
       const transport = transportWith({

@@ -993,18 +993,29 @@ async function replyProfileScope(
     return;
   }
 
-  // Load the user's custom compartments once so both the show and set
-  // branches can mark which compartments are custom in the rendered
-  // scope. `compartments.list` is identity-checked (same handle that
-  // resolved the profile above), so a Result error here means the
-  // identity was rejected mid-flow — bail rather than silently dropping
-  // the legend.
-  const customsRes = await transport.compartments.list(handle);
-  if (customsRes.isErr()) {
-    await ctx.reply(errorMessage(customsRes.error));
-    return;
+  // The scope rendered in the reply is either the current `profile.memoryScope`
+  // (show) or the about-to-be-written value (clear → null, set → spec.scope).
+  // We only need the custom-compartments list to mark non-core values — for an
+  // unrestricted scope or one whose compartments are all in `CORE_COMPARTMENTS`,
+  // the legend would never fire, so skip the fetch entirely. Saves a DB round-
+  // trip in the common case (most profiles have null or all-core scopes).
+  const renderedScope: ProfileMemoryScope | null =
+    spec.kind === "show" ? profile.memoryScope : spec.kind === "clear" ? null : spec.scope;
+  const needsCustoms =
+    renderedScope !== null &&
+    renderedScope.compartments.some(
+      (c) => !(CORE_COMPARTMENTS as ReadonlyArray<string>).includes(c),
+    );
+
+  let customs: ReadonlySet<string> | undefined;
+  if (needsCustoms) {
+    const customsRes = await transport.compartments.list(handle);
+    if (customsRes.isErr()) {
+      await ctx.reply(errorMessage(customsRes.error));
+      return;
+    }
+    customs = new Set(customsRes.value.map((c) => c.name));
   }
-  const customs = new Set(customsRes.value.map((c) => c.name));
 
   if (spec.kind === "show") {
     await ctx.reply(`Scope for "${profile.name}": ${formatScope(profile.memoryScope, customs)}`);
