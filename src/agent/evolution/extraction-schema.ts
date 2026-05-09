@@ -26,6 +26,14 @@ export const CorrectionItemSchema = z.discriminatedUnion("action", [
   CorrectionBaseSchema.extend({
     action: z.literal("new"),
     matchedExistingRuleId: z.null(),
+    channelType: z
+      .string()
+      .nullable()
+      .describe(
+        "Channel scope for this rule. Set to a channel type (e.g., 'telegram') only when " +
+          "the correction is clearly specific to that channel; otherwise null (applies to all channels). " +
+          "Must be one of the channels active in this conversation, or null.",
+      ),
   }),
   CorrectionBaseSchema.extend({
     action: z.literal("reinforce"),
@@ -47,7 +55,13 @@ export type CorrectionExtraction = z.infer<typeof CorrectionExtractionSchema>;
 // --- Extraction prompt ---
 
 export function buildExtractionPrompt(
-  existingRules: ReadonlyArray<{ id: string; rule: string; category: string }>,
+  existingRules: ReadonlyArray<{
+    id: string;
+    rule: string;
+    category: string;
+    channelType: string | null;
+  }>,
+  activeChannelTypes: ReadonlyArray<string>,
 ): string {
   const rulesSection =
     existingRules.length > 0
@@ -55,11 +69,34 @@ export function buildExtractionPrompt(
 
 The following rules have already been extracted from previous conversations. Compare each new correction against these to avoid duplicates.
 
-${existingRules.map((r, i) => `${i + 1}. [${r.id}] (${r.category}) ${r.rule}`).join("\n")}
+${existingRules
+  .map((r, i) => {
+    const scope = r.channelType ? `channel:${r.channelType}` : "all channels";
+    return `${i + 1}. [${r.id}] (${r.category}, ${scope}) ${r.rule}`;
+  })
+  .join("\n")}
 
-If a correction is semantically equivalent to an existing rule, set action to "reinforce" and matchedExistingRuleId to the rule's ID.
-If a correction directly contradicts an existing rule, set action to "contradiction" and matchedExistingRuleId to the contradicted rule's ID.`
+If a correction is semantically equivalent to an existing rule with the same channel scope, set action to "reinforce" and matchedExistingRuleId to the rule's ID.
+If a correction directly contradicts an existing rule, set action to "contradiction" and matchedExistingRuleId to the contradicted rule's ID.
+A rule that is similar in wording but applies to a different channel scope (e.g. existing rule applies to all channels but the correction is Telegram-specific) is NOT a match — emit it as "new" with the appropriate channelType.`
       : "No existing rules have been extracted yet. All corrections will be new.";
+
+  const channelsSection =
+    activeChannelTypes.length > 0
+      ? `## Channel Scope
+
+The conversation reached the assistant via these active channel(s): ${activeChannelTypes
+          .map((t) => `\`${t}\``)
+          .join(", ")}.
+
+When extracting a "new" correction, set \`channelType\`:
+- to one of the active channels above when the correction is clearly tied to that medium (e.g. "don't send long voice notes here" on Telegram, "use markdown headings" on a web UI, "be brief in chat replies"), AND
+- to \`null\` (applies to all channels) for general behavioral preferences that aren't medium-specific.
+
+Default to \`null\` when in doubt — channel-specific corrections are the exception, not the norm.`
+      : `## Channel Scope
+
+No active channels were resolved for this conversation. Set \`channelType\` to \`null\` for every new correction.`;
 
   return `You are a behavioral correction extractor. Your job is to analyze a conversation transcript between a user and an AI assistant, and identify moments where the user corrected, redirected, or expressed a preference about the assistant's behavior.
 
@@ -83,6 +120,8 @@ If a correction directly contradicts an existing rule, set action to "contradict
   - "style": How the assistant should communicate (tone, format, length, approach)
   - "domain": What the assistant should know or do in specific domains
   - "memory": What the assistant should remember or track
+
+${channelsSection}
 
 ${rulesSection}
 

@@ -1815,7 +1815,7 @@ describe("DrizzleAgentStore", () => {
   });
 
   describe("evolution: corrections", () => {
-    it("getCorrections returns correction-sourced rules for profile + global", async () => {
+    it("getCorrections returns correction-sourced rules with channelType for profile + global", async () => {
       const profileId = await seedProfile();
 
       const { steeringRules } = await import("./schema.js");
@@ -1830,13 +1830,14 @@ describe("DrizzleAgentStore", () => {
           profileId: null,
         },
         {
-          rule: "Use tables for data",
+          rule: "No long voice notes",
           category: "style",
           active: true,
           source: "correction",
           priority: 100,
           observationCount: 2,
           profileId: null,
+          channelType: "telegram",
         },
         {
           rule: "Manual rule",
@@ -1851,7 +1852,10 @@ describe("DrizzleAgentStore", () => {
 
       const corrections = await tx((trx) => store.getCorrections(trx, profileId));
       expect(corrections).toHaveLength(2);
-      expect(corrections.map((c) => c.rule)).toEqual(["Be concise", "Use tables for data"]);
+      expect(corrections.map((c) => ({ rule: c.rule, channelType: c.channelType }))).toEqual([
+        { rule: "Be concise", channelType: null },
+        { rule: "No long voice notes", channelType: "telegram" },
+      ]);
     });
 
     it("upsertCorrection inserts new rule as inactive with observationCount 1", async () => {
@@ -1873,6 +1877,7 @@ describe("DrizzleAgentStore", () => {
           source: steeringRules.source,
           observationCount: steeringRules.observationCount,
           priority: steeringRules.priority,
+          channelType: steeringRules.channelType,
         })
         .from(steeringRules)
         .where(eq(steeringRules.id, result.id));
@@ -1883,7 +1888,27 @@ describe("DrizzleAgentStore", () => {
         source: "correction",
         observationCount: 1,
         priority: 100,
+        channelType: null,
       });
+    });
+
+    it("upsertCorrection persists channelType on a new rule when supplied", async () => {
+      const result = await tx((trx) =>
+        store.upsertCorrection(trx, {
+          rule: "Skip markdown headings here",
+          category: "style",
+          profileId: null,
+          channelType: "telegram",
+        }),
+      );
+
+      const { steeringRules } = await import("./schema.js");
+      const rows = await db
+        .select({ channelType: steeringRules.channelType })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, result.id));
+
+      expect(rows[0]?.channelType).toBe("telegram");
     });
 
     it("upsertCorrection increments existing rule without promotion when count < 2", async () => {

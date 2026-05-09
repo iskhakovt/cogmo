@@ -146,11 +146,11 @@ Query at prompt assembly: `(profile_id = $p OR profile_id IS NULL) AND (channel_
 
 All behavioral instructions — global, profile-scoped, and channel-scoped — live in this one table. Default channel rules (e.g., "avoid tables on Telegram", "prefer concise replies") are seeded when a channel is configured, same pattern as profile seeding. Adapters own only mechanical output rendering (`renderOutput`), not behavioral guidance. See [transport/adapters.md](transport/adapters.md) → Response Rendering.
 
-### Observation lineage `[proposed]`
+### Observation lineage `[confirmed]`
 
-Channel lineage is already derivable: `conversationId → channel_sessions → channels.type`. No denormalized column needed — the Observer can join to get the source channel at extraction time.
+Channel lineage is derived from the relational graph: `conversationId → channel_sessions → channels.type`. No denormalized column — the Observer's `load-active-channel-types` step calls `transportStore.getActiveChannelTypes(conversationId)` at extraction time.
 
-When Observer channel scoping lands, the Observer queries the conversation's active channels, passes them to the extraction LLM, and the LLM decides per correction whether it's channel-specific ("don't use tables" → Telegram) or general ("be more concise" → everywhere). The extraction Zod schema gains an optional `channelType` field.
+The Observer threads the active channel set into the extraction prompt; the LLM decides per correction whether it's channel-specific ("don't use tables" → `channelType: "telegram"`) or general ("be more concise" → `channelType: null`). The extraction Zod schema carries `channelType` on the `new` discriminated-union variant only — `reinforce` / `contradiction` inherit scope from the matched id. Hallucinated channel values outside the active set are coerced back to `null` with a warning before reaching the DB. `consolidateRules` excludes channel-scoped rows from merge candidates because `replaceRules` only emits the merged row as global; same-channel-scope merging is a future enhancement once `replaceRules` preserves `channel_type`.
 
 Future: if per-observation precision matters (rule graduated from mixed channels), introduce a `steering_rule_observations` table (`rule_id`, `conversation_id`, `channel_type`, `created_at`). Earns its keep when the rule count exceeds what eyeballing can handle.
 

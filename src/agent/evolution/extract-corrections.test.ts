@@ -93,6 +93,7 @@ describe("formatTranscript", () => {
 function mockExtractionDeps(
   chatTypedResponse: { corrections: Array<Record<string, unknown>> },
   storeOverrides?: Partial<ExtractionDeps["store"]>,
+  activeChannelTypes: ReadonlyArray<string> = [],
 ): ExtractionDeps {
   const provider = mockProvider({
     chat: vi.fn().mockResolvedValue({
@@ -113,6 +114,7 @@ function mockExtractionDeps(
       countActiveRules: vi.fn().mockResolvedValue(5),
       ...storeOverrides,
     },
+    activeChannelTypes,
   };
 }
 
@@ -156,6 +158,7 @@ describe("extractCorrections", () => {
           reasoning: "User corrected tool choice",
           matchedExistingRuleId: null,
           action: "new",
+          channelType: null,
         },
       ],
     });
@@ -167,6 +170,7 @@ describe("extractCorrections", () => {
       rule: "Use fetch_url for weather lookups",
       category: "domain",
       profileId: null,
+      channelType: null,
     });
   });
 
@@ -190,6 +194,7 @@ describe("extractCorrections", () => {
       rule: "Use fetch_url for weather",
       category: "domain",
       profileId: null,
+      channelType: null,
       existingRuleId: "existing-rule-1",
     });
   });
@@ -267,6 +272,7 @@ describe("extractCorrections", () => {
           reasoning: "first time",
           matchedExistingRuleId: null,
           action: "new",
+          channelType: null,
         },
         {
           rule: "Reinforced rule",
@@ -292,6 +298,112 @@ describe("extractCorrections", () => {
     expect(result.contradictions).toBe(1);
     // 2 upsert calls (new + reinforce), contradiction skipped
     expect(deps.store.upsertCorrection).toHaveBeenCalledTimes(2);
+  });
+
+  it("stamps channelType from the LLM when it's in the active channel set", async () => {
+    const deps = mockExtractionDeps(
+      {
+        corrections: [
+          {
+            rule: "Avoid voice notes longer than 60s",
+            category: "style",
+            reasoning: "Telegram-specific tone preference",
+            matchedExistingRuleId: null,
+            action: "new",
+            channelType: "telegram",
+          },
+        ],
+      },
+      undefined,
+      ["telegram", "direct"],
+    );
+
+    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+
+    expect(result.extracted).toBe(1);
+    expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
+      rule: "Avoid voice notes longer than 60s",
+      category: "style",
+      profileId: null,
+      channelType: "telegram",
+    });
+  });
+
+  it("coerces an LLM-emitted channelType outside the active set back to null", async () => {
+    const deps = mockExtractionDeps(
+      {
+        corrections: [
+          {
+            rule: "Hallucinated channel rule",
+            category: "style",
+            reasoning: "LLM picked a channel not in the active set",
+            matchedExistingRuleId: null,
+            action: "new",
+            channelType: "slack",
+          },
+        ],
+      },
+      undefined,
+      ["telegram"],
+    );
+
+    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+
+    expect(result.extracted).toBe(1);
+    expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
+      rule: "Hallucinated channel rule",
+      category: "style",
+      profileId: null,
+      channelType: null,
+    });
+  });
+
+  it("renders the existing rules and active channels in the prompt", async () => {
+    const deps = mockExtractionDeps(
+      { corrections: [] },
+      {
+        getCorrections: vi.fn().mockResolvedValue([
+          {
+            id: "rule-1",
+            rule: "Be concise",
+            category: "style",
+            active: true,
+            observationCount: 3,
+            channelType: null,
+          },
+          {
+            id: "rule-2",
+            rule: "Avoid markdown headings on Telegram",
+            category: "style",
+            active: true,
+            observationCount: 2,
+            channelType: "telegram",
+          },
+        ]),
+      },
+      ["telegram"],
+    );
+
+    await extractCorrections(sampleHistory, "profile-1", deps);
+
+    expect(deps.provider.chat).toHaveBeenCalledOnce();
+    const call = vi.mocked(deps.provider.chat).mock.calls[0]?.[0];
+    const system = call?.system ?? "";
+    expect(system).toContain("`telegram`");
+    expect(system).toContain("[rule-1] (style, all channels) Be concise");
+    expect(system).toContain(
+      "[rule-2] (style, channel:telegram) Avoid markdown headings on Telegram",
+    );
+  });
+
+  it("instructs the LLM to default to null when no channels are active", async () => {
+    const deps = mockExtractionDeps({ corrections: [] }, undefined, []);
+
+    await extractCorrections(sampleHistory, "profile-1", deps);
+
+    const call = vi.mocked(deps.provider.chat).mock.calls[0]?.[0];
+    const system = call?.system ?? "";
+    expect(system).toContain("No active channels were resolved");
   });
 
   it("skips extraction for empty transcript", async () => {

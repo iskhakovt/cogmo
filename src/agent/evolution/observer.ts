@@ -20,6 +20,7 @@ import { conversationIdle } from "../../inngest/events.js";
 import { type LlmProviderResolver, ProviderConfigError } from "../../llm/resolver.js";
 import { logger } from "../../logger.js";
 import type { MemoryProvider } from "../../memory/provider.js";
+import type { TransportStore } from "../../transport/store/index.js";
 import type { AgentStore } from "../store/index.js";
 import { consolidateRules } from "./consolidate-rules.js";
 import { buildRetainItems, classifyPendingMemories } from "./drain-pending-memories.js";
@@ -39,6 +40,13 @@ const PENDING_DRAIN_BATCH_SIZE = 100;
 export interface ObserverDeps {
   runInTx: Transactor;
   agentStore: AgentStore;
+  /**
+   * Read-only slice of `TransportStore` — the Observer needs the
+   * conversation's active channel types so the correction extractor can
+   * scope new rules per channel. Kept as a `Pick<>` to make the
+   * dependency explicit and minimal.
+   */
+  transportStore: Pick<TransportStore, "getActiveChannelTypes">;
   /**
    * Per-fire provider lookup. The extraction model is read from the
    * conversation's active profile inside the function (see `load-profile`
@@ -136,6 +144,16 @@ export async function runObserver(
     return rows.map((c) => ({ name: c.name, description: c.description }));
   });
 
+  // Distinct channel types active for this conversation drive correction
+  // scoping — the extractor uses them so rules tied to a specific medium
+  // (e.g. "no long voice notes here" on Telegram) land with
+  // `channel_type` set rather than as global rules. May be empty if all
+  // sessions have lapsed by the time the Observer fires; the extractor
+  // falls back to global-only in that case.
+  const activeChannelTypes = await step.run("load-active-channel-types", async () => {
+    return deps.runInTx((tx) => deps.transportStore.getActiveChannelTypes(tx, conversationId));
+  });
+
   // Resolve once per fire — outside `step.run` because the provider
   // instance isn't JSON-serializable. The resolver's own per-model
   // cache amortizes the cost across fires. Permanent config errors
@@ -159,6 +177,7 @@ export async function runObserver(
       model,
       runInTx: deps.runInTx,
       store: agentStore,
+      activeChannelTypes,
     });
   });
 
