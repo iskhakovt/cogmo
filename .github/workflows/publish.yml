@@ -1,27 +1,79 @@
 name: Publish
 
 # Release-time build of all three Cogmo-owned container images at the same
-# semver. Called from `ci.yml`'s `publish` job after semantic-release cuts a
-# new git tag, so `dunamai` resolves to a clean `MAJOR.MINOR.PATCH` here.
+# semver. Called from `release.yml` after semantic-release cuts a new git
+# tag, so `dunamai` resolves to a clean `MAJOR.MINOR.PATCH` here.
 #
-# Defaults from `docker-bake.hcl` are correct for production: cogmo builds
-# multi-arch (`linux/amd64` + `linux/arm64`), devbase + skills stay single-
-# arch (sysbox amd64-only). Attestations on. Per-platform GHA cache scopes.
+# Multi-arch strategy: cogmo runs on a per-platform matrix on native
+# runners (no QEMU emulation). Each matrix run pushes its image by digest
+# only — no tag yet. The `merge-cogmo` job then combines the per-platform
+# digests into a single multi-arch manifest under the release tag via
+# `docker buildx imagetools create`. devbase + skills are amd64-only
+# (sysbox amd64-only), so they build on a single runner with normal
+# bake + push.
+#
+# `merge-cogmo` waits on BOTH `cogmo` and `base-images` so a partial
+# publish (cogmo tagged but devbase/skills missing) can't happen. The
+# runtime cogmo image references `cogmo-devbase:VERSION` and
+# `cogmo-skills:VERSION` for sandboxed work — atomicity matters more than
+# the few-second-on-the-critical-path tax of waiting for base-images.
+#
+# Cache scopes per platform (`cogmo-amd64`, `cogmo-arm64`) avoid
+# moby/buildkit#2758, where a single buildx invocation building two
+# platforms into one scope has the second platform's manifest overwrite
+# the first.
 
 on:
   workflow_call:
   workflow_dispatch:
 
-# Deny-by-default; the docker job grants what it needs.
+# One publish flow at a time across the entire repo. Two simultaneous
+# `workflow_dispatch` invocations would race on the same release tags
+# and on the same per-platform digest artifacts.
+concurrency:
+  group: publish-images
+  cancel-in-progress: false
+
 permissions: {}
 
 jobs:
-  docker:
-    name: Build & Push Images
-    runs-on: ubuntu-latest
-    concurrency:
-      group: publish-images
-      cancel-in-progress: false
+  # Resolve the release version once and fan out to every build job so
+  # they all see the same string. dunamai inside each job worked today
+  # because release.yml pushes the tag before invoking publish.yml — but
+  # any future flow that dispatches publish.yml against an untagged
+  # commit would otherwise hand each job its own dev version.
+  setup:
+    name: Resolve version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - id: version
+        run: |
+          set -euo pipefail
+          echo "version=$(pipx run dunamai==1.26.1 from any --style semver)" >> "$GITHUB_OUTPUT"
+
+  cogmo:
+    name: Build cogmo (${{ matrix.slug }})
+    needs: [setup]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            slug: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            slug: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
     permissions:
       contents: read
       packages: write
@@ -30,10 +82,62 @@ jobs:
         with:
           fetch-depth: 0
 
-      - id: version
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      # Per-platform: override platforms + cache scope to the matrix arch
+      # and push by digest only — the merge job applies tags afterwards.
+      - uses: docker/bake-action@a66e1c87e2eca0503c343edf1d208c716d54b8a8 # v7.1.0
+        id: bake
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        with:
+          source: .
+          files: |
+            ./docker-bake.hcl
+          targets: cogmo
+          set: |
+            cogmo.platforms=${{ matrix.platform }}
+            cogmo.cache-from=type=gha,scope=cogmo-${{ matrix.slug }}
+            cogmo.cache-to=type=gha,scope=cogmo-${{ matrix.slug }},mode=max
+            cogmo.output=type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
         run: |
           set -euo pipefail
-          echo "version=$(pipx run dunamai==1.26.1 from any --style semver)" >> "$GITHUB_OUTPUT"
+          DIGEST=$(jq -r '.cogmo."containerimage.digest"' "${{ steps.bake.outputs.metadata-file }}")
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            echo "::error::no digest found in bake metadata"
+            cat "${{ steps.bake.outputs.metadata-file }}"
+            exit 1
+          fi
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cogmo-digest-${{ matrix.slug }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  base-images:
+    name: Build devbase + skills
+    needs: [setup]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
 
       - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
@@ -41,26 +145,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # One `metadata-action` call per image. Each emits a per-target
-      # bake-file with `tags` (semver + `latest`) and the standard OCI
-      # labels (`org.opencontainers.image.{source,revision,version,
-      # created,licenses,…}`). bake-action layers all three on top of
-      # `docker-bake.hcl`, populating the empty `*-meta` stubs.
-      - uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
-        id: meta-cogmo
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=${{ steps.version.outputs.version }}
-            type=raw,value=latest
-          bake-target: cogmo-meta
-
       - uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         id: meta-devbase
         with:
           images: ghcr.io/${{ github.repository }}-devbase
           tags: |
-            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ needs.setup.outputs.version }}
             type=raw,value=latest
           bake-target: devbase-meta
 
@@ -69,27 +159,70 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}-skills
           tags: |
-            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ needs.setup.outputs.version }}
             type=raw,value=latest
           bake-target: skills-meta
 
-      # binfmt_misc + QEMU for arm64-on-amd64 emulation. ubuntu-latest does
-      # not pre-register QEMU, and setup-buildx-action doesn't either —
-      # without this, the first arm64 RUN step fails with "exec format error".
-      - uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
-
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
+      # VERSION env passed for symmetry with the cogmo job + defense-in-depth.
+      # metadata-action's bake-files override the in-file `*-meta` fallback
+      # tags at runtime, so this is belt-and-suspenders against a future
+      # path where metadata-action's output isn't wired.
       - uses: docker/bake-action@a66e1c87e2eca0503c343edf1d208c716d54b8a8 # v7.1.0
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.setup.outputs.version }}
         with:
           source: .
           files: |
             ./docker-bake.hcl
-            cwd://${{ steps.meta-cogmo.outputs.bake-file }}
             cwd://${{ steps.meta-devbase.outputs.bake-file }}
             cwd://${{ steps.meta-skills.outputs.bake-file }}
-          # Default group → cogmo + devbase + skills.
-          targets: default
+          targets: devbase,skills
           push: true
+
+  merge-cogmo:
+    name: Merge cogmo multi-arch manifest
+    # Wait on base-images too — see workflow header for the atomicity rationale.
+    needs: [setup, cogmo, base-images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: /tmp/digests
+          pattern: cogmo-digest-*
+          merge-multiple: true
+
+      - uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ needs.setup.outputs.version }}
+            type=raw,value=latest
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Create multi-arch manifest
+        working-directory: /tmp/digests
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+
+      - name: Inspect multi-arch image
+        run: |
+          docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ needs.setup.outputs.version }}

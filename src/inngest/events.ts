@@ -216,6 +216,35 @@ export const codingTaskPrOpened = eventType("coding/task/pr-opened", {
 });
 
 /**
+ * Coding delegation — task entered the `failed` terminal state in any
+ * orchestrator (plan, execute, verify). Cleanup subscribers (run-branch
+ * deletion, future telemetry) consume this without re-checking the row.
+ * `reason` mirrors the row's `failure_reason` so subscribers don't have
+ * to fetch it. Emitted exactly once per terminal-failure transition;
+ * the conditional UPDATE upstream guarantees idempotency.
+ */
+export const codingTaskFailed = eventType("coding/task/failed", {
+  schema: z.object({
+    taskId: z.string(),
+    reason: z.string(),
+  }),
+});
+
+/**
+ * Coding delegation — weekly orphan-run-branch sweep fan-out. The cron
+ * lists managed coding repos and emits one event per repo so each repo's
+ * cleanup runs in its own retry/observability lane (per Inngest's fan-out
+ * idiom). Per-repo handlers query origin for `cogmo/run/*` refs, join with
+ * the `coding_tasks` table, and delete refs whose task row is terminal +
+ * older than 7 days OR has no row at all.
+ */
+export const codingRunBranchSweepRepo = eventType("coding/run-branch-sweep/repo", {
+  schema: z.object({
+    repoId: z.string(),
+  }),
+});
+
+/**
  * Skills deploy gate — `register` produced an `approve`-tier deploy that
  * needs human signoff before main is advanced. Emitted by Service.skills
  * after the runner returns `pending_approval`. The per-channel Telegram
