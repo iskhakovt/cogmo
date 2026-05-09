@@ -989,6 +989,24 @@ describe("createTransport", () => {
       });
     });
 
+    it("create maps InvalidNameError to profile_class_name_invalid", async () => {
+      const { InvalidNameError } = await import("../agent/store/errors.js");
+      const agentStore = mockAgentStore({
+        createProfileClass: vi
+          .fn()
+          .mockRejectedValue(new InvalidNameError("Mixed Case", "profile_class")),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profileClasses.create("handle", {
+        name: "Mixed Case",
+        description: "x",
+      });
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "profile_class_name_invalid",
+        name: "Mixed Case",
+      });
+    });
+
     it("create happy path forwards name + description", async () => {
       const createProfileClass = vi.fn().mockResolvedValue({
         id: "c-1",
@@ -1059,6 +1077,24 @@ describe("createTransport", () => {
       const res = await transport.compartments.list("handle");
       expect(res._unsafeUnwrap()).toHaveLength(1);
       expect(listCustomCompartments).toHaveBeenCalledWith(expect.anything(), "user-1");
+    });
+
+    it("create maps InvalidNameError to compartment_name_invalid", async () => {
+      const { InvalidNameError } = await import("../agent/store/errors.js");
+      const agentStore = mockAgentStore({
+        createCustomCompartment: vi
+          .fn()
+          .mockRejectedValue(new InvalidNameError("Bad Name", "compartment")),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.compartments.create("handle", {
+        name: "Bad Name",
+        description: "x",
+      });
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "compartment_name_invalid",
+        name: "Bad Name",
+      });
     });
 
     it("create maps reserved-name error to compartment_name_reserved", async () => {

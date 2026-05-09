@@ -1547,6 +1547,10 @@ function errorMessage(err: TransportError): string {
       return `No custom compartment named "${err.name}". Use /compartments to list.`;
     case "compartment_unknown":
       return `Unknown compartment "${err.name}". Use /compartments add ${err.name} <description> first, or pick a core value (personal, work, health, financial, technical, misc).`;
+    case "compartment_name_invalid":
+      return `Compartment name "${err.name}" is invalid. Use lowercase letters, digits, hyphens, or underscores; start with a letter; max 32 chars.`;
+    case "profile_class_name_invalid":
+      return `Profile-class name "${err.name}" is invalid. Use lowercase letters, digits, hyphens, or underscores; start with a letter; max 32 chars.`;
   }
 }
 

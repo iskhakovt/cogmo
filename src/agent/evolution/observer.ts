@@ -116,16 +116,6 @@ export async function runObserver(
     return deps.runInTx((tx) => agentStore.getHistory(tx, conversationId));
   });
 
-  // Load the user's `custom_compartments` once per fire — both the
-  // transcript-extraction prompt (phase 2) and the pending-memory
-  // classifier (phase 3) need them, and they're stable across the
-  // run. Stored as `{ name, description }` only because that's what
-  // the prompt-builder takes (id/createdAt are noise for the LLM).
-  const customCompartments = await step.run("load-custom-compartments", async () => {
-    const rows = await deps.runInTx((tx) => agentStore.listCustomCompartments(tx, conv.userId));
-    return rows.map((c) => ({ name: c.name, description: c.description }));
-  });
-
   if (history.length < MIN_MESSAGES_FOR_EXTRACTION) {
     logger.debug(
       { conversationId, messageCount: history.length },
@@ -133,6 +123,18 @@ export async function runObserver(
     );
     return { status: "skipped", reason: "too_short" };
   }
+
+  // Load the user's `custom_compartments` once per fire — both the
+  // transcript-extraction prompt (phase 2) and the pending-memory
+  // classifier (phase 3) need them, and they're stable across the
+  // run. Stored as `{ name, description }` only because that's what
+  // the prompt-builder takes (id/createdAt are noise for the LLM).
+  // Loaded after the too_short check so an idle on a brand-new
+  // conversation skips the query.
+  const customCompartments = await step.run("load-custom-compartments", async () => {
+    const rows = await deps.runInTx((tx) => agentStore.listCustomCompartments(tx, conv.userId));
+    return rows.map((c) => ({ name: c.name, description: c.description }));
+  });
 
   // Resolve once per fire — outside `step.run` because the provider
   // instance isn't JSON-serializable. The resolver's own per-model

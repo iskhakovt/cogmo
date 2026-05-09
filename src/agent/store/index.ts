@@ -8,6 +8,7 @@ import { CORE_COMPARTMENTS } from "../evolution/memory-extraction-schema.js";
 import type { AutoRecallMode } from "../recall-gate.js";
 import {
   CustomCompartmentCapExceededError,
+  InvalidNameError,
   ProfileClassInUseError,
   ProfileInUseError,
   ReservedCompartmentNameError,
@@ -41,6 +42,15 @@ import {
  * count. Cap is enforced at insert time (count + insert in one tx).
  */
 export const CUSTOM_COMPARTMENT_LIMIT = 10;
+
+/**
+ * Canonical shape for compartment + profile-class names. Lowercase ASCII
+ * letters / digits / hyphen / underscore, must start with a letter, ≤32
+ * chars. Mirrors the format of `CORE_COMPARTMENTS` values so the merged
+ * set is uniform, prevents `Work` / `work` conceptual duplicates, and
+ * avoids weird Unicode or whitespace landing in Hindsight tag values.
+ */
+const CANONICAL_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 
 /**
  * Sentinel for `messages.output_tokens` meaning "unknown — force a full token
@@ -1069,6 +1079,9 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     params: { userId: string; name: string; description: string },
   ): Promise<ProfileClass> {
+    if (!CANONICAL_NAME_RE.test(params.name)) {
+      throw new InvalidNameError(params.name, "profile_class");
+    }
     return translateUniqueViolation(async () => {
       return single(
         await tx.insert(profileClasses).values(params).returning({
@@ -1178,6 +1191,9 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     params: { userId: string; name: string; description: string },
   ): Promise<CustomCompartment> {
+    if (!CANONICAL_NAME_RE.test(params.name)) {
+      throw new InvalidNameError(params.name, "compartment");
+    }
     if ((CORE_COMPARTMENTS as ReadonlyArray<string>).includes(params.name)) {
       throw new ReservedCompartmentNameError(params.name);
     }

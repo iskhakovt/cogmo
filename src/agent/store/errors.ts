@@ -89,6 +89,26 @@ export class UnknownCompartmentError extends Error {
 }
 
 /**
+ * Thrown by `createCustomCompartment` / `createProfileClass` when the
+ * proposed name doesn't match the canonical shape (lowercase ASCII +
+ * `-`/`_`, ≤32 chars, must start with a letter). The constraint matches
+ * the format of `CORE_COMPARTMENTS` values and avoids `Work` / `work`
+ * conceptual duplicates, weird Unicode in tag values, or names that
+ * render badly when templated into LLM prompts as `**<name>**:`.
+ */
+export class InvalidNameError extends Error {
+  constructor(
+    public readonly proposedName: string,
+    public readonly kind: "compartment" | "profile_class",
+  ) {
+    super(
+      `invalid ${kind} name "${proposedName}": must be lowercase ASCII letters/digits/hyphen/underscore, start with a letter, ≤32 chars`,
+    );
+    this.name = "InvalidNameError";
+  }
+}
+
+/**
  * Thrown by `createCustomCompartment` when the proposed name collides with a
  * core compartment value (`personal`, `work`, …). Reserving the core names
  * keeps the merged classifier set unambiguous and prevents an operator from

@@ -254,6 +254,18 @@ describe("DrizzleAgentStore", () => {
       ).rejects.toThrow();
     });
 
+    it("rejects class names that don't match the canonical shape", async () => {
+      const { userId } = await seedClassed();
+      // Same canonical-name regex enforced for profile classes — keeps
+      // the merged "label registry" surface uniform with compartments.
+      await expect(
+        tx((trx) => store.createProfileClass(trx, { userId, name: "Intimate", description: "x" })),
+      ).rejects.toThrow(/invalid profile_class name/);
+      await expect(
+        tx((trx) => store.createProfileClass(trx, { userId, name: "two words", description: "x" })),
+      ).rejects.toThrow(/invalid profile_class name/);
+    });
+
     it("setProfileClass attaches a registered class", async () => {
       const { userId, profileId } = await seedClassed();
       await tx((trx) =>
@@ -340,6 +352,31 @@ describe("DrizzleAgentStore", () => {
       );
       const list = await tx((trx) => store.listCustomCompartments(trx, userId));
       expect(list.map((c) => c.name)).toEqual(["dnd", "music"]);
+    });
+
+    it("rejects names that don't match the canonical shape", async () => {
+      const userId = await seedUser();
+      // Uppercase, leading non-letter, special chars, too long, whitespace,
+      // empty. Trailing hyphens / underscores are intentionally accepted —
+      // the regex permits anything from the [a-z0-9_-] class after the
+      // leading letter, so `dnd-` is valid (matches `compartment:dnd-` as a
+      // tag value, even if it reads oddly).
+      const badNames = ["Work", "1campaign", "dnd!", "x".repeat(33), "two words", "", "-leading"];
+      for (const name of badNames) {
+        await expect(
+          tx((trx) => store.createCustomCompartment(trx, { userId, name, description: "x" })),
+        ).rejects.toThrow(/invalid compartment name/);
+      }
+    });
+
+    it("accepts canonical-shape names (lowercase + digits + - / _)", async () => {
+      const userId = await seedUser();
+      const ok = ["dnd", "music-prod", "side_project", "campaign1", "a"];
+      for (const name of ok) {
+        await tx((trx) => store.createCustomCompartment(trx, { userId, name, description: "x" }));
+      }
+      const list = await tx((trx) => store.listCustomCompartments(trx, userId));
+      expect(list.map((c) => c.name).sort()).toEqual([...ok].sort());
     });
 
     it("rejects core-compartment names as reserved", async () => {

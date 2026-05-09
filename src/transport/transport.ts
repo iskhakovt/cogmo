@@ -7,6 +7,7 @@ import { CORE_COMPARTMENTS } from "../agent/evolution/memory-extraction-schema.j
 import type { AutoRecallMode } from "../agent/recall-gate.js";
 import {
   CustomCompartmentCapExceededError,
+  InvalidNameError,
   ProfileClassInUseError,
   ProfileInUseError,
   ReservedCompartmentNameError,
@@ -176,8 +177,10 @@ export type TransportError =
   | { code: "compartment_cap_exceeded"; limit: number; current: number }
   | { code: "compartment_name_taken"; name: string }
   | { code: "compartment_name_reserved"; name: string }
+  | { code: "compartment_name_invalid"; name: string }
   | { code: "compartment_not_found"; name: string }
   | { code: "compartment_unknown"; name: string }
+  | { code: "profile_class_name_invalid"; name: string }
   | { code: "model_unavailable"; model: string }
   | { code: "alias_taken" }
   | { code: "operation_not_permitted" }
@@ -1067,6 +1070,9 @@ export function createTransport(deps: {
             });
             return ok(created);
           } catch (e) {
+            if (e instanceof InvalidNameError) {
+              return err({ code: "profile_class_name_invalid" as const, name: e.proposedName });
+            }
             if (e instanceof UniqueViolationError) {
               return err({ code: "profile_class_name_taken" as const, name: input.name });
             }
@@ -1116,6 +1122,9 @@ export function createTransport(deps: {
             });
             return ok(created);
           } catch (e) {
+            if (e instanceof InvalidNameError) {
+              return err({ code: "compartment_name_invalid" as const, name: e.proposedName });
+            }
             if (e instanceof ReservedCompartmentNameError) {
               return err({ code: "compartment_name_reserved" as const, name: e.compartmentName });
             }
