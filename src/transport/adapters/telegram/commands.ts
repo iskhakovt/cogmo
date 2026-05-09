@@ -1002,10 +1002,9 @@ async function replyProfileScope(
   const renderedScope: ProfileMemoryScope | null =
     spec.kind === "show" ? profile.memoryScope : spec.kind === "clear" ? null : spec.scope;
   const needsCustoms =
-    renderedScope !== null &&
-    renderedScope.compartments.some(
+    renderedScope?.compartments.some(
       (c) => !(CORE_COMPARTMENTS as ReadonlyArray<string>).includes(c),
-    );
+    ) ?? false;
 
   let customs: ReadonlySet<string> | undefined;
   if (needsCustoms) {
