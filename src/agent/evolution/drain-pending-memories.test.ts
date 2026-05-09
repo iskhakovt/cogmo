@@ -55,6 +55,7 @@ function mockDeps(
       getPendingMemories: vi.fn().mockResolvedValue(pendingRows),
       deletePendingMemories: vi.fn().mockResolvedValue(undefined),
     },
+    customCompartments: [],
   };
 }
 
@@ -174,6 +175,7 @@ describe("drainPendingMemories", () => {
         getPendingMemories: vi.fn().mockResolvedValue(rows),
         deletePendingMemories: vi.fn().mockResolvedValue(undefined),
       },
+      customCompartments: [],
     };
 
     const result = await drainPendingMemories("user-1", deps);
@@ -198,6 +200,7 @@ describe("drainPendingMemories", () => {
         getPendingMemories: vi.fn().mockResolvedValue(rows),
         deletePendingMemories: vi.fn().mockResolvedValue(undefined),
       },
+      customCompartments: [],
     };
 
     const result = await drainPendingMemories("user-1", deps);
@@ -205,6 +208,140 @@ describe("drainPendingMemories", () => {
     expect(result).toEqual({ drained: 0, byNetwork: {} });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
     expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
+  });
+});
+
+describe("drainPendingMemories — customCompartments threading", () => {
+  it("templates customs into the classifier system prompt", async () => {
+    const customs = [{ name: "dnd", description: "tabletop campaign notes" }];
+    const rows = [pending({ id: "pm-1", content: "campaign uses SWN rules" })];
+    const provider = mockProvider({
+      chat: vi.fn().mockResolvedValue({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              network: "world",
+              compartment: "dnd",
+              trust: "first-party",
+            }),
+          },
+        ],
+        stopReason: "end_turn",
+        model: "mock",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    });
+    const deps: DrainPendingDeps = {
+      provider,
+      model: "test-model",
+      runInTx: fakeRunInTx,
+      memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
+      store: {
+        getPendingMemories: vi.fn().mockResolvedValue(rows),
+        deletePendingMemories: vi.fn().mockResolvedValue(undefined),
+      },
+      customCompartments: customs,
+    };
+
+    await drainPendingMemories("user-1", deps);
+
+    const call = vi.mocked(provider.chat).mock.calls[0]?.[0];
+    const system = (call as { system?: string } | undefined)?.system ?? "";
+    expect(system).toContain("**dnd**: tabletop campaign notes");
+    expect(system).toContain("Custom compartments");
+  });
+
+  it("retains rows tagged with a custom compartment when the classifier emits it", async () => {
+    const rows = [pending({ id: "pm-1", content: "campaign uses SWN rules" })];
+    const deps: DrainPendingDeps = {
+      provider: mockProvider({
+        chat: vi.fn().mockResolvedValue({
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                network: "world",
+                compartment: "dnd",
+                trust: "first-party",
+              }),
+            },
+          ],
+          stopReason: "end_turn",
+          model: "mock",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        }),
+      }),
+      model: "test-model",
+      runInTx: fakeRunInTx,
+      memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
+      store: {
+        getPendingMemories: vi.fn().mockResolvedValue(rows),
+        deletePendingMemories: vi.fn().mockResolvedValue(undefined),
+      },
+      customCompartments: [{ name: "dnd", description: "x" }],
+    };
+
+    const result = await drainPendingMemories("user-1", deps);
+
+    expect(result.drained).toBe(1);
+    expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
+      expect.objectContaining({
+        tags: ["network:world", "compartment:dnd", "trust:first-party"],
+      }),
+    ]);
+  });
+
+  it("treats a classifier emission outside core ∪ customs as a per-row failure (skip, not crash)", async () => {
+    // When the structured-output parse fails on the strict compartment
+    // enum, classifyOne logs and returns null — the row stays in
+    // `pending_memories` for the next drain attempt. Other rows in the
+    // same batch still drain. Without per-fire schema construction the
+    // bad value would land in Hindsight unfilterable; this exercises
+    // the safety net.
+    const rows = [
+      pending({ id: "pm-good", content: "valid" }),
+      pending({ id: "pm-bad", content: "invalid" }),
+    ];
+    let call = 0;
+    const provider = mockProvider({
+      chat: vi.fn().mockImplementation(() => {
+        const i = call++;
+        const compartment = i === 0 ? "dnd" : "music";
+        return Promise.resolve({
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                network: "world",
+                compartment,
+                trust: "first-party",
+              }),
+            },
+          ],
+          stopReason: "end_turn",
+          model: "mock",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        });
+      }),
+    });
+    const deps: DrainPendingDeps = {
+      provider,
+      model: "test-model",
+      runInTx: fakeRunInTx,
+      memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
+      store: {
+        getPendingMemories: vi.fn().mockResolvedValue(rows),
+        deletePendingMemories: vi.fn().mockResolvedValue(undefined),
+      },
+      customCompartments: [{ name: "dnd", description: "x" }],
+    };
+
+    const result = await drainPendingMemories("user-1", deps);
+
+    expect(result.drained).toBe(1);
+    // Only the good row's id is deleted — the bad row stays for retry.
+    expect(deps.store.deletePendingMemories).toHaveBeenCalledWith(expect.anything(), ["pm-good"]);
   });
 });
 

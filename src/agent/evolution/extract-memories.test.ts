@@ -22,6 +22,7 @@ function mockExtractionDeps(
     memory: {
       retainBatch: vi.fn().mockResolvedValue(undefined),
     },
+    customCompartments: [],
     ...overrides,
   };
 }
@@ -187,6 +188,92 @@ describe("extractMemories", () => {
     const call = vi.mocked(deps.memory.retainBatch).mock.calls[0];
     const items = call?.[1] ?? [];
     expect(items[0]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
+  });
+
+  it("templates customCompartments names + descriptions into the system prompt", async () => {
+    const customs = [
+      { name: "dnd", description: "tabletop campaign notes" },
+      { name: "music", description: "music production sessions" },
+    ];
+    const provider = mockProvider({
+      chat: vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: JSON.stringify({ memories: [] }) }],
+        stopReason: "end_turn",
+        model: "mock",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    });
+    const deps: MemoryExtractionDeps = {
+      provider,
+      model: "test-model",
+      memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
+      customCompartments: customs,
+    };
+
+    await extractMemories(sampleHistory, "user-1", null, deps);
+
+    // Single chat call; the system prompt is the second positional arg
+    // shape on `provider.chat({ system, messages, ... })`. Inspect it
+    // directly so the assertion is robust to small wrapper changes.
+    const call = vi.mocked(provider.chat).mock.calls[0]?.[0];
+    const system = (call as { system?: string } | undefined)?.system ?? "";
+    expect(system).toContain("**dnd**: tabletop campaign notes");
+    expect(system).toContain("**music**: music production sessions");
+    expect(system).toContain("Custom compartments");
+  });
+
+  it("retains memories with a custom compartment value emitted by the LLM", async () => {
+    const customs = [{ name: "dnd", description: "tabletop campaign notes" }];
+    const deps = mockExtractionDeps(
+      {
+        memories: [
+          {
+            fact: "campaign uses Stars Without Number rules",
+            network: "world",
+            compartment: "dnd",
+            trust: "first-party",
+          },
+        ],
+      },
+      { customCompartments: customs },
+    );
+
+    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+
+    expect(result.extracted).toBe(1);
+    expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
+      expect.objectContaining({
+        content: "campaign uses Stars Without Number rules",
+        tags: ["network:world", "compartment:dnd", "trust:first-party"],
+      }),
+    ]);
+  });
+
+  it("rejects an LLM-emitted compartment value not in core ∪ customs (schema enforcement)", async () => {
+    // The structured-output schema is locked to `[...CORE, ...customNames]`
+    // — a stale prompt or LLM hallucination producing "music" with no
+    // matching custom row fails the parse, which `extractMemories` catches
+    // and degrades to a no-op. Without per-fire schema construction, the
+    // value would slip through to Hindsight as a tag the recall predicate
+    // can never match, silently inflating misc-bucket noise.
+    const deps = mockExtractionDeps(
+      {
+        memories: [
+          {
+            fact: "x",
+            network: "world",
+            compartment: "music",
+            trust: "first-party",
+          },
+        ],
+      },
+      { customCompartments: [{ name: "dnd", description: "x" }] },
+    );
+
+    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+
+    expect(result).toEqual({ extracted: 0, byNetwork: {} });
+    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 
   it("omits profile_class tag when profileClass is undefined (Inngest replay safety)", async () => {
