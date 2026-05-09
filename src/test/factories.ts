@@ -311,6 +311,9 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
         .fn()
         .mockResolvedValue(ok({ pendingId: "p-1", skillName: "echo", gitSha: "abc1234" })),
       denyDeploy: vi.fn().mockResolvedValue(ok({ pendingId: "p-1" })),
+      list: vi.fn().mockResolvedValue(ok([])),
+      disable: vi.fn().mockResolvedValue(ok({ name: "echo" })),
+      enable: vi.fn().mockResolvedValue(ok({ name: "echo", alreadyEnabled: false })),
     },
     mcp: {
       toolBudget: vi.fn().mockReturnValue(25),

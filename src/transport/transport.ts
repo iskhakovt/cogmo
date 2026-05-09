@@ -39,7 +39,7 @@ import {
 } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { SkillRunner } from "../skills/runner.js";
-import type { SkillStore } from "../skills/store/index.js";
+import type { SkillRiskTier, SkillStore, SkillTier } from "../skills/store/index.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { InboundContent } from "./content.js";
 import type { Session, TransportStore } from "./store/index.js";
@@ -158,6 +158,20 @@ export interface ConversationStatusSummary {
   } | null;
 }
 
+/**
+ * One row of `skills.list` — the operator-facing projection. Subset of
+ * `SkillSummary` from the runner with `gitSha` shortened by the
+ * adapter (we surface the full sha so different adapters can format
+ * differently).
+ */
+export interface SkillListEntry {
+  name: string;
+  tier: SkillTier;
+  riskTier: SkillRiskTier;
+  disabled: boolean;
+  gitSha: string;
+}
+
 export type TransportError =
   | { code: "session_not_found"; sessionId: string }
   | { code: "identity_rejected" }
@@ -186,6 +200,8 @@ export type TransportError =
   | { code: "task_not_pending_approval"; taskId: string; status: string }
   | { code: "task_already_terminal"; taskId: string; status: string }
   | { code: "skills_disabled" }
+  | { code: "skill_not_found"; name: string }
+  | { code: "skill_no_live_deploy"; name: string }
   | { code: "skill_deploy_not_found"; pendingId: string }
   | { code: "skill_deploy_not_pending"; pendingId: string; status: string }
   | { code: "skill_deploy_register_failed"; pendingId: string; reason: string }
@@ -425,6 +441,33 @@ export interface Transport {
       tapperPlatformHandle: string,
       reason?: string,
     ): Promise<Result<{ pendingId: string }, TransportError>>;
+    /**
+     * List all skills (enabled + disabled), sorted by name. Operator surface
+     * for `/skills` in Telegram and the equivalent CLI list. Returns
+     * `skills_disabled` when the runtime isn't wired.
+     */
+    list(
+      platformUserHandle: string,
+    ): Promise<Result<ReadonlyArray<SkillListEntry>, TransportError>>;
+    /**
+     * Soft-disable a live skill by name. Wraps `runner.deregister` —
+     * preserves history, just flips `disabled=true`. Returns
+     * `skill_not_found` when the name is unknown.
+     */
+    disable(
+      platformUserHandle: string,
+      name: string,
+    ): Promise<Result<{ name: string }, TransportError>>;
+    /**
+     * Re-enable a previously-disabled skill. Refuses with
+     * `skill_no_live_deploy` if the skill was never live at its current
+     * `gitSha` (denied-on-first-deploy guard — see {@link SkillRunner.enable}).
+     * Idempotent on already-enabled rows.
+     */
+    enable(
+      platformUserHandle: string,
+      name: string,
+    ): Promise<Result<{ name: string; alreadyEnabled: boolean }, TransportError>>;
   };
 
   /**
@@ -1362,6 +1405,56 @@ export function createTransport(deps: {
           ...(reason !== undefined && { reason }),
         });
         return ok({ pendingId });
+      },
+
+      async list(platformUserHandle) {
+        const identityCheck = await checkSkillsTapper(platformUserHandle);
+        if (identityCheck.isErr()) return err(identityCheck.error);
+        if (!skillRunner) return err({ code: "skills_disabled" as const });
+        const rows = await skillRunner.listAll();
+        return ok(
+          rows.map((r) => ({
+            name: r.name,
+            tier: r.tier,
+            riskTier: r.riskTier,
+            disabled: r.disabled,
+            gitSha: r.gitSha,
+          })),
+        );
+      },
+
+      async disable(platformUserHandle, name) {
+        const identityCheck = await checkSkillsTapper(platformUserHandle);
+        if (identityCheck.isErr()) return err(identityCheck.error);
+        if (!skillRunner || !skillStore) return err({ code: "skills_disabled" as const });
+        // Pre-check existence to surface a structured `skill_not_found`
+        // instead of letting `runner.deregister`'s thrown Error bubble out
+        // (the runner pre-dates the Result wrapping; rather than churn the
+        // RPC contract everywhere, we adapt at the Transport boundary).
+        const existing = await runInTx((tx) => skillStore.getSkillByName(tx, name));
+        if (!existing) return err({ code: "skill_not_found" as const, name });
+        await skillRunner.deregister({ name });
+        return ok({ name });
+      },
+
+      async enable(platformUserHandle, name) {
+        const identityCheck = await checkSkillsTapper(platformUserHandle);
+        if (identityCheck.isErr()) return err(identityCheck.error);
+        if (!skillRunner) return err({ code: "skills_disabled" as const });
+        const result = await skillRunner.enable({ name });
+        switch (result.kind) {
+          case "enabled":
+            return ok({ name: result.name, alreadyEnabled: false });
+          case "already_enabled":
+            return ok({ name: result.name, alreadyEnabled: true });
+          case "rejected":
+            switch (result.reason) {
+              case "not_found":
+                return err({ code: "skill_not_found" as const, name: result.name });
+              case "no_live_deploy":
+                return err({ code: "skill_no_live_deploy" as const, name: result.name });
+            }
+        }
       },
     },
 

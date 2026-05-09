@@ -379,6 +379,105 @@ inputs:
     expect(list.map((s) => s.name)).toEqual(["beta"]);
   });
 
+  it("enable re-activates a deregistered skill (round-trip)", async () => {
+    const runner = await makeRunner();
+    const row = await runner.__registerForTests({
+      name: "echo",
+      manifestSource: ECHO_MANIFEST,
+      body: ECHO_BODY,
+    });
+    await runner.deregister({ name: "echo" });
+    expect((await runner.listAll()).find((s) => s.name === "echo")?.disabled).toBe(true);
+
+    const result = await runner.enable({ name: "echo" });
+    expect(result).toEqual({ kind: "enabled", name: "echo", gitSha: row.gitSha });
+    expect((await runner.list()).map((s) => s.name)).toContain("echo");
+  });
+
+  it("enable on an already-enabled skill is idempotent", async () => {
+    const runner = await makeRunner();
+    const row = await runner.__registerForTests({
+      name: "echo",
+      manifestSource: ECHO_MANIFEST,
+      body: ECHO_BODY,
+    });
+    const result = await runner.enable({ name: "echo" });
+    expect(result).toEqual({ kind: "already_enabled", name: "echo", gitSha: row.gitSha });
+  });
+
+  it("enable rejects an unknown skill name", async () => {
+    const runner = await makeRunner();
+    const result = await runner.enable({ name: "nope" });
+    expect(result).toEqual({ kind: "rejected", name: "nope", reason: "not_found" });
+  });
+
+  it("enable refuses when the current sha was never live (approval-gate guard)", async () => {
+    // Simulate a denied first deploy: insert a disabled skill row + a single
+    // skill_deploys row with status='denied' at the same sha. /enable would
+    // otherwise smuggle un-approved code past the approval gate.
+    const runner = await makeRunner();
+    const sha = "feedfacefeedfacefeedfacefeedfacefeedface";
+    const row = await tx((trx) =>
+      store.insertSkill(trx, {
+        name: "denied-skill",
+        tier: "wasm",
+        riskTier: "approve",
+        effects: [],
+        schedule: null,
+        gitSha: sha,
+        inputs: { type: "object", properties: {} },
+        outputs: null,
+      }),
+    );
+    await tx((trx) => store.setSkillDisabled(trx, { id: row.id, disabled: true }));
+    await tx((trx) =>
+      store.insertDeploy(trx, {
+        skillId: row.id,
+        gitSha: sha,
+        priorGitSha: null,
+        riskTier: "approve",
+        status: "denied",
+        classifierLog: {
+          classifier_version: "test",
+          risk_tier: "approve",
+          declared_effects: [],
+          detected_effects: [],
+          declared_secrets: [],
+          validation_errors: [],
+        },
+      }),
+    );
+
+    const result = await runner.enable({ name: "denied-skill" });
+    expect(result).toEqual({
+      kind: "rejected",
+      name: "denied-skill",
+      reason: "no_live_deploy",
+    });
+    // Row still disabled — guard didn't accidentally flip it.
+    expect((await runner.listAll()).find((s) => s.name === "denied-skill")?.disabled).toBe(true);
+  });
+
+  it("listAll includes disabled skills (sorted by name)", async () => {
+    const runner = await makeRunner();
+    const a = await runner.__registerForTests({
+      name: "alpha",
+      manifestSource: ECHO_MANIFEST.replace("name: echo", "name: alpha"),
+      body: ECHO_BODY,
+    });
+    await runner.__registerForTests({
+      name: "beta",
+      manifestSource: ECHO_MANIFEST.replace("name: echo", "name: beta"),
+      body: ECHO_BODY,
+    });
+    await tx((trx) => store.setSkillDisabled(trx, { id: a.id, disabled: true }));
+    const list = await runner.listAll();
+    expect(list.map((s) => ({ name: s.name, disabled: s.disabled }))).toEqual([
+      { name: "alpha", disabled: true },
+      { name: "beta", disabled: false },
+    ]);
+  });
+
   it("invoke without prior register fails with the right error", async () => {
     const runner = await makeRunner();
     // Insert a skill row directly via the store, bypassing the runner's

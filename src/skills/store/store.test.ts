@@ -96,6 +96,63 @@ describe("DrizzleSkillStore", () => {
       expect(live.map((s) => s.name)).toEqual(["alpha", "zebra"]);
     });
 
+    it("listAllSkills includes disabled rows, sorted by name", async () => {
+      await seedSkill({ name: "zebra" });
+      await seedSkill({ name: "alpha" });
+      const disabled = await seedSkill({ name: "mango" });
+      await tx((trx) => store.setSkillDisabled(trx, { id: disabled.id, disabled: true }));
+
+      const all = await tx((trx) => store.listAllSkills(trx));
+      expect(all.map((s) => ({ name: s.name, disabled: s.disabled }))).toEqual([
+        { name: "alpha", disabled: false },
+        { name: "mango", disabled: true },
+        { name: "zebra", disabled: false },
+      ]);
+    });
+
+    it("hasLiveDeployForSkill is true only when a (skillId, gitSha, status='live') row exists", async () => {
+      const row = await seedSkill({ name: "echo", gitSha: SHA });
+      // No deploys yet → false.
+      expect(
+        await tx((trx) => store.hasLiveDeployForSkill(trx, { skillId: row.id, gitSha: SHA })),
+      ).toBe(false);
+
+      // Insert a `denied` deploy at SHA → still false.
+      await tx((trx) =>
+        store.insertDeploy(trx, {
+          skillId: row.id,
+          gitSha: SHA,
+          priorGitSha: null,
+          riskTier: "approve",
+          status: "denied",
+          classifierLog: STUB_LOG,
+        }),
+      );
+      expect(
+        await tx((trx) => store.hasLiveDeployForSkill(trx, { skillId: row.id, gitSha: SHA })),
+      ).toBe(false);
+
+      // Insert a `live` deploy at SHA → true.
+      await tx((trx) =>
+        store.insertDeploy(trx, {
+          skillId: row.id,
+          gitSha: SHA,
+          priorGitSha: null,
+          riskTier: "auto",
+          status: "live",
+          classifierLog: STUB_LOG,
+        }),
+      );
+      expect(
+        await tx((trx) => store.hasLiveDeployForSkill(trx, { skillId: row.id, gitSha: SHA })),
+      ).toBe(true);
+
+      // Different sha is not matched.
+      expect(
+        await tx((trx) => store.hasLiveDeployForSkill(trx, { skillId: row.id, gitSha: SHA_NEW })),
+      ).toBe(false);
+    });
+
     it("updateSkillSha changes git_sha", async () => {
       const row = await seedSkill();
       await tx((trx) => store.updateSkillSha(trx, { id: row.id, gitSha: SHA_NEW }));
