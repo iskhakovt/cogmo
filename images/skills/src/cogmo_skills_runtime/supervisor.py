@@ -37,7 +37,7 @@ import selectors
 import signal
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from cogmo_skills_runtime.runner import _main as _run_main
 
@@ -171,50 +171,89 @@ def main() -> None:
         if not isinstance(task_id, str) or not task_id:
             sys.stderr.write("supervisor: task_invoke missing 'id'\n")
             continue
-        wall_clock_s = task.get("wallClockS") or DEFAULT_WALL_CLOCK_S
+        _dispatch_one_task(task, task_id, _send)
 
-        # Fork. The child inherits stdin/stdout, the parent's pre-imports,
-        # and the runner's globals. Sequential per-supervisor — only one
-        # child at a time, no race on stdio.
-        pid = os.fork()
-        if pid == 0:
-            # Child — runs one task, exits.
-            try:
-                _run_one_task_in_child(task)
-            finally:
-                # _exit, not sys.exit — skip atexit/finalizers that could
-                # double-flush the inherited stdout (we already flushed
-                # the task_result line) or interfere with other in-flight
-                # state in the parent.
-                os._exit(0)
 
-        # Parent — wait for the child with timeout.
+def _dispatch_one_task(
+    task: Mapping[str, object],
+    task_id: str,
+    send: Callable[[Mapping[str, object]], None],
+) -> None:
+    """Fork + run one task, supervise wall-clock + reaping, synthesize a
+    `task_result` for the abnormal exit / timeout / waitpid-error paths.
+    Extracted from `main()` so tests can drive a single dispatch with a
+    captured `send` callback.
+    """
+    wall_clock_s = task.get("wallClockS") or DEFAULT_WALL_CLOCK_S
+    if not isinstance(wall_clock_s, int | float):
+        wall_clock_s = DEFAULT_WALL_CLOCK_S
+
+    # Fork. The child inherits stdin/stdout, the parent's pre-imports,
+    # and the runner's globals. Sequential per-supervisor — only one
+    # child at a time, no race on stdio.
+    pid = os.fork()
+    if pid == 0:
+        # Child — runs one task, exits.
         try:
-            _wait_with_timeout(pid, wall_clock_s)
-        except TimeoutError:
-            sys.stderr.write(f"supervisor: wall-clock {wall_clock_s}s exceeded for task {task_id}; killing child\n")
+            _run_one_task_in_child(task)
+        finally:
+            # _exit, not sys.exit — skip atexit/finalizers that could
+            # double-flush the inherited stdout (we already flushed
+            # the task_result line) or interfere with other in-flight
+            # state in the parent.
+            os._exit(0)
+
+    # Parent — wait for the child with timeout.
+    try:
+        status = _wait_with_timeout(pid, wall_clock_s)
+    except TimeoutError:
+        sys.stderr.write(f"supervisor: wall-clock {wall_clock_s}s exceeded for task {task_id}; killing child\n")
+        _kill_and_reap(pid)
+        send(
+            {
+                "type": "task_result",
+                "id": task_id,
+                "ok": False,
+                "error": "wall_clock_exceeded",
+            }
+        )
+    except OSError as e:
+        # pidfd_open / waitpid raised — should be very rare. ECHILD
+        # means the child was already reaped by something else (we're
+        # the only reaper, so this is "really shouldn't happen"); skip
+        # the redundant kill on that path. For any other OSError we
+        # SIGKILL as a precaution in case the process is still alive.
+        if e.errno != errno.ECHILD:
+            sys.stderr.write(f"supervisor: wait error for task {task_id}: {e}\n")
             _kill_and_reap(pid)
-            _send(
+        send(
+            {
+                "type": "task_result",
+                "id": task_id,
+                "ok": False,
+                "error": f"supervisor_wait_error: {e}",
+            }
+        )
+    else:
+        # Child exited on its own. Exit code 0 = task ran the runner's
+        # full lifecycle and emitted its own task_result on stdout.
+        # Non-zero = child died abnormally (SIGSEGV from a buggy C
+        # extension, OOM-killer, SIGKILL from outside, ...) — task_result
+        # was *not* written, so synthesize one here. Without this branch
+        # the host would only learn via the wallClockS + 5 s watchdog,
+        # which can be 65+ s for a default-budget skill.
+        if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
+            if os.WIFSIGNALED(status):
+                detail = f"signal={os.WTERMSIG(status)}"
+            else:
+                detail = f"exit={os.WEXITSTATUS(status)}"
+            sys.stderr.write(f"supervisor: child died abnormally for task {task_id}: {detail}\n")
+            send(
                 {
                     "type": "task_result",
                     "id": task_id,
                     "ok": False,
-                    "error": "wall_clock_exceeded",
-                }
-            )
-        except OSError as e:
-            # pidfd_open / waitpid raised — should be very rare. Reap the
-            # child if it's still around and tell the host we don't know
-            # what happened.
-            if e.errno != errno.ECHILD:
-                sys.stderr.write(f"supervisor: wait error for task {task_id}: {e}\n")
-            _kill_and_reap(pid)
-            _send(
-                {
-                    "type": "task_result",
-                    "id": task_id,
-                    "ok": False,
-                    "error": f"supervisor_wait_error: {e}",
+                    "error": f"child_died: {detail}",
                 }
             )
 

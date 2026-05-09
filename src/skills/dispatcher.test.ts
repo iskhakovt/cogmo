@@ -415,4 +415,61 @@ describe("Dispatcher", () => {
     fireError(new Error("transport: maximum buffer reached"));
     await expect(promise).rejects.toThrow(/transport: maximum buffer reached/);
   });
+
+  it("dispatches sequential tasks on a persistent transport (per-task ctxHandler)", async () => {
+    // The tier-2 supervisor reuses one Dispatcher across many tasks. Each
+    // `invoke()` passes its own ctxHandler. This pins the contract:
+    // ctx_calls during task N route to handler N, not to handler N-1 or
+    // a stale default. Regression target: someone "simplifies" the
+    // dispatcher by caching the constructor handler and dropping the
+    // per-task plumbing.
+    const { host, worker } = makeTransportPair();
+    const d = new Dispatcher({ transport: host });
+
+    const handlerA: CtxHandler = { handle: vi.fn().mockResolvedValue("A") };
+    const handlerB: CtxHandler = { handle: vi.fn().mockResolvedValue("B") };
+
+    // Task A: emits one ctx_call before resolving.
+    worker.onMessage((m) => {
+      const msg = m as { type: string; id?: string };
+      if (msg.type === "task_invoke" && msg.id === "task-A") {
+        worker.postMessage({ type: "ctx_call", id: "ctx-A", method: "now", args: {} });
+      } else if (msg.type === "ctx_result" && msg.id === "ctx-A") {
+        worker.postMessage({ type: "task_result", id: "task-A", ok: true, output: "doneA" });
+      } else if (msg.type === "task_invoke" && msg.id === "task-B") {
+        worker.postMessage({ type: "ctx_call", id: "ctx-B", method: "now", args: {} });
+      } else if (msg.type === "ctx_result" && msg.id === "ctx-B") {
+        worker.postMessage({ type: "task_result", id: "task-B", ok: true, output: "doneB" });
+      }
+    });
+
+    const a = await d.invoke({ ...INVOKE, id: "task-A" }, { ctxHandler: handlerA });
+    expect(a).toMatchObject({ id: "task-A", output: "doneA" });
+    expect(handlerA.handle).toHaveBeenCalledTimes(1);
+    expect(handlerB.handle).not.toHaveBeenCalled();
+
+    // Same dispatcher, second task — must work without close/recreate.
+    const b = await d.invoke({ ...INVOKE, id: "task-B" }, { ctxHandler: handlerB });
+    expect(b).toMatchObject({ id: "task-B", output: "doneB" });
+    // handler B fired exactly once for task B; handler A still at 1.
+    expect(handlerA.handle).toHaveBeenCalledTimes(1);
+    expect(handlerB.handle).toHaveBeenCalledTimes(1);
+
+    d.close();
+  });
+
+  it("rejects the pending task when ctx_call arrives with no ctxHandler configured", async () => {
+    // Defensive path: someone constructs a Dispatcher without
+    // `ctxHandler` and calls `invoke()` without `{ ctxHandler }` either.
+    // If the worker emits a ctx_call, there's nothing to handle it —
+    // the dispatcher must reject the pending task with a clear error
+    // rather than letting the caller hang on a ctx_result that never
+    // arrives.
+    const { host, worker } = makeTransportPair();
+    const d = new Dispatcher({ transport: host });
+    const promise = d.invoke(INVOKE);
+    worker.postMessage({ type: "ctx_call", id: "ctx-orphan", method: "now", args: {} });
+    await expect(promise).rejects.toThrow(/no ctxHandler/);
+    d.close();
+  });
 });

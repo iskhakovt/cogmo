@@ -62,13 +62,13 @@ export interface DispatcherOptions {
   transport: RpcTransport;
   /**
    * Default ctx handler for `invoke()` calls that don't pass one
-   * explicitly. Tier 1 (one dispatcher per task) wires it once at
-   * construction. Tier 2 supervisor workers (one dispatcher reused across
-   * many tasks) pass a fresh handler per `invoke()` call so each task
-   * carries its own per-run audit hooks; the constructor default is then
-   * unused but still required for a sane no-arg `invoke()`.
+   * explicitly. Tier 1 (one dispatcher per task) wires it here. Tier 2
+   * supervisor workers (one dispatcher reused across many tasks) leave it
+   * unset and supply a fresh handler per `invoke()` call. If neither is
+   * provided and a `ctx_call` arrives, the dispatcher rejects the
+   * pending task — a real bug at the call site, not a defensive throw.
    */
-  ctxHandler: CtxHandler;
+  ctxHandler?: CtxHandler;
 }
 
 /**
@@ -88,10 +88,10 @@ export interface DispatcherOptions {
  */
 export class Dispatcher {
   #transport: RpcTransport;
-  #defaultCtxHandler: CtxHandler;
+  #defaultCtxHandler: CtxHandler | undefined;
   #pendingTask: {
     id: string;
-    ctxHandler: CtxHandler;
+    ctxHandler: CtxHandler | undefined;
     resolve: (result: TaskResult) => void;
     reject: (e: Error) => void;
   } | null = null;
@@ -221,6 +221,27 @@ export class Dispatcher {
     const pending = this.#pendingTask;
     const ctxHandler = pending?.ctxHandler ?? this.#defaultCtxHandler;
     let response: CtxResult;
+    if (!ctxHandler) {
+      // Real bug at the call site — neither the constructor nor the
+      // per-task `invoke({ ctxHandler })` provided one, but the worker
+      // emitted a ctx_call. Reject the pending task so the caller's
+      // `invoke()` rejects with a clear error instead of hanging on a
+      // ctx_result that will never come.
+      log.warn(
+        { method: call.method, ctxId: call.id },
+        "ctx_call received but no ctxHandler configured — rejecting task",
+      );
+      const stillPending = this.#pendingTask;
+      if (stillPending) {
+        this.#pendingTask = null;
+        stillPending.reject(
+          new Error(
+            `dispatcher: no ctxHandler for ctx_call ${call.method} — caller must pass one to invoke() or via DispatcherOptions`,
+          ),
+        );
+      }
+      return;
+    }
     try {
       const value = await ctxHandler.handle({ method: call.method, args: call.args });
       response = { type: "ctx_result", id: call.id, ok: true, value };

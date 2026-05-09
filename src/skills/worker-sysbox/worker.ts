@@ -184,17 +184,11 @@ export class SysboxSkillWorker {
     });
 
     const transport = createNdjsonTransport(exec.stdin, exec.stdout);
-    // The default ctxHandler is never invoked — every `invoke()` passes a
-    // per-task handler. Provide a defensive throw-on-call default so a
-    // missed pass-through is loud.
-    const dispatcher = new Dispatcher({
-      transport,
-      ctxHandler: {
-        handle: async () => {
-          throw new Error("invariant: per-task ctxHandler missing on invoke()");
-        },
-      },
-    });
+    // No constructor default ctxHandler — every `invoke()` passes a
+    // per-task handler. If a missed pass-through ever triggers a ctx_call
+    // arriving with no handler, the dispatcher rejects the pending task
+    // with a clear error (see Dispatcher#handleCtxCall).
+    const dispatcher = new Dispatcher({ transport });
 
     log.debug({ workerId: opts.workerId, image: opts.image }, "skills worker spawned");
     return new SysboxSkillWorker({

@@ -6,14 +6,15 @@ these tests pin the building blocks: pidfd-based wait, SIGKILL+reap,
 and child entry point.
 """
 
-import io
 import json
 import os
 import time
+from collections.abc import Mapping
 
 import pytest
 
 from cogmo_skills_runtime.supervisor import (
+    _dispatch_one_task,
     _kill_and_reap,
     _run_one_task_in_child,
     _wait_with_timeout,
@@ -176,5 +177,85 @@ class TestSupervisorImportSafety:
         # The smoke test (TS sysbox-e2e job) covers the full loop.
 
 
-# Suppress pytest warning for unused io import (kept for future expansion).
-_ = io
+@_pidfd_required
+class TestDispatchOneTask:
+    """Drive `_dispatch_one_task` with a captured `send` so we can inspect
+    the synthesized `task_result` for abnormal-exit / wall-clock paths
+    without spinning up the full main loop.
+    """
+
+    def test_normal_exit_does_not_synthesize_task_result(self) -> None:
+        # Skill runs to completion; child writes its own task_result and
+        # exits 0. Supervisor should NOT also write one (would double-emit).
+        # Child stdout isn't observable from this process via capsys —
+        # capsys replaces `sys.stdout` in the parent, but after fork the
+        # child has its own copy and writes to a buffer the parent never
+        # sees. The contract this test pins is "supervisor does not also
+        # call send" on the happy path; the integration sysbox-e2e job
+        # covers the child's task_result reaching the host.
+        sent: list[Mapping[str, object]] = []
+        task = {
+            "type": "task_invoke",
+            "id": "t-ok",
+            "skill": "ok",
+            "inputs": {},
+            "body": "async def run(inputs, ctx):\n    return {'done': True}\n",
+            "wallClockS": 5,
+        }
+        _dispatch_one_task(task, "t-ok", sent.append)
+        assert sent == []
+
+    def test_child_exits_nonzero_synthesizes_child_died(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Skill calls `os._exit(139)` — simulates SIGSEGV exit code from a
+        # crashed C extension. Process exits before runner can write
+        # task_result. Supervisor must synthesize `child_died: exit=139`.
+        sent: list[Mapping[str, object]] = []
+        task = {
+            "type": "task_invoke",
+            "id": "t-die",
+            "skill": "die",
+            "inputs": {},
+            "body": "import os\nasync def run(inputs, ctx):\n    os._exit(139)\n",
+            "wallClockS": 5,
+        }
+        _dispatch_one_task(task, "t-die", sent.append)
+        # Child wrote nothing to stdout — no task_result before _exit.
+        # Supervisor's `send` got called once with child_died.
+        assert sent == [
+            {
+                "type": "task_result",
+                "id": "t-die",
+                "ok": False,
+                "error": "child_died: exit=139",
+            }
+        ]
+        # Supervisor logs the abnormal exit to its own stderr (the parent
+        # process's stderr — capsys captures this just fine).
+        assert "child died abnormally" in capsys.readouterr().err
+
+    def test_child_killed_by_signal_synthesizes_child_died_signal(self) -> None:
+        # Skill sleeps; we kill it externally to force a signal-based exit.
+        # Supervisor sees `WIFSIGNALED` and reports `signal=N`.
+        sent: list[Mapping[str, object]] = []
+        # The body sends SIGKILL to itself; status will say `signal=9`.
+        body = "import os, signal\nasync def run(inputs, ctx):\n    os.kill(os.getpid(), signal.SIGKILL)\n"
+        task = {
+            "type": "task_invoke",
+            "id": "t-sig",
+            "skill": "sig",
+            "inputs": {},
+            "body": body,
+            "wallClockS": 5,
+        }
+        _dispatch_one_task(task, "t-sig", sent.append)
+        assert len(sent) == 1
+        result = sent[0]
+        assert result["id"] == "t-sig"
+        assert result["ok"] is False
+        error = result["error"]
+        assert isinstance(error, str)
+        assert "child_died: signal=" in error
+
+

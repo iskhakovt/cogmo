@@ -5,13 +5,14 @@ These tests pin the JSON-RPC bridge and result-shape contracts in
 isolation — fake stdin/stdout streams, no fork, no docker.
 """
 
+import asyncio
 import io
 import json
 from typing import Any
 
 import pytest
 
-from cogmo_skills_runtime.runner import _main
+from cogmo_skills_runtime.runner import CtxError, _Bridge, _main
 
 
 async def _drive(
@@ -115,53 +116,22 @@ class TestErrors:
 
 
 class TestCtxBridge:
-    """The bridge writes ctx_call lines and blocks on ctx_result; we
-    drive it by pre-loading replies into the fake stdin.
+    """Direct unit tests on `_Bridge` — the call/deliver/fail correlation
+    logic is exercised end-to-end via the supervisor in sysbox-e2e, but
+    these isolate the request-id matching contract.
     """
 
     @pytest.mark.asyncio
-    async def test_ctx_now_round_trip(self) -> None:
-        # Pre-load a ctx_result that any ctx_call can match. The ctx_id
-        # is generated inside the runner so we don't know it ahead of
-        # time — we use a fake reader that copies any pending id back as
-        # the result id.
-        stdin_lines = []
-        stdout_buffer = io.StringIO()
-        stderr_buffer = io.StringIO()
-
-        # Strategy: drive the run as a coroutine, then watch stdout for
-        # the ctx_call, write the matching ctx_result to a pipe stdin.
-        # Simpler: hand-craft the call_id by patching uuid via the body
-        # that introspects the bridge — too involved. Instead, run with
-        # a body that doesn't await ctx (covered above) and pin the ctx
-        # bridge separately via a unit test on `_Bridge` if needed.
-        # This sub-suite is a smoke check that the stdin reader doesn't
-        # crash on the ctx_result happy path.
-        from cogmo_skills_runtime.runner import _Bridge
-
-        bridge = _Bridge(stdout_buffer)
-        # Manually queue a pending future + deliver the matching result
-        # to verify the correlation logic.
-        import asyncio
-
-        async def go() -> object:
-            future = asyncio.get_running_loop().create_future()
-            bridge._pending["ctx-fake"] = future
-            bridge.deliver({"id": "ctx-fake", "ok": True, "value": "hello"})
-            return await future
-
-        result = await go()
-        assert result == "hello"
-        # Suppress unused-var warnings.
-        _ = stdin_lines, stderr_buffer
+    async def test_deliver_resolves_pending_future(self) -> None:
+        bridge = _Bridge(io.StringIO())
+        future = asyncio.get_running_loop().create_future()
+        bridge._pending["ctx-fake"] = future
+        bridge.deliver({"id": "ctx-fake", "ok": True, "value": "hello"})
+        assert await future == "hello"
 
     @pytest.mark.asyncio
-    async def test_ctx_error_surfaces_typed_exception(self) -> None:
-        from cogmo_skills_runtime.runner import CtxError, _Bridge
-
+    async def test_deliver_surfaces_typed_ctx_error(self) -> None:
         bridge = _Bridge(io.StringIO())
-        import asyncio
-
         future = asyncio.get_running_loop().create_future()
         bridge._pending["ctx-err"] = future
         bridge.deliver(
@@ -179,11 +149,7 @@ class TestCtxBridge:
 
     @pytest.mark.asyncio
     async def test_fail_pending_rejects_outstanding_calls(self) -> None:
-        from cogmo_skills_runtime.runner import _Bridge
-
         bridge = _Bridge(io.StringIO())
-        import asyncio
-
         future = asyncio.get_running_loop().create_future()
         bridge._pending["ctx-orphan"] = future
         bridge.fail_pending(RuntimeError("stdin closed"))

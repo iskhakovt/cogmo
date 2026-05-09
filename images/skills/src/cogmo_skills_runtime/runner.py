@@ -17,7 +17,7 @@ import sys
 import traceback
 import uuid
 from collections.abc import Mapping, Sequence
-from typing import Any, TextIO
+from typing import Any, BinaryIO, TextIO
 
 
 class CtxError(Exception):
@@ -153,7 +153,7 @@ class Ctx:
         return await self._b.call("user", {})
 
 
-async def _read_stdin_lines(bridge: _Bridge, stdin: object, stderr: TextIO) -> None:
+async def _read_stdin_lines(bridge: _Bridge, stdin: BinaryIO, stderr: TextIO) -> None:
     """Drain stdin during a task's run — only `ctx_result` shapes are
     expected; everything else is logged to stderr and dropped.
     """
@@ -193,7 +193,7 @@ async def _main(
     inputs: Any,
     task_id: str,
     *,
-    stdin: object | None = None,
+    stdin: BinaryIO | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> None:
