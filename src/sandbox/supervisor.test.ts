@@ -132,7 +132,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const taskId = "019d0000-0000-7000-8000-000000000aaa";
     const handle = await sandbox.create({
       taskId,
-      worktree: { hostPath: "/tmp/wt" },
+      worktree: { type: "host-path", hostPath: "/tmp/wt" },
       homeVolume: { volumeName: "vol-1" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
@@ -186,7 +186,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
 
     await sandbox.create({
       taskId: "019d0000-0000-7000-8000-000000000bbb",
-      worktree: { hostPath: "/tmp/wt" },
+      worktree: { type: "host-path", hostPath: "/tmp/wt" },
       homeVolume: { volumeName: "vol-2" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
@@ -215,7 +215,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     await expect(
       sandbox.create({
         taskId: "019d0000-0000-7000-8000-000000000ccc",
-        worktree: { hostPath: "/tmp/wt" },
+        worktree: { type: "host-path", hostPath: "/tmp/wt" },
         homeVolume: { volumeName: "vol-3" },
         image: "alpine",
         resourceLimits: RESOURCE_LIMITS,
@@ -243,7 +243,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     await expect(
       sandbox.create({
         taskId: "019d0000-0000-7000-8000-000000000ddd",
-        worktree: { hostPath: "/tmp/wt" },
+        worktree: { type: "host-path", hostPath: "/tmp/wt" },
         homeVolume: { volumeName: "vol-4" },
         image: "alpine",
         resourceLimits: RESOURCE_LIMITS,
@@ -272,7 +272,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
 
     await sandbox.create({
       taskId: "019d0000-0000-7000-8000-000000000eee",
-      worktree: { hostPath: "/tmp/wt" },
+      worktree: { type: "host-path", hostPath: "/tmp/wt" },
       homeVolume: { volumeName: "vol-5" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
@@ -297,7 +297,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
 
     await sandbox.create({
       taskId: "019d0000-0000-7000-8000-000000000fff",
-      worktree: { hostPath: "/tmp/wt" },
+      worktree: { type: "host-path", hostPath: "/tmp/wt" },
       homeVolume: { volumeName: "vol-ap" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
@@ -337,7 +337,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
 
     await sandbox.create({
       taskId: "019d0000-0000-7000-8000-000000abcdef",
-      worktree: { hostPath: "/tmp/wt" },
+      worktree: { type: "host-path", hostPath: "/tmp/wt" },
       homeVolume: { volumeName: "vol-stop-askpass" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
@@ -398,7 +398,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
 
     await sandbox.create({
       taskId,
-      worktree: { hostPath: "/tmp/wt" },
+      worktree: { type: "host-path", hostPath: "/tmp/wt" },
       homeVolume: { volumeName: "vol-killfail" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
@@ -428,7 +428,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
 
     await sandbox.create({
       taskId: "019d0000-0000-7000-8000-0000000fffff",
-      worktree: { hostPath: "/tmp/wt" },
+      worktree: { type: "host-path", hostPath: "/tmp/wt" },
       homeVolume: { volumeName: "vol-no-askpass" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
@@ -454,7 +454,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     });
     await sandbox.create({
       taskId: "019d0000-0000-7000-8000-000000000e10",
-      worktree: { hostPath: "/tmp/wt" },
+      worktree: { type: "host-path", hostPath: "/tmp/wt" },
       homeVolume: { volumeName: "vol-env" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,
@@ -480,7 +480,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     });
     await sandbox.create({
       taskId: "019d0000-0000-7000-8000-000000000e11",
-      worktree: { hostPath: "/tmp/wt" },
+      worktree: { type: "host-path", hostPath: "/tmp/wt" },
       homeVolume: { volumeName: "vol-no-env" },
       image: "alpine",
       resourceLimits: RESOURCE_LIMITS,

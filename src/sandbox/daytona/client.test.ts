@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   DaytonaNotFoundError,
   type Sandbox as DaytonaSdkSandbox,
@@ -35,10 +38,24 @@ interface FakeSandboxOptions {
   labels?: Record<string, string>;
 }
 
-function fakeSandbox(opts: FakeSandboxOptions): DaytonaSdkSandbox {
-  // Constructed as a minimal duck-type — Cogmo's client only reads `id`,
-  // `state`, calls `start`/`delete`/`refreshActivity`/`process`, never the
-  // SDK-level behaviour we don't override here.
+interface FakeSandbox extends DaytonaSdkSandbox {
+  // Expose the spies directly so tests can assert against them without
+  // a `(sandbox.git.clone as Mock)` cast at every call site.
+  __spies: {
+    delete: ReturnType<typeof vi.fn>;
+    gitClone: ReturnType<typeof vi.fn>;
+    fsUploadFiles: ReturnType<typeof vi.fn>;
+    fsSetFilePermissions: ReturnType<typeof vi.fn>;
+  };
+}
+
+function fakeSandbox(opts: FakeSandboxOptions): FakeSandbox {
+  const spies = {
+    delete: vi.fn(async () => {}),
+    gitClone: vi.fn(async () => {}),
+    fsUploadFiles: vi.fn(async () => {}),
+    fsSetFilePermissions: vi.fn(async () => {}),
+  };
   const sandbox = {
     id: opts.id,
     state: opts.state,
@@ -47,7 +64,7 @@ function fakeSandbox(opts: FakeSandboxOptions): DaytonaSdkSandbox {
       sandbox.state = SandboxState.STARTED;
     }),
     stop: vi.fn(async () => {}),
-    delete: vi.fn(async () => {}),
+    delete: spies.delete,
     archive: vi.fn(async () => {}),
     refreshActivity: vi.fn(async () => {}),
     setLabels: vi.fn(async (l: Record<string, string>) => l),
@@ -55,8 +72,11 @@ function fakeSandbox(opts: FakeSandboxOptions): DaytonaSdkSandbox {
     process: {
       /* opaque to these tests */
     } as DaytonaSdkSandbox["process"],
+    git: { clone: spies.gitClone },
+    fs: { uploadFiles: spies.fsUploadFiles, setFilePermissions: spies.fsSetFilePermissions },
+    __spies: spies,
   };
-  return sandbox as unknown as DaytonaSdkSandbox;
+  return sandbox as unknown as FakeSandbox;
 }
 
 beforeEach(() => {
@@ -180,12 +200,177 @@ describe("DaytonaSandboxClient", () => {
       });
     });
 
+    it("clones via SDK git.clone when worktree.type is 'git-remote'", async () => {
+      const sb = fakeSandbox({ id: "sb-git", state: SandboxState.STARTED });
+      daytonaCalls.create.mockResolvedValue(sb);
+      const client = await makeClient();
+
+      await client.create({
+        ...BASE_SPEC,
+        worktree: {
+          type: "git-remote",
+          url: "https://github.com/cogmo/example.git",
+          branch: "cogmo/run/019d0000-0000-7000-8000-000000000aaa",
+          auth: { username: "x-access-token", password: "ghp_test_pat" },
+        },
+      });
+
+      // Sandbox-relative `/workspace` matches the bind-mount path
+      // Local-Docker uses, so the verify orchestrator's
+      // `WORKTREE_DIR_IN_CONTAINER` works on either backend unchanged.
+      expect(sb.__spies.gitClone).toHaveBeenCalledTimes(1);
+      expect(sb.__spies.gitClone).toHaveBeenCalledWith(
+        "https://github.com/cogmo/example.git",
+        "/workspace",
+        "cogmo/run/019d0000-0000-7000-8000-000000000aaa",
+        undefined,
+        "x-access-token",
+        "ghp_test_pat",
+      );
+    });
+
+    it("uploads askpass + applies modes when spec.askpass is set", async () => {
+      const sb = fakeSandbox({ id: "sb-ask", state: SandboxState.STARTED });
+      daytonaCalls.create.mockResolvedValue(sb);
+
+      const hostDir = mkdtempSync(join(tmpdir(), "cogmo-ask-client-"));
+      try {
+        writeFileSync(join(hostDir, "helper"), "#!/bin/sh\nexec /bin/cat /tmp/pat\n");
+        writeFileSync(join(hostDir, "pat"), "ghp_test_pat");
+        writeFileSync(join(hostDir, "signing-key"), "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n");
+        writeFileSync(join(hostDir, "signing-key.pub"), "ssh-ed25519 AAAA... cogmo-bot\n");
+
+        const client = await makeClient();
+        await client.create({
+          ...BASE_SPEC,
+          askpass: { hostDir, containerDir: "/.cogmo-askpass" },
+        });
+
+        expect(sb.__spies.fsUploadFiles).toHaveBeenCalledTimes(1);
+        // Detailed mode/contents assertions live in askpass-upload.test.ts;
+        // here we just confirm the integration fires.
+        expect(sb.__spies.fsSetFilePermissions).toHaveBeenCalledTimes(4);
+      } finally {
+        rmSync(hostDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rolls back via sdk delete() when post-create clone fails", async () => {
+      const sb = fakeSandbox({ id: "sb-fail", state: SandboxState.STARTED });
+      sb.__spies.gitClone.mockRejectedValue(new Error("clone forbidden"));
+      daytonaCalls.create.mockResolvedValue(sb);
+      const client = await makeClient();
+
+      await expect(
+        client.create({
+          ...BASE_SPEC,
+          worktree: {
+            type: "git-remote",
+            url: "https://github.com/cogmo/example.git",
+            branch: "cogmo/run/x",
+            auth: { username: "x-access-token", password: "bad" },
+          },
+        }),
+      ).rejects.toThrow(/clone forbidden/);
+      // Without the rollback the freshly-billed sandbox would orphan
+      // until the (Phase 3c) reaper picks it up — expensive on a
+      // per-sandbox-billing provider.
+      expect(sb.__spies.delete).toHaveBeenCalledTimes(1);
+    });
+
+    it("rolls back when fs.setFilePermissions fails mid-upload", async () => {
+      const sb = fakeSandbox({ id: "sb-perm-fail", state: SandboxState.STARTED });
+      sb.__spies.fsSetFilePermissions.mockRejectedValue(new Error("perm denied"));
+      daytonaCalls.create.mockResolvedValue(sb);
+
+      const hostDir = mkdtempSync(join(tmpdir(), "cogmo-perm-fail-"));
+      try {
+        writeFileSync(join(hostDir, "helper"), "#!/bin/sh\nexec /bin/cat /tmp/pat\n");
+        writeFileSync(join(hostDir, "pat"), "ghp_x");
+        writeFileSync(join(hostDir, "signing-key"), "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n");
+        writeFileSync(join(hostDir, "signing-key.pub"), "ssh-ed25519 AAAA... cogmo-bot\n");
+
+        const client = await makeClient();
+        await expect(
+          client.create({
+            ...BASE_SPEC,
+            askpass: { hostDir, containerDir: "/.cogmo-askpass" },
+          }),
+        ).rejects.toThrow(/perm denied/);
+        // 600 on signing-key is non-negotiable for ssh-keygen -Y sign;
+        // a setFilePermissions failure is the same provisioning hazard
+        // as a clone failure and rolls back identically.
+        expect(sb.__spies.delete).toHaveBeenCalledTimes(1);
+      } finally {
+        rmSync(hostDir, { recursive: true, force: true });
+      }
+    });
+
+    it("provisions both askpass and git-remote when both are set", async () => {
+      const sb = fakeSandbox({ id: "sb-both", state: SandboxState.STARTED });
+      daytonaCalls.create.mockResolvedValue(sb);
+
+      const hostDir = mkdtempSync(join(tmpdir(), "cogmo-both-"));
+      try {
+        writeFileSync(join(hostDir, "helper"), "#!/bin/sh\nexec /bin/cat /tmp/pat\n");
+        writeFileSync(join(hostDir, "pat"), "ghp_combined");
+        writeFileSync(join(hostDir, "signing-key"), "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n");
+        writeFileSync(join(hostDir, "signing-key.pub"), "ssh-ed25519 AAAA... cogmo-bot\n");
+
+        const client = await makeClient();
+        const session = await client.create({
+          ...BASE_SPEC,
+          worktree: {
+            type: "git-remote",
+            url: "https://github.com/cogmo/example.git",
+            branch: "cogmo/run/combined",
+            auth: { username: "x-access-token", password: "ghp_combined" },
+          },
+          askpass: { hostDir, containerDir: "/.cogmo-askpass" },
+        });
+
+        // Production shape (3b.2 coding pipeline) sets both — this
+        // catches a regression that would otherwise only surface end-to-end.
+        expect(sb.__spies.fsUploadFiles).toHaveBeenCalledTimes(1);
+        expect(sb.__spies.gitClone).toHaveBeenCalledTimes(1);
+        expect(sb.__spies.delete).not.toHaveBeenCalled();
+        expect(session.state.sandboxId).toBe("sb-both");
+      } finally {
+        rmSync(hostDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not propagate teardown errors during rollback — original cause survives", async () => {
+      const sb = fakeSandbox({ id: "sb-tear-fail", state: SandboxState.STARTED });
+      sb.__spies.gitClone.mockRejectedValue(new Error("clone forbidden"));
+      sb.__spies.delete.mockRejectedValue(new Error("teardown 503"));
+      daytonaCalls.create.mockResolvedValue(sb);
+      const client = await makeClient();
+
+      // Caller sees the ROOT cause (clone forbidden), not the teardown
+      // failure — otherwise an alert chain triggered by "teardown 503"
+      // would mask the original auth misconfig that started it.
+      await expect(
+        client.create({
+          ...BASE_SPEC,
+          worktree: {
+            type: "git-remote",
+            url: "https://github.com/cogmo/example.git",
+            branch: "cogmo/run/x",
+            auth: { username: "x-access-token", password: "bad" },
+          },
+        }),
+      ).rejects.toThrow(/clone forbidden/);
+      expect(sb.__spies.delete).toHaveBeenCalledTimes(1);
+    });
+
     it.each([
-      ["worktree", { worktree: { hostPath: "/tmp/wt" } } as Partial<SessionSpec>, /Phase 3a/],
       [
-        "askpass",
-        { askpass: { hostDir: "/tmp/a", containerDir: "/.cogmo-askpass" } } as Partial<SessionSpec>,
-        /Phase 3a/,
+        "host-path worktree",
+        {
+          worktree: { type: "host-path", hostPath: "/tmp/wt" },
+        } as Partial<SessionSpec>,
+        /git-remote/,
       ],
       ["homeVolume", { homeVolume: { volumeName: "v" } } as Partial<SessionSpec>, /auto-persists/],
       [
@@ -193,7 +378,7 @@ describe("DaytonaSandboxClient", () => {
         { allowPrivilegedRunc: true } as Partial<SessionSpec>,
         /Local-Docker-specific/,
       ],
-    ])("rejects %s as Phase-3a-unsupported", async (_label, override, msg) => {
+    ])("rejects %s as backend-incompatible", async (_label, override, msg) => {
       const client = await makeClient();
       await expect(client.create({ ...BASE_SPEC, ...override })).rejects.toThrow(msg);
       expect(daytonaCalls.create).not.toHaveBeenCalled();
