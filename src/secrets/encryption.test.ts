@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   decrypt,
+  decryptBytes,
   deriveMasterKey,
   encrypt,
+  encryptBytes,
   fromBase64,
   generateMasterKey,
   parseMasterKey,
@@ -67,6 +69,38 @@ describe("encryption", () => {
     if (nonce[0] === undefined) throw new Error("expected non-empty nonce");
     nonce[0] ^= 0xff;
     expect(() => decrypt(key, ciphertext, nonce)).toThrow();
+  });
+});
+
+describe("encryptBytes / decryptBytes", () => {
+  it("round-trips arbitrary bytes including null and 0xff", () => {
+    const key = testKey();
+    const plaintext = new Uint8Array([0x00, 0xff, 0x42, 0x13, 0x00]);
+    const { ciphertext, nonce } = encryptBytes(key, plaintext);
+    expect(decryptBytes(key, ciphertext, nonce)).toEqual(plaintext);
+  });
+
+  it("handles empty input", () => {
+    const key = testKey();
+    const { ciphertext, nonce } = encryptBytes(key, new Uint8Array());
+    expect(decryptBytes(key, ciphertext, nonce)).toEqual(new Uint8Array());
+  });
+
+  it("produces fresh nonces for each encryption", () => {
+    const key = testKey();
+    const data = new Uint8Array([1, 2, 3]);
+    const a = encryptBytes(key, data);
+    const b = encryptBytes(key, data);
+    expect(a.nonce).not.toEqual(b.nonce);
+    expect(a.ciphertext).not.toEqual(b.ciphertext);
+  });
+
+  it("throws on tampered ciphertext", () => {
+    const key = testKey();
+    const { ciphertext, nonce } = encryptBytes(key, new Uint8Array([1, 2, 3]));
+    if (ciphertext[0] === undefined) throw new Error("expected non-empty ciphertext");
+    ciphertext[0] ^= 0xff;
+    expect(() => decryptBytes(key, ciphertext, nonce)).toThrow();
   });
 });
 

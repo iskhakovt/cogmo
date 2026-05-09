@@ -71,6 +71,7 @@ import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.
 import { DrizzleSkillStore } from "./skills/store/index.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
 import { createDeliveryRouter } from "./transport/delivery-router.js";
+import { wrapAttachmentStoreWithEncryption } from "./transport/encrypted-attachment-store.js";
 import { startChannels } from "./transport/registry.js";
 import { DrizzleTransportStore } from "./transport/store/index.js";
 
@@ -265,8 +266,30 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // depend on it (image generation, file workspace, attachment delivery)
   // start handling traffic. HeadBucket is the cheapest probe.
   await checkS3Bucket(s3Client, env.S3_BUCKET);
-  const fileService = createFileService(s3Client, env.S3_BUCKET);
-  const attachmentStore = createAttachmentStore(s3Client, env.S3_BUCKET);
+  // Optional client-side encryption — when enabled, attachment bodies AND
+  // workspace file bodies are AES-256-GCM-encrypted before upload using
+  // a key derived from `COGMO_MASTER_KEY` (already validated above).
+  // Storage provider only ever sees ciphertext. Object keys remain
+  // plaintext (matches the AWS S3 Encryption Client convention — if
+  // file names need to stay secret, choose non-revealing names). See
+  // the `S3_CLIENT_ENCRYPT` env-var doc for the full trade-off.
+  const attachmentEncryptionKey = env.S3_CLIENT_ENCRYPT
+    ? deriveMasterKey(parseMasterKey(env.COGMO_MASTER_KEY), "cogmo/s3-objects/v1")
+    : null;
+  const fileService = createFileService(
+    s3Client,
+    env.S3_BUCKET,
+    attachmentEncryptionKey ? { key: attachmentEncryptionKey } : undefined,
+  );
+  const baseAttachmentStore = createAttachmentStore(s3Client, env.S3_BUCKET);
+  const attachmentStore = attachmentEncryptionKey
+    ? wrapAttachmentStoreWithEncryption(baseAttachmentStore, attachmentEncryptionKey)
+    : baseAttachmentStore;
+  if (env.S3_CLIENT_ENCRYPT) {
+    logger.info(
+      "S3_CLIENT_ENCRYPT=true — attachments and workspace files encrypted client-side with AES-256-GCM",
+    );
+  }
 
   // Tool credentials: DB first (wizard-configured), env fallback (dev convenience).
   const tavilyKey =

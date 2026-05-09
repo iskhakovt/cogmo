@@ -33,30 +33,53 @@ export function deriveMasterKey(rawKey: Uint8Array, purpose: string): Uint8Array
 }
 
 /**
- * Encrypt a plaintext string with AES-256-GCM.
+ * Encrypt raw bytes with AES-256-GCM.
  *
  * Returns the ciphertext (with appended auth tag) and a random 12-byte nonce.
  * The caller must store both — the nonce is not secret but is required for
  * decryption.
  */
-export function encrypt(
+export function encryptBytes(
   key: Uint8Array,
-  plaintext: string,
+  plaintext: Uint8Array,
 ): { ciphertext: Uint8Array; nonce: Uint8Array } {
   const nonce = randomBytes(NONCE_LENGTH);
-  const ciphertext = gcm(key, nonce).encrypt(new TextEncoder().encode(plaintext));
+  const ciphertext = gcm(key, nonce).encrypt(plaintext);
   return { ciphertext, nonce };
 }
 
 /**
- * Decrypt an AES-256-GCM ciphertext back to a plaintext string.
+ * Decrypt AES-256-GCM ciphertext back to raw bytes.
  *
  * Throws if the key, nonce, or ciphertext is wrong (auth tag verification
  * fails). Never returns corrupted data — it's all-or-nothing.
  */
+export function decryptBytes(
+  key: Uint8Array,
+  ciphertext: Uint8Array,
+  nonce: Uint8Array,
+): Uint8Array {
+  return gcm(key, nonce).decrypt(ciphertext);
+}
+
+/**
+ * Encrypt a plaintext string with AES-256-GCM. Thin UTF-8 wrapper over
+ * `encryptBytes` — for callers (e.g. the secrets-at-rest store) that
+ * work in strings.
+ */
+export function encrypt(
+  key: Uint8Array,
+  plaintext: string,
+): { ciphertext: Uint8Array; nonce: Uint8Array } {
+  return encryptBytes(key, new TextEncoder().encode(plaintext));
+}
+
+/**
+ * Decrypt AES-256-GCM ciphertext back to a plaintext string. Thin UTF-8
+ * wrapper over `decryptBytes`.
+ */
 export function decrypt(key: Uint8Array, ciphertext: Uint8Array, nonce: Uint8Array): string {
-  const plaintext = gcm(key, nonce).decrypt(ciphertext);
-  return new TextDecoder().decode(plaintext);
+  return new TextDecoder().decode(decryptBytes(key, ciphertext, nonce));
 }
 
 /** Parse a base64-encoded master key into raw bytes. */

@@ -25,6 +25,7 @@ const MIME_EXT: Record<string, string> = {
   "image/webp": "webp",
   "image/svg+xml": "svg",
   "application/pdf": "pdf",
+  "application/octet-stream": "bin",
 };
 
 export function mediaTypeToExt(mediaType: string): string {
