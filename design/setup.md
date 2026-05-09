@@ -45,6 +45,8 @@ The wizard is a linear sequence of steps. Each step:
 | S3 storage | No (defaults work for dev) | `headBucket` |
 | Telegram channel | No | `getMe` → "Connected as @bot_username" |
 | Telegram allowlist | If Telegram added | Parse comma-separated user IDs |
+| GitHub identity (PAT + SSH signing key) | No (required for coding-delegation) | `GET /user`; SSH keypair generated locally |
+| Daytona API key | No (required for `SANDBOX_BACKEND=daytona`) | `daytona.list({}, 1, 1)` probe — returns typed errors for 401 / 403 (org-id missing) / connection |
 | Summary | — | Live ping each component |
 
 ### Inline help
@@ -76,7 +78,7 @@ The wizard is **not a one-shot first-run gate**. It's a settings flow that happe
 
 ### Non-interactive mode
 
-For CI, IaC, or Docker entrypoint scripts. Reads from env vars with `COGMO_` prefix:
+For CI, IaC, or Docker entrypoint scripts. Reads from env vars with the `COGMO_` prefix when the value is a **credential** (seeded into the encrypted `secrets` table on first boot and not read again — `COGMO_LLM_API_KEY`, `COGMO_GITHUB_PAT`, `COGMO_DAYTONA_API_KEY`, etc.). **Operator config** values that the runtime keeps reading from the environment (provider URLs, org pins) keep their upstream-tool name (`DAYTONA_API_URL`, `DAYTONA_ORGANIZATION_ID`) — these are not seeded, not encrypted, and consulted on every boot.
 
 | Env var | Maps to | Required |
 |-|-|-|
@@ -87,6 +89,10 @@ For CI, IaC, or Docker entrypoint scripts. Reads from env vars with `COGMO_` pre
 | `COGMO_TELEGRAM_ALLOWED_USERS` | Comma-separated Telegram user IDs | Required with token |
 | `COGMO_TAVILY_API_KEY` (+ `_FILE`) | Tavily API key | Optional |
 | `COGMO_FAL_API_KEY` (+ `_FILE`) | fal.ai image generation key | Optional |
+| `COGMO_GITHUB_PAT` (+ `_FILE`) | GitHub identity bundle PAT (validated against `GET /user`); SSH keypair generated locally | Optional (required for coding-delegation) |
+| `COGMO_DAYTONA_API_KEY` (+ `_FILE`) | Daytona API key — seeded into the encrypted `daytona_api_key` secret on first boot, never read again. | Optional (required for `SANDBOX_BACKEND=daytona`) |
+| `DAYTONA_API_URL` | Daytona base URL — `undefined` defaults to Daytona Cloud. Operator config, not a credential. | Optional |
+| `DAYTONA_ORGANIZATION_ID` | Pins the API key to a specific Daytona org. Required when the key has multi-org access (otherwise `daytona.list()` returns 403). | Optional |
 
 Every secret-bearing input supports the `_FILE` convention (Docker-style — point at a file, contents used as the value).
 

@@ -155,6 +155,57 @@ const codingTask = inngest.createFunction(
 );
 ```
 
+### Fan-out cron (per-item retry lanes) `[confirmed]`
+
+For crons that touch N independent items (sweep N repos, reconcile N user accounts), fan out via `step.sendEvent` to a per-item handler instead of a serial loop. Each per-item run gets its own retry budget and lane in the dashboard, and per-item failures don't block siblings.
+
+```typescript
+// Cron emits one event per repo
+const sweepCron = inngest.createFunction(
+  { id: "sweep-cron", retries: 2, triggers: [{ cron: "0 4 * * 0" }] },
+  async ({ step }) => {
+    const repos = await step.run("list-repos", () => listRepos());
+    if (repos.length === 0) return { repos: 0 };
+    await step.sendEvent("fan-out",
+      repos.map((r) => sweepRepoEvent.create({ repoId: r.id })));
+    return { repos: repos.length };
+  },
+);
+
+// Per-repo handler with its own concurrency cap + default retries
+const perRepo = inngest.createFunction(
+  { id: "sweep-repo", concurrency: { limit: 2 }, triggers: [sweepRepoEvent] },
+  async ({ event, step }) => {
+    // ... per-repo work, each item in its own step.run ...
+  },
+);
+```
+
+Concrete example: `src/agent/coding/cleanup-orphan-run-branches.ts` sweeps `cogmo/run/*` refs from GitHub. Cron lists repos, fans out per-repo, per-repo handler walks `listMatchingRefs` via `octokit.paginate` and runs each `git.deleteRef` in its own `step.run` so a single 5xx doesn't redo successful deletes on retry.
+
+### Don't return secrets through `step.run` `[confirmed]`
+
+Inngest persists every `step.run` return value into its internal state store (necessary for replay-correctness). A step body that decrypts a secret and returns it leaks the plaintext into Inngest's database and logs.
+
+Pattern: load secrets **outside** `step.run`. Either at function-load time (top-level await), or inline before the step that consumes them. Inside step bodies you can decrypt + use a secret freely — just don't return it.
+
+```typescript
+// ❌ leaks the PAT into Inngest state
+const identity = await step.run("load-identity", () =>
+  resolveGitHubIdentity(secretsStore, name));
+
+// ✓ uses the PAT but doesn't return it
+const identity = await resolveGitHubIdentity(secretsStore, name);  // outside step.run
+const sessionState = await step.run("create-container", async () => {
+  const session = await sandbox.create({
+    worktree: { ..., auth: { username: "x-access-token", password: identity.pat } },
+  });
+  return session.state;  // sessionState carries no PAT
+});
+```
+
+The inline DB read is itself idempotent (a secret decrypt has no side effects), so re-running it on replay is safe even though it's not checkpointed. Concrete examples in `src/agent/coding/orchestrator.ts` and `src/agent/coding/cleanup-orphan-run-branches.ts`.
+
 ## Agent Self-Scheduling `[proposed]`
 
 The agent can create scheduled tasks by sending events that trigger Inngest functions, or by using the Inngest REST API to create new function triggers.
