@@ -300,9 +300,9 @@ The git-remote transport pushes a `cogmo/run/<task-id>` ref to the remote at `al
 
 The slice-4 PR namespace `cogmo/<idShort>` (different from `cogmo/run/*`) stays untouched — GitHub's `delete_branch_on_merge` setting cleans it up on merge, and the WIP-ref cron above prunes `refs/cogmo-wip/<task-id>` independently.
 
-### Why GitHub identities load OUTSIDE `step.run`
+### Identity loading and `step.run`
 
-Inngest persists every `step.run` return value into its state store. A `step.run` body that resolves a `github_identity:<name>` secret and returns the bundle would persist the PAT + SSH private key into Inngest's database. The orchestrator avoids this by calling `loadIdentity` directly (no step wrapper) at the top of plan / execute / verify, and by resolving auth INSIDE step bodies (where consumed by `buildWorktreeSpec` → `sandbox.create`) but never returning it. This is enforced by inline comments at every load site and by the cleanup-cron's parallel design — `cleanup-orphan-run-branches.ts` loads identity inline and only the per-ref `step.run` return values (no PAT) reach the state store.
+Identity bundles (PAT + SSH private key) follow [scheduling.md → Don't return secrets through `step.run`](scheduling.md#dont-return-secrets-through-steprun-confirmed): `loadIdentity` is called inline (never wrapped in a step), and when consumed inside step bodies (`buildWorktreeSpec` → `sandbox.create`, the cleanup cron's per-ref deletes) the PAT is used internally and never returned. The orchestrator and `cleanup-orphan-run-branches.ts` both follow this pattern.
 
 ### Resume procedure `[confirmed]`
 

@@ -78,7 +78,7 @@ The wizard is **not a one-shot first-run gate**. It's a settings flow that happe
 
 ### Non-interactive mode
 
-For CI, IaC, or Docker entrypoint scripts. Reads from env vars with `COGMO_` prefix:
+For CI, IaC, or Docker entrypoint scripts. Reads from env vars with the `COGMO_` prefix when the value is a **credential** (seeded into the encrypted `secrets` table on first boot and not read again — `COGMO_LLM_API_KEY`, `COGMO_GITHUB_PAT`, `COGMO_DAYTONA_API_KEY`, etc.). **Operator config** values that the runtime keeps reading from the environment (provider URLs, org pins) keep their upstream-tool name (`DAYTONA_API_URL`, `DAYTONA_ORGANIZATION_ID`) — these are not seeded, not encrypted, and consulted on every boot.
 
 | Env var | Maps to | Required |
 |-|-|-|

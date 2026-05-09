@@ -476,13 +476,13 @@ Configured via environment:
 
 tRPC's HTTP client accepts a custom `fetch`, so the Unix-socket case is wired via undici's `Agent({ socketPath })`. No code difference between transports beyond the URL.
 
-## Daytona Backend `[confirmed]` / `[proposed]` for real-traffic load behavior
+## Daytona Backend `[confirmed]`
 
 The Daytona backend runs task sandboxes on Daytona's managed cloud (default) or self-hosted Daytona instance. Daytona owns sandbox isolation and lifecycle. Cogmo drives via the [Daytona TypeScript SDK](https://www.daytona.io/docs/typescript-sdk/daytona/).
 
 **Two phases shipped:** Phase 3a (PR #173) lifted skills tier-2 onto Daytona — worktree-less, ephemeral, ephemeral askpass-less. Phase 3b (PRs #183 / #192 / #196) wired coding-delegation through the `git-remote` working-tree transport: orchestrator force-pushes a `cogmo/run/<task-id>` ref, the SDK's `git.clone` rehydrates it inside the sandbox, askpass material is uploaded via `fs.uploadFiles`. Both flows share the same `SandboxClient` interface; consumers branch on `capabilities.workingTreeTransport`.
 
-**Status:** Production-ready for skills tier-2 and the coding-delegation `git-remote` flow against a single user's traffic. The streaming-exec WebSocket path (`getSessionCommandLogs`) and the `refreshActivity()` keepalive are `[proposed]` until real traffic exercises multi-minute idle stretches and transient WS disconnects — the unknowns called out below stay until Phase 3c integration testing closes them.
+Production-ready for skills tier-2 and the coding-delegation `git-remote` flow against a single user's traffic. Subsections that need real-traffic validation before they graduate to fully-trusted status carry their own `[proposed]` markers below — `Streaming exec` and `Keepalive` specifically.
 
 ### Authentication & deployment
 
@@ -492,7 +492,7 @@ Base URL is configuration, not credential — `DaytonaSandboxClientOptions.apiUr
 
 `DaytonaSandboxClientOptions.organizationId` is similarly deployment-time — populated from `DAYTONA_ORGANIZATION_ID` env. Required when the API key has multi-org access; Daytona returns 403 on `list({}, 1, 1)` if the org isn't pinned.
 
-#### Keepalive
+#### Keepalive `[proposed]`
 
 Daytona's default `autoStopInterval` reaps idle sandboxes after 15 minutes. Coding tasks stream model output for tens of minutes with arbitrary inter-token latency, which Daytona reads as "idle." The client starts a `refreshActivity()` ticker per live sandbox, firing every 5 minutes, to reset the auto-stop countdown. The ticker stops on `delete(session)` / `deleteByTaskId(taskId)` / `shutdown()`. `setInterval` handles are `unref()`'d so the Node process can exit cleanly when nothing else holds the loop open.
 
@@ -500,7 +500,7 @@ Daytona's default `autoStopInterval` reaps idle sandboxes after 15 minutes. Codi
 
 Applies only when `SessionSpec.worktree` is set — i.e. coding-delegation tasks. Skills tier-2 sessions omit `worktree` and skip the git ceremony entirely (`create()` → `exec()` → `delete()`).
 
-Working-tree material moves between orchestrator and sandbox via an ephemeral branch on the repo's GitHub remote. This matches the published industry pattern across Codex, Cursor, Devin, Codespaces, and Replit — every major AI coding agent uses git-as-transport rather than bind-mount or rsync. Daytona ships `sandbox.git.clone()` and `sandbox.git.push()` as first-class SDK methods.
+Working-tree material moves between orchestrator and sandbox via an ephemeral branch on the repo's GitHub remote. This matches the published pattern of remote AI-agent-sandbox products that need to push state into a managed VM: Codex Cloud and Devin both clone task state into their sandbox via git, and Daytona ships `sandbox.git.clone()` and `sandbox.git.push()` as first-class SDK methods — signalling the same expected flow. Local-IDE products (Cursor edits a checkout in place; Codespaces clones for the user's IDE) operate on a different axis and aren't precedent for the orchestrator-pushes-state direction.
 
 Per-task lifecycle (worktree-bearing sessions):
 
@@ -525,7 +525,7 @@ The 7-day retention applies only to the cron's stale criterion. The event-driven
 
 The slice-4 PR namespace `cogmo/<idShort>` (different namespace from `cogmo/run/*`) stays untouched until the user merges/closes — GitHub's repo-level `delete_branch_on_merge` setting handles those for free. The cron's prefix filter `heads/cogmo/run/` matches only the run-branch namespace, so PR branches are out of scope by construction.
 
-### Streaming exec
+### Streaming exec `[proposed]`
 
 The Daytona PTY path is wrong for `claude` — TTY mode triggers the CLI's interactive output (color codes, spinners) per claude-code's `isatty(stdout)` check, corrupting NDJSON parsing, and PTY collapses stdout/stderr into a single channel.
 
