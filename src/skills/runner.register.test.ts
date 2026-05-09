@@ -457,7 +457,7 @@ tier: wasm
   });
 
   describe("deregister", () => {
-    it("soft-disables the skill; list excludes it", async () => {
+    it("soft-disables the skill; list excludes it; returns kind: deregistered", async () => {
       const runner = await makeRunner();
       await pushFeatureBranch({
         work: repo.work,
@@ -467,7 +467,9 @@ tier: wasm
       });
       await runner.register({ branch: "skill/echo" });
 
-      await runner.deregister({ name: "echo" });
+      const result = await runner.deregister({ name: "echo" });
+      expect(result).toEqual({ kind: "deregistered", name: "echo" });
+
       const list = await runner.list();
       expect(list).toHaveLength(0);
       // Row still exists for audit history.
@@ -475,9 +477,10 @@ tier: wasm
       expect(skill?.disabled).toBe(true);
     });
 
-    it("rejects deregister of unknown skill", async () => {
+    it("returns rejected:not_found for an unknown skill", async () => {
       const runner = await makeRunner();
-      await expect(runner.deregister({ name: "missing" })).rejects.toThrow(/not found/);
+      const result = await runner.deregister({ name: "missing" });
+      expect(result).toEqual({ kind: "rejected", name: "missing", reason: "not_found" });
     });
   });
 

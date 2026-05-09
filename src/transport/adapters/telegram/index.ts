@@ -34,6 +34,8 @@ import type { Adapter, StreamHandle, StreamingAdapter } from "../../types.js";
 import {
   handleClasses,
   handleCompartments,
+  handleDisable,
+  handleEnable,
   handleEnd,
   handleMcp,
   handleModel,
@@ -47,6 +49,7 @@ import {
   handleResume,
   handleResumeCallback,
   handleSessions,
+  handleSkills,
   handleSkillsApprovalCallback,
   handleStatus,
   handleVoice,
@@ -451,6 +454,9 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("repair", (ctx) => handleRepair(transport, toCmdCtx(ctx)));
   bot.command("voice", (ctx) => handleVoice(transport, toCmdCtx(ctx)));
   bot.command("status", (ctx) => handleStatus(transport, toCmdCtx(ctx)));
+  bot.command("skills", (ctx) => handleSkills(transport, toCmdCtx(ctx)));
+  bot.command("disable", (ctx) => handleDisable(transport, toCmdCtx(ctx)));
+  bot.command("enable", (ctx) => handleEnable(transport, toCmdCtx(ctx)));
 
   // Mid-dialog abort for /profile new|edit and /repo add flows. Evaluate
   // both branches (no `||` short-circuit) so a hypothetical "both dialogs
@@ -757,6 +763,9 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       { command: "repair", description: "Clear errored status on a conversation" },
       { command: "voice", description: "Set voice mode (auto / always / off)" },
       { command: "status", description: "Show conversation, profile, and context stats" },
+      { command: "skills", description: "List skills (enabled + disabled)" },
+      { command: "disable", description: "Soft-disable a skill by name" },
+      { command: "enable", description: "Re-enable a previously-disabled skill" },
       { command: "cancel", description: "Abort the current interactive dialog" },
       { command: "start", description: "Show help" },
     ])

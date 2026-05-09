@@ -115,7 +115,7 @@ The agent extends its own capabilities — authors small Python programs ("skill
   - [x] Telegram approval inline keyboard for `approve`-tier deploys (Approve / Deny) — `Service.skills.register` emits `skills/deploy/approval-requested` on pending_approval; per-channel Inngest function `telegram-skills-approval-${channelId}` posts the keyboard with skill summary + declared effects; `transport.skills.{approveDeploy,denyDeploy}` provides the identity-checked callback target; `handleSkillsApprovalCallback` edits the message in place + clears the keyboard on tap.
 - [x] `register_skill` agent tool — `src/skills/skills-tool.ts` + `Service.skills` namespace; wraps the RPC. `SKILLS_PROMPT_GUIDANCE` instructs the agent to author via `delegate_coding` then register.
 - [x] `cogmo skills` CLI — full surface: `register <branch>`, `approve <pendingId>`, `deny <pendingId> [reason]`, `rollback <name> <sha>`, `deregister <name>`, plus the existing `list` / `run`.
-- [ ] `/disable <skill>`, `/enable <skill>` channel commands — Telegram shortcuts for the same RPCs
+- [x] `/disable <skill>`, `/enable <skill>` channel commands — Telegram shortcuts plus a `/skills` listing surface (enabled + disabled). `/enable` refuses skills whose current sha was never live (denied-on-first-deploy guard); enable/disable are idempotent on already-enabled / already-disabled rows.
 
 ### P3.4 — Invocation
 
