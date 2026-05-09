@@ -355,11 +355,13 @@ inputs:
     await expect(runner.approveDeploy({ pendingId: "x" })).rejects.toThrow(/skillsRepoPath/);
     await expect(runner.rollback({ name: "x", toGitSha: "y" })).rejects.toThrow(/skillsRepoPath/);
     // denyDeploy + deregister are pure DB updates — no git access needed.
-    // deregister throws on a non-existent skill, denyDeploy is idempotent.
+    // denyDeploy is idempotent on a missing pending id; deregister
+    // returns rejected:not_found via DeregisterResult.
     await expect(
       runner.denyDeploy({ pendingId: "00000000-0000-0000-0000-000000000000" }),
     ).resolves.toBeUndefined();
-    await expect(runner.deregister({ name: "x" })).rejects.toThrow(/not found/);
+    const dereg = await runner.deregister({ name: "x" });
+    expect(dereg).toEqual({ kind: "rejected", name: "x", reason: "not_found" });
   });
 
   it("list excludes disabled skills", async () => {
@@ -386,7 +388,10 @@ inputs:
       manifestSource: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    await runner.deregister({ name: "echo" });
+    expect(await runner.deregister({ name: "echo" })).toEqual({
+      kind: "deregistered",
+      name: "echo",
+    });
     expect((await runner.listAll()).find((s) => s.name === "echo")?.disabled).toBe(true);
 
     const result = await runner.enable({ name: "echo" });

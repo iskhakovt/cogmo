@@ -1386,7 +1386,7 @@ export async function handleSkills(
   }
   if (res.value.length === 0) {
     await ctx.reply(
-      "No skills registered. Use `/cogmo skills register <branch>` from the CLI or the agent's `register_skill` tool.",
+      "No skills registered. Use `cogmo skills register <branch>` from the CLI or the agent's `register_skill` tool.",
     );
     return;
   }

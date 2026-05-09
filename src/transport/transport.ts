@@ -159,10 +159,9 @@ export interface ConversationStatusSummary {
 }
 
 /**
- * One row of `skills.list` — the operator-facing projection. Subset of
- * `SkillSummary` from the runner with `gitSha` shortened by the
- * adapter (we surface the full sha so different adapters can format
- * differently).
+ * One row of `skills.list` — the operator-facing projection. Carries the
+ * full `gitSha` so adapters can render it however they like (Telegram
+ * shortens to 7 chars; a CLI might print the full sha).
  */
 export interface SkillListEntry {
   name: string;
@@ -1426,31 +1425,25 @@ export function createTransport(deps: {
       async disable(platformUserHandle, name) {
         const identityCheck = await checkSkillsTapper(platformUserHandle);
         if (identityCheck.isErr()) return err(identityCheck.error);
-        if (!skillRunner || !skillStore) return err({ code: "skills_disabled" as const });
-        // Pre-check existence to surface a structured `skill_not_found`
-        // instead of letting `runner.deregister`'s thrown Error bubble out
-        // (the runner pre-dates the Result wrapping; rather than churn the
-        // RPC contract everywhere, we adapt at the Transport boundary).
-        const existing = await runInTx((tx) => skillStore.getSkillByName(tx, name));
-        if (!existing) return err({ code: "skill_not_found" as const, name });
-        try {
-          await skillRunner.deregister({ name });
-        } catch (e) {
-          // The runner's `deregister` throws on "skill not found" — we
-          // pre-checked, but a race between the check and this call (or a
-          // future hard-delete RPC) could still wipe the row. Map the
-          // throw onto `skill_not_found` rather than letting it bubble
-          // past the Result boundary; the transport contract is "never
-          // throw, always return a Result." Other errors (DB outage,
-          // etc.) re-throw so they surface as 500-class failures
-          // upstream rather than getting silently swallowed as
-          // `skill_not_found`.
-          if (e instanceof Error && /skill not found/i.test(e.message)) {
-            return err({ code: "skill_not_found" as const, name });
-          }
-          throw e;
+        if (!skillRunner) return err({ code: "skills_disabled" as const });
+        const result = await skillRunner.deregister({ name });
+        switch (result.kind) {
+          case "deregistered":
+            return ok({ name: result.name });
+          case "rejected":
+            switch (result.reason) {
+              case "not_found":
+                return err({ code: "skill_not_found" as const, name: result.name });
+              default: {
+                // Inline-never guard mirrors `runner.ts` /
+                // `sandbox/factory.ts`. TS errors here when a new
+                // DeregisterFailureReason variant is added without a
+                // matching case.
+                const _exhaustive: never = result.reason;
+                throw new Error(`unhandled deregister reason: ${_exhaustive as string}`);
+              }
+            }
         }
-        return ok({ name });
       },
 
       async enable(platformUserHandle, name) {
@@ -1469,16 +1462,16 @@ export function createTransport(deps: {
                 return err({ code: "skill_not_found" as const, name: result.name });
               case "no_live_deploy":
                 return err({ code: "skill_no_live_deploy" as const, name: result.name });
-              default:
-                // Exhaustiveness guard: TS errors here if a new
-                // EnableFailureReason variant gets added without a
-                // matching case above. The throw is unreachable today;
-                // it's a runtime safety net so a future variant doesn't
-                // silently fall through and return `undefined`.
-                return assertExhaustive(result.reason);
+              default: {
+                // Inline-never exhaustiveness guard — TS errors here if
+                // a new EnableFailureReason variant is added without a
+                // matching case. Mirrors `runner.ts` /
+                // `sandbox/factory.ts`. Unreachable at runtime; the
+                // throw is a defence-in-depth fallback.
+                const _exhaustive: never = result.reason;
+                throw new Error(`unhandled enable reason: ${_exhaustive as string}`);
+              }
             }
-          default:
-            return assertExhaustive(result);
         }
       },
     },
@@ -1695,17 +1688,4 @@ function validateRepoInput(input: {
     };
   }
   return null;
-}
-
-/**
- * Compile-time exhaustiveness guard for discriminated-union `switch`
- * statements. Pass the discriminant after handling all known cases;
- * TS errors at the call site if a new variant is added without a
- * matching `case`. The runtime throw is a defence-in-depth fallback
- * for the (unreachable today) "unknown variant slipped past the type
- * checker" scenario — better to fail loud than to return `undefined`
- * and surface as `Promise<undefined>` at the adapter boundary.
- */
-function assertExhaustive(value: never): never {
-  throw new Error(`unreachable variant: ${JSON.stringify(value)}`);
 }

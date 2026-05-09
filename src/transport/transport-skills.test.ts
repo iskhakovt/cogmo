@@ -12,7 +12,12 @@ import { mock } from "vitest-mock-extended";
 import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import { inboundArrived } from "../inngest/events.js";
-import type { EnableResult, SkillRunner, SkillSummary } from "../skills/runner.js";
+import type {
+  DeregisterResult,
+  EnableResult,
+  SkillRunner,
+  SkillSummary,
+} from "../skills/runner.js";
 import type { SkillRow, SkillStore } from "../skills/store/index.js";
 import { mockAgentStore, mockTransportStore } from "../test/factories.js";
 import type { AttachmentStore } from "./attachment-store.js";
@@ -123,62 +128,50 @@ describe("Transport.skills.list", () => {
 });
 
 describe("Transport.skills.disable", () => {
-  it("calls runner.deregister and returns ok({name}) for an existing skill", async () => {
+  it("maps runner.deregister=deregistered → ok({name})", async () => {
     const runner = mock<SkillRunner>();
-    const store = mock<SkillStore>();
-    store.getSkillByName.mockResolvedValue(makeSkillRow({ name: "echo" }));
-    runner.deregister.mockResolvedValue(undefined);
-    const transport = makeTransport({ runner, store });
+    runner.deregister.mockResolvedValue({
+      kind: "deregistered",
+      name: "echo",
+    } satisfies DeregisterResult);
+    const transport = makeTransport({ runner, store: mock<SkillStore>() });
 
     const result = await transport.skills.disable(KNOWN_HANDLE, "echo");
     expect(result._unsafeUnwrap()).toEqual({ name: "echo" });
     expect(runner.deregister).toHaveBeenCalledWith({ name: "echo" });
   });
 
-  it("returns skill_not_found without calling deregister when the name is unknown", async () => {
+  it("maps runner.deregister=rejected:not_found → err(skill_not_found)", async () => {
     const runner = mock<SkillRunner>();
-    const store = mock<SkillStore>();
-    store.getSkillByName.mockResolvedValue(undefined);
-    const transport = makeTransport({ runner, store });
+    runner.deregister.mockResolvedValue({
+      kind: "rejected",
+      name: "ghost",
+      reason: "not_found",
+    } satisfies DeregisterResult);
+    const transport = makeTransport({ runner, store: mock<SkillStore>() });
 
     const result = await transport.skills.disable(KNOWN_HANDLE, "ghost");
     expect(result._unsafeUnwrapErr()).toEqual({ code: "skill_not_found", name: "ghost" });
-    expect(runner.deregister).not.toHaveBeenCalled();
   });
 
-  it("rejects unknown caller before any DB read", async () => {
+  it("rejects unknown caller before calling runner", async () => {
     const runner = mock<SkillRunner>();
-    const store = mock<SkillStore>();
-    const transport = makeTransport({ runner, store });
+    const transport = makeTransport({ runner, store: mock<SkillStore>() });
 
     const result = await transport.skills.disable(UNKNOWN_HANDLE, "echo");
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
-    expect(store.getSkillByName).not.toHaveBeenCalled();
+    expect(runner.deregister).not.toHaveBeenCalled();
   });
 
-  it("maps `runner.deregister: skill not found` race to skill_not_found (Result, not throw)", async () => {
-    // Race window: pre-check sees the row, but the row vanishes before
-    // `runner.deregister` runs. Today there's no hard-delete RPC so
-    // the race is theoretical; pin the contract so a future
-    // hard-delete doesn't break the "Transport never throws" promise.
+  it("rethrows infrastructure errors (DB / network) — Result wraps domain failures only", async () => {
+    // The runner returns Result<T, DeregisterFailureReason> for domain
+    // states (skill not found). Infrastructure errors (DB outage,
+    // store throw) still escape via Promise rejection — the transport
+    // contract is "domain failures are Result, infra failures are
+    // 500-class throws upstream."
     const runner = mock<SkillRunner>();
-    const store = mock<SkillStore>();
-    store.getSkillByName.mockResolvedValue(makeSkillRow({ name: "echo" }));
-    runner.deregister.mockRejectedValue(new Error("skill not found: echo"));
-    const transport = makeTransport({ runner, store });
-
-    const result = await transport.skills.disable(KNOWN_HANDLE, "echo");
-    expect(result._unsafeUnwrapErr()).toEqual({ code: "skill_not_found", name: "echo" });
-  });
-
-  it("rethrows non-not-found runner errors (don't silently coerce real failures)", async () => {
-    // A DB outage / Inngest failure must surface as a thrown 500-class
-    // error upstream, not get silently mapped to skill_not_found.
-    const runner = mock<SkillRunner>();
-    const store = mock<SkillStore>();
-    store.getSkillByName.mockResolvedValue(makeSkillRow({ name: "echo" }));
     runner.deregister.mockRejectedValue(new Error("connection refused"));
-    const transport = makeTransport({ runner, store });
+    const transport = makeTransport({ runner, store: mock<SkillStore>() });
 
     await expect(transport.skills.disable(KNOWN_HANDLE, "echo")).rejects.toThrow(
       /connection refused/,

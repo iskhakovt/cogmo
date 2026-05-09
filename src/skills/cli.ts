@@ -129,14 +129,13 @@ export async function runSkillsCli(
         io.err("Usage: cogmo skills deregister <name>");
         return 2;
       }
-      try {
-        await runner.deregister({ name });
-        io.out(JSON.stringify({ name, status: "disabled" }, null, 2));
-        return 0;
-      } catch (e) {
-        io.err(`deregister failed: ${e instanceof Error ? e.message : String(e)}`);
+      const result = await runner.deregister({ name });
+      if (result.kind === "rejected") {
+        io.err(`deregister failed: skill not found: ${result.name}`);
         return 1;
       }
+      io.out(JSON.stringify({ name: result.name, status: "disabled" }, null, 2));
+      return 0;
     }
 
     default:
