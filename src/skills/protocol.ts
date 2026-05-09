@@ -10,9 +10,28 @@ import { z } from "zod";
 export const TaskInvokeSchema = z.object({
   type: z.literal("task_invoke"),
   id: z.string().min(1),
-  /** Skill name — informational; the worker receives the body separately. */
+  /** Skill name — informational; surfaced in worker logs. */
   skill: z.string().min(1),
   inputs: z.unknown(),
+  /**
+   * Skill source. Tier 1 (Pyodide) reads it through the runner's
+   * `__skill_body__` global — pre-baked at exec time, so the field is
+   * accepted but ignored. Tier 2 (sysbox supervisor) takes the body from
+   * here for every task because the supervisor is long-lived across tasks
+   * and can't pre-bake any one body.
+   */
+  body: z.string().optional(),
+  /**
+   * Per-task isolation hint from the manifest. Tier 1 ignores it (single-
+   * heap WASM). Tier 2 supervisor uses `recycle` to mark the worker
+   * non-reusable after the task — pool replaces it on next acquire.
+   * `subinterpreter` is reserved for a future runtime; for B.2 it
+   * behaves like the default fresh-process-per-task isolation supervisor
+   * already provides.
+   */
+  isolation: z.enum(["subinterpreter", "recycle"]).optional(),
+  /** Wall-clock cap in seconds for the supervisor's per-task pebble timeout. */
+  wallClockS: z.number().positive().optional(),
 });
 export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
 

@@ -60,21 +60,38 @@ export class CtxError extends Error {
 
 export interface DispatcherOptions {
   transport: RpcTransport;
-  ctxHandler: CtxHandler;
+  /**
+   * Default ctx handler for `invoke()` calls that don't pass one
+   * explicitly. Tier 1 (one dispatcher per task) wires it here. Tier 2
+   * supervisor workers (one dispatcher reused across many tasks) leave it
+   * unset and supply a fresh handler per `invoke()` call. If neither is
+   * provided and a `ctx_call` arrives, the dispatcher rejects the
+   * pending task — a real bug at the call site, not a defensive throw.
+   */
+  ctxHandler?: CtxHandler;
 }
 
 /**
- * Drives a single task to completion over a transport. Sends one
- * `task_invoke`, awaits the matching `task_result`, and services every
- * `ctx_call` the worker issues mid-task by routing to the host's
- * `CtxHandler`. Multiple ctx calls may be in flight concurrently — the
- * dispatcher correlates by `id`.
+ * Drives skill tasks to completion over a transport. One in-flight task at a
+ * time (sequential — the tier-2 supervisor protocol is "one task per
+ * worker"). For each task: sends `task_invoke`, awaits the matching
+ * `task_result`, and services every `ctx_call` the worker issues mid-task by
+ * routing to the in-flight task's `CtxHandler`. Multiple ctx calls may be in
+ * flight concurrently within a single task — the dispatcher correlates by
+ * the ctx_call's `id`.
+ *
+ * Reuse-across-tasks: after a `task_result` resolves an `invoke()`, the
+ * dispatcher is ready for the next `invoke()`. The transport is preserved.
+ * `close()` is the boundary — only the worker's disposal calls it. This
+ * lets a long-lived python supervisor accept many sequential task_invokes
+ * without rebuilding the transport.
  */
 export class Dispatcher {
   #transport: RpcTransport;
-  #ctxHandler: CtxHandler;
+  #defaultCtxHandler: CtxHandler | undefined;
   #pendingTask: {
     id: string;
+    ctxHandler: CtxHandler | undefined;
     resolve: (result: TaskResult) => void;
     reject: (e: Error) => void;
   } | null = null;
@@ -82,7 +99,7 @@ export class Dispatcher {
 
   constructor(opts: DispatcherOptions) {
     this.#transport = opts.transport;
-    this.#ctxHandler = opts.ctxHandler;
+    this.#defaultCtxHandler = opts.ctxHandler;
     this.#transport.onMessage((raw) => this.#onMessage(raw));
     this.#transport.onError?.((err) => this.#onTransportError(err));
   }
@@ -100,16 +117,22 @@ export class Dispatcher {
     // close path during error propagation.
   }
 
-  /** Send a `task_invoke` and resolve when the matching `task_result` arrives. */
-  invoke(invoke: TaskInvoke): Promise<TaskResult> {
+  /**
+   * Send a `task_invoke` and resolve when the matching `task_result` arrives.
+   * `opts.ctxHandler` overrides the constructor default for this task only —
+   * tier-2 supervisor workers use this to scope the run id / audit hooks per
+   * task on a shared dispatcher.
+   */
+  invoke(invoke: TaskInvoke, opts?: { ctxHandler?: CtxHandler }): Promise<TaskResult> {
     if (this.#pendingTask) {
-      throw new Error("dispatcher already has an in-flight task — one task per dispatcher");
+      throw new Error("dispatcher already has an in-flight task — one task at a time");
     }
     if (this.#closed) {
       throw new Error("dispatcher is closed");
     }
+    const ctxHandler = opts?.ctxHandler ?? this.#defaultCtxHandler;
     const promise = new Promise<TaskResult>((resolve, reject) => {
-      this.#pendingTask = { id: invoke.id, resolve, reject };
+      this.#pendingTask = { id: invoke.id, ctxHandler, resolve, reject };
     });
     try {
       this.#transport.postMessage(invoke);
@@ -192,9 +215,35 @@ export class Dispatcher {
   }
 
   async #handleCtxCall(call: CtxCall): Promise<void> {
+    // Capture the in-flight task's ctxHandler at dispatch time. If the task
+    // resolves between the ctx_call landing and the handler running, the
+    // captured reference is still the right one for this call.
+    const pending = this.#pendingTask;
+    const ctxHandler = pending?.ctxHandler ?? this.#defaultCtxHandler;
     let response: CtxResult;
+    if (!ctxHandler) {
+      // Real bug at the call site — neither the constructor nor the
+      // per-task `invoke({ ctxHandler })` provided one, but the worker
+      // emitted a ctx_call. Reject the pending task so the caller's
+      // `invoke()` rejects with a clear error instead of hanging on a
+      // ctx_result that will never come.
+      log.warn(
+        { method: call.method, ctxId: call.id },
+        "ctx_call received but no ctxHandler configured — rejecting task",
+      );
+      const stillPending = this.#pendingTask;
+      if (stillPending) {
+        this.#pendingTask = null;
+        stillPending.reject(
+          new Error(
+            `dispatcher: no ctxHandler for ctx_call ${call.method} — caller must pass one to invoke() or via DispatcherOptions`,
+          ),
+        );
+      }
+      return;
+    }
     try {
-      const value = await this.#ctxHandler.handle({ method: call.method, args: call.args });
+      const value = await ctxHandler.handle({ method: call.method, args: call.args });
       response = { type: "ctx_result", id: call.id, ok: true, value };
     } catch (e) {
       if (e instanceof CtxError) {
@@ -224,10 +273,10 @@ export class Dispatcher {
       // ctx_result that never arrives.
       const sendError = e instanceof Error ? e.message : String(e);
       log.warn({ ctxId: call.id, err: sendError }, "ctx_result send failed");
-      const pending = this.#pendingTask;
-      if (pending) {
+      const stillPending = this.#pendingTask;
+      if (stillPending) {
         this.#pendingTask = null;
-        pending.reject(new Error(`dispatcher: ctx_result send failed: ${sendError}`));
+        stillPending.reject(new Error(`dispatcher: ctx_result send failed: ${sendError}`));
       }
     }
   }

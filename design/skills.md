@@ -118,15 +118,16 @@ Overrides validated at deploy against a per-tier hard ceiling (e.g., ≤2 GB mem
 
 The container tier is warmed from day 1. A 1–2s cold start on every interactive skill invocation is user-visible latency. The dispatcher abstraction also removes the need for a sync/async tier split — one pool handles both uniformly.
 
-Implementation lives in `src/skills/worker-sysbox/` — `pool.ts` owns the lifecycle, `worker.ts` wraps a long-lived `SandboxSession`, and `host.ts` runs one task on a session. `SkillRunnerImpl.create` eagerly stands the pool up when a sandbox is wired; `shutdown()` tears it down.
+Implementation lives across two trees. The TypeScript host in `src/skills/worker-sysbox/` (`pool.ts` for lifecycle, `worker.ts` wraps a long-lived `SandboxSession` running the python supervisor) and the Python runtime in `images/skills/` (a real `cogmo_skills_runtime` package with `pyproject.toml`, `uv.lock`, ruff + pyrefly + pytest, multi-stage Docker build that bakes the venv into `cogmo-skills:<version>` at `/opt/cogmo-skills/.venv`). The TS worker spawns the supervisor via `python3 -u -m cogmo_skills_runtime` — `__main__.py` calls `supervisor.main()`. `SkillRunnerImpl.create` eagerly stands the pool up when a sandbox is wired; `shutdown()` tears it down.
 
 ### Shape `[confirmed]`
 
 | Piece | Responsibility |
 |-|-|
 | **Pool manager** (`SysboxWorkerPool`) | Track each worker's state (`idle` / `busy` / `draining`). Scale between `min` and `max` on demand. Recycle workers after N tasks or T ms age. Sweep idle workers above `min`. |
-| **Worker** (`SysboxSkillWorker`) | One sysbox container with a `SandboxSession`, reused across many tasks. Spawns a fresh `python3 -u -c <RUNNER>` exec per task — no long-lived python process in v1, so per-task isolation comes for free at the OS level. |
-| **Dispatcher** | One `Dispatcher` per task drives `task_invoke` → `task_result` over a per-exec NDJSON transport. Per-task `CtxHandler` carries the run id, manifest, and audit hooks for that invocation. |
+| **Worker** (`SysboxSkillWorker`) | One sysbox container with a `SandboxSession`, reused across many tasks. Spawns the python supervisor process ONCE at create-time via `session.execStreaming`; that process stays alive for the worker's lifetime, forking a fresh child per task. The host's `Dispatcher` multiplexes sequential `task_invoke` / `task_result` over the supervisor's stdin/stdout. |
+| **Supervisor** (`supervisor.py`) | Long-lived python process inside the container. Reads `task_invoke` lines from stdin; for each task, `os.fork()`s a child that runs the existing one-shot runner (`runner.py`'s `_main(body, inputs, task_id)`). Parent supervises wall-clock via `os.pidfd_open` + `selectors.select(timeout=...)`; on timeout, SIGKILLs the child and emits `wall_clock_exceeded` on the host's behalf. Child writes `ctx_call` / `task_result` to stdout and reads `ctx_result` from stdin directly (real `os.fork()` inherits FDs cleanly). EOF on stdin = clean shutdown. |
+| **Dispatcher** | One `Dispatcher` per worker (NOT per task), reused across the worker's lifetime over a persistent NDJSON transport. Per-task `CtxHandler` is supplied at each `invoke()` call so the run id, manifest, and audit hooks scope to that task. |
 
 ### Protocol
 
@@ -156,22 +157,22 @@ Each message is one line of NDJSON. Every `*_result` carries the `id` of the req
 
 stdin/stdout chosen over HTTP / Unix socket for simplicity — one process per worker, no port allocation, no service discovery. Multiplexing on a single pipe is fine because it's plain NDJSON with correlation IDs.
 
-### State reset between tasks
+### State reset between tasks `[confirmed]`
 
 Between tasks, "state" means Python module-level globals, library internals (connection pools, engine caches), `sys.modules` entries, monkey-patches, open file handles, background threads. Any of this leaking from task 1 into task 2 is a correctness or security bug.
 
-**v1 (shipped): fresh `python -c` exec per task on a long-lived container.** ~300ms per task, full process-level isolation between tasks. Container drift (tmpfs growth, kernel state) is bounded by the pool's recycle policy (`recycleAfterTasks` / `recycleAfterMs`). Cheaper than spawn-per-task (~1-2s) by skipping container create + image load. Wall-clock kills mark the worker non-reusable so the next invoke spawns a fresh container.
+**Shipped: pre-fork supervisor — long-lived parent, `os.fork()` per task.** ~10-30 ms per task (COW fork from a parent that's already imported `asyncio`, `json`, `traceback`, `uuid`, the Ctx bridge classes — children inherit those for free). Full process-level isolation: every task runs in a fresh OS process forked from the supervisor's `sys.modules` snapshot at create time, so module-level state, monkey-patches, threading state, and open fds from task 1 cannot leak into task 2. Bounded container drift via the pool's `recycleAfterTasks` / `recycleAfterMs`. Wall-clock kill is `SIGKILL` on the child PID; the supervisor itself stays alive and forks a fresh child for the next task — pool worker stays reusable.
 
-**v2 (deferred — see todo): subinterpreter per task** (Python 3.14+, PEP 734's `concurrent.interpreters`). Fresh interpreter per invocation, shared process. ~50ms per task, full reset. Cheaper than v1 worker recycle (~300ms). PEP 684 added the C-level per-interpreter GIL in 3.12, but the stable Python-level API for spawning + communicating with subinterpreters only landed in 3.14 — so 3.14 is the floor.
+**Why not subinterpreters (PEP 734).** Researched in 2026-05; ecosystem isn't ready. NumPy and pandas don't support `Py_mod_multiple_interpreters` yet (numpy/numpy#24755 estimates "~a year of rewrite"); cross-interp asyncio bridging is hand-rolled (no stdlib recipe); zero production adopters. The latency win (~50ms vs ~10-30ms here) doesn't justify the bridge complexity and ecosystem fragility. Revisit when (a) NumPy ships subinterp support, (b) at least one notable project ships it in production, (c) async-aware queue API lands in stdlib. Probably 3.16+ (late 2027).
 
-**Per-skill opt-out** — skills whose C-extension dependencies don't support subinterpreters declare `isolation: recycle` in `SKILL.md`. Deploy-time check sniffs known-incompatible wheels and either forces the declaration or rejects. The `isolation` enum is already in the manifest schema; v1 ignores it (every task already runs in a fresh process). Options per skill (relevant from v2 onwards):
+**Why not `multiprocessing` / `pebble`.** Tried; rejected. `multiprocessing.process.BaseProcess._bootstrap()` unconditionally calls `util._close_stdin()` in every worker child regardless of `fork` / `forkserver` start method. Workers can't read host stdin, which breaks the ctx-bridge over inherited stdio. Workarounds (dup-and-restore stdin, separate pipe pair with multiplexing supervisor) re-introduce the complexity hand-rolling avoids. Hand-rolled fork supervisor sidesteps the stdlib's design intent and is ~150 LOC of stdlib-only Unix code (`os.fork`, `os.pidfd_open`, `selectors.select`, `os.kill`, `os.waitpid`).
 
-| Mode | When to use |
-|-|-|
-| `subinterpreter` (default) | Most skills. Pure Python + well-behaved C extensions. |
-| `recycle` | Skills importing libraries with subinterpreter-hostile C extensions. Worker is killed and respawned after each task (~300ms overhead — same as v1). |
+**Per-skill opt-out** — `isolation: recycle` in `SKILL.md` poisons the worker after the task runs, so the pool replaces it on the next acquire. Useful for skills whose imports (e.g. C extensions with module-level threading state) might leave the supervisor's snapshot in a state we don't want subsequent tasks to inherit. The `isolation: subinterpreter` enum value is currently treated as "default" (the shipped fork-per-task model); reserved for a future runtime that actually uses PEP 734.
 
-**System fallback** — if a meaningful fraction of skills need `recycle`, flip the default to `recycle` system-wide via one config knob. Revisit as the CPython 3.14+ subinterpreter ecosystem matures.
+| Mode | Today (shipped) | When to use |
+|-|-|-|
+| `subinterpreter` (default) | Fork-per-task isolation; worker stays reusable. | Default for all skills — fork inherits the supervisor's pre-imports cleanly. |
+| `recycle` | Fork-per-task + worker poisoned after task → replaced on next acquire. | Skills whose imports could pollute the supervisor's `sys.modules` snapshot in a way that hurts subsequent forks (rare). |
 
 **Not used:** logical reset (`importlib.reload` + globals clear). Too leaky — misses library state and monkey-patches. Present in the option space but never the right answer.
 

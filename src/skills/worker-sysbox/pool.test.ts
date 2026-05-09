@@ -2,15 +2,15 @@ import { describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { SandboxClient } from "../../sandbox/index.js";
 import type { CtxHandler } from "../dispatcher.js";
-import type { RunTaskOnSessionParams, RunTaskOnSessionResult } from "./host.js";
 import { DEFAULT_POOL_OPTIONS, SysboxWorkerPool, type WorkerHandle } from "./pool.js";
+import type { InvokeParams, InvokeResult } from "./worker.js";
 
 interface FakeWorkerScript {
   /**
    * Behaviour for each invoke call, in order. If the array runs out, the
    * default is `{ ok: true, output: { i }, workerReusable: true }`.
    */
-  invokes?: Array<RunTaskOnSessionResult | "throw">;
+  invokes?: Array<InvokeResult | "throw">;
   /** When true, dispose throws — surface error path. */
   disposeFails?: boolean;
 }
@@ -56,7 +56,7 @@ function makeFakeWorker(
         state = "draining";
         throw new Error("scripted throw");
       }
-      const result: RunTaskOnSessionResult = scripted ?? {
+      const result: InvokeResult = scripted ?? {
         ok: true,
         output: { taskCount },
         workerReusable: true,
@@ -81,7 +81,7 @@ function makeFakeWorker(
 
 const noopCtx: CtxHandler = { handle: async () => null };
 
-function invokeParams(taskId: string): RunTaskOnSessionParams & { ctxHandler: CtxHandler } {
+function invokeParams(taskId: string): InvokeParams {
   return {
     taskId,
     skillName: "test",
