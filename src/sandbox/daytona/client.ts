@@ -60,11 +60,21 @@ interface CreateOptions extends DaytonaSandboxClientOptions {
 }
 
 /**
- * Phase 3a: worktree-less only. Skills tier-2 works end-to-end on this
- * backend; coding-delegation calls (which set `spec.worktree`) throw a
- * deliberate "not yet supported" error until Phase 3b lands the
- * git-as-transport flow. The capability flag advertises `git-remote`
- * already so consumers can branch correctly when 3b ships.
+ * Daytona-backed sandbox client. Supports two consumer flows:
+ *
+ *   - Skills tier-2 (Phase 3a): worktree-less, ephemeral. `create()`
+ *     omits both `worktree` and `askpass`; the sandbox is just an
+ *     isolated process host.
+ *   - Coding-delegation (Phase 3b): `WorktreeSpec` with
+ *     `type: "git-remote"` triggers `sandbox.git.clone()` from the
+ *     orchestrator-pushed `cogmo/run/<task-id>` ref. `SessionSpec.askpass`
+ *     uploads the four-file bundle (`helper`, `pat`, `signing-key`,
+ *     `signing-key.pub`) via `fs.uploadFiles` + `fs.setFilePermissions`
+ *     so the in-container git operations see the same askpass layout
+ *     as the Local-Docker backend's bind-mount.
+ *
+ * The capability flag advertises `workingTreeTransport: "git-remote"`;
+ * orchestrators branch on it without backend awareness.
  */
 export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> {
   readonly backendId = "daytona";
