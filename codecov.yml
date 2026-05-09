@@ -14,6 +14,13 @@ coverage:
 comment:
   layout: "reach, diff, flags, files"
   require_changes: true
+  # Two CI jobs upload coverage under separate flags (`unit`,
+  # `integration`). Without `after_n_builds`, Codecov posts the comment
+  # as soon as the first flag arrives — patch% is then computed only
+  # against that flag, which for unit-tested code shows up as ~6% under
+  # the integration flag even when the file is 80%+ covered by unit
+  # tests. Waiting for both uploads lets the comment reflect the union.
+  after_n_builds: 2
 
 flag_management:
   default_rules:
