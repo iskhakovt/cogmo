@@ -78,6 +78,18 @@ import { startChannels } from "./transport/registry.js";
 import { DrizzleTransportStore } from "./transport/store/index.js";
 import type { SttProvider, TtsProvider } from "./voice/types.js";
 
+/**
+ * Per-stage option ownership — keep in sync when adding fields:
+ *
+ * - `providerOverride`, `falFetchOverride` → read by `bootstrapCore`
+ *   (LLM provider resolver, fal.ai client construction).
+ * - `voiceFetchOverride` → read by `bootstrapRuntime` (voice provider
+ *   construction).
+ *
+ * `bootstrapSandbox` and `bootstrapSkillRunner` take no options today.
+ * Adding a new field? Add it to the relevant stage's signature and
+ * update this map so the next reader knows where to wire it.
+ */
 export interface BootstrapOptions {
   /**
    * Inject a provider directly — skips DB resolution and serves the same
@@ -190,8 +202,11 @@ export interface RuntimeDeps {
  * Stage 1: data layer. Migrations, stores, secrets, S3, file service,
  * tool credentials, LLM provider resolver, the boot user/profile pair,
  * the Hindsight memory client. Constructs no sandbox, registers no
- * Inngest functions, starts no background work. Safe to call from any
- * CLI — running concurrently with `cogmo serve` is harmless.
+ * Inngest functions, starts no background work — concurrent invocations
+ * with `cogmo serve` can't reap each other's sandboxes, which is the
+ * specific race this stage was carved out to prevent. (Drizzle's PG
+ * migrator advisory-locks against parallel migrate runs; the skills-repo
+ * bootstrap is idempotent file writes.)
  */
 export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDeps> {
   await migrate(db, { migrationsFolder: "./migrations" });
@@ -818,21 +833,16 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const { skillRunner } = await bootstrapSkillRunner(core, sandbox);
   const runtime = await bootstrapRuntime(core, sandbox, skillRunner, opts);
 
+  // Spread every stage so any field added to a stage interface flows
+  // through to callers without touching the aggregate. `inngest` and
+  // `skillRunner` are added explicitly because they're not on any stage
+  // shape (the inngest client is a module-level singleton; the skill
+  // runner returns from its own factory, unwrapped here).
   return {
-    db: core.db,
+    ...core,
+    ...sandbox,
+    ...runtime,
     inngest,
-    functions: runtime.functions,
-    adapters: runtime.adapters,
-    agentStore: core.agentStore,
-    transportStore: core.transportStore,
-    sandboxStore: core.sandboxStore,
-    sandbox: sandbox.sandbox,
-    sandboxInstanceId: sandbox.sandboxInstanceId,
-    resolveProvider: core.resolveProvider,
-    memory: core.memory,
     skillRunner,
-    skillStore: core.skillStore,
-    mcpRegistry: runtime.mcpRegistry,
-    runInTx: core.runInTx,
   };
 }
