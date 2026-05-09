@@ -274,7 +274,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // file names need to stay secret, choose non-revealing names). See
   // the `S3_CLIENT_ENCRYPT` env-var doc for the full trade-off.
   const attachmentEncryptionKey = env.S3_CLIENT_ENCRYPT
-    ? deriveMasterKey(parseMasterKey(env.COGMO_MASTER_KEY), "cogmo/s3-attachments/v1")
+    ? deriveMasterKey(parseMasterKey(env.COGMO_MASTER_KEY), "cogmo/s3-objects/v1")
     : null;
   const fileService = createFileService(
     s3Client,

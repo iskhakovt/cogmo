@@ -24,7 +24,7 @@ function mockBytesBody(bytes: Uint8Array) {
 }
 
 function testKey(): Uint8Array {
-  return deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/s3-attachments/v1");
+  return deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/s3-objects/v1");
 }
 
 describe("createFileService", () => {
@@ -123,11 +123,10 @@ describe("createFileService", () => {
         ContentType: "application/octet-stream",
       });
       const body = input.Body;
-      expect(Buffer.isBuffer(body)).toBe(true);
-      const buf = body as Buffer;
-      expect(isEncrypted(buf)).toBe(true);
+      if (!Buffer.isBuffer(body)) throw new Error("expected Body to be a Buffer");
+      expect(isEncrypted(body)).toBe(true);
       // Plaintext must NOT appear in the body that hits S3.
-      expect(buf.includes(Buffer.from("hello plaintext"))).toBe(false);
+      expect(body.includes(Buffer.from("hello plaintext"))).toBe(false);
     });
 
     it("read: decrypts a blob written by the encrypted writer", async () => {
