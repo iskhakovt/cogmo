@@ -37,12 +37,19 @@ async function dispatch(cmd: string): Promise<number> {
     }
     case "skills": {
       const { runSkillsCli } = await import("./skills/cli.js");
-      const { bootstrap } = await import("./index.js");
-      const { skillRunner } = await bootstrap();
-      if (!skillRunner) {
-        console.error("Skill runner failed to initialize.");
-        return 1;
-      }
+      const { bootstrapCore, bootstrapSkillRunner } = await import("./index.js");
+      // CLI mode: skip bootstrapSandbox (no instance row, no
+      // reconcileCrashedInstances). Tier-2 skill execution requires the
+      // sandbox and will throw at call time; tier-1 skills + every admin
+      // subcommand (list / register / approve / deny / rollback /
+      // deregister) run fine.
+      const core = await bootstrapCore();
+      const { skillRunner } = await bootstrapSkillRunner(core, {
+        sandbox: null,
+        codingSandbox: null,
+        sandboxInstanceId: null,
+        sandboxDocker: null,
+      });
       return runSkillsCli(process.argv.slice(3), skillRunner);
     }
     case "migrate-memories":
@@ -50,16 +57,11 @@ async function dispatch(cmd: string): Promise<number> {
       const { runMigrateMemoriesCli, runBackfillProfileClassCli } = await import(
         "./agent/evolution/migrations-cli.js"
       );
-      const { bootstrap } = await import("./index.js");
+      const { bootstrapCore } = await import("./index.js");
       const { env } = await import("./env.js");
-      // skipSandbox: true so the reaper (`reconcileCrashedInstances`)
-      // doesn't run. Without this, invoking either CLI while
-      // `cogmo serve` is up reaps serve's running coding-task
-      // containers — the reaper has no liveness check on other
-      // instance rows and treats any non-self `cogmo.instance`
-      // label as orphaned. These two CLIs don't touch sandboxes,
-      // so skipping is safe.
-      const { agentStore, runInTx } = await bootstrap({ skipSandbox: true });
+      // CLI mode: data layer only. No sandbox client, no instance row, no
+      // reaper — running this concurrently with `cogmo serve` is harmless.
+      const { agentStore, runInTx } = await bootstrapCore();
       const resolveDefaultBankId = async (): Promise<string | null> => {
         const user = await runInTx((tx) => agentStore.getFirstUser(tx));
         return user ? user.id : null;

@@ -29,6 +29,7 @@ import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
 import { createRecoverConversation } from "./agent/recover-conversation.js";
+import type { Service } from "./agent/service.js";
 import { CORE_MEMORY_PROMPT_GUIDANCE, MEMORY_PROMPT_GUIDANCE } from "./agent/service.js";
 import { DrizzleAgentStore } from "./agent/store/index.js";
 import { createDefaultTools } from "./agent/tools.js";
@@ -39,7 +40,7 @@ import {
   checkUuidv7,
   loadHindsightCompat,
 } from "./boot/checks.js";
-import { db, transactor } from "./db/index.js";
+import { type Database, db, type Transactor, transactor } from "./db/index.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
 import type { LlmProvider } from "./llm/provider.js";
@@ -69,11 +70,13 @@ import { bootstrapSkillsRepo } from "./skills/repo.js";
 import { SkillRunnerImpl } from "./skills/runner.js";
 import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
 import { DrizzleSkillStore } from "./skills/store/index.js";
+import type { AttachmentStore } from "./transport/attachment-store.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
 import { createDeliveryRouter } from "./transport/delivery-router.js";
 import { wrapAttachmentStoreWithEncryption } from "./transport/encrypted-attachment-store.js";
 import { startChannels } from "./transport/registry.js";
 import { DrizzleTransportStore } from "./transport/store/index.js";
+import type { SttProvider, TtsProvider } from "./voice/types.js";
 
 export interface BootstrapOptions {
   /**
@@ -97,28 +100,100 @@ export interface BootstrapOptions {
    * provider instance only — does not affect Anthropic/S3/etc.
    */
   voiceFetchOverride?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-  /**
-   * Skip sandbox init — including `reconcileCrashedInstances`, the reaper
-   * that kills any managed container whose `cogmo.instance` label doesn't
-   * match this run's id. Set by CLIs that don't need a sandbox
-   * (`cogmo migrate-memories`, `cogmo backfill`) so concurrent invocations
-   * don't reap a running `cogmo serve`'s coding-task containers. The
-   * reaper has no liveness check on other instance rows — any non-self
-   * label is treated as orphaned. The proper fix is splitting bootstrap
-   * into core/runtime so this flag doesn't have to exist; tracked in
-   * todo as a follow-up. Returned `sandbox` / `sandboxInstanceId` /
-   * `codingSandbox` are `null` when this is true.
-   */
-  skipSandbox?: boolean;
 }
 
 /**
- * Wire all application dependencies — stores, providers, tools, adapters, Inngest functions.
+ * Pure data layer — no Inngest registration, no long-lived background work.
  *
- * Returns the assembled pieces so callers can choose how to run them
- * (serve mode, connect mode, or in-process for tests).
+ * Returned by `bootstrapCore` and consumed by every other bootstrap stage.
+ * One-shot CLIs (`cogmo migrate-memories`, `cogmo backfill`) call only
+ * `bootstrapCore` and pull what they need directly off this object — they
+ * never construct a sandbox client and never run the reaper, so they can't
+ * race a live `cogmo serve` for its containers.
  */
-export async function bootstrap(opts: BootstrapOptions = {}) {
+export interface CoreDeps {
+  db: Database;
+  runInTx: Transactor;
+  agentStore: DrizzleAgentStore;
+  transportStore: DrizzleTransportStore;
+  sandboxStore: DrizzleSandboxStore;
+  codingStore: DrizzleCodingStore;
+  mcpStore: DrizzleMcpStore;
+  skillStore: DrizzleSkillStore;
+  secretsStore: DrizzleSecretsStore;
+  s3Client: S3Client;
+  attachmentStore: AttachmentStore;
+  fileService: Service["files"];
+  /** Non-null when `S3_CLIENT_ENCRYPT=true`. Same key feeds files + attachments. */
+  attachmentEncryptionKey: Uint8Array | null;
+  tavilyKey: string | undefined;
+  openrouterKey: string | undefined;
+  falKey: string | undefined;
+  falProvider: ReturnType<typeof createFal> | undefined;
+  resolveProvider: LlmProviderResolver;
+  user: { id: string };
+  profile: { id: string };
+  memory: HindsightMemoryProvider;
+}
+
+/**
+ * Sandbox client + lifecycle handles. Returned by `bootstrapSandbox`.
+ *
+ * `bootstrapSandbox` ALWAYS runs `reconcileCrashedInstances`, which reaps any
+ * managed container whose `cogmo.instance` label doesn't match this run's id.
+ * Only `cogmo serve` calls it — running it from a one-shot CLI would reap
+ * the live `cogmo serve` instance's coding-task containers (no liveness
+ * check on other instance rows). All fields are `null` when the configured
+ * backend is unavailable (no `SANDBOX_RUNTIME`, missing `daytona_api_key`).
+ */
+export interface SandboxDeps {
+  sandbox: SandboxClient | null;
+  codingSandbox: SandboxClient<LocalDockerSessionState> | null;
+  sandboxInstanceId: string | null;
+  sandboxDocker: Docker | null;
+}
+
+const NO_SANDBOX: SandboxDeps = {
+  sandbox: null,
+  codingSandbox: null,
+  sandboxInstanceId: null,
+  sandboxDocker: null,
+};
+
+/**
+ * Skill runner + its construction inputs. Returned by `bootstrapSkillRunner`.
+ *
+ * Tier-2 (sysbox / Daytona) only runs when `sandbox` is non-null. CLIs that
+ * call `bootstrapSkillRunner(core, NO_SANDBOX)` get a runner that supports
+ * tier-1 (Pyodide) skills + every admin subcommand (list / register /
+ * approve / deny / rollback / deregister); tier-2 invocations throw a
+ * clear "no sandbox configured" error at call time.
+ */
+export interface SkillRunnerHandle {
+  skillRunner: SkillRunnerImpl;
+}
+
+/**
+ * Inngest functions + transport adapters + per-runtime resources. Returned
+ * by `bootstrapRuntime` for `cogmo serve`. Carries everything the orchestrator
+ * needs to handle messages and the long-lived bookkeeping (MCP registry,
+ * sandbox reaper) that must NOT run from a one-shot CLI.
+ */
+export interface RuntimeDeps {
+  // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
+  functions: any[];
+  adapters: Awaited<ReturnType<typeof startChannels>>["adapters"];
+  mcpRegistry: McpRegistryImpl;
+}
+
+/**
+ * Stage 1: data layer. Migrations, stores, secrets, S3, file service,
+ * tool credentials, LLM provider resolver, the boot user/profile pair,
+ * the Hindsight memory client. Constructs no sandbox, registers no
+ * Inngest functions, starts no background work. Safe to call from any
+ * CLI — running concurrently with `cogmo serve` is harmless.
+ */
+export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDeps> {
   await migrate(db, { migrationsFolder: "./migrations" });
   logger.info("database migrations applied");
 
@@ -141,10 +216,10 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const agentStore = new DrizzleAgentStore();
   const transportStore = new DrizzleTransportStore();
   const sandboxStore = new DrizzleSandboxStore();
+  const codingStore = new DrizzleCodingStore();
+  const mcpStore = new DrizzleMcpStore();
+  const skillStore = new DrizzleSkillStore();
 
-  // Secrets store — required for decrypting provider credentials and
-  // channel tokens. Constructed before the sandbox block because the
-  // Daytona backend pulls its API key from the secrets table at boot.
   if (!env.COGMO_MASTER_KEY) {
     throw new Error(
       "COGMO_MASTER_KEY is required. Generate one with: cogmo gen-key\n" + "Then run: cogmo setup",
@@ -154,107 +229,17 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     deriveMasterKey(parseMasterKey(env.COGMO_MASTER_KEY), "cogmo/secrets-at-rest/v1"),
   );
 
-  // Sandbox is opt-in by backend:
-  //   - `SANDBOX_BACKEND=local-docker` (default) requires `SANDBOX_RUNTIME`;
-  //     unset = sandbox disabled (coding-delegation features fail at call
-  //     time with a clear error). No silent fallback.
-  //   - `SANDBOX_BACKEND=daytona` requires `daytona_api_key` in the
-  //     encrypted secrets table; missing = sandbox disabled.
-  // Phase 3a only supports skills tier-2 on Daytona; coding-delegation
-  // requires the local-docker backend until Phase 3b ships
-  // git-as-transport. `codingSandbox` is the narrowed handle the coding
-  // orchestrator wires against; `sandbox` is the wide handle the skills
-  // runner takes.
-  let sandbox: SandboxClient | null = null;
-  let codingSandbox: SandboxClient<LocalDockerSessionState> | null = null;
-  let sandboxInstanceId: string | null = null;
-  let sandboxDocker: Docker | null = null;
-  if (opts.skipSandbox) {
-    logger.info("skipSandbox=true — sandbox init bypassed (CLI mode without coding-delegation)");
-  } else if (env.SANDBOX_BACKEND === "local-docker") {
-    if (!env.SANDBOX_RUNTIME) {
-      logger.info(
-        "SANDBOX_RUNTIME unset — sandbox module disabled (coding-delegation unavailable)",
-      );
-    } else {
-      const docker = new Docker();
-      sandboxDocker = docker;
-      const instance = await tx((trx) =>
-        sandboxStore.insertInstance(trx, { host: hostname(), pid: process.pid }),
-      );
-      sandboxInstanceId = instance.id;
-      const proxy = await CogmoSocketProxy.create({
-        socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
-        hostDockerSocket: env.SANDBOX_HOST_DOCKER_SOCKET,
-      });
-      const localDocker = await createSandboxBackend({
-        backend: "local-docker",
-        docker,
-        store: sandboxStore,
-        runInTx: tx,
-        runtime: env.SANDBOX_RUNTIME,
-        instanceId: instance.id,
-        proxy,
-        askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
-      });
-      sandbox = localDocker;
-      // `instanceof` narrowing — only the local-Docker class implements
-      // the LocalDocker-typed interface that coding orchestrators need.
-      if (localDocker instanceof LocalDockerSandboxClient) codingSandbox = localDocker;
-      const { orphansReaped } = await sandbox.reconcileCrashedInstances(instance.id);
-      if (orphansReaped > 0) {
-        logger.warn({ orphansReaped }, "reaped orphan containers from prior instance(s)");
-      }
-      logger.info(
-        {
-          runtime: env.SANDBOX_RUNTIME,
-          instanceId: instance.id,
-          proxySocketDir: env.SANDBOX_PROXY_SOCKET_DIR,
-        },
-        "local-docker sandbox initialized",
-      );
-    }
-  } else if (env.SANDBOX_BACKEND === "daytona") {
-    const apiKey = await tx((trx) => secretsStore.getSecret(trx, DAYTONA_API_KEY_SECRET));
-    if (!apiKey) {
-      logger.warn(
-        `SANDBOX_BACKEND=daytona but \`${DAYTONA_API_KEY_SECRET}\` secret is absent — sandbox disabled. Run \`cogmo setup\` to add it.`,
-      );
-    } else {
-      // Daytona needs a process-run id for label-stamping orphan
-      // detection in a future reconcile pass. We don't insert into
-      // sandbox_instances (that table FK's to local-docker
-      // `containers`) — just generate one for symmetry with the
-      // local-docker `cogmo.instance` label.
-      sandboxInstanceId = randomUUID();
-      sandbox = await createSandboxBackend({
-        backend: "daytona",
-        apiKey,
-        instanceId: sandboxInstanceId,
-        ...(env.DAYTONA_API_URL && { apiUrl: env.DAYTONA_API_URL }),
-        ...(env.DAYTONA_ORGANIZATION_ID && { organizationId: env.DAYTONA_ORGANIZATION_ID }),
-      });
-      logger.info(
-        {
-          instanceId: sandboxInstanceId,
-          apiUrl: env.DAYTONA_API_URL ?? "https://app.daytona.io/api",
-        },
-        "daytona sandbox initialized (coding-delegation requires local-docker until Phase 3b)",
-      );
-    }
-  }
-
   const { user, profile } = await tx(async (trx) => {
-    const user = await agentStore.getFirstUser(trx);
+    const u = await agentStore.getFirstUser(trx);
     const defaultProfile = await agentStore.getDefaultProfile(trx);
-    if (!user || !defaultProfile) {
+    if (!u || !defaultProfile) {
       throw new Error("no user or profile found — run `cogmo setup` first");
     }
-    const profile = await agentStore.getProfile(trx, defaultProfile.id);
-    if (!profile) {
+    const p = await agentStore.getProfile(trx, defaultProfile.id);
+    if (!p) {
       throw new Error("default profile disappeared — database inconsistency");
     }
-    return { user, profile };
+    return { user: u, profile: p };
   });
 
   // Per-turn provider dispatch: handle-message and observer call this
@@ -268,8 +253,6 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     : createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
 
   // S3-compatible file storage (MinIO locally, AWS S3 / R2 in production).
-  // Constructed before tool registration because image-tools needs the
-  // attachment store injected at factory time.
   const s3Client = new S3Client({
     ...(env.S3_ENDPOINT ? { endpoint: env.S3_ENDPOINT, forcePathStyle: true } : {}),
     region: env.S3_REGION,
@@ -313,34 +296,205 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     (await tx((trx) => secretsStore.getSecret(trx, "openrouter_api_key"))) ??
     env.OPENROUTER_API_KEY;
   const falKey = (await tx((trx) => secretsStore.getSecret(trx, "fal_api_key"))) ?? env.FAL_API_KEY;
-
-  const webTools = createWebTools(tavilyKey, openrouterKey);
   const falProvider = falKey
     ? createFal({ apiKey: falKey, ...(opts.falFetchOverride && { fetch: opts.falFetchOverride }) })
     : undefined;
-  const imageTools = createImageTools(falProvider, attachmentStore);
-  const documentTools = createDocumentTools(attachmentStore);
 
-  // Coding store + service factory + durable orchestrator. The
-  // `delegate_coding` tool is registered unconditionally so the LLM sees
-  // it; it throws a clear error at call time when the sandbox is
-  // unavailable (rather than disappearing from the prompt every other
-  // run).
-  //
-  // The streaming registry is the in-process pub/sub bridge between the
-  // orchestrator (publisher, runs inside Inngest) and the Telegram
-  // delivery adapter (subscriber, slice 2.0g). Single instance per
-  // process; both sides look up by taskId.
-  const codingStore = new DrizzleCodingStore();
+  const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL, {
+    maxQueryTokens: env.HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
+  });
+  // Hard-fail when the running server reports a version outside the
+  // compat range pinned in `package.json` → `cogmo.hindsightCompat`.
+  // Soft-fail (warn) when /version itself can't be reached — memory
+  // tools surface their own errors at request time. See `src/boot/checks.ts`.
+  await checkHindsightVersion(memory, loadHindsightCompat());
+
+  return {
+    db,
+    runInTx: tx,
+    agentStore,
+    transportStore,
+    sandboxStore,
+    codingStore,
+    mcpStore,
+    skillStore,
+    secretsStore,
+    s3Client,
+    attachmentStore,
+    fileService,
+    attachmentEncryptionKey,
+    tavilyKey,
+    openrouterKey,
+    falKey,
+    falProvider,
+    resolveProvider,
+    user,
+    profile,
+    memory,
+  };
+}
+
+/**
+ * Stage 2: sandbox client + crash-instance reconciliation. Inserts a row
+ * into `cogmo_instances` (local-docker backend) so other Cogmo processes
+ * can see this instance is live, then reaps any container labeled with a
+ * dead instance id. Only `cogmo serve` should call this — running it from
+ * a one-shot CLI reaps the live `cogmo serve`'s coding-task containers
+ * because the reaper has no liveness check on other instance rows.
+ *
+ * Returns `NO_SANDBOX` (all-null) when the configured backend is
+ * unavailable: `local-docker` requires `SANDBOX_RUNTIME`; `daytona`
+ * requires `daytona_api_key` in the encrypted secrets table.
+ */
+export async function bootstrapSandbox(core: CoreDeps): Promise<SandboxDeps> {
+  // Sandbox is opt-in by backend:
+  //   - `SANDBOX_BACKEND=local-docker` (default) requires `SANDBOX_RUNTIME`;
+  //     unset = sandbox disabled (coding-delegation features fail at call
+  //     time with a clear error). No silent fallback.
+  //   - `SANDBOX_BACKEND=daytona` requires `daytona_api_key` in the
+  //     encrypted secrets table; missing = sandbox disabled.
+  // Phase 3a only supports skills tier-2 on Daytona; coding-delegation
+  // requires the local-docker backend until Phase 3b ships
+  // git-as-transport. `codingSandbox` is the narrowed handle the coding
+  // orchestrator wires against; `sandbox` is the wide handle the skills
+  // runner takes.
+  if (env.SANDBOX_BACKEND === "local-docker") {
+    if (!env.SANDBOX_RUNTIME) {
+      logger.info(
+        "SANDBOX_RUNTIME unset — sandbox module disabled (coding-delegation unavailable)",
+      );
+      return NO_SANDBOX;
+    }
+    const docker = new Docker();
+    const instance = await core.runInTx((trx) =>
+      core.sandboxStore.insertInstance(trx, { host: hostname(), pid: process.pid }),
+    );
+    const proxy = await CogmoSocketProxy.create({
+      socketDir: env.SANDBOX_PROXY_SOCKET_DIR,
+      hostDockerSocket: env.SANDBOX_HOST_DOCKER_SOCKET,
+    });
+    const localDocker = await createSandboxBackend({
+      backend: "local-docker",
+      docker,
+      store: core.sandboxStore,
+      runInTx: core.runInTx,
+      runtime: env.SANDBOX_RUNTIME,
+      instanceId: instance.id,
+      proxy,
+      askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
+    });
+    // `instanceof` narrowing — only the local-Docker class implements
+    // the LocalDocker-typed interface that coding orchestrators need.
+    const codingSandbox = localDocker instanceof LocalDockerSandboxClient ? localDocker : null;
+    const { orphansReaped } = await localDocker.reconcileCrashedInstances(instance.id);
+    if (orphansReaped > 0) {
+      logger.warn({ orphansReaped }, "reaped orphan containers from prior instance(s)");
+    }
+    logger.info(
+      {
+        runtime: env.SANDBOX_RUNTIME,
+        instanceId: instance.id,
+        proxySocketDir: env.SANDBOX_PROXY_SOCKET_DIR,
+      },
+      "local-docker sandbox initialized",
+    );
+    return {
+      sandbox: localDocker,
+      codingSandbox,
+      sandboxInstanceId: instance.id,
+      sandboxDocker: docker,
+    };
+  }
+  if (env.SANDBOX_BACKEND === "daytona") {
+    const apiKey = await core.runInTx((trx) =>
+      core.secretsStore.getSecret(trx, DAYTONA_API_KEY_SECRET),
+    );
+    if (!apiKey) {
+      logger.warn(
+        `SANDBOX_BACKEND=daytona but \`${DAYTONA_API_KEY_SECRET}\` secret is absent — sandbox disabled. Run \`cogmo setup\` to add it.`,
+      );
+      return NO_SANDBOX;
+    }
+    // Daytona needs a process-run id for label-stamping orphan
+    // detection in a future reconcile pass. We don't insert into
+    // sandbox_instances (that table FK's to local-docker
+    // `containers`) — just generate one for symmetry with the
+    // local-docker `cogmo.instance` label.
+    const sandboxInstanceId = randomUUID();
+    const sandbox = await createSandboxBackend({
+      backend: "daytona",
+      apiKey,
+      instanceId: sandboxInstanceId,
+      ...(env.DAYTONA_API_URL && { apiUrl: env.DAYTONA_API_URL }),
+      ...(env.DAYTONA_ORGANIZATION_ID && { organizationId: env.DAYTONA_ORGANIZATION_ID }),
+    });
+    logger.info(
+      {
+        instanceId: sandboxInstanceId,
+        apiUrl: env.DAYTONA_API_URL ?? "https://app.daytona.io/api",
+      },
+      "daytona sandbox initialized (coding-delegation requires local-docker until Phase 3b)",
+    );
+    return { sandbox, codingSandbox: null, sandboxInstanceId, sandboxDocker: null };
+  }
+  return NO_SANDBOX;
+}
+
+/**
+ * Stage 3: skill runner. Used by both `cogmo serve` (where the runner is
+ * shared between handle-message's `register_skill` tool and the channel
+ * adapters' `/skill` admin commands) and `cogmo skills` (where the CLI
+ * drives it directly). Tier-2 (sysbox/Daytona) skill execution requires
+ * a non-null `sandbox`; CLIs pass `NO_SANDBOX` and accept that tier-2
+ * invocations throw at call time.
+ */
+export async function bootstrapSkillRunner(
+  core: CoreDeps,
+  sandbox: SandboxDeps,
+): Promise<SkillRunnerHandle> {
+  const skillRunner = await SkillRunnerImpl.create({
+    store: core.skillStore,
+    runInTx: core.runInTx,
+    secretsStore: core.secretsStore,
+    memory: core.memory,
+    files: core.fileService,
+    ...(sandbox.sandbox && { sandbox: sandbox.sandbox }),
+    tier2Image: env.COGMO_SKILLS_IMAGE,
+    user: { id: core.user.id, timezone: env.USER_TIMEZONE },
+    memoryBankId: core.user.id,
+    skillsRepoPath: env.COGMO_SKILLS_PATH,
+    // Cache Pyodide's pre-built packages under the skills repo's git dir
+    // so JsDelivr fetches don't repeat across worker spawns. Only matters
+    // for skills that micropip-install pure-Python wheels — the stdlib is
+    // always bundled.
+    pyodidePackageCacheDir: `${env.COGMO_SKILLS_PATH}/.pyodide-cache`,
+  });
+  return { skillRunner };
+}
+
+/**
+ * Stage 4: agent runtime. Wires tools, prompt source, MCP registry,
+ * channel adapters, voice provider, debounce / idle / observer / coding
+ * orchestrator, and the sandbox reaper Inngest function. Only `cogmo
+ * serve` calls this — every Inngest registration here goes into the
+ * connect-mode app. Long-lived background work that must not run from a
+ * one-shot CLI lives in this stage.
+ */
+export async function bootstrapRuntime(
+  core: CoreDeps,
+  sandbox: SandboxDeps,
+  skillRunner: SkillRunnerImpl,
+  opts: BootstrapOptions = {},
+): Promise<RuntimeDeps> {
   const codingBackend = new ClaudeCodeBackend();
   const codingStreamingRegistry = new CodingStreamingRegistry();
   const codingServiceFactory = (conversationId: string) =>
     createCodingService(
       {
-        runInTx: tx,
-        codingStore,
+        runInTx: core.runInTx,
+        codingStore: core.codingStore,
         inngest,
-        sandboxAvailable: codingSandbox !== null,
+        sandboxAvailable: sandbox.codingSandbox !== null,
       },
       conversationId,
     );
@@ -350,17 +504,17 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // surface that Phase 3a doesn't expose on Daytona. Phase 3b lifts this.
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const codingFunctions: any[] = [];
-  if (codingSandbox) {
+  if (sandbox.codingSandbox) {
     const orchestratorDeps = {
-      runInTx: tx,
-      store: codingStore,
-      sandbox: codingSandbox,
+      runInTx: core.runInTx,
+      store: core.codingStore,
+      sandbox: sandbox.codingSandbox,
       backend: codingBackend,
       // Threaded for the failure-cascade WIP-ref push (`safeTeardownWorktree`).
       // Verify-orchestrator already needs it for commit signing + push auth;
       // the plan/execute orchestrators reuse the same identity to push
       // dirty/unpushed worktrees to `refs/cogmo-wip/<taskId>` on failure.
-      secretsStore,
+      secretsStore: core.secretsStore,
       devbaseImage: env.COGMO_DEVBASE_IMAGE,
       defaultResourceLimits: { cpus: 2, memory_bytes: 2 * 1024 * 1024 * 1024, pids: 256 },
       taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
@@ -411,10 +565,10 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     codingFunctions.push(
       createCodingVerifyOrchestrator(
         {
-          runInTx: tx,
-          store: codingStore,
-          sandbox: codingSandbox,
-          secretsStore,
+          runInTx: core.runInTx,
+          store: core.codingStore,
+          sandbox: sandbox.codingSandbox,
+          secretsStore: core.secretsStore,
           askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
           devbaseImage: env.COGMO_DEVBASE_IMAGE,
           defaultResourceLimits: orchestratorDeps.defaultResourceLimits,
@@ -428,20 +582,24 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     // Sandbox reaper — runs every minute, kills TTL-expired containers,
     // discovers orphans tagged with dead instance ids, marks stale DB
     // rows exited. See `src/sandbox/reaper.ts`.
-    if (sandboxDocker && sandboxInstanceId) {
+    if (sandbox.sandboxDocker && sandbox.sandboxInstanceId) {
       codingFunctions.push(
         createSandboxReaper(
           {
-            docker: sandboxDocker,
-            store: sandboxStore,
-            runInTx: tx,
-            instanceId: sandboxInstanceId,
+            docker: sandbox.sandboxDocker,
+            store: core.sandboxStore,
+            runInTx: core.runInTx,
+            instanceId: sandbox.sandboxInstanceId,
           },
           inngest,
         ),
       );
     }
   }
+
+  const webTools = createWebTools(core.tavilyKey, core.openrouterKey);
+  const imageTools = createImageTools(core.falProvider, core.attachmentStore);
+  const documentTools = createDocumentTools(core.attachmentStore);
 
   const tools = createDefaultTools(
     [
@@ -467,43 +625,12 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
       SKILLS_PROMPT_GUIDANCE,
     ],
     getUserContext: async () => {
-      const blocks = await tx((trx) => agentStore.getCoreMemoryBlocks(trx, user.id));
+      const blocks = await core.runInTx((trx) =>
+        core.agentStore.getCoreMemoryBlocks(trx, core.user.id),
+      );
       if (blocks.length === 0) return null;
       return blocks.map((b) => `## ${b.key}\n${b.content}`).join("\n\n");
     },
-  });
-  const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL, {
-    maxQueryTokens: env.HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
-  });
-  // Hard-fail when the running server reports a version outside the
-  // compat range pinned in `package.json` → `cogmo.hindsightCompat`.
-  // Soft-fail (warn) when /version itself can't be reached — memory
-  // tools surface their own errors at request time. See `src/boot/checks.ts`.
-  await checkHindsightVersion(memory, loadHindsightCompat());
-
-  // Skills runtime — Tier 1 ready in P3.1; register / classifier ship in P3.3.
-  // The runner is exposed so the `cogmo skills` CLI subcommand can drive it
-  // without re-bootstrapping. Bank id is the user id (per `design/memory.md`
-  // single-user single-bank model). `skillsRepoPath` is what enables the
-  // register / rollback flows to read SKILL.md from git and advance
-  // `refs/heads/main`.
-  const skillStore = new DrizzleSkillStore();
-  const skillRunner = await SkillRunnerImpl.create({
-    store: skillStore,
-    runInTx: tx,
-    secretsStore,
-    memory,
-    files: fileService,
-    ...(sandbox && { sandbox }),
-    tier2Image: env.COGMO_SKILLS_IMAGE,
-    user: { id: user.id, timezone: env.USER_TIMEZONE },
-    memoryBankId: user.id,
-    skillsRepoPath: env.COGMO_SKILLS_PATH,
-    // Cache Pyodide's pre-built packages under the skills repo's git dir
-    // so JsDelivr fetches don't repeat across worker spawns. Only matters
-    // for skills that micropip-install pure-Python wheels — the stdlib is
-    // always bundled.
-    pyodidePackageCacheDir: `${env.COGMO_SKILLS_PATH}/.pyodide-cache`,
   });
 
   const idleTimeoutMs = env.SESSION_IDLE_TIMEOUT_MINUTES * 60 * 1000;
@@ -517,11 +644,10 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // every channel's Transport (admin `/mcp` operations). Constructed before
   // startChannels so the same connection pool is reused — duplicate registries
   // would each spawn their own subprocess on first use.
-  const mcpStore = new DrizzleMcpStore();
   const mcpRegistry = new McpRegistryImpl({
-    store: mcpStore,
-    secrets: secretsStore,
-    runInTx: tx,
+    store: core.mcpStore,
+    secrets: core.secretsStore,
+    runInTx: core.runInTx,
     runner: new McpHostRunner(),
     callTimeoutMs: env.MCP_CALL_TIMEOUT_MS,
     idleEvictionMs: env.MCP_IDLE_EVICTION_MS,
@@ -535,30 +661,34 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     adapters,
     adapterMap,
   } = await startChannels({
-    defaultUserId: user.id,
-    defaultProfileId: profile.id,
-    runInTx: tx,
-    transportStore,
-    agentStore,
-    codingStore,
+    defaultUserId: core.user.id,
+    defaultProfileId: core.profile.id,
+    runInTx: core.runInTx,
+    transportStore: core.transportStore,
+    agentStore: core.agentStore,
+    codingStore: core.codingStore,
     codingStreamingRegistry,
     skillRunner,
-    skillStore,
+    skillStore: core.skillStore,
     mcpRegistry,
     inngest,
     inboundArrived,
-    attachments: attachmentStore,
+    attachments: core.attachmentStore,
     idleTimeoutMs,
-    secretsStore,
+    secretsStore: core.secretsStore,
     reposDir: env.COGMO_REPOS_DIR,
   });
 
   const deliveryRouter = createDeliveryRouter({
-    runInTx: tx,
+    runInTx: core.runInTx,
     adapters: adapterMap,
-    transportStore,
+    transportStore: core.transportStore,
   });
-  const idleTimer = createIdleTimer({ idleTimeoutMs, runInTx: tx, transportStore });
+  const idleTimer = createIdleTimer({
+    idleTimeoutMs,
+    runInTx: core.runInTx,
+    transportStore: core.transportStore,
+  });
   const debounceFunctions = createDebounceFunctions(debounceConfig);
 
   // Voice — bootstrap a single OpenAIVoiceProvider when voice_config is
@@ -572,9 +702,9 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // hot-reload"). Personal-scale single-user tolerates the restart
   // cleanly; promote when multi-user lands or operator-driven tweaks
   // become frequent.
-  const voiceCfgRow = await tx((trx) => agentStore.getVoiceConfig(trx));
-  let ttsProvider: import("./voice/types.js").TtsProvider | undefined;
-  let sttProvider: import("./voice/types.js").SttProvider | undefined;
+  const voiceCfgRow = await core.runInTx((trx) => core.agentStore.getVoiceConfig(trx));
+  let ttsProvider: TtsProvider | undefined;
+  let sttProvider: SttProvider | undefined;
   let voiceCfgForTurn: { ttsVoice: string; ttsModel: string } | undefined;
   if (voiceCfgRow) {
     // Slice 1 only ships OpenAIVoiceProvider. Surface a warn when the
@@ -592,8 +722,12 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
         "voice_config.stt_provider unsupported in slice 1 — voice transcription disabled. Set stt_provider='openai' or wait for slice 2.",
       );
     }
-    const ttsKey = await tx((trx) => secretsStore.getSecretById(trx, voiceCfgRow.ttsSecretId));
-    const sttKey = await tx((trx) => secretsStore.getSecretById(trx, voiceCfgRow.sttSecretId));
+    const ttsKey = await core.runInTx((trx) =>
+      core.secretsStore.getSecretById(trx, voiceCfgRow.ttsSecretId),
+    );
+    const sttKey = await core.runInTx((trx) =>
+      core.secretsStore.getSecretById(trx, voiceCfgRow.sttSecretId),
+    );
     if (ttsKey && sttKey && voiceCfgRow.ttsProvider === "openai") {
       const { OpenAIVoiceProvider } = await import("./voice/openai.js");
       const tts = new OpenAIVoiceProvider({
@@ -625,15 +759,15 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   }
 
   const handleMessage = createHandleMessage({
-    runInTx: tx,
-    agentStore,
-    transportStore,
-    resolveProvider,
+    runInTx: core.runInTx,
+    agentStore: core.agentStore,
+    transportStore: core.transportStore,
+    resolveProvider: core.resolveProvider,
     tools,
-    memory,
+    memory: core.memory,
     promptSource,
-    fileService,
-    attachments: attachmentStore,
+    fileService: core.fileService,
+    attachments: core.attachmentStore,
     debounceConfig,
     deliveryRouter,
     runStreamingAgentLoop,
@@ -646,13 +780,16 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   });
 
   const observer = createObserver({
-    runInTx: tx,
-    agentStore,
-    resolveProvider,
-    memory,
+    runInTx: core.runInTx,
+    agentStore: core.agentStore,
+    resolveProvider: core.resolveProvider,
+    memory: core.memory,
   });
 
-  const recoverConversation = createRecoverConversation({ runInTx: tx, agentStore });
+  const recoverConversation = createRecoverConversation({
+    runInTx: core.runInTx,
+    agentStore: core.agentStore,
+  });
 
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [
@@ -665,21 +802,37 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
     ...codingFunctions,
   ];
 
+  return { functions, adapters, mcpRegistry };
+}
+
+/**
+ * Aggregate bootstrap — wires every stage together. Used by `cogmo serve`
+ * and the integration test harness.
+ *
+ * One-shot CLIs (`cogmo skills`, `cogmo migrate-memories`, `cogmo backfill`)
+ * call only the stages they need. See `src/main.ts` for the dispatch.
+ */
+export async function bootstrap(opts: BootstrapOptions = {}) {
+  const core = await bootstrapCore(opts);
+  const sandbox = await bootstrapSandbox(core);
+  const { skillRunner } = await bootstrapSkillRunner(core, sandbox);
+  const runtime = await bootstrapRuntime(core, sandbox, skillRunner, opts);
+
   return {
-    db,
+    db: core.db,
     inngest,
-    functions,
-    adapters,
-    agentStore,
-    transportStore,
-    sandboxStore,
-    sandbox,
-    sandboxInstanceId,
-    resolveProvider,
-    memory,
+    functions: runtime.functions,
+    adapters: runtime.adapters,
+    agentStore: core.agentStore,
+    transportStore: core.transportStore,
+    sandboxStore: core.sandboxStore,
+    sandbox: sandbox.sandbox,
+    sandboxInstanceId: sandbox.sandboxInstanceId,
+    resolveProvider: core.resolveProvider,
+    memory: core.memory,
     skillRunner,
-    skillStore,
-    mcpRegistry,
-    runInTx: tx,
+    skillStore: core.skillStore,
+    mcpRegistry: runtime.mcpRegistry,
+    runInTx: core.runInTx,
   };
 }
