@@ -444,7 +444,15 @@ export class SkillRunnerImpl implements SkillRunner {
       };
     }
 
-    const classifierLog = classifyManifest(manifest);
+    const classifierLog = await classifyManifest(manifest, body);
+    if (classifierLog.validation_errors.length > 0) {
+      // Undeclared dangerous effects → reject the deploy outright with
+      // the per-effect labels surfaced to the user. Don't even insert
+      // a `denied` deploy row: the AST path is a pre-flight, not a
+      // human approval, and storing a denied row for "manifest typo"
+      // pollutes the audit log meant for real approval-gate events.
+      return rejectedResult(branchSha, classifierLog.validation_errors.join("; "));
+    }
 
     const result = await this.#runInTx((tx) =>
       this.#store.executeRegister(tx, {
@@ -660,7 +668,13 @@ export class SkillRunnerImpl implements SkillRunner {
       };
     }
 
-    const classifierLog = classifyManifest(manifest);
+    const classifierLog = await classifyManifest(manifest, body);
+    if (classifierLog.validation_errors.length > 0) {
+      // Same UX-gate semantics as `register`: a target sha whose body
+      // declares effects out of sync with the manifest is a foot-gun
+      // operators want flagged before main rewinds.
+      return rejectedResult(targetSha, classifierLog.validation_errors.join("; "));
+    }
 
     const mainSha = await getMainSha(repoPath);
 
