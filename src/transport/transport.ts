@@ -1433,7 +1433,23 @@ export function createTransport(deps: {
         // RPC contract everywhere, we adapt at the Transport boundary).
         const existing = await runInTx((tx) => skillStore.getSkillByName(tx, name));
         if (!existing) return err({ code: "skill_not_found" as const, name });
-        await skillRunner.deregister({ name });
+        try {
+          await skillRunner.deregister({ name });
+        } catch (e) {
+          // The runner's `deregister` throws on "skill not found" — we
+          // pre-checked, but a race between the check and this call (or a
+          // future hard-delete RPC) could still wipe the row. Map the
+          // throw onto `skill_not_found` rather than letting it bubble
+          // past the Result boundary; the transport contract is "never
+          // throw, always return a Result." Other errors (DB outage,
+          // etc.) re-throw so they surface as 500-class failures
+          // upstream rather than getting silently swallowed as
+          // `skill_not_found`.
+          if (e instanceof Error && /skill not found/i.test(e.message)) {
+            return err({ code: "skill_not_found" as const, name });
+          }
+          throw e;
+        }
         return ok({ name });
       },
 
@@ -1453,7 +1469,16 @@ export function createTransport(deps: {
                 return err({ code: "skill_not_found" as const, name: result.name });
               case "no_live_deploy":
                 return err({ code: "skill_no_live_deploy" as const, name: result.name });
+              default:
+                // Exhaustiveness guard: TS errors here if a new
+                // EnableFailureReason variant gets added without a
+                // matching case above. The throw is unreachable today;
+                // it's a runtime safety net so a future variant doesn't
+                // silently fall through and return `undefined`.
+                return assertExhaustive(result.reason);
             }
+          default:
+            return assertExhaustive(result);
         }
       },
     },
@@ -1670,4 +1695,17 @@ function validateRepoInput(input: {
     };
   }
   return null;
+}
+
+/**
+ * Compile-time exhaustiveness guard for discriminated-union `switch`
+ * statements. Pass the discriminant after handling all known cases;
+ * TS errors at the call site if a new variant is added without a
+ * matching `case`. The runtime throw is a defence-in-depth fallback
+ * for the (unreachable today) "unknown variant slipped past the type
+ * checker" scenario — better to fail loud than to return `undefined`
+ * and surface as `Promise<undefined>` at the adapter boundary.
+ */
+function assertExhaustive(value: never): never {
+  throw new Error(`unreachable variant: ${JSON.stringify(value)}`);
 }

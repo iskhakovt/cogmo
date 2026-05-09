@@ -155,6 +155,35 @@ describe("Transport.skills.disable", () => {
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
     expect(store.getSkillByName).not.toHaveBeenCalled();
   });
+
+  it("maps `runner.deregister: skill not found` race to skill_not_found (Result, not throw)", async () => {
+    // Race window: pre-check sees the row, but the row vanishes before
+    // `runner.deregister` runs. Today there's no hard-delete RPC so
+    // the race is theoretical; pin the contract so a future
+    // hard-delete doesn't break the "Transport never throws" promise.
+    const runner = mock<SkillRunner>();
+    const store = mock<SkillStore>();
+    store.getSkillByName.mockResolvedValue(makeSkillRow({ name: "echo" }));
+    runner.deregister.mockRejectedValue(new Error("skill not found: echo"));
+    const transport = makeTransport({ runner, store });
+
+    const result = await transport.skills.disable(KNOWN_HANDLE, "echo");
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "skill_not_found", name: "echo" });
+  });
+
+  it("rethrows non-not-found runner errors (don't silently coerce real failures)", async () => {
+    // A DB outage / Inngest failure must surface as a thrown 500-class
+    // error upstream, not get silently mapped to skill_not_found.
+    const runner = mock<SkillRunner>();
+    const store = mock<SkillStore>();
+    store.getSkillByName.mockResolvedValue(makeSkillRow({ name: "echo" }));
+    runner.deregister.mockRejectedValue(new Error("connection refused"));
+    const transport = makeTransport({ runner, store });
+
+    await expect(transport.skills.disable(KNOWN_HANDLE, "echo")).rejects.toThrow(
+      /connection refused/,
+    );
+  });
 });
 
 describe("Transport.skills.enable", () => {
