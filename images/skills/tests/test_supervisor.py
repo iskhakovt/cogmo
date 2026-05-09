@@ -21,6 +21,17 @@ from cogmo_skills_runtime.supervisor import (
     _wait_with_timeout,
 )
 
+# `os.pidfd_open` requires Linux kernel 5.3+ AND a Python build that
+# enabled HAVE_PIDFD_OPEN at configure time. The runtime image
+# (`python:3.14-slim`) has it; some uv-downloaded `python-build-standalone`
+# builds for Python 3.14 do not. Tests that depend on `pidfd_open` skip
+# when it's missing — the integration test (sysbox-e2e job) covers the
+# pidfd path against the actual runtime python.
+_pidfd_required = pytest.mark.skipif(
+    not hasattr(os, "pidfd_open"),
+    reason="os.pidfd_open unavailable on this build of CPython",
+)
+
 
 def _fork_sleeper(seconds: float) -> int:
     """Fork a child that sleeps then exits cleanly."""
@@ -31,6 +42,7 @@ def _fork_sleeper(seconds: float) -> int:
     return pid
 
 
+@_pidfd_required
 class TestWaitWithTimeout:
     def test_returns_when_child_exits_in_time(self) -> None:
         pid = _fork_sleeper(0.05)
