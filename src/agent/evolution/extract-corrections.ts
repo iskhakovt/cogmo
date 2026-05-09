@@ -219,7 +219,7 @@ function isReinforcementInScope(
     {
       rule: correction.rule,
       matchedId: matchedRule.id,
-      matchedChannelType: matchedRule.channelType,
+      channelType: matchedRule.channelType,
       activeChannels: [...activeChannelSet],
     },
     "extraction: reinforce targets a rule outside the active channel set — skipping",
