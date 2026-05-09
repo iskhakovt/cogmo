@@ -27,6 +27,10 @@ jobs:
     name: Release
     if: github.ref == 'refs/heads/main' && github.repository == 'iskhakovt/cogmo'
     runs-on: ubuntu-latest
+    # Covers the 5-min wait-for-status-checks step + ~1 min of semantic-release
+    # work + buffer. The Environment-approval pause does not count against
+    # `timeout-minutes` (it's pre-job, not in-job).
+    timeout-minutes: 10
     # Approval gate: GitHub pauses this job until the required reviewer
     # (configured in Settings → Environments → production) clicks Approve.
     # Matches the pattern Anthropic's TS SDK uses on `publish-npm.yml`.
@@ -47,9 +51,11 @@ jobs:
       # (this `release` job's own check), so the only filter we add is
       # `^codecov/` for the informational checks marked non-blocking in
       # `.codecov.yml` per 16cb72f. Treats `success` / `skipped` /
-      # `neutral` as pass. Waits for in-progress checks up to `timeout`,
-      # so dispatch immediately after a merge proceeds smoothly when CI
-      # finishes during the wait.
+      # `neutral` as pass. Short `timeout` keeps runner-billing minimal —
+      # covers "I clicked dispatch while CI was finishing" without
+      # burning a full CI cycle's worth of polling time. If you click
+      # dispatch with CI nowhere near done, the action fails after 5 min
+      # and you re-click once CI completes.
       - name: Wait for CI green on main HEAD
         if: ${{ !inputs.skip_ci_check }}
         uses: poseidon/wait-for-status-checks@899c768d191b56eef585c18f8558da19e1f3e707 # v0.6.0
@@ -57,7 +63,7 @@ jobs:
           token: ${{ github.token }}
           ignore_pattern: ^codecov/
           interval: 30
-          timeout: 2700
+          timeout: 300
       - name: Skipped CI gate (operator override)
         if: ${{ inputs.skip_ci_check }}
         run: echo "::warning::skip_ci_check=true — releasing without verifying CI status on main HEAD"

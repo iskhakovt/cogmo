@@ -23,6 +23,7 @@ jobs:
   cleanup:
     name: Prune old container versions
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     concurrency:
       group: ghcr-cleanup-${{ github.repository }}
       cancel-in-progress: false

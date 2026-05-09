@@ -17,6 +17,7 @@ jobs:
     name: PR Title
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     permissions:
       contents: read
     steps:
@@ -34,6 +35,7 @@ jobs:
   check:
     name: Typecheck & Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
@@ -50,6 +52,7 @@ jobs:
   skills-runtime:
     name: Skills Runtime (Python)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       checks: write
@@ -77,6 +80,7 @@ jobs:
   unit:
     name: Unit Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       checks: write
@@ -105,6 +109,7 @@ jobs:
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       checks: write
@@ -143,6 +148,7 @@ jobs:
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       checks: write
