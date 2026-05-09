@@ -81,10 +81,10 @@ import type { SttProvider, TtsProvider } from "./voice/types.js";
 /**
  * Per-stage option ownership — keep in sync when adding fields:
  *
- * - `providerOverride`, `falFetchOverride` → read by `bootstrapCore`
- *   (LLM provider resolver, fal.ai client construction).
- * - `voiceFetchOverride` → read by `bootstrapRuntime` (voice provider
- *   construction).
+ * - `providerOverride` → read by `bootstrapCore` (LLM provider resolver).
+ * - `falFetchOverride`, `voiceFetchOverride` → read by `bootstrapRuntime`
+ *   (fal.ai + OpenAI voice provider construction; both clients live next
+ *   to the agent loop that consumes them).
  *
  * `bootstrapSandbox` and `bootstrapSkillRunner` take no options today.
  * Adding a new field? Add it to the relevant stage's signature and
@@ -138,10 +138,14 @@ export interface CoreDeps {
   fileService: Service["files"];
   /** Non-null when `S3_CLIENT_ENCRYPT=true`. Same key feeds files + attachments. */
   attachmentEncryptionKey: Uint8Array | null;
+  /**
+   * Tool-credential strings only. The data layer reads secrets; clients
+   * (web tools, image generation provider, doc tools) are constructed in
+   * `bootstrapRuntime` next to the agent loop that consumes them.
+   */
   tavilyKey: string | undefined;
   openrouterKey: string | undefined;
   falKey: string | undefined;
-  falProvider: ReturnType<typeof createFal> | undefined;
   resolveProvider: LlmProviderResolver;
   user: { id: string };
   profile: { id: string };
@@ -311,9 +315,6 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     (await tx((trx) => secretsStore.getSecret(trx, "openrouter_api_key"))) ??
     env.OPENROUTER_API_KEY;
   const falKey = (await tx((trx) => secretsStore.getSecret(trx, "fal_api_key"))) ?? env.FAL_API_KEY;
-  const falProvider = falKey
-    ? createFal({ apiKey: falKey, ...(opts.falFetchOverride && { fetch: opts.falFetchOverride }) })
-    : undefined;
 
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL, {
     maxQueryTokens: env.HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
@@ -341,7 +342,6 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     tavilyKey,
     openrouterKey,
     falKey,
-    falProvider,
     resolveProvider,
     user,
     profile,
@@ -612,8 +612,16 @@ export async function bootstrapRuntime(
     }
   }
 
+  // Tool clients live with the agent loop that consumes them. Core
+  // exposes credentials as strings; runtime turns them into clients.
+  const falProvider = core.falKey
+    ? createFal({
+        apiKey: core.falKey,
+        ...(opts.falFetchOverride && { fetch: opts.falFetchOverride }),
+      })
+    : undefined;
   const webTools = createWebTools(core.tavilyKey, core.openrouterKey);
-  const imageTools = createImageTools(core.falProvider, core.attachmentStore);
+  const imageTools = createImageTools(falProvider, core.attachmentStore);
   const documentTools = createDocumentTools(core.attachmentStore);
 
   const tools = createDefaultTools(
