@@ -43,31 +43,21 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-      - name: Verify CI green on main HEAD
+      # Polls check runs on this SHA. Defaults exclude the current job
+      # (this `release` job's own check), so the only filter we add is
+      # `^codecov/` for the informational checks marked non-blocking in
+      # `.codecov.yml` per 16cb72f. Treats `success` / `skipped` /
+      # `neutral` as pass. Waits for in-progress checks up to `timeout`,
+      # so dispatch immediately after a merge proceeds smoothly when CI
+      # finishes during the wait.
+      - name: Wait for CI green on main HEAD
         if: ${{ !inputs.skip_ci_check }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        # Excludes:
-        #   - "Release" / "Publish Image": this run is what we're about to do.
-        #   - codecov/*: marked informational in `.codecov.yml` per 16cb72f.
-        # Treats `success`, `skipped`, `neutral` as pass — matches GitHub's
-        # own UI green-checkmark contract. Fails fast if any check is still
-        # in_progress; re-run after CI completes.
-        run: |
-          set -euo pipefail
-          SHA=$(git rev-parse HEAD)
-          NOT_GREEN=$(gh api "repos/${{ github.repository }}/commits/$SHA/check-runs" \
-            --jq '[.check_runs[]
-                   | select(.name != "Release" and .name != "Publish Image"
-                            and (.name | startswith("codecov/") | not))
-                   | select(.status != "completed"
-                            or (.conclusion | IN("success","skipped","neutral") | not))]')
-          if [ "$(echo "$NOT_GREEN" | jq length)" -gt 0 ]; then
-            echo "::error::CI on $SHA is not fully green:"
-            echo "$NOT_GREEN" | jq -r '.[] | "  \(.name): status=\(.status) conclusion=\(.conclusion // "null")"'
-            exit 1
-          fi
-          echo "CI on $SHA: all required checks green"
+        uses: poseidon/wait-for-status-checks@899c768d191b56eef585c18f8558da19e1f3e707 # v0.6.0
+        with:
+          token: ${{ github.token }}
+          ignore_pattern: ^codecov/
+          interval: 30
+          timeout: 2700
       - name: Skipped CI gate (operator override)
         if: ${{ inputs.skip_ci_check }}
         run: echo "::warning::skip_ci_check=true — releasing without verifying CI status on main HEAD"
