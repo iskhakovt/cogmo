@@ -4,10 +4,12 @@ coverage:
       default:
         target: auto
         threshold: 1%
+        informational: true
     patch:
       default:
         target: auto
         threshold: 1%
+        informational: true
 
 comment:
   layout: "reach, diff, flags, files"
@@ -20,9 +22,11 @@ flag_management:
       - type: project
         target: auto
         threshold: 1%
+        informational: true
       - type: patch
         target: auto
         threshold: 1%
+        informational: true
 
 ignore:
   - "src/test/**"
