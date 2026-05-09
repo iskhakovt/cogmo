@@ -1,25 +1,36 @@
 /**
  * Embedded Python source for the Tier-2 (sysbox container) skill runner.
- * Materialized at exec time as the `python3 -u -c <SOURCE>` argument, mirroring
- * how Tier 1 inlines `ctx.py.ts` into Pyodide via `runPythonAsync`. Keeps the
- * runtime in TS (no separate `.py` resource to ship and locate inside the
- * container image).
+ * Defines `_main(body, inputs, task_id)` — the per-task lifecycle. Two
+ * callers wrap it:
  *
- * Protocol: line-buffered NDJSON over stdin/stdout.
- *   - Reads one `task_invoke` from stdin (the host sends exactly one).
- *   - Resolves `await ctx.<method>(...)` calls by writing `ctx_call` to stdout
+ *   - The supervisor (`supervisor.py.ts`) interpolates this source and
+ *     calls `_main` from a forked child after reading `task_invoke` from
+ *     stdin in the supervisor parent. Body / inputs / task_id come from
+ *     the in-memory task dict. Used by both the warm pool and per-task
+ *     one-shots (skills with resource overrides that bypass the pool).
+ *
+ *   - There is no stdin-driven `task_invoke` reader inside this module
+ *     anymore — the supervisor always passes the task by argument. The
+ *     stdin reader below only consumes `ctx_result` lines that resolve
+ *     `await ctx.foo()` calls mid-task.
+ *
+ * Protocol — line-buffered NDJSON over stdin/stdout:
+ *   - Resolves `await ctx.<method>(...)` by writing `ctx_call` to stdout
  *     and blocking on the matching `ctx_result` from stdin.
- *   - Writes one `task_result` to stdout. Then exits.
+ *   - Writes one `task_result` to stdout. Then returns; the caller
+ *     (supervisor child) exits.
  *
  * Multiple `ctx_call`s may be in flight (the host services them concurrently
  * and replies in any order); the runner correlates by `id`.
  */
 export const RUNNER_PY: string = `
 import asyncio
+import inspect
 import json
 import sys
 import traceback
 import uuid
+
 
 # stdout/stderr are line-buffered already because the host sets python -u.
 # stdin reads happen via asyncio's StreamReader for non-blocking framing.
@@ -48,9 +59,6 @@ class _Bridge:
 
     async def call(self, method, args):
         call_id = "ctx-" + uuid.uuid4().hex[:12]
-        # \`get_running_loop\` is the safe form inside a coroutine — \`get_event_loop\`
-        # is deprecated in 3.10+ when no loop is running and slated for harder
-        # removal; on 3.14 (the floor) it already emits DeprecationWarning.
         future = asyncio.get_running_loop().create_future()
         self._pending[call_id] = future
         await self._send({"type": "ctx_call", "id": call_id, "method": method, "args": args})
@@ -154,12 +162,9 @@ class Ctx:
         return await self._b.call("user", {})
 
 
-async def _read_stdin_lines(bridge, task_invoke_future):
-    """Drain stdin, route each line to the right place.
-
-    The first \`task_invoke\` resolves the \`task_invoke_future\`; subsequent
-    \`ctx_result\`s deliver through the bridge. Any other shape is logged to
-    stderr and ignored.
+async def _read_stdin_lines(bridge):
+    """Drain stdin during a task's run — only \`ctx_result\` shapes are
+    expected; everything else is logged to stderr and dropped.
     """
     loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader()
@@ -178,37 +183,33 @@ async def _read_stdin_lines(bridge, task_invoke_future):
             sys.stderr.write("ignoring malformed line\\n")
             continue
         kind = message.get("type")
-        if kind == "task_invoke":
-            if not task_invoke_future.done():
-                task_invoke_future.set_result(message)
-        elif kind == "ctx_result":
+        if kind == "ctx_result":
             bridge.deliver(message)
-        # task_result and ctx_call are worker-emitted shapes; if we see them
-        # on stdin it's a host bug. Drop silently rather than crashing.
+        # task_invoke / task_result / ctx_call are not expected here under
+        # the supervisor model; drop silently to avoid coupling to host bugs.
 
 
-def _send(obj):
+def _send_sync(obj):
     """Synchronous send used after the event loop ends (final task_result)."""
     sys.stdout.write(json.dumps(obj) + "\\n")
     sys.stdout.flush()
 
 
-async def _main(skill_body):
+async def _main(skill_body, inputs, task_id):
+    """Per-task lifecycle. Compiles the skill body, runs
+    \`async def run(inputs, ctx)\`, emits exactly one \`task_result\` line
+    on stdout. Errors at any stage land as a non-ok task_result; the
+    function does not raise to the caller.
+    """
     bridge = _Bridge()
-    loop = asyncio.get_event_loop()
-    task_invoke_future = loop.create_future()
-    stdin_task = asyncio.create_task(_read_stdin_lines(bridge, task_invoke_future))
-
-    invoke = await task_invoke_future
-    task_id = invoke["id"]
-    inputs = invoke["inputs"]
+    stdin_task = asyncio.create_task(_read_stdin_lines(bridge))
 
     # Compile and run the user's skill body, expecting an \`async def run(inputs, ctx)\`.
     skill_module = {}
     try:
         exec(compile(skill_body, "<skill>", "exec"), skill_module)
     except SyntaxError as e:
-        _send({
+        _send_sync({
             "type": "task_result",
             "id": task_id,
             "ok": False,
@@ -218,8 +219,8 @@ async def _main(skill_body):
         return
 
     run_fn = skill_module.get("run")
-    if not callable(run_fn) or not asyncio.iscoroutinefunction(run_fn):
-        _send({
+    if not callable(run_fn) or not inspect.iscoroutinefunction(run_fn):
+        _send_sync({
             "type": "task_result",
             "id": task_id,
             "ok": False,
@@ -231,16 +232,16 @@ async def _main(skill_body):
     ctx = Ctx(bridge)
     try:
         output = await run_fn(inputs, ctx)
-        _send({"type": "task_result", "id": task_id, "ok": True, "output": output})
+        _send_sync({"type": "task_result", "id": task_id, "ok": True, "output": output})
     except CtxError as e:
-        _send({
+        _send_sync({
             "type": "task_result",
             "id": task_id,
             "ok": False,
             "error": f"{e.kind}: {e.message}",
         })
     except Exception as e:
-        _send({
+        _send_sync({
             "type": "task_result",
             "id": task_id,
             "ok": False,
@@ -253,9 +254,4 @@ async def _main(skill_body):
             await stdin_task
         except (asyncio.CancelledError, Exception):
             pass
-
-
-# The host appends the user's skill body as a JSON-encoded string assigned
-# to \`__skill_body__\` immediately before running this module via -c.
-asyncio.run(_main(__skill_body__))
 `;

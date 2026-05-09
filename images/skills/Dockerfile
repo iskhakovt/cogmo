@@ -8,7 +8,9 @@
 # Today's image is intentionally minimal — Python runtime + non-root user.
 # We own the pipeline; deps land here as real skills demand them (s3fs-fuse
 # for the future POSIX shim, common pip wheels once we know which actually
-# save cold-start time).
+# save cold-start time). When the first runtime Python dep arrives, this
+# image picks up `uv` + `pyproject.toml` + `uv.lock` for reproducible
+# installs and per-skill `requirements.txt` resolution (P3.4).
 
 FROM mirror.gcr.io/library/python:3.14-slim@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033
 

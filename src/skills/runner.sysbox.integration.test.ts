@@ -136,14 +136,28 @@ async def run(inputs, ctx):
 `;
 
 /**
- * Returns the container's hostname — by default the docker short container
- * ID. Two invocations from the same warm-pool worker share a hostname; two
- * from different containers (cold start, recycle) don't.
+ * Returns the container's hostname (= docker short container ID by
+ * default) and the supervisor's PID. Two invocations from the same warm
+ * worker share both — the container survives across tasks AND the
+ * supervisor process survives across tasks (forking children per task).
  */
 const HOSTNAME_BODY = `
-import socket
+import os, socket
 async def run(inputs, ctx):
-    return {"host": socket.gethostname()}
+    return {"host": socket.gethostname(), "ppid": os.getppid()}
+`;
+
+/**
+ * Sets a global on the first call, asserts the global is gone on the next.
+ * Validates per-task process isolation: the supervisor forks a fresh child
+ * per task, so module-level state from task 1 can't leak into task 2.
+ */
+const STATE_LEAK_BODY = `
+import sys
+async def run(inputs, ctx):
+    seen_before = "_cogmo_test_marker" in sys.modules
+    sys.modules["_cogmo_test_marker"] = object()
+    return {"seen_before": seen_before}
 `;
 
 const containerManifest = (name: string) => `---
@@ -253,12 +267,46 @@ resources:
     const r2 = await runner.invoke({ name: "tier2-host", inputs: {} });
     expect(r1.status).toBe("success");
     expect(r2.status).toBe("success");
-    const h1 = (r1.output as { host: string }).host;
-    const h2 = (r2.output as { host: string }).host;
-    // Same container — pool reused the warm worker. If this drifts, the
-    // pool is spawning per-task again and the warm-pool win is gone.
-    expect(h1).toBe(h2);
-    expect(h1).toMatch(/^[0-9a-f]{12}$/);
+    const o1 = r1.output as { host: string; ppid: number };
+    const o2 = r2.output as { host: string; ppid: number };
+    // Same container — pool reused the warm worker.
+    expect(o1.host).toBe(o2.host);
+    expect(o1.host).toMatch(/^[0-9a-f]{12}$/);
+    // Same supervisor process — children forked from it across tasks.
+    // If supervisors are spawning per task, ppid would differ.
+    expect(o1.ppid).toBe(o2.ppid);
+
+    await runner.shutdown();
+  }, 180_000);
+
+  it("isolates module-level state between sequential tasks (fresh fork per task)", async () => {
+    const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
+      store: skillStore,
+      memory: stubMemory(),
+      secretsStore: stubSecrets(),
+      files: noopFiles,
+      sandbox,
+      tier2Image: SKILLS_IMAGE,
+      user: { id: "u-1", timezone: "UTC" },
+      memoryBankId: "bank-1",
+    });
+
+    await runner.__registerForTests({
+      name: "tier2-leak",
+      manifestSource: containerManifest("tier2-leak"),
+      body: STATE_LEAK_BODY,
+    });
+
+    const r1 = await runner.invoke({ name: "tier2-leak", inputs: {} });
+    const r2 = await runner.invoke({ name: "tier2-leak", inputs: {} });
+    expect(r1.status).toBe("success");
+    expect(r2.status).toBe("success");
+    // Task 1 sets `sys.modules["_cogmo_test_marker"]`. Task 2 runs in a
+    // fresh fork from the supervisor, so its `sys.modules` is the
+    // supervisor's snapshot at fork time — the marker isn't there.
+    expect((r1.output as { seen_before: boolean }).seen_before).toBe(false);
+    expect((r2.output as { seen_before: boolean }).seen_before).toBe(false);
 
     await runner.shutdown();
   }, 180_000);
