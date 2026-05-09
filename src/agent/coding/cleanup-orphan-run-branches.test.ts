@@ -225,4 +225,48 @@ describe("sweepRepo", () => {
     expect(result).toEqual({ repoId: repo.id, deleted: 0, skipped: 0, errors: 0 });
     expect(oct.calls.deleteRef).not.toHaveBeenCalled();
   });
+
+  it("continues to next ref after a delete failure (one bad ref doesn't block the sweep)", async () => {
+    const repo = await seedRepo();
+    const taskA = await insertTaskWithStatus(repo.id, "pr_open");
+    const taskB = await insertTaskWithStatus(repo.id, "pr_open");
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600 * 1000);
+    await db.execute(
+      sql`UPDATE coding_tasks SET created_at = ${eightDaysAgo} WHERE id IN (${taskA.id}, ${taskB.id})`,
+    );
+
+    // First delete throws a non-404/422 error (e.g. transient 502).
+    // Second delete succeeds. After the first throws, the loop catches
+    // and continues — so deleted=1 and errors=1, not deleted=0 with
+    // the function aborting on the first failure.
+    const oct = fakeOctokit([
+      `refs/heads/cogmo/run/${taskA.id}`,
+      `refs/heads/cogmo/run/${taskB.id}`,
+    ]);
+    let call = 0;
+    oct.calls.deleteRef.mockImplementation(async () => {
+      call++;
+      if (call === 1) throw new Error("simulated 502");
+      return { status: 204 };
+    });
+
+    const result = await sweepRepo(
+      {
+        runInTx: tx,
+        store,
+        secretsStore: fakeSecretsStore(),
+        octokitFactory: oct.factory as never,
+      },
+      repo.id,
+      stepRun,
+    );
+
+    expect(result).toEqual({
+      repoId: repo.id,
+      deleted: 1,
+      skipped: 0,
+      errors: 1,
+    });
+    expect(oct.calls.deleteRef).toHaveBeenCalledTimes(2);
+  });
 });

@@ -307,6 +307,19 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       gitRemoteIdentityPat = identity.pat;
     }
 
+    // Three checkpoints for container lifecycle so any failure between
+    // sandbox.create() succeeding and the post-create wiring completing
+    // still triggers cleanup via the outer catch:
+    //
+    //   1. `create-container` returns sessionState — once this checkpoints,
+    //      the container exists on Docker / Daytona side and is labelled
+    //      with the task id.
+    //   2. `containerCreated = true` — set OUTSIDE the step body so it
+    //      survives Inngest replay (step bodies are skipped on resume,
+    //      only checkpointed return values are loaded).
+    //   3. `persist-container-id` + `checkout-feature-branch` — wiring
+    //      that runs after the flag is set. If either throws, the catch
+    //      sees `containerCreated=true` and reaps via deleteByTaskId.
     const sessionState = await stepRun("create-container", async () => {
       const session = await sandbox.create({
         taskId,
@@ -329,24 +342,27 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         allowPrivilegedRunc: task.allowPrivilegedRunc,
         ...(sandboxEnv && { env: sandboxEnv }),
       });
-      if (isLocalDockerSessionState(session.state)) {
-        // `containers` is the local-docker FK target; managed backends
-        // (Daytona) leave the column null and rely on the sandbox's own
-        // task-id label for lineage tracking.
-        const localState = session.state;
-        await runInTx((tx) => store.setTaskContainerId(tx, taskId, localState.containerRowId));
-      }
-      if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-        await checkoutFeatureBranchInSandbox(session, wt.branch);
-      }
       return session.state;
     });
-    // Set OUTSIDE the step body — Inngest replays skip step bodies and
-    // load the checkpointed return value, so a flag set inside the body
-    // wouldn't survive a worker restart between this step and the next.
-    // The outer-line assignment re-runs on every replay until a later
-    // step boundary checkpoints.
     containerCreated = true;
+
+    if (isLocalDockerSessionState(sessionState)) {
+      // `containers` is the local-docker FK target; managed backends
+      // (Daytona) leave the column null and rely on the sandbox's own
+      // task-id label for lineage tracking.
+      const containerRowId = sessionState.containerRowId;
+      await stepRun("persist-container-id", () =>
+        runInTx((tx) => store.setTaskContainerId(tx, taskId, containerRowId)),
+      );
+    }
+    if (sandbox.capabilities.workingTreeTransport === "git-remote") {
+      await stepRun("checkout-feature-branch", async () => {
+        // Resume a session handle inside the step — handles aren't
+        // JSON-serializable so they can't cross step boundaries.
+        const session = await sandbox.resume(sessionState);
+        await checkoutFeatureBranchInSandbox(session, wt.branch);
+      });
+    }
 
     // Re-attach a session handle on this side of the step boundary —
     // handles can't cross step.run because they aren't
@@ -694,92 +710,99 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
 
     const secretsStore = deps.secretsStore;
 
-    // Get-or-create the task container. The plan-phase container has an
-    // idle TTL (CODING_TASK_IDLE_TTL_MINUTES); if approval took longer
-    // than that, the reaper stopped it and we recreate. `claude --resume
-    // <sid>` reloads the prior session from disk inside the container's
-    // persistent home volume, so the recreate is transparent to Claude.
+    // Get-or-create the task container in three checkpoints:
     //
-    // Auth is fetched INSIDE the step, AFTER `tryResumeByTaskId`. Two
-    // reasons: (1) resume is auth-free — the existing container's env
-    // (including `CLAUDE_CODE_OAUTH_TOKEN`) was fixed at plan-phase
-    // create time and can't be updated without recreating, so a stale
-    // secret is irrelevant on resume; (2) if the secret was removed
-    // between plan and execute, we still want the catch-path
-    // `deleteByTaskId` to reap the alive plan-phase container —
-    // `containerCreated` must be set from the resume branch BEFORE we
-    // throw, otherwise the catch sees `containerCreated=false` and
-    // leaks the container until the idle-TTL reaper runs.
-    // Resolve the GitHub identity once for git-remote backends — used
-    // for clone auth in the create-fresh path. tryResumeByTaskId returns
-    // an existing sandbox whose clone+checkout already completed in the
-    // plan phase (or a prior execute attempt), so resume is auth-free.
-    let gitRemoteIdentityPat: string | undefined;
-    if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-      if (!secretsStore) {
-        throw new Error("git-remote sandbox requires a secretsStore for clone auth");
-      }
-      const identity = await loadIdentity({
-        runInTx,
-        secretsStore,
-        identityName: repo.identityName,
-      });
-      gitRemoteIdentityPat = identity.pat;
-    }
-
-    const sessionState = await stepRun("get-or-create-container", async () => {
+    //   1. `try-resume` — non-null state means a prior sandbox is alive
+    //      (the reaper hasn't gotten to it; or the plan-phase container
+    //      is still warm). No fresh clone or checkout is needed and we
+    //      skip auth resolution entirely.
+    //   2. `create-container` (fresh-only) — sandbox.create() returning
+    //      sessionState. Auth is resolved INSIDE the body so a resume
+    //      hit doesn't pay the DB+decrypt cost, and so the PAT never
+    //      becomes a step return value (Inngest persists step returns
+    //      and we don't want credentials in its state store).
+    //   3. `containerCreated = true` — set OUTSIDE the steps so it
+    //      survives Inngest replay. Once any of (1)/(2) checkpointed,
+    //      a container labelled with this task id exists and the
+    //      catch path's `deleteByTaskId` call reaps it.
+    const resumedState = await stepRun("try-resume", async () => {
       const existing = await sandbox.tryResumeByTaskId(taskId);
-      if (existing) {
-        // Container already exists from a previous attempt that crashed
-        // mid-execute (or the reaper hasn't run yet). It still belongs
-        // to this task — failed-execute teardown should reap it the
-        // same as a freshly-created one. `deleteByTaskId` is
-        // idempotent so the catch-path call below is safe in either
-        // case.
-        return existing.state;
-      }
+      return existing?.state ?? null;
+    });
 
-      let sandboxEnv: Record<string, string> | undefined;
-      if (secretsStore) {
-        const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
-        if (authResult.isErr()) {
-          throw new Error(authResult.error.message);
+    let sessionState: typeof resumedState;
+    let isFreshCreate: boolean;
+    if (resumedState !== null) {
+      sessionState = resumedState;
+      isFreshCreate = false;
+    } else {
+      isFreshCreate = true;
+      sessionState = await stepRun("create-container", async () => {
+        let sandboxEnv: Record<string, string> | undefined;
+        if (secretsStore) {
+          const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
+          if (authResult.isErr()) {
+            throw new Error(authResult.error.message);
+          }
+          sandboxEnv = authResult.value;
         }
-        sandboxEnv = authResult.value;
-      }
 
-      const session = await sandbox.create({
-        taskId,
-        worktree: buildWorktreeSpec({
+        let gitRemoteIdentityPat: string | undefined;
+        if (sandbox.capabilities.workingTreeTransport === "git-remote") {
+          if (!secretsStore) {
+            throw new Error("git-remote sandbox requires a secretsStore for clone auth");
+          }
+          const identity = await loadIdentity({
+            runInTx,
+            secretsStore,
+            identityName: repo.identityName,
+          });
+          gitRemoteIdentityPat = identity.pat;
+        }
+
+        const session = await sandbox.create({
           taskId,
-          capability: sandbox.capabilities.workingTreeTransport,
-          assignment: worktreeAssignment,
-          remoteUrl: repo.remoteUrl,
-          identityPat: gitRemoteIdentityPat,
-        }),
-        ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
-          homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
-        }),
-        image: repo.devcontainer?.image ?? devbaseImage,
-        resourceLimits: defaultResourceLimits,
-        expiresAt: new Date(Date.now() + taskTtlMs),
-        allowPrivilegedRunc: task.allowPrivilegedRunc,
-        ...(sandboxEnv && { env: sandboxEnv }),
+          worktree: buildWorktreeSpec({
+            taskId,
+            capability: sandbox.capabilities.workingTreeTransport,
+            assignment: worktreeAssignment,
+            remoteUrl: repo.remoteUrl,
+            identityPat: gitRemoteIdentityPat,
+          }),
+          ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
+            homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
+          }),
+          image: repo.devcontainer?.image ?? devbaseImage,
+          resourceLimits: defaultResourceLimits,
+          expiresAt: new Date(Date.now() + taskTtlMs),
+          allowPrivilegedRunc: task.allowPrivilegedRunc,
+          ...(sandboxEnv && { env: sandboxEnv }),
+        });
+        return session.state;
       });
-      if (isLocalDockerSessionState(session.state)) {
-        const localState = session.state;
-        await runInTx((tx) => store.setTaskContainerId(tx, taskId, localState.containerRowId));
+    }
+    containerCreated = true;
+
+    // Post-create wiring — only on the fresh-create branch. A resume
+    // hit means a prior attempt already ran these (or they're not
+    // applicable), so re-running them would either be a no-op or
+    // produce confusing logs. Each step is independently checkpointed
+    // and individually idempotent (UPDATE setTaskContainerId,
+    // `git checkout -B` resets the branch to current HEAD).
+    if (isFreshCreate) {
+      if (isLocalDockerSessionState(sessionState)) {
+        const containerRowId = sessionState.containerRowId;
+        await stepRun("persist-container-id", () =>
+          runInTx((tx) => store.setTaskContainerId(tx, taskId, containerRowId)),
+        );
       }
       if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-        await checkoutFeatureBranchInSandbox(session, worktreeAssignment.branch);
+        await stepRun("checkout-feature-branch", async () => {
+          const session = await sandbox.resume(sessionState);
+          await checkoutFeatureBranchInSandbox(session, worktreeAssignment.branch);
+        });
       }
-      return session.state;
-    });
-    // Set OUTSIDE the step body so the flag survives Inngest replay —
-    // step bodies are skipped on resume and only the checkpointed return
-    // value is loaded, so an inside-the-body assignment would reset to
-    // `false` and the catch path would skip the `deleteByTaskId` cleanup.
-    containerCreated = true;
+    }
 
     const container = await sandbox.resume(sessionState);
 

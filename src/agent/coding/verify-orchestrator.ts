@@ -235,8 +235,11 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     );
 
     // Create a fresh container with the askpass dir mounted read-only at
-    // /.cogmo-askpass. The execute orchestrator already tore the previous
-    // container down, so this is always a fresh handle.
+    // /.cogmo-askpass. Two checkpoints so a failed post-create wiring
+    // step (`checkout-feature-branch`) still triggers cleanup via the
+    // finally block — `containerCreated` is set OUTSIDE the step so it
+    // survives Inngest replay (step bodies are skipped on resume and
+    // only the checkpointed return value is loaded).
     const sessionState = await stepRun("create-container", async () => {
       const session = await sandbox.create({
         taskId,
@@ -257,17 +260,16 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         askpass: { hostDir: askpass.hostDir, containerDir: askpass.containerDir },
         env: sandboxEnv,
       });
-      if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-        await checkoutFeatureBranchInSandbox(session, worktreeAssignment.branch);
-      }
       return session.state;
     });
-    // Set OUTSIDE the step body so the flag survives Inngest replay —
-    // step bodies are skipped on resume and only the checkpointed return
-    // value is loaded, so an inside-the-body assignment would reset to
-    // `false` and the finally block would skip the `deleteByTaskId`
-    // cleanup, leaking the container.
     containerCreated = true;
+
+    if (sandbox.capabilities.workingTreeTransport === "git-remote") {
+      await stepRun("checkout-feature-branch", async () => {
+        const session = await sandbox.resume(sessionState);
+        await checkoutFeatureBranchInSandbox(session, worktreeAssignment.branch);
+      });
+    }
     const container: SandboxSession = await sandbox.resume(sessionState);
 
     executeStream = await openExecuteStream(taskId);

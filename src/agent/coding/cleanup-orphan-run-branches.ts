@@ -30,6 +30,7 @@ import { logger } from "../../logger.js";
 import { describeResolveIdentityError, resolveGitHubIdentity } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { parseRemoteUrl } from "./draft-pr.js";
+import { runBranchFor } from "./git-as-transport.js";
 import { type CodingStore, isTerminalCodingTaskStatus } from "./store/index.js";
 
 const log = logger.child({ component: "coding.cleanup-orphan-run-branches" });
@@ -62,9 +63,12 @@ export function createOrphanRunBranchSweepFunctions(
   const cron = inngest.createFunction(
     {
       id: "coding-orphan-run-branch-sweep-cron",
-      // Cleanup is idempotent — the next week's tick picks up anything
-      // we missed. Mirroring the reaper's retries=0 stance.
-      retries: 0,
+      // 2 retries on the cron's outer body (list-repos, sendEvent fan-
+      // out) so a transient DB blip or Inngest event-bus hiccup doesn't
+      // lose the entire weekly sweep. Per-repo work has its own retry
+      // budget on the perRepo function below; `step.sendEvent`
+      // checkpoints, so retries here don't fan out twice.
+      retries: 2,
       triggers: [{ cron: "0 4 * * 0" }],
     },
     async ({ step }) => {
@@ -113,7 +117,10 @@ export async function sweepRepo(
     deps.runInTx((tx) => deps.store.getRepoById(tx, repoId)),
   );
   if (!repo) {
-    log.warn({ repoId }, "sweep-repo: repo row gone — nothing to do");
+    // Transient race with concurrent repo deletion — not warn-worthy,
+    // the cron will skip this fan-out event and pick up survivors next
+    // week.
+    log.info({ repoId }, "sweep-repo: repo row gone — nothing to do");
     return { repoId, deleted: 0, skipped: 0, errors: 0 };
   }
 
@@ -140,30 +147,27 @@ export async function sweepRepo(
 
   // `octokit.paginate` walks all pages — defensive against repos with
   // >30 (or >100) orphan run-branches that would otherwise be partially
-  // swept and leak over time.
-  const refs = await stepRun("list-run-refs", async () => {
+  // swept and leak over time. Carry only the task id forward; the full
+  // ref shape `heads/cogmo/run/<task-id>` is reconstructed via
+  // `runBranchFor` at every consumer site for symmetry with
+  // `cleanup-run-branch.ts`.
+  const taskIds = await stepRun("list-run-refs", async () => {
     const all = await octokit.paginate(octokit.git.listMatchingRefs, {
       owner: remote.owner,
       repo: remote.repo,
       ref: RUN_BRANCH_REF_PREFIX,
       per_page: 100,
     });
-    return all.map((r) => ({
-      // `git.deleteRef` wants the ref relative to `refs/` (e.g.
-      // `heads/cogmo/run/<id>`), NOT relative to `refs/heads/`. Strip
-      // only the `refs/` prefix so the round-trip is symmetric.
-      ref: r.ref.replace(/^refs\//, ""),
-    }));
+    return all.map((r) => r.ref.replace(/^refs\/heads\/cogmo\/run\//, ""));
   });
 
-  if (refs.length === 0) {
+  if (taskIds.length === 0) {
     return { repoId, deleted: 0, skipped: 0, errors: 0 };
   }
 
   // Batch task lookup — one query for every ref. Avoids N round-trips
   // through Inngest's executor and stays well under any per-function
   // step-count cap. Map by id for O(1) lookup in the loop below.
-  const taskIds = refs.map((r) => r.ref.replace(/^heads\/cogmo\/run\//, ""));
   const tasks = await stepRun("load-tasks", () =>
     deps.runInTx((tx) => deps.store.getTasksByIds(tx, taskIds)),
   );
@@ -173,8 +177,7 @@ export async function sweepRepo(
   let skipped = 0;
   let errors = 0;
 
-  for (const { ref } of refs) {
-    const taskId = ref.replace(/^heads\/cogmo\/run\//, "");
+  for (const taskId of taskIds) {
     const task = tasksById.get(taskId);
 
     // Stale criterion: task row is terminal AND created >7 days ago, OR
@@ -199,6 +202,7 @@ export async function sweepRepo(
       continue;
     }
 
+    const ref = `heads/${runBranchFor(taskId)}`;
     try {
       await stepRun(`delete-${taskId}`, async () => {
         try {
@@ -218,12 +222,17 @@ export async function sweepRepo(
       });
       deleted++;
     } catch (err) {
-      log.warn({ err, taskId, ref }, "sweep-repo: delete-ref failed (Inngest will retry step)");
+      // The per-delete `step.run` already exhausted its default retry
+      // budget before reaching here. Continue to the next ref instead
+      // of bubbling up — one bad ref shouldn't block the rest of this
+      // week's sweep, and the next weekly tick will pick this one up
+      // again. The error count surfaces in the function's return so
+      // it shows up in Inngest's run history.
+      log.warn({ err, taskId, ref }, "sweep-repo: delete-ref failed after retries — continuing");
       errors++;
-      throw err;
     }
   }
 
-  log.info({ repoId, refs: refs.length, deleted, skipped }, "sweep-repo done");
+  log.info({ repoId, refs: taskIds.length, deleted, skipped, errors }, "sweep-repo done");
   return { repoId, deleted, skipped, errors };
 }
