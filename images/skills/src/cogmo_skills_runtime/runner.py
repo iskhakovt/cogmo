@@ -16,6 +16,7 @@ import json
 import sys
 import traceback
 import uuid
+from collections.abc import Mapping, Sequence
 from typing import Any, TextIO
 
 
@@ -37,18 +38,22 @@ class _Bridge:
     """
 
     def __init__(self, stdout: TextIO) -> None:
+        # `Future[Any]` (not `object`) because the resolved value flows
+        # back to skill-author code via `await ctx.foo()`, which expects
+        # to operate on it without isinstance gymnastics. Any opt-out is
+        # the right shape at this boundary.
         self._pending: dict[str, asyncio.Future[Any]] = {}
         self._stdout_lock = asyncio.Lock()
         self._stdout = stdout
 
-    async def call(self, method: str, args: Any) -> Any:
+    async def call(self, method: str, args: object) -> Any:
         call_id = "ctx-" + uuid.uuid4().hex[:12]
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending[call_id] = future
         await self._send({"type": "ctx_call", "id": call_id, "method": method, "args": args})
         return await future
 
-    def deliver(self, message: dict[str, Any]) -> None:
+    def deliver(self, message: Mapping[str, object]) -> None:
         """Called by the stdin reader when a ctx_result arrives."""
         call_id = message.get("id")
         if not isinstance(call_id, str):
@@ -73,7 +78,7 @@ class _Bridge:
                 future.set_exception(error)
         self._pending.clear()
 
-    async def _send(self, obj: dict[str, Any]) -> None:
+    async def _send(self, obj: Mapping[str, object]) -> None:
         line = json.dumps(obj) + "\n"
         async with self._stdout_lock:
             self._stdout.write(line)
@@ -93,13 +98,13 @@ class _Memory:
         self._b = bridge
 
     async def recall(self, query: str, limit: int | None = None) -> Any:
-        args: dict[str, Any] = {"query": query}
+        args: dict[str, object] = {"query": query}
         if limit is not None:
             args["limit"] = limit
         return await self._b.call("memory.recall", args)
 
-    async def remember(self, content: str, tags: list[str] | None = None) -> Any:
-        args: dict[str, Any] = {"content": content}
+    async def remember(self, content: str, tags: Sequence[str] | None = None) -> Any:
+        args: dict[str, object] = {"content": content}
         if tags is not None:
             args["tags"] = list(tags)
         return await self._b.call("memory.remember", args)
@@ -116,7 +121,7 @@ class _Files:
         return await self._b.call("files.write", {"path": path, "content": content})
 
     async def list(self, prefix: str | None = None) -> Any:
-        args: dict[str, Any] = {}
+        args: dict[str, object] = {}
         if prefix is not None:
             args["prefix"] = prefix
         result = await self._b.call("files.list", args)
@@ -127,7 +132,7 @@ class _Log:
     def __init__(self, bridge: _Bridge) -> None:
         self._b = bridge
 
-    async def info(self, message: str, **fields: Any) -> Any:
+    async def info(self, message: str, **fields: object) -> Any:
         return await self._b.call("log.info", {"message": message, "fields": fields})
 
 
@@ -148,7 +153,7 @@ class Ctx:
         return await self._b.call("user", {})
 
 
-async def _read_stdin_lines(bridge: _Bridge, stdin: Any, stderr: TextIO) -> None:
+async def _read_stdin_lines(bridge: _Bridge, stdin: object, stderr: TextIO) -> None:
     """Drain stdin during a task's run — only `ctx_result` shapes are
     expected; everything else is logged to stderr and dropped.
     """
@@ -177,7 +182,7 @@ async def _read_stdin_lines(bridge: _Bridge, stdin: Any, stderr: TextIO) -> None
         # the supervisor model; drop silently to avoid coupling to host bugs.
 
 
-def _send_sync(stdout: TextIO, obj: dict[str, Any]) -> None:
+def _send_sync(stdout: TextIO, obj: Mapping[str, object]) -> None:
     """Synchronous send used after the event loop ends (final task_result)."""
     stdout.write(json.dumps(obj) + "\n")
     stdout.flush()
@@ -188,7 +193,7 @@ async def _main(
     inputs: Any,
     task_id: str,
     *,
-    stdin: Any | None = None,
+    stdin: object | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> None:
@@ -198,6 +203,8 @@ async def _main(
     function does not raise to the caller.
 
     Streams default to `sys.stdin`/`stdout`/`stderr`; tests pass fakes.
+    `inputs` stays `Any` because it flows opaquely into user skill code,
+    where the skill author's typechecker (not ours) decides the shape.
     """
     out = stdout if stdout is not None else sys.stdout
     err = stderr if stderr is not None else sys.stderr
@@ -207,7 +214,7 @@ async def _main(
     stdin_task = asyncio.create_task(_read_stdin_lines(bridge, inp, err))
 
     # Compile and run the user's skill body, expecting an `async def run(inputs, ctx)`.
-    skill_module: dict[str, Any] = {}
+    skill_module: dict[str, object] = {}
     try:
         exec(compile(skill_body, "<skill>", "exec"), skill_module)
     except SyntaxError as e:
@@ -266,5 +273,5 @@ async def _main(
         stdin_task.cancel()
         try:
             await stdin_task
-        except asyncio.CancelledError, Exception:
+        except (asyncio.CancelledError, Exception):
             pass

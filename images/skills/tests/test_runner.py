@@ -144,7 +144,7 @@ class TestCtxBridge:
         # to verify the correlation logic.
         import asyncio
 
-        async def go() -> Any:
+        async def go() -> object:
             future = asyncio.get_running_loop().create_future()
             bridge._pending["ctx-fake"] = future
             bridge.deliver({"id": "ctx-fake", "ok": True, "value": "hello"})

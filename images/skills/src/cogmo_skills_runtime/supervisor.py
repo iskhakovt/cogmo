@@ -37,7 +37,7 @@ import selectors
 import signal
 import sys
 import time
-from typing import Any
+from collections.abc import Mapping
 
 from cogmo_skills_runtime.runner import _main as _run_main
 
@@ -45,7 +45,7 @@ DEFAULT_WALL_CLOCK_S = 60
 SIGKILL_GRACE_S = 2.0
 
 
-def _send(obj: dict[str, Any]) -> None:
+def _send(obj: Mapping[str, object]) -> None:
     """Write a single JSON object to host stdout. Used only for results
     the supervisor synthesises (timeout, child died); normal task_results
     come from the child writing directly to its inherited stdout.
@@ -102,7 +102,7 @@ def _kill_and_reap(pid: int) -> None:
         pass
 
 
-def _run_one_task_in_child(task: dict[str, Any]) -> None:
+def _run_one_task_in_child(task: Mapping[str, object]) -> None:
     """Runs in the forked child. Returns nothing; the runner writes its
     own task_result to stdout. Child exits with code 0 on normal
     completion (including ctx-error / skill-exception paths — those
