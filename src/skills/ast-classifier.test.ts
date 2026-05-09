@@ -27,7 +27,7 @@ function manifestWith(overrides: Partial<SkillManifest> = {}): SkillManifest {
     secrets: [],
     cost_per_call_usd: 0,
     ...overrides,
-  } as SkillManifest;
+  } satisfies SkillManifest;
 }
 
 describe("classifyWithAst — empty / harmless body", () => {

@@ -59,7 +59,7 @@ const log = logger.child({ component: "skills.ast-classifier" });
  * path; the vendor directory is shipped to `/app/vendor` in the Docker
  * image alongside `dist/`.
  */
-const WASM_PATH = resolvePath(
+const DEFAULT_WASM_PATH = resolvePath(
   process.cwd(),
   "vendor",
   "tree-sitter-python",
@@ -67,9 +67,19 @@ const WASM_PATH = resolvePath(
 );
 
 /**
- * Lazy-init parser. The first call pays the WASM load (~tens of ms);
- * subsequent calls share the singleton. `reset` is exported for tests
- * that want to exercise the load-failure path.
+ * Mutable parser-init configuration. Tests override `wasmPath` via
+ * {@link __setWasmPathForTests} to exercise the load-failure path; the
+ * production code path never touches it.
+ */
+let wasmPath = DEFAULT_WASM_PATH;
+
+/**
+ * Lazy-init parser, single shared instance per process. Concurrent
+ * `classifyWithAst` calls await the same promise, which is safe under
+ * Node's single-threaded event loop — the parser's WASM heap is not
+ * mutated outside `parser.parse()`, which runs to completion before
+ * yielding. If `register` ever moves to Worker threads, this becomes a
+ * sharing hazard and each worker needs its own `Parser` instance.
  */
 let parserPromise: Promise<Parser> | null = null;
 
@@ -77,7 +87,7 @@ async function getParser(): Promise<Parser> {
   if (!parserPromise) {
     parserPromise = (async () => {
       await Parser.init();
-      const langBytes = readFileSync(WASM_PATH);
+      const langBytes = readFileSync(wasmPath);
       const Python = await Language.load(langBytes);
       const parser = new Parser();
       parser.setLanguage(Python);
@@ -96,6 +106,16 @@ async function getParser(): Promise<Parser> {
 /** Test-only — drop the cached parser so next call re-initializes. */
 export function __resetParserForTests(): void {
   parserPromise = null;
+}
+
+/**
+ * Test-only — point the parser at a different WASM file (or at a
+ * missing path to force a load failure). Pass `null` to restore the
+ * production default. Combine with {@link __resetParserForTests} so
+ * the next call re-runs `getParser` against the new path.
+ */
+export function __setWasmPathForTests(path: string | null): void {
+  wasmPath = path ?? DEFAULT_WASM_PATH;
 }
 
 interface DetectedHit {
@@ -264,6 +284,14 @@ function matchCall(node: Node, hits: DetectedHit[]): void {
  * Predicate runners. Today we only need `open_write_mode`: match if
  * `args[1]` is a string literal whose Python-string value contains
  * a write-mode flag. Default mode is `"r"` (read) when omitted.
+ *
+ * Known gap: `open(file=path, mode="w")` (kwargs form) doesn't match
+ * because we only inspect the second positional arg. Acceptable per
+ * the head-comment threat model — operators wanting to slip a write
+ * past the lint can already do so with `getattr(__import__("os"),
+ * "system")`. Sysbox carries the security weight; AST lint is a UX
+ * gate. If false negatives become a real problem, walk
+ * `keyword_argument` children too.
  */
 function matchesArgPredicate(callNode: Node, predicate: "open_write_mode"): boolean {
   if (predicate === "open_write_mode") {

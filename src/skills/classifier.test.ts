@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { __resetParserForTests, __setWasmPathForTests } from "./ast-classifier.js";
 import {
   AST_CLASSIFIER_VERSION,
   classifyManifest,
@@ -18,7 +19,7 @@ function makeManifest(overrides: Partial<SkillManifest> = {}): SkillManifest {
     secrets: [],
     cost_per_call_usd: 0,
     ...overrides,
-  } as SkillManifest;
+  } satisfies SkillManifest;
 }
 
 const NOOP_BODY = `
@@ -127,5 +128,56 @@ describe("classifyManifestStub (fallback)", () => {
       }),
     );
     expect(log.declared_secrets).toEqual(["plain_name", "object_form"]);
+  });
+});
+
+/**
+ * Operational safety net: when the AST parser load throws (broken
+ * WASM at runtime, missing vendor file in some pathological deploy,
+ * etc.), the classifier MUST fall back to the declaration-only stub
+ * rather than crashing the register flow. The fallback is what keeps
+ * the deploy pipeline available when the lint path silently breaks.
+ */
+describe("classifyManifest — fallback when AST parser is unloadable", () => {
+  afterEach(() => {
+    // Restore the production WASM path so other tests in this file
+    // (and elsewhere in the suite) get the live AST classifier.
+    __setWasmPathForTests(null);
+    __resetParserForTests();
+  });
+
+  it("falls back to the stub + stamps STUB_CLASSIFIER_VERSION when WASM path is missing", async () => {
+    __setWasmPathForTests("/tmp/cogmo-nonexistent-wasm-path-xxxxxxxxxxxx.wasm");
+    __resetParserForTests();
+
+    // Manifest declares a destructive effect → stub returns approve.
+    // (The AST path would also return approve, but with a different
+    // classifier_version and no validation_errors yet — the proof
+    // here is that classifier_version says we took the stub branch.)
+    const log = await classifyManifest(
+      makeManifest({ effects: ["sends_email"] }),
+      "async def run(inputs, ctx):\n    return {}\n",
+    );
+    expect(log.classifier_version).toBe(STUB_CLASSIFIER_VERSION);
+    expect(log.risk_tier).toBe("approve");
+    expect(log.detected_effects).toEqual([]);
+    expect(log.validation_errors).toEqual([]);
+  });
+
+  it("fallback preserves the stub's harmless-skill behavior (notify, never auto)", async () => {
+    __setWasmPathForTests("/tmp/cogmo-nonexistent-wasm-path-yyyyyyyyyyyy.wasm");
+    __resetParserForTests();
+
+    // No declared effects, harmless body — under the AST path this
+    // promotes to auto. Under the stub fallback, auto is unreachable
+    // (the stub can't *prove* read-only) so it stays at notify.
+    // Asserting `!== "auto"` directly proves we didn't take the
+    // AST path.
+    const log = await classifyManifest(
+      makeManifest(),
+      "async def run(inputs, ctx):\n    return {}\n",
+    );
+    expect(log.classifier_version).toBe(STUB_CLASSIFIER_VERSION);
+    expect(log.risk_tier).toBe("notify");
   });
 });

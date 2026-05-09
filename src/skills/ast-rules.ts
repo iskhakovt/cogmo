@@ -56,11 +56,19 @@ export interface CallRule {
  * network" would defeat the auto-tier.
  */
 export const IMPORT_RULES: readonly ImportRule[] = [
+  // `smtplib` actually sends. `email` (stdlib) is intentionally absent
+  // because it only constructs MIME messages — a skill that builds an
+  // email and hands it to a webhook doesn't need to declare
+  // `sends_email`. The smtplib rule carries the "this thing actually
+  // talks SMTP" semantics.
   { module: "smtplib", effect: "sends_email", label: "smtplib" },
-  { module: "email", effect: "sends_email", label: "email (SMTP/SMTP-likely)" },
   { module: "slack_sdk", effect: "sends_message", label: "slack_sdk" },
   { module: "slackclient", effect: "sends_message", label: "slackclient" },
   { module: "discord", effect: "sends_message", label: "discord" },
+  // Cogmo's primary channel is Telegram, so this rule trips every
+  // skill that legitimately uses `python-telegram-bot`. That's the
+  // right default — operators just declare `sends_message` in the
+  // manifest and the deploy proceeds.
   { module: "telegram", effect: "sends_message", label: "telegram" },
   { module: "twilio", effect: "sends_message", label: "twilio" },
   { module: "stripe", effect: "financial", label: "stripe" },
