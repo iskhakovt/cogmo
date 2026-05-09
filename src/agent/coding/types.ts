@@ -18,19 +18,39 @@ export const DevcontainerSpecSchema = z
 export type DevcontainerSpec = z.infer<typeof DevcontainerSpecSchema>;
 
 /**
- * Branch + worktree path derived from the task id by the orchestrator's
- * `allocate-worktree` step. Stored as one JSONB blob (rather than two
- * nullable text columns) so the two fields are atomic by construction:
- * either the worktree is allocated (both present, validated by Zod on read
- * and write) or it isn't (column is null). No "half-allocated" intermediate
- * state is representable.
+ * Branch + transport-specific worktree material derived from the task id
+ * by the orchestrator's `allocate-worktree` step. Stored as one JSONB blob
+ * (rather than separate columns) so the variant is atomic by construction:
+ * either the worktree is allocated (validated by Zod on read and write) or
+ * it isn't (column is null). No "half-allocated" intermediate state is
+ * representable.
+ *
+ * Discriminated by transport — `host-path` carries a host filesystem path
+ * the local-Docker backend bind-mounts at `/workspace`; `git-remote` carries
+ * only the slice-4 feature branch, because the run-branch is materialized
+ * inside the sandbox by `git clone` (no host worktree).
  */
-export const WorktreeAssignmentSchema = z
+export const HostPathWorktreeAssignmentSchema = z
   .object({
+    type: z.literal("host-path"),
     branch: z.string().min(1),
     worktreePath: z.string().min(1),
   })
   .strict();
+export type HostPathWorktreeAssignment = z.infer<typeof HostPathWorktreeAssignmentSchema>;
+
+export const GitRemoteWorktreeAssignmentSchema = z
+  .object({
+    type: z.literal("git-remote"),
+    branch: z.string().min(1),
+  })
+  .strict();
+export type GitRemoteWorktreeAssignment = z.infer<typeof GitRemoteWorktreeAssignmentSchema>;
+
+export const WorktreeAssignmentSchema = z.discriminatedUnion("type", [
+  HostPathWorktreeAssignmentSchema,
+  GitRemoteWorktreeAssignmentSchema,
+]);
 export type WorktreeAssignment = z.infer<typeof WorktreeAssignmentSchema>;
 
 /**

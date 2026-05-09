@@ -122,7 +122,7 @@ const task: CodingTaskRow = {
   triggerSource: "user",
   triggerRef: null,
   backend: "claude",
-  worktreeAssignment: { branch: "cogmo/abc", worktreePath: "/worktrees/abc" },
+  worktreeAssignment: { type: "host-path", branch: "cogmo/abc", worktreePath: "/worktrees/abc" },
   sessionId: null,
   containerId: null,
   allowPrivilegedRunc: false,
