@@ -363,6 +363,36 @@ describe("SysboxSkillWorker", () => {
       await expect(w.dispose()).resolves.toBeUndefined();
       expect(w.state).toBe("disposed");
     });
+
+    it("swallows exec.dispose failures during dispose", async () => {
+      // Same as above but the exec handle's dispose is what fails. Worker
+      // logs and continues; sandbox.delete still runs. Pins the
+      // "dispose is best-effort" contract.
+      const bundle = buildFakeSandbox();
+      // Re-create the session with a failing exec.dispose. Ugly because
+      // execDisposeCalls is wired in buildFakeSandbox; just override.
+      const failingExec: ExecStreamingHandle = {
+        stdin: new PassThrough() as unknown as Writable,
+        stdout: new PassThrough() as unknown as Readable,
+        stderr: new PassThrough() as unknown as Readable,
+        wait: async () => ({ exitCode: 0 }),
+        dispose: async () => {
+          throw new Error("exec dispose failed");
+        },
+      };
+      vi.mocked(bundle.session.execStreaming).mockResolvedValue(failingExec);
+
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-exec-fail",
+        sandbox: bundle.sandbox,
+        image: "python:3.14-slim",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      await expect(w.dispose()).resolves.toBeUndefined();
+      expect(w.state).toBe("disposed");
+      // sandbox.delete still ran despite exec.dispose throwing.
+      expect(bundle.sandbox.delete).toHaveBeenCalled();
+    });
   });
 
   describe("clocks", () => {

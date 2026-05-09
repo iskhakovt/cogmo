@@ -458,6 +458,40 @@ describe("Dispatcher", () => {
     d.close();
   });
 
+  it("rejects the pending task when ctx_result send fails (transport closed mid-task)", async () => {
+    // Worker emits a ctx_call. CtxHandler resolves. We try to send the
+    // ctx_result back, but postMessage throws (port closed). Without
+    // surfacing this as a task failure, `invoke()` would hang forever on
+    // a worker that's still awaiting a ctx_result it'll never get.
+    let postMessageThrows = false;
+    const captured: unknown[] = [];
+    let messageHandler: ((m: unknown) => void) | undefined;
+    const transport: RpcTransport = {
+      postMessage: (m) => {
+        if (postMessageThrows && (m as { type: string }).type === "ctx_result") {
+          throw new Error("transport: closed");
+        }
+        captured.push(m);
+      },
+      onMessage: (h) => {
+        messageHandler = h;
+      },
+      close: () => {},
+    };
+    const handler: CtxHandler = { handle: vi.fn().mockResolvedValue("v") };
+    const d = new Dispatcher({ transport, ctxHandler: handler });
+
+    const promise = d.invoke(INVOKE);
+    // The worker emits a ctx_call. Mid-task, the transport closes — the
+    // next ctx_result send will throw.
+    postMessageThrows = true;
+    if (!messageHandler) throw new Error("expected onMessage to have been wired");
+    messageHandler({ type: "ctx_call", id: "ctx-1", method: "now", args: {} });
+
+    await expect(promise).rejects.toThrow(/ctx_result send failed/);
+    d.close();
+  });
+
   it("rejects the pending task when ctx_call arrives with no ctxHandler configured", async () => {
     // Defensive path: someone constructs a Dispatcher without
     // `ctxHandler` and calls `invoke()` without `{ ctxHandler }` either.
