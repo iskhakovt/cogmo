@@ -18,11 +18,13 @@ import type { ResourceLimits } from "../../sandbox/types.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { loadCodingSandboxEnv } from "./auth.js";
 import type { BackendUsage, CodingBackend, PermissionResponse } from "./backend.js";
+import { loadIdentity, pushTaskBranchToRemote, runBranchFor } from "./git-as-transport.js";
 import { shortenRequestId } from "./permission-keyboard.js";
 import * as policy from "./policy.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow, ToolDecision } from "./store/index.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import { canonicalPattern, replayDecisionLog } from "./tool-gate.js";
+import type { WorktreeAssignment } from "./types.js";
 import { allocateWorktree } from "./worktree.js";
 
 const log = logger.child({ component: "coding.orchestrator" });
@@ -107,6 +109,7 @@ export interface CodingOrchestratorResult {
 }
 
 const HOME_VOLUME_PREFIX = "cogmo-task-home";
+const WORKTREE_DIR_IN_CONTAINER = "/workspace";
 
 export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: Inngest) {
   return inngest.createFunction(
@@ -127,7 +130,7 @@ export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: 
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
     async ({ event, step }) => {
-      return runCodingTask({ taskId: event.data.taskId, deps, stepRun: step.run });
+      return runCodingTask({ taskId: event.data.taskId, deps, stepRun: step.run, inngest });
     },
   );
 }
@@ -136,6 +139,12 @@ interface RunParams {
   taskId: string;
   deps: CodingOrchestratorDeps;
   stepRun: StepRun;
+  /**
+   * Inngest client — used to emit `coding/task/failed` so cleanup
+   * subscribers (run-branch deletion, future telemetry) hook in
+   * without polling the row.
+   */
+  inngest: Pick<Inngest, "send">;
 }
 
 /**
@@ -150,7 +159,7 @@ interface RunParams {
  * retry.
  */
 export async function runCodingTask(params: RunParams): Promise<CodingOrchestratorResult> {
-  const { taskId, deps, stepRun } = params;
+  const { taskId, deps, stepRun, inngest } = params;
   const {
     runInTx,
     store,
@@ -183,62 +192,89 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     );
 
     await stepRun("allocate-worktree", async () => {
+      // 12 hex chars = 48-bit prefix of the UUIDv7 = the full unix-ms
+      // timestamp portion. Two tasks created in the same millisecond would
+      // still collide (~1 in 16 chance from the next nibble), but single-
+      // user concurrency makes that effectively impossible. Original 8
+      // chars was just the high-order timestamp bits — every task in the
+      // same ~4096-second window shared a prefix. Bad.
+      const idShort = taskId.replaceAll("-", "").slice(0, 12);
+      const branch = `cogmo/${idShort}`;
+
       // Idempotent reconcile: if the row already has an assignment (a
       // previous attempt persisted it), re-use; otherwise derive from the
-      // task id and persist before the worktree itself is created.
-      if (!assignment) {
-        // 12 hex chars = 48-bit prefix of the UUIDv7 = the full unix-ms
-        // timestamp portion. Two tasks created in the same millisecond
-        // would still collide (~1 in 16 chance from the next nibble), but
-        // single-user concurrency makes that effectively impossible.
-        // Original 8 chars was just the high-order timestamp bits — every
-        // task in the same ~4096-second window shared a prefix. Bad.
-        const idShort = taskId.replaceAll("-", "").slice(0, 12);
-        const candidatePath = join(worktreesDir, repo.name, idShort);
-        // Defense in depth: refuse to create a worktree outside
-        // worktreesDir even if `repo.name` somehow contains traversal
-        // sequences. Repo-name validation in `Transport.repos.add` is the
-        // first line; this is the second. Segment-aware to avoid rejecting
-        // valid relative paths that happen to start with `..` (e.g. `..foo`
-        // is a legal directory name, only `..` and `..<sep>` mean escape).
-        const root = resolve(worktreesDir);
-        const rel = relative(root, resolve(candidatePath));
-        if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      // task id and persist before the worktree itself is materialised.
+      if (sandbox.capabilities.workingTreeTransport === "bind-mount") {
+        if (!assignment) {
+          const candidatePath = join(worktreesDir, repo.name, idShort);
+          // Defense in depth: refuse to create a worktree outside
+          // worktreesDir even if `repo.name` somehow contains traversal
+          // sequences. Repo-name validation in `Transport.repos.add` is the
+          // first line; this is the second. Segment-aware to avoid
+          // rejecting valid relative paths that happen to start with `..`
+          // (e.g. `..foo` is a legal directory name, only `..` and `..<sep>`
+          // mean escape).
+          const root = resolve(worktreesDir);
+          const rel = relative(root, resolve(candidatePath));
+          if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+            throw new Error(
+              `worktree path escape: repo.name="${repo.name}" produced path outside worktreesDir`,
+            );
+          }
+          const next: WorktreeAssignment = {
+            type: "host-path",
+            branch,
+            worktreePath: candidatePath,
+          };
+          assignment = next;
+          await runInTx((tx) => store.setTaskWorktreeAssignment(tx, taskId, next));
+        }
+        if (assignment.type !== "host-path") {
           throw new Error(
-            `worktree path escape: repo.name="${repo.name}" produced path outside worktreesDir`,
+            `bind-mount backend requires host-path worktree assignment, got ${assignment.type}`,
           );
         }
-        const next = {
-          type: "host-path" as const,
-          branch: `cogmo/${idShort}`,
-          worktreePath: candidatePath,
-        };
-        assignment = next;
-        await runInTx((tx) => store.setTaskWorktreeAssignment(tx, taskId, next));
+        await allocateWorktree({
+          repoPath: repo.localPath,
+          branch: assignment.branch,
+          worktreePath: assignment.worktreePath,
+        });
+      } else {
+        // git-remote: no host worktree. The orchestrator force-pushes the
+        // current default-branch tip to `cogmo/run/<task-id>` so the
+        // sandbox can clone it on `create()`. The slice-4 feature branch
+        // (`cogmo/<idShort>`) is checked out inside the sandbox after
+        // create — see `create-container` step.
+        if (!deps.secretsStore) {
+          throw new Error(
+            "git-remote sandbox requires a secretsStore to resolve the GitHub identity for the run-branch push",
+          );
+        }
+        if (!assignment) {
+          const next: WorktreeAssignment = { type: "git-remote", branch };
+          assignment = next;
+          await runInTx((tx) => store.setTaskWorktreeAssignment(tx, taskId, next));
+        }
+        const identity = await loadIdentity({
+          runInTx,
+          secretsStore: deps.secretsStore,
+          identityName: repo.identityName,
+        });
+        await pushTaskBranchToRemote({
+          localRepoPath: repo.localPath,
+          remoteUrl: repo.remoteUrl,
+          taskId,
+          defaultBranch: repo.defaultBranch,
+          identity,
+        });
       }
-      if (assignment.type !== "host-path") {
-        throw new Error(
-          `local-docker backend requires host-path worktree assignment, got ${assignment.type}`,
-        );
-      }
-      await allocateWorktree({
-        repoPath: repo.localPath,
-        branch: assignment.branch,
-        worktreePath: assignment.worktreePath,
-      });
     });
 
     if (!assignment) {
       throw new Error("allocate-worktree completed without setting worktreeAssignment");
     }
-    if (assignment.type !== "host-path") {
-      // Plan/execute path under local-Docker. Daytona variant lands in
-      // 3b.2.B; this guard keeps the type system honest until then.
-      throw new Error(`plan orchestrator requires host-path worktree, got ${assignment.type}`);
-    }
-    // Capture the narrowed value in a const so the closure below sees the
-    // non-null + host-path type — TS doesn't carry `let` narrowing across
-    // closures.
+    // Capture in a const so closures below see the non-null type — TS
+    // doesn't carry `let` narrowing across closures.
     const wt = assignment;
 
     // Resolve subscription auth before the durable create-container step
@@ -256,11 +292,37 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       sandboxEnv = authResult.value;
     }
 
+    // Resolve the GitHub identity once — git-remote backends need it for
+    // the sandbox's clone auth. Bind-mount paths skip this entirely.
+    let gitRemoteIdentityPat: string | undefined;
+    if (sandbox.capabilities.workingTreeTransport === "git-remote") {
+      if (!deps.secretsStore) {
+        throw new Error("git-remote sandbox requires a secretsStore for clone auth");
+      }
+      const identity = await loadIdentity({
+        runInTx,
+        secretsStore: deps.secretsStore,
+        identityName: repo.identityName,
+      });
+      gitRemoteIdentityPat = identity.pat;
+    }
+
     const sessionState = await stepRun("create-container", async () => {
       const session = await sandbox.create({
         taskId,
-        worktree: { type: "host-path", hostPath: wt.worktreePath },
-        homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
+        worktree: buildWorktreeSpec({
+          taskId,
+          capability: sandbox.capabilities.workingTreeTransport,
+          assignment: wt,
+          remoteUrl: repo.remoteUrl,
+          identityPat: gitRemoteIdentityPat,
+        }),
+        // Managed backends (Daytona) auto-persist sandbox FS across
+        // stop/start, so an explicit homeVolume is unnecessary — and the
+        // backend doesn't honor it anyway.
+        ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
+          homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
+        }),
         image: repo.devcontainer?.image ?? devbaseImage,
         resourceLimits: defaultResourceLimits,
         expiresAt: new Date(Date.now() + taskTtlMs),
@@ -277,6 +339,9 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         // task-id label for lineage tracking.
         const localState = session.state;
         await runInTx((tx) => store.setTaskContainerId(tx, taskId, localState.containerRowId));
+      }
+      if (sandbox.capabilities.workingTreeTransport === "git-remote") {
+        await checkoutFeatureBranchInSandbox(session, wt.branch);
       }
       return session.state;
     });
@@ -312,6 +377,11 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         runInTx((tx) =>
           store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
         ),
+      );
+      await stepRun("emit-task-failed", () =>
+        inngest
+          .send({ name: "coding/task/failed", data: { taskId, reason } })
+          .then(() => undefined),
       );
       const a = assignment;
       if (a) {
@@ -367,6 +437,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
     ).catch(() => {});
+    await inngest.send({ name: "coding/task/failed", data: { taskId, reason } }).catch(() => {});
     if (assignment) {
       await safeTeardownWorktree({
         runInTx,
@@ -479,6 +550,66 @@ export function createCodingExecuteOrchestrator(deps: CodingOrchestratorDeps, in
   );
 }
 
+/**
+ * Build the `WorktreeSpec` the sandbox backend wants. Bind-mount backends
+ * get `host-path` pointing at the previously-allocated host worktree;
+ * git-remote backends get `cogmo/run/<task-id>` (already pushed to origin
+ * by the orchestrator's allocate-worktree step) and HTTPS basic-auth
+ * carrying the bot's PAT.
+ */
+export function buildWorktreeSpec(args: {
+  taskId: string;
+  capability: "bind-mount" | "git-remote";
+  assignment: WorktreeAssignment;
+  remoteUrl: string;
+  /** Required when `capability === "git-remote"`. */
+  identityPat: string | undefined;
+}):
+  | { type: "host-path"; hostPath: string }
+  | {
+      type: "git-remote";
+      url: string;
+      branch: string;
+      auth: { username: string; password: string };
+    } {
+  if (args.capability === "bind-mount") {
+    if (args.assignment.type !== "host-path") {
+      throw new Error("bind-mount sandbox got non-host-path assignment");
+    }
+    return { type: "host-path", hostPath: args.assignment.worktreePath };
+  }
+  if (args.identityPat === undefined) {
+    throw new Error("git-remote WorktreeSpec requires identity.pat");
+  }
+  return {
+    type: "git-remote",
+    url: args.remoteUrl,
+    branch: runBranchFor(args.taskId),
+    auth: { username: "x-access-token", password: args.identityPat },
+  };
+}
+
+/**
+ * After cloning `cogmo/run/<task-id>`, move HEAD onto the slice-4 feature
+ * branch `cogmo/<idShort>` so `runCommitAndPush(branch)` operates on the
+ * right name. Idempotent on retry: `checkout -B` resets the branch to
+ * current HEAD if it already exists.
+ */
+export async function checkoutFeatureBranchInSandbox(
+  session: SandboxSession,
+  branch: string,
+): Promise<void> {
+  const handle = await session.execStreaming(["git", "checkout", "-B", branch], {
+    workingDir: WORKTREE_DIR_IN_CONTAINER,
+  });
+  handle.stdout.resume();
+  handle.stderr.resume();
+  const { exitCode } = await handle.wait();
+  if (exitCode !== 0) {
+    throw new Error(`git checkout -B ${branch} failed inside sandbox (exit ${exitCode})`);
+  }
+}
+
 interface ExecuteRunParams {
   taskId: string;
   deps: CodingOrchestratorDeps;
@@ -535,11 +666,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   if (!task.worktreeAssignment) {
     throw new Error(`coding task ${taskId} has no worktree_assignment`);
   }
-  if (task.worktreeAssignment.type !== "host-path") {
-    throw new Error(
-      `execute orchestrator requires host-path worktree, got ${task.worktreeAssignment.type}`,
-    );
-  }
 
   const sessionId = task.sessionId;
   const worktreeAssignment = task.worktreeAssignment;
@@ -582,6 +708,23 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     // `containerCreated` must be set from the resume branch BEFORE we
     // throw, otherwise the catch sees `containerCreated=false` and
     // leaks the container until the idle-TTL reaper runs.
+    // Resolve the GitHub identity once for git-remote backends — used
+    // for clone auth in the create-fresh path. tryResumeByTaskId returns
+    // an existing sandbox whose clone+checkout already completed in the
+    // plan phase (or a prior execute attempt), so resume is auth-free.
+    let gitRemoteIdentityPat: string | undefined;
+    if (sandbox.capabilities.workingTreeTransport === "git-remote") {
+      if (!secretsStore) {
+        throw new Error("git-remote sandbox requires a secretsStore for clone auth");
+      }
+      const identity = await loadIdentity({
+        runInTx,
+        secretsStore,
+        identityName: repo.identityName,
+      });
+      gitRemoteIdentityPat = identity.pat;
+    }
+
     const sessionState = await stepRun("get-or-create-container", async () => {
       const existing = await sandbox.tryResumeByTaskId(taskId);
       if (existing) {
@@ -606,8 +749,16 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
 
       const session = await sandbox.create({
         taskId,
-        worktree: { type: "host-path", hostPath: worktreeAssignment.worktreePath },
-        homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
+        worktree: buildWorktreeSpec({
+          taskId,
+          capability: sandbox.capabilities.workingTreeTransport,
+          assignment: worktreeAssignment,
+          remoteUrl: repo.remoteUrl,
+          identityPat: gitRemoteIdentityPat,
+        }),
+        ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
+          homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
+        }),
         image: repo.devcontainer?.image ?? devbaseImage,
         resourceLimits: defaultResourceLimits,
         expiresAt: new Date(Date.now() + taskTtlMs),
@@ -618,6 +769,9 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       if (isLocalDockerSessionState(session.state)) {
         const localState = session.state;
         await runInTx((tx) => store.setTaskContainerId(tx, taskId, localState.containerRowId));
+      }
+      if (sandbox.capabilities.workingTreeTransport === "git-remote") {
+        await checkoutFeatureBranchInSandbox(session, worktreeAssignment.branch);
       }
       return session.state;
     });
@@ -645,6 +799,11 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         runInTx((tx) =>
           store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
         ),
+      );
+      await stepRun("emit-task-failed", () =>
+        inngest
+          .send({ name: "coding/task/failed", data: { taskId, reason } })
+          .then(() => undefined),
       );
       await stepRun("teardown-worktree", () =>
         safeTeardownWorktree({
@@ -725,6 +884,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
     ).catch(() => {});
+    await inngest.send({ name: "coding/task/failed", data: { taskId, reason } }).catch(() => {});
     await safeTeardownWorktree({
       runInTx,
       ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),

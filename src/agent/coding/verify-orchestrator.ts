@@ -37,7 +37,13 @@ import type { SecretsStore } from "../../secrets/store/index.js";
 import { loadCodingSandboxEnv } from "./auth.js";
 import { runCommitAndPush } from "./commit-push.js";
 import { parseRemoteUrl, runOpenDraftPr } from "./draft-pr.js";
-import { type ExecuteStreamHandle, NULL_EXECUTE_STREAM } from "./orchestrator.js";
+import { fetchFeatureBranch } from "./git-as-transport.js";
+import {
+  buildWorktreeSpec,
+  checkoutFeatureBranchInSandbox,
+  type ExecuteStreamHandle,
+  NULL_EXECUTE_STREAM,
+} from "./orchestrator.js";
 import type { CodingStore } from "./store/index.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { PrMetadata } from "./types.js";
@@ -144,11 +150,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   if (!task.worktreeAssignment) {
     throw new Error(`coding task ${taskId} has no worktree_assignment`);
   }
-  if (task.worktreeAssignment.type !== "host-path") {
-    throw new Error(
-      `verify orchestrator requires host-path worktree, got ${task.worktreeAssignment.type}`,
-    );
-  }
   const worktreeAssignment = task.worktreeAssignment;
 
   /**
@@ -166,6 +167,9 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       runInTx((tx) =>
         store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
       ),
+    );
+    await stepRun("emit-task-failed", () =>
+      inngest.send({ name: "coding/task/failed", data: { taskId, reason } }).then(() => undefined),
     );
     await stepRun("teardown-worktree", () =>
       safeTeardownWorktree({ secretsStore, runInTx, repo, taskId, worktreeAssignment }),
@@ -236,8 +240,16 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     const sessionState = await stepRun("create-container", async () => {
       const session = await sandbox.create({
         taskId,
-        worktree: { type: "host-path", hostPath: worktreeAssignment.worktreePath },
-        homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
+        worktree: buildWorktreeSpec({
+          taskId,
+          capability: sandbox.capabilities.workingTreeTransport,
+          assignment: worktreeAssignment,
+          remoteUrl: repo.remoteUrl,
+          identityPat: identity.pat,
+        }),
+        ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
+          homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
+        }),
         image: repo.devcontainer?.image ?? deps.devbaseImage,
         resourceLimits: deps.defaultResourceLimits,
         expiresAt: new Date(Date.now() + deps.taskTtlMs),
@@ -246,11 +258,11 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         env: sandboxEnv,
       });
       containerCreated = true;
+      if (sandbox.capabilities.workingTreeTransport === "git-remote") {
+        await checkoutFeatureBranchInSandbox(session, worktreeAssignment.branch);
+      }
       return session.state;
     });
-    // host-path worktree guaranteed by the type guard at function entry;
-    // sandbox state stays the wide union because the resume contract
-    // doesn't carry a transport discriminator yet.
     const container: SandboxSession = await sandbox.resume(sessionState);
 
     executeStream = await openExecuteStream(taskId);
@@ -384,6 +396,22 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         .then(() => undefined),
     );
 
+    // git-remote backends don't bind-mount the worktree, so the local
+    // mirror's `refs/remotes/origin/cogmo/<idShort>` lags the sandbox's
+    // push. Fetch it back so a future host-side merge or `git log`
+    // reflects the actual PR head. Best-effort — origin is the source
+    // of truth and any later op can fetch on demand.
+    if (sandbox.capabilities.workingTreeTransport === "git-remote") {
+      await stepRun("fetch-feature-branch", () =>
+        fetchFeatureBranch({
+          localRepoPath: repo.localPath,
+          remoteUrl: repo.remoteUrl,
+          branch: worktreeAssignment.branch,
+          identity,
+        }),
+      );
+    }
+
     if (executeStream) {
       await executeStream
         .complete(true)
@@ -397,6 +425,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
     ).catch(() => {});
+    await inngest.send({ name: "coding/task/failed", data: { taskId, reason } }).catch(() => {});
     await safeTeardownWorktree({
       secretsStore,
       runInTx,

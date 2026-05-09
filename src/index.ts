@@ -5,6 +5,8 @@ import { S3Client } from "@aws-sdk/client-s3";
 import Docker from "dockerode";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { ClaudeCodeBackend } from "./agent/coding/claude.js";
+import { createOrphanRunBranchSweepFunctions } from "./agent/coding/cleanup-orphan-run-branches.js";
+import { createRunBranchCleanupSubscriber } from "./agent/coding/cleanup-run-branch.js";
 import {
   createCodingExecuteOrchestrator,
   createCodingOrchestrator,
@@ -590,6 +592,36 @@ export async function bootstrapRuntime(
           defaultResourceLimits: orchestratorDeps.defaultResourceLimits,
           taskTtlMs: orchestratorDeps.taskTtlMs,
           openExecuteStream: orchestratorDeps.openExecuteStream,
+        },
+        inngest,
+      ),
+    );
+
+    // Event-driven cleanup of `cogmo/run/*` branches once a task reaches
+    // a terminal state (`pr_open` or `failed`). Best-effort — the weekly
+    // cron in `cleanup-orphan-run-branches.ts` is the safety net for
+    // events that never fired.
+    codingFunctions.push(
+      createRunBranchCleanupSubscriber(
+        {
+          runInTx: core.runInTx,
+          store: core.codingStore,
+          secretsStore: core.secretsStore,
+        },
+        inngest,
+      ),
+    );
+
+    // Weekly orphan-run-branch sweep — safety net for refs the
+    // event-driven cleanup missed (host crash before emit, drift,
+    // foreign refs). Cron emits one event per repo; the per-repo
+    // handler queries origin + DB and force-deletes stale refs.
+    codingFunctions.push(
+      ...createOrphanRunBranchSweepFunctions(
+        {
+          runInTx: core.runInTx,
+          store: core.codingStore,
+          secretsStore: core.secretsStore,
         },
         inngest,
       ),

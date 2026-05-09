@@ -1,0 +1,207 @@
+/**
+ * Weekly safety-net cron for orphan `cogmo/run/*` refs on the GitHub
+ * remote. Event-driven cleanup (`cleanup-run-branch.ts`) deletes refs
+ * immediately on terminal task events; this cron catches anything that
+ * leaked — events that never fired (host crashed between status set and
+ * event emit), drift between the DB and the remote, manual pushes, etc.
+ *
+ * Shape (per Inngest fan-out idiom):
+ *   1. Cron fires once a week (`0 4 * * 0` — Sun 04:00 UTC).
+ *   2. Lists managed coding repos.
+ *   3. Fans out via `step.sendEvent` — one `coding/run-branch-sweep/repo`
+ *      event per repo. Each per-repo handler then has its own retries +
+ *      step-level observability.
+ *   4. Per-repo handler: list `cogmo/run/*` refs via octokit, join with
+ *      `coding_tasks`, delete each stale ref via its own `step.run`
+ *      (replay-granular, idempotent).
+ *
+ * Stale criterion: terminal task row OR absent row, AND ref's task is
+ * older than 7 days (the retention window — also applies to refs whose
+ * task row was deleted, e.g. cancelled tasks GC'd from the DB).
+ */
+
+import { RequestError } from "@octokit/request-error";
+import { Octokit } from "@octokit/rest";
+import type { Inngest } from "inngest";
+import type { Transactor } from "../../db/index.js";
+import { codingRunBranchSweepRepo } from "../../inngest/events.js";
+import type { StepRun } from "../../inngest/index.js";
+import { logger } from "../../logger.js";
+import { describeResolveIdentityError, resolveGitHubIdentity } from "../../secrets/github.js";
+import type { SecretsStore } from "../../secrets/store/index.js";
+import { parseRemoteUrl } from "./draft-pr.js";
+import { type CodingStore, isTerminalCodingTaskStatus } from "./store/index.js";
+
+const log = logger.child({ component: "coding.cleanup-orphan-run-branches" });
+
+/** Refs older than this stop being load-bearing for any retry path. */
+const RETENTION_DAYS = 7;
+const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+/** `refs/heads/cogmo/run/<task-id>` prefix used by `git.listMatchingRefs`. */
+const RUN_BRANCH_REF_PREFIX = "heads/cogmo/run/";
+
+export interface CleanupOrphanRunBranchesDeps {
+  runInTx: Transactor;
+  store: CodingStore;
+  secretsStore: SecretsStore;
+  octokitFactory?: (pat: string) => Octokit;
+  /** Override for tests. Defaults to `() => new Date()`. */
+  now?: () => Date;
+}
+
+export function createOrphanRunBranchSweepFunctions(
+  deps: CleanupOrphanRunBranchesDeps,
+  inngest: Inngest,
+) {
+  const cron = inngest.createFunction(
+    {
+      id: "coding-orphan-run-branch-sweep-cron",
+      // Cleanup is idempotent — the next week's tick picks up anything
+      // we missed. Mirroring the reaper's retries=0 stance.
+      retries: 0,
+      triggers: [{ cron: "0 4 * * 0" }],
+    },
+    async ({ step }) => {
+      const repos = await step.run("list-repos", () =>
+        deps.runInTx((tx) => deps.store.listRepos(tx)),
+      );
+      if (repos.length === 0) {
+        return { repos: 0, fanOut: 0 };
+      }
+      // Per Inngest fan-out idiom: one event per repo, each with its own
+      // retry lane. `step.sendEvent` checkpoints the send, so a cron retry
+      // doesn't double-send.
+      const events = repos.map((r) => codingRunBranchSweepRepo.create({ repoId: r.id }));
+      await step.sendEvent("fan-out", events);
+      return { repos: repos.length, fanOut: events.length };
+    },
+  );
+
+  const perRepo = inngest.createFunction(
+    {
+      id: "coding-orphan-run-branch-sweep-repo",
+      // Per-repo work owns the actual deletes — default retries (3) so a
+      // transient octokit 5xx or secondary rate-limit is retried with
+      // backoff before giving up. Concurrency capped at 2 so a many-repo
+      // fan-out doesn't blow GitHub's per-token budget.
+      concurrency: { limit: 2 },
+      triggers: [codingRunBranchSweepRepo],
+    },
+    async ({ event, step }) => {
+      return await sweepRepo(deps, event.data.repoId, step.run);
+    },
+  );
+
+  return [cron, perRepo];
+}
+
+/** Exported for unit tests — production callers go through the Inngest function. */
+export async function sweepRepo(
+  deps: CleanupOrphanRunBranchesDeps,
+  repoId: string,
+  stepRun: StepRun,
+): Promise<{ repoId: string; deleted: number; skipped: number; errors: number }> {
+  const now = (deps.now ?? (() => new Date()))();
+
+  const repo = await stepRun("load-repo", () =>
+    deps.runInTx((tx) => deps.store.getRepoById(tx, repoId)),
+  );
+  if (!repo) {
+    log.warn({ repoId }, "sweep-repo: repo row gone — nothing to do");
+    return { repoId, deleted: 0, skipped: 0, errors: 0 };
+  }
+
+  const remote = parseRemoteUrl(repo.remoteUrl);
+  if (!remote) {
+    log.warn({ repoId, remoteUrl: repo.remoteUrl }, "sweep-repo: cannot parse remote");
+    return { repoId, deleted: 0, skipped: 0, errors: 0 };
+  }
+
+  const identity = await stepRun("load-identity", async () => {
+    const result = await deps.runInTx((tx) =>
+      resolveGitHubIdentity(tx, deps.secretsStore, repo.identityName),
+    );
+    if (result.isErr()) {
+      throw new Error(describeResolveIdentityError(result.error));
+    }
+    return result.value;
+  });
+
+  const octokit = deps.octokitFactory?.(identity.pat) ?? new Octokit({ auth: identity.pat });
+
+  // `listMatchingRefs` returns up to 100 refs per page. Personal scale
+  // never approaches that; if it does, switch to `octokit.paginate`.
+  const refs = await stepRun("list-run-refs", async () => {
+    const { data } = await octokit.git.listMatchingRefs({
+      owner: remote.owner,
+      repo: remote.repo,
+      ref: RUN_BRANCH_REF_PREFIX,
+    });
+    return data.map((r) => ({
+      // Strip the leading `refs/heads/` so we only carry the suffix; the
+      // task id is what matters.
+      ref: r.ref.replace(/^refs\/heads\//, ""),
+    }));
+  });
+
+  let deleted = 0;
+  let skipped = 0;
+  let errors = 0;
+
+  for (const { ref } of refs) {
+    const taskId = ref.replace(/^cogmo\/run\//, "");
+    const task = await stepRun(`load-task-${taskId}`, () =>
+      deps.runInTx((tx) => deps.store.getTask(tx, taskId)),
+    );
+
+    // Stale criterion: task row is terminal AND created >7 days ago, OR
+    // there is no task row at all (deleted, or this ref came from a
+    // foreign source). Non-terminal tasks are NEVER swept regardless of
+    // age — they may be stuck pending approval; the user owns that.
+    let stale: boolean;
+    if (!task) {
+      stale = true;
+    } else if (!isTerminalCodingTaskStatus(task.status)) {
+      stale = false;
+    } else {
+      // `stepRun` round-trips through JSON, so `createdAt` arrives as an
+      // ISO string. `new Date(string)` parses it back.
+      const createdAt = new Date(task.createdAt);
+      const ageMs = now.getTime() - createdAt.getTime();
+      stale = ageMs >= RETENTION_MS;
+    }
+
+    if (!stale) {
+      skipped++;
+      continue;
+    }
+
+    try {
+      await stepRun(`delete-${taskId}`, async () => {
+        try {
+          await octokit.git.deleteRef({
+            owner: remote.owner,
+            repo: remote.repo,
+            ref,
+          });
+          log.info({ taskId, ref, repo: repo.name }, "swept orphan run-branch");
+        } catch (err) {
+          if (err instanceof RequestError && (err.status === 404 || err.status === 422)) {
+            log.info({ taskId, ref, status: err.status }, "run-branch already gone");
+            return;
+          }
+          throw err;
+        }
+      });
+      deleted++;
+    } catch (err) {
+      log.warn({ err, taskId, ref }, "sweep-repo: delete-ref failed (Inngest will retry step)");
+      errors++;
+      throw err;
+    }
+  }
+
+  log.info({ repoId, refs: refs.length, deleted, skipped }, "sweep-repo done");
+  return { repoId, deleted, skipped, errors };
+}

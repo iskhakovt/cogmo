@@ -316,6 +316,11 @@ function makeDeps(
   };
 }
 
+// `inngest` is required by both runCodingTask and runCodingExecute for
+// emit-task-failed / emit-cli-done / coding/task/permission-requested.
+// Defined here so both describe blocks can share it.
+const fakeInngestShared = { send: vi.fn().mockResolvedValue(undefined) };
+
 describe("runCodingTask", () => {
   it("happy path: plan streamed, session_id persisted, status → awaiting_approval (user trigger)", async () => {
     const repo = await seedRepo();
@@ -335,7 +340,12 @@ describe("runCodingTask", () => {
       openPlanStream: async () => planStream.handle,
     });
 
-    const result = await runCodingTask({ taskId: task.id, deps, stepRun });
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps,
+      stepRun,
+      inngest: fakeInngestShared,
+    });
     expect(result.status).toBe("awaiting_approval");
     expect(result.plan).toBe("## Plan\n1. Do X\n");
 
@@ -392,7 +402,12 @@ describe("runCodingTask", () => {
     );
     const deps = makeDeps({ sandbox, backend, secretsStore: fakeSecrets });
 
-    const result = await runCodingTask({ taskId: task.id, deps, stepRun });
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps,
+      stepRun,
+      inngest: fakeInngestShared,
+    });
     expect(result.status).toBe("awaiting_approval");
     expect(createCalls[0]?.env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: "sk-test-oauth" });
   });
@@ -406,7 +421,12 @@ describe("runCodingTask", () => {
     fakeSecrets.getSecret.mockResolvedValue(undefined);
     const deps = makeDeps({ sandbox, backend, secretsStore: fakeSecrets });
 
-    const result = await runCodingTask({ taskId: task.id, deps, stepRun });
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps,
+      stepRun,
+      inngest: fakeInngestShared,
+    });
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
       expect(result.failureReason).toMatch(/claude_code_oauth_token/);
@@ -438,6 +458,7 @@ describe("runCodingTask", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
+      inngest: fakeInngestShared,
     });
     expect(result.status).toBe("executing");
     expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("executing");
@@ -457,6 +478,7 @@ describe("runCodingTask", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend, openPlanStream: async () => planStream.handle }),
       stepRun,
+      inngest: fakeInngestShared,
     });
     expect(result.status).toBe("failed");
     expect(result.failureReason).toMatch(/exit code 2/);
@@ -480,6 +502,7 @@ describe("runCodingTask", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
+      inngest: fakeInngestShared,
     });
     expect(result.status).toBe("failed");
     expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("failed");
@@ -497,6 +520,7 @@ describe("runCodingTask", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend: backendYielding([]) }),
       stepRun,
+      inngest: fakeInngestShared,
     });
     expect(result.status).toBe("failed");
     expect(result.failureReason).toMatch(/docker daemon down/);
@@ -535,6 +559,7 @@ describe("runCodingTask", () => {
       taskId: badTask.id,
       deps: makeDeps({ sandbox, backend: backendYielding([]) }),
       stepRun,
+      inngest: fakeInngestShared,
     });
     expect(result.status).toBe("failed");
     expect((await tx((trx) => store.getTask(trx, badTask.id)))?.status).toBe("failed");
@@ -547,6 +572,7 @@ describe("runCodingTask", () => {
         taskId: "019d0000-0000-7000-8000-0000000000ff",
         deps: makeDeps({ sandbox, backend: backendYielding([]) }),
         stepRun,
+        inngest: fakeInngestShared,
       }),
     ).rejects.toThrow(/task not found/);
   });
@@ -566,6 +592,7 @@ describe("runCodingTask", () => {
         taskId: task.id,
         deps: makeDeps({ sandbox, backend: backendYielding([]), store: ghostStore }),
         stepRun,
+        inngest: fakeInngestShared,
       }),
     ).rejects.toThrow(/repo not found/);
   });
@@ -689,7 +716,7 @@ async function seedExecutableTask(
 // tool gate isn't exercised here (no permission_request events in these
 // backends), so `stepWaitForEvent` is a stub that never fires.
 const fakeStepWaitForEvent = (async () => null) as any;
-const fakeInngest = { send: vi.fn().mockResolvedValue(undefined) };
+const fakeInngest = fakeInngestShared;
 
 describe("runCodingExecute", () => {
   it("happy path: container reused, deltas streamed, status → pending_verify, usage persisted", async () => {

@@ -27,6 +27,11 @@ const TERMINAL_STATUSES: ReadonlyArray<CodingTaskStatus> = [
   "cancelled",
 ] as const;
 
+/** True when a task is in a state from which it will not transition further. */
+export function isTerminalCodingTaskStatus(status: CodingTaskStatus): boolean {
+  return TERMINAL_STATUSES.includes(status);
+}
+
 export interface CodingRepoRow {
   id: string;
   name: string;
