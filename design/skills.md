@@ -740,11 +740,13 @@ Paths are logical (`notes/meeting.md`). The host enforces ACL — a skill cannot
 
 Each tier exposes the workspace at `/files` via a private substrate populated at task start and reconciled to S3 at task end. The host owns the staging loop; the skill is unaware.
 
-| Tier | Substrate | Stage in (task start) | Reconcile out (task end) |
+For each tier, "stage in" is `Service["files"].list(userPrefix)` to enumerate entries, then `Service["files"].read(path)` per entry to fetch content, then a substrate-specific write. "Reconcile out" walks the substrate, diffs against the staged set, and pushes changed entries via `Service["files"].write`.
+
+| Tier | Substrate | Stage in (substrate write) | Reconcile out (substrate read) |
 |-|-|-|-|
-| WASM (Pyodide) | Pyodide MEMFS | `pyodide.FS.writeFile(path, bytes)` for each entry from `Service["files"].list(userPrefix)` | Walk `pyodide.FS`, diff vs. staged set, push deltas via `Service["files"].write` |
-| Sysbox local Docker | Host tmpfs bind-mounted at `/files` | List + write into the tmpfs before container start | Walk the host tmpfs after container stop, diff, push deltas |
-| Daytona remote | Daytona Volume + per-user `subpath` mounted at `/files` | `sandbox.fs.uploadFile(buf, path)` per entry | `sandbox.fs.listFiles` + `downloadFile`, diff, push deltas |
+| WASM (Pyodide) | Pyodide MEMFS | `pyodide.FS.writeFile(path, content)` per entry | Walk `pyodide.FS`, read changed paths via `pyodide.FS.readFile` |
+| Sysbox local Docker | Host tmpfs bind-mounted at `/files` | `node:fs.writeFile(tmpfsPath, content)` per entry, before container start | Walk the host tmpfs after container stop, read changed paths via `node:fs.readFile` |
+| Daytona remote | Daytona Volume + per-user `subpath` mounted at `/files` | `sandbox.fs.uploadFile(Buffer.from(content), path)` per entry | `sandbox.fs.listFiles` + `sandbox.fs.downloadFile` for changed paths |
 
 The orchestration loop is one host-side function parameterised by a small `TierFs` interface (`stage(spec)` / `reconcile(spec)`); only the substrate adapter differs across tiers.
 
@@ -762,8 +764,8 @@ The orchestration loop is one host-side function parameterised by a small `TierF
 
 #### Semantics
 
-- **Within a task:** stdlib write-then-read works exactly as POSIX expects — both ops hit the same private substrate.
-- **Across tasks (sequential):** task A's POSIX writes are durable in S3 by the time task B starts. Task B's stage-in pulls them. Eventual consistency at the task boundary, not within a task.
+- **Within a task:** stdlib write-then-read works exactly as POSIX expects — both ops hit the same private substrate. POSIX and RPC are isolated within a task: a POSIX write lands in the substrate and is invisible to a subsequent `await ctx.files.read` (which reads S3); an RPC write lands in S3 and is invisible to a subsequent stdlib `open()` (which reads the substrate). Skills should pick one path per file and stick with it for the duration of the task.
+- **Across tasks (sequential):** task A reconciles before task B's stage-in begins, so task B sees task A's POSIX writes. S3 strong read-after-write consistency makes this exact, not eventual — the boundary is the consistency point.
 - **Across tasks (concurrent):** each task gets its own private substrate. Task B does not see task A's POSIX writes until A reconciles. If both write the same path, last-reconcile-wins on the S3 mirror. Documented; mitigated by (a) the orchestrator's per-user concurrency throttle on most flows, and (b) the RPC escape hatch for skills that genuinely need live cross-task visibility.
 - **No file locking** — `ctx.files.write` is "create or overwrite", no append, no partial updates. Read-modify-write is racy and the caller owns the consequences. Skills coordinating on the same file should pass state through return values or `ctx.memory`, not file races.
 - **Strongly consistent S3 reads** on AWS (since Dec 2020), MinIO distributed/standalone, and Cloudflare R2 — a reconciled write is visible to the next task's stage-in immediately.
