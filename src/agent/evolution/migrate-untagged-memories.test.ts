@@ -45,8 +45,8 @@ describe("migrateUntaggedMemories", () => {
 
   it("stages every memory as source=migration in a single batch and clears the bank", async () => {
     const items = [
-      { content: "fact A", context: null },
-      { content: "fact B", context: "while planning" },
+      { text: "fact A", context: null },
+      { text: "fact B", context: "while planning" },
     ];
     const deps = makeDeps({
       listMemories: vi.fn().mockResolvedValue(pageOf(items)),
@@ -66,7 +66,7 @@ describe("migrateUntaggedMemories", () => {
   it("writes backup before staging or clearing — order matters", async () => {
     const calls: string[] = [];
     const deps = makeDeps({
-      listMemories: vi.fn().mockResolvedValue(pageOf([{ content: "fact" }])),
+      listMemories: vi.fn().mockResolvedValue(pageOf([{ text: "fact" }])),
       writeBackup: vi.fn().mockImplementation(async () => {
         calls.push("backup");
       }),
@@ -87,7 +87,7 @@ describe("migrateUntaggedMemories", () => {
 
   it("does not stage or clear when backup write throws", async () => {
     const deps = makeDeps({
-      listMemories: vi.fn().mockResolvedValue(pageOf([{ content: "fact" }])),
+      listMemories: vi.fn().mockResolvedValue(pageOf([{ text: "fact" }])),
       writeBackup: vi.fn().mockRejectedValue(new Error("disk full")),
     });
 
@@ -101,13 +101,13 @@ describe("migrateUntaggedMemories", () => {
     const listMemories = vi
       .fn()
       .mockResolvedValueOnce({
-        items: [{ content: "p1-a" }, { content: "p1-b" }],
+        items: [{ text: "p1-a" }, { text: "p1-b" }],
         total: 3,
         limit: 100,
         offset: 0,
       })
       .mockResolvedValueOnce({
-        items: [{ content: "p2-a" }],
+        items: [{ text: "p2-a" }],
         total: 3,
         limit: 100,
         offset: 2,
@@ -124,7 +124,7 @@ describe("migrateUntaggedMemories", () => {
     ).toHaveLength(3);
   });
 
-  it("rejects malformed list response (no content field)", async () => {
+  it("rejects malformed list response (no text field)", async () => {
     const deps = makeDeps({
       listMemories: vi.fn().mockResolvedValue(pageOf([{ wrongShape: true }])),
     });

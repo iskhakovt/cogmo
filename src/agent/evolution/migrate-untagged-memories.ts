@@ -24,8 +24,16 @@ import type { AgentStore } from "../store/index.js";
 
 const PAGE_SIZE = 100;
 
+/**
+ * Hindsight's `listMemories` returns each unit with `text` (the
+ * extracted fact) and `context` (empty string when absent — not
+ * null). The earlier shape of this schema parsed `content`, which
+ * never matched a real listMemories response and made this
+ * migration silently unrunnable against a live bank — caught when
+ * adding the integration test alongside `backfill-profile-class.ts`.
+ */
 const RawMemorySchema = z.object({
-  content: z.string(),
+  text: z.string(),
   context: z.string().nullable().optional(),
 });
 
@@ -106,7 +114,14 @@ async function readBank(
 
     for (const item of page.items) {
       const parsed = RawMemorySchema.parse(item);
-      out.push({ content: parsed.content, context: parsed.context ?? null });
+      // Empty-string context is Hindsight's "no context" — normalise
+      // to null so downstream `bulkStagePendingMemories` drops the
+      // field instead of stamping a literal "" into pending_memories.
+      const context =
+        parsed.context !== undefined && parsed.context !== null && parsed.context.length > 0
+          ? parsed.context
+          : null;
+      out.push({ content: parsed.text, context });
     }
 
     offset += page.items.length;

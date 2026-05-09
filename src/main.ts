@@ -45,9 +45,35 @@ async function dispatch(cmd: string): Promise<number> {
       }
       return runSkillsCli(process.argv.slice(3), skillRunner);
     }
+    case "migrate-memories":
+    case "backfill": {
+      const { runMigrateMemoriesCli, runBackfillProfileClassCli } = await import(
+        "./agent/evolution/migrations-cli.js"
+      );
+      const { bootstrap } = await import("./index.js");
+      const { env } = await import("./env.js");
+      const { agentStore, runInTx } = await bootstrap();
+      const resolveDefaultBankId = async (): Promise<string> => {
+        const user = await runInTx((tx) => agentStore.getFirstUser(tx));
+        if (!user) {
+          throw new Error("No users in the database. Run `cogmo seed` or `cogmo setup` first.");
+        }
+        return user.id;
+      };
+      const cliDeps = {
+        hindsightUrl: env.HINDSIGHT_URL,
+        agentStore,
+        runInTx,
+        resolveDefaultBankId,
+      };
+      const args = process.argv.slice(3);
+      return cmd === "migrate-memories"
+        ? runMigrateMemoriesCli(args, cliDeps)
+        : runBackfillProfileClassCli(args, cliDeps);
+    }
     default:
       console.error(`Unknown command: ${cmd}`);
-      console.error("Usage: main.js [serve|seed|setup|gen-key|skills]");
+      console.error("Usage: main.js [serve|seed|setup|gen-key|skills|migrate-memories|backfill]");
       return 1;
   }
 }
