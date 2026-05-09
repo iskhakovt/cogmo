@@ -227,12 +227,14 @@ describe("DrizzleCodingStore", () => {
       );
       await tx((trx) =>
         store.setTaskWorktreeAssignment(trx, t.id, {
+          type: "host-path",
           branch: "cogmo/abc12345",
           worktreePath: "/var/lib/cogmo/worktrees/cogmo/abc12345",
         }),
       );
       const reloaded = await tx((trx) => store.getTask(trx, t.id));
       expect(reloaded?.worktreeAssignment).toEqual({
+        type: "host-path",
         branch: "cogmo/abc12345",
         worktreePath: "/var/lib/cogmo/worktrees/cogmo/abc12345",
       });
@@ -256,18 +258,21 @@ describe("DrizzleCodingStore", () => {
       );
       await tx((trx) =>
         store.setTaskWorktreeAssignment(trx, t.id, {
+          type: "host-path",
           branch: "cogmo/aaaa",
           worktreePath: "/p1",
         }),
       );
       await tx((trx) =>
         store.setTaskWorktreeAssignment(trx, t.id, {
+          type: "host-path",
           branch: "cogmo/aaaa",
           worktreePath: "/p1",
         }),
       );
       const reloaded = await tx((trx) => store.getTask(trx, t.id));
       expect(reloaded?.worktreeAssignment).toEqual({
+        type: "host-path",
         branch: "cogmo/aaaa",
         worktreePath: "/p1",
       });
@@ -285,7 +290,13 @@ describe("DrizzleCodingStore", () => {
         }),
       );
       await expect(
-        tx((trx) => store.setTaskWorktreeAssignment(trx, t.id, { branch: "", worktreePath: "/p" })),
+        tx((trx) =>
+          store.setTaskWorktreeAssignment(trx, t.id, {
+            type: "host-path",
+            branch: "",
+            worktreePath: "/p",
+          }),
+        ),
       ).rejects.toThrow();
     });
 
@@ -455,6 +466,7 @@ describe("DrizzleCodingStore", () => {
       );
       await tx((trx) =>
         store.setTaskWorktreeAssignment(trx, t.id, {
+          type: "host-path",
           branch: "cogmo/abc",
           worktreePath: "/p",
         }),

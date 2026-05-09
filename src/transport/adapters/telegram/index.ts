@@ -33,6 +33,7 @@ import type { InboundContent } from "../../content.js";
 import type { Adapter, StreamHandle, StreamingAdapter } from "../../types.js";
 import {
   handleClasses,
+  handleCompartments,
   handleDisable,
   handleEnable,
   handleEnd,
@@ -446,6 +447,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("end", (ctx) => handleEnd(transport, toCmdCtx(ctx)));
   bot.command("profile", (ctx) => handleProfile(transport, toCmdCtx(ctx), profileDialogs));
   bot.command("classes", (ctx) => handleClasses(transport, toCmdCtx(ctx)));
+  bot.command("compartments", (ctx) => handleCompartments(transport, toCmdCtx(ctx)));
   bot.command("model", (ctx) => handleModel(transport, toCmdCtx(ctx)));
   bot.command("repo", (ctx) => handleRepo(transport, toCmdCtx(ctx), repoDialogs));
   bot.command("mcp", (ctx) => handleMcp(transport, toCmdCtx(ctx)));

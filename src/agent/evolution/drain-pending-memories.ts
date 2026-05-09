@@ -26,9 +26,10 @@ import { logger } from "../../logger.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
 import type { AgentStore, PendingMemory, PendingMemorySource } from "../store/index.js";
 import {
+  buildClassifiedMemorySchema,
+  buildPendingClassificationPrompt,
   type ClassifiedMemory,
-  ClassifiedMemorySchema,
-  PENDING_CLASSIFICATION_PROMPT,
+  type CompartmentDefinition,
 } from "./memory-extraction-schema.js";
 
 /**
@@ -41,6 +42,13 @@ const CLASSIFIER_CONCURRENCY = 8;
 export interface ClassifyDeps {
   provider: LlmProvider;
   model: string;
+  /**
+   * The user's `custom_compartments` rows at fire time. Templated into the
+   * classifier prompt and locked into the structured-output schema. Empty
+   * array = core-only. Pre-loaded by the Observer so every row in a batch
+   * shares the same schema (one compile per fire, not per row).
+   */
+  customCompartments: ReadonlyArray<CompartmentDefinition>;
 }
 
 export interface DrainPendingDeps extends ClassifyDeps {
@@ -93,9 +101,12 @@ export async function classifyPendingMemories(
   pending: ReadonlyArray<ClassifierInput>,
   deps: ClassifyDeps,
 ): Promise<ClassifyPendingResult> {
+  const customNames = deps.customCompartments.map((c) => c.name);
+  const schema = buildClassifiedMemorySchema(customNames);
+  const system = buildPendingClassificationPrompt(deps.customCompartments);
   const classified: Array<ClassifiedRow | null> = [];
   for (const chunk of R.chunk([...pending], CLASSIFIER_CONCURRENCY)) {
-    const results = await Promise.all(chunk.map((p) => classifyOne(p, deps)));
+    const results = await Promise.all(chunk.map((p) => classifyOne(p, schema, system, deps)));
     classified.push(...results);
   }
   const successful = R.filter(classified, (c): c is ClassifiedRow => c !== null);
@@ -151,6 +162,7 @@ export async function drainPendingMemories(
   const { successful, byNetwork } = await classifyPendingMemories(pending, {
     provider: deps.provider,
     model: deps.model,
+    customCompartments: deps.customCompartments,
   });
 
   if (successful.length === 0) {
@@ -172,14 +184,19 @@ export async function drainPendingMemories(
   return { drained: successful.length, byNetwork };
 }
 
-async function classifyOne(p: ClassifierInput, deps: ClassifyDeps): Promise<ClassifiedRow | null> {
+async function classifyOne(
+  p: ClassifierInput,
+  schema: ReturnType<typeof buildClassifiedMemorySchema>,
+  system: string,
+  deps: Pick<ClassifyDeps, "provider" | "model">,
+): Promise<ClassifiedRow | null> {
   try {
     const { data } = await chatTyped({
       provider: deps.provider,
       model: deps.model,
-      system: PENDING_CLASSIFICATION_PROMPT,
+      system,
       messages: [{ role: "user", content: formatForClassifier(p) }],
-      schema: ClassifiedMemorySchema,
+      schema,
       name: "pending-memory-classification",
     });
     return {

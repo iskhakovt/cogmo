@@ -191,6 +191,7 @@ async function seedTask(opts?: {
   );
   await tx((trx) =>
     store.setTaskWorktreeAssignment(trx, task.id, {
+      type: "host-path",
       branch: "cogmo/abc12345",
       worktreePath: "/tmp/worktrees/abc12345",
     }),

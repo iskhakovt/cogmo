@@ -3,10 +3,14 @@ import { isAbsolute, join } from "node:path";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { CodingStore } from "../agent/coding/store/index.js";
+import { CORE_COMPARTMENTS } from "../agent/evolution/memory-extraction-schema.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
 import {
+  CustomCompartmentCapExceededError,
+  InvalidNameError,
   ProfileClassInUseError,
   ProfileInUseError,
+  ReservedCompartmentNameError,
   UniqueViolationError,
   UnknownProfileClassError,
 } from "../agent/store/errors.js";
@@ -14,12 +18,13 @@ import type {
   AgentStore,
   ConversationStatus,
   ConversationSummary,
+  CustomCompartment,
   Profile,
   ProfileClass,
   VoiceMode,
 } from "../agent/store/index.js";
 import type { ProfileMemoryScope, ToolSet } from "../agent/store/schema.js";
-import type { Transactor } from "../db/index.js";
+import type { Transaction, Transactor } from "../db/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { computeBudget } from "../llm/models.js";
 import { logger } from "../logger.js";
@@ -182,6 +187,13 @@ export type TransportError =
   | { code: "profile_class_not_found"; name: string }
   | { code: "profile_class_name_taken"; name: string }
   | { code: "unknown_profile_class"; name: string }
+  | { code: "compartment_cap_exceeded"; limit: number; current: number }
+  | { code: "compartment_name_taken"; name: string }
+  | { code: "compartment_name_reserved"; name: string }
+  | { code: "compartment_name_invalid"; name: string }
+  | { code: "compartment_not_found"; name: string }
+  | { code: "compartment_unknown"; name: string }
+  | { code: "profile_class_name_invalid"; name: string }
   | { code: "model_unavailable"; model: string }
   | { code: "alias_taken" }
   | { code: "operation_not_permitted" }
@@ -341,6 +353,25 @@ export interface Transport {
       platformUserHandle: string,
       input: { name: string; description: string },
     ): Promise<Result<ProfileClass, TransportError>>;
+    delete(platformUserHandle: string, name: string): Promise<Result<void, TransportError>>;
+  };
+
+  /**
+   * Custom compartments — per-user extensions of the curated `MemoryCompartment`
+   * enum. The Observer loads these on each fire and templates `description`
+   * into the classifier prompt; descriptions are LLM-facing instructions, not
+   * documentation. Forward-only delete: `delete` removes future
+   * classifications but does not touch `compartment:<name>` tags already
+   * stamped on Hindsight memories. Cap is `CUSTOM_COMPARTMENT_LIMIT`.
+   */
+  compartments: {
+    list(
+      platformUserHandle: string,
+    ): Promise<Result<ReadonlyArray<CustomCompartment>, TransportError>>;
+    create(
+      platformUserHandle: string,
+      input: { name: string; description: string },
+    ): Promise<Result<CustomCompartment, TransportError>>;
     delete(platformUserHandle: string, name: string): Promise<Result<void, TransportError>>;
   };
 
@@ -935,6 +966,17 @@ export function createTransport(deps: {
           if (!(await agentStore.isModelUserSelectable(tx, input.model))) {
             return err({ code: "model_unavailable" as const, model: input.model });
           }
+          if (input.memoryScope) {
+            const unknown = await findUnknownCompartmentImpl(
+              tx,
+              agentStore,
+              identity.userId,
+              input.memoryScope.compartments,
+            );
+            if (unknown !== null) {
+              return err({ code: "compartment_unknown" as const, name: unknown });
+            }
+          }
           try {
             const created = await agentStore.createProfile(tx, {
               userId: identity.userId,
@@ -973,6 +1015,17 @@ export function createTransport(deps: {
             !(await agentStore.isModelUserSelectable(tx, changes.model))
           ) {
             return err({ code: "model_unavailable" as const, model: changes.model });
+          }
+          if (changes.memoryScope) {
+            const unknown = await findUnknownCompartmentImpl(
+              tx,
+              agentStore,
+              identity.userId,
+              changes.memoryScope.compartments,
+            );
+            if (unknown !== null) {
+              return err({ code: "compartment_unknown" as const, name: unknown });
+            }
           }
           try {
             const updated = await agentStore.updateProfile(tx, profileId, changes);
@@ -1059,6 +1112,9 @@ export function createTransport(deps: {
             });
             return ok(created);
           } catch (e) {
+            if (e instanceof InvalidNameError) {
+              return err({ code: "profile_class_name_invalid" as const, name: e.proposedName });
+            }
             if (e instanceof UniqueViolationError) {
               return err({ code: "profile_class_name_taken" as const, name: input.name });
             }
@@ -1083,6 +1139,61 @@ export function createTransport(deps: {
             }
             throw e;
           }
+        });
+      },
+    },
+
+    compartments: {
+      async list(platformUserHandle) {
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          return ok(await agentStore.listCustomCompartments(tx, identity.userId));
+        });
+      },
+
+      async create(platformUserHandle, input) {
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          try {
+            const created = await agentStore.createCustomCompartment(tx, {
+              userId: identity.userId,
+              name: input.name,
+              description: input.description,
+            });
+            return ok(created);
+          } catch (e) {
+            if (e instanceof InvalidNameError) {
+              return err({ code: "compartment_name_invalid" as const, name: e.proposedName });
+            }
+            if (e instanceof ReservedCompartmentNameError) {
+              return err({ code: "compartment_name_reserved" as const, name: e.compartmentName });
+            }
+            if (e instanceof CustomCompartmentCapExceededError) {
+              return err({
+                code: "compartment_cap_exceeded" as const,
+                limit: e.limit,
+                current: e.current,
+              });
+            }
+            if (e instanceof UniqueViolationError) {
+              return err({ code: "compartment_name_taken" as const, name: input.name });
+            }
+            throw e;
+          }
+        });
+      },
+
+      async delete(platformUserHandle, name) {
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          const result = await agentStore.deleteCustomCompartment(tx, identity.userId, name);
+          if (!result.deleted) {
+            return err({ code: "compartment_not_found" as const, name });
+          }
+          return ok(undefined);
         });
       },
     },
@@ -1650,6 +1761,27 @@ export function createTransport(deps: {
  * Returns a `TransportError` to surface, or `null` if input is valid.
  */
 const REPO_NAME_RE = /^[a-zA-Z0-9._-]+$/;
+/**
+ * Walk a candidate compartment list and return the first value that's
+ * neither a core compartment nor one of the user's registered
+ * `custom_compartments`. Returns `null` when every value is valid.
+ * Loads customs via the supplied `tx` so the check sits inside the
+ * outer transaction (consistency with the upcoming write).
+ */
+async function findUnknownCompartmentImpl(
+  tx: Transaction,
+  agentStore: Pick<AgentStore, "listCustomCompartments">,
+  userId: string,
+  compartments: ReadonlyArray<string>,
+): Promise<string | null> {
+  const customs = await agentStore.listCustomCompartments(tx, userId);
+  const allowed = new Set<string>([...CORE_COMPARTMENTS, ...customs.map((c) => c.name)]);
+  for (const c of compartments) {
+    if (!allowed.has(c)) return c;
+  }
+  return null;
+}
+
 function validateRepoInput(input: {
   name: string;
   localPath: string;
