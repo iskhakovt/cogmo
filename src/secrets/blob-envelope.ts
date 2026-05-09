@@ -46,7 +46,7 @@ export function isEncrypted(blob: Buffer): boolean {
  *   [magic 4B] [version 2B BE] [nonce 12B] [ciphertext + GCM tag]
  */
 export function encryptBuffer(plaintext: Buffer, key: Uint8Array): Buffer {
-  const { ciphertext, nonce } = encryptBytes(key, new Uint8Array(plaintext));
+  const { ciphertext, nonce } = encryptBytes(key, plaintext);
   const out = Buffer.allocUnsafe(HEADER_LENGTH + ciphertext.length);
   MAGIC.copy(out, 0);
   out.writeUInt16BE(VERSION_V1, MAGIC_LENGTH);
@@ -71,7 +71,7 @@ export function decryptBuffer(blob: Buffer, key: Uint8Array): Buffer {
   if (version !== VERSION_V1) {
     throw new Error(`unknown encrypted-blob version: ${version}`);
   }
-  const nonce = new Uint8Array(blob.subarray(MAGIC_LENGTH + VERSION_LENGTH, HEADER_LENGTH));
-  const ciphertext = new Uint8Array(blob.subarray(HEADER_LENGTH));
+  const nonce = blob.subarray(MAGIC_LENGTH + VERSION_LENGTH, HEADER_LENGTH);
+  const ciphertext = blob.subarray(HEADER_LENGTH);
   return Buffer.from(decryptBytes(key, ciphertext, nonce));
 }
