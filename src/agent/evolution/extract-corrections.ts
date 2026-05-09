@@ -111,6 +111,13 @@ export async function extractCorrections(
     if (result.promoted) promoted++;
   }
 
+  // `countActiveRules` counts both axes (channel-scoped + global), but
+  // `consolidateRules` only merges global rows. A flood of
+  // channel-scoped rules can therefore trip the threshold even though
+  // there's nothing to merge — `consolidateRules` short-circuits at
+  // its `< 2` global-rules check, so the cost is one redundant read
+  // per Observer fire. Left as-is until the steering_rules count
+  // crosses ~30 and that read becomes worth saving.
   const activeCount = await deps.runInTx((tx) => deps.store.countActiveRules(tx, profileId));
   const consolidationNeeded = activeCount > CONSOLIDATION_THRESHOLD;
 
@@ -122,6 +129,18 @@ export async function extractCorrections(
   return { extracted, reinforced, contradictions, promoted, consolidationNeeded };
 }
 
+/**
+ * Cross-scope reinforcement safety lives in the extraction prompt, not
+ * in code. The `reinforce` schema variant deliberately omits
+ * `channelType`, so we can't reject a Telegram-scoped correction that
+ * names a global rule's id without an extra read of the matched row.
+ * The prompt instructs the LLM to emit such cases as `new` instead;
+ * `coerceChannelType` plus the active-channel rendering give the LLM
+ * the context to do that. At personal scale the prompt-side guidance
+ * has held up; if we see false reinforcements in practice, fold the
+ * matched rule's `channelType` into `upsertCorrection`'s update path
+ * and reject the mismatch there.
+ */
 async function applyCorrection(
   correction: CorrectionItem,
   channelType: string | null,
