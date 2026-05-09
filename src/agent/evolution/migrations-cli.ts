@@ -35,6 +35,7 @@ import { logger } from "../../logger.js";
 import type { AgentStore } from "../store/index.js";
 import {
   type BackfillDeps,
+  type RawBankMemory as BackfillRawBankMemory,
   backfillProfileClass,
   type RetainItem,
 } from "./backfill-profile-class.js";
@@ -50,11 +51,16 @@ export interface MigrationCliDeps {
   runInTx: Transactor;
   /**
    * Resolves the default bank id when `--bankId` is omitted. Returns
-   * the first user's id by convention. Throws if no user exists yet
-   * (operators must run `cogmo seed` or the setup wizard first).
+   * the first user's id by convention. Returns `null` when no user
+   * exists yet — the CLI surfaces a friendly usage line instead of
+   * a thrown stack (operators run `cogmo seed` or the setup wizard
+   * first).
    */
-  resolveDefaultBankId: () => Promise<string>;
+  resolveDefaultBankId: () => Promise<string | null>;
 }
+
+const PRE_RUN_NOTICE =
+  "Pause Observer drains (or stop `cogmo serve`) before running this — concurrent retains during the migration window may be lost.";
 
 const BACKUP_DIR = ".dev/memory-backups";
 
@@ -87,7 +93,10 @@ export async function runMigrateMemoriesCli(
 ): Promise<number> {
   const bankId = args[0] ?? (await deps.resolveDefaultBankId());
   if (!bankId) {
-    console.error("Usage: cogmo migrate-memories <bankId>");
+    console.error(
+      "Usage: cogmo migrate-memories <bankId>\n" +
+        "No users in the database. Run `cogmo seed` or `cogmo setup` first.",
+    );
     return 1;
   }
 
@@ -95,6 +104,7 @@ export async function runMigrateMemoriesCli(
   const backupPath = makeBackupPath(bankId);
   console.log(`Migrating bank "${bankId}" — Hindsight ${deps.hindsightUrl}`);
   console.log(`Backup will be written to ${backupPath}`);
+  console.warn(PRE_RUN_NOTICE);
 
   const migrationDeps: MigrationDeps = {
     listMemories: (id, opts) => hindsight.listMemories(id, opts),
@@ -169,11 +179,44 @@ export async function runBackfillProfileClassCli(
   }
 
   const bankId = parsed.bankIdOverride ?? (await deps.resolveDefaultBankId());
+  if (!bankId) {
+    console.error(
+      "Usage: cogmo backfill profile-class --tag=<a,b> [--bankId=<id>]\n" +
+        "No users in the database. Run `cogmo seed` or `cogmo setup` first.",
+    );
+    return 1;
+  }
   const { hindsight, sdkClient } = makeHindsightShared(deps.hindsightUrl);
   const backupPath = makeBackupPath(bankId);
   console.log(`Backfilling bank "${bankId}" with classes [${parsed.classTags.join(", ")}]`);
   console.log(`Hindsight ${deps.hindsightUrl}`);
   console.log(`Backup will be written to ${backupPath}`);
+  console.warn(PRE_RUN_NOTICE);
+
+  // Operator-facing nuance worth surfacing once: the skip path is
+  // tag-presence-based, not tag-value-based. A row already carrying
+  // any `profile_class:*` is passed through unchanged regardless of
+  // which `--tag` values you pass. So a partial first run with
+  // `--tag=general` followed by a second with `--tag=legacy` does
+  // NOT add `legacy` to the already-`general`-tagged rows. Pass
+  // both on the first invocation if you want both. The note below
+  // only fires when there's a real risk of confusion (multi-tag
+  // call against a bank that already has any classed rows).
+  if (parsed.classTags.length > 1) {
+    const probe = await hindsight.listMemories(bankId, { limit: 100, offset: 0 });
+    const anyClassed = probe.items.some((item) => {
+      const tags = (item as { tags?: string[] }).tags ?? [];
+      return tags.some((t) => t.startsWith("profile_class:"));
+    });
+    if (anyClassed) {
+      console.warn(
+        "Note: some memories in this bank already carry a profile_class:* tag. " +
+          "Backfill skips those rows entirely — it does NOT append additional " +
+          "profile_class:* values from --tag to existing classed rows. To stamp " +
+          "multiple values, pass them all on the first run.",
+      );
+    }
+  }
 
   const backfillDeps: BackfillDeps = {
     listMemories: (id, opts) => hindsight.listMemories(id, opts),
@@ -189,7 +232,7 @@ export async function runBackfillProfileClassCli(
       // "verify by /status or recall" follow-up.
       await hindsight.retainBatch(id, [...items], { async: false });
     },
-    writeBackup: writeBackupFn(backupPath),
+    writeBackup: writeBackupFn<BackfillRawBankMemory>(backupPath),
   };
 
   const result = await backfillProfileClass(bankId, backfillDeps, { classTags: parsed.classTags });

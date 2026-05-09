@@ -53,12 +53,9 @@ async function dispatch(cmd: string): Promise<number> {
       const { bootstrap } = await import("./index.js");
       const { env } = await import("./env.js");
       const { agentStore, runInTx } = await bootstrap();
-      const resolveDefaultBankId = async (): Promise<string> => {
+      const resolveDefaultBankId = async (): Promise<string | null> => {
         const user = await runInTx((tx) => agentStore.getFirstUser(tx));
-        if (!user) {
-          throw new Error("No users in the database. Run `cogmo seed` or `cogmo setup` first.");
-        }
-        return user.id;
+        return user ? user.id : null;
       };
       const cliDeps = {
         hindsightUrl: env.HINDSIGHT_URL,

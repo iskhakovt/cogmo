@@ -58,6 +58,14 @@ const RawBankMemorySchema = z
     context: z.string().nullable().optional(),
     tags: z.array(z.string()).optional(),
     date: z.string().nullable().optional(),
+    // `Record<string, string>` matches what every Cogmo writer
+    // emits today (`extract-memories.ts`, `drain-pending-memories.ts`).
+    // Hindsight is third-party and could in theory return non-string
+    // values in a future version; if so, parse fails fast HERE —
+    // before any destructive op (clearBankMemories) — so the bank
+    // stays intact and the operator sees an actionable error rather
+    // than a half-cleared state. Loosen to `z.unknown()` only when a
+    // real Hindsight upgrade introduces non-string metadata.
     metadata: z.record(z.string(), z.string()).optional(),
   })
   .passthrough();

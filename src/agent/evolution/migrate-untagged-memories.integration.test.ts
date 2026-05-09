@@ -39,6 +39,14 @@ beforeAll(async () => {
   // idempotent — keeps this test self-contained against future seed
   // changes.
   await hindsight.createBank(BANK_ID);
+  // Clear before seeding so the strict `result.migrated === 2` assert
+  // below isn't sensitive to leftovers from a prior failed run, the
+  // seed step's own probe memories, or any future test that lands
+  // memories in the default user's bank.
+  const cleared = await sdk.clearBankMemories({ client: sdkClient, path: { bank_id: BANK_ID } });
+  if (cleared.error) {
+    throw new Error(`pre-test clearBankMemories failed: ${JSON.stringify(cleared.error)}`);
+  }
 });
 
 afterAll(async () => {
