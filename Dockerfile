@@ -14,9 +14,7 @@ RUN pnpm build
 RUN pnpm --filter cogmo deploy --prod /deploy
 
 FROM base
-ARG VERSION=dev
 ENV NODE_ENV=production
-ENV VERSION=$VERSION
 WORKDIR /app
 
 # git is required at runtime by `bootstrapSkillsRepo` (`git init --bare`) and
@@ -32,6 +30,9 @@ RUN apt-get update \
 
 USER node
 COPY --from=build --chown=node:node /deploy .
+
+ARG VERSION=dev
+ENV VERSION=$VERSION
 
 # health endpoint
 EXPOSE 9090

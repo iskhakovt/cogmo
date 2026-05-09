@@ -47,6 +47,7 @@ jobs:
     # (kernel 6.8+). Ubuntu-26.04 bump is tracked in todo.md once both
     # actions/runner-images and sysbox catch up.
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       checks: write
