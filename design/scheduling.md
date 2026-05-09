@@ -181,7 +181,7 @@ const perRepo = inngest.createFunction(
 );
 ```
 
-Concrete example: `src/agent/coding/cleanup-orphan-run-branches.ts` sweeps `cogmo/run/*` refs from GitHub. Cron lists repos, fans out per-repo, per-repo handler `octokit.paginate`s refs and runs each `git.deleteRef` in its own `step.run` so a single 5xx doesn't redo successful deletes on retry.
+Concrete example: `src/agent/coding/cleanup-orphan-run-branches.ts` sweeps `cogmo/run/*` refs from GitHub. Cron lists repos, fans out per-repo, per-repo handler walks `listMatchingRefs` via `octokit.paginate` and runs each `git.deleteRef` in its own `step.run` so a single 5xx doesn't redo successful deletes on retry.
 
 ### Don't return secrets through `step.run` `[confirmed]`
 

@@ -269,7 +269,7 @@ Owned by `src/agent/store/` (fits the existing agent domain — tasks are agent 
 
 | Trigger | When | Teardown path |
 |-|-|-|
-| Terminal task status (`pr_open`, `failed`, `cancelled`) | Short grace period for log flush (default 120s, `CODING_TASK_GRACE_SECONDS`) | Orchestrator calls `sandbox.deleteByTaskId(id)` → root-task cascade |
+| Terminal task status (`pr_open`, `failed`, `cancelled`) | Short grace period for log flush (default 120s, `CODING_TASK_GRACE_SECONDS`) | Orchestrator calls `sandbox.deleteByTaskId(taskId)` → root-task cascade |
 | Idle TTL | No CLI activity for `CODING_TASK_IDLE_TTL` (default 20 min) | Sandbox reaper TTL pass. `session_id` preserved in DB. |
 | Cogmo restart | Boot reconcile | Sandbox crash-recovery pass ([sandbox.md](sandbox.md) → Crash Recovery) |
 | LRU eviction under resource pressure | Disk / RAM threshold crossed | Oldest idle task containers first; active tasks protected |
