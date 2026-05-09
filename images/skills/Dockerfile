@@ -22,11 +22,11 @@ FROM mirror.gcr.io/library/python:3.14-slim@sha256:5b3879b6f3cb77e712644d50262d0
 # pinned to a specific astral release tag so a `uv sync` is deterministic.
 COPY --from=ghcr.io/astral-sh/uv:0.11.12 /uv /uvx /bin/
 
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    UV_NO_DEV=1 \
-    UV_PYTHON_DOWNLOADS=0 \
-    UV_NO_EDITABLE=1
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+ENV UV_NO_DEV=1
+ENV UV_PYTHON_DOWNLOADS=0
+ENV UV_NO_EDITABLE=1
 
 WORKDIR /app
 
@@ -54,8 +54,8 @@ RUN useradd -m -u 1000 -s /bin/bash cogmo
 # Copy just the venv from the builder. Owns it as cogmo so the supervisor
 # can write byte-cache invalidations etc. without root.
 COPY --from=builder --chown=cogmo:cogmo /app/.venv /opt/cogmo-skills/.venv
-ENV PATH="/opt/cogmo-skills/.venv/bin:${PATH}" \
-    VIRTUAL_ENV="/opt/cogmo-skills/.venv"
+ENV PATH="/opt/cogmo-skills/.venv/bin:${PATH}"
+ENV VIRTUAL_ENV="/opt/cogmo-skills/.venv"
 
 # Cogmo's host (`src/skills/worker-sysbox/worker.ts`) overrides the
 # Entrypoint/Cmd at create-container time; the default below is for
