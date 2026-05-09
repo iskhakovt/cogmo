@@ -234,9 +234,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     if (assignment.type !== "host-path") {
       // Plan/execute path under local-Docker. Daytona variant lands in
       // 3b.2.B; this guard keeps the type system honest until then.
-      throw new Error(
-        `plan orchestrator currently requires host-path worktree, got ${assignment.type}`,
-      );
+      throw new Error(`plan orchestrator requires host-path worktree, got ${assignment.type}`);
     }
     // Capture the narrowed value in a const so the closure below sees the
     // non-null + host-path type — TS doesn't carry `let` narrowing across
@@ -539,7 +537,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   }
   if (task.worktreeAssignment.type !== "host-path") {
     throw new Error(
-      `execute orchestrator currently requires host-path worktree, got ${task.worktreeAssignment.type}`,
+      `execute orchestrator requires host-path worktree, got ${task.worktreeAssignment.type}`,
     );
   }
 

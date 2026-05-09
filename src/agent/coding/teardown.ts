@@ -40,7 +40,7 @@ import {
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import type { CodingRepoRow } from "./store/index.js";
-import type { HostPathWorktreeAssignment, WorktreeAssignment } from "./types.js";
+import type { WorktreeAssignment } from "./types.js";
 import { removeWorktree } from "./worktree.js";
 
 const execFileP = promisify(execFile);
@@ -213,7 +213,7 @@ export async function safeTeardownWorktree(opts: {
     );
     return;
   }
-  const assignment: HostPathWorktreeAssignment = opts.worktreeAssignment;
+  const assignment = opts.worktreeAssignment;
   try {
     let identity: GitHubIdentity | undefined = opts.identity;
     if (!identity && opts.secretsStore) {

@@ -45,11 +45,12 @@ describe("runBranchFor", () => {
     );
   });
 
-  it("preserves the full uuid (not idShort) so it cannot collide with cogmo/<idShort>", () => {
+  it("does not collide with the slice-4 cogmo/<idShort> feature-branch shape", () => {
+    // Slice-4 feature branches match `^cogmo/[a-f0-9]{12}$`. Run-branches
+    // must escape that pattern so the orphan-cleanup cron can map a ref
+    // back to a `coding_tasks` row uniquely.
     const taskId = "019e0df3-be2c-78b2-a392-c19ef36d1ff4";
-    const ref = runBranchFor(taskId);
-    expect(ref).toContain(taskId);
-    expect(ref.length).toBeGreaterThan("cogmo/019e0df3be2c".length);
+    expect(runBranchFor(taskId)).not.toMatch(/^cogmo\/[a-f0-9]{12}$/);
   });
 });
 
@@ -146,6 +147,20 @@ describe("fetchFeatureBranch", () => {
       "+cogmo/abc123:refs/remotes/origin/cogmo/abc123",
     ]);
   });
+
+  it("propagates fetch failures (caller surfaces the error to the durable step)", async () => {
+    gitMocks.runGit.mockReset();
+    gitMocks.runGit.mockRejectedValue(new Error("fetch: connection reset"));
+
+    await expect(
+      fetchFeatureBranch({
+        localRepoPath: "/srv/cogmo/repos/example",
+        remoteUrl: "https://github.com/owner/example.git",
+        branch: "cogmo/abc123",
+        identity,
+      }),
+    ).rejects.toThrow(/connection reset/);
+  });
 });
 
 describe("loadIdentity", () => {
@@ -189,5 +204,19 @@ describe("loadIdentity", () => {
         identityName: "default",
       }),
     ).rejects.toThrow(/corrupt/);
+  });
+
+  it("throws with a schema-mismatch message when JSON parses but Zod fails", async () => {
+    const secretsStore = mock<SecretsStore>();
+    // Valid JSON, valid keys, but `pat` empty — fails the `min(1)` constraint.
+    secretsStore.getSecret.mockResolvedValue(JSON.stringify({ ...identity, pat: "" }));
+
+    await expect(
+      loadIdentity({
+        runInTx: fakeRunInTx,
+        secretsStore,
+        identityName: "default",
+      }),
+    ).rejects.toThrow(/malformed/);
   });
 });

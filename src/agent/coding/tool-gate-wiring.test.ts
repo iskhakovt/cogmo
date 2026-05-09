@@ -47,7 +47,6 @@ let close: () => Promise<void>;
 let store: DrizzleCodingStore;
 let sandboxStore: DrizzleSandboxStore;
 let baseDir: string;
-let _instanceId: string;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
@@ -57,8 +56,9 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  const inst = await tx((trx) => sandboxStore.insertInstance(trx, { host: "h", pid: 1 }));
-  _instanceId = inst.id;
+  // Insert a sandbox instance row — required by `containers.instance_id`'s
+  // FK when the orchestrator stamps a container row mid-test.
+  await tx((trx) => sandboxStore.insertInstance(trx, { host: "h", pid: 1 }));
 });
 
 afterEach(async () => {

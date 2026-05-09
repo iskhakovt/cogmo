@@ -60,6 +60,13 @@ export interface PushTaskBranchParams {
  * locally. The fetch refspec writes `refs/remotes/origin/<defaultBranch>`
  * explicitly so the push refspec on the next line resolves regardless
  * of the mirror's remote configuration.
+ *
+ * Inherits — does not enforce — single-writer-per-task semantics. Task
+ * IDs are UUIDv7 and the orchestrator wraps this call in a durable
+ * Inngest step with `concurrency: { limit: 1, key: "event.data.taskId" }`,
+ * so concurrent pushes against the same `cogmo/run/<task-id>` ref are
+ * not possible in production. If a future caller breaks that contract,
+ * the force-push would silently overwrite a sibling run.
  */
 export async function pushTaskBranchToRemote(p: PushTaskBranchParams): Promise<void> {
   const runRef = runBranchFor(p.taskId);

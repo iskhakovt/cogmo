@@ -146,7 +146,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   }
   if (task.worktreeAssignment.type !== "host-path") {
     throw new Error(
-      `verify orchestrator currently requires host-path worktree, got ${task.worktreeAssignment.type}`,
+      `verify orchestrator requires host-path worktree, got ${task.worktreeAssignment.type}`,
     );
   }
   const worktreeAssignment = task.worktreeAssignment;
@@ -248,6 +248,9 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       containerCreated = true;
       return session.state;
     });
+    // host-path worktree guaranteed by the type guard at function entry;
+    // sandbox state stays the wide union because the resume contract
+    // doesn't carry a transport discriminator yet.
     const container: SandboxSession = await sandbox.resume(sessionState);
 
     executeStream = await openExecuteStream(taskId);
