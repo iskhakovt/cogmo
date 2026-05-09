@@ -52,7 +52,14 @@ async function dispatch(cmd: string): Promise<number> {
       );
       const { bootstrap } = await import("./index.js");
       const { env } = await import("./env.js");
-      const { agentStore, runInTx } = await bootstrap();
+      // skipSandbox: true so the reaper (`reconcileCrashedInstances`)
+      // doesn't run. Without this, invoking either CLI while
+      // `cogmo serve` is up reaps serve's running coding-task
+      // containers — the reaper has no liveness check on other
+      // instance rows and treats any non-self `cogmo.instance`
+      // label as orphaned. These two CLIs don't touch sandboxes,
+      // so skipping is safe.
+      const { agentStore, runInTx } = await bootstrap({ skipSandbox: true });
       const resolveDefaultBankId = async (): Promise<string | null> => {
         const user = await runInTx((tx) => agentStore.getFirstUser(tx));
         return user ? user.id : null;
