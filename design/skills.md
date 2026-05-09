@@ -452,7 +452,7 @@ export const SkillManifestSchema = z.object({
 
 Single schema, four consumers, zero drift.
 
-## Risk tiering & auto-apply `[proposed]`
+## Risk tiering & auto-apply `[confirmed]`
 
 Not every skill creation or edit needs human approval. Review-everything is friction the system doesn't need. Instead, each deploy is auto-classified into one of three tiers based on the manifest + a static-analysis pass; tier determines whether Cogmo merges directly, notifies, or waits for explicit approval.
 
@@ -471,9 +471,19 @@ The classifier is deterministic and takes:
 - **Declared effects** from `SKILL.md` frontmatter.
 - **Declared secrets** + their destination bindings.
 - **Execution tier** (WASM vs container).
-- **Static analysis pass** — lint the skill code for patterns the manifest didn't declare: imports of `subprocess`, calls to `os.remove`, known-destructive SDK methods (`.delete()`, `.send()`, `.transfer()`, etc.). Any undeclared match → tier upgrade, and the author (agent or human) is forced to declare it.
+- **Static analysis pass** — walks the Python AST for imports + call patterns the manifest didn't declare: imports of `subprocess` / `smtplib` / `stripe` / etc., calls to `os.remove` / `subprocess.run` / `open(..., "w")`, etc. Any undeclared match → `validation_errors` populated and the deploy is rejected; the author (agent or human) must declare the effect to proceed.
 
 Output: one of `auto` / `notify` / `approve`. Recorded in the `skills.risk_tier` column and in the `skill_deploys` audit log.
+
+#### Implementation
+
+Static analysis runs via [tree-sitter](https://tree-sitter.github.io/) — concrete-syntax-tree parser, error-tolerant. We use the WASM build (`web-tree-sitter`) with `tree-sitter-python.wasm` vendored at `vendor/tree-sitter-python/` (extracted from `@vscode/tree-sitter-wasm` — VS Code's curated bundle). WASM over native to keep the deploy single-binary: pure-JS deps, no `node-gyp`, no prebuilt-binary-per-Node-major fragility. Cold start of the parser is tens of ms; steady-state parse of typical skill files is single-digit ms.
+
+Detection rules live in `src/skills/ast-rules.ts` as pure data — two tables (`IMPORT_RULES` mapping top-level packages → effect, `CALL_RULES` mapping `(object?, attr)` patterns → effect with optional positional-arg predicates like `open_write_mode`). Adding a rule is one row; the walker in `src/skills/ast-classifier.ts` doesn't change.
+
+**Threat model — UX gate, not security boundary.** A skill body can `getattr(__import__("os"), "system")(...)`, alias a module under a different name, or use a third-party SDK we don't have a rule for, and bypass detection. The actual security boundaries are sysbox isolation (tier-2), the `effects`-driven secret allowlist (P3.4), and the `approve` tier for risky skills. AST lint serves two narrower purposes: (1) force the manifest's `effects:` to track what the body actually does (drift catcher); (2) prove enough harmlessness to skip the human approval tap (tier promoter for `auto`). Don't try to harden it against adversarial authors — that's not its job.
+
+**Failure mode.** Any throw from the AST path (parser load failure, walk panic, unexpected node shape) is caught at the `classifier.ts` boundary and routes through the declaration-only stub (`classifyManifestStub`). The audit log shifts `classifier_version` from `ast-1` to `stub-2-effect-aware` so an operator can spot the degradation; the deploy still completes with a conservative declaration-only tier. The fallback can never reach `auto` — the stub can't *prove* read-only, only the AST path can.
 
 ### Where the classifier runs
 
@@ -509,20 +519,35 @@ interface SkillRunner {
   approveDeploy(opts: { pendingId: string }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
   rollback(opts: { name: string; toGitSha?: string }): Promise<RegisterResult>;
-  deregister(opts: { name: string }): Promise<void>;
-  list(): Promise<readonly SkillRow[]>;
+  deregister(opts: { name: string }): Promise<DeregisterResult>;
+  enable(opts: { name: string }): Promise<EnableResult>;
+  list(): Promise<readonly SkillSummary[]>;
+  listAll(): Promise<readonly SkillSummary[]>;  // includes disabled
   invoke(opts: { name: string; inputs: unknown }): Promise<SkillRunResult>;
 }
 
 interface RegisterResult {
   name: string;
-  risk_tier: "auto" | "notify" | "approve";
-  status: "live" | "pending_approval" | "rejected";
-  git_sha: string;               // live SHA post-register (or unchanged if pending/rejected)
+  riskTier: "auto" | "notify" | "approve";
+  status: "live" | "pending_approval" | "rejected" | "no_op";
+  gitSha: string;                // live SHA post-register (or unchanged if pending/rejected)
   errors?: readonly string[];    // present if status === "rejected"
-  pending_id?: string;            // present if status === "pending_approval"
+  pendingId?: string;            // present if status === "pending_approval"
 }
+
+// Discriminated unions — typed `kind` instead of thrown `Error`s, so transport
+// adapters can pattern-match without string-matching error messages.
+type DeregisterResult =
+  | { kind: "deregistered"; name: string }
+  | { kind: "rejected"; name: string; reason: "not_found" };
+
+type EnableResult =
+  | { kind: "enabled"; name: string; gitSha: string }
+  | { kind: "already_enabled"; name: string; gitSha: string }
+  | { kind: "rejected"; name: string; reason: "not_found" | "no_live_deploy" };
 ```
+
+**Approval-gate guard on `enable`.** Re-enabling refuses (`reason: "no_live_deploy"`) when the skill's current `gitSha` has no `skill_deploys` row with `status = 'live'`. Without the guard, a denied first deploy (`skills.disabled = true`, `skill_deploys.status = 'denied'` at the rejected sha) could be smuggled past the approval gate via `/disable foo` then `/enable foo` — flipping `disabled = false` would activate code that never passed human review. Rolled-back skills still pass because the prior live deploy row remains in the append-only history.
 
 **Key properties:**
 
@@ -562,9 +587,11 @@ Orthogonal axis — lowers friction for iteration:
 
 If an auto-applied skill misbehaves:
 
-- **`/disable <skill>`** — channel command disables immediately (sets `skills.disabled = true`; running tasks finish, no new invocations accepted).
+- **`/disable <skill>`** — channel command disables immediately (sets `skills.disabled = true`; running tasks finish, no new invocations accepted). Idempotent on already-disabled rows.
+- **`/enable <skill>`** — re-activates a previously disabled skill. Refuses with a "no live deploy" message if the skill was never live at its current sha (denied-on-first-deploy guard above).
+- **`/skills`** — operator inventory: lists every registered skill (enabled + disabled, with marker), tier, risk tier, short git sha. Discovery surface for the other two commands.
 - **`/rollback <skill>`** — revert to prior git SHA, re-sync.
-- **Automatic kill-switches** — a skill exceeding its cost cap, error-rate threshold, or wall-clock budget auto-disables and pings the user.
+- **Automatic kill-switches** *(P3.4)* — a skill exceeding its cost cap, error-rate threshold, or wall-clock budget auto-disables and pings the user.
 
 ### Mapping to existing design
 
