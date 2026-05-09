@@ -50,15 +50,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Run the cleanup one last time so leftover state from the file's
-  // final test (notably the `_test: true` Telegram channel created
-  // by `seedActiveChannelSession`) doesn't poison the shared DB for
-  // later integration files. `cli.integration.test.ts` and
-  // `pipeline.integration.test.ts` both call `bootstrap()` which
-  // iterates every channel row through `startChannels`; a leftover
-  // Telegram channel with a non-bot-token credentials blob throws
-  // "Empty token!" on adapter setup.
-  await cleanupTestState();
   await pgClient.end();
 });
 
@@ -66,10 +57,10 @@ beforeEach(cleanupTestState);
 
 // Clean DB state per-test so assertion counts don't drift. Order
 // matters for FKs: channel_sessions → messages → steering_rules →
-// conversations → test profiles → profile_classes; test channels
-// (marked via the `_test` credentials sentinel) come last to dodge
-// the channel_sessions FK. Test profiles / channels are matched by
-// name / credentials marker to avoid touching seeded fixtures.
+// conversations → test profiles → profile_classes. Channels are
+// seeded once by `test/integration-setup.ts` and outlive every test;
+// channel_sessions are per-test and cleared here. Test profiles are
+// matched by name to avoid touching seeded fixtures.
 // pending_memories and custom_compartments are independent.
 async function cleanupTestState(): Promise<void> {
   await pgClient.unsafe(
@@ -105,7 +96,6 @@ async function cleanupTestState(): Promise<void> {
   await pgClient.unsafe(`DELETE FROM profile_classes WHERE user_id = $1`, [userId]);
   await pgClient.unsafe(`DELETE FROM custom_compartments WHERE user_id = $1`, [userId]);
   await pgClient.unsafe(`DELETE FROM pending_memories WHERE user_id = $1`, [userId]);
-  await pgClient.unsafe(`DELETE FROM channels WHERE credentials @> '{"_test": true}'::jsonb`);
 }
 
 // --- Test helpers ---
@@ -126,25 +116,25 @@ const fakeStep: ObserverStepHarness = {
 const fakeRunInTx: import("../../db/index.js").Transactor = (cb) => db.transaction((tx) => cb(tx));
 
 /**
- * Insert a test channel of the given type and an active session linking
+ * Open an active session on the seeded channel of the given type, linking
  * it to the conversation. Used to drive the Observer's
- * `getActiveChannelTypes` step under real PG. The channel is marked via
- * a `_test: true` credentials sentinel so beforeEach can clean it up
- * without touching seeded fixtures.
+ * `getActiveChannelTypes` step under real PG. Channels are seeded once by
+ * `test/integration-setup.ts` (Telegram, Direct) and queried here by type
+ * — same pattern `pipeline.integration.test.ts` uses.
  */
-async function seedActiveChannelSession(
+async function openActiveChannelSession(
   conversationId: string,
   channelType: string,
 ): Promise<void> {
-  const inserted = await db
-    .insert(channels)
-    .values({
-      type: channelType,
-      credentials: { _test: true, type: channelType },
-      identityMode: "fixed",
-    })
-    .returning({ id: channels.id });
-  const channelId = expectDefined(inserted[0], "inserted channel row").id;
+  const [channel] = await db
+    .select({ id: channels.id })
+    .from(channels)
+    .where(eq(channels.type, channelType))
+    .limit(1);
+  const channelId = expectDefined(
+    channel,
+    `seeded ${channelType} channel — make sure test/integration-setup.ts seeds it`,
+  ).id;
   await db.insert(channelSessions).values({
     channelId,
     platformAddress: `addr-${channelType}-${conversationId.slice(0, 8)}`,
@@ -660,7 +650,7 @@ describe("runObserver — real PG + recording memory mock", () => {
     // (transport.getActiveChannelTypes → prompt → upsertCorrection
     // → steering_rules.channel_type) under real PG.
     const { conversationId } = await seedConversation({ messageCount: 4 });
-    await seedActiveChannelSession(conversationId, "telegram");
+    await openActiveChannelSession(conversationId, "telegram");
 
     const provider: LlmProvider = {
       name: "stub",
