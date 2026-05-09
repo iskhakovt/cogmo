@@ -138,15 +138,24 @@ def main() -> None:
     """Long-lived task-dispatch loop. Reads task_invoke lines from host
     stdin, forks a child per task, supervises wall-clock + reaping.
     EOF on stdin = clean shutdown.
+
+    Reads via `sys.stdin.buffer` (the underlying `BufferedReader`, not
+    the `TextIOWrapper`). The child uses `asyncio.connect_read_pipe`
+    against `sys.stdin.buffer` too, and connect_read_pipe operates on
+    the file descriptor directly — bytes parked in the parent's
+    `TextIOWrapper` decode buffer would be invisible to the child's
+    asyncio reader. By keeping both sides on the same `BufferedReader`
+    we avoid that whole class of buffering surprise.
     """
+    stdin = sys.stdin.buffer
     while True:
         try:
-            line = sys.stdin.readline()
+            line_bytes = stdin.readline()
         except KeyboardInterrupt:
             return
-        if not line:
+        if not line_bytes:
             return  # EOF — host closed stdin, clean shutdown.
-        line = line.strip()
+        line = line_bytes.decode("utf-8", errors="replace").strip()
         if not line:
             continue
         try:

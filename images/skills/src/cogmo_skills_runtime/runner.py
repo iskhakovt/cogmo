@@ -202,13 +202,19 @@ async def _main(
     on stdout. Errors at any stage land as a non-ok task_result; the
     function does not raise to the caller.
 
-    Streams default to `sys.stdin`/`stdout`/`stderr`; tests pass fakes.
-    `inputs` stays `Any` because it flows opaquely into user skill code,
-    where the skill author's typechecker (not ours) decides the shape.
+    Streams default to `sys.stdin.buffer` (binary) / `sys.stdout` /
+    `sys.stderr`; tests pass fakes. `inputs` stays `Any` because it flows
+    opaquely into user skill code, where the skill author's typechecker
+    (not ours) decides the shape.
+
+    `sys.stdin.buffer` (not `sys.stdin`) is what asyncio recommends for
+    `connect_read_pipe`: the text-mode `TextIOWrapper` adds an extra
+    decode layer asyncio doesn't use, and using a binary file-like is
+    what asyncio's documented contract asks for.
     """
     out = stdout if stdout is not None else sys.stdout
     err = stderr if stderr is not None else sys.stderr
-    inp = stdin if stdin is not None else sys.stdin
+    inp = stdin if stdin is not None else sys.stdin.buffer
 
     bridge = _Bridge(out)
     stdin_task = asyncio.create_task(_read_stdin_lines(bridge, inp, err))
