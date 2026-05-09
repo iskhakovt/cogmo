@@ -210,18 +210,28 @@ function applyScopeToReflect(
 /**
  * Build the leaves of the isolation filter — one leaf per dimension.
  *
- * Scope leaves (compartments / trust / opt-in profileClasses) are
- * `any_strict`: they exclude untagged memories so legacy un-tagged
- * rows aren't accidentally exposed.
+ * Scope leaves (compartments / trust / profileClasses) are `any_strict`:
+ * they exclude untagged memories so legacy un-tagged rows aren't
+ * accidentally exposed.
+ *
+ * The class leaf is identity-aware: when `scope.profileClasses` is set,
+ * the leaf's tag set is `scope.profileClasses ∪ {speakerClass}`. Speaker
+ * auto-include is structural, not an opt-in — a profile's recall always
+ * sees its own writes regardless of how the operator wrote `classes=…`.
+ * This matches the convention in personal-data systems (email's "Sent"
+ * folder, Drive owner-implicit-read, PostgreSQL RLS's `owner =
+ * current_user` idiom): self-recall is a primitive of the actor, not a
+ * configuration parameter. If a future use case needs write-only-no-self-
+ * recall (auditor / one-way channels), express it via a separate identity
+ * (e.g. `profile.profileClass = null`), not by misconfiguring the scope.
  *
  * The restricted-class NOT leaf is independent of `memoryScope` — it
  * applies even when scope is null, so a deployment that opts a class
  * into `restricted` gets fail-closed defaults without each profile
  * having to enumerate its allow-list. A class is excluded when it's
- * restricted AND not in the profile's effective opt-in set, where the
- * effective set is `scope.profileClasses ∪ {speakerClass}`. The
- * speaker auto-include keeps a restricted-speaker profile able to
- * recall its own writes when no explicit scope is set.
+ * restricted AND not in the same effective opt-in set
+ * (`scope.profileClasses ∪ {speakerClass}`), so the speaker auto-include
+ * applies symmetrically across both leaves.
  *
  * The NOT leaf uses `match: "any"` (not `any_strict`): it only
  * excludes memories that carry one of the restricted tags. Untagged
@@ -246,8 +256,12 @@ function buildScopeLeaves(
       },
     );
     if (scope.profileClasses !== undefined && scope.profileClasses.length > 0) {
+      const classes =
+        speakerClass !== null && !scope.profileClasses.includes(speakerClass)
+          ? [...scope.profileClasses, speakerClass]
+          : scope.profileClasses;
       leaves.push({
-        tags: scope.profileClasses.map((c) => `profile_class:${c}`),
+        tags: classes.map((c) => `profile_class:${c}`),
         match: "any_strict",
       });
     }

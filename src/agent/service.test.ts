@@ -644,3 +644,157 @@ describe("createService — restricted-class fail-closed (NOT leaf)", () => {
     });
   });
 });
+
+describe("createService — speaker auto-include in explicit any_strict leaf", () => {
+  // Identity-aware filter: self-recall is structural, not a configuration
+  // option. When the operator sets `classes=…` and forgets to include the
+  // profile's own class, the Service still adds it — so a profile always
+  // sees its own writes, matching the convention of every personal-context
+  // system (email Sent folder, Drive owner-read, RLS `owner=current_user`).
+
+  it("adds speakerClass to the any_strict leaf when not already in scope.profileClasses", async () => {
+    const memory = mockMemory();
+    const scope: ProfileMemoryScope = {
+      compartments: ["personal"],
+      trust: ["first-party"],
+      profileClasses: ["general"],
+    };
+    const svc = createService(
+      memory,
+      "user-123",
+      scope,
+      "intimate",
+      [],
+      stubFiles,
+      stubCoreMemory,
+      stubStage,
+    );
+
+    await svc.memory.recall("query");
+
+    expect(memory.recall).toHaveBeenCalledWith("user-123", "query", {
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:personal"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+            {
+              tags: ["profile_class:general", "profile_class:intimate"],
+              match: "any_strict",
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("does not duplicate the speaker class when already in the explicit list", async () => {
+    const memory = mockMemory();
+    const scope: ProfileMemoryScope = {
+      compartments: ["personal"],
+      trust: ["first-party"],
+      profileClasses: ["general", "intimate"],
+    };
+    const svc = createService(
+      memory,
+      "user-123",
+      scope,
+      "intimate",
+      [],
+      stubFiles,
+      stubCoreMemory,
+      stubStage,
+    );
+
+    await svc.memory.recall("query");
+
+    expect(memory.recall).toHaveBeenCalledWith("user-123", "query", {
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:personal"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+            {
+              tags: ["profile_class:general", "profile_class:intimate"],
+              match: "any_strict",
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("leaves the leaf unchanged when speakerClass is null (unclassed profile)", async () => {
+    const memory = mockMemory();
+    const scope: ProfileMemoryScope = {
+      compartments: ["personal"],
+      trust: ["first-party"],
+      profileClasses: ["general"],
+    };
+    const svc = createService(
+      memory,
+      "user-123",
+      scope,
+      null,
+      [],
+      stubFiles,
+      stubCoreMemory,
+      stubStage,
+    );
+
+    await svc.memory.recall("query");
+
+    expect(memory.recall).toHaveBeenCalledWith("user-123", "query", {
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:personal"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+            { tags: ["profile_class:general"], match: "any_strict" },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("composes with restricted-class NOT leaf: own class always recallable, other restricted classes excluded", async () => {
+    // The motivating combined case: speaker = intimate (restricted),
+    // operator scoped to ["general"] only, "secret" is also restricted.
+    // Speaker should auto-include in any_strict; secret should still be
+    // excluded by NOT leaf.
+    const memory = mockMemory();
+    const scope: ProfileMemoryScope = {
+      compartments: ["personal"],
+      trust: ["first-party"],
+      profileClasses: ["general"],
+    };
+    const svc = createService(
+      memory,
+      "user-123",
+      scope,
+      "intimate",
+      ["intimate", "secret"],
+      stubFiles,
+      stubCoreMemory,
+      stubStage,
+    );
+
+    await svc.memory.recall("query");
+
+    expect(memory.recall).toHaveBeenCalledWith("user-123", "query", {
+      tagGroups: [
+        {
+          and: [
+            { tags: ["compartment:personal"], match: "any_strict" },
+            { tags: ["trust:first-party"], match: "any_strict" },
+            {
+              tags: ["profile_class:general", "profile_class:intimate"],
+              match: "any_strict",
+            },
+            { not: { tags: ["profile_class:secret"], match: "any" } },
+          ],
+        },
+      ],
+    });
+  });
+});

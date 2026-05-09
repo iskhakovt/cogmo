@@ -152,7 +152,7 @@ describe("renderProfileList", () => {
     expect(renderProfileList([]).text).toContain("No profiles");
   });
 
-  it("annotates profileClass with `*` when the class is restricted", () => {
+  it("annotates profileClass with `!` when the class is restricted", () => {
     const profiles = [
       mkProfile({ id: "p1", name: "assistant", userId: "u1", profileClass: "general" }),
       mkProfile({ id: "p2", name: "private", userId: "u1", profileClass: "intimate" }),
@@ -161,7 +161,40 @@ describe("renderProfileList", () => {
       restrictedClasses: new Set(["intimate"]),
     });
     expect(rendered.text).toContain("[class=general]");
-    expect(rendered.text).toContain("[class=intimate*]");
+    expect(rendered.text).toContain("[class=intimate!]");
+    // Marker must come with a legend so the `!` isn't unexplained — even
+    // when no formatScope-rendered scope contributes its own legend.
+    expect(rendered.text).toContain("(! = restricted class)");
+  });
+
+  it("appends a class-level legend even when no profile has a memory scope set", () => {
+    // formatScope is the usual source of the legend, but it's only
+    // invoked when memoryScope is non-null. A profile carrying a
+    // restricted profileClass with null scope must still get a legend.
+    const profiles = [
+      mkProfile({
+        id: "p1",
+        name: "private",
+        userId: "u1",
+        memoryScope: null,
+        profileClass: "intimate",
+      }),
+    ];
+    const rendered = renderProfileList(profiles, {
+      restrictedClasses: new Set(["intimate"]),
+    });
+    expect(rendered.text).toContain("[class=intimate!]");
+    expect(rendered.text).toContain("(! = restricted class)");
+  });
+
+  it("omits the legend when no restricted class marker fires", () => {
+    const profiles = [
+      mkProfile({ id: "p1", name: "assistant", userId: "u1", profileClass: "general" }),
+    ];
+    const rendered = renderProfileList(profiles, {
+      restrictedClasses: new Set(["intimate"]),
+    });
+    expect(rendered.text).not.toContain("(! = restricted");
   });
 
   it("propagates restrictedClasses into formatScope so scope.profileClasses are marked", () => {
@@ -201,6 +234,7 @@ describe("renderConversationStatus", () => {
         toolCount: 4,
         autoRecall: "heuristic",
         memoryScope: null,
+        profileClass: null,
         voiceMode: "auto",
       },
       voiceMode: null,

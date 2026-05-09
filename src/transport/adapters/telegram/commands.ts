@@ -1053,7 +1053,12 @@ async function replyProfileScope(
 
   if (spec.kind === "show") {
     await ctx.reply(
-      `Scope for "${profile.name}": ${formatScope(profile.memoryScope, customs, restricted)}`,
+      `Scope for "${profile.name}": ${formatScope(
+        profile.memoryScope,
+        customs,
+        restricted,
+        profile.profileClass,
+      )}`,
     );
     return;
   }
@@ -1065,7 +1070,12 @@ async function replyProfileScope(
     return;
   }
   await ctx.reply(
-    `Scope for "${profile.name}" updated: ${formatScope(newScope, customs, restricted)}`,
+    `Scope for "${profile.name}" updated: ${formatScope(
+      newScope,
+      customs,
+      restricted,
+      profile.profileClass,
+    )}`,
   );
 }
 

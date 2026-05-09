@@ -149,6 +149,13 @@ export interface ConversationStatusSummary {
     toolCount: number;
     autoRecall: AutoRecallMode;
     memoryScope: ProfileMemoryScope | null;
+    /**
+     * Speaker-isolation class (`profile.profile_class`). Surfaced here so
+     * `formatScope` can render the effective recall filter — the Service
+     * auto-includes the speaker's class in the explicit class leaf, and
+     * the rendered scope should reflect that to avoid operator surprise.
+     */
+    profileClass: string | null;
     voiceMode: VoiceMode;
   };
   /** Per-conversation override; null = follow profile default. */
@@ -853,6 +860,7 @@ export function createTransport(deps: {
                 toolCount: profile.toolSet.length,
                 autoRecall: profile.autoRecall,
                 memoryScope: profile.memoryScope,
+                profileClass: profile.profileClass,
                 voiceMode: profile.voiceMode,
               },
               voiceMode: conv.voiceMode,

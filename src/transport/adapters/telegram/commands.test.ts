@@ -297,10 +297,12 @@ describe("handleProfile", () => {
     expect(compartmentsList).toHaveBeenCalled();
     expect(profileClassesList).toHaveBeenCalled();
     const reply = ctx.reply.mock.calls[0]?.[0];
-    // Restricted class gets the trailing `*` marker; unrestricted stays bare.
-    expect(reply).toContain("[class=intimate*]");
+    // Restricted class gets the trailing `!` marker (matching the
+    // `! = restricted` convention `formatScope` already uses); unrestricted
+    // stays bare. `*` is reserved for custom compartments on the same line.
+    expect(reply).toContain("[class=intimate!]");
     expect(reply).toContain("[class=general]");
-    expect(reply).not.toContain("[class=general*]");
+    expect(reply).not.toContain("[class=general!]");
   });
 
   it("/profile list degrades gracefully when the profileClasses registry list errors", async () => {
@@ -339,7 +341,7 @@ describe("handleProfile", () => {
     // Class still rendered (the profile data has it), just without the
     // restricted marker since we couldn't load the registry.
     expect(reply).toContain("[class=intimate]");
-    expect(reply).not.toContain("[class=intimate*]");
+    expect(reply).not.toContain("[class=intimate!]");
     // Crucially, no error message — the user gets their list back.
     expect(reply).not.toContain("not authorized");
   });
@@ -1847,6 +1849,73 @@ describe("formatScope", () => {
       profileClasses: ["intimate"],
     });
     expect(out).not.toContain("!");
+  });
+
+  it("appends speaker class with `(speaker)` annotation when not in the explicit list", () => {
+    // Operator wrote `classes=general` but the profile speaks as `intimate`.
+    // The Service auto-includes intimate in the recall filter; the rendered
+    // scope must reflect that effective set so the operator isn't surprised.
+    expect(
+      formatScope(
+        { compartments: ["personal"], trust: ["first-party"], profileClasses: ["general"] },
+        undefined,
+        undefined,
+        "intimate",
+      ),
+    ).toBe("compartments: personal / trust: first-party / classes: general, intimate (speaker)");
+  });
+
+  it("does not duplicate the speaker class when already in the explicit list", () => {
+    expect(
+      formatScope(
+        {
+          compartments: ["personal"],
+          trust: ["first-party"],
+          profileClasses: ["general", "intimate"],
+        },
+        undefined,
+        undefined,
+        "intimate",
+      ),
+    ).toBe("compartments: personal / trust: first-party / classes: general, intimate");
+  });
+
+  it("composes speaker `(speaker)` annotation with `!` restricted marker on the same class", () => {
+    expect(
+      formatScope(
+        { compartments: ["personal"], trust: ["first-party"], profileClasses: ["general"] },
+        undefined,
+        new Set(["intimate"]),
+        "intimate",
+      ),
+    ).toBe(
+      "compartments: personal / trust: first-party / classes: general, intimate! (speaker) (! = restricted)",
+    );
+  });
+
+  it("speakerClass null leaves classes unannotated", () => {
+    expect(
+      formatScope(
+        { compartments: ["personal"], trust: ["first-party"], profileClasses: ["general"] },
+        undefined,
+        undefined,
+        null,
+      ),
+    ).toBe("compartments: personal / trust: first-party / classes: general");
+  });
+
+  it("speakerClass set but scope has no profileClasses leaves rendering unchanged", () => {
+    // No `classes:` segment in the rendered output → no auto-include
+    // surface to annotate. Speaker has no effect on the compartment-only
+    // scope; the rendering stays the same as before.
+    expect(
+      formatScope(
+        { compartments: ["work"], trust: ["first-party"] },
+        undefined,
+        undefined,
+        "intimate",
+      ),
+    ).toBe("compartments: work / trust: first-party");
   });
 });
 
