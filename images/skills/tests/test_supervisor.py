@@ -87,13 +87,8 @@ class TestKillAndReap:
 
 
 class TestRunOneTaskInChild:
-    def test_writes_task_result_for_simple_skill(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        body = (
-            "async def run(inputs, ctx):\n"
-            "    return {'echo': inputs.get('x', 0) + 1}\n"
-        )
+    def test_writes_task_result_for_simple_skill(self, capsys: pytest.CaptureFixture[str]) -> None:
+        body = "async def run(inputs, ctx):\n    return {'echo': inputs.get('x', 0) + 1}\n"
         task = {
             "type": "task_invoke",
             "id": "t-echo",
@@ -111,9 +106,7 @@ class TestRunOneTaskInChild:
             "output": {"echo": 42},
         }
 
-    def test_writes_task_result_for_skill_with_syntax_error(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_writes_task_result_for_skill_with_syntax_error(self, capsys: pytest.CaptureFixture[str]) -> None:
         task = {
             "type": "task_invoke",
             "id": "t-bad",
@@ -129,9 +122,7 @@ class TestRunOneTaskInChild:
         assert result["ok"] is False
         assert "SyntaxError" in result["error"]
 
-    def test_writes_task_result_when_skill_raises(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_writes_task_result_when_skill_raises(self, capsys: pytest.CaptureFixture[str]) -> None:
         task = {
             "type": "task_invoke",
             "id": "t-raise",
@@ -146,9 +137,7 @@ class TestRunOneTaskInChild:
         assert "ValueError" in result["error"]
         assert "boom" in result["error"]
 
-    def test_rejects_skill_without_async_run(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_rejects_skill_without_async_run(self, capsys: pytest.CaptureFixture[str]) -> None:
         task = {
             "type": "task_invoke",
             "id": "t-no-run",

@@ -41,10 +41,7 @@ class TestHappyPath:
     @pytest.mark.asyncio
     async def test_returns_simple_result(self) -> None:
         result = await _drive(
-            body=(
-                "async def run(inputs, ctx):\n"
-                "    return {'doubled': inputs['x'] * 2}\n"
-            ),
+            body=("async def run(inputs, ctx):\n    return {'doubled': inputs['x'] * 2}\n"),
             inputs={"x": 21},
             task_id="t-double",
         )
@@ -89,10 +86,7 @@ class TestErrors:
     @pytest.mark.asyncio
     async def test_skill_raises(self) -> None:
         result = await _drive(
-            body=(
-                "async def run(inputs, ctx):\n"
-                "    raise RuntimeError('skill failed')\n"
-            ),
+            body=("async def run(inputs, ctx):\n    raise RuntimeError('skill failed')\n"),
             inputs={},
             task_id="t-raise",
         )

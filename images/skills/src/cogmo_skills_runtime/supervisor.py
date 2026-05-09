@@ -185,10 +185,7 @@ def main() -> None:
         try:
             _wait_with_timeout(pid, wall_clock_s)
         except TimeoutError:
-            sys.stderr.write(
-                f"supervisor: wall-clock {wall_clock_s}s exceeded "
-                f"for task {task_id}; killing child\n"
-            )
+            sys.stderr.write(f"supervisor: wall-clock {wall_clock_s}s exceeded for task {task_id}; killing child\n")
             _kill_and_reap(pid)
             _send(
                 {
