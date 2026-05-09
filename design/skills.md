@@ -716,7 +716,7 @@ Skills share files across invocations through a per-user workspace exposed as `c
 
 | Store | Use when | Properties |
 |-|-|-|
-| `ctx.files` | Named, mutable, listable text — notes, drafts, CSV, summaries | Logical paths, S3-backed, per-user prefix, eventually consistent |
+| `ctx.files` | Named, mutable, listable text — notes, drafts, CSV, summaries | Logical paths, S3-backed, per-user prefix; strong consistency at task boundaries (private substrate within a task) |
 | `ctx.attachments` | Binary blobs, write-once outputs — PNG, PDF | Opaque path token, no listing, immutable once uploaded |
 
 **Two access paths.** A skill reaches workspace files two ways, with the same ACL boundary underneath:
@@ -733,14 +733,22 @@ The RPC surface (`Service["files"]` mirrored to Python) is unchanged from prior 
 | `ctx.files.read(path)` | `str` — raises `FileNotFound` if missing |
 | `ctx.files.write(path, content)` | `None` — creates or overwrites |
 | `ctx.files.list(prefix=None)` | `list[FileEntry]` with `path`, `size`, `last_modified` |
+| `ctx.files.delete(path)` | `None` — idempotent; no error if the path is already absent |
 
-Paths are logical (`notes/meeting.md`). The host enforces ACL — a skill cannot escape its user's prefix. Reads cap at 100KB (matches `read_file`); writes have no explicit cap today (bounded by S3 object limits).
+Paths are logical (`notes/meeting.md`). The host enforces ACL — a skill cannot escape its user's prefix. The 100 KB read cap on `ctx.files.read` (matching the agent's `read_file` tool) is an LLM-output guardrail — its job is preventing a 50 MB string from landing in a tool result the LLM will then re-include in its context. POSIX `open()` does NOT inherit this cap and is bounded only by the substrate (Pyodide MEMFS by worker memory, sysbox tmpfs by mount size, Daytona Volume by quota); skills that need to materialise a large file end-to-end should use POSIX. Writes have no explicit cap on either path (bounded by S3 object limits).
 
 #### Per-tier POSIX shim — stage + reconcile
 
 Each tier exposes the workspace at `/files` via a private substrate populated at task start and reconciled to S3 at task end. The host owns the staging loop; the skill is unaware.
 
-For each tier, "stage in" is `Service["files"].list(userPrefix)` to enumerate entries, then `Service["files"].read(path)` per entry to fetch content, then a substrate-specific write. "Reconcile out" walks the substrate, diffs against the staged set, and pushes changed entries via `Service["files"].write`.
+For each tier, "stage in" is `Service["files"].list(userPrefix)` to enumerate entries, then `Service["files"].read(path)` per entry to fetch content, then a substrate-specific write. The host records a `path → sha256(content)` map of the staged set. "Reconcile out" walks the substrate, computes the same map, and diffs:
+
+- **Path in substrate, not in stage-in** → new file, push via `Service["files"].write`.
+- **Path in both, hash differs** → modified, push via `Service["files"].write`.
+- **Path in both, hash matches** → unchanged, skip (no S3 round-trip).
+- **Path in stage-in, not in substrate** → deleted by the skill (`os.remove`, `pathlib.Path.unlink`), push deletion via `Service["files"].delete`.
+
+Hashing on content (not mtime / size) avoids re-uploading large files the skill only `open()`-ed for read, and works uniformly across MEMFS (no real mtime), tmpfs, and Daytona Volumes. Hashes are computed once at stage-in (we have the bytes anyway) and once at reconcile (we have to read the substrate to write S3 anyway).
 
 | Tier | Substrate | Stage in (substrate write) | Reconcile out (substrate read) |
 |-|-|-|-|
@@ -765,8 +773,10 @@ The orchestration loop is one host-side function parameterised by a small `TierF
 #### Semantics
 
 - **Within a task:** stdlib write-then-read works exactly as POSIX expects — both ops hit the same private substrate. POSIX and RPC are isolated within a task: a POSIX write lands in the substrate and is invisible to a subsequent `await ctx.files.read` (which reads S3); an RPC write lands in S3 and is invisible to a subsequent stdlib `open()` (which reads the substrate). Skills should pick one path per file and stick with it for the duration of the task.
-- **Across tasks (sequential):** task A reconciles before task B's stage-in begins, so task B sees task A's POSIX writes. S3 strong read-after-write consistency makes this exact, not eventual — the boundary is the consistency point.
-- **Across tasks (concurrent):** each task gets its own private substrate. Task B does not see task A's POSIX writes until A reconciles. If both write the same path, last-reconcile-wins on the S3 mirror. Documented; mitigated by (a) the orchestrator's per-user concurrency throttle on most flows, and (b) the RPC escape hatch for skills that genuinely need live cross-task visibility.
+- **Deletion:** stdlib `os.remove` / `pathlib.Path.unlink` removes the path from the substrate; reconcile sees "in stage-in but not in substrate" and deletes the S3 object. `ctx.files.delete(path)` does the same via the RPC path, immediately, bypassing reconcile. Skills that delete a file then write to the same path within the same task get expected POSIX semantics (delete-then-write yields a write — the delete never reaches S3 because reconcile only sees the final substrate state).
+- **Across tasks (sequential):** task A reconciles before task B's stage-in begins, so task B sees task A's POSIX writes and deletions. S3 strong read-after-write consistency makes this exact, not eventual — the boundary is the consistency point.
+- **Across tasks (concurrent):** each task gets its own private substrate. Task B does not see task A's POSIX writes or deletions until A reconciles. If both modify the same path, last-reconcile-wins on the S3 mirror — and that includes the delete-vs-write case (a delete from one task can erase the other's write, or vice versa). Documented; mitigated by (a) the orchestrator's per-user concurrency throttle on most flows, and (b) the RPC escape hatch (`ctx.files.write` / `ctx.files.delete`) for skills that genuinely need live cross-task visibility.
+- **Stage-in cost** is `O(workspace size)` per task — every task lists the user prefix and reads each entry into the substrate. At single-user / ~200 tasks/day with mostly small text files (~tens of KB each), this is well below the per-task latency budget. The workspace is bounded by skill discipline; once it crosses a few hundred MB total, partition by prefix (one stage-in scopes to the prefix the skill declares it touches) or move large blobs to RPC-only access. Not a v1 concern.
 - **No file locking** — `ctx.files.write` is "create or overwrite", no append, no partial updates. Read-modify-write is racy and the caller owns the consequences. Skills coordinating on the same file should pass state through return values or `ctx.memory`, not file races.
 - **Strongly consistent S3 reads** on AWS (since Dec 2020), MinIO distributed/standalone, and Cloudflare R2 — a reconciled write is visible to the next task's stage-in immediately.
 
