@@ -118,7 +118,7 @@ Overrides validated at deploy against a per-tier hard ceiling (e.g., ≤2 GB mem
 
 The container tier is warmed from day 1. A 1–2s cold start on every interactive skill invocation is user-visible latency. The dispatcher abstraction also removes the need for a sync/async tier split — one pool handles both uniformly.
 
-Implementation lives in `src/skills/worker-sysbox/` — `pool.ts` owns the lifecycle, `worker.ts` wraps a long-lived `SandboxSession` running a python supervisor, `supervisor.py.ts` is the supervisor source, `runner.py.ts` is the per-task runner the supervisor's forked children execute. `SkillRunnerImpl.create` eagerly stands the pool up when a sandbox is wired; `shutdown()` tears it down.
+Implementation lives across two trees. The TypeScript host in `src/skills/worker-sysbox/` (`pool.ts` for lifecycle, `worker.ts` wraps a long-lived `SandboxSession` running the python supervisor) and the Python runtime in `images/skills/` (a real `cogmo_skills_runtime` package with `pyproject.toml`, `uv.lock`, ruff + pyrefly + pytest, multi-stage Docker build that bakes the venv into `cogmo-skills:<version>` at `/opt/cogmo-skills/.venv`). The TS worker spawns the supervisor via `python3 -u -m cogmo_skills_runtime` — `__main__.py` calls `supervisor.main()`. `SkillRunnerImpl.create` eagerly stands the pool up when a sandbox is wired; `shutdown()` tears it down.
 
 ### Shape `[confirmed]`
 

@@ -8,8 +8,16 @@ import type {
 import { type CtxHandler, Dispatcher } from "../dispatcher.js";
 import type { TaskInvoke } from "../protocol.js";
 import { DEFAULT_RESOURCE_LIMITS } from "./host.js";
-import { SUPERVISOR_PY } from "./supervisor.py.js";
 import { createNdjsonTransport } from "./transport.js";
+
+/**
+ * Entry point for the python supervisor. Resolves to the
+ * `cogmo_skills_runtime` package's `__main__.py` (which calls
+ * `supervisor.main()`). Installed into the cogmo-skills image's venv at
+ * build time — the source lives in `images/skills/src/cogmo_skills_runtime/`,
+ * not in this TS bundle. See `images/skills/Dockerfile`.
+ */
+const SUPERVISOR_CMD = ["python3", "-u", "-m", "cogmo_skills_runtime"] as const;
 
 const log = logger.child({ component: "skills.worker.sysbox" });
 
@@ -149,7 +157,7 @@ export class SysboxSkillWorker {
 
     let exec: ExecStreamingHandle;
     try {
-      exec = await session.execStreaming(["python3", "-u", "-c", SUPERVISOR_PY], {
+      exec = await session.execStreaming([...SUPERVISOR_CMD], {
         attachStdin: true,
       });
     } catch (e) {
