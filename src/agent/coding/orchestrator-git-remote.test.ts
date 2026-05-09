@@ -344,8 +344,8 @@ describe("runCodingTask — git-remote transport", () => {
       deps: makeDeps({
         sandbox,
         backend: backendYielding([]),
-        // biome-ignore lint/suspicious/noExplicitAny: deliberate omission to verify the secretsStore guard
-        secretsStore: undefined as any,
+        // @ts-expect-error — deliberately undefined to exercise the secretsStore guard
+        secretsStore: undefined,
       }),
       stepRun,
       inngest: fakeInngest,
