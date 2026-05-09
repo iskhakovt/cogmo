@@ -477,6 +477,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           await deps.runInTx((tx) =>
             agentStore.stagePendingMemory(tx, {
               userId,
+              // Snapshot the staging profile so the Observer drain stamps
+              // the right `profile_class:<class>` tag at retain time —
+              // without this, a row staged by an `intimate`-class profile
+              // could be drained by an idle on a `general`-class
+              // conversation and end up tagged as `general`, leaking
+              // across speaker isolation.
+              profileId: profile?.id ?? null,
               content,
               ...(opts?.context !== undefined && { context: opts.context }),
               source: "live_retain",

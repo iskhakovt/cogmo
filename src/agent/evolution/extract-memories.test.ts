@@ -36,7 +36,7 @@ const sampleHistory: Message[] = [
 describe("extractMemories", () => {
   it("returns zeros for empty transcript", async () => {
     const deps = mockExtractionDeps({ memories: [] });
-    const result = await extractMemories([], "user-1", deps);
+    const result = await extractMemories([], "user-1", null, deps);
 
     expect(result).toEqual({ extracted: 0, byNetwork: {} });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
@@ -45,7 +45,7 @@ describe("extractMemories", () => {
 
   it("returns zeros when no memories extracted", async () => {
     const deps = mockExtractionDeps({ memories: [] });
-    const result = await extractMemories(sampleHistory, "user-1", deps);
+    const result = await extractMemories(sampleHistory, "user-1", null, deps);
 
     expect(result).toEqual({ extracted: 0, byNetwork: {} });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
@@ -69,7 +69,7 @@ describe("extractMemories", () => {
       ],
     });
 
-    const result = await extractMemories(sampleHistory, "user-1", deps);
+    const result = await extractMemories(sampleHistory, "user-1", null, deps);
 
     expect(result.extracted).toBe(2);
     expect(result.byNetwork).toEqual({ world: 1, bank: 1 });
@@ -102,7 +102,7 @@ describe("extractMemories", () => {
       ],
     });
 
-    const result = await extractMemories(sampleHistory, "user-1", deps);
+    const result = await extractMemories(sampleHistory, "user-1", null, deps);
 
     expect(result.extracted).toBe(1);
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
@@ -126,7 +126,7 @@ describe("extractMemories", () => {
       ],
     });
 
-    const result = await extractMemories(sampleHistory, "user-1", deps);
+    const result = await extractMemories(sampleHistory, "user-1", null, deps);
 
     expect(result.extracted).toBe(4);
     expect(result.byNetwork).toEqual({ world: 2, observation: 1, opinion: 1 });
@@ -139,7 +139,7 @@ describe("extractMemories", () => {
       ],
     });
 
-    await extractMemories(sampleHistory, "ti", deps);
+    await extractMemories(sampleHistory, "ti", null, deps);
 
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("ti", expect.any(Array));
   });
@@ -154,9 +154,56 @@ describe("extractMemories", () => {
       },
     );
 
-    const result = await extractMemories(sampleHistory, "user-1", deps);
+    const result = await extractMemories(sampleHistory, "user-1", null, deps);
 
     expect(result).toEqual({ extracted: 0, byNetwork: {} });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
+  });
+
+  it("appends profile_class tag when profileClass is non-null", async () => {
+    const deps = mockExtractionDeps({
+      memories: [
+        { fact: "a fact", network: "world", compartment: "technical", trust: "first-party" },
+      ],
+    });
+
+    await extractMemories(sampleHistory, "user-1", "intimate", deps);
+
+    const call = vi.mocked(deps.memory.retainBatch).mock.calls[0];
+    const items = call?.[1] ?? [];
+    expect(items).toHaveLength(1);
+    expect(items[0]?.tags).toContain("profile_class:intimate");
+  });
+
+  it("omits profile_class tag when profileClass is null", async () => {
+    const deps = mockExtractionDeps({
+      memories: [
+        { fact: "a fact", network: "world", compartment: "technical", trust: "first-party" },
+      ],
+    });
+
+    await extractMemories(sampleHistory, "user-1", null, deps);
+
+    const call = vi.mocked(deps.memory.retainBatch).mock.calls[0];
+    const items = call?.[1] ?? [];
+    expect(items[0]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
+  });
+
+  it("omits profile_class tag when profileClass is undefined (Inngest replay safety)", async () => {
+    // The signature is `string | null`, but Inngest's step memoization
+    // can replay this function with a stale shape that drops the arg —
+    // arriving as `undefined`. Bare `!== null` would emit
+    // `profile_class:undefined`; the typeof guard catches both.
+    const deps = mockExtractionDeps({
+      memories: [
+        { fact: "a fact", network: "world", compartment: "technical", trust: "first-party" },
+      ],
+    });
+
+    await extractMemories(sampleHistory, "user-1", undefined as unknown as string | null, deps);
+
+    const call = vi.mocked(deps.memory.retainBatch).mock.calls[0];
+    const items = call?.[1] ?? [];
+    expect(items[0]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
   });
 });

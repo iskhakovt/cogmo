@@ -54,12 +54,19 @@ export interface DrainPendingResult {
   byNetwork: Record<string, number>;
 }
 
-/** A pending row with its assigned classification — intentionally JSON-safe so it survives Inngest step memoization. */
+/**
+ * A pending row with its assigned classification — intentionally JSON-safe so
+ * it survives Inngest step memoization. `profileClass` is the staging
+ * profile's class (carried through from the pending row), so each row in a
+ * batch can be tagged with the right `profile_class:<class>` independently of
+ * what conversation triggered the drain.
+ */
 export interface ClassifiedRow {
   id: string;
   content: string;
   context: string | null;
   source: PendingMemorySource;
+  profileClass: string | null;
   tags: ClassifiedMemory;
 }
 
@@ -72,9 +79,14 @@ export interface ClassifyPendingResult {
  * Subset of `PendingMemory` the classifier actually reads. Declared
  * separately so callers can pass rows that have already been through
  * Inngest step memoization (where `createdAt` is a JSON string, not a
- * `Date`) — we don't use the timestamp here.
+ * `Date`) — we don't use the timestamp here. Includes `profileClass`
+ * so the post-classification retain step can stamp each row with the
+ * class of the profile that staged it.
  */
-export type ClassifierInput = Pick<PendingMemory, "id" | "content" | "context" | "source">;
+export type ClassifierInput = Pick<
+  PendingMemory,
+  "id" | "content" | "context" | "source" | "profileClass"
+>;
 
 /** Run the classifier prompt over a batch of pending rows. Single-row failures are skipped, not propagated. */
 export async function classifyPendingMemories(
@@ -91,7 +103,21 @@ export async function classifyPendingMemories(
   return { successful, byNetwork };
 }
 
-/** Map classified rows to `RetainBatchItem`s. `metadata.source` carries the staging origin so live retains and migrations stay distinguishable from transcript extractions. */
+/**
+ * Map classified rows to `RetainBatchItem`s. `metadata.source` carries the
+ * staging origin so live retains and migrations stay distinguishable from
+ * transcript extractions.
+ *
+ * Each row's `profile_class:<class>` tag (when present) is taken from
+ * `r.profileClass` — the staging profile's CURRENT class, captured by
+ * `getPendingMemories`'s LEFT JOIN. This is what makes the speaker
+ * isolation correct under multi-profile drains: a row staged by profile
+ * A retains its class even if the conversation that triggered Observer
+ * runs under profile B. Migration-sourced rows (and rows whose staging
+ * profile was deleted) have `profileClass: null` and stamp untagged on
+ * the class dimension — their absence from a class-scoped recall is the
+ * existing legacy semantic.
+ */
 export function buildRetainItems(rows: ReadonlyArray<ClassifiedRow>): RetainBatchItem[] {
   return rows.map((r) => ({
     content: r.content,
@@ -100,6 +126,12 @@ export function buildRetainItems(rows: ReadonlyArray<ClassifiedRow>): RetainBatc
       `network:${r.tags.network}`,
       `compartment:${r.tags.compartment}`,
       `trust:${r.tags.trust}`,
+      // Guard against `undefined` (not just `null`) — Inngest serializes
+      // step output to JSON; an in-flight run started under earlier code
+      // that didn't include `profileClass` on `ClassifiedRow` will
+      // deserialize with `profileClass: undefined` on retry. Bare
+      // `!== null` would slip through and emit `profile_class:undefined`.
+      ...(typeof r.profileClass === "string" ? [`profile_class:${r.profileClass}`] : []),
     ],
     metadata: { source: r.source },
     observationScopes: "per_tag" as const,
@@ -155,6 +187,7 @@ async function classifyOne(p: ClassifierInput, deps: ClassifyDeps): Promise<Clas
       content: p.content,
       context: p.context,
       source: p.source,
+      profileClass: p.profileClass,
       tags: data,
     };
   } catch (err) {

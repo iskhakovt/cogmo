@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import { mockProvider } from "../../test/factories.js";
 import type { PendingMemory } from "../store/index.js";
-import { type DrainPendingDeps, drainPendingMemories } from "./drain-pending-memories.js";
+import {
+  buildRetainItems,
+  type ClassifiedRow,
+  type DrainPendingDeps,
+  drainPendingMemories,
+} from "./drain-pending-memories.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
@@ -13,6 +18,7 @@ function pending(overrides: Partial<PendingMemory> = {}): PendingMemory {
     content: "homelab IP is 10.0.10.10",
     context: null,
     source: "live_retain",
+    profileClass: null,
     createdAt: new Date("2026-05-06T10:00:00Z"),
     ...overrides,
   };
@@ -199,5 +205,69 @@ describe("drainPendingMemories", () => {
     expect(result).toEqual({ drained: 0, byNetwork: {} });
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
     expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
+  });
+});
+
+describe("buildRetainItems", () => {
+  function classified(overrides: Partial<ClassifiedRow> = {}): ClassifiedRow {
+    return {
+      id: "pm-1",
+      content: "user prefers tea",
+      context: null,
+      source: "live_retain",
+      profileClass: null,
+      tags: { network: "bank", compartment: "personal", trust: "first-party" },
+      ...overrides,
+    };
+  }
+
+  it("appends profile_class:<class> when row carries a non-null profileClass", () => {
+    const items = buildRetainItems([classified({ profileClass: "intimate" })]);
+    expect(items[0]?.tags).toEqual([
+      "network:bank",
+      "compartment:personal",
+      "trust:first-party",
+      "profile_class:intimate",
+    ]);
+  });
+
+  it("omits profile_class tag when row's profileClass is null", () => {
+    const items = buildRetainItems([classified()]);
+    expect(items[0]?.tags).toEqual(["network:bank", "compartment:personal", "trust:first-party"]);
+  });
+
+  it("treats undefined profileClass as untagged (Inngest replay safety)", () => {
+    // Regression: a row from an in-flight Inngest run started under
+    // earlier code that didn't include `profileClass` on ClassifiedRow
+    // deserializes with the field as `undefined`, not `null`. The bare
+    // `!== null` check would slip past it and emit
+    // `profile_class:undefined`. The typeof guard rejects both.
+    // Reconstruct without the `profileClass` key — the actual shape
+    // Inngest replay yields (the field is missing entirely on the
+    // deserialized object), which is what `typeof === "string"` is
+    // guarding against. `_dropped` rebinds via destructuring without
+    // tripping `noUnusedLocals` on the discard.
+    const { profileClass: _dropped, ...withoutClass } = classified();
+    void _dropped;
+    const items = buildRetainItems([withoutClass as ClassifiedRow]);
+    expect(items[0]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
+  });
+
+  it("stamps each row with its OWN class — speaker isolation under mixed batches", () => {
+    // Regression for the bug where a single drain batch containing rows
+    // staged by different profiles got tagged with the firing
+    // conversation's class, leaking across the speaker-isolation
+    // boundary. Each row's profileClass is now carried through from the
+    // pending row's snapshot.
+    const items = buildRetainItems([
+      classified({ id: "pm-intimate", profileClass: "intimate" }),
+      classified({ id: "pm-general", profileClass: "general" }),
+      classified({ id: "pm-untagged", profileClass: null }),
+    ]);
+    expect(items[0]?.tags).toContain("profile_class:intimate");
+    expect(items[0]?.tags).not.toContain("profile_class:general");
+    expect(items[1]?.tags).toContain("profile_class:general");
+    expect(items[1]?.tags).not.toContain("profile_class:intimate");
+    expect(items[2]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
   });
 });

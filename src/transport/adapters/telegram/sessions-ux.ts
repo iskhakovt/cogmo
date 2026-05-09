@@ -66,7 +66,10 @@ export function renderProfileList(
     // when set, so the common case stays compact. Wraps the canonical
     // `formatScope` form so list and show views never drift in sync.
     const scope = p.memoryScope ? ` [${formatScope(p.memoryScope)}]` : "";
-    return `• ${p.name} (${owner}, ${p.model})${scope}${current}`;
+    // Profile class is null for unclassed profiles — surface only when set
+    // so unclassed deployments don't see clutter.
+    const klass = p.profileClass ? ` [class=${p.profileClass}]` : "";
+    return `• ${p.name} (${owner}, ${p.model})${scope}${klass}${current}`;
   });
   return { text: lines.join("\n") };
 }
@@ -78,7 +81,14 @@ export function renderProfileList(
  */
 export function formatScope(scope: ProfileMemoryScope | null): string {
   if (scope === null) return "unrestricted (recalls all memories)";
-  return `compartments: ${scope.compartments.join(", ")} / trust: ${scope.trust.join(", ")}`;
+  const parts = [
+    `compartments: ${scope.compartments.join(", ")}`,
+    `trust: ${scope.trust.join(", ")}`,
+  ];
+  if (scope.profileClasses !== undefined && scope.profileClasses.length > 0) {
+    parts.push(`classes: ${scope.profileClasses.join(", ")}`);
+  }
+  return parts.join(" / ");
 }
 
 export function renderModelList(

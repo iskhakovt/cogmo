@@ -257,6 +257,7 @@ describe("telegram adapter", () => {
         create: vi.fn().mockResolvedValue(ok({} as never)),
         update: vi.fn().mockResolvedValue(ok({} as never)),
         delete: vi.fn().mockResolvedValue(ok(undefined)),
+        setClass: vi.fn().mockResolvedValue(ok(undefined)),
       },
     });
     await setup({
