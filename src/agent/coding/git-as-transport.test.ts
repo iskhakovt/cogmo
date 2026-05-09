@@ -74,8 +74,8 @@ describe("pushTaskBranchToRemote", () => {
       "-C",
       "/srv/cogmo/repos/example",
       "fetch",
-      "origin",
-      "main",
+      "https://github.com/owner/example.git",
+      "+main:refs/remotes/origin/main",
     ]);
     expect(gitMocks.runGit.mock.calls[1]?.[0]).toEqual([
       "-C",

@@ -48,22 +48,30 @@ export interface PushTaskBranchParams {
 
 /**
  * Refresh the local mirror's view of `defaultBranch`, then force-push it
- * to `cogmo/run/<task-id>` on origin. The fetch and push share one
+ * to `cogmo/run/<task-id>` on the remote. The fetch and push share one
  * askpass helper to halve the host-side disk churn for credential
  * material. Force-push semantics are intentional: a retry of a task with
  * an existing run-branch should pick up the latest default-branch tip,
  * not whatever was pushed last time.
+ *
+ * Both ops address the remote by URL (not by mirror-side remote name)
+ * and use explicit refspecs — symmetric with `fetchFeatureBranch`, and
+ * decouples the helper from whatever name `git remote` happens to use
+ * locally. The fetch refspec writes `refs/remotes/origin/<defaultBranch>`
+ * explicitly so the push refspec on the next line resolves regardless
+ * of the mirror's remote configuration.
  */
 export async function pushTaskBranchToRemote(p: PushTaskBranchParams): Promise<void> {
   const runRef = runBranchFor(p.taskId);
-  const refSpec = `+refs/remotes/origin/${p.defaultBranch}:refs/heads/${runRef}`;
+  const fetchRefSpec = `+${p.defaultBranch}:refs/remotes/origin/${p.defaultBranch}`;
+  const pushRefSpec = `+refs/remotes/origin/${p.defaultBranch}:refs/heads/${runRef}`;
 
   await withGitAskpass(p.identity.pat, async (env) => {
     // Refresh first — an N-day-stale mirror would push a stale base
     // commit into the run branch and the sandbox would do its work off
     // old code.
-    await runGit(["-C", p.localRepoPath, "fetch", "origin", p.defaultBranch], env);
-    await runGit(["-C", p.localRepoPath, "push", p.remoteUrl, refSpec], env);
+    await runGit(["-C", p.localRepoPath, "fetch", p.remoteUrl, fetchRefSpec], env);
+    await runGit(["-C", p.localRepoPath, "push", p.remoteUrl, pushRefSpec], env);
   });
 }
 
