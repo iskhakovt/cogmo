@@ -116,6 +116,14 @@ async function handle(
   }
   calls.push({ method, token, body });
 
+  // Throttle long-poll loop: grammY's `bot.start()` re-issues `getUpdates`
+  // immediately after each empty response, which spins a tight CPU loop in
+  // tests. A short delay gives the loop a sane cadence without slowing
+  // anything else (`getMe`, `setMyCommands`, etc. stay instant).
+  if (method === "getUpdates") {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
   respond(res, 200, { ok: true, result: cannedResult(method) });
 }
 
