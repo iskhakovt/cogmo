@@ -4,7 +4,7 @@ import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { truncate } from "../../util/string.js";
-import { CORE_COMPARTMENTS } from "../evolution/memory-extraction-schema.js";
+import { isCoreCompartment } from "../evolution/memory-extraction-schema.js";
 import type { AutoRecallMode } from "../recall-gate.js";
 import {
   CustomCompartmentCapExceededError,
@@ -1194,7 +1194,7 @@ export class DrizzleAgentStore implements AgentStore {
     if (!CANONICAL_NAME_RE.test(params.name)) {
       throw new InvalidNameError(params.name, "compartment");
     }
-    if ((CORE_COMPARTMENTS as ReadonlyArray<string>).includes(params.name)) {
+    if (isCoreCompartment(params.name)) {
       throw new ReservedCompartmentNameError(params.name);
     }
     const countRows = await tx

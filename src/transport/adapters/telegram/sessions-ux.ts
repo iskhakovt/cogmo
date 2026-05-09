@@ -78,17 +78,47 @@ export function renderProfileList(
  * Canonical render for a profile's memory scope. Used both by the
  * `/profile scope` show-reply (commands.ts) and the `/profile list`
  * annotation above. Single source of truth so the two views can't drift.
+ *
+ * When `customCompartments` is supplied (the user's `custom_compartments`
+ * names), each compartment that's a custom value gets a trailing `*` and
+ * a `(* = custom)` legend is appended — gives the operator a visual cue
+ * that the registry-extension mechanism actually fired without changing
+ * the canonical compartment value. Omit `customCompartments` (or pass
+ * empty) on call sites that don't have it loaded; the output stays
+ * unmarked rather than misleading.
+ *
+ * Stale-reference caveat: a scope referencing a since-deleted custom
+ * (e.g. `compartments: music` after `/compartments rm music`) renders
+ * bare — the value isn't in `CORE_COMPARTMENTS` *and* isn't in the
+ * loaded customs set, so it gets no `*`. A reader could infer "core"
+ * when the value is actually orphaned. New profile writes can't create
+ * this state (`findUnknownCompartmentImpl` rejects unknown values on
+ * create/update), but pre-existing scopes survive deletion of the
+ * compartment they reference (forward-only delete by design — see
+ * `Transport.compartments.delete`). Acceptable at single-user scale;
+ * promote to a follow-up if multi-user or longer-lived scopes make
+ * orphaned references common enough to confuse readers.
  */
-export function formatScope(scope: ProfileMemoryScope | null): string {
+export function formatScope(
+  scope: ProfileMemoryScope | null,
+  customCompartments?: ReadonlySet<string>,
+): string {
   if (scope === null) return "unrestricted (recalls all memories)";
+  let sawCustom = false;
+  const renderedCompartments = scope.compartments.map((c) => {
+    const isCustom = customCompartments?.has(c) ?? false;
+    if (isCustom) sawCustom = true;
+    return isCustom ? `${c}*` : c;
+  });
   const parts = [
-    `compartments: ${scope.compartments.join(", ")}`,
+    `compartments: ${renderedCompartments.join(", ")}`,
     `trust: ${scope.trust.join(", ")}`,
   ];
   if (scope.profileClasses !== undefined && scope.profileClasses.length > 0) {
     parts.push(`classes: ${scope.profileClasses.join(", ")}`);
   }
-  return parts.join(" / ");
+  const main = parts.join(" / ");
+  return sawCustom ? `${main} (* = custom)` : main;
 }
 
 export function renderModelList(

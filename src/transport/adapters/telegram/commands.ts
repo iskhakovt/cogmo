@@ -9,6 +9,7 @@
 import { actionToDecision } from "../../../agent/coding/permission-keyboard.js";
 import {
   CORE_COMPARTMENTS,
+  isCoreCompartment,
   MemoryTrustSchema,
 } from "../../../agent/evolution/memory-extraction-schema.js";
 import type { Profile } from "../../../agent/store/index.js";
@@ -990,12 +991,29 @@ async function replyProfileScope(
   const profile = resolved.profile;
 
   const spec = parseScopeSpec(scopeTokens);
-  if (spec.kind === "show") {
-    await ctx.reply(`Scope for "${profile.name}": ${formatScope(profile.memoryScope)}`);
-    return;
-  }
   if (spec.kind === "error") {
     await ctx.reply(spec.message);
+    return;
+  }
+
+  // Skip the customs fetch when the rendered scope is null or all-core —
+  // the `* = custom` legend never fires for those, so the roundtrip is wasted.
+  const renderedScope: ProfileMemoryScope | null =
+    spec.kind === "show" ? profile.memoryScope : spec.kind === "clear" ? null : spec.scope;
+  const needsCustoms = renderedScope?.compartments.some((c) => !isCoreCompartment(c)) ?? false;
+
+  let customs: ReadonlySet<string> | undefined;
+  if (needsCustoms) {
+    const customsRes = await transport.compartments.list(handle);
+    if (customsRes.isErr()) {
+      await ctx.reply(errorMessage(customsRes.error));
+      return;
+    }
+    customs = new Set(customsRes.value.map((c) => c.name));
+  }
+
+  if (spec.kind === "show") {
+    await ctx.reply(`Scope for "${profile.name}": ${formatScope(profile.memoryScope, customs)}`);
     return;
   }
 
@@ -1005,7 +1023,7 @@ async function replyProfileScope(
     await ctx.reply(errorMessage(update.error));
     return;
   }
-  await ctx.reply(`Scope for "${profile.name}" updated: ${formatScope(newScope)}`);
+  await ctx.reply(`Scope for "${profile.name}" updated: ${formatScope(newScope, customs)}`);
 }
 
 // ── /profile class + /classes ─────────────────────────────────────────
