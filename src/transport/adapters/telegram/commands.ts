@@ -8,7 +8,7 @@
 
 import { actionToDecision } from "../../../agent/coding/permission-keyboard.js";
 import {
-  MemoryCompartmentSchema,
+  CORE_COMPARTMENTS,
   MemoryTrustSchema,
 } from "../../../agent/evolution/memory-extraction-schema.js";
 import type { Profile } from "../../../agent/store/index.js";
@@ -71,6 +71,12 @@ const USAGE = {
     "  /classes                          → list registered profile classes\n" +
     "  /classes add intimate <desc>      → register a new class for /profile class to reference\n" +
     "  /classes rm intimate              → remove a class (must not be assigned to any profile)",
+  compartments:
+    "Usage: /compartments [list|add <name> <description>|rm <name>]\n" +
+    "  /compartments                     → list registered custom compartments\n" +
+    "  /compartments add dnd <desc>      → register a new compartment (description is read by the classifier LLM)\n" +
+    "  /compartments rm dnd              → remove (forward-only: existing memory tags are kept)\n" +
+    "  Core values (always available, not editable): personal, work, health, financial, technical, misc",
   model: "Usage: /model [<model>]",
   repo:
     "Usage: /repo [list|add [<name> <local_path> <remote_url>]|remove <name>]\n" +
@@ -270,6 +276,43 @@ export async function handleClasses(
     }
     default:
       await ctx.reply(USAGE.classes);
+  }
+}
+
+export async function handleCompartments(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const handle = String(ctx.from.id);
+  const trimmed = (ctx.match ?? "").trim();
+  if (!trimmed) {
+    return replyCompartmentsList(transport, ctx, handle);
+  }
+  const [sub, ...rest] = trimmed.split(/\s+/).filter(Boolean);
+  switch (sub) {
+    case "list":
+      return replyCompartmentsList(transport, ctx, handle);
+    case "add": {
+      const name = rest[0]?.trim();
+      const description = rest.slice(1).join(" ").trim();
+      if (!name || !description) {
+        await ctx.reply(USAGE.compartments);
+        return;
+      }
+      return replyCompartmentsAdd(transport, ctx, handle, name, description);
+    }
+    case "rm":
+    case "remove":
+    case "delete": {
+      const name = rest.join(" ").trim();
+      if (!name) {
+        await ctx.reply(USAGE.compartments);
+        return;
+      }
+      return replyCompartmentsDelete(transport, ctx, handle, name);
+    }
+    default:
+      await ctx.reply(USAGE.compartments);
   }
 }
 
@@ -909,7 +952,7 @@ export function parseScopeSpec(tokens: ReadonlyArray<string>): ScopeSpec {
       kind: "error",
       message:
         `Invalid scope: ${parsed.error.issues.map((i) => i.message).join("; ")}\n` +
-        `Compartments: ${MemoryCompartmentSchema.options.join(", ")}\n` +
+        `Compartments (core): ${CORE_COMPARTMENTS.join(", ")} (custom values from /compartments are also accepted)\n` +
         `Trust:        ${MemoryTrustSchema.options.join(", ")}`,
     };
   }
@@ -1076,6 +1119,61 @@ async function replyClassesDelete(
     return;
   }
   await ctx.reply(`Class "${name}" removed.`);
+}
+
+async function replyCompartmentsList(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+): Promise<void> {
+  const res = await transport.compartments.list(handle);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  if (res.value.length === 0) {
+    await ctx.reply(
+      "No custom compartments registered. Use /compartments add <name> <description> to create one.\n\nCore (always available): personal, work, health, financial, technical, misc",
+    );
+    return;
+  }
+  const lines = res.value.map((c) => `• ${c.name} — ${c.description}`);
+  await ctx.reply(
+    `Custom compartments:\n${lines.join("\n")}\n\nCore (always available): personal, work, health, financial, technical, misc`,
+  );
+}
+
+async function replyCompartmentsAdd(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+  name: string,
+  description: string,
+): Promise<void> {
+  const res = await transport.compartments.create(handle, { name, description });
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  await ctx.reply(
+    `Registered compartment "${res.value.name}". Takes effect on the next Observer fire — facts the classifier picks for this bucket will be tagged compartment:${res.value.name}.`,
+  );
+}
+
+async function replyCompartmentsDelete(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+  name: string,
+): Promise<void> {
+  const res = await transport.compartments.delete(handle, name);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  await ctx.reply(
+    `Compartment "${name}" removed. Forward-only — existing memories tagged compartment:${name} are kept; the classifier will stop picking this bucket for new facts.`,
+  );
 }
 
 // ── /repo ─────────────────────────────────────────────────────────────
@@ -1439,6 +1537,16 @@ function errorMessage(err: TransportError): string {
       return `A profile class named "${err.name}" already exists.`;
     case "unknown_profile_class":
       return `Unknown profile class "${err.name}". Register it with /classes add first.`;
+    case "compartment_cap_exceeded":
+      return `Custom compartment cap reached (${err.current}/${err.limit}). Remove one with /compartments rm <name> first.`;
+    case "compartment_name_taken":
+      return `A compartment named "${err.name}" already exists.`;
+    case "compartment_name_reserved":
+      return `"${err.name}" is a core compartment and can't be redefined.`;
+    case "compartment_not_found":
+      return `No custom compartment named "${err.name}". Use /compartments to list.`;
+    case "compartment_unknown":
+      return `Unknown compartment "${err.name}". Use /compartments add ${err.name} <description> first, or pick a core value (personal, work, health, financial, technical, misc).`;
   }
 }
 

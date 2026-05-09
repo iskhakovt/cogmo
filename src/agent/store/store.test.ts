@@ -329,6 +329,99 @@ describe("DrizzleAgentStore", () => {
     });
   });
 
+  describe("custom compartments", () => {
+    it("creates and lists, ordered by name", async () => {
+      const userId = await seedUser();
+      await tx((trx) =>
+        store.createCustomCompartment(trx, { userId, name: "music", description: "music notes" }),
+      );
+      await tx((trx) =>
+        store.createCustomCompartment(trx, { userId, name: "dnd", description: "dnd campaign" }),
+      );
+      const list = await tx((trx) => store.listCustomCompartments(trx, userId));
+      expect(list.map((c) => c.name)).toEqual(["dnd", "music"]);
+    });
+
+    it("rejects core-compartment names as reserved", async () => {
+      const userId = await seedUser();
+      await expect(
+        tx((trx) =>
+          store.createCustomCompartment(trx, {
+            userId,
+            name: "personal",
+            description: "shadow",
+          }),
+        ),
+      ).rejects.toThrow(/reserved/);
+      await expect(
+        tx((trx) =>
+          store.createCustomCompartment(trx, {
+            userId,
+            name: "misc",
+            description: "shadow",
+          }),
+        ),
+      ).rejects.toThrow(/reserved/);
+    });
+
+    it("rejects duplicates within the same user", async () => {
+      const userId = await seedUser();
+      await tx((trx) =>
+        store.createCustomCompartment(trx, { userId, name: "dnd", description: "first" }),
+      );
+      await expect(
+        tx((trx) =>
+          store.createCustomCompartment(trx, { userId, name: "dnd", description: "second" }),
+        ),
+      ).rejects.toThrow();
+    });
+
+    it("enforces the per-user cap and reports current count on overflow", async () => {
+      const userId = await seedUser();
+      for (let i = 0; i < 10; i++) {
+        await tx((trx) =>
+          store.createCustomCompartment(trx, {
+            userId,
+            name: `c${i}`,
+            description: `desc-${i}`,
+          }),
+        );
+      }
+      await expect(
+        tx((trx) =>
+          store.createCustomCompartment(trx, {
+            userId,
+            name: "overflow",
+            description: "x",
+          }),
+        ),
+      ).rejects.toThrow(/cap exceeded: 10\/10/);
+    });
+
+    it("delete is forward-only and idempotent on unknown names", async () => {
+      const userId = await seedUser();
+      await tx((trx) =>
+        store.createCustomCompartment(trx, { userId, name: "dnd", description: "x" }),
+      );
+      const r1 = await tx((trx) => store.deleteCustomCompartment(trx, userId, "dnd"));
+      expect(r1.deleted).toBe(true);
+      const r2 = await tx((trx) => store.deleteCustomCompartment(trx, userId, "dnd"));
+      expect(r2.deleted).toBe(false);
+    });
+
+    it("scopes by user — one user's compartments are not visible to another", async () => {
+      const u1 = await seedUser();
+      const u2 = await seedUser();
+      await tx((trx) =>
+        store.createCustomCompartment(trx, { userId: u1, name: "dnd", description: "x" }),
+      );
+      const list1 = await tx((trx) => store.listCustomCompartments(trx, u1));
+      const list2 = await tx((trx) => store.listCustomCompartments(trx, u2));
+      expect(list1.map((c) => c.name)).toEqual(["dnd"]);
+      expect(list2).toHaveLength(0);
+    });
+  });
+
   describe("conversations", () => {
     it("creates and retrieves a conversation with default 'active' status", async () => {
       const { userId, profileId, conversationId } = await seedConversation();

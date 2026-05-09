@@ -59,6 +59,48 @@ export class UnknownProfileClassError extends Error {
   }
 }
 
+/**
+ * Thrown by `createCustomCompartment` when the user already has the maximum
+ * number of custom compartments. Cap protects classifier accuracy + prompt
+ * size; >~10 compartments degrades the LLM's bucket choice.
+ */
+export class CustomCompartmentCapExceededError extends Error {
+  constructor(
+    public readonly limit: number,
+    public readonly current: number,
+  ) {
+    super(`custom compartment cap exceeded: ${current}/${limit}`);
+    this.name = "CustomCompartmentCapExceededError";
+  }
+}
+
+/**
+ * Thrown when a profile-scope update / create references a compartment value
+ * that's neither a core value nor one of the user's registered custom
+ * compartments. Surfaced from Transport when the operator typo's a value or
+ * forgets to `/compartments add` first. Carries the offending name so the
+ * adapter can emit an actionable message.
+ */
+export class UnknownCompartmentError extends Error {
+  constructor(public readonly compartmentName: string) {
+    super(`unknown compartment: "${compartmentName}"`);
+    this.name = "UnknownCompartmentError";
+  }
+}
+
+/**
+ * Thrown by `createCustomCompartment` when the proposed name collides with a
+ * core compartment value (`personal`, `work`, …). Reserving the core names
+ * keeps the merged classifier set unambiguous and prevents an operator from
+ * shadowing a built-in bucket with a different definition.
+ */
+export class ReservedCompartmentNameError extends Error {
+  constructor(public readonly compartmentName: string) {
+    super(`compartment name "${compartmentName}" is reserved`);
+    this.name = "ReservedCompartmentNameError";
+  }
+}
+
 interface PgUniqueViolation {
   code: "23505";
   constraint_name?: string;
