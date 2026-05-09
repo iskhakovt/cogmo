@@ -203,6 +203,13 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
 
     const binds: string[] = [];
     if (spec.worktree) {
+      if (spec.worktree.type !== "host-path") {
+        // Local-Docker advertises `workingTreeTransport: "bind-mount"`;
+        // an orchestrator passing `git-remote` here is a wiring bug.
+        throw new Error(
+          `LocalDockerSandbox: WorktreeSpec.type "${spec.worktree.type}" is not supported (capabilities advertise "bind-mount")`,
+        );
+      }
       binds.push(`${spec.worktree.hostPath}:/workspace`);
     }
     if (proxySocketPath) {

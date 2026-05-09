@@ -8,10 +8,30 @@ export type { SandboxRuntime } from "./runtime.js";
 export type { ContainerRow, ContainerRuntime, ContainerStatus } from "./store/index.js";
 export type { ContainerLabels, ResourceLimits } from "./types.js";
 
-/** Working-tree material to materialize at session start. */
-export interface WorktreeSpec {
-  /** Local-Docker: host path bind-mounted at `/workspace`. */
+/**
+ * Working-tree material to materialize at session start. Discriminated
+ * by transport — consumers pick the variant based on
+ * `SandboxClient.capabilities.workingTreeTransport`. `host-path` carries
+ * a host filesystem path the backend bind-mounts at `/workspace`;
+ * `git-remote` carries a clone URL + branch + auth the backend clones
+ * inside the sandbox.
+ */
+export type WorktreeSpec = HostPathWorktreeSpec | GitRemoteWorktreeSpec;
+
+export interface HostPathWorktreeSpec {
+  type: "host-path";
+  /** Host path bind-mounted at `/workspace`. */
   hostPath: string;
+}
+
+export interface GitRemoteWorktreeSpec {
+  type: "git-remote";
+  /** HTTPS clone URL — the GitHub remote the bot account's PAT can authenticate against. */
+  url: string;
+  /** Source branch to clone. Typically the orchestrator's just-pushed `cogmo/run/<task-id>`. */
+  branch: string;
+  /** HTTPS basic-auth credentials. Username is `x-access-token` for GitHub PATs. */
+  auth: { username: string; password: string };
 }
 
 /** Persistent per-task scratch volume mounted at the image's home dir. */

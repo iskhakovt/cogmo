@@ -235,7 +235,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     const sessionState = await stepRun("create-container", async () => {
       const session = await sandbox.create({
         taskId,
-        worktree: { hostPath: worktreeAssignment.worktreePath },
+        worktree: { type: "host-path", hostPath: worktreeAssignment.worktreePath },
         homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
         image: repo.devcontainer?.image ?? deps.devbaseImage,
         resourceLimits: deps.defaultResourceLimits,

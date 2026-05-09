@@ -247,7 +247,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     const sessionState = await stepRun("create-container", async () => {
       const session = await sandbox.create({
         taskId,
-        worktree: { hostPath: wt.worktreePath },
+        worktree: { type: "host-path", hostPath: wt.worktreePath },
         homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
         image: repo.devcontainer?.image ?? devbaseImage,
         resourceLimits: defaultResourceLimits,
@@ -583,7 +583,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
 
       const session = await sandbox.create({
         taskId,
-        worktree: { hostPath: worktreeAssignment.worktreePath },
+        worktree: { type: "host-path", hostPath: worktreeAssignment.worktreePath },
         homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
         image: repo.devcontainer?.image ?? devbaseImage,
         resourceLimits: defaultResourceLimits,
