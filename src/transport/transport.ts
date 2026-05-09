@@ -24,7 +24,7 @@ import type {
   VoiceMode,
 } from "../agent/store/index.js";
 import type { ProfileMemoryScope, ToolSet } from "../agent/store/schema.js";
-import type { Transactor } from "../db/index.js";
+import type { Transaction, Transactor } from "../db/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { computeBudget } from "../llm/models.js";
 import { logger } from "../logger.js";
@@ -1658,7 +1658,7 @@ const REPO_NAME_RE = /^[a-zA-Z0-9._-]+$/;
  * outer transaction (consistency with the upcoming write).
  */
 async function findUnknownCompartmentImpl(
-  tx: Parameters<AgentStore["listCustomCompartments"]>[0],
+  tx: Transaction,
   agentStore: Pick<AgentStore, "listCustomCompartments">,
   userId: string,
   compartments: ReadonlyArray<string>,

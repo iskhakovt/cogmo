@@ -51,6 +51,8 @@ export interface ReplyOptions {
   };
 }
 
+const CORE_LIST = CORE_COMPARTMENTS.join(", ");
+
 const USAGE = {
   resume: "Usage: /resume <alias>",
   name: "Usage: /name <alias>  (or /name -  to clear)",
@@ -64,7 +66,7 @@ const USAGE = {
     "                                                          → also restrict on speaker dimension\n" +
     "  /profile class <name> <classname>                       → assign profile to a class\n" +
     "  /profile class <name> clear                             → unclass the profile\n" +
-    "  Compartments: personal, work, health, financial, technical, misc\n" +
+    `  Compartments: ${CORE_LIST}\n` +
     "  Trust:        first-party, any",
   classes:
     "Usage: /classes [list|add <name> <description>|rm <name>]\n" +
@@ -76,7 +78,7 @@ const USAGE = {
     "  /compartments                     → list registered custom compartments\n" +
     "  /compartments add dnd <desc>      → register a new compartment (description is read by the classifier LLM)\n" +
     "  /compartments rm dnd              → remove (forward-only: existing memory tags are kept)\n" +
-    "  Core values (always available, not editable): personal, work, health, financial, technical, misc",
+    `  Core values (always available, not editable): ${CORE_LIST}`,
   model: "Usage: /model [<model>]",
   repo:
     "Usage: /repo [list|add [<name> <local_path> <remote_url>]|remove <name>]\n" +
@@ -952,7 +954,7 @@ export function parseScopeSpec(tokens: ReadonlyArray<string>): ScopeSpec {
       kind: "error",
       message:
         `Invalid scope: ${parsed.error.issues.map((i) => i.message).join("; ")}\n` +
-        `Compartments (core): ${CORE_COMPARTMENTS.join(", ")} (custom values from /compartments are also accepted)\n` +
+        `Compartments (core): ${CORE_LIST} (custom values from /compartments are also accepted)\n` +
         `Trust:        ${MemoryTrustSchema.options.join(", ")}`,
     };
   }
@@ -1133,13 +1135,13 @@ async function replyCompartmentsList(
   }
   if (res.value.length === 0) {
     await ctx.reply(
-      "No custom compartments registered. Use /compartments add <name> <description> to create one.\n\nCore (always available): personal, work, health, financial, technical, misc",
+      `No custom compartments registered. Use /compartments add <name> <description> to create one.\n\nCore (always available): ${CORE_LIST}`,
     );
     return;
   }
   const lines = res.value.map((c) => `• ${c.name} — ${c.description}`);
   await ctx.reply(
-    `Custom compartments:\n${lines.join("\n")}\n\nCore (always available): personal, work, health, financial, technical, misc`,
+    `Custom compartments:\n${lines.join("\n")}\n\nCore (always available): ${CORE_LIST}`,
   );
 }
 
@@ -1156,7 +1158,7 @@ async function replyCompartmentsAdd(
     return;
   }
   await ctx.reply(
-    `Registered compartment "${res.value.name}". Takes effect on the next Observer fire — facts the classifier picks for this bucket will be tagged compartment:${res.value.name}.`,
+    `Registered compartment "${res.value.name}". The description you wrote is the classifier's instruction sheet — the LLM reads it on every Observer fire to decide when to use this bucket. Takes effect on the next fire; facts picked for it will be tagged compartment:${res.value.name}.`,
   );
 }
 
@@ -1546,7 +1548,7 @@ function errorMessage(err: TransportError): string {
     case "compartment_not_found":
       return `No custom compartment named "${err.name}". Use /compartments to list.`;
     case "compartment_unknown":
-      return `Unknown compartment "${err.name}". Use /compartments add ${err.name} <description> first, or pick a core value (personal, work, health, financial, technical, misc).`;
+      return `Unknown compartment "${err.name}". Use /compartments add ${err.name} <description> first, or pick a core value (${CORE_LIST}).`;
     case "compartment_name_invalid":
       return `Compartment name "${err.name}" is invalid. Use lowercase letters, digits, hyphens, or underscores; start with a letter; max 32 chars.`;
     case "profile_class_name_invalid":

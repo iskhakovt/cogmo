@@ -24,6 +24,7 @@ import type { Database } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { ChatParams, ChatStreamResult, LlmResponse } from "../../llm/types.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
+import { expectDefined } from "../../test/assertions.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { conversations, messages, profiles } from "../store/schema.js";
 import { type ObserverStepHarness, runObserver } from "./observer.js";
@@ -102,26 +103,24 @@ async function seedConversation(opts: {
   messageCount: number;
   profileClass?: string;
 }): Promise<{ conversationId: string; profileId: string }> {
-  const profileId = (
-    await db
-      .insert(profiles)
-      .values({
-        userId,
-        name: `it-profile-${Date.now()}`,
-        basePrompt: "test profile",
-        model: "claude-sonnet-4-6",
-        toolSet: [],
-        ...(opts.profileClass !== undefined && { profileClass: opts.profileClass }),
-      })
-      .returning({ id: profiles.id })
-  )[0]?.id as string;
+  const insertedProfile = await db
+    .insert(profiles)
+    .values({
+      userId,
+      name: `it-profile-${Date.now()}`,
+      basePrompt: "test profile",
+      model: "claude-sonnet-4-6",
+      toolSet: [],
+      ...(opts.profileClass !== undefined && { profileClass: opts.profileClass }),
+    })
+    .returning({ id: profiles.id });
+  const profileId = expectDefined(insertedProfile[0], "inserted profile row").id;
 
-  const conversationId = (
-    await db
-      .insert(conversations)
-      .values({ userId, profileId, isPrivate: true })
-      .returning({ id: conversations.id })
-  )[0]?.id as string;
+  const insertedConversation = await db
+    .insert(conversations)
+    .values({ userId, profileId, isPrivate: true })
+    .returning({ id: conversations.id });
+  const conversationId = expectDefined(insertedConversation[0], "inserted conversation row").id;
 
   // Alternate user / assistant rows so transcript shape is realistic.
   const rows = Array.from({ length: opts.messageCount }, (_, i) => ({
@@ -483,19 +482,18 @@ describe("runObserver — real PG + recording memory mock", () => {
       [userId, "intimate", "for emotional topics"],
     );
     // Profile-A: classed `intimate`, will stage the pending row.
-    const profileAId = (
-      await db
-        .insert(profiles)
-        .values({
-          userId,
-          name: `it-profile-A-${Date.now()}`,
-          basePrompt: "intimate profile",
-          model: "claude-sonnet-4-6",
-          toolSet: [],
-          profileClass: "intimate",
-        })
-        .returning({ id: profiles.id })
-    )[0]?.id as string;
+    const insertedProfileA = await db
+      .insert(profiles)
+      .values({
+        userId,
+        name: `it-profile-A-${Date.now()}`,
+        basePrompt: "intimate profile",
+        model: "claude-sonnet-4-6",
+        toolSet: [],
+        profileClass: "intimate",
+      })
+      .returning({ id: profiles.id });
+    const profileAId = expectDefined(insertedProfileA[0], "inserted profile-A row").id;
     // Profile-B: unclassed, hosts the conversation that fires the Observer.
     const { conversationId } = await seedConversation({ messageCount: 4 });
     // Stage the pending row under profile-A's lineage.
