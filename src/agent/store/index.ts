@@ -671,6 +671,7 @@ export interface AgentStore {
         rule: string;
         category: string;
         profileId: string | null;
+        channelType: string | null;
         priority: number;
         observationCount: number;
       };
@@ -1781,6 +1782,7 @@ export class DrizzleAgentStore implements AgentStore {
         rule: string;
         category: string;
         profileId: string | null;
+        channelType: string | null;
         priority: number;
         observationCount: number;
       };
@@ -1798,6 +1800,7 @@ export class DrizzleAgentStore implements AgentStore {
           priority: params.newRule.priority,
           observationCount: params.newRule.observationCount,
           profileId: params.newRule.profileId,
+          channelType: params.newRule.channelType,
         })
         .returning({ id: steeringRules.id }),
     );
