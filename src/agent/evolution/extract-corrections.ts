@@ -41,6 +41,7 @@ export interface ExtractionResult {
   reinforced: number;
   contradictions: number;
   promoted: number;
+  crossScopeReinforcementsSkipped: number;
   consolidationNeeded: boolean;
 }
 
@@ -64,6 +65,7 @@ export async function extractCorrections(
       reinforced: 0,
       contradictions: 0,
       promoted: 0,
+      crossScopeReinforcementsSkipped: 0,
       consolidationNeeded: false,
     };
   }
@@ -84,6 +86,7 @@ export async function extractCorrections(
   let reinforced = 0;
   let contradictions = 0;
   let promoted = 0;
+  let crossScopeReinforcementsSkipped = 0;
 
   const activeChannelSet = new Set(deps.activeChannelTypes);
 
@@ -99,6 +102,14 @@ export async function extractCorrections(
       );
       contradictions++;
       continue;
+    }
+
+    if (correction.action === "reinforce") {
+      const matchedRule = existingRules.find((r) => r.id === correction.matchedExistingRuleId);
+      if (!isReinforcementInScope(matchedRule, correction, activeChannelSet)) {
+        crossScopeReinforcementsSkipped++;
+        continue;
+      }
     }
 
     const channelType =
@@ -122,24 +133,41 @@ export async function extractCorrections(
   const consolidationNeeded = activeCount > CONSOLIDATION_THRESHOLD;
 
   logger.info(
-    { extracted, reinforced, contradictions, promoted, activeCount, consolidationNeeded },
+    {
+      extracted,
+      reinforced,
+      contradictions,
+      promoted,
+      crossScopeReinforcementsSkipped,
+      activeCount,
+      consolidationNeeded,
+    },
     "correction extraction complete",
   );
 
-  return { extracted, reinforced, contradictions, promoted, consolidationNeeded };
+  return {
+    extracted,
+    reinforced,
+    contradictions,
+    promoted,
+    crossScopeReinforcementsSkipped,
+    consolidationNeeded,
+  };
 }
 
 /**
- * Cross-scope reinforcement safety lives in the extraction prompt, not
- * in code. The `reinforce` schema variant deliberately omits
- * `channelType`, so we can't reject a Telegram-scoped correction that
- * names a global rule's id without an extra read of the matched row.
- * The prompt instructs the LLM to emit such cases as `new` instead;
- * `coerceChannelType` plus the active-channel rendering give the LLM
- * the context to do that. At personal scale the prompt-side guidance
- * has held up; if we see false reinforcements in practice, fold the
- * matched rule's `channelType` into `upsertCorrection`'s update path
- * and reject the mismatch there.
+ * Reinforcement is gated on the matched rule's `channelType` matching
+ * the conversation's active channel set — `isReinforcementInScope`
+ * runs before this call and skips out-of-scope reinforces from the
+ * extraction loop. The prompt is the steering signal that asks the
+ * LLM to emit cross-scope wording matches as `new` with the right
+ * `channelType`; this gate is the safety net for when it doesn't. The
+ * matched rule is already in `existingRules` (loaded for the prompt),
+ * so the validation costs nothing extra at the DB layer. Global rules
+ * (`channelType === null`) always pass — they apply everywhere by
+ * definition. A hallucinated `matchedExistingRuleId` that names no
+ * loaded rule also skips, which keeps the LLM from fabricating
+ * reinforcement for a row we can't even verify.
  */
 async function applyCorrection(
   correction: CorrectionItem,
@@ -158,6 +186,45 @@ async function applyCorrection(
       }),
     }),
   );
+}
+
+/**
+ * Validate that the LLM's `reinforce` action targets a rule whose scope
+ * actually applies to this conversation. Global rules always pass.
+ * Channel-scoped rules pass only when their `channelType` is in the
+ * active set. A missing matched rule (hallucinated id) and an
+ * out-of-scope channel match both fail — both cases are logged with
+ * the same shape as `coerceChannelType`'s warning so audit grepping
+ * stays uniform.
+ */
+function isReinforcementInScope(
+  matchedRule: { id: string; channelType: string | null } | undefined,
+  correction: { rule: string; matchedExistingRuleId: string | null },
+  activeChannelSet: ReadonlySet<string>,
+): boolean {
+  if (matchedRule === undefined) {
+    logger.warn(
+      {
+        rule: correction.rule,
+        matchedId: correction.matchedExistingRuleId,
+        activeChannels: [...activeChannelSet],
+      },
+      "extraction: reinforce names an unknown rule id — skipping",
+    );
+    return false;
+  }
+  if (matchedRule.channelType === null) return true;
+  if (activeChannelSet.has(matchedRule.channelType)) return true;
+  logger.warn(
+    {
+      rule: correction.rule,
+      matchedId: matchedRule.id,
+      matchedChannelType: matchedRule.channelType,
+      activeChannels: [...activeChannelSet],
+    },
+    "extraction: reinforce targets a rule outside the active channel set — skipping",
+  );
+  return false;
 }
 
 /**
