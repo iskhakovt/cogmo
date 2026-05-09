@@ -45,9 +45,39 @@ async function dispatch(cmd: string): Promise<number> {
       }
       return runSkillsCli(process.argv.slice(3), skillRunner);
     }
+    case "migrate-memories":
+    case "backfill": {
+      const { runMigrateMemoriesCli, runBackfillProfileClassCli } = await import(
+        "./agent/evolution/migrations-cli.js"
+      );
+      const { bootstrap } = await import("./index.js");
+      const { env } = await import("./env.js");
+      // skipSandbox: true so the reaper (`reconcileCrashedInstances`)
+      // doesn't run. Without this, invoking either CLI while
+      // `cogmo serve` is up reaps serve's running coding-task
+      // containers — the reaper has no liveness check on other
+      // instance rows and treats any non-self `cogmo.instance`
+      // label as orphaned. These two CLIs don't touch sandboxes,
+      // so skipping is safe.
+      const { agentStore, runInTx } = await bootstrap({ skipSandbox: true });
+      const resolveDefaultBankId = async (): Promise<string | null> => {
+        const user = await runInTx((tx) => agentStore.getFirstUser(tx));
+        return user ? user.id : null;
+      };
+      const cliDeps = {
+        hindsightUrl: env.HINDSIGHT_URL,
+        agentStore,
+        runInTx,
+        resolveDefaultBankId,
+      };
+      const args = process.argv.slice(3);
+      return cmd === "migrate-memories"
+        ? runMigrateMemoriesCli(args, cliDeps)
+        : runBackfillProfileClassCli(args, cliDeps);
+    }
     default:
       console.error(`Unknown command: ${cmd}`);
-      console.error("Usage: main.js [serve|seed|setup|gen-key|skills]");
+      console.error("Usage: main.js [serve|seed|setup|gen-key|skills|migrate-memories|backfill]");
       return 1;
   }
 }
