@@ -81,18 +81,23 @@ export const env = createEnv({
     S3_SECRET_KEY: z.string().optional(),
     S3_REGION: z.string().default("us-east-1"),
     /**
-     * When `true` / `1`, attachments are AES-256-GCM-encrypted client-side
-     * before upload using a key derived from `COGMO_MASTER_KEY`. The
-     * bucket then only sees ciphertext — useful when the bucket is
-     * provider-managed (Cloudflare R2, public-cloud S3) and the operator
-     * doesn't want the storage provider readable. Reads transparently
-     * fall back to plaintext when the 4-byte Cogmo magic prefix is
-     * absent, so flipping the flag on a populated bucket Just Works:
-     * old objects stay readable, new uploads are encrypted, the bucket
-     * converges over time. Cost: master-key rotation still requires
-     * re-encrypting every existing object, and the bucket loses
-     * direct-browser-serve. Off by default. Same `"true" | "1"` semantics
-     * as `INNGEST_DEV` — see that comment for why we don't `z.coerce`.
+     * When `true` / `1`, both attachments AND workspace files (the
+     * agent's `read_file` / `write_file` workspace) are
+     * AES-256-GCM-encrypted client-side before upload using a key
+     * derived from `COGMO_MASTER_KEY`. The bucket then only sees
+     * ciphertext bodies — useful when the bucket is provider-managed
+     * (Cloudflare R2, public-cloud S3) and the operator doesn't want
+     * the storage provider readable. Reads transparently fall back to
+     * plaintext when the 4-byte Cogmo magic prefix is absent, so
+     * flipping the flag on a populated bucket Just Works: old objects
+     * stay readable, new uploads are encrypted, the bucket converges
+     * over time. Object keys (file names) remain plaintext — matches
+     * the AWS S3 Encryption Client convention. If you need to keep
+     * file names secret, choose non-revealing names. Cost: master-key
+     * rotation still requires re-encrypting every existing object, and
+     * the bucket loses direct-browser-serve. Off by default. Same
+     * `"true" | "1"` semantics as `INNGEST_DEV` — see that comment for
+     * why we don't `z.coerce`.
      */
     S3_CLIENT_ENCRYPT: z
       .string()

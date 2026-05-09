@@ -1,13 +1,9 @@
 import { gcm } from "@noble/ciphers/aes.js";
 import { describe, expect, it, vi } from "vitest";
+import { decryptBuffer, encryptBuffer, isEncrypted } from "../secrets/blob-envelope.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import type { AttachmentStore } from "./attachment-store.js";
-import {
-  decryptBuffer,
-  encryptBuffer,
-  isEncrypted,
-  wrapAttachmentStoreWithEncryption,
-} from "./encrypted-attachment-store.js";
+import { wrapAttachmentStoreWithEncryption } from "./encrypted-attachment-store.js";
 
 const PURPOSE = "cogmo/s3-attachments/v1";
 
@@ -99,7 +95,7 @@ describe("encryptBuffer / decryptBuffer", () => {
   it("rejects an unknown version", () => {
     const blob = encryptBuffer(Buffer.from("secret"), testKey());
     blob.writeUInt16BE(0x9999, 4);
-    expect(() => decryptBuffer(blob, testKey())).toThrow(/unknown encrypted-attachment version/);
+    expect(() => decryptBuffer(blob, testKey())).toThrow(/unknown encrypted-blob version/);
   });
 
   it("rejects a blob that's missing the magic prefix entirely", () => {
