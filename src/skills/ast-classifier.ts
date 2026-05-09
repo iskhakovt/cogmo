@@ -115,46 +115,51 @@ function detectHits(rootNode: Node): DetectedHit[] {
 
   // Walk via cursor — far cheaper than recursive `namedChild(i)` on
   // large trees. We descend into every named child but skip token
-  // nodes (no children to look at).
+  // nodes (no children to look at). The cursor wraps a WASM heap
+  // allocation that the JS GC can't see; release it in a `finally`
+  // so a thrown rule (or a future panic in a child) can't leak.
   const cursor = rootNode.walk();
-
-  function visit(): void {
-    const node = cursor.currentNode;
-    switch (node.type) {
-      case "import_statement":
-        for (const name of extractImportModules(node)) {
-          for (const rule of IMPORT_RULES) {
-            if (rule.module === name) {
-              hits.push({ effect: rule.effect, label: rule.label });
+  try {
+    function visit(): void {
+      const node = cursor.currentNode;
+      switch (node.type) {
+        case "import_statement":
+          for (const name of extractImportModules(node)) {
+            for (const rule of IMPORT_RULES) {
+              if (rule.module === name) {
+                hits.push({ effect: rule.effect, label: rule.label });
+              }
             }
           }
-        }
-        break;
-      case "import_from_statement": {
-        const module = extractImportFromModule(node);
-        if (module) {
-          for (const rule of IMPORT_RULES) {
-            if (rule.module === module) {
-              hits.push({ effect: rule.effect, label: rule.label });
+          break;
+        case "import_from_statement": {
+          const module = extractImportFromModule(node);
+          if (module) {
+            for (const rule of IMPORT_RULES) {
+              if (rule.module === module) {
+                hits.push({ effect: rule.effect, label: rule.label });
+              }
             }
           }
+          break;
         }
-        break;
+        case "call":
+          matchCall(node, hits);
+          break;
       }
-      case "call":
-        matchCall(node, hits);
-        break;
+
+      if (cursor.gotoFirstChild()) {
+        do {
+          visit();
+        } while (cursor.gotoNextSibling());
+        cursor.gotoParent();
+      }
     }
 
-    if (cursor.gotoFirstChild()) {
-      do {
-        visit();
-      } while (cursor.gotoNextSibling());
-      cursor.gotoParent();
-    }
+    visit();
+  } finally {
+    cursor.delete();
   }
-
-  visit();
   return hits;
 }
 
@@ -350,8 +355,15 @@ export async function classifyWithAst(
     return classifyFromDeclarationsOnly(manifest);
   }
 
-  const hits = detectHits(tree.rootNode);
-  tree.delete();
+  // `tree.delete()` releases the WASM-heap allocation backing the
+  // tree. JS GC can't see it; pair the call with the parse in a
+  // try/finally so a throw inside `detectHits` can't leak.
+  let hits: DetectedHit[];
+  try {
+    hits = detectHits(tree.rootNode);
+  } finally {
+    tree.delete();
+  }
 
   const detectedSet = new Set<SkillEffect>(hits.map((h) => h.effect));
   const declaredSet = new Set<SkillEffect>(manifest.effects);
