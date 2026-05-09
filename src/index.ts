@@ -97,6 +97,19 @@ export interface BootstrapOptions {
    * provider instance only — does not affect Anthropic/S3/etc.
    */
   voiceFetchOverride?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  /**
+   * Skip sandbox init — including `reconcileCrashedInstances`, the reaper
+   * that kills any managed container whose `cogmo.instance` label doesn't
+   * match this run's id. Set by CLIs that don't need a sandbox
+   * (`cogmo migrate-memories`, `cogmo backfill`) so concurrent invocations
+   * don't reap a running `cogmo serve`'s coding-task containers. The
+   * reaper has no liveness check on other instance rows — any non-self
+   * label is treated as orphaned. The proper fix is splitting bootstrap
+   * into core/runtime so this flag doesn't have to exist; tracked in
+   * todo as a follow-up. Returned `sandbox` / `sandboxInstanceId` /
+   * `codingSandbox` are `null` when this is true.
+   */
+  skipSandbox?: boolean;
 }
 
 /**
@@ -156,7 +169,9 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   let codingSandbox: SandboxClient<LocalDockerSessionState> | null = null;
   let sandboxInstanceId: string | null = null;
   let sandboxDocker: Docker | null = null;
-  if (env.SANDBOX_BACKEND === "local-docker") {
+  if (opts.skipSandbox) {
+    logger.info("skipSandbox=true — sandbox init bypassed (CLI mode without coding-delegation)");
+  } else if (env.SANDBOX_BACKEND === "local-docker") {
     if (!env.SANDBOX_RUNTIME) {
       logger.info(
         "SANDBOX_RUNTIME unset — sandbox module disabled (coding-delegation unavailable)",
