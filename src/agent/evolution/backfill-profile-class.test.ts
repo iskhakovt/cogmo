@@ -91,6 +91,29 @@ describe("backfillProfileClass", () => {
     ]);
   });
 
+  it("preserves metadata on round-trip (e.g. source provenance)", async () => {
+    // Production memories carry `metadata: { source: "conversation" }`
+    // (or `live_retain` / `migration`) from `extract-memories.ts` and
+    // `drain-pending-memories.ts`. Backfill must not drop that field —
+    // otherwise audit trails go missing on every backfill run.
+    const items = [
+      {
+        text: "preserves metadata",
+        tags: ["network:bank", "compartment:personal", "trust:first-party"],
+        metadata: { source: "conversation", run_id: "abc-123" },
+      },
+    ];
+    const deps = makeDeps({ listMemories: vi.fn().mockResolvedValue(pageOf(items)) });
+
+    await backfillProfileClass("ti", deps, { classTags: ["general"] });
+
+    expect(deps.retainBatch).toHaveBeenCalledWith("ti", [
+      expect.objectContaining({
+        metadata: { source: "conversation", run_id: "abc-123" },
+      }),
+    ]);
+  });
+
   it("treats empty-string context as no context — drops the field on retain", async () => {
     // Hindsight returns `context: ""` for absent context (not null);
     // the function normalises that so retainBatch receives no `context`

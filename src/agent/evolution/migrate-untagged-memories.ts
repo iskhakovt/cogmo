@@ -31,10 +31,21 @@ const PAGE_SIZE = 100;
  * never matched a real listMemories response and made this
  * migration silently unrunnable against a live bank — caught when
  * adding the integration test alongside `backfill-profile-class.ts`.
+ *
+ * `date` is captured here so the field is observable to callers, but
+ * the staging shape (`bulkStagePendingMemories`) has no slot for an
+ * original timestamp today — re-retain after Observer drain stamps
+ * `date = now()`. Plumbing it through requires a
+ * `pending_memories.original_timestamp` column + threading on
+ * `bulkStagePendingMemories` / `getPendingMemories` /
+ * `buildRetainItems` / `RetainBatchItem.timestamp`. Tracked as a
+ * follow-up; for now this migration is acknowledged as
+ * timestamp-lossy on the legacy memories.
  */
 const RawMemorySchema = z.object({
   text: z.string(),
   context: z.string().nullable().optional(),
+  date: z.string().nullable().optional(),
 });
 
 export interface RawBankMemory {
