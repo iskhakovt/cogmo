@@ -11,3 +11,10 @@ test-results/
 !.claude/commands/
 !.claude/settings.json
 notes/
+
+# Python sub-projects (images/skills, future)
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/

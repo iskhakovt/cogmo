@@ -47,6 +47,33 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
 
+  skills-runtime:
+    name: Skills Runtime (Python)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    defaults:
+      run:
+        working-directory: images/skills
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install uv
+        uses: astral-sh/setup-uv@bd01e18f51369d5a26f1651c3cb451d3417e3bba # v7.0.0
+        with:
+          # Match the version pinned in images/skills/Dockerfile so a CI
+          # green doesn't drift from what the published image uses.
+          version: "0.11.12"
+          enable-cache: true
+          cache-dependency-glob: "images/skills/uv.lock"
+      - run: uv sync --locked
+      - name: ruff (lint + format)
+        run: uv run ruff check
+      - name: pyrefly (typecheck)
+        run: uv run pyrefly check
+      - name: pytest
+        run: uv run pytest
+
   unit:
     name: Unit Tests
     runs-on: ubuntu-latest

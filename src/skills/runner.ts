@@ -28,12 +28,13 @@ import type {
   SkillTier,
 } from "./store/index.js";
 import type { ClassifierLog, SkillInputs, SkillManifest } from "./types.js";
-import { type RunTaskOnSessionResult, runOnSysboxContainer } from "./worker-sysbox/host.js";
+import { runOnSysboxContainer } from "./worker-sysbox/host.js";
 import {
   DEFAULT_POOL_OPTIONS,
   SysboxWorkerPool,
   type SysboxWorkerPoolOptions,
 } from "./worker-sysbox/pool.js";
+import type { InvokeResult } from "./worker-sysbox/worker.js";
 import { type RunOnWorkerResult, runOnWorker } from "./worker-wasm/host.js";
 
 /**
@@ -771,7 +772,7 @@ export class SkillRunnerImpl implements SkillRunner {
     // Switch + `never` exhaustiveness so a future SkillTier value (added to
     // the pgEnum) is a compile-time miss here rather than a silent route
     // through the sysbox path.
-    let result: RunOnWorkerResult | RunTaskOnSessionResult;
+    let result: RunOnWorkerResult | InvokeResult;
     switch (skill.tier) {
       case "wasm":
         result = await runOnWorker({
@@ -801,6 +802,7 @@ export class SkillRunnerImpl implements SkillRunner {
         // ~1-2s cold-start that pre-pool tier-2 skills paid every time.
         // This is rare: most skills don't override and ride the warm path.
         const overrides = mapManifestResourceLimits(cached.manifest.resources);
+        const isolation = cached.manifest.isolation;
         if (overrides.cpus !== undefined || overrides.memory_bytes !== undefined) {
           result = await runOnSysboxContainer({
             taskId: run.id,
@@ -808,6 +810,7 @@ export class SkillRunnerImpl implements SkillRunner {
             body: cached.body,
             inputs: opts.inputs,
             ...(wallClockS !== undefined && { wallClockS }),
+            ...(isolation !== undefined && { isolation }),
             resourceLimits: overrides,
             image: this.#tier2Image,
             sandbox,
@@ -820,6 +823,7 @@ export class SkillRunnerImpl implements SkillRunner {
             body: cached.body,
             inputs: opts.inputs,
             ...(wallClockS !== undefined && { wallClockS }),
+            ...(isolation !== undefined && { isolation }),
             ctxHandler,
           });
         }

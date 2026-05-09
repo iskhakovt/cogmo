@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { logger } from "../../logger.js";
 import type { ResourceLimits, SandboxClient } from "../../sandbox/index.js";
-import type { CtxHandler } from "../dispatcher.js";
-import type { RunTaskOnSessionParams, RunTaskOnSessionResult } from "./host.js";
-import { SysboxSkillWorker } from "./worker.js";
+import { type InvokeParams, type InvokeResult, SysboxSkillWorker } from "./worker.js";
 
 const log = logger.child({ component: "skills.worker.sysbox.pool" });
 
@@ -80,9 +78,7 @@ export interface WorkerHandle {
   tryAcquire(): boolean;
   release(): void;
   markPoisoned(): void;
-  invoke(
-    params: RunTaskOnSessionParams & { ctxHandler: CtxHandler },
-  ): Promise<RunTaskOnSessionResult>;
+  invoke(params: InvokeParams): Promise<InvokeResult>;
   dispose(): Promise<void>;
 }
 
@@ -255,9 +251,7 @@ export class SysboxWorkerPool {
    * Run one task. Acquires an idle worker (spawning if needed and below
    * `max`), invokes the task, releases or recycles the worker, and returns.
    */
-  async invoke(
-    params: RunTaskOnSessionParams & { ctxHandler: CtxHandler },
-  ): Promise<RunTaskOnSessionResult> {
+  async invoke(params: InvokeParams): Promise<InvokeResult> {
     if (this.#disposed) {
       throw new Error("SysboxWorkerPool: invoke after dispose");
     }
