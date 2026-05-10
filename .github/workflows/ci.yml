@@ -27,6 +27,13 @@ jobs:
   # top-level config file was added but not listed). Push-to-main always
   # runs the full suite — main is the merge gate of last resort, so we
   # don't trust path filters there.
+  #
+  # Out of scope intentionally: dotfile-config changes (.gitignore,
+  # .editorconfig, .gitattributes, .dockerignore, etc.) trigger CI. They
+  # change rarely, can have real runtime/CI consequences when they do
+  # (a wrong .dockerignore breaks image builds), and the cost of running
+  # CI on them is negligible compared to the cost of silently skipping a
+  # build-affecting change.
   changes:
     name: Detect doc-only changes
     runs-on: ubuntu-latest
@@ -141,7 +148,9 @@ jobs:
       # only feeds Codecov's main-branch trend line — PR-diff coverage
       # would still need a base report from main to compare against.
       # Limiting --coverage to main-push runs cuts ~half this job's
-      # runtime on the high-volume PR-push path.
+      # runtime on the high-volume PR-push path. Revisit if Codecov's
+      # PR-coverage / patch-coverage reports become a desired signal —
+      # those need both a base (main) and a head (PR) report.
       - name: Unit tests (with coverage)
         if: github.event_name == 'push'
         run: pnpm test --coverage --coverage.reportsDirectory=coverage/unit
