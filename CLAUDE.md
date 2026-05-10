@@ -65,18 +65,16 @@ Read `design/` for the full picture. Key docs:
 
 ## Task Tracking
 
-`todo.md` has four sections:
+`todo.md` has three sections:
 
 | Section | Purpose |
 |-|-|
-| **Next** | Actionable now, priority-ordered. `/next` picks from top. |
+| **Next** | Actionable now, priority-ordered. `/next` picks from top. Subheaded by topic; priorities still sort within each subsection. |
 | **Later** | Future-phase work. Promote to Next when the phase begins. |
 | **Blocked** | Waiting on something external. Only the user moves these to Next. |
-| **Done** | Completed. |
 
 - **Priorities:** `p1` (do soon — core, unblocks work), `p2` (do eventually), `p3` (do if bored — polish, cleanup). Format: `` `p1` `` tag before the task text.
-- Mark tasks `[x]` and move to Done when completed.
-- When completing a task, also check off the corresponding item in PROGRESS.md and drop a fragment in [`changelog.d/`](changelog.d/). Filename: `YYYY-MM-DD-short-slug.md` — pick a slug specific enough that two parallel PRs the same day won't collide (use words from the actual change, not generic ones). Body is plain Markdown — the rich prose entry, no leading date or table syntax. Never edit existing fragments. One fragment per PR avoids merge conflicts on parallel PRs.
+- When completing a task, **delete the entry** from `todo.md`, check off the corresponding item in PROGRESS.md, and drop a fragment in [`changelog.d/`](changelog.d/). The changelog fragment is the durable record — todo.md doesn't keep a graveyard. Filename: `YYYY-MM-DD-short-slug.md` — pick a slug specific enough that two parallel PRs the same day won't collide (use words from the actual change, not generic ones). Body is plain Markdown — the rich prose entry, no leading date or table syntax. Never edit existing fragments. One fragment per PR avoids merge conflicts on parallel PRs.
 
 Other tracking docs:
 
