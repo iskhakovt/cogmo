@@ -1,0 +1,1 @@
+CI: doc-only PR detection via `dorny/paths-filter` (negation patterns + `predicate-quantifier: every`), `e2e` label gate on PR runs (auto-triggered by `pull_request: types: [labeled]`), single `Required Checks` aggregator job via `re-actors/alls-green`, `--coverage` instrumentation gated to main-push only on Unit + Integration jobs.

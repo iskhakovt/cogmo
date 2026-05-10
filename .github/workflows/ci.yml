@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `labeled` lets adding the `e2e` label retrigger the workflow without
+    # forcing a no-op commit — the e2e job's gate then evaluates true on
+    # the next run. `unlabeled` is intentionally absent: removing a label
+    # shouldn't invalidate a passing e2e result for the same SHA.
+    types: [opened, synchronize, reopened, labeled]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -13,6 +18,40 @@ concurrency:
 permissions: {}
 
 jobs:
+  # Doc-only PR detection. Negation patterns + `predicate-quantifier: every`
+  # mean a file matches `code` only if it sits OUTSIDE every doc path —
+  # so the filter outputs `true` iff at least one changed file is non-doc.
+  # Forgetting to add a new doc path here makes CI run unnecessarily on
+  # that doc's changes, which is the safe failure mode (vs. an affirmative
+  # `code: ['src/**', ...]` list, which would silently skip CI when a new
+  # top-level config file was added but not listed). Push-to-main always
+  # runs the full suite — main is the merge gate of last resort, so we
+  # don't trust path filters there.
+  changes:
+    name: Detect doc-only changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ github.event_name != 'pull_request' || steps.filter.outputs.code == 'true' }}
+    steps:
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        if: github.event_name == 'pull_request'
+        id: filter
+        with:
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '!**/*.md'
+              - '!design/**'
+              - '!changelog.d/**'
+              - '!todo.md'
+              - '!PROGRESS.md'
+              - '!LICENSE'
+              - '!.github/ISSUE_TEMPLATE/**'
+
   pr-title:
     name: PR Title
     if: github.event_name == 'pull_request'
@@ -34,6 +73,8 @@ jobs:
 
   check:
     name: Typecheck & Lint
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -51,6 +92,8 @@ jobs:
 
   skills-runtime:
     name: Skills Runtime (Python)
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -79,6 +122,8 @@ jobs:
 
   unit:
     name: Unit Tests
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -92,9 +137,19 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test --coverage --coverage.reportsDirectory=coverage/unit
+      # Coverage instrumentation roughly doubles unit-test wallclock and
+      # only feeds Codecov's main-branch trend line — PR-diff coverage
+      # would still need a base report from main to compare against.
+      # Limiting --coverage to main-push runs cuts ~half this job's
+      # runtime on the high-volume PR-push path.
+      - name: Unit tests (with coverage)
+        if: github.event_name == 'push'
+        run: pnpm test --coverage --coverage.reportsDirectory=coverage/unit
+      - name: Unit tests
+        if: github.event_name != 'push'
+        run: pnpm test
       - uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
-        if: always()
+        if: always() && github.event_name == 'push'
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unit
@@ -108,6 +163,8 @@ jobs:
 
   integration:
     name: Integration Tests
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -129,11 +186,19 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - run: pnpm test:integration --coverage --coverage.reportsDirectory=coverage/integration
+      # Same coverage rationale as the unit job — main-push only.
+      - name: Integration tests (with coverage)
+        if: github.event_name == 'push'
+        run: pnpm test:integration --coverage --coverage.reportsDirectory=coverage/integration
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+      - name: Integration tests
+        if: github.event_name != 'push'
+        run: pnpm test:integration
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
       - uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
-        if: always()
+        if: always() && github.event_name == 'push'
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: integration
@@ -147,6 +212,20 @@ jobs:
 
   e2e:
     name: E2E Tests
+    needs: [changes]
+    # Run on every push to main (release-gate of last resort) and on PRs
+    # only when explicitly opted in via the `e2e` label. PR-push runs are
+    # the bulk of e2e cost (~3 min each, ~45 PR pushes/day), and most PRs
+    # don't touch app code paths e2e exercises. Label is sticky across
+    # subsequent pushes to the same PR — once you opt in, the next push
+    # also runs e2e. The `labeled` activity type on `on.pull_request`
+    # above means adding the label retriggers the workflow on the
+    # current head SHA without a no-op commit.
+    if: |
+      needs.changes.outputs.code == 'true' && (
+        github.event_name == 'push' ||
+        contains(github.event.pull_request.labels.*.name, 'e2e')
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -201,3 +280,22 @@ jobs:
           name: E2E Test Results
           path: test-results/junit.xml
           reporter: java-junit
+
+  # Single required-status check fed into branch protection. Aggregates
+  # every other job: success when all needs succeeded OR were legitimately
+  # skipped (doc-only PR, push-not-PR for pr-title, no `e2e` label for
+  # e2e). Failure of `changes` itself is NOT an allowed skip — if path
+  # detection breaks, the whole pipeline must fail rather than silently
+  # green. When you add a new job below, add it to both `needs:` and
+  # `allowed-skips:` if it can be legitimately skipped.
+  required-checks:
+    name: Required Checks
+    if: always()
+    needs: [changes, pr-title, check, skills-runtime, unit, integration, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: re-actors/alls-green@afee1c1eac2a506084c274e9c02c8e0687b48d9e # v1.2.2
+        with:
+          jobs: ${{ toJSON(needs) }}
+          allowed-skips: pr-title,check,skills-runtime,unit,integration,e2e
