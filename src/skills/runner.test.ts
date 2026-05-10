@@ -1,12 +1,14 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Service } from "../agent/service.js";
 import type { Database, Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
+import type { SandboxClient } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { InputValidationError, mapManifestResourceLimits, SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
+import { SysboxWorkerPool } from "./worker-sysbox/pool.js";
 
 function makeMockFiles(): Service["files"] {
   return {
@@ -572,5 +574,158 @@ describe("mapManifestResourceLimits", () => {
 
   it("ignores wall_clock_s — that's threaded as a separate runOnSysboxContainer arg", () => {
     expect(mapManifestResourceLimits({ wall_clock_s: 60 })).toEqual({});
+  });
+});
+
+// Race + lifecycle invariants for the lazy tier-2 pool. Spies on
+// `SysboxWorkerPool.create` (named import is bound to the module's
+// class object, so the spy propagates to runner.ts's call site
+// without further plumbing) so we can control timing without
+// spinning up real sysbox containers.
+const TIER2_MANIFEST = `---
+name: tier2-test
+description: tier-2 test skill
+tier: container
+inputs:
+  type: object
+  properties: {}
+---
+`;
+const TIER2_BODY = `
+def main(inputs, ctx):
+    return {"ok": True}
+`;
+
+describe("SkillRunnerImpl tier-2 pool lifecycle", { timeout: 60_000 }, () => {
+  let createSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    createSpy = vi.spyOn(SysboxWorkerPool, "create");
+  });
+  afterEach(() => {
+    createSpy.mockRestore();
+  });
+
+  function makeFakePool() {
+    return {
+      invoke: vi.fn(async () => ({ ok: true, output: { x: 7 }, workerReusable: true })),
+      dispose: vi.fn(async () => undefined),
+    } as unknown as SysboxWorkerPool;
+  }
+
+  async function makeTier2Runner() {
+    const runner = await SkillRunnerImpl.create({
+      store,
+      runInTx: tx,
+      memory: makeMockMemory(),
+      secretsStore: makeMockSecrets(),
+      files: makeMockFiles(),
+      user: { id: "user-1", timezone: "UTC" },
+      memoryBankId: "bank-1",
+      sandbox: mock<SandboxClient>(),
+    });
+    await runner.__registerForTests({
+      name: "tier2-test",
+      manifestSource: TIER2_MANIFEST,
+      body: TIER2_BODY,
+    });
+    return runner;
+  }
+
+  it("dedupes concurrent first-callers — one SysboxWorkerPool.create across N parallel invokes", async () => {
+    const fakePool = makeFakePool();
+    let resolveCreate: (p: SysboxWorkerPool) => void = () => {};
+    createSpy.mockImplementation(() => new Promise<SysboxWorkerPool>((r) => (resolveCreate = r)));
+    const runner = await makeTier2Runner();
+
+    // Three invokes fire before the pool finishes constructing — all
+    // three should queue behind one in-flight `#poolPromise`.
+    const pending = [
+      runner.invoke({ name: "tier2-test", inputs: {} }),
+      runner.invoke({ name: "tier2-test", inputs: {} }),
+      runner.invoke({ name: "tier2-test", inputs: {} }),
+    ];
+    // Drain microtasks so each invoke reaches `#ensurePool`.
+    await new Promise<void>((r) => setImmediate(r));
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+
+    resolveCreate(fakePool);
+    const results = await Promise.all(pending);
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(fakePool.invoke).toHaveBeenCalledTimes(3);
+    for (const r of results) {
+      expect(r.status).toBe("success");
+    }
+  });
+
+  it("clears #poolPromise on init failure — next invoke retries with a fresh create", async () => {
+    const fakePool = makeFakePool();
+    createSpy
+      .mockRejectedValueOnce(new Error("daytona unreachable"))
+      .mockResolvedValueOnce(fakePool);
+    const runner = await makeTier2Runner();
+
+    // First invoke fails because pool create rejects. The current
+    // tier-2 path surfaces the failure as a thrown exception (no
+    // outer try/catch wraps `pool.invoke`); the contract under test
+    // here is just that the failure happens AND that the second
+    // invoke retries — not the shape of the failure surface.
+    await expect(runner.invoke({ name: "tier2-test", inputs: {} })).rejects.toThrow(
+      /daytona unreachable/,
+    );
+
+    // Second invoke triggers a fresh create — pool resolves and the
+    // skill runs through normally. Pins the "no permanent poisoning"
+    // contract.
+    const ok = await runner.invoke({ name: "tier2-test", inputs: {} });
+    expect(ok.status).toBe("success");
+    expect(createSpy).toHaveBeenCalledTimes(2);
+    expect(fakePool.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("invoke after shutdown throws and never calls SysboxWorkerPool.create", async () => {
+    const runner = await makeTier2Runner();
+    // No pool was ever created. Shutdown still flips `#disposed` so a
+    // post-shutdown tier-2 invoke can't lazy-spawn one.
+    await runner.shutdown();
+
+    await expect(runner.invoke({ name: "tier2-test", inputs: {} })).rejects.toThrow(
+      /pool requested after shutdown/,
+    );
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it("shutdown awaits in-flight pool init and disposes the late-arriving pool", async () => {
+    const fakePool = makeFakePool();
+    let resolveCreate: (p: SysboxWorkerPool) => void = () => {};
+    createSpy.mockImplementation(() => new Promise<SysboxWorkerPool>((r) => (resolveCreate = r)));
+    const runner = await makeTier2Runner();
+
+    // Kick off pool init via an invoke — it will hang on the
+    // controlled create promise.
+    const inflight = runner.invoke({ name: "tier2-test", inputs: {} });
+    inflight.catch(() => undefined); // suppress unhandled-rejection — we await it explicitly below
+    await new Promise<void>((r) => setImmediate(r));
+    expect(createSpy).toHaveBeenCalledTimes(1);
+
+    // Begin shutdown while pool init is still pending. Shutdown
+    // awaits the in-flight promise rather than tearing down empty.
+    let shutdownResolved = false;
+    const shutdownPromise = runner.shutdown().then(() => {
+      shutdownResolved = true;
+    });
+    await new Promise<void>((r) => setImmediate(r));
+    // Shutdown is blocked on the pending create — proves the await.
+    expect(shutdownResolved).toBe(false);
+
+    // Resolve create; shutdown should now run pool.dispose.
+    resolveCreate(fakePool);
+    await shutdownPromise;
+    await inflight;
+
+    expect(shutdownResolved).toBe(true);
+    expect(fakePool.dispose).toHaveBeenCalledTimes(1);
   });
 });

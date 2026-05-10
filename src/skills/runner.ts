@@ -398,12 +398,9 @@ export class SkillRunnerImpl implements SkillRunner {
    * invoke can't lazy-create a fresh pool that nobody's left to clean up.
    */
   async shutdown(): Promise<void> {
+    // Set `#disposed` before awaiting in-flight init so a racing
+    // `invoke()` can't kick off a fresh `#ensurePool` after this point.
     this.#disposed = true;
-    // Wait out an in-flight init before disposing — otherwise a
-    // newly-spawned pool could outlive shutdown and leak its workers.
-    // Setting `#disposed` BEFORE the await also blocks any racing
-    // `invoke()` from kicking off a fresh `#ensurePool` after this
-    // point.
     if (this.#poolPromise) {
       await this.#poolPromise.catch(() => undefined);
     }

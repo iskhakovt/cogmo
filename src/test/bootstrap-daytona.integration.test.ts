@@ -58,9 +58,9 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  // Mirror `cogmo serve`'s teardown order from main.ts: adapters +
-  // skill runner first (each may hold the MCP registry / sandbox
-  // open), then registry, then the sandbox, then the temp dir.
+  // Mirror `cogmo serve`'s teardown order from main.ts: adapters,
+  // skill runner (holds the sandbox via its lazy pool), MCP
+  // registry, sandbox handle, then the temp dir backing the fake.
   if (bootstrapResult) {
     for (const adapter of bootstrapResult.adapters) {
       await adapter.stop();
