@@ -34,6 +34,7 @@ import { promisify } from "node:util";
 import type { Octokit } from "@octokit/rest";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
 import type { StepRun } from "../../inngest/index.js";
 import {
@@ -350,14 +351,17 @@ function streamFromBuffer(buf: Buffer): Readable {
 
 // --- Secrets store stub ──────────────────────────────────────────────
 
-class FakeSecretsStore {
-  #values = new Map<string, string>();
-  async getSecret(_tx: unknown, name: string): Promise<string | null> {
-    return this.#values.get(name) ?? null;
-  }
-  set(name: string, value: string): void {
-    this.#values.set(name, value);
-  }
+function makeFakeSecretsStore(): {
+  secrets: SecretsStore;
+  set: (name: string, value: string) => void;
+} {
+  const values = new Map<string, string>();
+  const secrets = mock<SecretsStore>();
+  secrets.getSecret.mockImplementation(async (_tx, name: string) => values.get(name));
+  return {
+    secrets,
+    set: (name, value) => values.set(name, value),
+  };
 }
 
 // --- Test setup ──────────────────────────────────────────────────────
@@ -385,12 +389,13 @@ afterEach(async () => {
 
 // --- Helpers ─────────────────────────────────────────────────────────
 
-let secrets: FakeSecretsStore;
+let secretsStore: SecretsStore;
+let setSecret: (name: string, value: string) => void;
 let worktreePath: string;
 let workspaceRoot: string;
 
 beforeEach(async () => {
-  secrets = new FakeSecretsStore();
+  ({ secrets: secretsStore, set: setSecret } = makeFakeSecretsStore());
   // Real Ed25519 keypair so `git commit -S` actually signs (the verify
   // orchestrator hard-codes `-c gpg.format=ssh -c user.signingkey=...`
   // and a placeholder string makes ssh-keygen fail with `couldn't load
@@ -406,13 +411,13 @@ beforeEach(async () => {
     login: GITEA_USER,
     id: "1",
   };
-  secrets.set(gitHubIdentitySecretName("default"), serializeGitHubIdentity(identity));
+  setSecret(gitHubIdentitySecretName("default"), serializeGitHubIdentity(identity));
   // Subscription auth: orchestrator demands the OAuth token before
   // creating the container (see auth.ts → loadCodingSandboxEnv). Test
   // value is opaque to the verify path — the orchestrator only forwards
   // it as `CLAUDE_CODE_OAUTH_TOKEN` env, and verify never invokes
   // `claude -p` (it runs the repo's verify_command + git, not the CLI).
-  secrets.set("claude_code_oauth_token", "sk-test-claude-code-oauth-token");
+  setSecret("claude_code_oauth_token", "sk-test-claude-code-oauth-token");
 
   // Fresh worktree per test — clone the fixture repo from Gitea via the
   // configured PAT so origin is set correctly and HEAD points at the
@@ -506,7 +511,7 @@ function makeDeps(opts: {
     runInTx: tx,
     store,
     sandbox,
-    secretsStore: secrets as unknown as SecretsStore,
+    secretsStore,
     askpassBaseDir: HOST_ASKPASS_BASE,
     devbaseImage: "ignored",
     defaultResourceLimits: { cpus: 1, memory_bytes: 1 << 30, pids: 64 },
@@ -738,7 +743,7 @@ describe("verify orchestrator integration — git-remote transport (fake daytona
       runInTx: tx,
       store,
       sandbox: fakeSandboxClient,
-      secretsStore: secrets as unknown as SecretsStore,
+      secretsStore,
       askpassBaseDir: HOST_ASKPASS_BASE,
       devbaseImage: "ignored",
       defaultResourceLimits: { cpus: 1, memory_bytes: 1 << 30, pids: 64 },
