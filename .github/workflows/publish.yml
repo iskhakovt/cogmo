@@ -102,7 +102,7 @@ jobs:
             ./docker-bake.hcl
           targets: cogmo
           set: |
-            cogmo.platforms=${{ matrix.platform }}
+            cogmo.platform=${{ matrix.platform }}
             cogmo.cache-from=type=gha,scope=cogmo-${{ matrix.slug }}
             cogmo.cache-to=type=gha,scope=cogmo-${{ matrix.slug }},mode=max
             cogmo.output=type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
