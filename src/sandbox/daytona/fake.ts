@@ -28,11 +28,11 @@
  *   - Image-pull / snapshot-build error paths.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { Readable } from "node:stream";
+import type { Readable } from "node:stream";
 import { promisify } from "node:util";
 import { logger } from "../../logger.js";
 import {
@@ -304,43 +304,20 @@ class FakeDaytonaSandboxSession implements SandboxSession<DaytonaSessionState> {
 
   async exec(cmd: readonly string[], opts?: ExecOptions): Promise<ExecResult> {
     const startedAt = Date.now();
-    const { stdout, stderr, exitCode } = await this.#runOnHost(cmd, opts);
-    return {
-      stdout,
-      stderr,
-      exitCode,
-      wallTimeSeconds: (Date.now() - startedAt) / 1000,
-      truncated: false,
-    };
-  }
-
-  async execStreaming(cmd: readonly string[], opts?: ExecOptions): Promise<ExecStreamingHandle> {
-    const { stdout, stderr, exitCode } = await this.#runOnHost(cmd, opts);
-    return {
-      stdout: streamFromBuffer(Buffer.from(stdout)),
-      stderr: streamFromBuffer(Buffer.from(stderr)),
-      wait: async () => ({ exitCode }),
-      dispose: async () => {},
-    };
-  }
-
-  async #runOnHost(
-    cmd: readonly string[],
-    opts?: ExecOptions,
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     if (cmd.length === 0) {
-      return { stdout: "", stderr: "exec: empty command", exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: "exec: empty command",
+        exitCode: 1,
+        wallTimeSeconds: 0,
+        truncated: false,
+      };
     }
-    const cwd = resolveCwd(opts?.workingDir, this.#record);
-    const env = composeEnv(opts?.env, this.#record);
-    // The path-substitution mirror for askpass paths: the orchestrator
-    // threads `GIT_ASKPASS=/.cogmo-askpass/helper` etc. The real backend
-    // serves the askpass dir at that container path; the fake remaps to
-    // `<sandboxRoot>/.cogmo-askpass/...` so host-side `git` can resolve.
-    const askpassMirror = this.#record.askpass?.containerDir;
-    const args = askpassMirror ? cmd.map((a) => rewriteAskpass(a, askpassMirror)) : [...cmd];
-
-    return execFileP(args[0] ?? "", args.slice(1), { cwd, env }).then(
+    const prepared = this.#prepare(cmd, opts);
+    const result = await execFileP(prepared.argv[0] ?? "", prepared.argv.slice(1), {
+      cwd: prepared.cwd,
+      env: prepared.env,
+    }).then(
       (r) => ({ stdout: r.stdout, stderr: r.stderr, exitCode: 0 }),
       (err: NodeJS.ErrnoException & { code?: number; stdout?: string; stderr?: string }) => ({
         stdout: err.stdout ?? "",
@@ -348,15 +325,93 @@ class FakeDaytonaSandboxSession implements SandboxSession<DaytonaSessionState> {
         exitCode: typeof err.code === "number" ? err.code : 1,
       }),
     );
+    return {
+      ...result,
+      wallTimeSeconds: (Date.now() - startedAt) / 1000,
+      truncated: false,
+    };
+  }
+
+  async execStreaming(cmd: readonly string[], opts?: ExecOptions): Promise<ExecStreamingHandle> {
+    if (cmd.length === 0) {
+      throw new Error("execStreaming: empty command");
+    }
+    const prepared = this.#prepare(cmd, opts);
+    // True streaming: `spawn` returns immediately with live stdout /
+    // stderr `Readable`s; the caller consumes (or `dispose`s) them
+    // while the process runs. `wait()` resolves when the process
+    // closes — `close` (not `exit`) so EOF on stdout/stderr has
+    // already been delivered, matching the real ExecStreamingHandle
+    // contract.
+    const child = spawn(prepared.argv[0] ?? "", prepared.argv.slice(1), {
+      cwd: prepared.cwd,
+      env: prepared.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let exitCode: number | null = null;
+    let exitErr: Error | null = null;
+    const exitPromise = new Promise<{ exitCode: number }>((resolve, reject) => {
+      child.on("error", (err) => {
+        exitErr = err;
+        reject(err);
+      });
+      child.on("close", (code) => {
+        exitCode = typeof code === "number" ? code : 1;
+        resolve({ exitCode });
+      });
+    });
+
+    let disposed = false;
+    return {
+      stdout: child.stdout as Readable,
+      stderr: child.stderr as Readable,
+      wait: () => exitPromise,
+      dispose: async () => {
+        if (disposed) return;
+        disposed = true;
+        // Mirror the dockerode dispose contract: tear down the
+        // transport but don't synthesise a signal. SIGTERM lets
+        // hooked-up cleanup run; the host will reap. Idempotent.
+        if (exitCode === null && exitErr === null) {
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            // Already exited between the check and the kill — ignore.
+          }
+        }
+      },
+    };
+  }
+
+  #prepare(
+    cmd: readonly string[],
+    opts: ExecOptions | undefined,
+  ): { argv: string[]; cwd: string; env: Record<string, string> } {
+    const cwd = resolveCwd(opts?.workingDir, this.#record);
+    const env = composeEnv(opts?.env, this.#record);
+    // The path-substitution mirror for askpass paths: the orchestrator
+    // threads `GIT_ASKPASS=/.cogmo-askpass/helper` etc. The real backend
+    // serves the askpass dir at that container path; the fake remaps to
+    // `<sandboxRoot>/.cogmo-askpass/...` so host-side `git` can resolve.
+    const askpassMirror = this.#record.askpass?.containerDir;
+    const argv = askpassMirror ? cmd.map((a) => rewriteAskpass(a, askpassMirror)) : [...cmd];
+    return { argv, cwd, env };
   }
 }
 
 function resolveCwd(workingDir: string | undefined, record: FakeSandboxRecord): string {
-  if (workingDir === undefined) {
-    return join(record.sandboxRoot, "workspace");
+  const workspaceRoot = join(record.sandboxRoot, "workspace");
+  if (workingDir === undefined || workingDir === WORKTREE_PATH_IN_SANDBOX) {
+    return workspaceRoot;
   }
-  if (workingDir === WORKTREE_PATH_IN_SANDBOX) {
-    return join(record.sandboxRoot, "workspace");
+  // Subpaths of /workspace get remapped relative to the sandbox-root
+  // workspace — a working_dir of `/workspace/src` resolves to
+  // `<sandboxRoot>/workspace/src`. Without this, the literal path
+  // would route to the host's `/workspace/src`, which doesn't exist.
+  const prefix = `${WORKTREE_PATH_IN_SANDBOX}/`;
+  if (workingDir.startsWith(prefix)) {
+    return join(workspaceRoot, workingDir.slice(prefix.length));
   }
   return workingDir;
 }
@@ -398,13 +453,4 @@ function injectHttpsAuth(url: string, auth: { username: string; password: string
   parsed.username = encodeURIComponent(auth.username);
   parsed.password = encodeURIComponent(auth.password);
   return parsed.toString();
-}
-
-function streamFromBuffer(buf: Buffer): Readable {
-  return new Readable({
-    read() {
-      this.push(buf);
-      this.push(null);
-    },
-  });
 }

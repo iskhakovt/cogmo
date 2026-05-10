@@ -371,4 +371,55 @@ describe("FakeDaytonaSandboxClient — execStreaming", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe(tmpdir());
   });
+
+  it("returns the streaming handle BEFORE the process exits (not blocking)", async () => {
+    // Contract: execStreaming returns immediately so the caller can
+    // consume stdout / dispose during the run. Block-until-exit defeats
+    // the purpose. This test asserts the handle resolves while the
+    // process is still alive.
+    const session = await client.create(
+      makeSpec({
+        worktree: {
+          type: "git-remote",
+          url: `file://${sourceRepo}`,
+          branch: "cogmo/run/test-task",
+          auth: { username: "x-access-token", password: "ghp_test" },
+        },
+      }),
+    );
+    const startedAt = Date.now();
+    // Sleep for ~150ms then write to stdout.
+    const handle = await session.execStreaming(["sh", "-c", "sleep 0.15; echo done"]);
+    const handleReturnedAt = Date.now();
+    // Handle should return well before the 150ms sleep finishes —
+    // generous bound (50ms) so flaky CI doesn't trip.
+    expect(handleReturnedAt - startedAt).toBeLessThan(50);
+    // Drain to completion + assert the actual process did finish.
+    const chunks: Buffer[] = [];
+    for await (const chunk of handle.stdout) chunks.push(Buffer.from(chunk));
+    const { exitCode } = await handle.wait();
+    expect(exitCode).toBe(0);
+    expect(Buffer.concat(chunks).toString("utf8")).toContain("done");
+  });
+
+  it("remaps /workspace subpaths to <sandboxRoot>/workspace/<subpath>", async () => {
+    const session = await client.create(
+      makeSpec({
+        worktree: {
+          type: "git-remote",
+          url: `file://${sourceRepo}`,
+          branch: "cogmo/run/test-task",
+          auth: { username: "x-access-token", password: "ghp_test" },
+        },
+      }),
+    );
+    // Pre-create a subdir inside the cloned workspace so the cwd resolves.
+    await session.exec(["mkdir", "-p", "src"]);
+    // Run `pwd` with a `/workspace/src` working dir — the fake should
+    // remap it to `<sandboxRoot>/workspace/src`, not the host's
+    // (non-existent) `/workspace/src`.
+    const result = await session.exec(["pwd"], { workingDir: "/workspace/src" });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe(join(baseDir, session.state.sandboxId, "workspace", "src"));
+  });
 });
