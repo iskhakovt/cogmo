@@ -6,6 +6,7 @@
  * Old rules are atomically replaced via store.replaceRules().
  */
 
+import * as R from "remeda";
 import { z } from "zod";
 import type { Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
@@ -80,17 +81,41 @@ export async function consolidateRules(
   deps: ConsolidationDeps,
 ): Promise<ConsolidationResult> {
   const allRules = await deps.runInTx((tx) => deps.store.getCorrections(tx, profileId));
-  // Only consolidate global rules (channelType=null). A Telegram-only
-  // rule ("avoid markdown headings here") and a global rule ("be
-  // concise") may share wording but are conceptually distinct, and
-  // `replaceRules` always emits the merged row as global — merging
-  // across scopes would silently drop channel_type.
-  const rules = allRules.filter((r) => r.active && r.channelType === null);
+  // Group by channel scope so each LLM invocation only sees rules of one
+  // scope. `replaceRules` writes the merged row with the same channelType
+  // it was called with, so per-scope runs preserve scope without giving
+  // the LLM any opportunity to propose a cross-scope merge.
+  const activeRules = allRules.filter((r) => r.active);
+  const byChannel = R.groupBy(activeRules, (r) => r.channelType ?? "");
 
-  if (rules.length < 2) {
-    return { mergedGroups: 0, rulesRemoved: 0 };
+  let mergedGroups = 0;
+  let rulesRemoved = 0;
+
+  for (const [channelKey, rules] of Object.entries(byChannel)) {
+    if (rules.length < 2) {
+      continue;
+    }
+    const channelType = channelKey === "" ? null : channelKey;
+    const result = await consolidateChannelGroup(rules, channelType, deps);
+    mergedGroups += result.mergedGroups;
+    rulesRemoved += result.rulesRemoved;
   }
 
+  logger.info({ mergedGroups, rulesRemoved }, "rule consolidation complete");
+
+  return { mergedGroups, rulesRemoved };
+}
+
+async function consolidateChannelGroup(
+  rules: ReadonlyArray<{
+    id: string;
+    rule: string;
+    category: string;
+    observationCount: number;
+  }>,
+  channelType: string | null,
+  deps: ConsolidationDeps,
+): Promise<ConsolidationResult> {
   const systemPrompt = buildConsolidationPrompt(rules);
 
   const { data } = await chatTyped({
@@ -115,7 +140,7 @@ export async function consolidateRules(
       originals.some((r) => r.category !== group.category) ||
       group.originalIds.some((id) => consumedIds.has(id))
     ) {
-      logger.warn({ group }, "invalid merge group from LLM — skipped");
+      logger.warn({ group, channelType }, "invalid merge group from LLM — skipped");
       continue;
     }
     for (const id of group.originalIds) {
@@ -131,6 +156,7 @@ export async function consolidateRules(
           rule: group.mergedRule,
           category: group.category,
           profileId: null,
+          channelType,
           priority: 100,
           observationCount: totalObservations,
         },
@@ -140,8 +166,6 @@ export async function consolidateRules(
     mergedGroups++;
     rulesRemoved += group.originalIds.length - 1; // each group replaces N rules with 1
   }
-
-  logger.info({ mergedGroups, rulesRemoved }, "rule consolidation complete");
 
   return { mergedGroups, rulesRemoved };
 }

@@ -34,6 +34,7 @@ import { promisify } from "node:util";
 import type { Octokit } from "@octokit/rest";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
 import type { StepRun } from "../../inngest/index.js";
 import {
@@ -51,6 +52,7 @@ import {
 } from "../../secrets/github.js";
 import { generateSshKeyPair } from "../../secrets/ssh-keygen.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { FakeDaytonaSandboxClient } from "../../test/daytona-sandbox-fake.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { type CodingBackend, DrizzleCodingStore } from "./store/index.js";
 import { runCodingVerify, type VerifyOrchestratorDeps } from "./verify-orchestrator.js";
@@ -349,14 +351,17 @@ function streamFromBuffer(buf: Buffer): Readable {
 
 // --- Secrets store stub ──────────────────────────────────────────────
 
-class FakeSecretsStore {
-  #values = new Map<string, string>();
-  async getSecret(_tx: unknown, name: string): Promise<string | null> {
-    return this.#values.get(name) ?? null;
-  }
-  set(name: string, value: string): void {
-    this.#values.set(name, value);
-  }
+function makeFakeSecretsStore(): {
+  secrets: SecretsStore;
+  set: (name: string, value: string) => void;
+} {
+  const values = new Map<string, string>();
+  const secrets = mock<SecretsStore>();
+  secrets.getSecret.mockImplementation(async (_tx, name: string) => values.get(name));
+  return {
+    secrets,
+    set: (name, value) => values.set(name, value),
+  };
 }
 
 // --- Test setup ──────────────────────────────────────────────────────
@@ -384,12 +389,13 @@ afterEach(async () => {
 
 // --- Helpers ─────────────────────────────────────────────────────────
 
-let secrets: FakeSecretsStore;
+let secretsStore: SecretsStore;
+let setSecret: (name: string, value: string) => void;
 let worktreePath: string;
 let workspaceRoot: string;
 
 beforeEach(async () => {
-  secrets = new FakeSecretsStore();
+  ({ secrets: secretsStore, set: setSecret } = makeFakeSecretsStore());
   // Real Ed25519 keypair so `git commit -S` actually signs (the verify
   // orchestrator hard-codes `-c gpg.format=ssh -c user.signingkey=...`
   // and a placeholder string makes ssh-keygen fail with `couldn't load
@@ -405,13 +411,13 @@ beforeEach(async () => {
     login: GITEA_USER,
     id: "1",
   };
-  secrets.set(gitHubIdentitySecretName("default"), serializeGitHubIdentity(identity));
+  setSecret(gitHubIdentitySecretName("default"), serializeGitHubIdentity(identity));
   // Subscription auth: orchestrator demands the OAuth token before
   // creating the container (see auth.ts → loadCodingSandboxEnv). Test
   // value is opaque to the verify path — the orchestrator only forwards
   // it as `CLAUDE_CODE_OAUTH_TOKEN` env, and verify never invokes
   // `claude -p` (it runs the repo's verify_command + git, not the CLI).
-  secrets.set("claude_code_oauth_token", "sk-test-claude-code-oauth-token");
+  setSecret("claude_code_oauth_token", "sk-test-claude-code-oauth-token");
 
   // Fresh worktree per test — clone the fixture repo from Gitea via the
   // configured PAT so origin is set correctly and HEAD points at the
@@ -505,7 +511,7 @@ function makeDeps(opts: {
     runInTx: tx,
     store,
     sandbox,
-    secretsStore: secrets as unknown as SecretsStore,
+    secretsStore,
     askpassBaseDir: HOST_ASKPASS_BASE,
     devbaseImage: "ignored",
     defaultResourceLimits: { cpus: 1, memory_bytes: 1 << 30, pids: 64 },
@@ -614,5 +620,191 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
     expect(eventNames).toContain("coding/task/verify-complete");
     expect(eventNames).not.toContain("coding/task/pushed");
     expect(eventNames).not.toContain("coding/task/pr-opened");
+  }, 120_000);
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// git-remote transport — uses FakeDaytonaSandboxClient against the same
+// Gitea testcontainer. Exercises the orchestrator's git-remote arms:
+// SDK-style clone from `cogmo/run/<task-id>`, post-create checkout, host-
+// side commit + push, post-PR fetchFeatureBranch.
+
+async function seedTaskGitRemote(): Promise<{ taskId: string; branch: string; runRef: string }> {
+  const repoRow = await tx((trx) =>
+    store.insertRepo(trx, {
+      name: "fixture",
+      localPath: worktreePath,
+      defaultBranch: GITEA_DEFAULT_BRANCH,
+      remoteUrl: `${giteaUrl}/${GITEA_USER}/${GITEA_REPO}.git`,
+      devcontainer: null,
+      allowedBackends: ["claude"] as ReadonlyArray<CodingBackend>,
+      verifyCommand: "true",
+      taskTokenBudget: 200_000,
+      taskWallTimeSeconds: 1800,
+      maxConcurrentTasks: 1,
+      verifyTimeoutSeconds: 30,
+    }),
+  );
+
+  const task = await tx((trx) =>
+    store.insertTask(trx, {
+      repoId: repoRow.id,
+      goal: "git-remote integration fixture goal",
+      triggerSource: "user",
+      backend: "claude",
+      allowPrivilegedRunc: false,
+    }),
+  );
+
+  const branch = `cogmo/${task.id.slice(0, 8)}`;
+  const runRef = `cogmo/run/${task.id}`;
+  await tx((trx) => store.setTaskWorktreeAssignment(trx, task.id, { type: "git-remote", branch }));
+  await tx((trx) => store.setTaskPlan(trx, task.id, "1. add a file\n2. verify"));
+  await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "pending_verify" }));
+
+  return { taskId: task.id, branch, runRef };
+}
+
+async function pushRunBranchToGitea(runRef: string): Promise<void> {
+  // Plan-orchestrator would have run `pushTaskBranchToRemote` in the
+  // real flow; integration test simulates that pre-state directly so
+  // verify-orchestrator can clone from it.
+  const authedUrl = `${giteaUrl}/${GITEA_USER}/${GITEA_REPO}.git`.replace(
+    "://",
+    `://${GITEA_USER}:${giteaPat}@`,
+  );
+  await execFileP("git", ["-C", worktreePath, "push", authedUrl, `HEAD:refs/heads/${runRef}`]);
+}
+
+async function deleteGiteaBranch(branch: string): Promise<void> {
+  await fetch(
+    `${giteaUrl}/api/v1/repos/${GITEA_USER}/${GITEA_REPO}/branches/${encodeURIComponent(branch)}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `token ${giteaPat}` },
+    },
+  );
+}
+
+describe("verify orchestrator integration — git-remote transport (fake daytona)", () => {
+  let fakeBaseDir: string;
+  let fakeSandboxClient: FakeDaytonaSandboxClient;
+  // Branches that need cleanup on Gitea regardless of test outcome —
+  // failed-early tests would otherwise leak `cogmo/<idShort>` and
+  // `cogmo/run/<task-id>` refs across re-runs.
+  let branchesToCleanup: string[];
+
+  beforeEach(async () => {
+    fakeBaseDir = mkdtempSync(join(tmpdir(), "cogmo-int-fake-base-"));
+    fakeSandboxClient = await FakeDaytonaSandboxClient.create({
+      baseDir: fakeBaseDir,
+      instanceId: "test-instance",
+    });
+    branchesToCleanup = [];
+  });
+
+  afterEach(async () => {
+    await fakeSandboxClient.shutdown();
+    rmSync(fakeBaseDir, { recursive: true, force: true });
+    // Best-effort upstream cleanup. Swallow per-branch failures so a
+    // missing branch (already cleaned, never pushed) doesn't mask the
+    // original test failure.
+    for (const branch of branchesToCleanup) {
+      await deleteGiteaBranch(branch).catch(() => {});
+    }
+  });
+
+  it("happy path: sandbox clones run-branch, verify passes, feature branch pushed, PR opened, fetch back", async () => {
+    // Pre-stage a change on the local mirror so the run-branch we push
+    // upstream has something distinct from `main`. Keeps the assertion
+    // about feature-branch divergence honest even though the orchestrator
+    // itself doesn't write files.
+    writeFileSync(join(worktreePath, "TASK.md"), "git-remote fixture\n");
+    await execFileP("git", ["-C", worktreePath, "add", "."]);
+    await execFileP("git", [
+      "-C",
+      worktreePath,
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-m",
+      "wip change",
+    ]);
+
+    const { taskId, branch, runRef } = await seedTaskGitRemote();
+    // Register both refs for afterEach cleanup before any operation
+    // that might fail — guarantees we don't leak refs upstream when
+    // the test errors mid-flight.
+    branchesToCleanup.push(branch, runRef);
+    await pushRunBranchToGitea(runRef);
+
+    const capture: CapturedPullsCreate[] = [];
+    const deps: VerifyOrchestratorDeps = {
+      runInTx: tx,
+      store,
+      sandbox: fakeSandboxClient,
+      secretsStore,
+      askpassBaseDir: HOST_ASKPASS_BASE,
+      devbaseImage: "ignored",
+      defaultResourceLimits: { cpus: 1, memory_bytes: 1 << 30, pids: 64 },
+      taskTtlMs: 60_000,
+      octokitFactory: makeOctokitFactory({ capture }),
+    };
+    const inngestSend = vi.fn().mockResolvedValue(undefined);
+
+    const result = await runCodingVerify({
+      taskId,
+      deps,
+      stepRun,
+      inngest: { send: inngestSend },
+    });
+
+    expect(result.status).toBe("pr_open");
+
+    // The fake sandbox saw the orchestrator's git-remote spec — meaning
+    // `buildWorktreeSpec` correctly branched on `workingTreeTransport`.
+    expect(fakeSandboxClient.createCalls).toHaveLength(1);
+    const spec = fakeSandboxClient.createCalls[0];
+    if (!spec) throw new Error("expected one create call");
+    expect(spec.worktree?.type).toBe("git-remote");
+    if (spec.worktree?.type === "git-remote") {
+      expect(spec.worktree.branch).toBe(runRef);
+      expect(spec.worktree.url).toContain(`${GITEA_USER}/${GITEA_REPO}.git`);
+    }
+
+    // Feature branch landed on Gitea — the sandbox-side push succeeded.
+    const branchResp = await fetch(
+      `${giteaUrl}/api/v1/repos/${GITEA_USER}/${GITEA_REPO}/branches/${encodeURIComponent(branch)}`,
+      { headers: { Authorization: `token ${giteaPat}` } },
+    );
+    expect(branchResp.status).toBe(200);
+
+    // PR-create was captured by the scoped octokit factory.
+    expect(capture).toHaveLength(1);
+    expect(capture[0]?.body).toMatchObject({
+      owner: GITEA_USER,
+      repo: GITEA_REPO,
+      head: branch,
+      base: GITEA_DEFAULT_BRANCH,
+      draft: true,
+    });
+
+    // Post-PR `fetchFeatureBranch` updated the local mirror's
+    // remote-tracking ref. Resolves to a 40-char SHA on success.
+    const refOut = await execFileP("git", [
+      "-C",
+      worktreePath,
+      "rev-parse",
+      `refs/remotes/origin/${branch}`,
+    ]);
+    expect(refOut.stdout.trim()).toMatch(/^[0-9a-f]{40}$/);
+
+    // Lifecycle events fired in order.
+    expect(inngestSend.mock.calls.map((c) => c[0].name)).toEqual([
+      "coding/task/verify-complete",
+      "coding/task/pushed",
+      "coding/task/pr-opened",
+    ]);
+    // Branch cleanup handled by afterEach via `branchesToCleanup`.
   }, 120_000);
 });

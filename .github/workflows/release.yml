@@ -41,6 +41,7 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
+      checks: read
     outputs:
       new_release_published: ${{ steps.semantic.outputs.published }}
     steps:
@@ -61,6 +62,13 @@ jobs:
         uses: poseidon/wait-for-status-checks@899c768d191b56eef585c18f8558da19e1f3e707 # v0.6.0
         with:
           token: ${{ github.token }}
+          # Self-exclusion would otherwise wait on this job's own check
+          # run forever — the action's default exclusion uses the YAML
+          # job_id (`release`) but GitHub's API returns the display name
+          # (`Release`, from `name:` above), and the match is
+          # case-sensitive exact-string. Keep `Release` here in sync with
+          # the job's `name:` field.
+          ignore: Release
           ignore_pattern: ^codecov/
           interval: 30
           timeout: 300

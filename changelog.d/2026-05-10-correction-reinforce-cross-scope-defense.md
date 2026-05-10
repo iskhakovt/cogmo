@@ -1,0 +1,1 @@
+Code-level gate rejects out-of-scope reinforce corrections by checking the matched rule's channelType against the conversation's active channels before upsert. Hallucinated matched ids are also rejected. New `outOfScopeReinforcementsSkipped` and `unknownRuleReinforcementsSkipped` counters on `ExtractionResult`.

@@ -339,6 +339,62 @@ describe("DrizzleAgentStore", () => {
       const result = await tx((trx) => store.deleteProfileClass(trx, userId, "no-such"));
       expect(result.deleted).toBe(false);
     });
+
+    it("createProfileClass defaults restricted=false; listProfileClasses surfaces it", async () => {
+      const { userId } = await seedClassed();
+      const created = await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      expect(created.restricted).toBe(false);
+      const list = await tx((trx) => store.listProfileClasses(trx, userId));
+      expect(list[0]?.restricted).toBe(false);
+    });
+
+    it("setProfileClassRestricted flips the flag and is idempotent", async () => {
+      const { userId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      const first = await tx((trx) =>
+        store.setProfileClassRestricted(trx, userId, "intimate", true),
+      );
+      expect(first.updated).toBe(true);
+      const after = await tx((trx) => store.listProfileClasses(trx, userId));
+      expect(after[0]?.restricted).toBe(true);
+      // Re-flipping to the same value is a no-op success — idempotent.
+      const second = await tx((trx) =>
+        store.setProfileClassRestricted(trx, userId, "intimate", true),
+      );
+      expect(second.updated).toBe(true);
+      const off = await tx((trx) =>
+        store.setProfileClassRestricted(trx, userId, "intimate", false),
+      );
+      expect(off.updated).toBe(true);
+      const final = await tx((trx) => store.listProfileClasses(trx, userId));
+      expect(final[0]?.restricted).toBe(false);
+    });
+
+    it("setProfileClassRestricted returns updated:false for an unknown name", async () => {
+      const { userId } = await seedClassed();
+      const result = await tx((trx) =>
+        store.setProfileClassRestricted(trx, userId, "no-such", true),
+      );
+      expect(result.updated).toBe(false);
+    });
+
+    it("setProfileClassRestricted is independent of in-use status — restricting an attached class works", async () => {
+      const { userId, profileId } = await seedClassed();
+      await tx((trx) =>
+        store.createProfileClass(trx, { userId, name: "intimate", description: "x" }),
+      );
+      await tx((trx) => store.setProfileClass(trx, profileId, "intimate"));
+      const result = await tx((trx) =>
+        store.setProfileClassRestricted(trx, userId, "intimate", true),
+      );
+      expect(result.updated).toBe(true);
+      const list = await tx((trx) => store.listProfileClasses(trx, userId));
+      expect(list[0]?.restricted).toBe(true);
+    });
   });
 
   describe("custom compartments", () => {
@@ -2090,6 +2146,7 @@ describe("DrizzleAgentStore", () => {
             rule: "Combined rule A+B",
             category: "style",
             profileId: null,
+            channelType: null,
             priority: 100,
             observationCount: 5,
           },
@@ -2101,13 +2158,14 @@ describe("DrizzleAgentStore", () => {
       expect(remaining).toHaveLength(1);
       expect(remaining[0]!.id).toBe(result.id);
 
-      // New rule has correct values
+      // New rule has correct values, channelType persists as null
       const rows = await db
         .select({
           rule: steeringRules.rule,
           source: steeringRules.source,
           active: steeringRules.active,
           observationCount: steeringRules.observationCount,
+          channelType: steeringRules.channelType,
         })
         .from(steeringRules)
         .where(eq(steeringRules.id, result.id));
@@ -2117,6 +2175,65 @@ describe("DrizzleAgentStore", () => {
         source: "evolution",
         active: true,
         observationCount: 5,
+        channelType: null,
+      });
+    });
+
+    it("replaceRules persists channelType when supplied", async () => {
+      const { steeringRules } = await import("./schema.js");
+      const inserted = await db
+        .insert(steeringRules)
+        .values([
+          {
+            rule: "Avoid markdown headings on Telegram",
+            category: "style",
+            active: true,
+            source: "correction",
+            priority: 100,
+            observationCount: 3,
+            channelType: "telegram",
+          },
+          {
+            rule: "Skip headings in Telegram replies",
+            category: "style",
+            active: true,
+            source: "correction",
+            priority: 100,
+            observationCount: 2,
+            channelType: "telegram",
+          },
+        ])
+        .returning({ id: steeringRules.id });
+
+      const oldIds = inserted.map((r) => r.id);
+
+      const result = await tx((trx) =>
+        store.replaceRules(trx, {
+          oldIds,
+          newRule: {
+            rule: "Avoid markdown headings in Telegram replies",
+            category: "style",
+            profileId: null,
+            channelType: "telegram",
+            priority: 100,
+            observationCount: 5,
+          },
+        }),
+      );
+
+      const rows = await db
+        .select({
+          rule: steeringRules.rule,
+          channelType: steeringRules.channelType,
+          source: steeringRules.source,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, result.id));
+
+      expect(rows[0]).toEqual({
+        rule: "Avoid markdown headings in Telegram replies",
+        channelType: "telegram",
+        source: "evolution",
       });
     });
 
@@ -2146,6 +2263,7 @@ describe("DrizzleAgentStore", () => {
             rule: "New consolidated rule",
             category: "style",
             profileId: null,
+            channelType: null,
             priority: 100,
             observationCount: 2,
           },

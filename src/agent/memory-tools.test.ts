@@ -198,6 +198,8 @@ describe("memory tools through a scope-filtered Service", () => {
       provider,
       "user-123",
       { compartments: ["work", "technical"], trust: ["first-party"] },
+      null,
+      [],
       {
         read: vi.fn().mockResolvedValue(""),
         write: vi.fn().mockResolvedValue(undefined),

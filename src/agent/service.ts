@@ -102,6 +102,15 @@ export interface Service {
  * and reflect as a `tag_groups` ACL filter. Tools that use this
  * service cannot access other users' data or bypass the scope.
  *
+ * `speakerClass` and `restrictedClassNames` together drive fail-closed
+ * recall on the speaker dimension: any class flagged `restricted` in
+ * `profile_classes` is hidden unless the profile either opts in via
+ * `memory_scope.profileClasses` or speaks as the class itself
+ * (auto-include — a restricted-speaker profile reads its own writes by
+ * default). The NOT leaf is built even when `memoryScope` is null, so
+ * a profile without an explicit scope still benefits from fail-closed
+ * defaults on marked classes.
+ *
  * Retain is intentionally not scoped — writes go to Hindsight as-is,
  * and tagging happens at extraction time via the Observer drain.
  */
@@ -109,6 +118,8 @@ export function createService(
   memory: MemoryProvider,
   bankId: string,
   memoryScope: ProfileMemoryScope | null,
+  speakerClass: string | null,
+  restrictedClassNames: ReadonlyArray<string>,
   files: Service["files"],
   coreMemory: Service["coreMemory"],
   stageRetain: StageRetainFn,
@@ -117,10 +128,19 @@ export function createService(
 ): Service {
   return {
     memory: {
-      recall: (query, opts) => memory.recall(bankId, query, applyScopeToRecall(memoryScope, opts)),
+      recall: (query, opts) =>
+        memory.recall(
+          bankId,
+          query,
+          applyScopeToRecall(memoryScope, speakerClass, restrictedClassNames, opts),
+        ),
       retain: (content, opts) => memory.retain(bankId, content, opts),
       reflect: (query, opts) =>
-        memory.reflect(bankId, query, applyScopeToReflect(memoryScope, opts)),
+        memory.reflect(
+          bankId,
+          query,
+          applyScopeToReflect(memoryScope, speakerClass, restrictedClassNames, opts),
+        ),
       stageRetain,
     },
     files,
@@ -131,13 +151,10 @@ export function createService(
 }
 
 /**
- * Fold the profile's scope into a `tag_groups` filter combining the
- * scope leaves and any caller-supplied tag filter (tags, tagsMatch,
- * tagGroups). Returns `null` when the profile has no scope — the
- * caller passes opts through verbatim in that case.
- *
- * A caller passing `tagsMatch` without `tags` has no leaf to attach
- * the match mode to, so it's silently dropped — meaningless on its own.
+ * Fold scope + isolation leaves into a `tag_groups` filter combining
+ * any caller-supplied tag filter (tags, tagsMatch, tagGroups). Caller
+ * passing `tagsMatch` without `tags` has no leaf to attach the match
+ * mode to, so it's silently dropped — meaningless on its own.
  *
  * Caller leaves use `caller.tagsMatch ?? "any"` (the API default), not
  * `any_strict` like the scope leaves. The asymmetry is deliberate: the
@@ -149,10 +166,10 @@ export function createService(
  * on the caller's tag dimension.
  */
 function buildScopedTagGroups(
-  memoryScope: ProfileMemoryScope,
+  leaves: TagGroup[],
   caller: { tags?: string[]; tagsMatch?: TagsMatch; tagGroups?: TagGroup[] } | undefined,
 ): TagGroup[] {
-  const andChildren: TagGroup[] = buildScopeLeaves(memoryScope);
+  const andChildren: TagGroup[] = [...leaves];
   if (caller?.tags !== undefined && caller.tags.length > 0) {
     andChildren.push({ tags: caller.tags, match: caller.tagsMatch ?? "any" });
   }
@@ -165,53 +182,96 @@ function buildScopedTagGroups(
 // Strip the simple-tag-filter fields the scope path folds into tagGroups.
 // Spreading `rest` carries forward any future RecallOptions/ReflectOptions
 // fields automatically — adding a new option won't silently drop on the
-// scoped path while passing through unchanged on the no-scope path.
+// scoped path while passing through unchanged on the no-isolation path.
 function applyScopeToRecall(
   memoryScope: ProfileMemoryScope | null,
+  speakerClass: string | null,
+  restrictedClassNames: ReadonlyArray<string>,
   opts: RecallOptions | undefined,
 ): RecallOptions {
-  if (memoryScope === null) return opts ?? {};
+  const leaves = buildIsolationLeaves(memoryScope, speakerClass, restrictedClassNames);
+  if (leaves.length === 0) return opts ?? {};
   const { tags: _tags, tagsMatch: _tagsMatch, tagGroups: _tagGroups, ...rest } = opts ?? {};
-  return { ...rest, tagGroups: buildScopedTagGroups(memoryScope, opts) };
+  return { ...rest, tagGroups: buildScopedTagGroups(leaves, opts) };
 }
 
 function applyScopeToReflect(
   memoryScope: ProfileMemoryScope | null,
+  speakerClass: string | null,
+  restrictedClassNames: ReadonlyArray<string>,
   opts: ReflectOptions | undefined,
 ): ReflectOptions {
-  if (memoryScope === null) return opts ?? {};
+  const leaves = buildIsolationLeaves(memoryScope, speakerClass, restrictedClassNames);
+  if (leaves.length === 0) return opts ?? {};
   const { tags: _tags, tagsMatch: _tagsMatch, tagGroups: _tagGroups, ...rest } = opts ?? {};
-  return { ...rest, tagGroups: buildScopedTagGroups(memoryScope, opts) };
+  return { ...rest, tagGroups: buildScopedTagGroups(leaves, opts) };
 }
 
 /**
- * Build the leaves of the scope filter — one leaf per dimension.
- * `any_strict` excludes untagged memories (so legacy un-compartmented
- * rows aren't accidentally exposed) and ORs within the dimension.
- * The caller wraps these in an AND group.
+ * Build the leaves of the isolation filter — one leaf per dimension.
  *
- * The `profileClasses` leaf is only emitted when the scope set it; an
- * absent `profileClasses` means "no scoping on the speaker dimension"
- * and recall isn't filtered by class. Once set, the same `any_strict`
- * semantic excludes memories that have no `profile_class:*` tag —
- * pre-feature memories need a backfill (or the user must scope the
- * profile in a way that doesn't include the class dimension at all).
+ * Scope leaves (compartments / trust / profileClasses) are `any_strict`:
+ * they exclude untagged memories so legacy un-tagged rows aren't
+ * accidentally exposed.
+ *
+ * The class leaf is identity-aware: when `scope.profileClasses` is set,
+ * the leaf's tag set is `scope.profileClasses ∪ {speakerClass}`. Speaker
+ * auto-include is structural, not an opt-in — a profile's recall always
+ * sees its own writes regardless of how the operator wrote `classes=…`.
+ * This matches the convention in personal-data systems (email's "Sent"
+ * folder, Drive owner-implicit-read, PostgreSQL RLS's `owner =
+ * current_user` idiom): self-recall is a primitive of the actor, not a
+ * configuration parameter. If a future use case needs write-only-no-self-
+ * recall (auditor / one-way channels), express it via a separate identity
+ * (e.g. `profile.profileClass = null`), not by misconfiguring the scope.
+ *
+ * The restricted-class NOT leaf is independent of `memoryScope` — it
+ * applies even when scope is null, so a deployment that opts a class
+ * into `restricted` gets fail-closed defaults without each profile
+ * having to enumerate its allow-list. A class is excluded when it's
+ * restricted AND not in the same effective opt-in set
+ * (`scope.profileClasses ∪ {speakerClass}`), so the speaker auto-include
+ * applies symmetrically across both leaves.
+ *
+ * The NOT leaf uses `match: "any"` (not `any_strict`): it only
+ * excludes memories that carry one of the restricted tags. Untagged
+ * memories pass — pre-feature rows from any speaker are unaffected
+ * because they carry no `profile_class:*` tag at all.
  */
-function buildScopeLeaves(scope: ProfileMemoryScope): TagGroup[] {
-  const leaves: TagGroup[] = [
-    {
-      tags: scope.compartments.map((c) => `compartment:${c}`),
-      match: "any_strict",
-    },
-    {
-      tags: scope.trust.map((t) => `trust:${t}`),
-      match: "any_strict",
-    },
-  ];
-  if (scope.profileClasses !== undefined && scope.profileClasses.length > 0) {
+function buildIsolationLeaves(
+  scope: ProfileMemoryScope | null,
+  speakerClass: string | null,
+  restrictedClassNames: ReadonlyArray<string>,
+): TagGroup[] {
+  const leaves: TagGroup[] = [];
+  if (scope !== null) {
+    leaves.push(
+      {
+        tags: scope.compartments.map((c) => `compartment:${c}`),
+        match: "any_strict",
+      },
+      {
+        tags: scope.trust.map((t) => `trust:${t}`),
+        match: "any_strict",
+      },
+    );
+    if (scope.profileClasses !== undefined && scope.profileClasses.length > 0) {
+      const classes =
+        speakerClass !== null && !scope.profileClasses.includes(speakerClass)
+          ? [...scope.profileClasses, speakerClass]
+          : scope.profileClasses;
+      leaves.push({
+        tags: classes.map((c) => `profile_class:${c}`),
+        match: "any_strict",
+      });
+    }
+  }
+  const optedIn = new Set<string>(scope?.profileClasses ?? []);
+  if (speakerClass !== null) optedIn.add(speakerClass);
+  const excluded = restrictedClassNames.filter((c) => !optedIn.has(c));
+  if (excluded.length > 0) {
     leaves.push({
-      tags: scope.profileClasses.map((c) => `profile_class:${c}`),
-      match: "any_strict",
+      not: { tags: excluded.map((c) => `profile_class:${c}`), match: "any" },
     });
   }
   return leaves;

@@ -144,6 +144,8 @@ describe("extractCorrections", () => {
       reinforced: 0,
       contradictions: 0,
       promoted: 0,
+      outOfScopeReinforcementsSkipped: 0,
+      unknownRuleReinforcementsSkipped: 0,
       consolidationNeeded: false,
     });
     expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
@@ -175,17 +177,31 @@ describe("extractCorrections", () => {
   });
 
   it("reinforces existing correction", async () => {
-    const deps = mockExtractionDeps({
-      corrections: [
-        {
-          rule: "Use fetch_url for weather",
-          category: "domain",
-          reasoning: "Same correction again",
-          matchedExistingRuleId: "existing-rule-1",
-          action: "reinforce",
-        },
-      ],
-    });
+    const deps = mockExtractionDeps(
+      {
+        corrections: [
+          {
+            rule: "Use fetch_url for weather",
+            category: "domain",
+            reasoning: "Same correction again",
+            matchedExistingRuleId: "existing-rule-1",
+            action: "reinforce",
+          },
+        ],
+      },
+      {
+        getCorrections: vi.fn().mockResolvedValue([
+          {
+            id: "existing-rule-1",
+            rule: "Use fetch_url for weather",
+            category: "domain",
+            active: true,
+            observationCount: 1,
+            channelType: null,
+          },
+        ]),
+      },
+    );
 
     const result = await extractCorrections(sampleHistory, "profile-1", deps);
 
@@ -233,6 +249,16 @@ describe("extractCorrections", () => {
         ],
       },
       {
+        getCorrections: vi.fn().mockResolvedValue([
+          {
+            id: "rule-1",
+            rule: "Be concise",
+            category: "style",
+            active: true,
+            observationCount: 1,
+            channelType: null,
+          },
+        ]),
         upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: true }),
       },
     );
@@ -264,32 +290,46 @@ describe("extractCorrections", () => {
   });
 
   it("handles mixed corrections in one extraction", async () => {
-    const deps = mockExtractionDeps({
-      corrections: [
-        {
-          rule: "New rule",
-          category: "style",
-          reasoning: "first time",
-          matchedExistingRuleId: null,
-          action: "new",
-          channelType: null,
-        },
-        {
-          rule: "Reinforced rule",
-          category: "domain",
-          reasoning: "seen before",
-          matchedExistingRuleId: "rule-2",
-          action: "reinforce",
-        },
-        {
-          rule: "Contradicting rule",
-          category: "style",
-          reasoning: "conflicts",
-          matchedExistingRuleId: "rule-3",
-          action: "contradiction",
-        },
-      ],
-    });
+    const deps = mockExtractionDeps(
+      {
+        corrections: [
+          {
+            rule: "New rule",
+            category: "style",
+            reasoning: "first time",
+            matchedExistingRuleId: null,
+            action: "new",
+            channelType: null,
+          },
+          {
+            rule: "Reinforced rule",
+            category: "domain",
+            reasoning: "seen before",
+            matchedExistingRuleId: "rule-2",
+            action: "reinforce",
+          },
+          {
+            rule: "Contradicting rule",
+            category: "style",
+            reasoning: "conflicts",
+            matchedExistingRuleId: "rule-3",
+            action: "contradiction",
+          },
+        ],
+      },
+      {
+        getCorrections: vi.fn().mockResolvedValue([
+          {
+            id: "rule-2",
+            rule: "Reinforced rule",
+            category: "domain",
+            active: true,
+            observationCount: 1,
+            channelType: null,
+          },
+        ]),
+      },
+    );
 
     const result = await extractCorrections(sampleHistory, "profile-1", deps);
 
@@ -358,6 +398,153 @@ describe("extractCorrections", () => {
     });
   });
 
+  it("applies reinforce when the matched rule is global", async () => {
+    const deps = mockExtractionDeps(
+      {
+        corrections: [
+          {
+            rule: "Be concise",
+            category: "style",
+            reasoning: "seen before, applies everywhere",
+            matchedExistingRuleId: "rule-global",
+            action: "reinforce",
+          },
+        ],
+      },
+      {
+        getCorrections: vi.fn().mockResolvedValue([
+          {
+            id: "rule-global",
+            rule: "Be concise",
+            category: "style",
+            active: true,
+            observationCount: 1,
+            channelType: null,
+          },
+        ]),
+      },
+      ["telegram"],
+    );
+
+    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+
+    expect(result.reinforced).toBe(1);
+    expect(result.outOfScopeReinforcementsSkipped).toBe(0);
+    expect(result.unknownRuleReinforcementsSkipped).toBe(0);
+    expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
+      rule: "Be concise",
+      category: "style",
+      profileId: null,
+      channelType: null,
+      existingRuleId: "rule-global",
+    });
+  });
+
+  it("applies reinforce when the matched rule's channelType is in the active set", async () => {
+    const deps = mockExtractionDeps(
+      {
+        corrections: [
+          {
+            rule: "Avoid markdown headings",
+            category: "style",
+            reasoning: "Telegram-specific, seen before",
+            matchedExistingRuleId: "rule-tg",
+            action: "reinforce",
+          },
+        ],
+      },
+      {
+        getCorrections: vi.fn().mockResolvedValue([
+          {
+            id: "rule-tg",
+            rule: "Avoid markdown headings",
+            category: "style",
+            active: true,
+            observationCount: 1,
+            channelType: "telegram",
+          },
+        ]),
+      },
+      ["telegram"],
+    );
+
+    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+
+    expect(result.reinforced).toBe(1);
+    expect(result.outOfScopeReinforcementsSkipped).toBe(0);
+    expect(result.unknownRuleReinforcementsSkipped).toBe(0);
+    expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
+      rule: "Avoid markdown headings",
+      category: "style",
+      profileId: null,
+      channelType: null,
+      existingRuleId: "rule-tg",
+    });
+  });
+
+  it("skips reinforce when the matched rule's channelType is not in the active set", async () => {
+    const deps = mockExtractionDeps(
+      {
+        corrections: [
+          {
+            rule: "Avoid markdown headings",
+            category: "style",
+            reasoning: "matched a Slack rule by wording, but conversation is Telegram",
+            matchedExistingRuleId: "rule-slack",
+            action: "reinforce",
+          },
+        ],
+      },
+      {
+        getCorrections: vi.fn().mockResolvedValue([
+          {
+            id: "rule-slack",
+            rule: "Avoid markdown headings",
+            category: "style",
+            active: true,
+            observationCount: 1,
+            channelType: "slack",
+          },
+        ]),
+      },
+      ["telegram"],
+    );
+
+    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+
+    expect(result.reinforced).toBe(0);
+    expect(result.outOfScopeReinforcementsSkipped).toBe(1);
+    expect(result.unknownRuleReinforcementsSkipped).toBe(0);
+    expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
+  });
+
+  it("skips reinforce when matched rule id is unknown to existingRules", async () => {
+    const deps = mockExtractionDeps(
+      {
+        corrections: [
+          {
+            rule: "Be concise",
+            category: "style",
+            reasoning: "LLM hallucinated the matched id",
+            matchedExistingRuleId: "rule-ghost",
+            action: "reinforce",
+          },
+        ],
+      },
+      {
+        getCorrections: vi.fn().mockResolvedValue([]),
+      },
+      ["telegram"],
+    );
+
+    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+
+    expect(result.reinforced).toBe(0);
+    expect(result.outOfScopeReinforcementsSkipped).toBe(0);
+    expect(result.unknownRuleReinforcementsSkipped).toBe(1);
+    expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
+  });
+
   it("renders the existing rules and active channels in the prompt", async () => {
     const deps = mockExtractionDeps(
       { corrections: [] },
@@ -422,6 +609,8 @@ describe("extractCorrections", () => {
       reinforced: 0,
       contradictions: 0,
       promoted: 0,
+      outOfScopeReinforcementsSkipped: 0,
+      unknownRuleReinforcementsSkipped: 0,
       consolidationNeeded: false,
     });
     // chatTyped should not have been called

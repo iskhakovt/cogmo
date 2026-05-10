@@ -1,0 +1,1 @@
+ALTER TABLE "profile_classes" ADD COLUMN "restricted" boolean DEFAULT false NOT NULL;

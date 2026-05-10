@@ -168,6 +168,12 @@ export const customCompartments = pgTable(
  * outlive the profiles that reference them (so memory tags don't dangle
  * when a profile is deleted and recreated). `description` is human-facing
  * documentation only — the LLM classifier never reads it.
+ *
+ * `restricted` flips recall to fail-closed for this class: memories tagged
+ * with a restricted class are invisible to any profile whose
+ * `memory_scope.profileClasses` doesn't explicitly include the class (and
+ * which doesn't speak as the class itself). Default `false` preserves
+ * today's open-by-default behaviour for unmarked classes.
  */
 export const profileClasses = pgTable(
   "profile_classes",
@@ -178,6 +184,7 @@ export const profileClasses = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description").notNull(),
+    restricted: boolean("restricted").notNull().default(false),
     createdAt: ts(),
   },
   (t) => [unique("uq_profile_classes_user_name").on(t.userId, t.name)],
