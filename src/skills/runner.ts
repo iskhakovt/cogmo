@@ -310,6 +310,16 @@ export class SkillRunnerImpl implements SkillRunner {
   #pool: SysboxWorkerPool | undefined;
   #poolPromise: Promise<SysboxWorkerPool> | undefined;
   #poolOptions: SkillRunnerOptions["poolOptions"];
+  /**
+   * Set in `shutdown()` to block any subsequent `#ensurePool` from
+   * spinning up a new pool — without it, an `invoke()` racing in after
+   * shutdown completes would lazy-create a pool that no shutdown hook
+   * is left to dispose. Production wiring closes the runner on
+   * SIGTERM and the process exits, but the post-shutdown invoke is a
+   * real test surface and a real edge in any future graceful-restart
+   * path.
+   */
+  #disposed = false;
   #ajv: Ajv;
   /**
    * Parsed manifest + compiled validator cache, keyed by `<name>@<sha>`. A new
@@ -349,6 +359,9 @@ export class SkillRunnerImpl implements SkillRunner {
    * Daytona blip from poisoning the runner permanently.
    */
   async #ensurePool(): Promise<SysboxWorkerPool> {
+    if (this.#disposed) {
+      throw new Error("SkillRunnerImpl: tier-2 pool requested after shutdown");
+    }
     if (this.#pool) return this.#pool;
     if (this.#poolPromise) return this.#poolPromise;
     const sandbox = this.#sandbox;
@@ -357,22 +370,20 @@ export class SkillRunnerImpl implements SkillRunner {
       // guard exists only to narrow `sandbox` for the `create` call.
       throw new Error("invariant: #ensurePool called without a sandbox");
     }
-    this.#poolPromise = SysboxWorkerPool.create({
-      sandbox,
-      image: this.#tier2Image,
-      ...DEFAULT_POOL_OPTIONS,
-      ...this.#poolOptions,
-    }).then(
-      (pool) => {
+    this.#poolPromise = (async () => {
+      try {
+        const pool = await SysboxWorkerPool.create({
+          sandbox,
+          image: this.#tier2Image,
+          ...DEFAULT_POOL_OPTIONS,
+          ...this.#poolOptions,
+        });
         this.#pool = pool;
-        this.#poolPromise = undefined;
         return pool;
-      },
-      (err) => {
+      } finally {
         this.#poolPromise = undefined;
-        throw err;
-      },
-    );
+      }
+    })();
     return this.#poolPromise;
   }
 
@@ -380,10 +391,19 @@ export class SkillRunnerImpl implements SkillRunner {
    * Tear down the warm pool. Idempotent. Bootstrap callers wire this into
    * graceful-shutdown when they add SIGTERM handling. Leaves tier-1 (Pyodide)
    * untouched — those workers are short-lived per-call and self-clean.
+   *
+   * After `shutdown()` returns, any `invoke()` that hits the tier-2
+   * path throws `tier-2 pool requested after shutdown` — the
+   * `#disposed` flag short-circuits `#ensurePool` so a post-shutdown
+   * invoke can't lazy-create a fresh pool that nobody's left to clean up.
    */
   async shutdown(): Promise<void> {
+    this.#disposed = true;
     // Wait out an in-flight init before disposing — otherwise a
     // newly-spawned pool could outlive shutdown and leak its workers.
+    // Setting `#disposed` BEFORE the await also blocks any racing
+    // `invoke()` from kicking off a fresh `#ensurePool` after this
+    // point.
     if (this.#poolPromise) {
       await this.#poolPromise.catch(() => undefined);
     }
