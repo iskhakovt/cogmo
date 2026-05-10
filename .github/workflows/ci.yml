@@ -225,11 +225,16 @@ jobs:
     # Run on every push to main (release-gate of last resort) and on PRs
     # only when explicitly opted in via the `e2e` label. PR-push runs are
     # the bulk of e2e cost (~3 min each, ~45 PR pushes/day), and most PRs
-    # don't touch app code paths e2e exercises. Label is sticky across
-    # subsequent pushes to the same PR — once you opt in, the next push
-    # also runs e2e. The `labeled` activity type on `on.pull_request`
-    # above means adding the label retriggers the workflow on the
-    # current head SHA without a no-op commit.
+    # don't touch app code paths e2e exercises. The `labeled` activity
+    # type on `on.pull_request` above means adding the label retriggers
+    # the workflow on the current head SHA without a no-op commit.
+    #
+    # Label lifecycle: a passing run auto-removes the label (see the
+    # final step below) so the next push doesn't re-run e2e until you
+    # opt in again. A failing run leaves the label in place — the gate
+    # stays sticky until at least one pass on the current change set.
+    # `unlabeled` is intentionally absent from the workflow's activity
+    # types, so the auto-removal doesn't fire another run.
     if: |
       needs.changes.outputs.code == 'true' && (
         github.event_name == 'push' ||
@@ -240,6 +245,7 @@ jobs:
     permissions:
       contents: read
       checks: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
@@ -289,6 +295,18 @@ jobs:
           name: E2E Test Results
           path: test-results/junit.xml
           reporter: java-junit
+
+      # Pass-only label cleanup — see the lifecycle comment on the e2e
+      # `if:` above. Skips on push (no PR to edit) and when the label
+      # isn't present (push-triggered e2e on main). `success()` ensures
+      # we only clear the gate when the run was actually green.
+      - name: Remove e2e label after green run
+        if: |
+          success() && github.event_name == 'pull_request' &&
+          contains(github.event.pull_request.labels.*.name, 'e2e')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr edit ${{ github.event.pull_request.number }} --remove-label e2e
 
   # Single required-status check fed into branch protection. Aggregates
   # every other job: success when all needs succeeded OR were legitimately
