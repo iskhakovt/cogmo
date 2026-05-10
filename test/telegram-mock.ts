@@ -59,6 +59,8 @@ export interface TelegramMockServer {
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
+    // http IncomingMessage chunks are Buffer | string; the typeof guard above
+    // narrows the alternative branch to Buffer.
     chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer));
   }
   return Buffer.concat(chunks).toString("utf-8");
@@ -118,10 +120,15 @@ async function handle(
 
   // Throttle long-poll loop: grammY's `bot.start()` re-issues `getUpdates`
   // immediately after each empty response, which spins a tight CPU loop in
-  // tests. A short delay gives the loop a sane cadence without slowing
-  // anything else (`getMe`, `setMyCommands`, etc. stay instant).
+  // tests. Honour the `?timeout=` query param grammY sends (default 30s) but
+  // cap it to 1s so teardown never blocks waiting for a real long-poll, and
+  // fall back to a small constant when no timeout is provided.
   if (method === "getUpdates") {
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const u = new URL(req.url ?? "", "http://localhost");
+    const requested = Number(u.searchParams.get("timeout") ?? 0);
+    const seconds = Number.isFinite(requested) ? Math.min(Math.max(requested, 0), 1) : 0;
+    const delayMs = seconds > 0 ? seconds * 1000 : 100;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 
   respond(res, 200, { ok: true, result: cannedResult(method) });
@@ -145,6 +152,8 @@ export async function startTelegramMockServer(): Promise<TelegramMockServer> {
     // server is unreachable from outside the host.
     server.listen(0, "127.0.0.1", resolve);
   });
+  // Post-listen, `server.address()` is `AddressInfo` — the `string | null`
+  // alternatives are pre-listen / unix-socket cases that don't apply here.
   const addr = server.address() as AddressInfo;
   const url = `http://127.0.0.1:${addr.port}`;
 
@@ -152,6 +161,11 @@ export async function startTelegramMockServer(): Promise<TelegramMockServer> {
     url,
     calls,
     async stop() {
+      // grammY's `bot.start()` keeps a long-poll `getUpdates` request in
+      // flight; without `closeAllConnections` (Node 18.2+) `server.close`
+      // would wait for it to drain and the test process would hang at
+      // teardown.
+      server.closeAllConnections();
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
       });
