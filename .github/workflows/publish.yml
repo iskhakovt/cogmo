@@ -57,7 +57,9 @@ jobs:
       - id: version
         run: |
           set -euo pipefail
-          echo "version=$(pipx run dunamai==1.26.1 from any --style semver)" >> "$GITHUB_OUTPUT"
+          version=$(pipx run dunamai==1.26.1 from any --style semver)
+          echo "Resolved version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   cogmo:
     name: Build cogmo (${{ matrix.slug }})
@@ -114,15 +116,9 @@ jobs:
 
       - name: Export digest
         run: |
-          set -euo pipefail
-          DIGEST=$(jq -r '.cogmo."containerimage.digest"' "${{ steps.bake.outputs.metadata-file }}")
-          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
-            echo "::error::no digest found in bake metadata"
-            cat "${{ steps.bake.outputs.metadata-file }}"
-            exit 1
-          fi
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${DIGEST#sha256:}"
+          digest="${{ fromJSON(steps.bake.outputs.metadata).cogmo['containerimage.digest'] }}"
+          touch "/tmp/digests/${digest#sha256:}"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
