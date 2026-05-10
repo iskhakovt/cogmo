@@ -338,6 +338,75 @@ describe("OpenAICompatibleProvider", () => {
       const args = firstCreateArgs();
       expect(args.stream).toBe(true);
     });
+
+    // OpenAI-compatible upstreams surface stream failures one of two ways:
+    // an `APIError`-shaped object before the first chunk (5xx with body) or
+    // an `APIConnectionError`-shaped throw while iterating chunks (no
+    // `.status`). Both cases must (a) reject the iterator, (b) reject the
+    // `response` promise, and (c) propagate the original shape so
+    // `isRetriableProviderError` (which keys off `.status` presence) makes
+    // the right call upstream of `FallbackLlmProvider`.
+    it("propagates a pre-stream 502 with a numeric status on both events and response", async () => {
+      const provider = createProvider();
+      const upstream = Object.assign(new Error("Bad gateway"), {
+        name: "APIError",
+        status: 502,
+      });
+      mockCreate.mockRejectedValueOnce(upstream);
+
+      const { events, response } = provider.chatStream({
+        model: "anthropic/claude-sonnet-4",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      const iter = events[Symbol.asyncIterator]();
+      await expect(iter.next()).rejects.toMatchObject({ status: 502 });
+      await expect(response).rejects.toMatchObject({ status: 502 });
+    });
+
+    it("propagates a mid-stream connection drop on both events and response", async () => {
+      const provider = createProvider();
+      const drop = Object.assign(new Error("connection reset"), {
+        name: "APIConnectionError",
+      });
+
+      // Yield one delta, then explode — mirrors the chunked-SSE pattern
+      // where HTTP 200 starts the stream but the connection aborts
+      // mid-flight (network hiccup or upstream gateway closing the socket).
+      mockCreate.mockResolvedValueOnce({
+        [Symbol.asyncIterator]() {
+          let i = 0;
+          return {
+            async next(): Promise<IteratorResult<unknown>> {
+              if (i++ === 0) {
+                return {
+                  value: {
+                    model: "m",
+                    choices: [{ delta: { content: "partial" }, finish_reason: null }],
+                    usage: null,
+                  },
+                  done: false,
+                };
+              }
+              throw drop;
+            },
+          };
+        },
+      });
+
+      const { events, response } = provider.chatStream({
+        model: "m",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      const iter = events[Symbol.asyncIterator]();
+      const first = await iter.next();
+      expect(first.value).toEqual({ type: "text_delta", text: "partial" });
+      await expect(iter.next()).rejects.toBe(drop);
+      await expect(response).rejects.toBe(drop);
+    });
   });
 
   describe("prompt caching", () => {

@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "What is the capital of France? Answer with just the city name."
+      },
+      "response": {
+        "content": "Paris",
+        "model": "x-ai/grok-4.3-20260430",
+        "usage": {
+          "prompt_tokens": 157,
+          "completion_tokens": 82,
+          "total_tokens": 239
+        }
+      }
+    }
+  ]
+}
