@@ -12,8 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import type { DaytonaSessionState, SessionSpec } from "../index.js";
-import { FakeDaytonaSandboxClient } from "./fake.js";
+import type { DaytonaSessionState, SessionSpec } from "../sandbox/index.js";
+import { FakeDaytonaSandboxClient } from "./daytona-sandbox-fake.js";
 
 const execFileP = promisify(execFile);
 

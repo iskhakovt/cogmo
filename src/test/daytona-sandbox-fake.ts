@@ -34,7 +34,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { promisify } from "node:util";
-import { logger } from "../../logger.js";
+import { logger } from "../logger.js";
 import {
   type DaytonaSessionState,
   DaytonaSessionStateSchema,
@@ -45,7 +45,7 @@ import {
   type SandboxClient,
   type SandboxSession,
   type SessionSpec,
-} from "../index.js";
+} from "../sandbox/index.js";
 
 const execFileP = promisify(execFile);
 const log = logger.child({ component: "sandbox.daytona.fake" });

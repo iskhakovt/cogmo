@@ -36,7 +36,6 @@ import { GenericContainer, type StartedTestContainer, Wait } from "testcontainer
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import type { StepRun } from "../../inngest/index.js";
-import { FakeDaytonaSandboxClient } from "../../sandbox/daytona/fake.js";
 import {
   type ExecStreamingHandle,
   type LocalDockerSessionState,
@@ -52,6 +51,7 @@ import {
 } from "../../secrets/github.js";
 import { generateSshKeyPair } from "../../secrets/ssh-keygen.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { FakeDaytonaSandboxClient } from "../../test/daytona-sandbox-fake.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { type CodingBackend, DrizzleCodingStore } from "./store/index.js";
 import { runCodingVerify, type VerifyOrchestratorDeps } from "./verify-orchestrator.js";
