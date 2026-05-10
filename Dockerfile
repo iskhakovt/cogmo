@@ -19,10 +19,16 @@ WORKDIR /app
 
 # git is required at runtime by `bootstrapSkillsRepo` (`git init --bare`) and
 # every operation in `src/skills/git-ops.ts` (rev-parse, show, update-ref,
-# merge-base). The `node` user (UID 1000) ships in `node:24-slim`; bind-mounted
-# state directories from the host must be chowned 1000:1000 to match.
+# merge-base). `ca-certificates` is required for `git clone` over HTTPS in
+# `transport.repos.cloneAndAdd` (otherwise: "server certificate verification
+# failed. CAfile: none"); `openssh-client` is required for `git@host:` SSH
+# remotes in the same path. The `node` user (UID 1000) ships in `node:24-slim`;
+# bind-mounted state directories from the host must be chowned 1000:1000 to match.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git \
+ && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    openssh-client \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /var/lib/cogmo/skills /var/lib/cogmo/repos /var/lib/cogmo/worktrees /var/lib/cogmo/askpass \
  && git init --bare /var/lib/cogmo/skills \
