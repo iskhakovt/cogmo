@@ -385,7 +385,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
  */
 export async function bootstrapSandbox(
   core: CoreDeps,
-  opts: { sandboxClientOverride?: SandboxClient } = {},
+  opts: BootstrapOptions = {},
 ): Promise<SandboxDeps> {
   // Test-only injection — skips env-driven backend selection. Treated as
   // coding-capable (the orchestrator branches on `capabilities`, not
@@ -493,6 +493,10 @@ export async function bootstrapSandbox(
       ...(env.DAYTONA_API_URL && { apiUrl: env.DAYTONA_API_URL }),
       ...(env.DAYTONA_ORGANIZATION_ID && { organizationId: env.DAYTONA_ORGANIZATION_ID }),
     });
+    const { orphansReaped } = await sandbox.reconcileCrashedInstances(sandboxInstanceId);
+    if (orphansReaped > 0) {
+      logger.warn({ orphansReaped }, "reaped orphan sandboxes from prior instance(s)");
+    }
     logger.info(
       {
         instanceId: sandboxInstanceId,
@@ -918,10 +922,7 @@ export async function bootstrapRuntime(
  */
 export async function bootstrap(opts: BootstrapOptions = {}) {
   const core = await bootstrapCore(opts);
-  const sandbox = await bootstrapSandbox(
-    core,
-    opts.sandboxClientOverride ? { sandboxClientOverride: opts.sandboxClientOverride } : {},
-  );
+  const sandbox = await bootstrapSandbox(core, opts);
   const { skillRunner } = await bootstrapSkillRunner(core, sandbox);
   const runtime = await bootstrapRuntime(core, sandbox, skillRunner, opts);
 
