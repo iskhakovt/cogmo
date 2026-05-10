@@ -299,13 +299,16 @@ export class SkillRunnerImpl implements SkillRunner {
   #sandbox: SandboxClient | undefined;
   #tier2Image: string;
   /**
-   * Lazily-created warm pool over `#sandbox`. `undefined` until either the
-   * `create()` factory eagerly initialises it (production wiring with
-   * sandbox + image) or it's left `undefined` because no sandbox is wired
-   * (tier-1-only deployments). `invoke()` checks for it before routing a
-   * tier-container task.
+   * Lazily-created warm pool over `#sandbox`. Created on first tier-2
+   * invocation, not at boot — keeps cogmo serve startup independent of
+   * sandbox availability so an unreachable Daytona doesn't fail boot
+   * for deployments that may never invoke a tier-2 skill. Concurrent
+   * first-callers share `#poolPromise`; on init failure the promise
+   * clears so the next caller retries (no permanent poisoning from a
+   * transient Daytona blip).
    */
   #pool: SysboxWorkerPool | undefined;
+  #poolPromise: Promise<SysboxWorkerPool> | undefined;
   #poolOptions: SkillRunnerOptions["poolOptions"];
   #ajv: Ajv;
   /**
@@ -333,22 +336,44 @@ export class SkillRunnerImpl implements SkillRunner {
   }
 
   static async create(opts: SkillRunnerOptions): Promise<SkillRunnerImpl> {
-    const runner = new SkillRunnerImpl(opts);
-    if (opts.sandbox) {
-      // Eagerly bring the warm pool up so the first invocation hits a hot
-      // worker. Spawn failures here surface at the boot site (clear signal
-      // for misconfig — bad image, sandbox unreachable) instead of being
-      // deferred to the first user-driven invocation. If a deployment has
-      // sandbox wired but never invokes a tier-container skill, the always-
-      // warm worker is one container's worth of memory — acceptable.
-      runner.#pool = await SysboxWorkerPool.create({
-        sandbox: opts.sandbox,
-        image: opts.tier2Image ?? DEFAULT_TIER2_IMAGE,
-        ...DEFAULT_POOL_OPTIONS,
-        ...opts.poolOptions,
-      });
+    // Pool init is deferred to first tier-2 invocation — cogmo serve
+    // boots independently of sandbox availability. See `#ensurePool`.
+    return new SkillRunnerImpl(opts);
+  }
+
+  /**
+   * Lazily construct the tier-2 worker pool, dedup'ing concurrent
+   * first-callers behind one in-flight promise. On success the pool
+   * is cached on `#pool` and the promise is cleared. On failure the
+   * promise is cleared so the next caller retries — keeps a transient
+   * Daytona blip from poisoning the runner permanently.
+   */
+  async #ensurePool(): Promise<SysboxWorkerPool> {
+    if (this.#pool) return this.#pool;
+    if (this.#poolPromise) return this.#poolPromise;
+    const sandbox = this.#sandbox;
+    if (!sandbox) {
+      // Caller paths gate on `#sandbox` before reaching here; this
+      // guard exists only to narrow `sandbox` for the `create` call.
+      throw new Error("invariant: #ensurePool called without a sandbox");
     }
-    return runner;
+    this.#poolPromise = SysboxWorkerPool.create({
+      sandbox,
+      image: this.#tier2Image,
+      ...DEFAULT_POOL_OPTIONS,
+      ...this.#poolOptions,
+    }).then(
+      (pool) => {
+        this.#pool = pool;
+        this.#poolPromise = undefined;
+        return pool;
+      },
+      (err) => {
+        this.#poolPromise = undefined;
+        throw err;
+      },
+    );
+    return this.#poolPromise;
   }
 
   /**
@@ -357,6 +382,11 @@ export class SkillRunnerImpl implements SkillRunner {
    * untouched — those workers are short-lived per-call and self-clean.
    */
   async shutdown(): Promise<void> {
+    // Wait out an in-flight init before disposing — otherwise a
+    // newly-spawned pool could outlive shutdown and leak its workers.
+    if (this.#poolPromise) {
+      await this.#poolPromise.catch(() => undefined);
+    }
     if (this.#pool) {
       await this.#pool.dispose();
       this.#pool = undefined;
@@ -893,12 +923,11 @@ export class SkillRunnerImpl implements SkillRunner {
         });
         break;
       case "container": {
-        const pool = this.#pool;
         const sandbox = this.#sandbox;
-        if (!pool || !sandbox) {
-          // Can't reach this — the early `tier === "container" && !sandbox`
-          // throw above caught it (pool is created iff sandbox is wired).
-          throw new Error("invariant: pool unset on container tier path");
+        if (!sandbox) {
+          // Caught above by `tier === "container" && !sandbox`; this
+          // guard narrows for the call below.
+          throw new Error("invariant: sandbox unset on container tier path");
         }
         // Per-skill resource overrides are honoured via a one-shot
         // container — the pool runs every worker at the default resource
@@ -922,6 +951,7 @@ export class SkillRunnerImpl implements SkillRunner {
             ctxHandler,
           });
         } else {
+          const pool = await this.#ensurePool();
           result = await pool.invoke({
             taskId: run.id,
             skillName: skill.name,
