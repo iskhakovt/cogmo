@@ -7,6 +7,7 @@ import {
   SandboxState,
 } from "@daytonaio/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { expectDefined } from "../../test/assertions.js";
 import type { SessionSpec } from "../index.js";
 import { DaytonaSandboxClient } from "./client.js";
 
@@ -481,6 +482,50 @@ describe("DaytonaSandboxClient", () => {
       const client = await makeClient();
       await client.tryResumeByTaskId("t1");
       expect(sb.start).toHaveBeenCalled();
+    });
+
+    it("survives two concurrent calls for the same taskId (both return, both start() tolerated)", async () => {
+      // Race window: get-or-create-session retry collides with the
+      // reaper's reconcile pass, or two orchestrator step.run replays
+      // fire on the same taskId. Daytona's `list()` returns handles
+      // pointing at the same server-side sandbox; both callers see
+      // `state === STOPPED` in their snapshot before either start()
+      // flips it server-side. The SDK treats start() on an
+      // already-started sandbox as a no-op — this test pins that
+      // contract from Cogmo's side and exercises the wrap path
+      // returning consistent state both times.
+      const sb = fakeSandbox({ id: "sb-stopped", state: SandboxState.STOPPED });
+      // Override the default start() with a microtask-deferred body so
+      // both concurrent callers see `state === STOPPED` on their list
+      // snapshot before either start() flips it. Mirrors real SDK
+      // semantics: `list()` returns a stale view, `start()` mutates
+      // server-side state asynchronously.
+      sb.start = vi.fn(async () => {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        sb.state = SandboxState.STARTED;
+      });
+      daytonaCalls.list.mockResolvedValue({
+        items: [sb],
+        totalPages: 1,
+        currentPage: 1,
+        totalItems: 1,
+        itemsPerPage: 50,
+      });
+      const client = await makeClient();
+      const [aMaybe, bMaybe] = await Promise.all([
+        client.tryResumeByTaskId("t1"),
+        client.tryResumeByTaskId("t1"),
+      ]);
+      const a = expectDefined(aMaybe, "first concurrent tryResumeByTaskId");
+      const b = expectDefined(bMaybe, "second concurrent tryResumeByTaskId");
+      expect(a.state.sandboxId).toBe("sb-stopped");
+      expect(b.state.sandboxId).toBe("sb-stopped");
+      // Both callers saw STOPPED in their copy of the list result and
+      // each fired their own start(); the second is a no-op upstream
+      // but the client doesn't dedupe, by design — list() snapshots
+      // are stale by the time we act on them and re-checking would
+      // burn another HTTP roundtrip with no upside.
+      expect(sb.start).toHaveBeenCalledTimes(2);
     });
   });
 

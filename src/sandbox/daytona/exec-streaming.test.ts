@@ -142,6 +142,27 @@ describe("startExecStreaming", () => {
     expect(command).toContain("env 'GIT_ASKPASS'='/helper'");
   });
 
+  it("emits no env prefix when env is an empty record", async () => {
+    // Defends a subtle inversion: an `env: {}` opt arriving from a
+    // non-env-aware caller must NOT synthesize a bare `env exec ...`
+    // (which on most coreutils strips the inherited env, breaking
+    // PATH-dependent commands). Builder gates the prefix on
+    // `Object.keys(opts.env).length > 0` — this regression test
+    // pins the gate.
+    const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
+    await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["pwd"],
+      opts: { env: {} },
+    }).then((h) => h.wait());
+    const exec = vi.mocked(proc.executeSessionCommand);
+    const command = exec.mock.calls[0]?.[1].command;
+    // The whole command should be `exec 'pwd'` — no leading `env `,
+    // no leading `cd ` (workingDir omitted).
+    expect(command).toBe("exec 'pwd'");
+  });
+
   it("dispose() calls deleteSession and rejects wait() with DisposedError", async () => {
     // Per the `ExecStreamingHandle` contract, `wait()` must REJECT
     // (not resolve with a sentinel exit code) after `dispose()` so
@@ -204,6 +225,28 @@ describe("startExecStreaming", () => {
     // No session created — the rejection must fire before the
     // `createSession` call.
     expect(proc.createSession).not.toHaveBeenCalled();
+  });
+
+  it("rejects wait() when getSessionCommand throws post-WS-resolve (network blip on exit-code fetch)", async () => {
+    // Race window: WS closes naturally, then the follow-up
+    // `getSessionCommand` HTTP fetch fails (transient daemon error,
+    // rate limit, network drop). The natural-exit branch in
+    // exec-streaming.ts catches the throw, runs `cleanupSession`, and
+    // forwards the error to wait()'s reject — consumers must NOT see
+    // a phantom exitCode=0.
+    const proc = fakeProcess({ wsResolve: {} });
+    const fetchErr = new Error("503 Service Unavailable");
+    vi.mocked(proc.getSessionCommand).mockRejectedValue(fetchErr);
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: {},
+    });
+    await expect(handle.wait()).rejects.toBe(fetchErr);
+    // Session cleanup must still fire on this path so per-call
+    // sessions don't leak when the exit-code fetch fails.
+    expect(proc.deleteSession).toHaveBeenCalled();
   });
 
   it("rejects wait() when natural-exit returns no exit code (don't mask 'unknown' as 0)", async () => {
