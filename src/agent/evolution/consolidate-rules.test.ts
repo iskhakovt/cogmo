@@ -241,32 +241,44 @@ describe("consolidateRules", () => {
   });
 
   it("consolidates global and channel-scoped rules independently in one fire", async () => {
-    // Two scopes (global + telegram), each with 2 mergeable rules.
-    // `consolidateRules` iterates `Object.entries` of the grouped record;
-    // the global key ("") sorts before "telegram", so the global LLM
-    // response is returned first.
-    const deps = mockConsolidationDeps(
-      [
+    // The two scopes are consolidated as independent LLM calls, each
+    // emitting a `replaceRules` write that preserves its scope's
+    // `channelType`. Order between scopes is not part of the contract;
+    // the chat mock dispatches by which rule IDs appear in the prompt
+    // so iteration order can change without breaking the test.
+    const globalResponse = {
+      groups: [
         {
-          groups: [
-            {
-              originalIds: ["g1", "g2"],
-              mergedRule: "Be concise globally",
-              category: "style",
-            },
-          ],
-        },
-        {
-          groups: [
-            {
-              originalIds: ["t1", "t2"],
-              mergedRule: "Avoid markdown headings on Telegram",
-              category: "style",
-            },
-          ],
+          originalIds: ["g1", "g2"],
+          mergedRule: "Be concise globally",
+          category: "style",
         },
       ],
-      {
+    };
+    const telegramResponse = {
+      groups: [
+        {
+          originalIds: ["t1", "t2"],
+          mergedRule: "Avoid markdown headings on Telegram",
+          category: "style",
+        },
+      ],
+    };
+    const chatMock = vi.fn(async ({ system }: { system: string }) => {
+      const response = system.includes("[g1]") ? globalResponse : telegramResponse;
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(response) }],
+        stopReason: "end_turn" as const,
+        model: "mock",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      };
+    });
+    const provider = mockProvider({ chat: chatMock });
+    const deps: ConsolidationDeps = {
+      provider,
+      model: "test-model",
+      runInTx: fakeRunInTx,
+      store: {
         getCorrections: vi.fn().mockResolvedValue([
           {
             id: "g1",
@@ -301,8 +313,9 @@ describe("consolidateRules", () => {
             channelType: "telegram",
           },
         ] satisfies CorrectionRow[]),
+        replaceRules: vi.fn().mockResolvedValue({ id: "new-rule-1" }),
       },
-    );
+    };
 
     const result = await consolidateRules("profile-1", deps);
 
@@ -311,31 +324,39 @@ describe("consolidateRules", () => {
     expect(deps.provider.chat).toHaveBeenCalledTimes(2);
     expect(deps.store.replaceRules).toHaveBeenCalledTimes(2);
 
-    // Global merge call — channelType: null
-    expect(deps.store.replaceRules).toHaveBeenNthCalledWith(1, expect.anything(), {
-      oldIds: ["g1", "g2"],
-      newRule: {
-        rule: "Be concise globally",
-        category: "style",
-        profileId: null,
-        channelType: null,
-        priority: 100,
-        observationCount: 5,
-      },
-    });
-
-    // Telegram merge call — channelType: "telegram"
-    expect(deps.store.replaceRules).toHaveBeenNthCalledWith(2, expect.anything(), {
-      oldIds: ["t1", "t2"],
-      newRule: {
-        rule: "Avoid markdown headings on Telegram",
-        category: "style",
-        profileId: null,
-        channelType: "telegram",
-        priority: 100,
-        observationCount: 5,
-      },
-    });
+    const replaceCalls = vi.mocked(deps.store.replaceRules).mock.calls;
+    expect(replaceCalls).toEqual(
+      expect.arrayContaining([
+        [
+          expect.anything(),
+          {
+            oldIds: ["g1", "g2"],
+            newRule: {
+              rule: "Be concise globally",
+              category: "style",
+              profileId: null,
+              channelType: null,
+              priority: 100,
+              observationCount: 5,
+            },
+          },
+        ],
+        [
+          expect.anything(),
+          {
+            oldIds: ["t1", "t2"],
+            newRule: {
+              rule: "Avoid markdown headings on Telegram",
+              category: "style",
+              profileId: null,
+              channelType: "telegram",
+              priority: 100,
+              observationCount: 5,
+            },
+          },
+        ],
+      ]),
+    );
   });
 
   it("does not call LLM for a single-rule channel group", async () => {
