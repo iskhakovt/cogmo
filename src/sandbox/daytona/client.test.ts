@@ -7,6 +7,7 @@ import {
   SandboxState,
 } from "@daytonaio/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { expectDefined } from "../../test/assertions.js";
 import type { SessionSpec } from "../index.js";
 import { DaytonaSandboxClient } from "./client.js";
 
@@ -486,9 +487,10 @@ describe("DaytonaSandboxClient", () => {
     it("survives two concurrent calls for the same taskId (both return, both start() tolerated)", async () => {
       // Race window: get-or-create-session retry collides with the
       // reaper's reconcile pass, or two orchestrator step.run replays
-      // fire on the same taskId. Daytona's `list()` returns the same
-      // SDK handle to both callers; both walk into the STOPPED branch
-      // and call `sandbox.start()`. The SDK treats start() on an
+      // fire on the same taskId. Daytona's `list()` returns handles
+      // pointing at the same server-side sandbox; both callers see
+      // `state === STOPPED` in their snapshot before either start()
+      // flips it server-side. The SDK treats start() on an
       // already-started sandbox as a no-op — this test pins that
       // contract from Cogmo's side and exercises the wrap path
       // returning consistent state both times.
@@ -510,12 +512,14 @@ describe("DaytonaSandboxClient", () => {
         itemsPerPage: 50,
       });
       const client = await makeClient();
-      const [a, b] = await Promise.all([
+      const [aMaybe, bMaybe] = await Promise.all([
         client.tryResumeByTaskId("t1"),
         client.tryResumeByTaskId("t1"),
       ]);
-      expect(a?.state.sandboxId).toBe("sb-stopped");
-      expect(b?.state.sandboxId).toBe("sb-stopped");
+      const a = expectDefined(aMaybe, "first concurrent tryResumeByTaskId");
+      const b = expectDefined(bMaybe, "second concurrent tryResumeByTaskId");
+      expect(a.state.sandboxId).toBe("sb-stopped");
+      expect(b.state.sandboxId).toBe("sb-stopped");
       // Both callers saw STOPPED in their copy of the list result and
       // each fired their own start(); the second is a no-op upstream
       // but the client doesn't dedupe, by design — list() snapshots
