@@ -125,6 +125,13 @@ export interface ProfileClass {
   userId: string;
   name: string;
   description: string;
+  /**
+   * When true, memories tagged `profile_class:<name>` are hidden from any
+   * profile that doesn't explicitly opt the class into its
+   * `memory_scope.profileClasses` (and that doesn't speak as the class
+   * itself). Recall fail-closed for sensitive classes.
+   */
+  restricted: boolean;
   createdAt: Date;
 }
 
@@ -363,6 +370,20 @@ export interface AgentStore {
    * `{ deleted: false }` if no row matches; `{ deleted: true }` on success.
    */
   deleteProfileClass(tx: Transaction, userId: string, name: string): Promise<{ deleted: boolean }>;
+
+  /**
+   * Flip the `restricted` flag on a profile class. Returns
+   * `{ updated: false }` when no row matches the name (idempotent absence).
+   * Independent of whether any profile currently references the class:
+   * marking restricted while in use is the common case (an existing
+   * `intimate` class becoming sensitive after the fact).
+   */
+  setProfileClassRestricted(
+    tx: Transaction,
+    userId: string,
+    name: string,
+    restricted: boolean,
+  ): Promise<{ updated: boolean }>;
 
   /**
    * Set or clear a profile's `profile_class`. `className: null` clears it.
@@ -1068,6 +1089,7 @@ export class DrizzleAgentStore implements AgentStore {
         userId: profileClasses.userId,
         name: profileClasses.name,
         description: profileClasses.description,
+        restricted: profileClasses.restricted,
         createdAt: profileClasses.createdAt,
       })
       .from(profileClasses)
@@ -1090,10 +1112,25 @@ export class DrizzleAgentStore implements AgentStore {
           userId: profileClasses.userId,
           name: profileClasses.name,
           description: profileClasses.description,
+          restricted: profileClasses.restricted,
           createdAt: profileClasses.createdAt,
         }),
       );
     });
+  }
+
+  async setProfileClassRestricted(
+    tx: Transaction,
+    userId: string,
+    name: string,
+    restricted: boolean,
+  ): Promise<{ updated: boolean }> {
+    const updated = await tx
+      .update(profileClasses)
+      .set({ restricted })
+      .where(and(eq(profileClasses.userId, userId), eq(profileClasses.name, name)))
+      .returning({ id: profileClasses.id });
+    return { updated: updated.length > 0 };
   }
 
   async deleteProfileClass(

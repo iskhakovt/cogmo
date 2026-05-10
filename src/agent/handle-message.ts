@@ -450,6 +450,24 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // profile.model changes mid-turn.
       const profile = profileForVoice;
 
+      // Load the user's restricted profile-class set so the scoped service
+      // can fold in the fail-closed NOT leaf. Keyed on the conversation
+      // user (the bank owner), not `profile.userId` — an org profile
+      // (`profile.userId === null`) speaks for the conversation user, and
+      // restricted-class semantics follow the user's own registry. One
+      // extra round-trip per turn; table is small and indexed on user_id.
+      //
+      // FUTURE: deployments that have never used class restriction pay
+      // for this round-trip every turn for nothing. A per-user cache
+      // (invalidated by `setProfileClassRestricted` /
+      // `createProfileClass` / `deleteProfileClass`) would close that
+      // gap, but it's strictly more code than the round-trip costs at
+      // single-user scale — revisit when telemetry shows the read taking
+      // a meaningful slice of turn latency.
+      const restrictedClassNames = await deps
+        .runInTx((tx) => agentStore.listProfileClasses(tx, userId))
+        .then((classes) => classes.filter((c) => c.restricted).map((c) => c.name));
+
       // Build scoped service for this turn — must precede auto-recall so the
       // recall call goes through the same `memoryScope` ACL filter every other
       // memory operation does.
@@ -471,6 +489,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         memory,
         userId,
         profile?.memoryScope ?? null,
+        profile?.profileClass ?? null,
+        restrictedClassNames,
         fileService,
         coreMemoryService,
         async (content, opts) => {

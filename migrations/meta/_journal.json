@@ -190,6 +190,13 @@
       "when": 1778354159237,
       "tag": "0026_backfill_worktree_assignment_type",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1778365826426,
+      "tag": "0027_military_grim_reaper",
+      "breakpoints": true
     }
   ]
 }

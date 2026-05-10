@@ -961,6 +961,7 @@ describe("createTransport", () => {
           userId: "user-1",
           name: "intimate",
           description: "for emotional / relationship topics",
+          restricted: false,
           createdAt: new Date("2026-04-16T12:00:00Z"),
         },
       ]);
@@ -1013,6 +1014,7 @@ describe("createTransport", () => {
         userId: "user-1",
         name: "intimate",
         description: "for emotional / relationship topics",
+        restricted: false,
         createdAt: new Date("2026-04-16T12:00:00Z"),
       });
       const agentStore = mockAgentStore({ createProfileClass });
@@ -1058,6 +1060,47 @@ describe("createTransport", () => {
       const res = await transport.profileClasses.delete("handle", "intimate");
       expect(res.isOk()).toBe(true);
       expect(deleteProfileClass).toHaveBeenCalledWith(expect.anything(), "user-1", "intimate");
+    });
+
+    it("setRestricted forwards (userId, name, restricted) and returns ok on success", async () => {
+      const setProfileClassRestricted = vi.fn().mockResolvedValue({ updated: true });
+      const agentStore = mockAgentStore({ setProfileClassRestricted });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profileClasses.setRestricted("handle", "intimate", true);
+      expect(res.isOk()).toBe(true);
+      expect(setProfileClassRestricted).toHaveBeenCalledWith(
+        expect.anything(),
+        "user-1",
+        "intimate",
+        true,
+      );
+    });
+
+    it("setRestricted returns profile_class_not_found when the row is absent", async () => {
+      const agentStore = mockAgentStore({
+        setProfileClassRestricted: vi.fn().mockResolvedValue({ updated: false }),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profileClasses.setRestricted("handle", "no-such", true);
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "profile_class_not_found",
+        name: "no-such",
+      });
+    });
+
+    it("setRestricted returns identity_rejected when resolveUser returns null", async () => {
+      const transportStore = mockTransportStore({
+        resolveUser: vi.fn().mockResolvedValue(null),
+      });
+      const setProfileClassRestricted = vi.fn();
+      const { transport } = setup({
+        transportStore,
+        agentStore: mockAgentStore({ setProfileClassRestricted }),
+      });
+      const res = await transport.profileClasses.setRestricted("handle", "intimate", true);
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+      // Identity check fires before the store call — agent store stays untouched.
+      expect(setProfileClassRestricted).not.toHaveBeenCalled();
     });
   });
 
