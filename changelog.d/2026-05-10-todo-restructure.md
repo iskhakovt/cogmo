@@ -1,0 +1,9 @@
+**`todo.md` reorganised, `Done` graveyard retired.**
+
+`Next` and `Later` are now subheaded by topic (Coding delegation & sandbox · Memory & evolution · Agent loop & context · Skills, voice & transport · Setup, secrets & config · Observability & operations · Tools & web · Code style & refactors · CLI & DX · Testing, fixtures & CI · Phase 2 ingestion · MCP B–D · Skills follow-ons · etc.) with priorities still sorting within each subsection. Cross-task dependencies that span sections are now flagged inline — *Heal-on-persist* ↔ *Cross-tier orphan tool_use repair test* (best landed together), *Phase 3b.2 follow-ups* fold into *Phase 3c Daytona hardening*, Gmail/Calendar ingestion agents depend on *MCP client Phase D*, and a near-duplicate flag on the two `cache_control as any` refactor entries.
+
+Three items moved to `Blocked` because they're pure external waits: *Switch Hindsight LLM to gpt-5-nano* (waits on Hindsight emitting `max_completion_tokens` for GPT-5), *Bump GHA sysbox e2e to ubuntu-26.04* (waits on Nestybox sysbox supporting 26.04 + GHA publishing the runner image), *Monitor RustFS as a long-term MinIO replacement* (waits on RustFS reaching 1.0).
+
+`Done` removed entirely — `changelog.d/` already holds the durable record per-PR, so the in-todo graveyard was redundant. `CLAUDE.md` Task Tracking table updated (four sections → three) and the completion instruction now reads "delete the entry from `todo.md`, the changelog fragment is the durable record"; `.claude/commands/next.md` updated in lockstep so `/next` stops trying to move completed items into a section that no longer exists.
+
+Side cleanup: split a previously-merged bullet on the old line 24 into two distinct items — *Speed up the unit-test tier* and *MODEL_REGISTRY validation on boot* — that had concatenated during an earlier edit.
