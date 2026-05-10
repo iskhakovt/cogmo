@@ -27,7 +27,6 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
 
 const TELEGRAM_PATH_RE = /^\/bot([^/]+)\/(?:test\/)?([^/?]+)/;
 
@@ -59,9 +58,7 @@ export interface TelegramMockServer {
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
-    // http IncomingMessage chunks are Buffer | string; the typeof guard above
-    // narrows the alternative branch to Buffer.
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer));
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks).toString("utf-8");
 }
@@ -152,9 +149,10 @@ export async function startTelegramMockServer(): Promise<TelegramMockServer> {
     // server is unreachable from outside the host.
     server.listen(0, "127.0.0.1", resolve);
   });
-  // Post-listen, `server.address()` is `AddressInfo` — the `string | null`
-  // alternatives are pre-listen / unix-socket cases that don't apply here.
-  const addr = server.address() as AddressInfo;
+  const addr = server.address();
+  if (addr === null || typeof addr === "string") {
+    throw new Error("telegram-mock: server.address() returned null or unix-socket path");
+  }
   const url = `http://127.0.0.1:${addr.port}`;
 
   return {
