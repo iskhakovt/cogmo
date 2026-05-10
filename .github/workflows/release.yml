@@ -41,6 +41,7 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
+      checks: read
     outputs:
       new_release_published: ${{ steps.semantic.outputs.published }}
     steps:
