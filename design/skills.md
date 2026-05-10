@@ -180,15 +180,17 @@ Between tasks, "state" means Python module-level globals, library internals (con
 
 `DEFAULT_POOL_OPTIONS` in `src/skills/worker-sysbox/pool.ts`:
 
-| Parameter | Starting value | Notes |
-|-|-|-|
-| `min` (always warm) | 1 | Handles interactive latency from day 1. |
-| `max` (hard cap) | 3 | Personal scale — concurrent skill invocations rarely exceed. |
-| Spawn-on-demand | up to `max` | When no idle worker is free, spawn one up to `max` rather than queuing. Personal-scale latency wins over backpressure economy. (The original "queue depth → spawn at 2" knob was kept simple at v1 — re-introduce if usage shows we're paying for over-spawn.) |
-| `recycleAfterTasks` | 500 tasks | Bounds container drift (tmpfs, log accumulation, allocator fragmentation). |
-| `recycleAfterMs` | 24 h | Wall-clock ceiling — catches workers that ran few tasks but sat warm forever. |
-| `idleShutdownMs` | 30 min | Idle workers above `min` get reaped. `min` replenishes lazily on next invoke. |
-| `idleSweepIntervalMs` | 1 min | Sweep cadence. |
+| Parameter | Default | Env override | Notes |
+|-|-|-|-|
+| `min` (always warm) | `0` | `COGMO_SKILLS_POOL_MIN` | Workers exist iff there's an active or recently-active task. Pool itself is lazy-constructed on first tier-2 invocation. Trade-off: first invoke per idle period pays a cold start (~1-2 s Local-Docker, ~30 s warm Daytona). Set `1` for steady-state ~300 ms interactive latency at the cost of one always-running worker. |
+| `max` (hard cap) | `3` | — | Personal scale — concurrent skill invocations rarely exceed. |
+| Spawn-on-demand | up to `max` | — | When no idle worker is free, spawn one up to `max` rather than queuing. Personal-scale latency wins over backpressure economy. |
+| `recycleAfterTasks` | 500 tasks | — | Bounds container drift (tmpfs, log accumulation, allocator fragmentation). |
+| `recycleAfterMs` | 24 h | — | Wall-clock ceiling — catches workers that ran few tasks but sat warm forever. |
+| `idleShutdownMs` | 30 min | `COGMO_SKILLS_POOL_IDLE_SHUTDOWN_MS` | Idle workers above `min` get reaped. With `min=0` the pool drops to zero idle workers; useful on managed backends where a warm worker is a billable sandbox (Daytona deployments should set lower, e.g. 5 min). |
+| `idleSweepIntervalMs` | 1 min | — | Sweep cadence. |
+
+**Lazy pool init.** The pool itself isn't constructed until the first tier-2 invocation — `cogmo serve` boots without spinning anything up on the configured sandbox. Concurrent first-callers share one in-flight construction; an init failure (e.g. transient Daytona blip) clears the in-flight reference so the next invocation retries. This keeps an unreachable managed backend from failing boot for deployments that may never invoke a tier-2 skill.
 
 Starting values; revisit with usage data. Skills that declare `resources.{cpu_shares,memory_mb}` overrides bypass the pool — they get a fresh, per-skill-resource-budget container, paying the cold-start every invoke. Most skills don't override and ride the warm path.
 
@@ -1023,7 +1025,7 @@ interface SkillRunner {
 Calibration-grade — settle during real usage, not before implementation:
 
 - **Risk classifier thresholds** — starting boundary between `notify` and `approve` is a first pass. Relax or tighten based on observed false positives / actual incidents.
-- **Pool sizing** — `min=1 / max=3`, replace every 500 tasks, 30 min idle shutdown are starting values. Tune on real workload.
+- **Pool sizing** — `min=0 / max=3`, replace every 500 tasks, 30 min idle shutdown are starting values. `min` and `idleShutdownMs` are operator-tunable via `COGMO_SKILLS_POOL_MIN` / `COGMO_SKILLS_POOL_IDLE_SHUTDOWN_MS` (see Warm pool). Tune on real workload.
 - **Subinterpreter ecosystem** — track which C extensions need `isolation: recycle`. If the list grows large, flip default.
 - **Skill testing story** — `test.py` is mentioned but not specified. Required at deploy? Optional? What runner? Settle when first non-trivial skill ships.
 - **Retrieval-layer trigger** — when to add `search_skills()` (tool-list tokens > ~5k? selection accuracy drop?). Add metric first; threshold later.
