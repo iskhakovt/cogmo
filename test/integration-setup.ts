@@ -10,6 +10,7 @@ import { Network } from "testcontainers";
 import type { GlobalSetupContext } from "vitest/node";
 import * as c from "../dev/containers.js";
 import { createMock } from "./llmock-setup.js";
+import { startTelegramMockServer, type TelegramMockServer } from "./telegram-mock.js";
 
 // Load .env for recording mode — API keys needed for real upstream calls
 if (existsSync(".env")) loadEnvFile(".env");
@@ -19,7 +20,16 @@ if (existsSync(".env")) loadEnvFile(".env");
 const containers: StartedTestContainer[] = [];
 let network: Awaited<ReturnType<InstanceType<typeof Network>["start"]>> | null = null;
 let mock: LLMock | null = null;
+let telegramMock: TelegramMockServer | null = null;
 let skillsPath: string | null = null;
+
+/**
+ * Bot token for the seeded integration-test Telegram channel. Format matches
+ * BotFather's `<bot_id>:<random>` shape so grammY's URL builder produces a
+ * well-formed path. Never sent to real Telegram — every request is intercepted
+ * by `telegramMock`.
+ */
+const TELEGRAM_TEST_BOT_TOKEN = "1234567890:fake-test-token";
 
 export async function setup({ provide }: GlobalSetupContext) {
   network = await new Network().start();
@@ -100,6 +110,14 @@ export async function setup({ provide }: GlobalSetupContext) {
   const gatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;
   process.env.INNGEST_CONNECT_GATEWAY_URL = gatewayUrl;
 
+  // Telegram Bot API mock — listens on 127.0.0.1:<random>. Seeded into the
+  // `channels` row's `apiRoot` credential below so every grammY API call from
+  // the in-process bot AND any subprocess that boots `bootstrap()` (e.g.
+  // `cli.integration.test.ts`'s seed/CLI subprocesses) lands here instead of
+  // real Telegram. No env var needed — the URL travels through the DB row.
+  telegramMock = await startTelegramMockServer();
+  console.log(`telegram-mock at ${telegramMock.url}`);
+
   console.log("Running seed...");
   execSync("tsx src/main.ts seed", { stdio: "inherit" });
   console.log("Seed complete.");
@@ -107,6 +125,15 @@ export async function setup({ provide }: GlobalSetupContext) {
   const postgres = (await import("postgres")).default;
   const sql = postgres(urls.databaseUrl);
   const rows = await sql<{ id: string }[]>`SELECT id FROM users LIMIT 1`;
+  // Telegram channel fixture — `bootstrap()` iterates every channel row
+  // through `startChannels`, which constructs a grammY `Bot` with these
+  // credentials. The `apiRoot` field is consumed by the Telegram adapter's
+  // `setup()` and routes all bot API calls to the mock above.
+  await sql`
+    INSERT INTO channels (type, credentials, identity_mode)
+    SELECT 'telegram', ${sql.json({ token: TELEGRAM_TEST_BOT_TOKEN, apiRoot: telegramMock.url })}, 'create'
+    WHERE NOT EXISTS (SELECT 1 FROM channels WHERE type = 'telegram')
+  `;
   await sql.end();
   const defaultUserId = rows[0]?.id;
   if (!defaultUserId) throw new Error("Default user not found after seed");
@@ -123,6 +150,7 @@ export async function setup({ provide }: GlobalSetupContext) {
 
 export async function teardown() {
   if (mock) await mock.stop();
+  if (telegramMock) await telegramMock.stop();
 
   console.log("Stopping test containers...");
   for (const container of containers.reverse()) {
