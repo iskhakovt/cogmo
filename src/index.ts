@@ -82,10 +82,13 @@ import type { SttProvider, TtsProvider } from "./voice/types.js";
  * - `falFetchOverride`, `voiceFetchOverride` → read by `bootstrapRuntime`
  *   (fal.ai + OpenAI voice provider construction; both clients live next
  *   to the agent loop that consumes them).
+ * - `sandboxClientOverride` → read by `bootstrapSandbox` (skips env-driven
+ *   backend selection so tests can wire `FakeDaytonaSandboxClient`
+ *   without hitting Daytona Cloud or a self-hosted compose).
  *
- * `bootstrapSandbox` and `bootstrapSkillRunner` take no options today.
- * Adding a new field? Add it to the relevant stage's signature and
- * update this map so the next reader knows where to wire it.
+ * `bootstrapSkillRunner` takes no options today. Adding a new field?
+ * Add it to the relevant stage's signature and update this map so the
+ * next reader knows where to wire it.
  */
 export interface BootstrapOptions {
   /**
@@ -109,6 +112,18 @@ export interface BootstrapOptions {
    * provider instance only — does not affect Anthropic/S3/etc.
    */
   voiceFetchOverride?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  /**
+   * Inject a fully-constructed sandbox client — skips backend selection
+   * entirely (no env read, no secret read, no Docker handle). Used by
+   * the bootstrap-daytona integration test to wire
+   * `FakeDaytonaSandboxClient` so the daytona arm + cleanup-cron arm of
+   * `bootstrapRuntime` exercise without paying for Daytona Cloud or
+   * pulling a 10-service self-hosted compose. The override is treated
+   * as a coding-capable backend: `sandbox` AND `codingSandbox` both
+   * resolve to it (the orchestrator branches on `capabilities`, not
+   * backend identity).
+   */
+  sandboxClientOverride?: SandboxClient;
 }
 
 /**
@@ -162,11 +177,14 @@ export interface CoreDeps {
 export interface SandboxDeps {
   sandbox: SandboxClient | null;
   /**
-   * Same handle as `sandbox` when local-docker is the active backend,
-   * otherwise null. Coding orchestrators take the wide `SandboxClient`
-   * type but only register when this is non-null — until Phase 3b.2.B
-   * wires the git-as-transport path, the local-docker backend is the
-   * only one with the host-bind-mount + askpass surface they require.
+   * Same handle as `sandbox` whenever a sandbox is configured. Coding
+   * orchestrators take the wide `SandboxClient` type and branch on
+   * `capabilities.workingTreeTransport` (`bind-mount` for local-docker,
+   * `git-remote` for daytona) rather than backend identity. The split
+   * exists because the registration gate is `codingSandbox !== null` —
+   * keeping it as a separate field leaves room for a future backend
+   * that's sandbox-capable but not coding-capable without widening the
+   * `SandboxClient` interface.
    */
   codingSandbox: SandboxClient | null;
   sandboxInstanceId: string | null;
@@ -365,19 +383,46 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
  * unavailable: `local-docker` requires `SANDBOX_RUNTIME`; `daytona`
  * requires `daytona_api_key` in the encrypted secrets table.
  */
-export async function bootstrapSandbox(core: CoreDeps): Promise<SandboxDeps> {
+export async function bootstrapSandbox(
+  core: CoreDeps,
+  opts: BootstrapOptions = {},
+): Promise<SandboxDeps> {
+  // Test-only injection — see `BootstrapOptions.sandboxClientOverride`
+  // for shape + intent. `sandboxDocker` stays null because the override
+  // may not be a Docker-based backend; the reaper Inngest function is
+  // local-docker-specific (queries the daemon via dockerode) and skips
+  // registration when `sandboxDocker === null`.
+  if (opts.sandboxClientOverride) {
+    const sandbox = opts.sandboxClientOverride;
+    const sandboxInstanceId = randomUUID();
+    const { orphansReaped } = await sandbox.reconcileCrashedInstances(sandboxInstanceId);
+    if (orphansReaped > 0) {
+      logger.warn({ orphansReaped }, "reaped orphan sandboxes from prior instance(s)");
+    }
+    logger.info(
+      { backendId: sandbox.backendId, instanceId: sandboxInstanceId },
+      "sandbox client override active (test-only)",
+    );
+    return {
+      sandbox,
+      codingSandbox: sandbox,
+      sandboxInstanceId,
+      sandboxDocker: null,
+    };
+  }
   // Sandbox is opt-in by backend:
   //   - `SANDBOX_BACKEND=local-docker` (default) requires `SANDBOX_RUNTIME`;
   //     unset = sandbox disabled (coding-delegation features fail at call
   //     time with a clear error). No silent fallback.
   //   - `SANDBOX_BACKEND=daytona` requires `daytona_api_key` in the
   //     encrypted secrets table; missing = sandbox disabled.
-  // Phase 3a only supports skills tier-2 on Daytona; coding-delegation
-  // requires the local-docker backend until Phase 3b.2.B wires the
-  // git-as-transport path. `codingSandbox` is the same handle as
-  // `sandbox` when local-docker is the active backend, otherwise null —
-  // the coding orchestrators' registration gate is the only knob the
-  // wider type doesn't capture, so we keep an explicit reference.
+  // Both backends are coding-capable: local-docker via host-bind-mount
+  // worktrees, daytona via git-as-transport (`cogmo/run/<task-id>` push
+  // → sandbox-side clone). `codingSandbox` is the same handle as
+  // `sandbox` whenever a backend is configured; the orchestrator
+  // branches on `capabilities.workingTreeTransport`, not backend
+  // identity. The split exists because the reaper Inngest function
+  // remains local-docker-specific (queries the Docker daemon).
   if (env.SANDBOX_BACKEND === "local-docker") {
     if (!env.SANDBOX_RUNTIME) {
       logger.info(
@@ -446,14 +491,18 @@ export async function bootstrapSandbox(core: CoreDeps): Promise<SandboxDeps> {
       ...(env.DAYTONA_API_URL && { apiUrl: env.DAYTONA_API_URL }),
       ...(env.DAYTONA_ORGANIZATION_ID && { organizationId: env.DAYTONA_ORGANIZATION_ID }),
     });
+    const { orphansReaped } = await sandbox.reconcileCrashedInstances(sandboxInstanceId);
+    if (orphansReaped > 0) {
+      logger.warn({ orphansReaped }, "reaped orphan sandboxes from prior instance(s)");
+    }
     logger.info(
       {
         instanceId: sandboxInstanceId,
         apiUrl: env.DAYTONA_API_URL ?? "https://app.daytona.io/api",
       },
-      "daytona sandbox initialized (coding-delegation requires local-docker until Phase 3b)",
+      "daytona sandbox initialized",
     );
-    return { sandbox, codingSandbox: null, sandboxInstanceId, sandboxDocker: null };
+    return { sandbox, codingSandbox: sandbox, sandboxInstanceId, sandboxDocker: null };
   }
   return NO_SANDBOX;
 }
@@ -871,7 +920,7 @@ export async function bootstrapRuntime(
  */
 export async function bootstrap(opts: BootstrapOptions = {}) {
   const core = await bootstrapCore(opts);
-  const sandbox = await bootstrapSandbox(core);
+  const sandbox = await bootstrapSandbox(core, opts);
   const { skillRunner } = await bootstrapSkillRunner(core, sandbox);
   const runtime = await bootstrapRuntime(core, sandbox, skillRunner, opts);
 
