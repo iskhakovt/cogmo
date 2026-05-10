@@ -25,7 +25,10 @@ WORKDIR /app
 # remotes in the same path. The `node` user (UID 1000) ships in `node:24-slim`;
 # bind-mounted state directories from the host must be chowned 1000:1000 to match.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates openssh-client \
+ && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    openssh-client \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /var/lib/cogmo/skills /var/lib/cogmo/repos /var/lib/cogmo/worktrees /var/lib/cogmo/askpass \
  && git init --bare /var/lib/cogmo/skills \
