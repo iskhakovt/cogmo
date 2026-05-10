@@ -234,7 +234,11 @@ describe("message pipeline", () => {
     const defaultUserId = inject("defaultUserId");
 
     const profileRows = await db.select({ id: profiles.id }).from(profiles).limit(1);
-    const channelRows = await db.select({ id: channels.id }).from(channels).limit(1);
+    const channelRows = await db
+      .select({ id: channels.id })
+      .from(channels)
+      .where(eq(channels.type, "direct"))
+      .limit(1);
     expect(profileRows.length).toBe(1);
     expect(channelRows.length).toBeGreaterThanOrEqual(1);
 
@@ -444,7 +448,11 @@ describe("message pipeline", () => {
     const defaultUserId = inject("defaultUserId");
 
     const [profile] = await db.select({ id: profiles.id }).from(profiles).limit(1);
-    const [channel] = await db.select({ id: channels.id }).from(channels).limit(1);
+    const [channel] = await db
+      .select({ id: channels.id })
+      .from(channels)
+      .where(eq(channels.type, "direct"))
+      .limit(1);
     if (!profile || !channel) throw new Error("seed incomplete");
 
     const [conv] = await db

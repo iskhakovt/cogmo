@@ -1,0 +1,1 @@
+Telegram channel is seeded once in integration globalSetup with credentials pointing at a localhost mock HTTP server (`test/telegram-mock.ts`). The mock intercepts grammY's Bot API calls (canned `getMe`, no-op `getUpdates`). Replaces the per-test channel-creation + marker-cleanup pattern with a fixture any integration file calling `bootstrap()` reuses cleanly.
