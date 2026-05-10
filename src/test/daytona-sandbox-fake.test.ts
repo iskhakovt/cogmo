@@ -387,19 +387,76 @@ describe("FakeDaytonaSandboxClient — execStreaming", () => {
         },
       }),
     );
+    // 1s sleep + 250ms bound so a contended CI runner doesn't trip
+    // — but a blocking impl would still take 1000ms+, well past the
+    // assertion. Generous + correct.
     const startedAt = Date.now();
-    // Sleep for ~150ms then write to stdout.
-    const handle = await session.execStreaming(["sh", "-c", "sleep 0.15; echo done"]);
+    const handle = await session.execStreaming(["sh", "-c", "sleep 1; echo done"]);
     const handleReturnedAt = Date.now();
-    // Handle should return well before the 150ms sleep finishes —
-    // generous bound (50ms) so flaky CI doesn't trip.
-    expect(handleReturnedAt - startedAt).toBeLessThan(50);
+    expect(handleReturnedAt - startedAt).toBeLessThan(250);
     // Drain to completion + assert the actual process did finish.
     const chunks: Buffer[] = [];
     for await (const chunk of handle.stdout) chunks.push(Buffer.from(chunk));
     const { exitCode } = await handle.wait();
     expect(exitCode).toBe(0);
     expect(Buffer.concat(chunks).toString("utf8")).toContain("done");
+  }, 10_000);
+
+  it("dispose() rejects wait() with DisposedError per the ExecStreamingHandle contract", async () => {
+    const session = await client.create(
+      makeSpec({
+        worktree: {
+          type: "git-remote",
+          url: `file://${sourceRepo}`,
+          branch: "cogmo/run/test-task",
+          auth: { username: "x-access-token", password: "ghp_test" },
+        },
+      }),
+    );
+    // Long-running process so dispose() lands before natural exit.
+    const handle = await session.execStreaming(["sh", "-c", "sleep 30"]);
+    handle.stdout.resume();
+    handle.stderr.resume();
+    await handle.dispose();
+    await expect(handle.wait()).rejects.toThrow(/disposed/i);
+  });
+
+  it("dispose() is idempotent — second call is a no-op", async () => {
+    const session = await client.create(
+      makeSpec({
+        worktree: {
+          type: "git-remote",
+          url: `file://${sourceRepo}`,
+          branch: "cogmo/run/test-task",
+          auth: { username: "x-access-token", password: "ghp_test" },
+        },
+      }),
+    );
+    const handle = await session.execStreaming(["sh", "-c", "sleep 30"]);
+    handle.stdout.resume();
+    handle.stderr.resume();
+    await handle.dispose();
+    // Second call must not throw and must not re-reject wait().
+    await expect(handle.dispose()).resolves.toBeUndefined();
+  });
+
+  it("exec() throws on empty command (matches execStreaming)", async () => {
+    const session = await client.create(makeSpec());
+    await expect(session.exec([])).rejects.toThrow(/empty command/);
+  });
+
+  it("execStreaming() throws on empty command", async () => {
+    const session = await client.create(makeSpec());
+    await expect(session.execStreaming([])).rejects.toThrow(/empty command/);
+  });
+
+  it("exec() rethrows ENOENT instead of masking as exitCode=1", async () => {
+    const session = await client.create(makeSpec());
+    // `does-not-exist-binary-cogmo` is unambiguously not on PATH.
+    // Real backends fail visibly when the image lacks a binary; the
+    // fake must do the same instead of returning a confusing exit-1
+    // result that hides the spawn failure.
+    await expect(session.exec(["does-not-exist-binary-cogmo-fixture"])).rejects.toThrow(/ENOENT/);
   });
 
   it("remaps /workspace subpaths to <sandboxRoot>/workspace/<subpath>", async () => {

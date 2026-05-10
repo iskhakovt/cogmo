@@ -684,6 +684,10 @@ async function deleteGiteaBranch(branch: string): Promise<void> {
 describe("verify orchestrator integration — git-remote transport (fake daytona)", () => {
   let fakeBaseDir: string;
   let fakeSandboxClient: FakeDaytonaSandboxClient;
+  // Branches that need cleanup on Gitea regardless of test outcome —
+  // failed-early tests would otherwise leak `cogmo/<idShort>` and
+  // `cogmo/run/<task-id>` refs across re-runs.
+  let branchesToCleanup: string[];
 
   beforeEach(async () => {
     fakeBaseDir = mkdtempSync(join(tmpdir(), "cogmo-int-fake-base-"));
@@ -691,11 +695,18 @@ describe("verify orchestrator integration — git-remote transport (fake daytona
       baseDir: fakeBaseDir,
       instanceId: "test-instance",
     });
+    branchesToCleanup = [];
   });
 
   afterEach(async () => {
     await fakeSandboxClient.shutdown();
     rmSync(fakeBaseDir, { recursive: true, force: true });
+    // Best-effort upstream cleanup. Swallow per-branch failures so a
+    // missing branch (already cleaned, never pushed) doesn't mask the
+    // original test failure.
+    for (const branch of branchesToCleanup) {
+      await deleteGiteaBranch(branch).catch(() => {});
+    }
   });
 
   it("happy path: sandbox clones run-branch, verify passes, feature branch pushed, PR opened, fetch back", async () => {
@@ -716,13 +727,17 @@ describe("verify orchestrator integration — git-remote transport (fake daytona
     ]);
 
     const { taskId, branch, runRef } = await seedTaskGitRemote();
+    // Register both refs for afterEach cleanup before any operation
+    // that might fail — guarantees we don't leak refs upstream when
+    // the test errors mid-flight.
+    branchesToCleanup.push(branch, runRef);
     await pushRunBranchToGitea(runRef);
 
     const capture: CapturedPullsCreate[] = [];
     const deps: VerifyOrchestratorDeps = {
       runInTx: tx,
       store,
-      sandbox: fakeSandboxClient as unknown as SandboxClient<LocalDockerSessionState>,
+      sandbox: fakeSandboxClient,
       secretsStore: secrets as unknown as SecretsStore,
       askpassBaseDir: HOST_ASKPASS_BASE,
       devbaseImage: "ignored",
@@ -785,9 +800,6 @@ describe("verify orchestrator integration — git-remote transport (fake daytona
       "coding/task/pushed",
       "coding/task/pr-opened",
     ]);
-
-    // Cleanup upstream so re-runs don't pile up.
-    await deleteGiteaBranch(branch);
-    await deleteGiteaBranch(runRef);
+    // Branch cleanup handled by afterEach via `branchesToCleanup`.
   }, 120_000);
 });

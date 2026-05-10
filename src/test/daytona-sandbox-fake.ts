@@ -32,9 +32,9 @@ import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { Readable } from "node:stream";
 import { promisify } from "node:util";
 import { logger } from "../logger.js";
+import { DisposedError } from "../sandbox/daytona/exec-streaming.js";
 import {
   type DaytonaSessionState,
   DaytonaSessionStateSchema,
@@ -46,6 +46,7 @@ import {
   type SandboxSession,
   type SessionSpec,
 } from "../sandbox/index.js";
+import { expectDefined } from "./assertions.js";
 
 const execFileP = promisify(execFile);
 const log = logger.child({ component: "sandbox.daytona.fake" });
@@ -303,27 +304,36 @@ class FakeDaytonaSandboxSession implements SandboxSession<DaytonaSessionState> {
   }
 
   async exec(cmd: readonly string[], opts?: ExecOptions): Promise<ExecResult> {
-    const startedAt = Date.now();
     if (cmd.length === 0) {
-      return {
-        stdout: "",
-        stderr: "exec: empty command",
-        exitCode: 1,
-        wallTimeSeconds: 0,
-        truncated: false,
-      };
+      throw new Error("exec: empty command");
     }
+    const startedAt = Date.now();
     const prepared = this.#prepare(cmd, opts);
+    type ExecError = NodeJS.ErrnoException & {
+      code?: number | string;
+      stdout?: string;
+      stderr?: string;
+    };
     const result = await execFileP(prepared.argv[0] ?? "", prepared.argv.slice(1), {
       cwd: prepared.cwd,
       env: prepared.env,
     }).then(
       (r) => ({ stdout: r.stdout, stderr: r.stderr, exitCode: 0 }),
-      (err: NodeJS.ErrnoException & { code?: number; stdout?: string; stderr?: string }) => ({
-        stdout: err.stdout ?? "",
-        stderr: err.stderr ?? String(err),
-        exitCode: typeof err.code === "number" ? err.code : 1,
-      }),
+      (err: ExecError) => {
+        // Numeric `code` = process exit code; surface it. String `code`
+        // (e.g. "ENOENT" when the binary isn't on PATH) is a spawn-side
+        // failure — masking it as `exitCode: 1` hides bugs that real
+        // backends would error on. Rethrow so the caller sees the
+        // original error instead of a fake exit code.
+        if (typeof err.code === "number") {
+          return {
+            stdout: err.stdout ?? "",
+            stderr: err.stderr ?? String(err),
+            exitCode: err.code,
+          };
+        }
+        throw err;
+      },
     );
     return {
       ...result,
@@ -349,36 +359,59 @@ class FakeDaytonaSandboxSession implements SandboxSession<DaytonaSessionState> {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    let exitCode: number | null = null;
-    let exitErr: Error | null = null;
+    let settled = false;
+    let resolveExit!: (value: { exitCode: number }) => void;
+    let rejectExit!: (err: Error) => void;
     const exitPromise = new Promise<{ exitCode: number }>((resolve, reject) => {
-      child.on("error", (err) => {
-        exitErr = err;
-        reject(err);
-      });
-      child.on("close", (code) => {
-        exitCode = typeof code === "number" ? code : 1;
-        resolve({ exitCode });
-      });
+      resolveExit = resolve;
+      rejectExit = reject;
     });
+    // Pre-attach a silent catch so a caller that disposes without
+    // observing `wait()` doesn't trip Node's unhandledRejection
+    // detector — `wait()` returns the original promise, so callers
+    // that DO observe still see the rejection.
+    exitPromise.catch(() => {});
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      rejectExit(err);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      resolveExit({ exitCode: typeof code === "number" ? code : 1 });
+    });
+
+    // ChildProcess.stdout/stderr are `Readable | null`; with
+    // `stdio: ["ignore", "pipe", "pipe"]` they're guaranteed non-null
+    // but TS can't narrow that based on the stdio config. expectDefined
+    // does the runtime narrowing without a cast.
+    const stdout = expectDefined(child.stdout, "child.stdout");
+    const stderr = expectDefined(child.stderr, "child.stderr");
 
     let disposed = false;
     return {
-      stdout: child.stdout as Readable,
-      stderr: child.stderr as Readable,
+      stdout,
+      stderr,
       wait: () => exitPromise,
       dispose: async () => {
         if (disposed) return;
         disposed = true;
-        // Mirror the dockerode dispose contract: tear down the
-        // transport but don't synthesise a signal. SIGTERM lets
-        // hooked-up cleanup run; the host will reap. Idempotent.
-        if (exitCode === null && exitErr === null) {
-          try {
-            child.kill("SIGTERM");
-          } catch {
-            // Already exited between the check and the kill — ignore.
-          }
+        // Match the documented `ExecStreamingHandle` contract: after
+        // dispose(), wait() rejects with `DisposedError`. The real
+        // Daytona backend's exec-streaming wrapper rejects the same
+        // way; the local-Docker dockerode adapter does too. Surface it
+        // before SIGTERM so a caller racing dispose against natural
+        // exit can rely on the rejection regardless of timing.
+        if (!settled) {
+          settled = true;
+          rejectExit(new DisposedError());
+        }
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // Already exited between the settled-check and the kill —
+          // ignore. Idempotent.
         }
       },
     };
@@ -420,6 +453,11 @@ function composeEnv(
   override: Readonly<Record<string, string>> | undefined,
   record: FakeSandboxRecord,
 ): Record<string, string> {
+  // Inherited `process.env` is NOT rewritten — only the orchestrator-
+  // injected `override` values are. The orchestrator threads
+  // `GIT_ASKPASS=/.cogmo-askpass/helper` exclusively via override; an
+  // inherited env var that happens to contain the canonical path
+  // would be host-side already and shouldn't be rewritten.
   const base: Record<string, string> = Object.fromEntries(
     Object.entries(process.env).filter(
       (entry): entry is [string, string] => entry[1] !== undefined,
