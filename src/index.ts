@@ -535,6 +535,10 @@ export async function bootstrapSkillRunner(
     // for skills that micropip-install pure-Python wheels — the stdlib is
     // always bundled.
     pyodidePackageCacheDir: `${env.COGMO_SKILLS_PATH}/.pyodide-cache`,
+    poolOptions: {
+      min: env.COGMO_SKILLS_POOL_MIN,
+      idleShutdownMs: env.COGMO_SKILLS_POOL_IDLE_SHUTDOWN_MS,
+    },
   });
   return { skillRunner };
 }
