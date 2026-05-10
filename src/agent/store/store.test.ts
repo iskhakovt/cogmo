@@ -2146,6 +2146,7 @@ describe("DrizzleAgentStore", () => {
             rule: "Combined rule A+B",
             category: "style",
             profileId: null,
+            channelType: null,
             priority: 100,
             observationCount: 5,
           },
@@ -2157,13 +2158,14 @@ describe("DrizzleAgentStore", () => {
       expect(remaining).toHaveLength(1);
       expect(remaining[0]!.id).toBe(result.id);
 
-      // New rule has correct values
+      // New rule has correct values, channelType persists as null
       const rows = await db
         .select({
           rule: steeringRules.rule,
           source: steeringRules.source,
           active: steeringRules.active,
           observationCount: steeringRules.observationCount,
+          channelType: steeringRules.channelType,
         })
         .from(steeringRules)
         .where(eq(steeringRules.id, result.id));
@@ -2173,6 +2175,65 @@ describe("DrizzleAgentStore", () => {
         source: "evolution",
         active: true,
         observationCount: 5,
+        channelType: null,
+      });
+    });
+
+    it("replaceRules persists channelType when supplied", async () => {
+      const { steeringRules } = await import("./schema.js");
+      const inserted = await db
+        .insert(steeringRules)
+        .values([
+          {
+            rule: "Avoid markdown headings on Telegram",
+            category: "style",
+            active: true,
+            source: "correction",
+            priority: 100,
+            observationCount: 3,
+            channelType: "telegram",
+          },
+          {
+            rule: "Skip headings in Telegram replies",
+            category: "style",
+            active: true,
+            source: "correction",
+            priority: 100,
+            observationCount: 2,
+            channelType: "telegram",
+          },
+        ])
+        .returning({ id: steeringRules.id });
+
+      const oldIds = inserted.map((r) => r.id);
+
+      const result = await tx((trx) =>
+        store.replaceRules(trx, {
+          oldIds,
+          newRule: {
+            rule: "Avoid markdown headings in Telegram replies",
+            category: "style",
+            profileId: null,
+            channelType: "telegram",
+            priority: 100,
+            observationCount: 5,
+          },
+        }),
+      );
+
+      const rows = await db
+        .select({
+          rule: steeringRules.rule,
+          channelType: steeringRules.channelType,
+          source: steeringRules.source,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, result.id));
+
+      expect(rows[0]).toEqual({
+        rule: "Avoid markdown headings in Telegram replies",
+        channelType: "telegram",
+        source: "evolution",
       });
     });
 
@@ -2202,6 +2263,7 @@ describe("DrizzleAgentStore", () => {
             rule: "New consolidated rule",
             category: "style",
             profileId: null,
+            channelType: null,
             priority: 100,
             observationCount: 2,
           },
