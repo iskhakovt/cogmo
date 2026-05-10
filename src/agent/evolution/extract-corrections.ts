@@ -73,6 +73,7 @@ export async function extractCorrections(
   }
 
   const existingRules = await deps.runInTx((tx) => deps.store.getCorrections(tx, profileId));
+  const existingRulesById = R.indexBy(existingRules, R.prop("id"));
   const systemPrompt = buildExtractionPrompt(existingRules, deps.activeChannelTypes);
 
   const { data } = await chatTyped({
@@ -108,7 +109,7 @@ export async function extractCorrections(
     }
 
     if (correction.action === "reinforce") {
-      const matchedRule = existingRules.find((r) => r.id === correction.matchedExistingRuleId);
+      const matchedRule = existingRulesById[correction.matchedExistingRuleId];
       if (matchedRule === undefined) {
         logger.warn(
           {
