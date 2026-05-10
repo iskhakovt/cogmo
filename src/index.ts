@@ -113,9 +113,9 @@ export interface BootstrapOptions {
    */
   voiceFetchOverride?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   /**
-   * Inject a fully-constructed sandbox client — skips `SANDBOX_BACKEND`
-   * env-driven selection (no Docker handle minted, no `daytona_api_key`
-   * lookup). Used by the bootstrap-daytona integration test to wire
+   * Inject a fully-constructed sandbox client — skips backend selection
+   * entirely (no env read, no secret read, no Docker handle). Used by
+   * the bootstrap-daytona integration test to wire
    * `FakeDaytonaSandboxClient` so the daytona arm + cleanup-cron arm of
    * `bootstrapRuntime` exercise without paying for Daytona Cloud or
    * pulling a 10-service self-hosted compose. The override is treated
@@ -387,13 +387,11 @@ export async function bootstrapSandbox(
   core: CoreDeps,
   opts: BootstrapOptions = {},
 ): Promise<SandboxDeps> {
-  // Test-only injection — skips env-driven backend selection. Treated as
-  // coding-capable (the orchestrator branches on `capabilities`, not
-  // backend identity), so both `sandbox` and `codingSandbox` resolve to
-  // it. `sandboxDocker` stays null because the override may not be a
-  // Docker-based backend; the reaper Inngest function is local-docker-
-  // specific (queries the daemon via dockerode) and skips registration
-  // when `sandboxDocker === null`.
+  // Test-only injection — see `BootstrapOptions.sandboxClientOverride`
+  // for shape + intent. `sandboxDocker` stays null because the override
+  // may not be a Docker-based backend; the reaper Inngest function is
+  // local-docker-specific (queries the daemon via dockerode) and skips
+  // registration when `sandboxDocker === null`.
   if (opts.sandboxClientOverride) {
     const sandbox = opts.sandboxClientOverride;
     const sandboxInstanceId = randomUUID();

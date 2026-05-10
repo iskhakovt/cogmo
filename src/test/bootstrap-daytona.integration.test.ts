@@ -96,11 +96,13 @@ function functionIds(fns: ReadonlyArray<InngestFunction.Any>): string[] {
 
 describe("bootstrap with sandboxClientOverride (FakeDaytonaSandboxClient)", () => {
   it("resolves sandbox + codingSandbox to the override with daytona-shape capabilities", () => {
-    expect(sandboxDeps.sandbox).not.toBeNull();
     expect(sandboxDeps.sandbox).toBe(fakeSandbox);
     expect(sandboxDeps.codingSandbox).toBe(fakeSandbox);
+    // `randomUUID()` mints a v4 — version nibble pinned to `4` so a
+    // future swap to v7 here would fail the test instead of silently
+    // changing the wire format consumers see.
     expect(sandboxDeps.sandboxInstanceId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
     expect(sandboxDeps.sandboxDocker).toBeNull();
     expect(sandboxDeps.sandbox?.backendId).toBe("daytona-fake");
