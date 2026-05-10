@@ -151,6 +151,71 @@ describe("renderProfileList", () => {
   it("handles empty list", () => {
     expect(renderProfileList([]).text).toContain("No profiles");
   });
+
+  it("annotates profileClass with `!` when the class is restricted", () => {
+    const profiles = [
+      mkProfile({ id: "p1", name: "assistant", userId: "u1", profileClass: "general" }),
+      mkProfile({ id: "p2", name: "private", userId: "u1", profileClass: "intimate" }),
+    ];
+    const rendered = renderProfileList(profiles, {
+      restrictedClasses: new Set(["intimate"]),
+    });
+    expect(rendered.text).toContain("[class=general]");
+    expect(rendered.text).toContain("[class=intimate!]");
+    // Marker must come with a legend so the `!` isn't unexplained — even
+    // when no formatScope-rendered scope contributes its own legend.
+    expect(rendered.text).toContain("(! = restricted)");
+  });
+
+  it("appends a class-level legend even when no profile has a memory scope set", () => {
+    // formatScope is the usual source of the legend, but it's only
+    // invoked when memoryScope is non-null. A profile carrying a
+    // restricted profileClass with null scope must still get a legend.
+    const profiles = [
+      mkProfile({
+        id: "p1",
+        name: "private",
+        userId: "u1",
+        memoryScope: null,
+        profileClass: "intimate",
+      }),
+    ];
+    const rendered = renderProfileList(profiles, {
+      restrictedClasses: new Set(["intimate"]),
+    });
+    expect(rendered.text).toContain("[class=intimate!]");
+    expect(rendered.text).toContain("(! = restricted)");
+  });
+
+  it("omits the legend when no restricted class marker fires", () => {
+    const profiles = [
+      mkProfile({ id: "p1", name: "assistant", userId: "u1", profileClass: "general" }),
+    ];
+    const rendered = renderProfileList(profiles, {
+      restrictedClasses: new Set(["intimate"]),
+    });
+    expect(rendered.text).not.toContain("(! = restricted");
+  });
+
+  it("propagates restrictedClasses into formatScope so scope.profileClasses are marked", () => {
+    const profiles = [
+      mkProfile({
+        id: "p1",
+        name: "isolated",
+        userId: "u1",
+        memoryScope: {
+          compartments: ["personal"],
+          trust: ["first-party"],
+          profileClasses: ["intimate"],
+        },
+      }),
+    ];
+    const rendered = renderProfileList(profiles, {
+      restrictedClasses: new Set(["intimate"]),
+    });
+    expect(rendered.text).toContain("classes: intimate!");
+    expect(rendered.text).toContain("(! = restricted)");
+  });
 });
 
 describe("renderConversationStatus", () => {
@@ -169,6 +234,7 @@ describe("renderConversationStatus", () => {
         toolCount: 4,
         autoRecall: "heuristic",
         memoryScope: null,
+        profileClass: null,
         voiceMode: "auto",
       },
       voiceMode: null,
@@ -182,7 +248,7 @@ describe("renderConversationStatus", () => {
   const NOW = new Date("2026-04-16T13:00:00Z"); // 3h after createdAt, 1h30m after last msg
 
   it("renders alias and includes profile, last-turn, steering, and MCP lines", () => {
-    const text = renderConversationStatus(mkStatus(), NOW);
+    const text = renderConversationStatus(mkStatus(), { now: NOW });
     expect(text).toContain("work · status: active · age: 3h");
     expect(text).toContain("messages: 7 · idle: 1h");
     expect(text).toContain("main · claude-sonnet-4-6 · tools: 4 · auto-recall: heuristic");
@@ -193,14 +259,14 @@ describe("renderConversationStatus", () => {
   });
 
   it("falls back to id tail when no alias is set", () => {
-    const text = renderConversationStatus(mkStatus({ alias: undefined }), NOW);
+    const text = renderConversationStatus(mkStatus({ alias: undefined }), { now: NOW });
     expect(text).toContain("id aaaabbbb");
   });
 
   it("renders 'no turns yet' when lastTurn is null", () => {
     const text = renderConversationStatus(
       mkStatus({ lastTurn: null, messageCount: 0, lastMessageAt: null }),
-      NOW,
+      { now: NOW },
     );
     expect(text).toContain("no turns yet · budget: 180k");
     // No idle line when there are no messages.
@@ -210,7 +276,7 @@ describe("renderConversationStatus", () => {
   it("masks the -1 output sentinel as '-' (pre-migration row)", () => {
     const text = renderConversationStatus(
       mkStatus({ lastTurn: { inputTokens: 9000, outputTokens: -1 } }),
-      NOW,
+      { now: NOW },
     );
     expect(text).toContain("out: -");
     expect(text).not.toContain("-1");
@@ -219,19 +285,19 @@ describe("renderConversationStatus", () => {
   it("renders 'in: -' when persisted inputTokens is null and skips the percent", () => {
     const text = renderConversationStatus(
       mkStatus({ lastTurn: { inputTokens: null, outputTokens: 200 } }),
-      NOW,
+      { now: NOW },
     );
     expect(text).toContain("in: - · out: 200 · budget: 180k");
     expect(text).not.toMatch(/\(\d+%\)/);
   });
 
   it("omits the budget number when contextBudget is null", () => {
-    const text = renderConversationStatus(mkStatus({ contextBudget: null }), NOW);
+    const text = renderConversationStatus(mkStatus({ contextBudget: null }), { now: NOW });
     expect(text).not.toContain("budget:");
   });
 
   it("omits the MCP line when mcp is null (disabled)", () => {
-    const text = renderConversationStatus(mkStatus({ mcp: null }), NOW);
+    const text = renderConversationStatus(mkStatus({ mcp: null }), { now: NOW });
     expect(text).not.toContain("MCP:");
     expect(text).toContain("steering: 2 rules");
   });
@@ -239,7 +305,7 @@ describe("renderConversationStatus", () => {
   it("renders only the override label when override differs from profile default", () => {
     const text = renderConversationStatus(
       mkStatus({ voiceMode: "always", profile: { ...mkStatus().profile, voiceMode: "auto" } }),
-      NOW,
+      { now: NOW },
     );
     expect(text).toContain("voice: always (override; profile default auto)");
   });
@@ -247,13 +313,13 @@ describe("renderConversationStatus", () => {
   it("renders the profile default line when override is null and default is non-auto", () => {
     const text = renderConversationStatus(
       mkStatus({ voiceMode: null, profile: { ...mkStatus().profile, voiceMode: "always" } }),
-      NOW,
+      { now: NOW },
     );
     expect(text).toContain("voice: always (profile default)");
   });
 
   it("hides the voice line in the unsurprising case (override=null, default=auto)", () => {
-    const text = renderConversationStatus(mkStatus(), NOW);
+    const text = renderConversationStatus(mkStatus(), { now: NOW });
     expect(text).not.toMatch(/voice:/);
   });
 
@@ -263,7 +329,7 @@ describe("renderConversationStatus", () => {
     // that `/voice clear` would still change semantics on a future default flip).
     const text = renderConversationStatus(
       mkStatus({ voiceMode: "always", profile: { ...mkStatus().profile, voiceMode: "always" } }),
-      NOW,
+      { now: NOW },
     );
     expect(text).toContain("voice: always (override matches profile default)");
   });
@@ -271,7 +337,7 @@ describe("renderConversationStatus", () => {
   it("surfaces an explicit auto override even when the profile default is also auto", () => {
     // Same regression — profile default `auto` is the case that was hidden
     // entirely, dropping the "explicitly overridden" signal on the floor.
-    const text = renderConversationStatus(mkStatus({ voiceMode: "auto" }), NOW);
+    const text = renderConversationStatus(mkStatus({ voiceMode: "auto" }), { now: NOW });
     expect(text).toContain("voice: auto (override matches profile default)");
   });
 
@@ -283,7 +349,7 @@ describe("renderConversationStatus", () => {
           memoryScope: { compartments: ["work", "technical"], trust: ["first-party"] },
         },
       }),
-      NOW,
+      { now: NOW },
     );
     expect(text).toContain("scope: compartments: work, technical / trust: first-party");
   });

@@ -54,24 +54,50 @@ export function renderSessionsList(
 
 export function renderProfileList(
   profiles: ReadonlyArray<Profile>,
-  opts: { currentProfileId?: string | undefined } = {},
+  opts: {
+    currentProfileId?: string | undefined;
+    customCompartments?: ReadonlySet<string>;
+    restrictedClasses?: ReadonlySet<string>;
+  } = {},
 ): RenderedList {
   if (profiles.length === 0) {
     return { text: "No profiles available." };
   }
+  let sawRestrictedClass = false;
   const lines = profiles.map((p) => {
     const owner = p.userId === null ? "org" : "you";
     const current = p.id === opts.currentProfileId ? " ← current" : "";
     // Memory scope is null for most profiles (unrestricted) — only annotate
     // when set, so the common case stays compact. Wraps the canonical
     // `formatScope` form so list and show views never drift in sync.
-    const scope = p.memoryScope ? ` [${formatScope(p.memoryScope)}]` : "";
+    const scope = p.memoryScope
+      ? ` [${formatScope(
+          p.memoryScope,
+          opts.customCompartments,
+          opts.restrictedClasses,
+          p.profileClass,
+        )}]`
+      : "";
     // Profile class is null for unclassed profiles — surface only when set
-    // so unclassed deployments don't see clutter.
-    const klass = p.profileClass ? ` [class=${p.profileClass}]` : "";
+    // so unclassed deployments don't see clutter. Restricted classes get a
+    // trailing `!` marker (matching the convention used inside `formatScope`
+    // — `*` is already taken for custom compartments on the same line).
+    const klassRestricted =
+      p.profileClass !== null && (opts.restrictedClasses?.has(p.profileClass) ?? false);
+    if (klassRestricted) sawRestrictedClass = true;
+    const klass = p.profileClass ? ` [class=${p.profileClass}${klassRestricted ? "!" : ""}]` : "";
     return `• ${p.name} (${owner}, ${p.model})${scope}${klass}${current}`;
   });
-  return { text: lines.join("\n") };
+  // The list's `formatScope` calls already append `(! = restricted)` when
+  // a scope-rendered class is restricted, but a profile can carry a
+  // restricted `[class=…]` annotation while having `memoryScope = null`
+  // (so `formatScope` is never invoked). Append the legend at list level
+  // so the marker isn't unexplained in that path.
+  // Legend wording matches `formatScope` (`(! = restricted)`) so the two
+  // surfaces don't drift — the marker only appears on classes anyway, so
+  // the "class" suffix from earlier drafts was redundant.
+  const legend = sawRestrictedClass ? "\n(! = restricted)" : "";
+  return { text: `${lines.join("\n")}${legend}` };
 }
 
 /**
@@ -102,9 +128,12 @@ export function renderProfileList(
 export function formatScope(
   scope: ProfileMemoryScope | null,
   customCompartments?: ReadonlySet<string>,
+  restrictedClasses?: ReadonlySet<string>,
+  speakerClass?: string | null,
 ): string {
   if (scope === null) return "unrestricted (recalls all memories)";
   let sawCustom = false;
+  let sawRestricted = false;
   const renderedCompartments = scope.compartments.map((c) => {
     const isCustom = customCompartments?.has(c) ?? false;
     if (isCustom) sawCustom = true;
@@ -115,10 +144,33 @@ export function formatScope(
     `trust: ${scope.trust.join(", ")}`,
   ];
   if (scope.profileClasses !== undefined && scope.profileClasses.length > 0) {
-    parts.push(`classes: ${scope.profileClasses.join(", ")}`);
+    // The Service auto-includes the speaker's own class in the recall
+    // filter so a profile always sees its own writes, even when the
+    // operator's `classes=…` doesn't list it. Surface that auto-include
+    // here so the rendered scope reflects the *effective* filter, not
+    // just the stored config — otherwise the operator can be surprised
+    // by what `private` actually recalls when its class is "intimate"
+    // and they wrote `classes=general`.
+    const speakerAutoIncluded =
+      speakerClass !== undefined &&
+      speakerClass !== null &&
+      !scope.profileClasses.includes(speakerClass);
+    const effective = speakerAutoIncluded
+      ? [...scope.profileClasses, speakerClass]
+      : scope.profileClasses;
+    const renderedClasses = effective.map((c) => {
+      const isRestricted = restrictedClasses?.has(c) ?? false;
+      if (isRestricted) sawRestricted = true;
+      const annotated = isRestricted ? `${c}!` : c;
+      return speakerAutoIncluded && c === speakerClass ? `${annotated} (speaker)` : annotated;
+    });
+    parts.push(`classes: ${renderedClasses.join(", ")}`);
   }
   const main = parts.join(" / ");
-  return sawCustom ? `${main} (* = custom)` : main;
+  const legends: string[] = [];
+  if (sawCustom) legends.push("* = custom");
+  if (sawRestricted) legends.push("! = restricted");
+  return legends.length > 0 ? `${main} (${legends.join("; ")})` : main;
 }
 
 export function renderModelList(
@@ -152,8 +204,13 @@ function labelFor(s: ConversationSummary, current: boolean): string {
  */
 export function renderConversationStatus(
   summary: ConversationStatusSummary,
-  now: Date = new Date(),
+  opts: {
+    now?: Date;
+    customCompartments?: ReadonlySet<string>;
+    restrictedClasses?: ReadonlySet<string>;
+  } = {},
 ): string {
+  const now = opts.now ?? new Date();
   const idTail = summary.conversationId.slice(-8);
   const head = summary.alias ?? `id ${idTail}`;
   const ageMs = now.getTime() - summary.createdAt.getTime();
@@ -166,7 +223,7 @@ export function renderConversationStatus(
     "",
     "Profile",
     `  ${summary.profile.name} · ${summary.profile.model} · tools: ${summary.profile.toolCount} · auto-recall: ${summary.profile.autoRecall}`,
-    `  scope: ${formatScope(summary.profile.memoryScope)}`,
+    `  scope: ${formatScope(summary.profile.memoryScope, opts.customCompartments, opts.restrictedClasses, summary.profile.profileClass)}`,
   ];
 
   // Voice mode line.
