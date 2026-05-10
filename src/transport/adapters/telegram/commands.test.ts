@@ -2782,6 +2782,7 @@ describe("handleStatus", () => {
           toolCount: 3,
           autoRecall: "heuristic",
           memoryScope: null,
+          profileClass: null,
           voiceMode: "auto",
         },
         voiceMode: null,
@@ -2793,7 +2794,7 @@ describe("handleStatus", () => {
     );
     const ctx = mkCtx();
     await handleStatus(transport, ctx);
-    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    const reply = ctx.reply.mock.calls[0]?.[0];
     expect(reply).toContain("work · status: active");
     expect(reply).toContain("main · claude-sonnet-4-6");
     expect(reply).toContain("steering: 1 rules");
@@ -2804,6 +2805,208 @@ describe("handleStatus", () => {
     const ctx = mkCtx();
     await handleStatus(transport, ctx);
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("not authorized"));
+  });
+
+  it("fetches the restricted-classes registry and renders `!` markers when the scope sets profileClasses", async () => {
+    const profileClassesList = vi.fn().mockResolvedValue(
+      ok([
+        {
+          id: "c-1",
+          userId: "u-1",
+          name: "intimate",
+          description: "x",
+          restricted: true,
+          createdAt: new Date("2026-04-16T12:00:00Z"),
+        },
+      ]),
+    );
+    const transport = transportWith({
+      conversations: {
+        summary: vi.fn().mockResolvedValue(
+          ok({
+            conversationId: "11111111-2222-3333-4444-555555556666",
+            alias: "private",
+            status: "active",
+            createdAt: new Date(),
+            lastMessageAt: new Date(),
+            messageCount: 4,
+            profile: {
+              id: "p1",
+              name: "private",
+              model: "claude-sonnet-4-6",
+              toolCount: 3,
+              autoRecall: "heuristic",
+              memoryScope: {
+                compartments: ["personal"],
+                trust: ["first-party"],
+                profileClasses: ["intimate"],
+              },
+              profileClass: "intimate",
+              voiceMode: "auto",
+            },
+            voiceMode: null,
+            lastTurn: { inputTokens: 1234, outputTokens: 56 },
+            contextBudget: 180_000,
+            steeringRulesCount: 1,
+            mcp: null,
+          }),
+        ),
+      },
+      profileClasses: { list: profileClassesList },
+    });
+    const ctx = mkCtx();
+    await handleStatus(transport, ctx);
+    expect(profileClassesList).toHaveBeenCalledWith("1");
+    const reply = ctx.reply.mock.calls[0]?.[0];
+    expect(reply).toContain("classes: intimate!");
+    expect(reply).toContain("(! = restricted)");
+  });
+
+  it("renders the speaker auto-include `(speaker)` annotation alongside the `!` marker", async () => {
+    // The combined case: speaker=intimate (restricted), explicit
+    // scope.profileClasses=["general"]. Service auto-includes intimate;
+    // /status must surface that.
+    const transport = transportWith({
+      conversations: {
+        summary: vi.fn().mockResolvedValue(
+          ok({
+            conversationId: "11111111-2222-3333-4444-555555556666",
+            alias: "private",
+            status: "active",
+            createdAt: new Date(),
+            lastMessageAt: new Date(),
+            messageCount: 4,
+            profile: {
+              id: "p1",
+              name: "private",
+              model: "claude-sonnet-4-6",
+              toolCount: 3,
+              autoRecall: "heuristic",
+              memoryScope: {
+                compartments: ["personal"],
+                trust: ["first-party"],
+                profileClasses: ["general"],
+              },
+              profileClass: "intimate",
+              voiceMode: "auto",
+            },
+            voiceMode: null,
+            lastTurn: { inputTokens: 1234, outputTokens: 56 },
+            contextBudget: 180_000,
+            steeringRulesCount: 1,
+            mcp: null,
+          }),
+        ),
+      },
+      profileClasses: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            {
+              id: "c-1",
+              userId: "u-1",
+              name: "intimate",
+              description: "x",
+              restricted: true,
+              createdAt: new Date("2026-04-16T12:00:00Z"),
+            },
+          ]),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleStatus(transport, ctx);
+    const reply = ctx.reply.mock.calls[0]?.[0];
+    expect(reply).toContain("classes: general, intimate! (speaker)");
+    expect(reply).toContain("(! = restricted)");
+  });
+
+  it("skips the registry fetches when the scope is null and the profile is unclassed", async () => {
+    const profileClassesList = vi.fn().mockResolvedValue(ok([]));
+    const compartmentsList = vi.fn().mockResolvedValue(ok([]));
+    const transport = transportWith({
+      conversations: {
+        summary: vi.fn().mockResolvedValue(
+          ok({
+            conversationId: "11111111-2222-3333-4444-555555556666",
+            alias: "work",
+            status: "active",
+            createdAt: new Date(),
+            lastMessageAt: new Date(),
+            messageCount: 4,
+            profile: {
+              id: "p1",
+              name: "main",
+              model: "claude-sonnet-4-6",
+              toolCount: 3,
+              autoRecall: "heuristic",
+              memoryScope: null,
+              profileClass: null,
+              voiceMode: "auto",
+            },
+            voiceMode: null,
+            lastTurn: { inputTokens: 1234, outputTokens: 56 },
+            contextBudget: 180_000,
+            steeringRulesCount: 1,
+            mcp: null,
+          }),
+        ),
+      },
+      profileClasses: { list: profileClassesList },
+      compartments: { list: compartmentsList },
+    });
+    const ctx = mkCtx();
+    await handleStatus(transport, ctx);
+    // No `classes:` in rendered scope → no marker possible → skip
+    // both registry fetches.
+    expect(profileClassesList).not.toHaveBeenCalled();
+    expect(compartmentsList).not.toHaveBeenCalled();
+  });
+
+  it("degrades gracefully when the profileClasses registry list errors (status still rendered)", async () => {
+    const transport = transportWith({
+      conversations: {
+        summary: vi.fn().mockResolvedValue(
+          ok({
+            conversationId: "11111111-2222-3333-4444-555555556666",
+            alias: "private",
+            status: "active",
+            createdAt: new Date(),
+            lastMessageAt: new Date(),
+            messageCount: 4,
+            profile: {
+              id: "p1",
+              name: "private",
+              model: "claude-sonnet-4-6",
+              toolCount: 3,
+              autoRecall: "heuristic",
+              memoryScope: {
+                compartments: ["personal"],
+                trust: ["first-party"],
+                profileClasses: ["intimate"],
+              },
+              profileClass: "intimate",
+              voiceMode: "auto",
+            },
+            voiceMode: null,
+            lastTurn: { inputTokens: 1234, outputTokens: 56 },
+            contextBudget: 180_000,
+            steeringRulesCount: 1,
+            mcp: null,
+          }),
+        ),
+      },
+      profileClasses: {
+        list: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
+      },
+    });
+    const ctx = mkCtx();
+    await handleStatus(transport, ctx);
+    const reply = ctx.reply.mock.calls[0]?.[0];
+    // /status should still render; just without restricted markers.
+    expect(reply).toContain("private · status: active");
+    expect(reply).toContain("classes: intimate");
+    expect(reply).not.toContain("intimate!");
+    expect(reply).not.toContain("not authorized");
   });
 });
 

@@ -189,7 +189,7 @@ function applyScopeToRecall(
   restrictedClassNames: ReadonlyArray<string>,
   opts: RecallOptions | undefined,
 ): RecallOptions {
-  const leaves = buildScopeLeaves(memoryScope, speakerClass, restrictedClassNames);
+  const leaves = buildIsolationLeaves(memoryScope, speakerClass, restrictedClassNames);
   if (leaves.length === 0) return opts ?? {};
   const { tags: _tags, tagsMatch: _tagsMatch, tagGroups: _tagGroups, ...rest } = opts ?? {};
   return { ...rest, tagGroups: buildScopedTagGroups(leaves, opts) };
@@ -201,7 +201,7 @@ function applyScopeToReflect(
   restrictedClassNames: ReadonlyArray<string>,
   opts: ReflectOptions | undefined,
 ): ReflectOptions {
-  const leaves = buildScopeLeaves(memoryScope, speakerClass, restrictedClassNames);
+  const leaves = buildIsolationLeaves(memoryScope, speakerClass, restrictedClassNames);
   if (leaves.length === 0) return opts ?? {};
   const { tags: _tags, tagsMatch: _tagsMatch, tagGroups: _tagGroups, ...rest } = opts ?? {};
   return { ...rest, tagGroups: buildScopedTagGroups(leaves, opts) };
@@ -238,7 +238,7 @@ function applyScopeToReflect(
  * memories pass — pre-feature rows from any speaker are unaffected
  * because they carry no `profile_class:*` tag at all.
  */
-function buildScopeLeaves(
+function buildIsolationLeaves(
   scope: ProfileMemoryScope | null,
   speakerClass: string | null,
   restrictedClassNames: ReadonlyArray<string>,

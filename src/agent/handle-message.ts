@@ -456,6 +456,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // (`profile.userId === null`) speaks for the conversation user, and
       // restricted-class semantics follow the user's own registry. One
       // extra round-trip per turn; table is small and indexed on user_id.
+      //
+      // FUTURE: deployments that have never used class restriction pay
+      // for this round-trip every turn for nothing. A per-user cache
+      // (invalidated by `setProfileClassRestricted` /
+      // `createProfileClass` / `deleteProfileClass`) would close that
+      // gap, but it's strictly more code than the round-trip costs at
+      // single-user scale — revisit when telemetry shows the read taking
+      // a meaningful slice of turn latency.
       const restrictedClassNames = await deps
         .runInTx((tx) => agentStore.listProfileClasses(tx, userId))
         .then((classes) => classes.filter((c) => c.restricted).map((c) => c.name));

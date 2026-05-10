@@ -93,7 +93,10 @@ export function renderProfileList(
   // restricted `[class=…]` annotation while having `memoryScope = null`
   // (so `formatScope` is never invoked). Append the legend at list level
   // so the marker isn't unexplained in that path.
-  const legend = sawRestrictedClass ? "\n(! = restricted class)" : "";
+  // Legend wording matches `formatScope` (`(! = restricted)`) so the two
+  // surfaces don't drift — the marker only appears on classes anyway, so
+  // the "class" suffix from earlier drafts was redundant.
+  const legend = sawRestrictedClass ? "\n(! = restricted)" : "";
   return { text: `${lines.join("\n")}${legend}` };
 }
 
@@ -201,8 +204,13 @@ function labelFor(s: ConversationSummary, current: boolean): string {
  */
 export function renderConversationStatus(
   summary: ConversationStatusSummary,
-  now: Date = new Date(),
+  opts: {
+    now?: Date;
+    customCompartments?: ReadonlySet<string>;
+    restrictedClasses?: ReadonlySet<string>;
+  } = {},
 ): string {
+  const now = opts.now ?? new Date();
   const idTail = summary.conversationId.slice(-8);
   const head = summary.alias ?? `id ${idTail}`;
   const ageMs = now.getTime() - summary.createdAt.getTime();
@@ -215,7 +223,7 @@ export function renderConversationStatus(
     "",
     "Profile",
     `  ${summary.profile.name} · ${summary.profile.model} · tools: ${summary.profile.toolCount} · auto-recall: ${summary.profile.autoRecall}`,
-    `  scope: ${formatScope(summary.profile.memoryScope, undefined, undefined, summary.profile.profileClass)}`,
+    `  scope: ${formatScope(summary.profile.memoryScope, opts.customCompartments, opts.restrictedClasses, summary.profile.profileClass)}`,
   ];
 
   // Voice mode line.

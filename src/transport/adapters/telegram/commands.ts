@@ -712,7 +712,35 @@ export async function handleStatus(
     await ctx.reply("No active conversation yet — send a message first.");
     return;
   }
-  await ctx.reply(renderConversationStatus(res.value));
+  // Mirror replyProfileScope's conditional-fetch pattern: load the
+  // customs / restricted-classes registries only when the rendered scope
+  // can actually surface a marker, so a `/status` on an unscoped profile
+  // doesn't pay for two extra round-trips. Both fetches degrade
+  // best-effort — the user asked for status, not a registry list, so
+  // a registry error renders without markers rather than failing.
+  const summary = res.value;
+  const scope = summary.profile.memoryScope;
+  const needsCustoms = scope?.compartments.some((c) => !isCoreCompartment(c)) ?? false;
+  const hasClasses = scope?.profileClasses !== undefined && scope.profileClasses.length > 0;
+  const hasSpeaker = summary.profile.profileClass !== null;
+  // Restricted markers can fire either inside `formatScope` (when the
+  // scope sets profileClasses) or via the speaker auto-include rendering,
+  // which appends the speaker class even when the operator's list omits
+  // it. Both paths consult the restricted-class set, so fetch whenever
+  // either could fire.
+  const needsRestricted = hasClasses || hasSpeaker;
+  const customsRes = needsCustoms ? await transport.compartments.list(handle) : undefined;
+  const customs = customsRes?.isOk() ? new Set(customsRes.value.map((c) => c.name)) : undefined;
+  const classesRes = needsRestricted ? await transport.profileClasses.list(handle) : undefined;
+  const restrictedClasses = classesRes?.isOk()
+    ? new Set(classesRes.value.filter((c) => c.restricted).map((c) => c.name))
+    : undefined;
+  await ctx.reply(
+    renderConversationStatus(summary, {
+      ...(customs !== undefined && { customCompartments: customs }),
+      ...(restrictedClasses !== undefined && { restrictedClasses }),
+    }),
+  );
 }
 
 export async function handleNew(transport: Transport, ctx: TelegramCommandContext): Promise<void> {
