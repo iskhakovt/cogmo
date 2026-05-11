@@ -11,7 +11,8 @@
   "files": [
     "dist",
     "migrations",
-    "vendor"
+    "vendor",
+    "data"
   ],
   "scripts": {
     "dev": "tsx --env-file-if-exists=.env scripts/dev-infra.ts",

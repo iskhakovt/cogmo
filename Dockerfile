@@ -10,6 +10,11 @@ COPY tsconfig.json tsup.config.ts ./
 COPY src/ src/
 COPY migrations/ migrations/
 COPY vendor/ vendor/
+COPY data/ data/
+# Build-time guard: the resolver's LiteLLM snapshot loader expects this
+# file at the deploy root. Failing here is louder than silently falling
+# back to the conservative default (128k/4k) for every model in prod.
+RUN test -s data/litellm-models.json
 RUN pnpm build
 RUN pnpm --filter cogmo deploy --prod /deploy
 
