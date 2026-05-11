@@ -1,4 +1,5 @@
 /// <reference path="../../test/vitest.d.ts" />
+import { execFileSync } from "node:child_process";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
@@ -87,5 +88,37 @@ describe("e2e smoke", () => {
 
     expect(assistantMsg).toBeDefined();
     expect(assistantMsg!.content).toBeDefined();
+  });
+
+  it("bundled binary loads the LiteLLM snapshot — `cogmo model list` reports source=litellm", async () => {
+    // Regression for a path-resolution bug: `litellm-data.ts` originally
+    // computed the snapshot path relative to `import.meta.url`. tsup
+    // flattens the build into `dist/`, so the `../../` depth in source
+    // doesn't survive — bundled, the resolver looked for `/data/...`
+    // instead of `/app/data/...` and silently fell back to the
+    // conservative default for every model. The build-time
+    // `RUN test -s data/litellm-models.json` doesn't catch this because
+    // the file IS in the image; the bug is in how the bundled module
+    // resolves the path.
+    //
+    // We seed `claude-sonnet-4-6` as the default profile's model and
+    // route it via the e2e provider. With the snapshot loaded, the
+    // resolver finds LiteLLM data for that id and the CLI prints
+    // `litellm`. Without the snapshot (the regressed state), every
+    // column would render `default`.
+    const containerId = inject("appContainerId");
+    const stdout = execFileSync(
+      "docker",
+      ["exec", containerId, "node", "dist/main.js", "model", "list"],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    expect(stdout).toMatch(/claude-sonnet-4-6/);
+    // The source column for the seeded model is either `litellm` (both
+    // columns from snapshot) or `cw=litellm,mo=litellm` if some future
+    // refactor splits — anything matching `litellm` proves the snapshot
+    // was readable from the bundled dist path. A regression would render
+    // `default` (or `cw=default,mo=default`) and miss this match.
+    expect(stdout).toMatch(/litellm/);
+    expect(stdout).not.toMatch(/\bdefault\b/);
   });
 });

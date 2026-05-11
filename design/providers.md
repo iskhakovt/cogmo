@@ -200,9 +200,17 @@ The setup wizard validates each provider by calling `GET /v1/models` (standard a
 
 Validation status is tracked on the **secret** (`secrets.validated_at`), not on the provider row — the credential is what gets validated, not the provider config.
 
-## Model registry
+## Limits resolution
 
-`MODEL_REGISTRY` in `src/llm/models.ts` maps model strings → context window limits. It stays provider-agnostic and code-level — a model's limits don't depend on which provider serves it. If the set of supported models grows beyond a small hardcoded map, promote to DB rows.
+Model limits (context window + max output tokens) come from a three-layer resolver in `src/llm/models.ts:resolveLimits(model, rowLimits)`. Layers, in priority order:
+
+1. **DB row override.** `model_providers.context_window` and `model_providers.max_output_tokens` (nullable). Set by the setup wizard or `cogmo model add` when an operator wants to pin explicit limits. Layered per-column: a row that sets only `max_output_tokens` still falls through to the next layer for `context_window`.
+2. **Bundled LiteLLM snapshot.** `data/litellm-models.json`, refreshed manually via `pnpm tsx scripts/refresh-litellm-models.ts`. Pruned to the two fields we consume; ~2,200 models covered. The loader (`src/llm/litellm-data.ts`) normalizes lookup keys through a small alias ladder — `x-ai/grok-4.3` finds `xai/grok-4.3`, `openrouter/<x>` strips the prefix, etc. — so OpenRouter slugs resolve against vendor-direct entries.
+3. **Conservative default.** 128k context / 4k max output, with a one-time `WARN` log per unknown model. Compaction errs on the side of firing too early rather than overrunning the upstream's real limit.
+
+`resolveLimits` never throws — unknown models silently fall to the default. `getModelLimits` no longer exists; callers receive limits as a `ResolvedLlm` from `LlmProviderResolver` (the resolver loads `model_providers` once per turn and surfaces the primary row's columns alongside the adapter).
+
+`cogmo model list` prints each routing row's effective limits with the source (`db`/`litellm`/`default`) so operators can see why compaction behaves the way it does. Re-record the LiteLLM snapshot when a new flagship lands by running the refresh script and committing the diff.
 
 ## Ecosystem context
 

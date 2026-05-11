@@ -41,6 +41,22 @@ export const NonInteractiveAnswersSchema = z
     llmProviderType: z.enum(PROVIDER_TYPES),
     llmApiKey: z.string().min(10, { error: "API key looks too short" }),
     llmBaseUrl: z.string().url({ error: "COGMO_LLM_BASE_URL must be a valid URL" }).optional(),
+    /**
+     * Model id to register with the provider. Optional — when omitted, the
+     * non-interactive runner falls back to the default profile's existing
+     * `model` field, which preserves the legacy behaviour ("just wire the
+     * provider; the seed already picked Sonnet"). Set this when adding a
+     * provider for a model the seed doesn't pick (Grok, GPT-5.5, …).
+     */
+    llmModel: z.string().min(1).optional(),
+    /**
+     * Optional explicit limit overrides. Both default to `null`, in which
+     * case the resolver falls through to the bundled LiteLLM snapshot →
+     * conservative default. Set when LiteLLM doesn't know the model and
+     * the conservative default (128k/4k) would compact too aggressively.
+     */
+    llmContextWindow: z.coerce.number().int().positive().optional(),
+    llmMaxOutputTokens: z.coerce.number().int().positive().optional(),
     telegramBotToken: z
       .string()
       .regex(/:/, { error: "Telegram token must contain a colon" })
@@ -107,6 +123,9 @@ const FILE_BACKED = [
 const PLAIN = [
   "COGMO_LLM_PROVIDER_TYPE",
   "COGMO_LLM_BASE_URL",
+  "COGMO_LLM_MODEL",
+  "COGMO_LLM_CONTEXT_WINDOW",
+  "COGMO_LLM_MAX_OUTPUT_TOKENS",
   "COGMO_TELEGRAM_ALLOWED_USERS",
 ] as const;
 
@@ -156,6 +175,9 @@ export function parseNonInteractiveEnv(
     llmProviderType: resolved.COGMO_LLM_PROVIDER_TYPE,
     llmApiKey: resolved.COGMO_LLM_API_KEY,
     llmBaseUrl: resolved.COGMO_LLM_BASE_URL,
+    llmModel: resolved.COGMO_LLM_MODEL,
+    llmContextWindow: resolved.COGMO_LLM_CONTEXT_WINDOW,
+    llmMaxOutputTokens: resolved.COGMO_LLM_MAX_OUTPUT_TOKENS,
     telegramBotToken: resolved.COGMO_TELEGRAM_BOT_TOKEN,
     telegramAllowedUsers: resolved.COGMO_TELEGRAM_ALLOWED_USERS,
     tavilyApiKey: resolved.COGMO_TAVILY_API_KEY,
