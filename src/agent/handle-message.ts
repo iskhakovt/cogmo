@@ -403,15 +403,56 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         ),
       });
 
+      // Per-turn tool registry — built-ins from bootstrap + the live image
+      // catalog (loaded fresh each turn so wizard / CLI CRUD takes effect
+      // without a restart) + one dynamic tool per live skill + MCP tools
+      // resolved against the profile's globs. Rebuilt every turn so
+      // registered skills + newly-approved MCP tools appear immediately, and
+      // rolled-back / disabled / un-approved ones disappear. The skill-tool
+      // builder is fault-tolerant: a single skill with unreadable git source
+      // is logged and dropped, the rest of the list still loads. Composition
+      // policy (built-ins win on collision; profile.toolSet globs filter
+      // every source) lives in `composeTurnTools`. Image tools join the
+      // built-ins set rather than the skill/MCP sets — they're first-party
+      // and should win on any name collision with operator-installed
+      // extensions, same as memory / web / file tools.
+      //
+      // Resolved BEFORE `assemble-prompt` so the catalog renders into the
+      // system prompt's `# Tools` section — otherwise the LLM can't
+      // introspect its own per-turn capabilities and answers "what can you
+      // do?" from the built-ins alone, missing image gen, registered
+      // skills, and MCP tools entirely.
+      const imageTools = deps.imageToolsLoader ? await deps.imageToolsLoader.getTools() : [];
+      const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
+      const turnToolSetGlobs = profileForVoice?.toolSet ?? [];
+      const mcpTools = deps.mcpRegistry
+        ? await deps.mcpRegistry.resolveTools({ toolGlobs: turnToolSetGlobs })
+        : [];
+      const turnTools = composeTurnTools({
+        builtIns: [...tools.snapshot(), ...imageTools],
+        skillTools,
+        mcpTools,
+        toolSetGlobs: turnToolSetGlobs,
+      });
+      const toolDefs = turnTools.definitions();
+
+      // Profile passed in from the outer read (`profileForVoice`) so
+      // voice-mode resolution, `composeTurnTools` globs, and the prompt's
+      // `# Tools` / base-prompt sections all come from the same row. A
+      // concurrent `/settings` mid-turn used to land between the outer
+      // read and a second `getProfile` inside this step, leaving the
+      // prompt's tool filter and base-prompt sourced from different
+      // snapshots under READ COMMITTED.
       const systemPrompt = await step.run("assemble-prompt", async () => {
         const ctx = await loadConversationContext(
           { runInTx: deps.runInTx, agentStore, transportStore },
-          { conversationId, profileId },
+          { conversationId, profile: profileForVoice },
         );
         return promptSource.assemble({
-          profile: ctx.profile,
+          profile: profileForVoice,
           rules: ctx.rules,
           voiceMode: voiceModeForTurn,
+          toolDefinitions: toolDefs,
         });
       });
 
@@ -601,32 +642,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const limits = resolveLimits(model, rowLimits);
       const budget = computeBudget(limits);
       const summarizationModel = snapshot.summarizationModel;
-
-      // Per-turn tool registry — built-ins from bootstrap + the live image
-      // catalog (loaded fresh each turn so wizard / CLI CRUD takes effect
-      // without a restart) + one dynamic tool per live skill + MCP tools
-      // resolved against the profile's globs. Rebuilt every turn so
-      // registered skills + newly-approved MCP tools appear immediately, and
-      // rolled-back / disabled / un-approved ones disappear. The skill-tool
-      // builder is fault-tolerant: a single skill with unreadable git source
-      // is logged and dropped, the rest of the list still loads. Composition
-      // policy (built-ins win on collision; profile.toolSet globs filter
-      // every source) lives in `composeTurnTools`. Image tools join the
-      // built-ins set rather than the skill/MCP sets — they're first-party
-      // and should win on any name collision with operator-installed
-      // extensions, same as memory / web / file tools.
-      const imageTools = deps.imageToolsLoader ? await deps.imageToolsLoader.getTools() : [];
-      const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
-      const mcpTools = deps.mcpRegistry
-        ? await deps.mcpRegistry.resolveTools({ toolGlobs: profile?.toolSet ?? [] })
-        : [];
-      const turnTools = composeTurnTools({
-        builtIns: [...tools.snapshot(), ...imageTools],
-        skillTools,
-        mcpTools,
-        toolSetGlobs: profile?.toolSet ?? [],
-      });
-      const toolDefs = turnTools.definitions();
 
       const lastTokens = await deps.runInTx((tx) => agentStore.getLastTokens(tx, conversationId));
       const skip = shouldSkipCounting(

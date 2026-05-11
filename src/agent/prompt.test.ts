@@ -57,9 +57,11 @@ describe("DefaultPromptSource", () => {
   });
 
   it("auto-generates tools section from definitions", async () => {
-    const prompt = await new DefaultPromptSource({
-      toolDefinitions: () => testTools,
-    }).assemble({ profile: undefined, rules: [] });
+    const prompt = await new DefaultPromptSource().assemble({
+      profile: undefined,
+      rules: [],
+      toolDefinitions: testTools,
+    });
 
     expect(prompt).toContain("# Tools");
     expect(prompt).toContain("**web_search**: Search the web");
@@ -68,7 +70,17 @@ describe("DefaultPromptSource", () => {
   });
 
   it("omits tools section when no tools registered", async () => {
-    const prompt = await new DefaultPromptSource({ toolDefinitions: () => [] }).assemble({
+    const prompt = await new DefaultPromptSource().assemble({
+      profile: undefined,
+      rules: [],
+      toolDefinitions: [],
+    });
+
+    expect(prompt).not.toContain("# Tools");
+  });
+
+  it("omits tools section when toolDefinitions is undefined", async () => {
+    const prompt = await new DefaultPromptSource().assemble({
       profile: undefined,
       rules: [],
     });
@@ -135,12 +147,12 @@ describe("DefaultPromptSource", () => {
   it("assembles sections in correct order", async () => {
     const prompt = await new DefaultPromptSource({
       timezone: "UTC",
-      toolDefinitions: () => testTools,
       serviceGuidance: ["Test memory guidance."],
       getUserContext: async () => "Name: Tim",
     }).assemble({
       profile: undefined,
       rules: [{ rule: "Be kind" }],
+      toolDefinitions: testTools,
     });
 
     const userIdx = prompt.indexOf("# User");
