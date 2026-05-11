@@ -776,15 +776,22 @@ async function promptAddImageModels(deps: WizardDeps, providerName: string): Pro
       await p.text({
         message: "Aspect ratios (comma-separated; Enter to skip — fixed-size model):",
         placeholder: IMAGE_ALLOWED_RATIOS.join(","),
+        // Inline validate so a typo doesn't blow away the name/model-string/
+        // description the user already typed — they edit-fix the ratios prompt
+        // and continue. The parser does the work; we discard the parse result
+        // here and re-call after to keep types clean.
+        validate: (v = "") => {
+          if (parseWizardRatios(v) === "invalid") {
+            return `Allowed: ${IMAGE_ALLOWED_RATIOS.join(", ")}`;
+          }
+          return undefined;
+        },
       }),
     );
     const ratios = parseWizardRatios(ratiosInput);
-    if (ratios === "invalid") {
-      p.log.warn(
-        `Some ratios didn't match the allowed set (${IMAGE_ALLOWED_RATIOS.join(", ")}); skipping this model.`,
-      );
-      continue;
-    }
+    // Validator above guarantees this is never "invalid" by the time we get
+    // here — the prompt won't accept the value. Narrow accordingly.
+    if (ratios === "invalid") continue;
 
     const seed = cancelGuard(
       await p.confirm({

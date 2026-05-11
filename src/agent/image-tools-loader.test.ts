@@ -164,6 +164,71 @@ describe("ImageToolsLoader", () => {
     expect(lastReturn?.[0]?.providersSnapshotIds).toEqual([]); // cache evicted
   });
 
+  it("rebuilds when an existing provider row's secretId is rotated", async () => {
+    mockBuildImageProvider.mockReset();
+    mockCreateImageTools.mockReset();
+    mockBuildImageProvider.mockImplementation(async (row: ImageProviderRow) => ({
+      kind: "fal",
+      row,
+      provider: { tag: row.secretId },
+    }));
+    mockCreateImageTools.mockReturnValue([]);
+
+    let row: ImageProviderRow = providerRow();
+    const store = {
+      listImageProviders: vi.fn().mockImplementation(async () => [row]),
+      listImageModelsWithProvider: vi.fn().mockResolvedValue([]),
+    } as unknown as AgentStore;
+    const loader = makeLoader(store);
+
+    await loader.getTools(); // initial
+    expect(mockBuildImageProvider).toHaveBeenCalledTimes(1);
+    await loader.getTools(); // no change — cache hit
+    expect(mockBuildImageProvider).toHaveBeenCalledTimes(1);
+
+    // Operator rotates the secret — `secretId` changes for the same row id.
+    row = { ...row, secretId: "sec-rotated" };
+    await loader.getTools();
+    expect(mockBuildImageProvider).toHaveBeenCalledTimes(2);
+    expect(mockBuildImageProvider.mock.calls.at(-1)?.[0]).toMatchObject({
+      secretId: "sec-rotated",
+    });
+  });
+
+  it("rebuilds when an existing provider row's baseUrl or type changes", async () => {
+    mockBuildImageProvider.mockReset();
+    mockCreateImageTools.mockReset();
+    mockBuildImageProvider.mockImplementation(async (row: ImageProviderRow) => ({
+      kind: row.type === "fal" ? "fal" : "oai",
+      row,
+      provider: {},
+    }));
+    mockCreateImageTools.mockReturnValue([]);
+
+    let row: ImageProviderRow = providerRow({
+      type: "openai_compatible",
+      baseUrl: "https://api.venice.ai/api/v1",
+    });
+    const store = {
+      listImageProviders: vi.fn().mockImplementation(async () => [row]),
+      listImageModelsWithProvider: vi.fn().mockResolvedValue([]),
+    } as unknown as AgentStore;
+    const loader = makeLoader(store);
+
+    await loader.getTools();
+    expect(mockBuildImageProvider).toHaveBeenCalledTimes(1);
+
+    // Operator changes base URL only.
+    row = { ...row, baseUrl: "https://api.venice.ai/api/v2" };
+    await loader.getTools();
+    expect(mockBuildImageProvider).toHaveBeenCalledTimes(2);
+
+    // Operator changes type (rare; would only happen via direct DB poke).
+    row = { ...row, type: "fal", baseUrl: null };
+    await loader.getTools();
+    expect(mockBuildImageProvider).toHaveBeenCalledTimes(3);
+  });
+
   it("returns whatever createImageTools returns (empty when no models)", async () => {
     mockBuildImageProvider.mockReset();
     mockCreateImageTools.mockReset();
