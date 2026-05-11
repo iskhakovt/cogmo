@@ -101,6 +101,7 @@
     "@types/picomatch": "^4.0.3",
     "@types/semver": "^7.7.1",
     "@types/split2": "4.2.3",
+    "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^4.1.5",
     "dotenv": "^17.3.1",
     "drizzle-kit": "^0.31.10",
@@ -112,7 +113,8 @@
     "type-fest": "^5.6.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5",
-    "vitest-mock-extended": "4.0.0"
+    "vitest-mock-extended": "4.0.0",
+    "ws": "^8.20.0"
   },
   "pnpm": {
     "overrides": {
