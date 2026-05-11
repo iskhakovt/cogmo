@@ -12,6 +12,13 @@ import {
   CLAUDE_CODE_OAUTH_TOKEN_SECRET,
   CLAUDE_CODE_OAUTH_TOKEN_SECRET_DESCRIPTION,
 } from "../agent/coding/auth.js";
+import { addModelRouting } from "../agent/provider/add-model-routing.js";
+import { addProvider } from "../agent/provider/add-provider.js";
+import {
+  type DiscoveredModel,
+  DiscoveryUnavailable,
+  discoverModels,
+} from "../agent/provider/discover-models.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ProviderAttrs } from "../agent/store/schema.js";
 import { type Transactor, transactor } from "../db/transactor.js";
@@ -33,12 +40,10 @@ import type { TransportStore } from "../transport/store/index.js";
 import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
   type DaytonaProbeOpts,
-  validateAnthropicKey,
   validateClaudeCodeOauthToken,
   validateDaytonaApiKey,
   validateGitHubPat,
   validateHindsight,
-  validateOpenAICompatibleKey,
   validateTavilyKey,
   validateTelegramToken,
 } from "./validate.js";
@@ -127,11 +132,16 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
       options: [
         { value: "keep", label: "Keep current configuration" },
         { value: "add", label: "Add another provider" },
+        { value: "add-model", label: "Add a model to an existing provider" },
         { value: "replace", label: "Replace existing provider" },
       ],
     });
     cancelGuard(action);
     if (action === "keep") return;
+    if (action === "add-model") {
+      await stepAddModelToExisting(deps, existing);
+      return;
+    }
     if (action === "replace") {
       for (const prov of existing) {
         await deps.runInTx((tx) => deps.agentStore.deleteProvider(tx, prov.id));
@@ -178,73 +188,272 @@ async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
     }),
   );
 
-  // Validate
-  const s = p.spinner();
-  s.start("Validating API key...");
-
   const adapterType = providerType === "anthropic" ? "anthropic" : "openai_compatible";
-
-  let result: import("./validate.js").ValidationResult;
-  if (adapterType === "anthropic") {
-    result = await validateAnthropicKey(apiKey, baseUrl);
-  } else {
-    if (!baseUrl) throw new Error(`Base URL required for ${String(providerType)} but not set`);
-    result = await validateOpenAICompatibleKey(apiKey, baseUrl);
+  if (adapterType === "openai_compatible" && !baseUrl) {
+    throw new Error(`Base URL required for ${String(providerType)} but not set`);
   }
 
-  if (!result.valid) {
-    s.stop(`Validation failed: ${result.error}`);
-    const retry = await p.confirm({ message: "Save anyway?" });
-    if (!cancelGuard(retry)) return;
+  // Validate + persist via the shared domain function, so this code path is
+  // identical to `cogmo provider add`.
+  const s = p.spinner();
+  s.start("Validating API key...");
+  const attrs: ProviderAttrs = {};
+  if (providerType === "openrouter") attrs.promptCaching = true;
+
+  const { providerId, validation } = await retryPrompt(
+    () =>
+      addProvider(deps, {
+        name: providerType as string,
+        type: adapterType,
+        ...(baseUrl && { baseUrl }),
+        apiKey,
+        attrs,
+      }),
+    `add provider "${String(providerType)}"`,
+  );
+
+  if (!validation.valid) {
+    s.stop(`Validation warning: ${validation.error ?? "unknown"}`);
+    const proceed = await p.confirm({ message: "Save anyway and continue with model setup?" });
+    if (!cancelGuard(proceed)) return;
   } else {
     s.stop("API key validated.");
   }
 
-  // Store
-  const providerName = providerType as string;
-  const { id: secretId } = await deps.runInTx((tx) =>
-    deps.secretsStore.putSecret(tx, {
-      name: `${providerName}_api_key`,
-      plaintext: apiKey,
-      description: `API key for ${providerName}`,
-    }),
-  );
-  if (result.valid) {
-    await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, `${providerName}_api_key`));
-  }
-
-  const attrs: ProviderAttrs = {};
-  if (providerType === "openrouter") {
-    attrs.promptCaching = true;
-  }
-
-  const { id: providerId } = await deps.runInTx((tx) =>
-    deps.agentStore.createProvider(tx, {
-      name: providerName,
-      type: adapterType,
-      ...(baseUrl && { baseUrl }),
-      secretId,
-      attrs,
-    }),
-  );
-
-  // Register this provider for the default profile's model.
-  // Use next available position to avoid UNIQUE(model, position) collision.
-  await deps.runInTx(async (tx) => {
-    const defaultProfile = await deps.agentStore.getDefaultProfile(tx);
-    if (!defaultProfile) return;
-    const profile = await deps.agentStore.getProfile(tx, defaultProfile.id);
-    if (!profile) return;
-    const nextPosition = await deps.agentStore.getNextModelProviderPosition(tx, profile.model);
-    await deps.agentStore.addModelProvider(tx, {
-      model: profile.model,
-      providerId,
-      position: nextPosition,
-      userSelectable: true,
-    });
+  // Pick + register at least one model for this provider. Loops so the
+  // operator can add multiple models in one wizard pass; CLI covers the
+  // post-setup case.
+  await stepAddModelsForProvider(deps, {
+    providerType,
+    adapterType,
+    baseUrl: baseUrl ?? "",
+    apiKey,
+    providerId,
+    providerLabel: providerType as string,
   });
 
-  p.log.success(`Provider "${providerName}" configured for model routing.`);
+  p.log.success(`Provider "${String(providerType)}" configured.`);
+}
+
+interface ProviderRegistrationContext {
+  providerType: ProviderType;
+  adapterType: "anthropic" | "openai_compatible";
+  baseUrl: string;
+  apiKey: string;
+  providerId: string;
+  providerLabel: string;
+}
+
+/**
+ * Pick + register one or more models for a freshly-added provider. Loops
+ * until the user declines "add another for this provider?" so a single
+ * wizard pass can wire up Sonnet + Haiku on the same Anthropic key, or
+ * three different Grok variants on the same OpenRouter key, without
+ * dropping into the CLI.
+ */
+async function stepAddModelsForProvider(
+  deps: WizardDeps,
+  ctx: ProviderRegistrationContext,
+): Promise<void> {
+  const discovered = await retryDiscovery(ctx);
+  for (let i = 0; ; i++) {
+    const picked = await pickModelInteractive(discovered);
+    if (picked === null) break; // user opted out of adding a model
+
+    await registerModelForProvider(deps, ctx, picked);
+
+    if (i === 0) {
+      // First model is required for the wizard to be useful. Default-no
+      // beyond that — bulk additions are still possible via the CLI.
+      const another = await p.confirm({
+        message: `Add another model for "${ctx.providerLabel}"?`,
+        initialValue: false,
+      });
+      if (!cancelGuard(another)) break;
+    } else {
+      const another = await p.confirm({
+        message: "Add another?",
+        initialValue: false,
+      });
+      if (!cancelGuard(another)) break;
+    }
+  }
+}
+
+/**
+ * Add a model to an already-registered provider (the wizard's "add a
+ * model to an existing provider" branch). Shares the picker + registration
+ * flow with `stepAddModelsForProvider`.
+ */
+async function stepAddModelToExisting(
+  deps: WizardDeps,
+  existing: ReadonlyArray<{ id: string; name: string; type: string }>,
+): Promise<void> {
+  const provider = await p.select({
+    message: "Which provider?",
+    options: existing.map((p) => ({ value: p.id, label: p.name })),
+  });
+  cancelGuard(provider);
+  const row = existing.find((p) => p.id === provider);
+  if (!row) return;
+
+  // Re-fetch the full provider row to recover its base URL + decrypted
+  // secret so discovery can run with the original credentials. Skip the
+  // wizard's discovery step entirely when the provider type doesn't
+  // support model discovery (Anthropic direct still works; custom-with-no-
+  // `/v1/models` falls back to free-form input).
+  const full = await deps.runInTx((tx) => deps.agentStore.getProvider(tx, row.id));
+  if (!full) {
+    p.log.error(`Provider "${row.name}" disappeared mid-flight. Aborting.`);
+    return;
+  }
+  const apiKey = await deps.runInTx((tx) => deps.secretsStore.getSecretById(tx, full.secretId));
+  if (!apiKey) {
+    p.log.error(`Secret for provider "${row.name}" not found. Re-run setup.`);
+    return;
+  }
+  const adapterType = (full.type === "anthropic" ? "anthropic" : "openai_compatible") as
+    | "anthropic"
+    | "openai_compatible";
+  const baseUrl = full.baseUrl ?? "";
+  await stepAddModelsForProvider(deps, {
+    providerType: "custom",
+    adapterType,
+    baseUrl,
+    apiKey,
+    providerId: row.id,
+    providerLabel: row.name,
+  });
+}
+
+/**
+ * Run `/v1/models` discovery with retry-on-failure prompts. Returns
+ * `null` when the endpoint doesn't expose model listing — caller falls
+ * back to free-form text input.
+ */
+async function retryDiscovery(ctx: ProviderRegistrationContext): Promise<DiscoveredModel[] | null> {
+  for (;;) {
+    const s = p.spinner();
+    s.start("Discovering available models...");
+    try {
+      const models = await discoverModels({
+        type: ctx.adapterType,
+        baseUrl: ctx.baseUrl || guessAnthropicUrl(ctx.adapterType),
+        apiKey: ctx.apiKey,
+      });
+      s.stop(`Found ${models.length} model${models.length === 1 ? "" : "s"}.`);
+      return models;
+    } catch (err) {
+      s.stop(`Discovery failed: ${(err as Error).message}`);
+      if (err instanceof DiscoveryUnavailable) {
+        // Provider doesn't expose /v1/models. Fine — text input fallback.
+        return null;
+      }
+      const next = await p.select({
+        message: "Discovery failed. What would you like to do?",
+        options: [
+          { value: "retry", label: "Retry" },
+          { value: "skip", label: "Skip — type the model id by hand" },
+          { value: "abort", label: "Abort this provider" },
+        ],
+      });
+      cancelGuard(next);
+      if (next === "retry") continue;
+      if (next === "skip") return null;
+      throw new WizardCancelled();
+    }
+  }
+}
+
+function guessAnthropicUrl(adapter: "anthropic" | "openai_compatible"): string {
+  return adapter === "anthropic" ? "https://api.anthropic.com" : "";
+}
+
+/**
+ * Show a searchable picker over the discovered list, or fall back to a
+ * free-form text input when discovery returned null. Returns `null` when
+ * the user opts out of adding a model.
+ */
+async function pickModelInteractive(
+  discovered: DiscoveredModel[] | null,
+): Promise<DiscoveredModel | null> {
+  if (discovered === null || discovered.length === 0) {
+    const id = await p.text({
+      message: "Enter the model id (no model list available from this provider):",
+      validate: (v = "") => (v.trim().length === 0 ? "Required" : undefined),
+    });
+    const value = cancelGuard(id).trim();
+    if (!value) return null;
+    return { id: value };
+  }
+
+  const choice = await p.autocomplete({
+    message: "Pick a model (type to filter):",
+    options: discovered.map((m) => ({
+      value: m.id,
+      label: m.id,
+      // exactOptionalPropertyTypes is on — only include `hint` when it has
+      // a value, otherwise the entry shape doesn't match clack's type.
+      ...(m.name && { hint: m.name }),
+    })),
+    initialUserInput: "",
+  });
+  const picked = cancelGuard(choice);
+  const match = discovered.find((m) => m.id === picked);
+  return match ?? null;
+}
+
+/**
+ * Resolve limits for a picked model and insert the routing row. Prompts
+ * for explicit limits only when discovery didn't include them — the
+ * resolver still has the LiteLLM bundled snapshot to fall through to, and
+ * the operator can leave the prompts at their defaults if they don't
+ * care.
+ */
+async function registerModelForProvider(
+  deps: WizardDeps,
+  ctx: ProviderRegistrationContext,
+  picked: DiscoveredModel,
+): Promise<void> {
+  // Inline OpenRouter-style limits go straight into the row override.
+  // For everything else we leave both columns null so the resolver
+  // falls through to LiteLLM → conservative default. Operators who want
+  // to pin can do so via `cogmo model add --context N --max-output N`.
+  await addModelRouting(deps, {
+    model: picked.id,
+    providerId: ctx.providerId,
+    userSelectable: true,
+    ...(picked.contextWindow != null && { contextWindow: picked.contextWindow }),
+    ...(picked.maxOutputTokens != null && { maxOutputTokens: picked.maxOutputTokens }),
+  });
+  p.log.success(`Registered "${picked.id}" on "${ctx.providerLabel}".`);
+}
+
+/**
+ * Wrap an external-API call with `retry / skip / abort` prompts on
+ * failure. `skip` returns the failure as a rejected promise so the
+ * caller's catch handler can decide what to do; most call sites should
+ * abort entirely on skip (treat the operator's "skip" as "this provider
+ * isn't ready").
+ */
+async function retryPrompt<T>(fn: () => Promise<T>, label: string): Promise<T> {
+  for (;;) {
+    try {
+      return await fn();
+    } catch (err) {
+      p.log.error(`Failed to ${label}: ${(err as Error).message}`);
+      const next = await p.select({
+        message: "What would you like to do?",
+        options: [
+          { value: "retry", label: "Retry" },
+          { value: "abort", label: "Abort" },
+        ],
+      });
+      cancelGuard(next);
+      if (next === "retry") continue;
+      throw new WizardCancelled();
+    }
+  }
 }
 
 async function stepConfigureTelegram(

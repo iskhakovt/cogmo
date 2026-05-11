@@ -1,107 +1,155 @@
 /**
- * Model registry — maps model identifiers to capabilities.
+ * Model limits resolution.
  *
- * Curated allowlist. Unknown models fail with a clear error.
- * When adding a new model to a profile, add it here at the same time.
+ * Cogmo doesn't curate a model allowlist — operators bring whatever model
+ * id their provider exposes (`x-ai/grok-4.3`, `google/gemini-3-flash-preview`,
+ * a niche local llama variant on a private vLLM box). The resolver answers
+ * "what context window + max output budget does this model accept?" by
+ * layering three sources, in priority order:
  *
- * Slug conventions:
- *  - Anthropic native (via Anthropic SDK): `claude-{tier}-{major}-{minor}` and
- *    occasionally a date suffix (e.g. `claude-haiku-4-5-20251001`).
- *  - OpenRouter (via OpenAI-compatible SDK): `{org}/{model}` with the
- *    org-canonical model id (e.g. `anthropic/claude-opus-4.6`,
- *    `x-ai/grok-4.20`, `google/gemini-2.5-pro`).
- *  - Bare `gpt-4o` etc. are OpenAI direct.
+ *   1. **DB row override** — the `(context_window, max_output_tokens)` columns
+ *      on `model_providers`. Set by the setup wizard or `cogmo model add`
+ *      when the operator wants explicit control. Highest priority — when
+ *      either column is set we trust it without further lookup.
+ *   2. **LiteLLM bundled snapshot** — `data/litellm-models.json`, refreshed
+ *      manually via `scripts/refresh-litellm-models.ts`. Covers ~2,200
+ *      models from the community-curated registry; bridges OpenRouter
+ *      slugs to vendor-direct ids via key normalization.
+ *   3. **Conservative default** — 128k context, 4k max output, with a
+ *      `WARN` log so operators see the fallback fire and can pin explicit
+ *      limits if compaction quality matters.
+ *
+ * Limits travel with the routing decision: the caller threads the row's
+ * `(contextWindow, maxOutputTokens)` into {@link resolveLimits}, which
+ * returns a fully-resolved {@link ModelLimits} plus a {@link LimitsSource}
+ * tag so `cogmo model list` can show where each row's effective limits
+ * came from.
  */
+
+import { logger } from "../logger.js";
+import { lookupLitellm } from "./litellm-data.js";
 
 export interface ModelLimits {
   contextWindow: number;
   maxOutputTokens: number;
 }
 
-const MODEL_REGISTRY: ReadonlyMap<string, ModelLimits> = new Map([
-  // --- Anthropic (direct via Anthropic SDK) ---
-  ["claude-opus-4-7", { contextWindow: 1_000_000, maxOutputTokens: 128_000 }],
-  ["claude-opus-4-6", { contextWindow: 1_000_000, maxOutputTokens: 128_000 }],
-  ["claude-opus-4-5-20251101", { contextWindow: 200_000, maxOutputTokens: 64_000 }],
-  ["claude-opus-4-1-20250805", { contextWindow: 200_000, maxOutputTokens: 32_000 }],
-  ["claude-sonnet-4-6", { contextWindow: 1_000_000, maxOutputTokens: 64_000 }],
-  ["claude-sonnet-4-5-20250929", { contextWindow: 200_000, maxOutputTokens: 64_000 }],
-  ["claude-haiku-4-5-20251001", { contextWindow: 200_000, maxOutputTokens: 64_000 }],
+/**
+ * Where the resolver picked each individual column from. Useful for
+ * debugging "why is compaction so aggressive on this model" via
+ * `cogmo model list`, where each row shows the source per column —
+ * a partial DB override (e.g. only `maxOutputTokens` pinned) reports
+ * `db` for that column and `litellm` for the one falling through, so
+ * operators can see the contribution of each layer.
+ */
+export type LimitsSource = "db" | "litellm" | "default";
 
-  // --- OpenAI (direct) ---
-  ["gpt-5.5", { contextWindow: 1_000_000, maxOutputTokens: 128_000 }],
-  ["gpt-5.4", { contextWindow: 1_000_000, maxOutputTokens: 128_000 }],
-  ["gpt-5.4-mini", { contextWindow: 400_000, maxOutputTokens: 128_000 }],
-  ["gpt-4o", { contextWindow: 128_000, maxOutputTokens: 16_384 }],
-  ["gpt-4o-mini", { contextWindow: 128_000, maxOutputTokens: 16_384 }],
+export interface ResolvedLimits extends ModelLimits {
+  contextWindowSource: LimitsSource;
+  maxOutputTokensSource: LimitsSource;
+}
 
-  // --- OpenRouter (OpenAI-compatible SDK) ---
-  // Anthropic via OpenRouter
-  ["anthropic/claude-opus-4.7", { contextWindow: 1_000_000, maxOutputTokens: 128_000 }],
-  ["anthropic/claude-opus-4.6", { contextWindow: 1_000_000, maxOutputTokens: 128_000 }],
-  ["anthropic/claude-sonnet-4.6", { contextWindow: 1_000_000, maxOutputTokens: 64_000 }],
-  ["anthropic/claude-haiku-4.5", { contextWindow: 200_000, maxOutputTokens: 64_000 }],
-  // xAI Grok — ordered by release date (xAI's `4.3` shipped after `4.20`,
-  // so semver-descending would put them in the wrong chronological order).
-  ["x-ai/grok-4.3", { contextWindow: 1_000_000, maxOutputTokens: 32_000 }],
-  ["x-ai/grok-4.20", { contextWindow: 2_000_000, maxOutputTokens: 32_000 }],
-  ["x-ai/grok-4.1-fast", { contextWindow: 2_000_000, maxOutputTokens: 30_000 }],
-  ["x-ai/grok-4-fast", { contextWindow: 2_000_000, maxOutputTokens: 30_000 }],
-  // Google Gemini
-  ["google/gemini-3-flash-preview", { contextWindow: 1_048_576, maxOutputTokens: 65_536 }],
-  ["google/gemini-2.5-pro", { contextWindow: 1_048_576, maxOutputTokens: 65_536 }],
-  ["google/gemini-2.5-flash", { contextWindow: 1_048_576, maxOutputTokens: 65_535 }],
-  ["google/gemini-2.5-flash-lite", { contextWindow: 1_048_576, maxOutputTokens: 65_535 }],
-  // OpenAI flagship + mid-tier via OpenRouter
-  ["openai/gpt-5.5", { contextWindow: 1_050_000, maxOutputTokens: 128_000 }],
-  ["openai/gpt-5.4", { contextWindow: 1_050_000, maxOutputTokens: 128_000 }],
-  ["openai/gpt-5.4-mini", { contextWindow: 400_000, maxOutputTokens: 128_000 }],
-  ["openai/gpt-oss-120b", { contextWindow: 131_072, maxOutputTokens: 32_768 }],
-  // DeepSeek — cheap open-weights with tool support
-  ["deepseek/deepseek-v4-pro", { contextWindow: 1_048_576, maxOutputTokens: 32_768 }],
-  ["deepseek/deepseek-v4-flash", { contextWindow: 1_048_576, maxOutputTokens: 32_768 }],
-  ["deepseek/deepseek-v3.2", { contextWindow: 163_840, maxOutputTokens: 8_192 }],
-  // Moonshot Kimi — long-context Chinese MoE, OpenAI-compatible tools
-  ["moonshotai/kimi-k2.6", { contextWindow: 262_144, maxOutputTokens: 16_384 }],
-  // MiniMax
-  ["minimax/minimax-m2.7", { contextWindow: 196_608, maxOutputTokens: 32_768 }],
-  // Z-AI (Zhipu) GLM
-  ["z-ai/glm-5.1", { contextWindow: 202_752, maxOutputTokens: 65_535 }],
-  // Tencent Hunyuan — paid + free tier (same wire shape, same limits)
-  ["tencent/hy3-preview", { contextWindow: 262_144, maxOutputTokens: 65_536 }],
-  ["tencent/hy3-preview:free", { contextWindow: 262_144, maxOutputTokens: 65_536 }],
-  // StepFun
-  ["stepfun/step-3.5-flash", { contextWindow: 262_144, maxOutputTokens: 32_768 }],
-  // NVIDIA Nemotron — free tier
-  ["nvidia/nemotron-3-super-120b-a12b:free", { contextWindow: 262_144, maxOutputTokens: 32_768 }],
-  // OpenRouter's own preview model
-  ["openrouter/owl-alpha", { contextWindow: 1_048_576, maxOutputTokens: 262_144 }],
-]);
+/**
+ * Optional explicit override for a single model. Either column may be set
+ * independently — for instance, an operator might pin `maxOutputTokens` on
+ * a reasoning model to cap response length without overriding the context
+ * window.
+ */
+export interface PartialLimits {
+  contextWindow: number | null;
+  maxOutputTokens: number | null;
+}
+
+/**
+ * Conservative fallback when a model is unknown to both DB overrides and
+ * the LiteLLM snapshot. 128k / 4k is a safe lower bound: it under-uses
+ * larger models (compaction fires earlier than necessary) but never
+ * over-promises capacity that the upstream would reject. Compaction
+ * quality is the only thing that suffers — operators can pin the real
+ * values via the wizard or `cogmo model add` when they care.
+ */
+export const DEFAULT_LIMITS: ModelLimits = {
+  contextWindow: 128_000,
+  maxOutputTokens: 4_096,
+};
 
 const DEFAULT_SAFETY_BUFFER = 10_000;
 
 /**
- * Get context window and output limits for a model.
- * Throws on unknown models — misconfiguration should be caught early.
+ * Resolve the effective limits for a model.
  *
- * INVARIANT: only ever called with the current turn's model resolved from
- * `profiles.model` (via `snapshot.model` in `handle-message.ts`). Historical
- * `messages.model` rows are write-only and may reference retired/deprecated
- * ids that are no longer in the registry — never route those through here.
+ * `rowLimits` are the DB columns from the `model_providers` row that's
+ * being used for this turn (caller already did the routing lookup).
+ * Pass `null` for either column when the row left it unset.
+ *
+ * Always returns a value — never throws on unknown models. When neither
+ * the row nor the snapshot has a hit, logs a single `WARN` per model id
+ * via the deduplicating cache so a long-running process doesn't spam
+ * the same warning every turn.
  */
-export function getModelLimits(model: string): ModelLimits {
-  const limits = MODEL_REGISTRY.get(model);
-  if (!limits) {
-    throw new Error(`Unknown model "${model}" — add it to MODEL_REGISTRY in src/llm/models.ts`);
+export function resolveLimits(model: string, rowLimits?: PartialLimits): ResolvedLimits {
+  const litellm = lookupLitellm(model);
+  const cw = pickColumn(
+    rowLimits?.contextWindow,
+    litellm?.contextWindow,
+    DEFAULT_LIMITS.contextWindow,
+  );
+  const mo = pickColumn(
+    rowLimits?.maxOutputTokens,
+    litellm?.maxOutputTokens,
+    DEFAULT_LIMITS.maxOutputTokens,
+  );
+  // Warn once when the model is unknown to LiteLLM AND no DB override
+  // supplied either column — the resolver fell through to the
+  // conservative default everywhere, and the operator probably wants to
+  // know.
+  if (cw.source === "default" && mo.source === "default") {
+    warnFallbackOnce(model);
   }
-  return limits;
+  return {
+    contextWindow: cw.value,
+    maxOutputTokens: mo.value,
+    contextWindowSource: cw.source,
+    maxOutputTokensSource: mo.source,
+  };
+}
+
+function pickColumn(
+  override: number | null | undefined,
+  litellm: number | undefined,
+  fallback: number,
+): { value: number; source: LimitsSource } {
+  if (override != null) return { value: override, source: "db" };
+  if (litellm != null) return { value: litellm, source: "litellm" };
+  return { value: fallback, source: "default" };
+}
+
+const warnedModels = new Set<string>();
+
+function warnFallbackOnce(model: string): void {
+  if (warnedModels.has(model)) return;
+  warnedModels.add(model);
+  logger.warn(
+    {
+      model,
+      defaultContextWindow: DEFAULT_LIMITS.contextWindow,
+      defaultMaxOutputTokens: DEFAULT_LIMITS.maxOutputTokens,
+    },
+    `model "${model}" not in LiteLLM snapshot — using conservative default. ` +
+      `Set explicit limits via the setup wizard or \`cogmo model add --context N --max-output N\` ` +
+      `for accurate compaction.`,
+  );
 }
 
 /**
- * Compute the input token budget for a model.
- * budget = contextWindow - maxOutputTokens - safetyBuffer
+ * Compute the input-token budget for a turn given resolved model limits.
+ *
+ *   budget = contextWindow - maxOutputTokens - safetyBuffer
+ *
+ * `safetyBuffer` defaults to 10k tokens — leaves headroom for tool
+ * definitions, system prompt, and the reply priming that the SDK's
+ * `countTokens` doesn't account for cleanly across providers.
  */
-export function computeBudget(model: string, safetyBuffer = DEFAULT_SAFETY_BUFFER): number {
-  const { contextWindow, maxOutputTokens } = getModelLimits(model);
-  return contextWindow - maxOutputTokens - safetyBuffer;
+export function computeBudget(limits: ModelLimits, safetyBuffer = DEFAULT_SAFETY_BUFFER): number {
+  return limits.contextWindow - limits.maxOutputTokens - safetyBuffer;
 }

@@ -172,6 +172,12 @@ export async function setup({ provide }: GlobalSetupContext) {
   provide("inngestEventKey", "test");
   provide("hindsightUrl", hindsightUrl);
   provide("defaultUserId", defaultUserId);
+  // Exposed so tests can `docker exec` against the bundled binary — used
+  // by the LiteLLM-snapshot smoke check that proves the resolver can find
+  // `data/litellm-models.json` after tsup bundling. There's no way to
+  // pass the testcontainers handle itself through `provide` (not JSON),
+  // so we hand back the raw ID and the test uses the host docker CLI.
+  provide("appContainerId", appContainer.getId());
 
   console.log(`E2E environment ready — ${JSON.stringify({ ...urls, hindsightUrl })}`);
 }

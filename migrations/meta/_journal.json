@@ -197,6 +197,13 @@
       "when": 1778365826426,
       "tag": "0027_military_grim_reaper",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1778496335062,
+      "tag": "0028_elite_serpent_society",
+      "breakpoints": true
     }
   ]
 }

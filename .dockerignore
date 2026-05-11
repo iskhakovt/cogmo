@@ -11,6 +11,7 @@
 !src/
 !migrations/
 !vendor/
+!data/
 
 # Exclude test files that live inside src/
 src/**/*.test.ts

@@ -1124,7 +1124,7 @@ describe("DrizzleAgentStore", () => {
       await tx((trx) => store.deleteProvider(trx, providerId));
 
       expect(await tx((trx) => store.getProvider(trx, providerId))).toBeUndefined();
-      expect(await tx((trx) => store.resolveProviderForModel(trx, "claude-test"))).toBeUndefined();
+      expect(await tx((trx) => store.listProvidersForModel(trx, "claude-test"))).toEqual([]);
     });
   });
 
@@ -1162,13 +1162,13 @@ describe("DrizzleAgentStore", () => {
         }),
       );
 
-      const resolved = await tx((trx) => store.resolveProviderForModel(trx, "claude-sonnet-4"));
-      expect(resolved?.name).toBe("primary");
+      const rows = await tx((trx) => store.listProvidersForModel(trx, "claude-sonnet-4"));
+      expect(rows[0]?.name).toBe("primary");
     });
 
-    it("returns undefined when no provider is registered for a model", async () => {
-      const resolved = await tx((trx) => store.resolveProviderForModel(trx, "nonexistent-model"));
-      expect(resolved).toBeUndefined();
+    it("returns an empty list when no provider is registered for a model", async () => {
+      const rows = await tx((trx) => store.listProvidersForModel(trx, "nonexistent-model"));
+      expect(rows).toEqual([]);
     });
 
     it("removes model_providers by provider", async () => {
@@ -1192,8 +1192,8 @@ describe("DrizzleAgentStore", () => {
 
       await tx((trx) => store.removeModelProvidersByProvider(trx, providerId));
 
-      expect(await tx((trx) => store.resolveProviderForModel(trx, "model-a"))).toBeUndefined();
-      expect(await tx((trx) => store.resolveProviderForModel(trx, "model-b"))).toBeUndefined();
+      expect(await tx((trx) => store.listProvidersForModel(trx, "model-a"))).toEqual([]);
+      expect(await tx((trx) => store.listProvidersForModel(trx, "model-b"))).toEqual([]);
     });
 
     it("enforces unique (model, position)", async () => {

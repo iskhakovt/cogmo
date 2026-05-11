@@ -28,7 +28,7 @@ Tables are documented in the design doc that owns their domain:
 |-|-|-|
 | `secrets` | [infrastructure.md](infrastructure.md) | Encrypted credentials (AES-256-GCM). Name-keyed. |
 | `llm_providers` | [providers.md](providers.md) | Provider config (type, base_url, secret FK, attrs) |
-| `model_providers` | [providers.md](providers.md) | Model → provider routing with position-based priority. UNIQUE(model, position) prevents ties. `user_selectable` flag gates user-facing model picker (admin-managed via psql). |
+| `model_providers` | [providers.md](providers.md) | Model → provider routing with position-based priority. UNIQUE(model, position) prevents ties. `user_selectable` flag gates user-facing model picker. Optional `context_window` / `max_output_tokens` columns let operators pin limits when LiteLLM doesn't know the model; both nullable, fall through to the bundled LiteLLM snapshot then a conservative default. Managed via `cogmo model add/list/remove` or the setup wizard's model picker. |
 
 `profiles` gains:
 - `summarization_model TEXT` (nullable, replaces `SUMMARIZATION_MODEL` env var).

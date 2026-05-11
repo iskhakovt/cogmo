@@ -3,9 +3,12 @@ import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import { conversationErrored, inboundReady, responseReady } from "../inngest/events.js";
 import { isRetriableProviderError } from "../llm/fallback.js";
-import { computeBudget } from "../llm/models.js";
-import type { LlmProvider } from "../llm/provider.js";
-import { type LlmProviderResolver, ProviderConfigError } from "../llm/resolver.js";
+import { computeBudget, resolveLimits } from "../llm/models.js";
+import {
+  type LlmProviderResolver,
+  ProviderConfigError,
+  type ResolvedLlm,
+} from "../llm/resolver.js";
 import type { ContentBlock, Message, StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
@@ -104,7 +107,7 @@ export interface HandleMessageDeps {
 async function resolveOrFail(
   resolveProvider: LlmProviderResolver,
   model: string,
-): Promise<LlmProvider> {
+): Promise<ResolvedLlm> {
   try {
     return await resolveProvider(model);
   } catch (err) {
@@ -569,7 +572,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // in step state. See design/crash-recovery.md.
 
       const model = snapshot.model;
-      const budget = computeBudget(model);
 
       // Per-turn provider dispatch — the snapshot's model determines which
       // adapter (Anthropic, xAI via OpenAI-compat, etc.) handles the chat,
@@ -583,7 +585,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // so Inngest aborts immediately and `onFailure` notifies the user
       // — no point burning retries on a misconfiguration. See
       // design/providers.md → Provider dispatch.
-      const provider = await resolveOrFail(resolveProvider, model);
+      const { provider, limits: rowLimits } = await resolveOrFail(resolveProvider, model);
+      // Layered limits: row override → bundled LiteLLM snapshot → conservative
+      // default. Always returns a value; never throws on unknown models.
+      const limits = resolveLimits(model, rowLimits);
+      const budget = computeBudget(limits);
       const summarizationModel = snapshot.summarizationModel;
 
       // Per-turn tool registry — built-ins from bootstrap + one dynamic tool
@@ -631,7 +637,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             const summarizationProvider =
               summarizationModel === model
                 ? provider
-                : await resolveOrFail(resolveProvider, summarizationModel);
+                : (await resolveOrFail(resolveProvider, summarizationModel)).provider;
             // Step ID is hardcoded — relies on `compactMessages` calling
             // `summarize` at most once per invocation (contract on
             // ContextManagerDeps.summarize). If that ever changes, switch to
