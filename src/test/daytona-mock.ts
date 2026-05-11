@@ -146,6 +146,30 @@ const TOOLBOX_PATH_PREFIX = "/toolbox/";
  */
 const MOCK_URL_PLACEHOLDER = "http://__daytona_mock__";
 
+/**
+ * Hop-by-hop / connection-scoped HTTP headers that MUST NOT be
+ * forwarded to upstream (or accepted from upstream as-is). Per
+ * RFC 2616 §13.5.1 plus `host` (connection-scoped routing target).
+ * `content-length` is hop-by-hop in practice — Node's `fetch()`
+ * recomputes it from the Buffer body. `transfer-encoding: chunked`
+ * is the one that bites — undici rejects it with
+ * `InvalidArgumentError: invalid transfer-encoding header` when
+ * supplied on the input request. Shared between the HTTP forwarder
+ * and the WS upgrade so the two paths can't drift.
+ */
+const HOP_BY_HOP_HEADERS = new Set([
+  "host",
+  "connection",
+  "content-length",
+  "transfer-encoding",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailers",
+  "upgrade",
+]);
+
 interface InFlightScenario {
   name: string;
   calls: Call[];
@@ -316,13 +340,10 @@ export class DaytonaMock {
     for (const [k, v] of Object.entries(incomingHeaders)) {
       if (typeof v !== "string") continue;
       const lower = k.toLowerCase();
-      if (
-        lower === "host" ||
-        lower === "connection" ||
-        lower === "upgrade" ||
-        lower === "content-length" ||
-        lower.startsWith("sec-websocket-")
-      ) {
+      // Strip hop-by-hop + sec-websocket-* (the new upstream WS sets
+      // its own upgrade handshake headers). Shared HOP_BY_HOP set
+      // keeps this in lockstep with the HTTP forwarder.
+      if (HOP_BY_HOP_HEADERS.has(lower) || lower.startsWith("sec-websocket-")) {
         continue;
       }
       wsHeaders[k] = v;
@@ -712,10 +733,7 @@ export class DaytonaMock {
     const out: Record<string, string> = {};
     for (const [k, v] of Object.entries(headers)) {
       if (typeof v !== "string") continue;
-      const lower = k.toLowerCase();
-      // Hop-by-hop + host are connection-scoped and would confuse
-      // upstream if forwarded as-is.
-      if (lower === "host" || lower === "connection" || lower === "content-length") continue;
+      if (HOP_BY_HOP_HEADERS.has(k.toLowerCase())) continue;
       out[k] = v;
     }
     return out;
