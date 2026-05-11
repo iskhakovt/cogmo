@@ -27,6 +27,7 @@ import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./con
 import { loadConversationContext } from "./conversation/load-conversation-context.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
+import type { ImageToolsLoader } from "./image-tools-loader.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
 import { shouldSkipRecall } from "./recall-gate.js";
@@ -49,6 +50,15 @@ export interface HandleMessageDeps {
    */
   resolveProvider: LlmProviderResolver;
   tools: ToolRegistry;
+  /**
+   * Per-turn loader for the `generate_image` tool set. Re-queries
+   * `image_providers` + `image_models` on every call so wizard / CLI
+   * mutations surface without a process restart. Optional only because some
+   * unit tests bypass image gen entirely; production wiring always populates
+   * it. Cached adapter instances live on the loader, so the per-turn cost is
+   * two cheap selects on small tables.
+   */
+  imageToolsLoader?: ImageToolsLoader;
   memory: MemoryProvider;
   promptSource: PromptSource;
   fileService: Service["files"];
@@ -592,20 +602,26 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const budget = computeBudget(limits);
       const summarizationModel = snapshot.summarizationModel;
 
-      // Per-turn tool registry — built-ins from bootstrap + one dynamic tool
-      // per live skill + MCP tools resolved against the profile's globs.
-      // Rebuilt every turn so registered skills + newly-approved MCP tools
-      // appear immediately, and rolled-back / disabled / un-approved ones
-      // disappear. The skill-tool builder is fault-tolerant: a single skill
-      // with unreadable git source is logged and dropped, the rest of the
-      // list still loads. Composition policy (built-ins win on collision;
-      // profile.toolSet globs filter every source) lives in `composeTurnTools`.
+      // Per-turn tool registry — built-ins from bootstrap + the live image
+      // catalog (loaded fresh each turn so wizard / CLI CRUD takes effect
+      // without a restart) + one dynamic tool per live skill + MCP tools
+      // resolved against the profile's globs. Rebuilt every turn so
+      // registered skills + newly-approved MCP tools appear immediately, and
+      // rolled-back / disabled / un-approved ones disappear. The skill-tool
+      // builder is fault-tolerant: a single skill with unreadable git source
+      // is logged and dropped, the rest of the list still loads. Composition
+      // policy (built-ins win on collision; profile.toolSet globs filter
+      // every source) lives in `composeTurnTools`. Image tools join the
+      // built-ins set rather than the skill/MCP sets — they're first-party
+      // and should win on any name collision with operator-installed
+      // extensions, same as memory / web / file tools.
+      const imageTools = deps.imageToolsLoader ? await deps.imageToolsLoader.getTools() : [];
       const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
       const mcpTools = deps.mcpRegistry
         ? await deps.mcpRegistry.resolveTools({ toolGlobs: profile?.toolSet ?? [] })
         : [];
       const turnTools = composeTurnTools({
-        builtIns: tools.snapshot(),
+        builtIns: [...tools.snapshot(), ...imageTools],
         skillTools,
         mcpTools,
         toolSetGlobs: profile?.toolSet ?? [],

@@ -198,8 +198,10 @@ const FAL_DEFAULT_MODELS: ReadonlyArray<FalDefaultModel> = [
   {
     name: "fal/flux-kontext",
     modelString: "fal-ai/flux-pro/kontext",
-    description: "image editing — use when modifying an existing image",
-    capabilities: { aspectRatios: [...FAL_DEFAULT_RATIOS], seed: true },
+    description:
+      "image editing — modify an existing image (resize, restyle, swap subjects). " +
+      "Always pass a `referenceImage` path to the image you're editing.",
+    capabilities: { aspectRatios: [...FAL_DEFAULT_RATIOS], seed: true, imageInput: "required" },
   },
 ];
 

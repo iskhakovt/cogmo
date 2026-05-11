@@ -20,7 +20,11 @@ import {
   discoverModels,
 } from "../agent/provider/discover-models.js";
 import type { AgentStore } from "../agent/store/index.js";
-import type { ProviderAttrs } from "../agent/store/schema.js";
+import {
+  IMAGE_ALLOWED_ASPECT_RATIOS,
+  type ImageAspectRatio,
+  type ProviderAttrs,
+} from "../agent/store/schema.js";
 import { type Transactor, transactor } from "../db/transactor.js";
 import {
   DAYTONA_API_KEY_SECRET,
@@ -616,6 +620,264 @@ async function stepConfigureOptionalTools(deps: WizardDeps): Promise<void> {
   }
 }
 
+/**
+ * Configure OpenAI-compatible image providers (Venice, OpenAI gpt-image, custom).
+ * Fal is handled in `stepConfigureOptionalTools` via the `fal_api_key` prompt —
+ * the boot-time `ensureFalImageDefaults` seed wires the canonical 9-model
+ * catalog automatically. This step covers the other half: providers that
+ * speak `POST /v1/images/generations` and require per-model registration.
+ */
+async function stepConfigureImageProviders(deps: WizardDeps): Promise<void> {
+  const allExisting = await deps.runInTx((tx) => deps.agentStore.listImageProviders(tx));
+  const oaiExisting = allExisting.filter((p) => p.type === "openai_compatible");
+
+  if (oaiExisting.length === 0) {
+    const add = await p.confirm({
+      message:
+        "Configure an OpenAI-compatible image provider? (Venice, OpenAI gpt-image, custom — fal handled separately) (optional)",
+      initialValue: false,
+    });
+    if (!cancelGuard(add)) return;
+  } else {
+    const names = oaiExisting.map((p) => p.name).join(", ");
+    const action = await p.select({
+      message: `OpenAI-compatible image provider(s) configured: ${names}. What would you like to do?`,
+      options: [
+        { value: "keep", label: "Keep current configuration" },
+        { value: "add", label: "Add another image provider" },
+        { value: "add-model", label: "Add a model to an existing provider" },
+      ],
+    });
+    cancelGuard(action);
+    if (action === "keep") return;
+    if (action === "add-model") {
+      await stepAddImageModelToExisting(deps, oaiExisting);
+      return;
+    }
+  }
+
+  await addOaiImageProvider(deps);
+}
+
+const IMAGE_PROVIDER_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+
+async function addOaiImageProvider(deps: WizardDeps): Promise<void> {
+  p.note(
+    [
+      "Venice: https://venice.ai/settings/api → Create API Key",
+      "OpenAI: https://platform.openai.com/api-keys",
+      "Custom: any endpoint that speaks `POST /v1/images/generations`",
+    ].join("\n"),
+    "Where to get an API key",
+  );
+
+  const name = cancelGuard(
+    await p.text({
+      message: "Provider name (e.g. venice, openai):",
+      validate: (v = "") => {
+        if (!IMAGE_PROVIDER_NAME_RE.test(v)) {
+          return "Lowercase letters, digits, hyphens, or underscores; must start with a letter; ≤32 chars";
+        }
+        return undefined;
+      },
+    }),
+  );
+
+  const baseUrl = cancelGuard(
+    await p.text({
+      message: "Base URL (e.g. https://api.venice.ai/api/v1):",
+      validate: (v = "") => {
+        if (!v.startsWith("https://")) return "Must start with https://";
+        if (v.endsWith("/")) return "Drop the trailing slash";
+        return undefined;
+      },
+    }),
+  );
+
+  const apiKey = cancelGuard(
+    await p.password({
+      message: "API key:",
+      validate: (v) => (v && v.length >= 8 ? undefined : "Key seems too short"),
+    }),
+  );
+
+  const secretName = `${name}_api_key`;
+  const s = p.spinner();
+  s.start("Saving image provider...");
+  let providerId: string;
+  try {
+    providerId = await deps.runInTx(async (tx) => {
+      const { id: secretId } = await deps.secretsStore.putSecret(tx, {
+        name: secretName,
+        plaintext: apiKey,
+        description: `openai_compatible image provider key (${name})`,
+      });
+      const result = await deps.agentStore.createImageProvider(tx, {
+        name,
+        type: "openai_compatible",
+        baseUrl,
+        secretId,
+        attrs: {},
+      });
+      return result.id;
+    });
+    s.stop(`Added image provider "${name}".`);
+  } catch (err) {
+    s.stop(`Failed to add image provider: ${(err as Error).message}`);
+    return;
+  }
+
+  // No credential probe here — unlike the LLM-provider step we can't ping
+  // `/v1/models` without a model id we haven't collected yet, and an unsolicited
+  // 1×1 test gen would surprise-bill the operator. Surface that loud and clear
+  // so a typo'd key isn't a silent failure waiting for the first generation.
+  p.log.warn(
+    `API key saved as "${secretName}" without live validation. ` +
+      "Errors (bad key, wrong URL) surface on the first image generation.",
+  );
+
+  await promptAddImageModels(deps, name, providerId);
+}
+
+async function stepAddImageModelToExisting(
+  deps: WizardDeps,
+  existing: ReadonlyArray<{ id: string; name: string; type: string }>,
+): Promise<void> {
+  const choice = await p.select({
+    message: "Which provider?",
+    options: existing.map((row) => ({
+      value: row.id,
+      label: `${row.name} (${row.type})`,
+    })),
+  });
+  const providerId = cancelGuard(choice);
+  const row = existing.find((r) => r.id === providerId);
+  if (!row) return; // unreachable — the select only offered known ids
+  await promptAddImageModels(deps, row.name, row.id);
+}
+
+/**
+ * Loop "add a model?" for an already-saved image provider. Each iteration
+ * collects name, model-string, description, capabilities, then calls
+ * `agentStore.createImageModel`. The same domain function backs
+ * `cogmo image-model add` — no behaviour drift between wizard and CLI.
+ *
+ * Caller passes `providerId` (known from the createImageProvider return or
+ * the "add-model-to-existing" select) so we don't re-look-up by name on
+ * every iteration.
+ */
+async function promptAddImageModels(
+  deps: WizardDeps,
+  providerName: string,
+  providerId: string,
+): Promise<void> {
+  for (let i = 0; ; i++) {
+    const prompt =
+      i === 0 ? `Add a model for "${providerName}"?` : `Add another model for "${providerName}"?`;
+    const add = await p.confirm({ message: prompt, initialValue: i === 0 });
+    if (!cancelGuard(add)) break;
+
+    const modelName = cancelGuard(
+      await p.text({
+        message: "Model name (LLM-facing, e.g. venice/flux-dev):",
+        validate: (v = "") => (v.trim() ? undefined : "Required"),
+      }),
+    );
+    const modelString = cancelGuard(
+      await p.text({
+        message: "Model string (provider API id, e.g. flux-dev):",
+        validate: (v = "") => (v.trim() ? undefined : "Required"),
+      }),
+    );
+    const description = cancelGuard(
+      await p.text({
+        message: "Description (one line, read by the LLM at every turn):",
+        validate: (v = "") => (v.trim() ? undefined : "Required"),
+      }),
+    );
+
+    const ratiosInput = cancelGuard(
+      await p.text({
+        message: "Aspect ratios (comma-separated; Enter to skip — fixed-size model):",
+        placeholder: IMAGE_ALLOWED_ASPECT_RATIOS.join(","),
+        // Inline validate so a typo doesn't blow away the name/model-string/
+        // description the user already typed — they edit-fix the ratios prompt
+        // and continue. The parser does the work; we discard the parse result
+        // here and re-call after to keep types clean.
+        validate: (v = "") => {
+          if (parseWizardRatios(v) === "invalid") {
+            return `Allowed: ${IMAGE_ALLOWED_ASPECT_RATIOS.join(", ")}`;
+          }
+          return undefined;
+        },
+      }),
+    );
+    const ratios = parseWizardRatios(ratiosInput);
+    // Validator above guarantees this is never "invalid" by the time we get
+    // here — the prompt won't accept the value. Narrow accordingly.
+    if (ratios === "invalid") continue;
+
+    const seed = cancelGuard(
+      await p.confirm({
+        message: "Does this model honor a `seed` parameter?",
+        initialValue: false,
+      }),
+    );
+
+    const imageInputChoice = cancelGuard(
+      await p.select({
+        message: "Reference-image support?",
+        options: [
+          { value: "none", label: "None — text-to-image only" },
+          { value: "optional", label: "Optional" },
+          { value: "required", label: "Required (image-editing model)" },
+        ],
+        initialValue: "none",
+      }),
+    );
+
+    const capabilities = {
+      ...(ratios && { aspectRatios: [...ratios] }),
+      ...(seed && { seed: true }),
+      ...(imageInputChoice !== "none" && {
+        imageInput: imageInputChoice as "required" | "optional",
+      }),
+    };
+
+    try {
+      await deps.runInTx((tx) =>
+        deps.agentStore.createImageModel(tx, {
+          providerId,
+          name: modelName,
+          modelString,
+          description,
+          capabilities,
+          userSelectable: true,
+        }),
+      );
+      p.log.success(`Added image model "${modelName}".`);
+    } catch (err) {
+      p.log.error(`Failed to add model: ${(err as Error).message}`);
+    }
+  }
+}
+
+function parseWizardRatios(raw: string): ReadonlyArray<ImageAspectRatio> | undefined | "invalid" {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const parts = trimmed
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const validated: ImageAspectRatio[] = [];
+  for (const part of parts) {
+    const match = IMAGE_ALLOWED_ASPECT_RATIOS.find((r) => r === part);
+    if (!match) return "invalid";
+    validated.push(match);
+  }
+  return validated.length > 0 ? validated : undefined;
+}
+
 async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) =>
     resolveGitHubIdentity(tx, deps.secretsStore, DEFAULT_GITHUB_IDENTITY_NAME),
@@ -1034,21 +1296,24 @@ export async function runWizard(deps: {
   // Step 3: Telegram (optional)
   const { botUsername } = await stepConfigureTelegram(wizardDeps, userId);
 
-  // Step 4: Optional tools
+  // Step 4: Optional tools (Tavily, fal.ai)
   await stepConfigureOptionalTools(wizardDeps);
 
-  // Step 5: GitHub identity for the coding-delegation pipeline (optional)
+  // Step 5: OpenAI-compatible image providers (Venice, OpenAI gpt-image, custom)
+  await stepConfigureImageProviders(wizardDeps);
+
+  // Step 6: GitHub identity for the coding-delegation pipeline (optional)
   await stepConfigureGitHubIdentity(wizardDeps);
 
-  // Step 6: Claude Code subscription auth for the coding-delegation pipeline (optional)
+  // Step 7: Claude Code subscription auth for the coding-delegation pipeline (optional)
   await stepConfigureClaudeCodeAuth(wizardDeps);
 
-  // Step 7: Daytona managed sandbox (optional — required when SANDBOX_BACKEND=daytona)
+  // Step 8: Daytona managed sandbox (optional — required when SANDBOX_BACKEND=daytona)
   await stepConfigureDaytona(wizardDeps);
 
-  // Step 8: Hindsight check
+  // Step 9: Hindsight check
   await stepValidateHindsight();
 
-  // Step 9: Summary + next-steps
+  // Step 10: Summary + next-steps
   await stepSummary(wizardDeps, botUsername);
 }

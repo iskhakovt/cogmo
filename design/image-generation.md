@@ -114,7 +114,7 @@ Two layers, for `openai_compatible` providers:
 
 ## Tool Definition `[confirmed]`
 
-The catalog is loaded at bootstrap from `image_models WHERE user_selectable = true`, joined with their `image_providers`. The Zod enum for `model` and the per-model description embedded in the tool prose are built once per process — restart to pick up new models (same caching posture as `LlmProviderResolver`; hot-reload is a deferred p3).
+The catalog is loaded **per turn** from `image_models WHERE user_selectable = true`, joined with their `image_providers`. The `ImageToolsLoader` (`src/agent/image-tools-loader.ts`) re-queries on every `handle-message` invocation and rebuilds the Zod enum + tool description from the current rows — so wizard / CLI CRUD takes effect on the next message, not the next process restart. Provider adapter instances (`buildImageProvider` output) are memoized inside the loader by row id, so we only decrypt + construct each SDK client once per process; only the catalog rows themselves are re-read each turn (two cheap selects on small tables). The same hot-reload posture is on the roadmap for `LlmProviderResolver` and the voice provider — they share the same fix shape.
 
 ```typescript
 // src/agent/image-tools.ts
@@ -212,6 +212,8 @@ function createImageTools(deps: {
 **Tool exposes a small surface.** Only `prompt`, `model`, `aspectRatio`, `seed`. Advanced params (steps, guidance_scale, negative_prompt) are intentionally omitted — the LLM shouldn't tune inference hyperparameters. If the user asks for specific tuning, the prompt description is the right lever.
 
 **Per-model capability narrowing.** The Zod `aspectRatio` enum is the union of `capabilities.aspectRatios` across all user-selectable models. The handler narrows per the picked model and returns text the LLM can act on (re-pick a ratio or a different model) — not an exception. `seed` similarly: handler drops it for models whose `capabilities.seed` is false/absent. The LLM sees per-model support inline in the tool description.
+
+**Reference image (image-to-image / kontext).** Models that accept an existing image — fal/flux-kontext, future fal-2/edit variants — declare `capabilities.imageInput = "required" | "optional"`. The tool schema exposes a `referenceImage: string` field; the value is an `AttachmentStore` path (`inbound/<id>.png` from a user upload, or `generated/<id>.png` from a previous turn the LLM generated). The handler downloads the bytes via `attachments.download(path)` and forwards them through the AI SDK's `prompt: { text, images }` shape — only validated against `kind: "fal"` today (kontext line). For `kind: "oai"` the handler returns a text error pointing the LLM at a fal model; a dedicated `openai` provider type would unlock gpt-image-* edit support later (tracked separately in `todo.md`). Three text-recoverable error shapes are surfaced: required-but-missing (LLM re-calls with a path), supplied-but-unsupported (LLM picks a different model or drops the field), supplied-to-non-fal (LLM picks a fal-backed edit model).
 
 **Storage prefix.** Generated images use the `"generated"` prefix via `attachments.upload(buffer, mediaType, "generated")`. The `AttachmentStore.upload()` signature accepts an optional `prefix` param (default `"inbound"` for backward compatibility).
 
@@ -395,12 +397,14 @@ Aspect ratio support varies across providers (Venice's `image_size` presets, rec
 
 ### Adding a provider via the wizard
 
-1. **Add image provider** → name, type (`fal` / `openai_compatible`), base URL (required for `openai_compatible`), API key (creates a `secrets` row).
-2. Wizard validates the credential. For `openai_compatible`: `GET ${baseURL}/v1/models` with the key. For `fal`: a 1×1 test generation against `fal-ai/flux/schnell`.
-3. **Add image model** → pick provider, name, model_string, description, capabilities (`aspectRatios`, `seed`, …), `user_selectable`. Optional "test generate" button.
-4. Restart cogmo — new providers and models appear in the tool catalog. (Hot-reload is a deferred p3, mirroring the LLM resolver and voice config entries.)
+The wizard surfaces two distinct entry points:
 
-Deleting an `image_providers` row cascades to its `image_models`. Deleting an `image_models` row removes it from the next process boot's tool catalog without affecting historical messages — `messages.content` carries the tool call by `name` only, not by FK.
+- **`stepConfigureOptionalTools`** handles fal — a single `fal_api_key` prompt. The boot-time `ensureFalImageDefaults` seed wires the canonical 9-model catalog automatically, so the wizard doesn't ask the operator to pick fal models one by one.
+- **`stepConfigureImageProviders`** (`src/setup/wizard.ts`) handles `openai_compatible` providers (Venice, OpenAI gpt-image, custom servers). Prompts for name + base URL + API key, then loops "add a model? (name, model_string, description, ratios, seed, image-input)" until the operator declines. Same domain functions back the `cogmo image-provider` / `cogmo image-model` CLI commands — no behaviour drift between wizard and CLI.
+
+Both surfaces are hot-reload-aware: changes take effect on the next message turn, not on process restart.
+
+Deleting an `image_providers` row cascades to its `image_models`. Deleting an `image_models` row removes it from the live tool catalog without affecting historical messages — `messages.content` carries the tool call by `name` only, not by FK.
 
 ### Profile integration
 

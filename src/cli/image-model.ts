@@ -12,24 +12,19 @@
  */
 
 import type { AgentStore } from "../agent/store/index.js";
-import type { ImageModelCapabilities } from "../agent/store/schema.js";
+import {
+  IMAGE_ALLOWED_ASPECT_RATIOS,
+  type ImageAspectRatio,
+  type ImageModelCapabilities,
+} from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
-
-const ALLOWED_RATIOS: ReadonlyArray<NonNullable<ImageModelCapabilities["aspectRatios"]>[number]> = [
-  "1:1",
-  "16:9",
-  "9:16",
-  "4:3",
-  "3:4",
-  "21:9",
-  "9:21",
-];
 
 const USAGE = `Usage: cogmo image-model <command> [args]
 
 Commands:
   add <name> --provider <name> --model-string <id> --description "<text>"
-              [--ratios 1:1,16:9,...] [--seed] [--no-selectable]
+              [--ratios 1:1,16:9,...] [--seed]
+              [--image-input required|optional] [--no-selectable]
 
               Register an image model. \`name\` is the LLM-facing key
               (must be globally unique — convention: <provider>/<slug>).
@@ -38,6 +33,10 @@ Commands:
               \`ratios\` is a comma-separated list of supported aspect
               ratios; omit for fixed-size models. \`--seed\` advertises
               that this model honors the seed parameter.
+              \`--image-input\` advertises that this model accepts a
+              reference image — \`required\` for edit-only models like
+              fal/flux-kontext, \`optional\` for models that accept one but
+              don't require it. Only supported for fal providers today.
 
   list [--provider <name>] [--all]
               Show catalog rows. Default lists user-selectable models only;
@@ -138,6 +137,7 @@ async function addModelCmd(
   const capabilities: ImageModelCapabilities = {
     ...(opts.ratios && { aspectRatios: opts.ratios }),
     ...(opts.seed === true && { seed: true }),
+    ...(opts.imageInput && { imageInput: opts.imageInput }),
   };
 
   try {
@@ -152,7 +152,6 @@ async function addModelCmd(
       }),
     );
     io.out(`Added image model "${name}" (id=${id}, provider=${provider.name}).`);
-    io.out("Restart `cogmo serve` for the change to take effect.");
     return 0;
   } catch (err) {
     io.err(`Failed to add image model: ${(err as Error).message}`);
@@ -179,10 +178,11 @@ async function listModels(
     io.out("(no image models)");
     return 0;
   }
-  io.out("name\tprovider\tmodel_string\tratios\tseed\tselectable");
+  io.out("name\tprovider\tmodel_string\tratios\tseed\timage_input\tselectable");
   for (const row of filtered) {
     const ratios = row.capabilities.aspectRatios?.join(",") ?? "-";
     const seed = row.capabilities.seed === true ? "yes" : "no";
+    const imageInput = row.capabilities.imageInput ?? "-";
     io.out(
       [
         row.name,
@@ -190,6 +190,7 @@ async function listModels(
         row.modelString,
         ratios,
         seed,
+        imageInput,
         row.userSelectable ? "yes" : "no",
       ].join("\t"),
     );
@@ -215,7 +216,6 @@ async function removeModel(
   }
   await deps.runInTx((tx) => deps.agentStore.deleteImageModel(tx, target.id));
   io.out(`Removed image model "${name}".`);
-  io.out("Restart `cogmo serve` for the change to take effect.");
   return 0;
 }
 
@@ -225,6 +225,7 @@ interface ParsedFlags {
   description: string | undefined;
   ratios: NonNullable<ImageModelCapabilities["aspectRatios"]> | undefined;
   seed: boolean | undefined;
+  imageInput: NonNullable<ImageModelCapabilities["imageInput"]> | undefined;
   userSelectable: boolean;
   all: boolean;
 }
@@ -236,6 +237,7 @@ function parseFlags(args: readonly string[]): ParsedFlags {
     description: undefined,
     ratios: undefined,
     seed: undefined,
+    imageInput: undefined,
     userSelectable: true,
     all: false,
   };
@@ -261,6 +263,15 @@ function parseFlags(args: readonly string[]): ParsedFlags {
       case "--seed":
         out.seed = true;
         break;
+      case "--image-input": {
+        const value = takeValue(args, i, flag);
+        if (value !== "required" && value !== "optional") {
+          throw new Error(`--image-input got "${value}"; expected required or optional`);
+        }
+        out.imageInput = value;
+        i++;
+        break;
+      }
       case "--no-selectable":
         out.userSelectable = false;
         break;
@@ -297,11 +308,13 @@ function parseRatios(value: string): NonNullable<ImageModelCapabilities["aspectR
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-  const validated: NonNullable<ImageModelCapabilities["aspectRatios"]> = [];
+  const validated: ImageAspectRatio[] = [];
   for (const part of parts) {
-    const match = ALLOWED_RATIOS.find((r) => r === part);
+    const match = IMAGE_ALLOWED_ASPECT_RATIOS.find((r) => r === part);
     if (!match) {
-      throw new Error(`--ratios got "${part}"; expected one of ${ALLOWED_RATIOS.join(", ")}`);
+      throw new Error(
+        `--ratios got "${part}"; expected one of ${IMAGE_ALLOWED_ASPECT_RATIOS.join(", ")}`,
+      );
     }
     validated.push(match);
   }
