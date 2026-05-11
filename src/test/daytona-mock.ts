@@ -153,7 +153,17 @@ interface InFlightScenario {
 
 interface ReplayState {
   fixture: Fixture;
-  /** Index of the next call to match — advances on each successful match. */
+  /**
+   * Index of the next call to match. Advances on each successful
+   * HTTP or WS match — they share one cursor. Order-fragile: replay
+   * must invoke calls in the same sequence as recording, including
+   * HTTP/WS interleaving. A WS upgrade with N HTTP calls recorded
+   * after it can't be matched first; the cursor would skip past
+   * those HTTP calls and they'd 503 on the next replay. Today the
+   * sole scenario interleaves deterministically, so this is fine —
+   * promote to per-kind cursors when a second scenario needs a
+   * different order.
+   */
   cursor: number;
 }
 
@@ -166,6 +176,14 @@ export class DaytonaMock {
   #scenario: InFlightScenario | null = null;
   /** Record mode: { sandbox-id → real toolbox base URL } so toolbox forwards work. */
   #toolboxUpstreams = new Map<string, string>();
+  /**
+   * Record mode: in-flight WS-journaling promises. Each entry resolves
+   * when the corresponding upstream WS closes AND its frames have been
+   * pushed into `#scenario.calls`. `endScenario()` awaits the full set
+   * so a fixture write after the SDK call resolves but before upstream
+   * close lands still captures the WS frames.
+   */
+  #pendingWsJournals = new Set<Promise<void>>();
   /** Replay mode: loaded fixture + cursor. */
   #replay: ReplayState | null = null;
 
@@ -235,6 +253,14 @@ export class DaytonaMock {
   /** Persist the current scenario buffer to `fixturePath`. */
   async endScenario(): Promise<void> {
     if (this.#opts.mode !== "record" || this.#scenario === null) return;
+    // Wait for every in-flight upstream WS connection to emit close
+    // (or error) and flush its frames into `#scenario.calls` before
+    // we serialize. The SDK's WS callback can resolve before the
+    // upstream close arrives at the mock; without this await, the
+    // fixture would miss those frames.
+    if (this.#pendingWsJournals.size > 0) {
+      await Promise.allSettled([...this.#pendingWsJournals]);
+    }
     const fixture: Fixture = {
       scenario: this.#scenario.name,
       recordedAt: new Date().toISOString(),
@@ -306,6 +332,18 @@ export class DaytonaMock {
     const frames: WsFrame[] = [];
     const upstream = new WebSocket(upstreamUrl, { headers: wsHeaders });
 
+    // Track journal completion so `endScenario()` can wait for the
+    // upstream close to land + frames to flush before writing the
+    // fixture. Without this, the SDK's WS promise can resolve (its
+    // client-side close fires when we forward the upstream close) and
+    // the test can call `endScenario()` while we're still mid-journal.
+    let resolveJournaled: () => void = () => {};
+    const journaled = new Promise<void>((resolve) => {
+      resolveJournaled = resolve;
+    });
+    this.#pendingWsJournals.add(journaled);
+    journaled.finally(() => this.#pendingWsJournals.delete(journaled));
+
     // Server→client direction. Forward + journal.
     upstream.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
       const text = data.toString();
@@ -315,6 +353,7 @@ export class DaytonaMock {
     upstream.on("close", (code, reason) => {
       frames.push({ direction: "close", code, reason: reason.toString() });
       this.#scenario?.calls.push({ kind: "ws", path, frames });
+      resolveJournaled();
       try {
         ws.close(code, reason);
       } catch {
@@ -324,6 +363,7 @@ export class DaytonaMock {
     upstream.on("error", (err) => {
       log.warn({ err: err.message, upstreamUrl }, "upstream WS errored during record");
       this.#scenario?.calls.push({ kind: "ws", path, frames });
+      resolveJournaled();
       try {
         ws.close(1011, "upstream error");
       } catch {
@@ -423,12 +463,13 @@ export class DaytonaMock {
   async #handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? "GET";
     const path = req.url ?? "/";
-    const bodyBuf = await this.#readBody(req);
 
     if (this.#opts.mode === "record") {
+      const bodyBuf = await this.#readBody(req);
       await this.#recordAndForward(method, path, req.headers, bodyBuf, res);
     } else {
-      this.#replayMatch(method, path, bodyBuf, res);
+      // Replay matches by `(method, path)` only — body is not consumed.
+      this.#replayMatch(method, path, res);
     }
   }
 
@@ -439,6 +480,14 @@ export class DaytonaMock {
     body: Buffer,
     res: ServerResponse,
   ): Promise<void> {
+    // Narrow `#opts` to the record variant at the top so downstream
+    // accesses to `upstreamApiKey` / `upstreamOrganizationId`
+    // typecheck without repeated `mode === "record"` guards.
+    if (this.#opts.mode !== "record") {
+      throw new Error("invariant: #recordAndForward called outside record mode");
+    }
+    const opts = this.#opts;
+
     const upstreamUrl = this.#resolveUpstreamUrl(path);
     if (!upstreamUrl) {
       res.statusCode = 502;
@@ -446,23 +495,26 @@ export class DaytonaMock {
       return;
     }
     const upstreamHeaders = this.#prepareUpstreamHeaders(headers);
-    if (this.#opts.mode === "record") {
-      // Authorization is added only to the OUTBOUND request; never
-      // persisted to the fixture below. Use the lowercase form to
-      // overwrite the SDK's incoming `authorization` header rather
-      // than emit a duplicate — Node's `fetch()` builds Headers by
-      // `append`-ing, which joins same-name duplicates with a
-      // comma, malforming the Bearer token.
-      upstreamHeaders.authorization = `Bearer ${this.#opts.upstreamApiKey}`;
-      if (this.#opts.upstreamOrganizationId) {
-        upstreamHeaders["x-daytona-organization-id"] = this.#opts.upstreamOrganizationId;
-      }
+    // Authorization is added only to the OUTBOUND request; stripped
+    // from the fixture journal below so real keys never land on disk.
+    // Lowercase key overwrites the SDK's incoming `authorization`
+    // rather than emitting a duplicate — Node's `fetch()` builds
+    // Headers via `append`, joining same-name duplicates with a
+    // comma and malforming the Bearer token.
+    upstreamHeaders.authorization = `Bearer ${opts.upstreamApiKey}`;
+    if (opts.upstreamOrganizationId) {
+      upstreamHeaders["x-daytona-organization-id"] = opts.upstreamOrganizationId;
     }
 
     log.debug({ method, upstreamUrl, bodyBytes: body.length }, "forward");
     const upstreamResp = await fetch(upstreamUrl, {
       method,
       headers: upstreamHeaders,
+      // `as unknown as BodyInit`: Node Buffer is structurally a
+      // Uint8Array (and BodyInit accepts Uint8Array), but
+      // `@types/node`'s Buffer doesn't unify with the DOM-style
+      // BodyInit union from undici's fetch types. Cast forces the
+      // structurally-correct value through.
       ...(body.length > 0 && { body: body as unknown as BodyInit }),
     });
     log.debug({ status: upstreamResp.status, upstreamUrl }, "upstream response");
@@ -506,12 +558,27 @@ export class DaytonaMock {
       respBodyTextForFixture = respBodyBuf.toString("utf8");
     }
 
-    // Journal the call. Authorization header is stripped; never write
-    // a real API key to disk.
+    // Journal the call. Authorization is stripped (never persist real
+    // keys to disk). Hop-by-hop and connection-scoped headers (host,
+    // content-length, connection, accept-encoding) are also stripped:
+    // they're not used for matching, change on every record (random
+    // mock port, varying body sizes), and would churn the diff on
+    // re-records. We keep the SDK metadata (`user-agent`,
+    // `x-daytona-*`) + the content-type so the recorded shape stays
+    // descriptive.
     const reqHeadersForFixture: Record<string, string> = {};
     for (const [k, v] of Object.entries(headers)) {
       if (typeof v !== "string") continue;
-      if (k.toLowerCase() === "authorization") continue;
+      const lower = k.toLowerCase();
+      if (
+        lower === "authorization" ||
+        lower === "host" ||
+        lower === "content-length" ||
+        lower === "connection" ||
+        lower === "accept-encoding"
+      ) {
+        continue;
+      }
       reqHeadersForFixture[k] = v;
     }
     let reqBodyJson: unknown;
@@ -554,7 +621,16 @@ export class DaytonaMock {
     res.end(respBodyForClient);
   }
 
-  #replayMatch(method: string, path: string, body: Buffer, res: ServerResponse): void {
+  /**
+   * Match an incoming HTTP request to the next unconsumed call in
+   * `#replay.fixture.calls`. Match key is `(method, path)` only —
+   * the request body is intentionally NOT part of the match. Strict
+   * body comparison would force re-records on every UUID/timestamp;
+   * we rely on `(method, path)` + FIFO ordering to keep replays
+   * deterministic. See the `ReplayState.cursor` docstring for the
+   * HTTP/WS interleaving caveat.
+   */
+  #replayMatch(method: string, path: string, res: ServerResponse): void {
     const replay = this.#replay;
     if (!replay) {
       res.statusCode = 500;
@@ -598,12 +674,8 @@ export class DaytonaMock {
     res.statusCode = 503;
     res.setHeader("content-type", "text/plain");
     res.end(
-      `daytona-mock replay: no fixture match for ${method} ${path} after cursor ${replay.cursor}. Re-record via scripts/record-daytona-fixture.ts.`,
+      `daytona-mock replay: no fixture match for ${method} ${path} after cursor ${replay.cursor}. Re-record via \`pnpm test:record\` with DAYTONA_API_KEY set.`,
     );
-    // Note: bodyBuf currently unused for matching. Strict body
-    // comparison would force re-records on every UUID; we rely on
-    // method+path+FIFO ordering.
-    void body;
   }
 
   /**
