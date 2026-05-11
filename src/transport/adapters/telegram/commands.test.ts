@@ -13,6 +13,7 @@ import {
   handleMcp,
   handleModel,
   handleName,
+  handleNew,
   handlePlanCallback,
   handleProfile,
   handleRepair,
@@ -215,6 +216,118 @@ describe("handleEnd", () => {
     const ctx = mkCtx();
     await handleEnd(transport, ctx);
     expect(ctx.reply).toHaveBeenCalledWith("No active conversation.");
+  });
+});
+
+describe("handleNew", () => {
+  function profile(id: string, name: string, userId: string | null = "u"): Profile {
+    return {
+      id,
+      userId,
+      name,
+      basePrompt: "",
+      model: "claude-sonnet-4-6",
+      summarizationModel: null,
+      extractionModel: null,
+      autoRecall: "heuristic",
+      voiceMode: "auto",
+      toolSet: [],
+      memoryScope: null,
+      profileClass: null,
+    };
+  }
+
+  function mockCreateConversation(profileName: string) {
+    return vi.fn().mockResolvedValue(
+      ok({
+        id: "s1",
+        channelId: "ch",
+        platformAddress: "42",
+        conversationId: "c1",
+        status: "active",
+        receive: "routed",
+        profileName,
+      }),
+    );
+  }
+
+  it("creates a conversation with no profileId when none is passed", async () => {
+    // No profile arg → handleNew must not pass `profileId`, letting the
+    // Transport apply its fallback chain (per-chat default > global default).
+    const createConversation = mockCreateConversation("assistant");
+    const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue(null),
+      createConversation,
+    });
+    const ctx = mkCtx();
+    await handleNew(transport, ctx);
+    expect(createConversation).toHaveBeenCalledWith("42", "1", { isPrivate: true });
+  });
+
+  it("passes the resolved profileId through when the user names a profile", async () => {
+    const createConversation = mockCreateConversation("coder");
+    const transport = transportWith({
+      profiles: { list: vi.fn().mockResolvedValue(ok([profile("p1", "coder")])) },
+      resolveSession: vi.fn().mockResolvedValue(null),
+      createConversation,
+    });
+    const ctx = mkCtx("coder");
+    await handleNew(transport, ctx);
+    expect(createConversation).toHaveBeenCalledWith("42", "1", {
+      isPrivate: true,
+      profileId: "p1",
+    });
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('with profile "coder"'));
+  });
+
+  it("surfaces the profile name returned by createConversation (race-free)", async () => {
+    // The fallback (chat default or global default) is opaque to handleNew;
+    // it relies on createConversation's return to name the profile it
+    // actually used. This is atomic with the insert — getCurrent would be
+    // racy against a concurrent /new swapping the active session.
+    const createConversation = mockCreateConversation("doc-mode");
+    // Spy on getCurrent to confirm we DO NOT call it on this path — the
+    // race fix's whole point is removing that follow-up lookup.
+    const getCurrent = vi.fn();
+    const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue(null),
+      createConversation,
+      conversations: { getCurrent },
+    });
+    const ctx = mkCtx();
+    await handleNew(transport, ctx);
+    expect(getCurrent).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('with profile "doc-mode"'));
+  });
+
+  it("closes the existing session before creating a new conversation", async () => {
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+    const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue({
+        id: "s-old",
+        channelId: "ch",
+        platformAddress: "42",
+        conversationId: "c-old",
+        status: "active",
+        receive: "routed",
+      }),
+      closeSession,
+    });
+    const ctx = mkCtx();
+    await handleNew(transport, ctx);
+    expect(closeSession).toHaveBeenCalledWith("s-old");
+  });
+
+  it("rejects an unknown profile name without creating a conversation", async () => {
+    const createConversation = vi.fn();
+    const transport = transportWith({
+      profiles: { list: vi.fn().mockResolvedValue(ok([])) },
+      createConversation,
+    });
+    const ctx = mkCtx("ghost");
+    await handleNew(transport, ctx);
+    expect(createConversation).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('No profile named "ghost"'));
   });
 });
 
@@ -460,6 +573,114 @@ describe("handleProfile", () => {
     const ctx = mkCtx("edit coder");
     await handleProfile(transport, ctx, dialogs);
     expect(startEdit).toHaveBeenCalledWith(transport, ctx, "coder");
+  });
+
+  describe("default subcommand", () => {
+    function profile(id: string, name: string, userId: string | null = "u"): Profile {
+      return {
+        id,
+        userId,
+        name,
+        basePrompt: "",
+        model: "claude-sonnet-4-6",
+        summarizationModel: null,
+        extractionModel: null,
+        autoRecall: "heuristic",
+        voiceMode: "auto",
+        toolSet: [],
+        memoryScope: null,
+        profileClass: null,
+      };
+    }
+
+    it("with no arg, shows the unset state when no default is pinned", async () => {
+      const transport = transportWith({
+        chats: { getDefaultProfile: vi.fn().mockResolvedValue(ok(null)) },
+      });
+      const ctx = mkCtx("default");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("No default profile pinned"));
+    });
+
+    it("with no arg, shows the pinned profile name when one is set", async () => {
+      const transport = transportWith({
+        chats: {
+          getDefaultProfile: vi
+            .fn()
+            .mockResolvedValue(ok({ profileId: "p1", profileName: "doc-mode" })),
+        },
+      });
+      const ctx = mkCtx("default");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('"doc-mode"'));
+    });
+
+    it("with `clear`, calls chats.clearDefaultProfile", async () => {
+      const clearDefaultProfile = vi.fn().mockResolvedValue(ok(undefined));
+      const transport = transportWith({
+        chats: { clearDefaultProfile },
+      });
+      const ctx = mkCtx("default clear");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(clearDefaultProfile).toHaveBeenCalledWith("1", "42");
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("cleared"));
+    });
+
+    it("with a profile name, resolves it and pins via chats.setDefaultProfile", async () => {
+      const setDefaultProfile = vi.fn().mockResolvedValue(ok(undefined));
+      const transport = transportWith({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([profile("p1", "coder")])),
+        },
+        chats: { setDefaultProfile },
+      });
+      const ctx = mkCtx("default coder");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(setDefaultProfile).toHaveBeenCalledWith("1", "42", "p1");
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("pinned"));
+    });
+
+    it("with an unknown profile name, reports it and does not call setDefaultProfile", async () => {
+      const setDefaultProfile = vi.fn();
+      const transport = transportWith({
+        profiles: { list: vi.fn().mockResolvedValue(ok([])) },
+        chats: { setDefaultProfile },
+      });
+      const ctx = mkCtx("default ghost");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(setDefaultProfile).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('No profile named "ghost"'));
+    });
+
+    it("surfaces an ambiguity message when two visible profiles share the name", async () => {
+      // Both have a user owner — disambiguation in resolveProfileByName only
+      // auto-resolves when exactly one is user-owned and the rest are org.
+      const transport = transportWith({
+        profiles: {
+          list: vi
+            .fn()
+            .mockResolvedValue(ok([profile("p1", "shared", "u1"), profile("p2", "shared", "u2")])),
+        },
+      });
+      const ctx = mkCtx("default shared");
+      await handleProfile(transport, ctx, mkDialogs());
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("ambiguous"));
+    });
+
+    it("surfaces transport errors from setDefaultProfile", async () => {
+      const setDefaultProfile = vi.fn().mockResolvedValue(err({ code: "profile_not_found" }));
+      const transport = transportWith({
+        profiles: { list: vi.fn().mockResolvedValue(ok([profile("p1", "coder")])) },
+        chats: { setDefaultProfile },
+      });
+      const ctx = mkCtx("default coder");
+      await handleProfile(transport, ctx, mkDialogs());
+      // errorMessage() maps profile_not_found to a human-readable line; the
+      // exact wording is owned elsewhere — just assert we didn't silently
+      // claim success.
+      const reply = ctx.reply.mock.calls.at(-1)?.[0];
+      expect(reply).not.toContain("pinned");
+    });
   });
 
   describe("scope subcommand", () => {
