@@ -12,18 +12,12 @@
  */
 
 import type { AgentStore } from "../agent/store/index.js";
-import type { ImageModelCapabilities } from "../agent/store/schema.js";
+import {
+  IMAGE_ALLOWED_ASPECT_RATIOS,
+  type ImageAspectRatio,
+  type ImageModelCapabilities,
+} from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
-
-const ALLOWED_RATIOS: ReadonlyArray<NonNullable<ImageModelCapabilities["aspectRatios"]>[number]> = [
-  "1:1",
-  "16:9",
-  "9:16",
-  "4:3",
-  "3:4",
-  "21:9",
-  "9:21",
-];
 
 const USAGE = `Usage: cogmo image-model <command> [args]
 
@@ -314,11 +308,13 @@ function parseRatios(value: string): NonNullable<ImageModelCapabilities["aspectR
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-  const validated: NonNullable<ImageModelCapabilities["aspectRatios"]> = [];
+  const validated: ImageAspectRatio[] = [];
   for (const part of parts) {
-    const match = ALLOWED_RATIOS.find((r) => r === part);
+    const match = IMAGE_ALLOWED_ASPECT_RATIOS.find((r) => r === part);
     if (!match) {
-      throw new Error(`--ratios got "${part}"; expected one of ${ALLOWED_RATIOS.join(", ")}`);
+      throw new Error(
+        `--ratios got "${part}"; expected one of ${IMAGE_ALLOWED_ASPECT_RATIOS.join(", ")}`,
+      );
     }
     validated.push(match);
   }

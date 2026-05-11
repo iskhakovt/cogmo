@@ -1,15 +1,18 @@
 /**
  * Hot-reload contract for `ImageToolsLoader` — the per-turn catalog loader
- * that replaces the boot-time `createImageTools` call. Three behaviours
- * under test: refresh-on-CRUD, adapter caching, eviction-on-delete.
+ * that replaces the boot-time `createImageTools` call. Five behaviours
+ * under test: refresh-on-CRUD, adapter caching, fingerprint-driven rebuild
+ * (secret rotation / baseUrl / type swap), eviction-on-delete, empty
+ * catalog.
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { AgentStore, ImageModelWithProvider, ImageProviderRow } from "../agent/store/index.js";
+import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { ImageToolsLoader } from "./image-tools-loader.js";
+import type { AgentStore, ImageModelWithProvider, ImageProviderRow } from "./store/index.js";
 
 // Mock buildImageProvider so the loader test doesn't need real SDK
 // construction; tracks call count so we can assert the cache.
@@ -55,22 +58,27 @@ function modelRow(overrides: Partial<ImageModelWithProvider> = {}): ImageModelWi
   };
 }
 
+/**
+ * Build a typed `mock<AgentStore>()` and stub just the two list methods the
+ * loader calls. Returned mock is a `MockProxy<AgentStore>` so every other
+ * method is a callable `vi.fn()` — the loader test never touches them.
+ */
 function makeStore(opts: {
   providers: ImageProviderRow[];
   models: ImageModelWithProvider[];
 }): AgentStore {
-  return {
-    listImageProviders: vi.fn().mockImplementation(async () => opts.providers),
-    listImageModelsWithProvider: vi.fn().mockImplementation(async () => opts.models),
-  } as unknown as AgentStore;
+  const store = mock<AgentStore>();
+  store.listImageProviders.mockResolvedValue(opts.providers);
+  store.listImageModelsWithProvider.mockResolvedValue(opts.models);
+  return store;
 }
 
 function makeLoader(store: AgentStore): ImageToolsLoader {
   return new ImageToolsLoader({
     runInTx: fakeTransactor,
     agentStore: store,
-    secretsStore: {} as unknown as SecretsStore,
-    attachments: {} as unknown as AttachmentStore,
+    secretsStore: mock<SecretsStore>(),
+    attachments: mock<AttachmentStore>(),
   });
 }
 
@@ -109,10 +117,9 @@ describe("ImageToolsLoader", () => {
 
     let providers: ImageProviderRow[] = [providerRow()];
     let models: ImageModelWithProvider[] = [modelRow()];
-    const store = {
-      listImageProviders: vi.fn().mockImplementation(async () => providers),
-      listImageModelsWithProvider: vi.fn().mockImplementation(async () => models),
-    } as unknown as AgentStore;
+    const store = mock<AgentStore>();
+    store.listImageProviders.mockImplementation(async () => providers);
+    store.listImageModelsWithProvider.mockImplementation(async () => models);
     const loader = makeLoader(store);
 
     await loader.getTools(); // initial
@@ -149,10 +156,9 @@ describe("ImageToolsLoader", () => {
     });
 
     let providers: ImageProviderRow[] = [providerRow()];
-    const store = {
-      listImageProviders: vi.fn().mockImplementation(async () => providers),
-      listImageModelsWithProvider: vi.fn().mockResolvedValue([]),
-    } as unknown as AgentStore;
+    const store = mock<AgentStore>();
+    store.listImageProviders.mockImplementation(async () => providers);
+    store.listImageModelsWithProvider.mockResolvedValue([]);
     const loader = makeLoader(store);
 
     await loader.getTools();
@@ -175,10 +181,9 @@ describe("ImageToolsLoader", () => {
     mockCreateImageTools.mockReturnValue([]);
 
     let row: ImageProviderRow = providerRow();
-    const store = {
-      listImageProviders: vi.fn().mockImplementation(async () => [row]),
-      listImageModelsWithProvider: vi.fn().mockResolvedValue([]),
-    } as unknown as AgentStore;
+    const store = mock<AgentStore>();
+    store.listImageProviders.mockImplementation(async () => [row]);
+    store.listImageModelsWithProvider.mockResolvedValue([]);
     const loader = makeLoader(store);
 
     await loader.getTools(); // initial
@@ -209,10 +214,9 @@ describe("ImageToolsLoader", () => {
       type: "openai_compatible",
       baseUrl: "https://api.venice.ai/api/v1",
     });
-    const store = {
-      listImageProviders: vi.fn().mockImplementation(async () => [row]),
-      listImageModelsWithProvider: vi.fn().mockResolvedValue([]),
-    } as unknown as AgentStore;
+    const store = mock<AgentStore>();
+    store.listImageProviders.mockImplementation(async () => [row]);
+    store.listImageModelsWithProvider.mockResolvedValue([]);
     const loader = makeLoader(store);
 
     await loader.getTools();

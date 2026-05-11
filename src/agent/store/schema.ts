@@ -149,8 +149,24 @@ export type ImageProviderAttrs = z.infer<typeof ImageProviderAttrsSchema>;
  * Forward-extensible: add `negativePrompt`, `maxPromptLength`,
  * `outputMediaType`, etc. without a migration as new providers land.
  */
+/**
+ * Canonical aspect-ratio vocabulary. Shared between the schema (for the
+ * stored JSONB shape) and the wizard / CLI input parsers (for operator-typed
+ * validation) so adding a new ratio is a single-source change.
+ */
+export const IMAGE_ALLOWED_ASPECT_RATIOS = [
+  "1:1",
+  "16:9",
+  "9:16",
+  "4:3",
+  "3:4",
+  "21:9",
+  "9:21",
+] as const;
+export type ImageAspectRatio = (typeof IMAGE_ALLOWED_ASPECT_RATIOS)[number];
+
 export const ImageModelCapabilitiesSchema = z.object({
-  aspectRatios: z.array(z.enum(["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21"])).optional(),
+  aspectRatios: z.array(z.enum(IMAGE_ALLOWED_ASPECT_RATIOS)).optional(),
   seed: z.boolean().optional(),
   imageInput: z.enum(["required", "optional"]).optional(),
 });

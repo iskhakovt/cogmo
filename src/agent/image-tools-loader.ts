@@ -33,7 +33,6 @@
  * the first piece of that pattern landing for image gen.
  */
 
-import type { AgentStore, ImageProviderRow } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import {
   buildImageProvider,
@@ -43,6 +42,7 @@ import {
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { createImageTools } from "./image-tools.js";
+import type { AgentStore, ImageProviderRow } from "./store/index.js";
 import type { ToolSpec } from "./tools.js";
 
 export interface ImageToolsLoaderDeps {
@@ -97,11 +97,11 @@ export class ImageToolsLoader {
     // Evict adapters whose underlying row was deleted. The cache holds the
     // SDK instance and a closed-over decrypted key — both want to GC promptly
     // after the row disappears so a rotated secret can't accidentally serve
-    // the next turn.
+    // the next turn. Snapshot the keys first so the delete loop doesn't
+    // mutate the iterator we're walking.
     const live = new Set(providerRows.map((r) => r.id));
-    for (const id of this.#providers.keys()) {
-      if (!live.has(id)) this.#providers.delete(id);
-    }
+    const stale = [...this.#providers.keys()].filter((id) => !live.has(id));
+    for (const id of stale) this.#providers.delete(id);
 
     for (const row of providerRows) {
       const cached = this.#providers.get(row.id);

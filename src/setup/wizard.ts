@@ -20,7 +20,11 @@ import {
   discoverModels,
 } from "../agent/provider/discover-models.js";
 import type { AgentStore } from "../agent/store/index.js";
-import type { ProviderAttrs } from "../agent/store/schema.js";
+import {
+  IMAGE_ALLOWED_ASPECT_RATIOS,
+  type ImageAspectRatio,
+  type ProviderAttrs,
+} from "../agent/store/schema.js";
 import { type Transactor, transactor } from "../db/transactor.js";
 import {
   DAYTONA_API_KEY_SECRET,
@@ -656,8 +660,6 @@ async function stepConfigureImageProviders(deps: WizardDeps): Promise<void> {
 }
 
 const IMAGE_PROVIDER_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
-const IMAGE_ALLOWED_RATIOS = ["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21"] as const;
-type ImageAllowedRatio = (typeof IMAGE_ALLOWED_RATIOS)[number];
 
 async function addOaiImageProvider(deps: WizardDeps): Promise<void> {
   p.note(
@@ -702,20 +704,22 @@ async function addOaiImageProvider(deps: WizardDeps): Promise<void> {
   const secretName = `${name}_api_key`;
   const s = p.spinner();
   s.start("Saving image provider...");
+  let providerId: string;
   try {
-    await deps.runInTx(async (tx) => {
+    providerId = await deps.runInTx(async (tx) => {
       const { id: secretId } = await deps.secretsStore.putSecret(tx, {
         name: secretName,
         plaintext: apiKey,
         description: `openai_compatible image provider key (${name})`,
       });
-      return deps.agentStore.createImageProvider(tx, {
+      const result = await deps.agentStore.createImageProvider(tx, {
         name,
         type: "openai_compatible",
         baseUrl,
         secretId,
         attrs: {},
       });
+      return result.id;
     });
     s.stop(`Added image provider "${name}".`);
   } catch (err) {
@@ -723,21 +727,33 @@ async function addOaiImageProvider(deps: WizardDeps): Promise<void> {
     return;
   }
 
-  await promptAddImageModels(deps, name);
+  // No credential probe here — unlike the LLM-provider step we can't ping
+  // `/v1/models` without a model id we haven't collected yet, and an unsolicited
+  // 1×1 test gen would surprise-bill the operator. Surface that loud and clear
+  // so a typo'd key isn't a silent failure waiting for the first generation.
+  p.log.warn(
+    `API key saved as "${secretName}" without live validation. ` +
+      "Errors (bad key, wrong URL) surface on the first image generation.",
+  );
+
+  await promptAddImageModels(deps, name, providerId);
 }
 
 async function stepAddImageModelToExisting(
   deps: WizardDeps,
-  existing: ReadonlyArray<{ name: string; type: string }>,
+  existing: ReadonlyArray<{ id: string; name: string; type: string }>,
 ): Promise<void> {
   const choice = await p.select({
     message: "Which provider?",
     options: existing.map((row) => ({
-      value: row.name,
+      value: row.id,
       label: `${row.name} (${row.type})`,
     })),
   });
-  await promptAddImageModels(deps, cancelGuard(choice));
+  const providerId = cancelGuard(choice);
+  const row = existing.find((r) => r.id === providerId);
+  if (!row) return; // unreachable — the select only offered known ids
+  await promptAddImageModels(deps, row.name, row.id);
 }
 
 /**
@@ -745,8 +761,16 @@ async function stepAddImageModelToExisting(
  * collects name, model-string, description, capabilities, then calls
  * `agentStore.createImageModel`. The same domain function backs
  * `cogmo image-model add` — no behaviour drift between wizard and CLI.
+ *
+ * Caller passes `providerId` (known from the createImageProvider return or
+ * the "add-model-to-existing" select) so we don't re-look-up by name on
+ * every iteration.
  */
-async function promptAddImageModels(deps: WizardDeps, providerName: string): Promise<void> {
+async function promptAddImageModels(
+  deps: WizardDeps,
+  providerName: string,
+  providerId: string,
+): Promise<void> {
   for (let i = 0; ; i++) {
     const prompt =
       i === 0 ? `Add a model for "${providerName}"?` : `Add another model for "${providerName}"?`;
@@ -775,14 +799,14 @@ async function promptAddImageModels(deps: WizardDeps, providerName: string): Pro
     const ratiosInput = cancelGuard(
       await p.text({
         message: "Aspect ratios (comma-separated; Enter to skip — fixed-size model):",
-        placeholder: IMAGE_ALLOWED_RATIOS.join(","),
+        placeholder: IMAGE_ALLOWED_ASPECT_RATIOS.join(","),
         // Inline validate so a typo doesn't blow away the name/model-string/
         // description the user already typed — they edit-fix the ratios prompt
         // and continue. The parser does the work; we discard the parse result
         // here and re-call after to keep types clean.
         validate: (v = "") => {
           if (parseWizardRatios(v) === "invalid") {
-            return `Allowed: ${IMAGE_ALLOWED_RATIOS.join(", ")}`;
+            return `Allowed: ${IMAGE_ALLOWED_ASPECT_RATIOS.join(", ")}`;
           }
           return undefined;
         },
@@ -812,14 +836,6 @@ async function promptAddImageModels(deps: WizardDeps, providerName: string): Pro
       }),
     );
 
-    const provider = await deps.runInTx((tx) =>
-      deps.agentStore.findImageProviderByName(tx, providerName),
-    );
-    if (!provider) {
-      p.log.error(`Provider "${providerName}" disappeared mid-flight; aborting.`);
-      return;
-    }
-
     const capabilities = {
       ...(ratios && { aspectRatios: [...ratios] }),
       ...(seed && { seed: true }),
@@ -831,7 +847,7 @@ async function promptAddImageModels(deps: WizardDeps, providerName: string): Pro
     try {
       await deps.runInTx((tx) =>
         deps.agentStore.createImageModel(tx, {
-          providerId: provider.id,
+          providerId,
           name: modelName,
           modelString,
           description,
@@ -846,16 +862,16 @@ async function promptAddImageModels(deps: WizardDeps, providerName: string): Pro
   }
 }
 
-function parseWizardRatios(raw: string): ReadonlyArray<ImageAllowedRatio> | undefined | "invalid" {
+function parseWizardRatios(raw: string): ReadonlyArray<ImageAspectRatio> | undefined | "invalid" {
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
   const parts = trimmed
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  const validated: ImageAllowedRatio[] = [];
+  const validated: ImageAspectRatio[] = [];
   for (const part of parts) {
-    const match = IMAGE_ALLOWED_RATIOS.find((r) => r === part);
+    const match = IMAGE_ALLOWED_ASPECT_RATIOS.find((r) => r === part);
     if (!match) return "invalid";
     validated.push(match);
   }

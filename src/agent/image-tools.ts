@@ -217,13 +217,12 @@ export function createImageTools(deps: {
         const shouldForwardSeed = input.seed !== undefined && row.capabilities.seed === true;
 
         // The AI SDK's `prompt` field accepts either `string` (text-only) or
-        // `{ text, images }` (image input). For fal models with a reference,
-        // use the latter shape; everything else passes the plain string.
-        // `as unknown as string` bridges the AI SDK's type — `generateImage`
-        // accepts the object shape at runtime for fal but the public type
-        // signature only declares `string` (provider-specific extension that
-        // the SDK doesn't surface in its generic).
-        const promptArg: unknown = referenceImageBytes
+        // `{ text, images }` (image input). The latter is a fal-provider
+        // extension at runtime — the SDK's public type only declares `string`,
+        // so we type the value precisely here and cast only at the
+        // `generateImage` call site.
+        type GeneratePromptArg = string | { text: string; images: Buffer[] };
+        const promptArg: GeneratePromptArg = referenceImageBytes
           ? { text: input.prompt, images: [referenceImageBytes] }
           : input.prompt;
 
@@ -236,7 +235,12 @@ export function createImageTools(deps: {
               // `!== undefined` re-narrows for `exactOptionalPropertyTypes`.
               return await generateImage({
                 model: imageModel,
-                prompt: promptArg as string,
+                // `prompt` accepts the object shape at runtime for fal but the
+                // public `generateImage` signature only declares `string`
+                // (provider-specific extension surfaced via fal's
+                // `prompt.images` — see vercel/ai #11573 thread on
+                // ai-sdk-providers/fal docs).
+                prompt: promptArg as unknown as string,
                 ...(shouldForwardAspect &&
                   input.aspectRatio !== undefined && {
                     aspectRatio: input.aspectRatio as `${number}:${number}`,
