@@ -58,7 +58,10 @@ const USAGE = {
   resume: "Usage: /resume <alias>",
   name: "Usage: /name <alias>  (or /name -  to clear)",
   profile:
-    "Usage: /profile [list|switch <name>|new <name>|edit <name>|delete <name>|scope <name> [clear|compartments=… trust=… [classes=…]]|class <name> <class|clear>]\n" +
+    "Usage: /profile [list|switch <name>|new <name>|edit <name>|delete <name>|default [<name>|clear]|scope <name> [clear|compartments=… trust=… [classes=…]]|class <name> <class|clear>]\n" +
+    "  /profile default                                        → show this chat's default profile\n" +
+    "  /profile default <name>                                 → pin a default for new conversations in this chat\n" +
+    "  /profile default clear                                  → unpin (fall back to the global default)\n" +
     "  /profile scope <name>                                   → show current scope\n" +
     "  /profile scope <name> clear                             → unrestricted (recall all)\n" +
     "  /profile scope <name> compartments=work,technical trust=first-party\n" +
@@ -209,6 +212,8 @@ export async function handleProfile(
       return replyProfileList(transport, ctx, handle, addr);
     case "switch":
       return replyProfileSwitch(transport, ctx, handle, addr, arg);
+    case "default":
+      return replyProfileDefault(transport, ctx, handle, addr, arg);
     case "delete":
       return replyProfileDelete(transport, ctx, handle, arg);
     case "new":
@@ -777,9 +782,21 @@ export async function handleNew(transport: Transport, ctx: TelegramCommandContex
     await ctx.reply(errorMessage(result.error));
     return;
   }
+  // Surface the profile actually used. When the user passed an explicit name
+  // we already know it; otherwise we look it up so the chat-default pin
+  // becomes visible (without this, a chat pinned to a non-global default
+  // would silently start conversations on it and the user would have to
+  // remember the binding).
+  let resolvedName = profileName;
+  if (!resolvedName) {
+    const current = await transport.conversations.getCurrent(handle, addr);
+    if (current.isOk() && current.value) {
+      resolvedName = current.value.profileName;
+    }
+  }
   await ctx.reply(
-    profileName
-      ? `New conversation started with profile "${profileName}".`
+    resolvedName
+      ? `New conversation started with profile "${resolvedName}".`
       : "New conversation started.",
   );
 }
@@ -863,6 +880,75 @@ async function replyProfileSwitch(
     return;
   }
   await ctx.reply(`Profile switched to "${name}". Takes effect next turn.`);
+}
+
+/**
+ * `/profile default [<name>|clear]` — manage the chat-pinned default profile
+ * used by `createConversation` when no explicit profile is passed (i.e. plain
+ * `/new` or the auto-create on first message). One row per Telegram chat.
+ *
+ * - no arg → show the current binding
+ * - `clear` → remove the binding (fall back to the global default)
+ * - `<name>` → resolve to a profile and pin it
+ */
+async function replyProfileDefault(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+  addr: string,
+  arg: string,
+): Promise<void> {
+  if (!arg) {
+    const current = await transport.chats.getDefaultProfile(handle, addr);
+    if (current.isErr()) {
+      await ctx.reply(errorMessage(current.error));
+      return;
+    }
+    if (!current.value) {
+      await ctx.reply(
+        "No default profile pinned for this chat. New conversations use the global default.\n" +
+          "Pin one with /profile default <name>.",
+      );
+      return;
+    }
+    await ctx.reply(
+      `Default profile for this chat: "${current.value.profileName}".\n` +
+        "Use /profile default clear to unpin.",
+    );
+    return;
+  }
+
+  if (arg === "clear") {
+    const res = await transport.chats.clearDefaultProfile(handle, addr);
+    if (res.isErr()) {
+      await ctx.reply(errorMessage(res.error));
+      return;
+    }
+    await ctx.reply("Default profile cleared. New conversations use the global default.");
+    return;
+  }
+
+  const res = await resolveProfileByName(transport, handle, arg);
+  if (res.kind === "error") {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  if (res.kind === "none") {
+    await ctx.reply(`No profile named "${arg}". Use /profile list to see available profiles.`);
+    return;
+  }
+  if (res.kind === "ambiguous") {
+    await ctx.reply(ambiguityMessage(arg, res.matches));
+    return;
+  }
+  const set = await transport.chats.setDefaultProfile(handle, addr, res.profile.id);
+  if (set.isErr()) {
+    await ctx.reply(errorMessage(set.error));
+    return;
+  }
+  await ctx.reply(
+    `Default profile for this chat pinned to "${arg}". New conversations on this chat will use it.`,
+  );
 }
 
 async function replyProfileDelete(

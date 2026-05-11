@@ -180,6 +180,9 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     createIdentity: vi.fn().mockResolvedValue({ id: "identity-1" }),
     updateChannelCredentials: vi.fn().mockResolvedValue(undefined),
     removeChannel: vi.fn().mockResolvedValue(undefined),
+    getChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
+    setChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
+    clearChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -204,6 +207,7 @@ export function mockTransportDeep(overrides: DeepPartial<Transport> = {}): Trans
     ...base,
     ...overrides,
     conversations: { ...base.conversations, ...(overrides.conversations ?? {}) },
+    chats: { ...base.chats, ...(overrides.chats ?? {}) },
     profiles: { ...base.profiles, ...(overrides.profiles ?? {}) },
     profileClasses: { ...base.profileClasses, ...(overrides.profileClasses ?? {}) },
     compartments: { ...base.compartments, ...(overrides.compartments ?? {}) },
@@ -249,6 +253,11 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       setProfile: vi.fn().mockResolvedValue(ok(undefined)),
       repair: vi.fn().mockResolvedValue(ok({ wasErrored: false })),
       setVoiceMode: vi.fn().mockResolvedValue(ok(undefined)),
+    },
+    chats: {
+      getDefaultProfile: vi.fn().mockResolvedValue(ok(null)),
+      setDefaultProfile: vi.fn().mockResolvedValue(ok(undefined)),
+      clearDefaultProfile: vi.fn().mockResolvedValue(ok(undefined)),
     },
     profiles: {
       list: vi.fn().mockResolvedValue(ok([])),

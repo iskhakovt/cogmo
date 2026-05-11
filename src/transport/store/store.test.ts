@@ -635,4 +635,188 @@ describe("DrizzleTransportStore", () => {
       expect(await tx((trx) => store.getVoiceMaxReplyChars(trx, conversationId))).toBe(1500);
     });
   });
+
+  describe("chat default profile", () => {
+    it("returns undefined when no default is pinned", async () => {
+      const channelId = await seedChannel("telegram");
+      const got = await tx((trx) => store.getChatDefaultProfile(trx, channelId, "addr-x"));
+      expect(got).toBeUndefined();
+    });
+
+    it("sets, reads, and clears a chat default profile", async () => {
+      const channelId = await seedChannel("telegram");
+      const { profileId } = await seedConversation();
+
+      await tx((trx) =>
+        store.setChatDefaultProfile(trx, { channelId, platformAddress: "addr-1", profileId }),
+      );
+
+      const got = await tx((trx) => store.getChatDefaultProfile(trx, channelId, "addr-1"));
+      expect(got).toEqual({ profileId });
+
+      await tx((trx) => store.clearChatDefaultProfile(trx, channelId, "addr-1"));
+      expect(
+        await tx((trx) => store.getChatDefaultProfile(trx, channelId, "addr-1")),
+      ).toBeUndefined();
+    });
+
+    it("setChatDefaultProfile is an upsert keyed on (channelId, platformAddress)", async () => {
+      const channelId = await seedChannel("telegram");
+      const { profileId: p1 } = await seedConversation();
+      const { profileId: p2 } = await seedConversation();
+
+      await tx((trx) =>
+        store.setChatDefaultProfile(trx, {
+          channelId,
+          platformAddress: "addr-1",
+          profileId: p1,
+        }),
+      );
+      await tx((trx) =>
+        store.setChatDefaultProfile(trx, {
+          channelId,
+          platformAddress: "addr-1",
+          profileId: p2,
+        }),
+      );
+
+      expect(await tx((trx) => store.getChatDefaultProfile(trx, channelId, "addr-1"))).toEqual({
+        profileId: p2,
+      });
+    });
+
+    it("scopes defaults by (channelId, platformAddress)", async () => {
+      const ch1 = await seedChannel("telegram");
+      const ch2 = await seedChannel("slack");
+      const { profileId: p1 } = await seedConversation();
+      const { profileId: p2 } = await seedConversation();
+
+      await tx((trx) =>
+        store.setChatDefaultProfile(trx, {
+          channelId: ch1,
+          platformAddress: "addr-1",
+          profileId: p1,
+        }),
+      );
+      await tx((trx) =>
+        store.setChatDefaultProfile(trx, {
+          channelId: ch1,
+          platformAddress: "addr-2",
+          profileId: p2,
+        }),
+      );
+      await tx((trx) =>
+        store.setChatDefaultProfile(trx, {
+          channelId: ch2,
+          platformAddress: "addr-1",
+          profileId: p2,
+        }),
+      );
+
+      expect(await tx((trx) => store.getChatDefaultProfile(trx, ch1, "addr-1"))).toEqual({
+        profileId: p1,
+      });
+      expect(await tx((trx) => store.getChatDefaultProfile(trx, ch1, "addr-2"))).toEqual({
+        profileId: p2,
+      });
+      expect(await tx((trx) => store.getChatDefaultProfile(trx, ch2, "addr-1"))).toEqual({
+        profileId: p2,
+      });
+    });
+
+    it("clearChatDefaultProfile is idempotent when no row exists", async () => {
+      const channelId = await seedChannel("telegram");
+      await tx((trx) => store.clearChatDefaultProfile(trx, channelId, "addr-1"));
+      // No throw; nothing to assert beyond reaching here.
+    });
+
+    it("cascades on channel delete — removeChannel sweeps the chat defaults with it", async () => {
+      // Confirms the ON DELETE CASCADE on channel_id: removing a channel
+      // (e.g. operator rotates a Telegram bot) takes its chat-default rows
+      // with it, so a re-registered channel doesn't inherit stale pins.
+      // removeChannel currently does manual deletes in FK order then deletes
+      // the channel itself — the cascade fires on that final delete.
+      const channelId = await seedChannel("telegram");
+      const { profileId } = await seedConversation();
+      await tx((trx) =>
+        store.setChatDefaultProfile(trx, { channelId, platformAddress: "addr-1", profileId }),
+      );
+      await tx((trx) =>
+        store.setChatDefaultProfile(trx, { channelId, platformAddress: "addr-2", profileId }),
+      );
+
+      await tx((trx) => store.removeChannel(trx, channelId));
+
+      // Both rows should be swept by the FK cascade on the channels delete.
+      // Query each address back through the store rather than poking raw SQL
+      // — the public API gives us the typed assertion for free.
+      expect(
+        await tx((trx) => store.getChatDefaultProfile(trx, channelId, "addr-1")),
+      ).toBeUndefined();
+      expect(
+        await tx((trx) => store.getChatDefaultProfile(trx, channelId, "addr-2")),
+      ).toBeUndefined();
+    });
+
+    it("agentStore.deleteProfile succeeds when a chat default references the profile", async () => {
+      // Integration check: deleteProfile only ref-counts conversations and
+      // messages; it relies on the FK cascade on profile_id to sweep
+      // chat_default_profiles. If a future change flips that FK to RESTRICT
+      // (matching the profile_class pattern), deleteProfile will start
+      // raising an opaque PG FK error — this test catches that regression.
+      const channelId = await seedChannel("telegram");
+      profileNameCounter += 1;
+      const profileId = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `pin-only-${profileNameCounter}`,
+            basePrompt: "prompt",
+            model: "model",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      await tx((trx) =>
+        store.setChatDefaultProfile(trx, { channelId, platformAddress: "addr-1", profileId }),
+      );
+
+      await tx((trx) => agentStore.deleteProfile(trx, profileId));
+
+      // Both the profile and its chat-default binding should be gone.
+      expect(
+        await tx((trx) => store.getChatDefaultProfile(trx, channelId, "addr-1")),
+      ).toBeUndefined();
+    });
+
+    it("cascades on profile delete — affected chats unpin silently", async () => {
+      // Confirms the ON DELETE CASCADE on profile_id: deleting a pinned
+      // profile sweeps the binding rather than raising an FK violation,
+      // so the chat falls back to the global default on the next /new.
+      // Use a profile with no conversation refs (conversations.profile_id
+      // is RESTRICT, so deleting through it would fail for unrelated reasons).
+      const channelId = await seedChannel("telegram");
+      profileNameCounter += 1;
+      const profileId = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `pinned-only-${profileNameCounter}`,
+            basePrompt: "prompt",
+            model: "model",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      await tx((trx) =>
+        store.setChatDefaultProfile(trx, { channelId, platformAddress: "addr-1", profileId }),
+      );
+
+      await db.execute(sql`DELETE FROM profiles WHERE id = ${profileId}`);
+
+      expect(
+        await tx((trx) => store.getChatDefaultProfile(trx, channelId, "addr-1")),
+      ).toBeUndefined();
+    });
+  });
 });

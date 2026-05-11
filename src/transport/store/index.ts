@@ -3,7 +3,13 @@ import type { JsonValue } from "type-fest";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { InboundContent } from "../content.js";
-import { channelSessions, channels, inboundMessages, userIdentities } from "./schema.js";
+import {
+  channelSessions,
+  channels,
+  chatDefaultProfiles,
+  inboundMessages,
+  userIdentities,
+} from "./schema.js";
 
 export interface Session {
   id: string;
@@ -150,6 +156,38 @@ export interface TransportStore {
       platformHandle: string;
     },
   ): Promise<{ id: string }>;
+
+  /**
+   * Look up the per-chat default profile for `(channelId, platformAddress)`.
+   * Returns the profile id when a row exists, else `undefined`. The Transport
+   * uses this to seed `createConversation` when the caller didn't pass an
+   * explicit profile.
+   */
+  getChatDefaultProfile(
+    tx: Transaction,
+    channelId: string,
+    platformAddress: string,
+  ): Promise<{ profileId: string } | undefined>;
+
+  /**
+   * Upsert the per-chat default profile. Same `(channelId, platformAddress)`
+   * key as `getChatDefaultProfile` — second call with a different profile
+   * overwrites the first.
+   */
+  setChatDefaultProfile(
+    tx: Transaction,
+    params: { channelId: string; platformAddress: string; profileId: string },
+  ): Promise<void>;
+
+  /**
+   * Delete the per-chat default profile binding. Idempotent — a no-op when
+   * no row exists.
+   */
+  clearChatDefaultProfile(
+    tx: Transaction,
+    channelId: string,
+    platformAddress: string,
+  ): Promise<void>;
 
   /** Update channel credentials (e.g., token rotation). */
   updateChannelCredentials(
@@ -521,6 +559,52 @@ export class DrizzleTransportStore implements TransportStore {
         })
         .returning({ id: userIdentities.id }),
     );
+  }
+
+  async getChatDefaultProfile(
+    tx: Transaction,
+    channelId: string,
+    platformAddress: string,
+  ): Promise<{ profileId: string } | undefined> {
+    const rows = await tx
+      .select({ profileId: chatDefaultProfiles.profileId })
+      .from(chatDefaultProfiles)
+      .where(
+        and(
+          eq(chatDefaultProfiles.channelId, channelId),
+          eq(chatDefaultProfiles.platformAddress, platformAddress),
+        ),
+      )
+      .limit(1);
+    return rows[0];
+  }
+
+  async setChatDefaultProfile(
+    tx: Transaction,
+    params: { channelId: string; platformAddress: string; profileId: string },
+  ): Promise<void> {
+    await tx
+      .insert(chatDefaultProfiles)
+      .values(params)
+      .onConflictDoUpdate({
+        target: [chatDefaultProfiles.channelId, chatDefaultProfiles.platformAddress],
+        set: { profileId: params.profileId },
+      });
+  }
+
+  async clearChatDefaultProfile(
+    tx: Transaction,
+    channelId: string,
+    platformAddress: string,
+  ): Promise<void> {
+    await tx
+      .delete(chatDefaultProfiles)
+      .where(
+        and(
+          eq(chatDefaultProfiles.channelId, channelId),
+          eq(chatDefaultProfiles.platformAddress, platformAddress),
+        ),
+      );
   }
 
   async updateChannelCredentials(
