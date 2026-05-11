@@ -46,6 +46,13 @@ interface DockerCreateCallArgs {
     Binds?: string[];
     Runtime?: string;
     CgroupParent?: string;
+    NanoCpus?: number;
+    Memory?: number;
+    PidsLimit?: number;
+    // StorageOpt is Docker's per-container disk quota knob (only honored by
+    // some storage drivers). Tracked here so the "disk_bytes silently ignored
+    // on local-docker" test can assert the supervisor never sets it.
+    StorageOpt?: Record<string, string>;
   };
 }
 
@@ -169,6 +176,49 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     // slice on demand and aborts here if systemd refuses (e.g. on a
     // non-systemd host).
     expect(create0.HostConfig?.CgroupParent).toBe(expectedSlice);
+  });
+
+  it("ignores ResourceLimits.disk_bytes — runc HostConfig has no native disk quota", async () => {
+    // disk_bytes is a Daytona-only knob (mapped onto the platform's `disk`
+    // field); on local-docker the supervisor must drop it. Docker's
+    // closest equivalent (`StorageOpt`) is only honored by a couple of
+    // storage drivers and is deliberately left alone. Regression guard
+    // so a future "let's also wire local disk caps" change has to revisit
+    // this test rather than silently ship a partial implementation.
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, calls } = fakeDocker({ dockerId: "docker-disk" });
+    const { proxy } = fakeProxy();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+      proxy,
+    });
+    await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-0000000000d1",
+      worktree: { type: "host-path", hostPath: "/tmp/wt" },
+      homeVolume: { volumeName: "vol-disk" },
+      image: "alpine",
+      resourceLimits: {
+        cpus: 1,
+        memory_bytes: 256 * 1024 * 1024,
+        pids: 64,
+        // 5 GiB — large enough that an accidental passthrough would be
+        // obvious (and well above Daytona's defaults).
+        disk_bytes: 5 * 1024 * 1024 * 1024,
+      },
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const create0 = expectDefined(calls.create[0], "first create call");
+    // The other three caps still flow through, proving the supervisor
+    // received the spec and didn't error on the extra field.
+    expect(create0.HostConfig?.NanoCpus).toBe(1_000_000_000);
+    expect(create0.HostConfig?.Memory).toBe(256 * 1024 * 1024);
+    expect(create0.HostConfig?.PidsLimit).toBe(64);
+    // …but no disk-quota field landed in HostConfig.
+    expect(create0.HostConfig?.StorageOpt).toBeUndefined();
   });
 
   it("unregisters the proxy on stopTask", async () => {

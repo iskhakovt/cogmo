@@ -381,7 +381,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
  * keeps `cogmo serve` startup independent of how many orphan containers the
  * daemon happens to be carrying.
  */
-function scheduleReconcileCrashedInstances(client: SandboxClient, instanceId: string): void {
+export function scheduleReconcileCrashedInstances(client: SandboxClient, instanceId: string): void {
   const backendLabel = client.backendId;
   void client.reconcileCrashedInstances(instanceId).then(
     ({ orphansReaped }) => {
