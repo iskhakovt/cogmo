@@ -571,9 +571,21 @@ The Daytona backend does not run the Cogmo Docker socket proxy, the systemd cgro
 
 `ResourceLimits.pids` is silently ignored — Daytona's `Resources` shape has only `cpu` / `gpu` / `memory` / `disk` fields, no per-sandbox process-count cap. If pid-cap is load-bearing for a workload (fork-bomb defence inside the sandbox), set up cgroup limits via `process.executeCommand` after `create()` instead.
 
+`ResourceLimits.disk_bytes` is optional and forwarded to Daytona's `disk` field (rounded up to GiB, floored at 1 GiB to honour the platform minimum). Omit to accept Daytona's platform default — currently 3 GiB. Skills tier-2 sets `disk_bytes: 1 GiB` in `DEFAULT_RESOURCE_LIMITS` (the image plus typical scratch fits in <500 MB; the 1 GiB floor is 3× over-provisioned and frees up two thirds of the per-sandbox storage charge versus the platform default). Local-Docker silently ignores `disk_bytes` — runc HostConfig has no native disk quota and the supervisor doesn't set one.
+
 ### Crash recovery
 
 `SandboxSessionState` for the Daytona backend stores `{ type: "daytona", taskId, sandboxId }`. On orchestrator restart mid-task, `client.resume(state)` re-attaches to the existing sandbox via the Daytona API. If the sandbox was reaped (TTL exceeded, manual delete, provider-side eviction), `resume()` fails fast and the orchestrator marks the task failed.
+
+### Snapshot pre-creation `[proposed]`
+
+The lazy `daytona.create({ image })` path works today with private GHCR registries (auth flows through dashboard-registered credentials, confirmed empirically in May 2026). The alternative `daytona.snapshot.create({ name, image, resources })` + `daytona.create({ snapshot })` shape trades implicit caching for explicit, named snapshots and shaves cold-pull latency off the first task after a release. Constraints discovered during the audit:
+
+- `:latest` tags are rejected by `snapshot.create` with `Images with tag ":latest" are not allowed`. Any pre-creation path needs to fall back to `{ image }` for unversioned dev tags.
+- `CreateSandboxFromSnapshotParams` has no `resources` field — resource shape bakes into the snapshot at creation time. One snapshot per (image, resource-class) tuple.
+- Snapshots persist in Daytona's internal registry; old versions accumulate across releases. A GC pass that deletes snapshots not matching the currently-deployed image set is part of any production shape.
+
+Not implemented today because cold-pull latency (15-30 s) is bounded and Daytona's per-runner snapshot cache makes subsequent creates fast (~1 s). If the cliff ever becomes user-visible (e.g. Daytona changes cache eviction policy, or runner fleet grows), the implementation pattern is: `DaytonaSandboxClient.ensureImagePresent(image)` becomes meaningful (memoised promise per image, error-clearing on rejection), bootstrap calls `void client.ensureImagePresent(devbase); void client.ensureImagePresent(skills)` non-blocking, and `create()` awaits the in-flight promise before dispatching. See `design/infrastructure.md` → "Boot-Time Blocking Policy".
 
 ### Deferred / Phase 3c
 
@@ -582,7 +594,7 @@ The Daytona backend does not run the Cogmo Docker socket proxy, the systemd cgro
 - **Edge-case unit gaps:** `buildShellCommand` with empty `env: {}`, `getSessionCommand` failure post-WS-resolve, concurrent `tryResumeByTaskId` for the same taskId.
 - **Daytona reaper / orphan reconcile.** `reconcileCrashedInstances` is a no-op today (Daytona auto-persists/auto-archives are the provider's job); a Cogmo-side audit pass that lists sandboxes labelled `cogmo.instance != current` and either resumes or deletes them would catch stale state from crashed retries.
 - **Cost dashboarding.** Wire Daytona usage stats into `coding_tasks.resource_usage` JSONB so post-hoc spend analysis works on managed runs the same as local.
-- **Cogmo-baked Daytona base image.** Bake `stdbuf` (`claude` block-buffering defeat) and other Cogmo-side deps so first-task latency drops from 2-5 min (Daytona builds + snapshots `cogmo/devbase`) to ~30s (snapshot already exists). Blocked on Daytona TS SDK exposing private-registry credential management — currently dashboard-only.
+- **Cogmo-baked Daytona base image.** Bake `stdbuf` (`claude` block-buffering defeat) and other Cogmo-side deps. Cold-pull latency for `cogmo/devbase` was measured at ~28 s in May 2026 (snapshot route) and ~19 s on the lazy `{ image }` path; subsequent creates against the same image are ~1 s once Daytona's runner cache warms. Eager pre-creation via `daytona.snapshot.create` (rejects `:latest` tags) is the lever to flatten the version-bump cliff — see "Snapshot pre-creation" below.
 
 ## Module Structure `[confirmed]`
 

@@ -133,10 +133,57 @@ describe("DaytonaSandboxClient", () => {
         resourceLimits: { cpus: 0.5, memory_bytes: 512 * 1024 * 1024, pids: 64 },
       });
       const call = daytonaCalls.create.mock.calls[0]?.[0] as {
-        resources: { cpu: number; memory: number };
+        resources: { cpu: number; memory: number; disk?: number };
       };
       expect(call.resources.cpu).toBe(1);
       expect(call.resources.memory).toBe(1);
+      // Omitting disk_bytes leaves the `disk` field unset so Daytona's
+      // platform default applies (currently 3 GiB).
+      expect(call.resources.disk).toBeUndefined();
+    });
+
+    it("maps disk_bytes onto Daytona's `disk` field (GiB, floor 1)", async () => {
+      daytonaCalls.create.mockResolvedValue(
+        fakeSandbox({ id: "sb-disk", state: SandboxState.STARTED }),
+      );
+      const client = await makeClient();
+      await client.create({
+        ...BASE_SPEC,
+        // 1.5 GiB → ceil to 2 GiB so the caller never gets under-provisioned.
+        resourceLimits: {
+          cpus: 1,
+          memory_bytes: 1024 * 1024 * 1024,
+          pids: 256,
+          disk_bytes: 1.5 * 1024 * 1024 * 1024,
+        },
+      });
+      const call = daytonaCalls.create.mock.calls[0]?.[0] as {
+        resources: { disk?: number };
+      };
+      expect(call.resources.disk).toBe(2);
+    });
+
+    it("floors disk_bytes at 1 GiB (Daytona's per-resource minimum)", async () => {
+      daytonaCalls.create.mockResolvedValue(
+        fakeSandbox({ id: "sb-disk-floor", state: SandboxState.STARTED }),
+      );
+      const client = await makeClient();
+      await client.create({
+        ...BASE_SPEC,
+        // 500 MiB ceiled to 1 GiB then floored at 1 — the floor branch of
+        // `daytonaUnit` is what keeps callers from asking Daytona for
+        // sub-minimum sizes that the API would reject.
+        resourceLimits: {
+          cpus: 1,
+          memory_bytes: 1024 * 1024 * 1024,
+          pids: 256,
+          disk_bytes: 500 * 1024 * 1024,
+        },
+      });
+      const call = daytonaCalls.create.mock.calls[0]?.[0] as {
+        resources: { disk?: number };
+      };
+      expect(call.resources.disk).toBe(1);
     });
 
     it("computes autoStopInterval as ceil(minutes-until-expiresAt) with a 1-min floor", async () => {

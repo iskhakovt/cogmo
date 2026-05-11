@@ -146,6 +146,7 @@ export class SysboxSkillWorker {
       cpus: opts.resourceLimits?.cpus ?? DEFAULT_RESOURCE_LIMITS.cpus,
       memory_bytes: opts.resourceLimits?.memory_bytes ?? DEFAULT_RESOURCE_LIMITS.memory_bytes,
       pids: opts.resourceLimits?.pids ?? DEFAULT_RESOURCE_LIMITS.pids,
+      disk_bytes: opts.resourceLimits?.disk_bytes ?? DEFAULT_RESOURCE_LIMITS.disk_bytes,
     };
 
     const session = await opts.sandbox.create({

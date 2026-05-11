@@ -17,10 +17,18 @@ const log = logger.child({ component: "skills.worker.sysbox" });
  * is the per-task systemd slice; this is a per-container fence to catch
  * fork bombs, not a budget.
  */
-export const DEFAULT_RESOURCE_LIMITS: ResourceLimits = {
+// `Required<ResourceLimits>` — disk_bytes is optional on the schema but the
+// skills default always sets it, so consumers can read it without a narrowing
+// branch.
+export const DEFAULT_RESOURCE_LIMITS: Required<ResourceLimits> = {
   cpus: 1,
   memory_bytes: 512 * 1024 * 1024,
   pids: 1024,
+  // Daytona-only — skills run a 178 MB image plus <100 MB of scratch in
+  // typical workloads. 1 GiB is the platform minimum and a 3× over-
+  // provision over real usage; the default 3 GiB would waste free-tier
+  // storage across many simultaneous workers. Ignored by local-docker.
+  disk_bytes: 1024 * 1024 * 1024,
 };
 
 /**
