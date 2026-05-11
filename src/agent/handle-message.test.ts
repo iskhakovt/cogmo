@@ -1,6 +1,10 @@
 import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { ProviderConfigError } from "../llm/resolver.js";
+import type { McpRegistry } from "../mcp/registry.js";
+import type { SkillRunner } from "../skills/runner.js";
+import { expectDefined } from "../test/assertions.js";
 import {
   mockAgentStore,
   mockDeliveryHandle,
@@ -14,6 +18,7 @@ import {
 } from "../test/factories.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
+import type { ImageToolsLoader } from "./image-tools-loader.js";
 import { ToolRegistry } from "./tools.js";
 
 function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
@@ -1149,18 +1154,29 @@ describe("createHandleMessage", () => {
       };
     }
 
+    function firstAssembleArg(deps: HandleMessageDeps) {
+      const [call] = expectDefined(
+        vi.mocked(deps.promptSource.assemble).mock.calls[0],
+        "promptSource.assemble call",
+      );
+      return call;
+    }
+
     it("surfaces image tools in the toolDefinitions arg", async () => {
-      const generateImage = {
-        name: "generate_image",
-        description: "generate",
-        inputSchema: { type: "object" as const, properties: {} },
-        handler: async () => "ok",
-      };
+      const imageToolsLoader = mock<ImageToolsLoader>();
+      imageToolsLoader.getTools.mockResolvedValue([
+        {
+          name: "generate_image",
+          description: "generate",
+          inputSchema: { type: "object", properties: {} },
+          handler: async () => "ok",
+        },
+      ]);
       const deps = mockDeps({
         agentStore: mockAgentStore({
           getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
         }),
-        imageToolsLoader: { getTools: vi.fn().mockResolvedValue([generateImage]) } as never,
+        imageToolsLoader,
       });
 
       await (createHandleMessage(deps) as any).fn({
@@ -1169,37 +1185,26 @@ describe("createHandleMessage", () => {
         runId: testRunId,
       });
 
-      const assembleCall = (deps.promptSource.assemble as any).mock.calls[0][0];
-      expect(toolNames(assembleCall.toolDefinitions)).toContain("generate_image");
+      expect(toolNames(firstAssembleArg(deps).toolDefinitions ?? [])).toContain("generate_image");
     });
 
     it("surfaces skill tools in the toolDefinitions arg", async () => {
-      const skillRunner = {
-        register: vi.fn(),
-        approveDeploy: vi.fn(),
-        denyDeploy: vi.fn(),
-        rollback: vi.fn(),
-        deregister: vi.fn(),
-        enable: vi.fn(),
-        list: vi.fn().mockResolvedValue([]),
-        listAll: vi.fn().mockResolvedValue([]),
-        listToolDefs: vi.fn().mockResolvedValue([
-          {
-            name: "echo",
-            description: "echo a number",
-            inputs: { type: "object", properties: {} },
-            tier: "wasm",
-            riskTier: "notify",
-            gitSha: "abc1234",
-          },
-        ]),
-        invoke: vi.fn(),
-      };
+      const skillRunner = mock<SkillRunner>();
+      skillRunner.listToolDefs.mockResolvedValue([
+        {
+          name: "echo",
+          description: "echo a number",
+          inputs: { type: "object", properties: {} },
+          tier: "wasm",
+          riskTier: "notify",
+          gitSha: "abc1234",
+        },
+      ]);
       const deps = mockDeps({
         agentStore: mockAgentStore({
           getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
         }),
-        skillRunner: skillRunner as never,
+        skillRunner,
       });
 
       await (createHandleMessage(deps) as any).fn({
@@ -1208,44 +1213,25 @@ describe("createHandleMessage", () => {
         runId: testRunId,
       });
 
-      const assembleCall = (deps.promptSource.assemble as any).mock.calls[0][0];
-      expect(toolNames(assembleCall.toolDefinitions)).toContain("echo");
+      expect(toolNames(firstAssembleArg(deps).toolDefinitions ?? [])).toContain("echo");
     });
 
     it("surfaces MCP tools in the toolDefinitions arg", async () => {
-      const mcpTool = {
-        name: "mcp__github__create_pr",
-        description: "open a PR",
-        inputSchema: { type: "object" as const, properties: {} },
-        durable: true,
-        handler: async () => "ok",
-      };
+      const mcpRegistry = mock<McpRegistry>();
+      mcpRegistry.resolveTools.mockResolvedValue([
+        {
+          name: "mcp__github__create_pr",
+          description: "open a PR",
+          inputSchema: { type: "object", properties: {} },
+          durable: true,
+          handler: async () => "ok",
+        },
+      ]);
       const deps = mockDeps({
         agentStore: mockAgentStore({
-          getProfile: vi.fn().mockResolvedValue({
-            id: "profile-1",
-            userId: null,
-            name: "assistant",
-            basePrompt: "test",
-            model: "claude-sonnet-4-6",
-            summarizationModel: null,
-            extractionModel: null,
-            autoRecall: "heuristic",
-            toolSet: ["*"],
-          }),
+          getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
         }),
-        mcpRegistry: {
-          start: vi.fn(),
-          stop: vi.fn(),
-          resolveTools: vi.fn().mockResolvedValue([mcpTool]),
-          toolBudget: () => 25,
-          addServer: vi.fn(),
-          removeServer: vi.fn(),
-          listServers: vi.fn(),
-          approveServer: vi.fn(),
-          approveTool: vi.fn(),
-          rejectTool: vi.fn(),
-        },
+        mcpRegistry,
       });
 
       await (createHandleMessage(deps) as any).fn({
@@ -1254,8 +1240,9 @@ describe("createHandleMessage", () => {
         runId: testRunId,
       });
 
-      const assembleCall = (deps.promptSource.assemble as any).mock.calls[0][0];
-      expect(toolNames(assembleCall.toolDefinitions)).toContain("mcp__github__create_pr");
+      expect(toolNames(firstAssembleArg(deps).toolDefinitions ?? [])).toContain(
+        "mcp__github__create_pr",
+      );
     });
 
     it("passes an empty toolDefinitions array when profile.toolSet is empty", async () => {
@@ -1269,17 +1256,7 @@ describe("createHandleMessage", () => {
       const deps = mockDeps({
         tools: builtIns,
         agentStore: mockAgentStore({
-          getProfile: vi.fn().mockResolvedValue({
-            id: "profile-1",
-            userId: null,
-            name: "assistant",
-            basePrompt: "test",
-            model: "claude-sonnet-4-6",
-            summarizationModel: null,
-            extractionModel: null,
-            autoRecall: "heuristic",
-            toolSet: [],
-          }),
+          getProfile: vi.fn().mockResolvedValue({ ...profileWithAllTools(), toolSet: [] }),
         }),
       });
 
@@ -1289,8 +1266,7 @@ describe("createHandleMessage", () => {
         runId: testRunId,
       });
 
-      const assembleCall = (deps.promptSource.assemble as any).mock.calls[0][0];
-      expect(assembleCall.toolDefinitions).toEqual([]);
+      expect(firstAssembleArg(deps).toolDefinitions).toEqual([]);
     });
 
     it("toolDefinitions in assemble matches the tool names in runStreamingAgentLoop.tools", async () => {
@@ -1304,40 +1280,22 @@ describe("createHandleMessage", () => {
         inputSchema: { type: "object", properties: {} },
         handler: async () => "ok",
       });
-      const mcpTool = {
-        name: "mcp__github__create_pr",
-        description: "open a PR",
-        inputSchema: { type: "object" as const, properties: {} },
-        durable: true,
-        handler: async () => "ok",
-      };
+      const mcpRegistry = mock<McpRegistry>();
+      mcpRegistry.resolveTools.mockResolvedValue([
+        {
+          name: "mcp__github__create_pr",
+          description: "open a PR",
+          inputSchema: { type: "object", properties: {} },
+          durable: true,
+          handler: async () => "ok",
+        },
+      ]);
       const deps = mockDeps({
         tools: builtIns,
         agentStore: mockAgentStore({
-          getProfile: vi.fn().mockResolvedValue({
-            id: "profile-1",
-            userId: null,
-            name: "assistant",
-            basePrompt: "test",
-            model: "claude-sonnet-4-6",
-            summarizationModel: null,
-            extractionModel: null,
-            autoRecall: "heuristic",
-            toolSet: ["*"],
-          }),
+          getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
         }),
-        mcpRegistry: {
-          start: vi.fn(),
-          stop: vi.fn(),
-          resolveTools: vi.fn().mockResolvedValue([mcpTool]),
-          toolBudget: () => 25,
-          addServer: vi.fn(),
-          removeServer: vi.fn(),
-          listServers: vi.fn(),
-          approveServer: vi.fn(),
-          approveTool: vi.fn(),
-          rejectTool: vi.fn(),
-        },
+        mcpRegistry,
       });
 
       await (createHandleMessage(deps) as any).fn({
@@ -1346,9 +1304,11 @@ describe("createHandleMessage", () => {
         runId: testRunId,
       });
 
-      const assembleCall = (deps.promptSource.assemble as any).mock.calls[0][0];
-      const loopCall = (deps.runStreamingAgentLoop as any).mock.calls[0][0];
-      const promptNames = toolNames(assembleCall.toolDefinitions).sort();
+      const [loopCall] = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "runStreamingAgentLoop call",
+      );
+      const promptNames = toolNames(firstAssembleArg(deps).toolDefinitions ?? []).sort();
       const apiNames = toolNames(loopCall.tools.definitions()).sort();
       expect(promptNames).toEqual(apiNames);
       expect(promptNames).toEqual(["mcp__github__create_pr", "memory_recall"]);
