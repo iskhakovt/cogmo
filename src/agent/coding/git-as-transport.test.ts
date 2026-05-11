@@ -122,13 +122,41 @@ describe("pushTaskBranchToRemote", () => {
     ).rejects.toThrow(/non-fast-forward/);
     expect(gitMocks.runGit).toHaveBeenCalledTimes(2);
   });
+
+  it("rejects an empty remoteUrl with a clear operator-facing message", async () => {
+    gitMocks.runGit.mockReset();
+
+    await expect(
+      pushTaskBranchToRemote({
+        localRepoPath: "/var/lib/cogmo/skills",
+        remoteUrl: "",
+        taskId: "t",
+        defaultBranch: "main",
+        identity,
+      }),
+    ).rejects.toThrow(/remote_url is empty/);
+    // Guard fires before any git work.
+    expect(gitMocks.runGit).not.toHaveBeenCalled();
+  });
 });
 
 describe("fetchFeatureBranch", () => {
-  it("fetches the feature branch into refs/remotes/origin/<branch>", async () => {
+  // Both the bareness rev-parse and the network-touching fetch flow
+  // through the same `runGit` mock now (the helper unified onto the
+  // single primitive — see the "Bareness check" comment in
+  // git-as-transport.ts). Tests sequence the two calls explicitly with
+  // mockResolvedValueOnce so the assertion against `mock.calls[1]`
+  // pins the fetch refspec without depending on path-based heuristics.
+  function setBarenessAndFetch(isBare: boolean) {
     gitMocks.runGit.mockReset();
-    gitMocks.runGit.mockResolvedValue({ stdout: "", stderr: "" });
+    gitMocks.runGit
+      .mockResolvedValueOnce({ stdout: isBare ? "true\n" : "false\n", stderr: "" })
+      .mockResolvedValue({ stdout: "", stderr: "" });
     gitMocks.withGitAskpass.mockClear();
+  }
+
+  it("fetches the feature branch into refs/remotes/origin/<branch> for non-bare mirrors", async () => {
+    setBarenessAndFetch(false);
 
     await fetchFeatureBranch({
       localRepoPath: "/srv/cogmo/repos/example",
@@ -138,8 +166,16 @@ describe("fetchFeatureBranch", () => {
     });
 
     expect(gitMocks.withGitAskpass).toHaveBeenCalledTimes(1);
-    expect(gitMocks.runGit).toHaveBeenCalledTimes(1);
+    expect(gitMocks.runGit).toHaveBeenCalledTimes(2);
     expect(gitMocks.runGit.mock.calls[0]?.[0]).toEqual([
+      "-C",
+      "/srv/cogmo/repos/example",
+      "rev-parse",
+      "--is-bare-repository",
+    ]);
+    // Bareness check is local-only — no askpass env passed (single-arg call).
+    expect(gitMocks.runGit.mock.calls[0]?.[1]).toBeUndefined();
+    expect(gitMocks.runGit.mock.calls[1]?.[0]).toEqual([
       "-C",
       "/srv/cogmo/repos/example",
       "fetch",
@@ -148,9 +184,35 @@ describe("fetchFeatureBranch", () => {
     ]);
   });
 
+  it("fetches into refs/heads/<branch> for bare repos (skills library path)", async () => {
+    // The bare-repo branch is what closes the Daytona bridge for skills:
+    // `register_skill` reads `refs/heads/<branch>` from `$COGMO_SKILLS_PATH`,
+    // so a fetch into `refs/remotes/origin/*` would strand the author's work.
+    setBarenessAndFetch(true);
+
+    await fetchFeatureBranch({
+      localRepoPath: "/var/lib/cogmo/skills",
+      remoteUrl: "https://github.com/owner/skills.git",
+      branch: "skill/hn-digest-2026-05-11",
+      identity,
+    });
+
+    expect(gitMocks.withGitAskpass).toHaveBeenCalledTimes(1);
+    expect(gitMocks.runGit).toHaveBeenCalledTimes(2);
+    expect(gitMocks.runGit.mock.calls[1]?.[0]).toEqual([
+      "-C",
+      "/var/lib/cogmo/skills",
+      "fetch",
+      "https://github.com/owner/skills.git",
+      "+skill/hn-digest-2026-05-11:refs/heads/skill/hn-digest-2026-05-11",
+    ]);
+  });
+
   it("propagates fetch failures (caller surfaces the error to the durable step)", async () => {
     gitMocks.runGit.mockReset();
-    gitMocks.runGit.mockRejectedValue(new Error("fetch: connection reset"));
+    gitMocks.runGit
+      .mockResolvedValueOnce({ stdout: "false\n", stderr: "" }) // bareness
+      .mockRejectedValue(new Error("fetch: connection reset"));
 
     await expect(
       fetchFeatureBranch({
@@ -160,6 +222,21 @@ describe("fetchFeatureBranch", () => {
         identity,
       }),
     ).rejects.toThrow(/connection reset/);
+  });
+
+  it("rejects an empty remoteUrl with a clear operator-facing message", async () => {
+    gitMocks.runGit.mockReset();
+
+    await expect(
+      fetchFeatureBranch({
+        localRepoPath: "/var/lib/cogmo/skills",
+        remoteUrl: "",
+        branch: "skill/foo",
+        identity,
+      }),
+    ).rejects.toThrow(/remote_url is empty/);
+    // Guard fires before any git work — no rev-parse, no fetch.
+    expect(gitMocks.runGit).not.toHaveBeenCalled();
   });
 });
 
