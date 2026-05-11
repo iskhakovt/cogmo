@@ -136,13 +136,23 @@ export type ImageProviderAttrs = z.infer<typeof ImageProviderAttrsSchema>;
  *   the tool description so the LLM doesn't ask for reproducibility from a
  *   non-deterministic model. Handler silently drops `seed` for models that
  *   don't honor it (lower stakes than a bad ratio — the image still renders).
+ * `imageInput` — declares whether the model accepts a reference image (image-
+ *   to-image / kontext-style editing). `"required"` means the model only
+ *   works with a reference (e.g. `fal/flux-kontext`); the handler returns a
+ *   text error if the LLM picks the model without supplying `referenceImage`.
+ *   `"optional"` means the model accepts an image but doesn't require one.
+ *   Absent → the model is text-only; passing `referenceImage` is rejected.
+ *   Today only honored by `kind: "fal"` providers (via the AI SDK's
+ *   `prompt: { text, images }` shape); openai-compatible providers reject
+ *   image input at the handler boundary until a validated path lands.
  *
- * Forward-extensible: add `imageInput`, `negativePrompt`, `maxPromptLength`,
+ * Forward-extensible: add `negativePrompt`, `maxPromptLength`,
  * `outputMediaType`, etc. without a migration as new providers land.
  */
 export const ImageModelCapabilitiesSchema = z.object({
   aspectRatios: z.array(z.enum(["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21"])).optional(),
   seed: z.boolean().optional(),
+  imageInput: z.enum(["required", "optional"]).optional(),
 });
 export type ImageModelCapabilities = z.infer<typeof ImageModelCapabilitiesSchema>;
 

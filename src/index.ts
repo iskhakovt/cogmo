@@ -25,7 +25,7 @@ import { fileTools } from "./agent/file-tools.js";
 import { createFileService, FILES_PROMPT_GUIDANCE } from "./agent/files.js";
 import { createHandleMessage } from "./agent/handle-message.js";
 import { createIdleTimer } from "./agent/idle-timer.js";
-import { createImageTools } from "./agent/image-tools.js";
+import { ImageToolsLoader } from "./agent/image-tools-loader.js";
 import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
@@ -44,7 +44,6 @@ import {
 import { type Database, db, type Transactor, transactor } from "./db/index.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
-import { buildImageProvider, type ImageProvider } from "./llm/image-providers.js";
 import type { LlmProvider } from "./llm/provider.js";
 import {
   constantResolver,
@@ -722,39 +721,25 @@ export async function bootstrapRuntime(
   // exposes credentials as strings; runtime turns them into clients.
   const webTools = createWebTools(core.tavilyKey, core.openrouterKey);
 
-  // Image gen catalog is DB-driven (image_providers + image_models). On every
-  // boot we (1) idempotently seed the canonical fal catalog if a fal secret
-  // exists — handles both wizard-driven setups and the legacy FAL_API_KEY env
-  // var path; (2) construct one adapter per configured provider via
-  // buildImageProvider; (3) hand the joined catalog to createImageTools, which
-  // builds the Zod enum + tool description from rows. No models configured →
-  // tool not registered. Restart-only — wizard CRUD changes take effect on
-  // next boot (hot-reload tracked as p3).
+  // Image gen catalog is DB-driven (image_providers + image_models). At boot
+  // we seed the canonical fal catalog if a fal secret exists — handles both
+  // wizard-driven setups and the legacy FAL_API_KEY env var path. The
+  // catalog itself is loaded per-turn by `ImageToolsLoader`, so wizard / CLI
+  // CRUD takes effect immediately without a restart; provider adapters are
+  // memoized inside the loader so we only decrypt + construct each provider's
+  // SDK client once per process.
   await ensureFalImageDefaults({
     runInTx: core.runInTx,
     agentStore: core.agentStore,
     secretsStore: core.secretsStore,
     ...(env.FAL_API_KEY && { envFalApiKey: env.FAL_API_KEY }),
   });
-  const imageProviderRows = await core.runInTx((trx) => core.agentStore.listImageProviders(trx));
-  const imageProviders = new Map<string, ImageProvider>();
-  for (const row of imageProviderRows) {
-    imageProviders.set(
-      row.id,
-      await buildImageProvider(row, {
-        runInTx: core.runInTx,
-        secretsStore: core.secretsStore,
-        ...(opts.falFetchOverride && { fetchOverrides: { fal: opts.falFetchOverride } }),
-      }),
-    );
-  }
-  const imageModelRows = await core.runInTx((trx) =>
-    core.agentStore.listImageModelsWithProvider(trx, { userSelectableOnly: true }),
-  );
-  const imageTools = createImageTools({
-    models: imageModelRows,
-    providers: imageProviders,
+  const imageToolsLoader = new ImageToolsLoader({
+    runInTx: core.runInTx,
+    agentStore: core.agentStore,
+    secretsStore: core.secretsStore,
     attachments: core.attachmentStore,
+    ...(opts.falFetchOverride && { fetchOverrides: { fal: opts.falFetchOverride } }),
   });
   const documentTools = createDocumentTools(core.attachmentStore);
 
@@ -764,7 +749,6 @@ export async function bootstrapRuntime(
       ...webTools,
       ...fileTools,
       ...coreMemoryTools,
-      ...imageTools,
       ...documentTools,
       delegateCodingTool,
       registerSkillTool,
@@ -921,6 +905,7 @@ export async function bootstrapRuntime(
     transportStore: core.transportStore,
     resolveProvider: core.resolveProvider,
     tools,
+    imageToolsLoader,
     memory: core.memory,
     promptSource,
     fileService: core.fileService,

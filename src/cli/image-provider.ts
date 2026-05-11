@@ -146,8 +146,6 @@ async function addProviderCmd(
     });
     io.out(`Added image provider "${name}" (id=${providerId}, secret=${secretName}).`);
     io.out(`Next: cogmo image-model add <model-name> --provider ${name} --model-string <id>`);
-    io.out("");
-    io.out("Restart `cogmo serve` for the change to take effect (image catalog loaded at boot).");
     return 0;
   } catch (err) {
     if (err instanceof InvalidProviderConfigError) {
@@ -176,6 +174,5 @@ async function removeProvider(
   }
   await deps.runInTx((tx) => deps.agentStore.deleteImageProvider(tx, provider.id));
   io.out(`Removed image provider "${name}". Its image_models rows cascade-deleted.`);
-  io.out("Restart `cogmo serve` for the change to take effect.");
   return 0;
 }
