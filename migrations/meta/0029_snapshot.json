@@ -1,5 +1,5 @@
 {
-  "id": "8925ee0d-6078-4f1c-88f9-d8241b774a99",
+  "id": "2c1617ec-8268-4506-8eb2-9f6b896cd9ae",
   "prevId": "8fced9ea-4628-4fe6-8e8b-82f0d8dbc64d",
   "version": "7",
   "dialect": "postgresql",
@@ -794,7 +794,7 @@
       "checkConstraints": {
         "chk_image_providers_base_url": {
           "name": "chk_image_providers_base_url",
-          "value": "(\"image_providers\".\"type\" = 'fal' AND \"image_providers\".\"base_url\" IS NULL) OR (\"image_providers\".\"type\" = 'openai_compatible' AND \"image_providers\".\"base_url\" IS NOT NULL)"
+          "value": "(\"image_providers\".\"type\" <> 'openai_compatible' OR \"image_providers\".\"base_url\" IS NOT NULL) AND (\"image_providers\".\"type\" <> 'fal' OR \"image_providers\".\"base_url\" IS NULL)"
         }
       },
       "isRLSEnabled": false

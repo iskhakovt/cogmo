@@ -206,6 +206,15 @@ export const modelProviders = pgTable(
  * No fallback chain — unlike `llm_providers` + `model_providers`, image
  * generation has no transparent cross-provider retry. A failed image gen
  * surfaces directly to the LLM via the tool result.
+ *
+ * **Extending `image_provider_type`:** the CHECK below is written as
+ * per-value implications, not a closed disjunction. A new enum value (say
+ * `replicate`) is unconstrained by default — it can land with or without
+ * `base_url`. If the new type needs its own base_url rule, add another
+ * implication clause in the same migration that adds the enum value.
+ * The closed-disjunction form (`(type = 'fal' AND ...) OR (type = 'oai' AND ...)`)
+ * rejects every row of a newly-added type until the constraint is
+ * rewritten — surprising failure mode we deliberately avoid.
  */
 export const imageProviders = pgTable(
   "image_providers",
@@ -223,7 +232,11 @@ export const imageProviders = pgTable(
   (t) => [
     check(
       "chk_image_providers_base_url",
-      sql`(${t.type} = 'fal' AND ${t.baseUrl} IS NULL) OR (${t.type} = 'openai_compatible' AND ${t.baseUrl} IS NOT NULL)`,
+      // Per-value implications: each clause means "if type = X then base_url
+      // satisfies Y." A type not mentioned here passes both clauses by
+      // vacuous truth — see the docstring for why this matters when
+      // extending the enum.
+      sql`(${t.type} <> 'openai_compatible' OR ${t.baseUrl} IS NOT NULL) AND (${t.type} <> 'fal' OR ${t.baseUrl} IS NULL)`,
     ),
   ],
 );
@@ -236,9 +249,13 @@ export const imageProviders = pgTable(
  * `provider.image(...)` / `provider.imageModel(...)`. `description` is read
  * by the LLM at every turn — write a one-line "use when..." hint, same
  * voice as the legacy `MODEL_CATALOG` blurbs. `capabilities` declares the
- * per-model knobs (see schema). `user_selectable` mirrors
- * `model_providers.user_selectable`: false keeps a model in the catalog
- * without exposing it to the LLM (deprecation, experimental).
+ * per-model knobs (see schema). `user_selectable` is the catalog-visibility
+ * gate: false keeps the row in `image_models` but omits it from the
+ * `generate_image` tool's `model` enum and per-model description block.
+ * Image gen has no end-user model picker (unlike `model_providers.user_selectable`
+ * which gates `/model`), so the only consumer this hides the row from is
+ * the LLM itself. Use for deprecation and experimental models the operator
+ * wants to stage without exposing.
  */
 export const imageModels = pgTable("image_models", {
   id: pk(),

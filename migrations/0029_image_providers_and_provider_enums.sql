@@ -21,7 +21,7 @@ CREATE TABLE "image_providers" (
 	"attrs" jsonb NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "image_providers_name_unique" UNIQUE("name"),
-	CONSTRAINT "chk_image_providers_base_url" CHECK (("image_providers"."type" = 'fal' AND "image_providers"."base_url" IS NULL) OR ("image_providers"."type" = 'openai_compatible' AND "image_providers"."base_url" IS NOT NULL))
+	CONSTRAINT "chk_image_providers_base_url" CHECK (("image_providers"."type" <> 'openai_compatible' OR "image_providers"."base_url" IS NOT NULL) AND ("image_providers"."type" <> 'fal' OR "image_providers"."base_url" IS NULL))
 );
 --> statement-breakpoint
 ALTER TABLE "llm_providers" ALTER COLUMN "type" SET DATA TYPE "public"."llm_provider_type" USING "type"::"public"."llm_provider_type";--> statement-breakpoint
