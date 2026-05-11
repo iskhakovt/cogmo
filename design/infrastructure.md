@@ -84,6 +84,27 @@ Standard Docker pattern (Postgres, MariaDB, Redis, Keycloak). For any env var `F
 
 `.env*` in `.dockerignore` as defense-in-depth.
 
+## Boot-Time Blocking Policy `[confirmed]`
+
+`cogmo serve` boot is staged (`bootstrapCore` → `bootstrapSandbox` → `bootstrapSkillRunner` → `bootstrapRuntime`); each stage blocks only on work that the *first inbound request* genuinely needs. Slow or recoverable work is fire-and-forget with structured error logging.
+
+**Stays blocking** (every later path depends on it):
+- DB migrations (`migrate(db, ...)`)
+- Master-key presence (`COGMO_MASTER_KEY` check)
+- User + profile load
+- Fast health probes (`checkUuidv7`, `checkS3Bucket`, `checkHindsightVersion`) — keep blocking because they fail loudly at deploy time and run in <200 ms total; the operator-visibility win beats the latency cost
+- Channel adapter startup (`startChannels`) — without channels open we can't receive anything
+
+**Fire-and-forget at boot**:
+- `reconcileCrashedInstances` on either backend — wrapped by `scheduleReconcileCrashedInstances` in `src/index.ts`. Reaping orphans from prior instances is recovery work; the per-minute reaper (`src/sandbox/reaper.ts`) and per-task TTL deletes cover ongoing orphans, so the boot pass only catches what the periodic reaper would catch on its next tick.
+
+**Already lazy** (verified during the audit):
+- `mcpRegistry.start()` — declared as a no-op; MCP connections happen on first tool call via the connection pool.
+- Skill warm pool (`SysboxWorkerPool.create`) — pool is constructed lazily inside `SkillRunnerImpl` on the first tier-2 invocation, so the eager `min` worker spawn never blocks boot.
+- Daytona snapshot warming — Daytona's runner caches the first-pull derived snapshot itself; cold pulls measured at 15–30 s in May 2026 and rare enough to leave on the first-task path. Pre-creating explicit snapshots is an open `[proposed]` lever; see `design/sandbox.md`.
+
+**Principle.** Block on what the first request needs and what we can probe in <200 ms. Defer the rest with a `Promise<void>` that logs on both fulfilment and rejection (structured, includes the subsystem label) and clears any in-flight cache on rejection so the next caller retries instead of inheriting a poisoned state. Never silently swallow a deferred failure — operators read logs to discover state.
+
 ## Deployment `[proposed]`
 
 Build TypeScript -> `dist/`. Deploy however suits the host — systemd service, Docker, etc. The app is a standard Node.js process with no special requirements beyond PostgreSQL and Redis.
