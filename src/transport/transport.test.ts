@@ -104,6 +104,223 @@ describe("createTransport", () => {
 
       expect(ts.resolveUser).toHaveBeenCalledWith(expect.anything(), "ch-1", "handle-1");
     });
+
+    it("falls back to the per-chat default profile when none is passed", async () => {
+      const ts = mockTransportStore({
+        getChatDefaultProfile: vi.fn().mockResolvedValue({ profileId: "profile-chat-default" }),
+      });
+      const agentStore = mockAgentStore();
+      const { transport } = setup({ transportStore: ts, agentStore });
+
+      await transport.createConversation("addr-1", "handle-1", { isPrivate: true });
+
+      expect(ts.getChatDefaultProfile).toHaveBeenCalledWith(expect.anything(), "ch-1", "addr-1");
+      expect(agentStore.createConversation).toHaveBeenCalledWith(expect.anything(), {
+        userId: "user-1",
+        profileId: "profile-chat-default",
+        isPrivate: true,
+      });
+    });
+
+    it("explicit profileId wins over the per-chat default", async () => {
+      const ts = mockTransportStore({
+        getChatDefaultProfile: vi.fn().mockResolvedValue({ profileId: "profile-chat-default" }),
+      });
+      const agentStore = mockAgentStore();
+      const { transport } = setup({ transportStore: ts, agentStore });
+
+      await transport.createConversation("addr-1", "handle-1", {
+        isPrivate: true,
+        profileId: "profile-explicit",
+      });
+
+      expect(ts.getChatDefaultProfile).not.toHaveBeenCalled();
+      expect(agentStore.createConversation).toHaveBeenCalledWith(expect.anything(), {
+        userId: "user-1",
+        profileId: "profile-explicit",
+        isPrivate: true,
+      });
+    });
+
+    it("falls through to the global default when neither explicit nor chat default is set", async () => {
+      // mockTransportStore returns `undefined` from getChatDefaultProfile by default.
+      const agentStore = mockAgentStore();
+      const { transport } = setup({ agentStore });
+
+      await transport.createConversation("addr-1", "handle-1", { isPrivate: true });
+
+      expect(agentStore.createConversation).toHaveBeenCalledWith(expect.anything(), {
+        userId: "user-1",
+        profileId: "profile-1", // setup() defaults defaultProfileId to "profile-1"
+        isPrivate: true,
+      });
+    });
+
+    it("returns the resolved profile name on the success value", async () => {
+      // The reply layer in handleNew consumes this to surface the profile
+      // actually used — atomic with the insert, so it's race-free against
+      // a concurrent /new swapping the active session.
+      const agentStore = mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({
+          id: "profile-1",
+          userId: null,
+          name: "doc-mode",
+          basePrompt: "",
+          model: "claude-sonnet-4-6",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "heuristic",
+          voiceMode: "auto",
+          toolSet: [],
+          memoryScope: null,
+          profileClass: null,
+        }),
+      });
+      const { transport } = setup({ agentStore });
+      const result = await transport.createConversation("addr-1", "handle-1", { isPrivate: true });
+      expect(result._unsafeUnwrap()).toMatchObject({ profileName: "doc-mode" });
+    });
+
+    it("returns profile_not_found when getProfile resolves to null after insert", async () => {
+      // Defensive: agentStore.createConversation just succeeded with this id
+      // under the same FK, so getProfile returning null would mean a torn tx
+      // or schema bug. Surface a typed error rather than crashing on null.
+      const agentStore = mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ agentStore });
+      const result = await transport.createConversation("addr-1", "handle-1", { isPrivate: true });
+      expect(result._unsafeUnwrapErr()).toEqual({ code: "profile_not_found" });
+    });
+  });
+
+  describe("chats.setDefaultProfile", () => {
+    it("returns identity_rejected when handle does not resolve", async () => {
+      const transportStore = mockTransportStore({
+        resolveUser: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ transportStore });
+      const res = await transport.chats.setDefaultProfile("ghost", "addr-1", "p1");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    });
+
+    it("returns profile_not_found when the profile does not exist", async () => {
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.chats.setDefaultProfile("handle", "addr-1", "ghost-profile");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_not_found" });
+    });
+
+    it("rejects pinning another user's profile", async () => {
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-other" }),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.chats.setDefaultProfile("handle", "addr-1", "p-their");
+      expect(res._unsafeUnwrapErr()).toMatchObject({
+        code: "access_denied",
+        reason: expect.stringContaining("not visible"),
+      });
+    });
+
+    it("allows pinning an org profile (user_id = null)", async () => {
+      const setChatDefaultProfile = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: null }),
+      });
+      const transportStore = mockTransportStore({ setChatDefaultProfile });
+      const { transport } = setup({ transportStore, agentStore });
+      const res = await transport.chats.setDefaultProfile("handle", "addr-1", "p-org");
+      expect(res.isOk()).toBe(true);
+      expect(setChatDefaultProfile).toHaveBeenCalledWith(expect.anything(), {
+        channelId: "ch-1",
+        platformAddress: "addr-1",
+        profileId: "p-org",
+      });
+    });
+
+    it("allows pinning the caller's own profile", async () => {
+      const setChatDefaultProfile = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+      });
+      const transportStore = mockTransportStore({ setChatDefaultProfile });
+      const { transport } = setup({ transportStore, agentStore });
+      const res = await transport.chats.setDefaultProfile("handle", "addr-1", "p-mine");
+      expect(res.isOk()).toBe(true);
+      expect(setChatDefaultProfile).toHaveBeenCalled();
+    });
+  });
+
+  describe("chats.getDefaultProfile", () => {
+    it("returns null when no default is pinned", async () => {
+      const { transport } = setup();
+      const res = await transport.chats.getDefaultProfile("handle", "addr-1");
+      expect(res._unsafeUnwrap()).toBeNull();
+    });
+
+    it("returns the bound profile's id and name when pinned", async () => {
+      const transportStore = mockTransportStore({
+        getChatDefaultProfile: vi.fn().mockResolvedValue({ profileId: "p-pinned" }),
+      });
+      const agentStore = mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({
+          id: "p-pinned",
+          userId: "user-1",
+          name: "doc-mode",
+          basePrompt: "",
+          model: "claude-sonnet-4-6",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "heuristic",
+          voiceMode: "auto",
+          toolSet: [],
+          memoryScope: null,
+          profileClass: null,
+        }),
+      });
+      const { transport } = setup({ transportStore, agentStore });
+      const res = await transport.chats.getDefaultProfile("handle", "addr-1");
+      expect(res._unsafeUnwrap()).toEqual({ profileId: "p-pinned", profileName: "doc-mode" });
+    });
+
+    it("returns profile_not_found when the bound row points at a missing profile", async () => {
+      // Defensive: the FK cascade should sweep the binding when the profile
+      // disappears, so seeing a row without a profile is an invariant break.
+      // The implementation surfaces it as profile_not_found rather than
+      // returning a half-populated record.
+      const transportStore = mockTransportStore({
+        getChatDefaultProfile: vi.fn().mockResolvedValue({ profileId: "p-ghost" }),
+      });
+      const agentStore = mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ transportStore, agentStore });
+      const res = await transport.chats.getDefaultProfile("handle", "addr-1");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_not_found" });
+    });
+  });
+
+  describe("chats.clearDefaultProfile", () => {
+    it("delegates to transportStore.clearChatDefaultProfile", async () => {
+      const clearChatDefaultProfile = vi.fn().mockResolvedValue(undefined);
+      const transportStore = mockTransportStore({ clearChatDefaultProfile });
+      const { transport } = setup({ transportStore });
+      const res = await transport.chats.clearDefaultProfile("handle", "addr-1");
+      expect(res.isOk()).toBe(true);
+      expect(clearChatDefaultProfile).toHaveBeenCalledWith(expect.anything(), "ch-1", "addr-1");
+    });
+
+    it("returns identity_rejected when handle does not resolve", async () => {
+      const transportStore = mockTransportStore({
+        resolveUser: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ transportStore });
+      const res = await transport.chats.clearDefaultProfile("ghost", "addr-1");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    });
   });
 
   describe("closeSession", () => {

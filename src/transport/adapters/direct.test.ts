@@ -24,7 +24,9 @@ const baseEvent = {
 async function setupAdapter(transportOverrides?: Partial<ReturnType<typeof mockTransport>>) {
   const transport = mockTransport({
     resolveSession: vi.fn().mockResolvedValue(activeSession),
-    createConversation: vi.fn().mockResolvedValue(ok(activeSession)),
+    createConversation: vi
+      .fn()
+      .mockResolvedValue(ok({ ...activeSession, profileName: "assistant" })),
     emit: vi.fn().mockResolvedValue(ok(undefined)),
     ...transportOverrides,
   });

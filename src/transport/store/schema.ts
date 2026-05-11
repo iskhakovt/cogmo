@@ -11,7 +11,7 @@ import {
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
-import { conversations, users } from "../../agent/store/schema.js";
+import { conversations, profiles, users } from "../../agent/store/schema.js";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { InboundContentSchema } from "../content.js";
 
@@ -71,6 +71,37 @@ export const inboundMessages = pgTable("inbound_messages", {
   platformTs: timestamp("platform_ts", { withTimezone: true }).notNull(), // when the user sent it
   createdAt: ts(),
 });
+
+/**
+ * Per-chat default profile. Keyed on `(channel_id, platform_address)` —
+ * one row per Telegram chat / Direct address / etc. When set, new
+ * conversations on that chat use this profile unless the caller passed an
+ * explicit `profileId`. Falls back to the global `defaultProfileId` baked
+ * into the Transport when no row exists.
+ *
+ * Set via `/profile default <name>` and cleared via `/profile default clear`
+ * in the Telegram adapter; the row is upserted on set and deleted on clear.
+ *
+ * Both FKs are `ON DELETE CASCADE`: deleting a channel sweeps its defaults
+ * with it, and deleting a profile silently unpins any chats using it as
+ * default (the binding is ephemeral preference, not historical data — the
+ * affected chats fall back to the global default on the next `createConv`).
+ */
+export const chatDefaultProfiles = pgTable(
+  "chat_default_profiles",
+  {
+    id: pk(),
+    channelId: uuid("channel_id")
+      .notNull()
+      .references(() => channels.id, { onDelete: "cascade" }),
+    platformAddress: text("platform_address").notNull(),
+    profileId: uuid("profile_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    createdAt: ts(),
+  },
+  (t) => [unique("uq_chat_default_profiles").on(t.channelId, t.platformAddress)],
+);
 
 export const userIdentities = pgTable(
   "user_identities",
