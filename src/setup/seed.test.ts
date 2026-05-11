@@ -1,8 +1,11 @@
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
+import { imageModels } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
+import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { ensureFalImageDefaults } from "./seed.js";
 
@@ -99,7 +102,7 @@ describe("ensureFalImageDefaults", () => {
     expect(models.some((m) => m.name === "fal/flux-dev")).toBe(true);
   });
 
-  it("is idempotent on re-run — no duplicate provider, no duplicate models, preserves edits", async () => {
+  it("re-run preserves an in-place operator edit to a model's description", async () => {
     await tx((trx) => secretsStore.putSecret(trx, { name: "fal_api_key", plaintext: "sk" }));
     const first = await ensureFalImageDefaults({
       runInTx: tx,
@@ -108,14 +111,22 @@ describe("ensureFalImageDefaults", () => {
     });
     if (!("seeded" in first)) throw new Error("expected first seeded");
 
-    // Operator edits one model's description directly via the store —
+    // Operator mutates one of the seeded model's descriptions in place —
     // simulates someone tweaking a "use when..." hint to match local taste.
+    // Re-seeding must NOT overwrite the edit, because `upsertImageModelsByName`
+    // uses `ON CONFLICT (name) DO NOTHING`.
     const modelsBefore = await tx((trx) => agentStore.listImageModels(trx));
-    const target = modelsBefore.find((m) => m.name === "fal/flux-dev");
-    expect(target).toBeDefined();
-    await tx((trx) => agentStore.deleteImageModel(trx, target!.id));
-    // Re-seed should re-insert the deleted row (DO NOTHING on existing names,
-    // re-create when name is gone) without duplicating others.
+    const target = expectDefined(
+      modelsBefore.find((m) => m.name === "fal/flux-dev"),
+      "fal/flux-dev seeded row",
+    );
+    const editedDescription = "[operator edit] my preferred default — fast and reliable";
+    await tx((trx) =>
+      trx
+        .update(imageModels)
+        .set({ description: editedDescription })
+        .where(eq(imageModels.id, target.id)),
+    );
 
     const second = await ensureFalImageDefaults({
       runInTx: tx,
@@ -124,12 +135,43 @@ describe("ensureFalImageDefaults", () => {
     });
     if (!("seeded" in second)) throw new Error("expected second seeded");
     expect(second.providerCreated).toBe(false); // provider already exists
-    expect(second.modelsInserted).toBe(1); // only the deleted row re-inserted
+    expect(second.modelsInserted).toBe(0); // every name already present → 0 inserts
+
+    const after = await tx((trx) => agentStore.listImageModels(trx));
+    const afterTarget = expectDefined(
+      after.find((m) => m.id === target.id),
+      "fal/flux-dev after re-seed",
+    );
+    // The operator edit survives — the row count is unchanged AND the
+    // mutated description is intact (would be reverted to the canonical
+    // string if the seed function did an UPSERT instead of ON CONFLICT
+    // DO NOTHING).
+    expect(after.length).toBe(modelsBefore.length);
+    expect(afterTarget.description).toBe(editedDescription);
+  });
+
+  it("re-run re-inserts a deleted row without duplicating provider or surviving rows", async () => {
+    await tx((trx) => secretsStore.putSecret(trx, { name: "fal_api_key", plaintext: "sk" }));
+    await ensureFalImageDefaults({ runInTx: tx, agentStore, secretsStore });
+    const modelsBefore = await tx((trx) => agentStore.listImageModels(trx));
+    const target = expectDefined(
+      modelsBefore.find((m) => m.name === "fal/flux-dev"),
+      "fal/flux-dev seeded row",
+    );
+    await tx((trx) => agentStore.deleteImageModel(trx, target.id));
+
+    const second = await ensureFalImageDefaults({
+      runInTx: tx,
+      agentStore,
+      secretsStore,
+    });
+    if (!("seeded" in second)) throw new Error("expected seeded");
+    expect(second.providerCreated).toBe(false);
+    expect(second.modelsInserted).toBe(1); // exactly the deleted row re-inserted
 
     const providers = await tx((trx) => agentStore.listImageProviders(trx));
-    expect(providers).toHaveLength(1); // no duplicate provider row
-
-    const modelsAfter = await tx((trx) => agentStore.listImageModels(trx));
-    expect(modelsAfter.length).toBe(modelsBefore.length); // same count as first run
+    expect(providers).toHaveLength(1);
+    const after = await tx((trx) => agentStore.listImageModels(trx));
+    expect(after.length).toBe(modelsBefore.length); // back to original count
   });
 });

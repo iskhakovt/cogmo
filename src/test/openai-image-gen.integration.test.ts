@@ -100,11 +100,10 @@ describe("openai-compatible image gen — OpenAI dall-e-3 (recorded)", () => {
       providerId: PROVIDER_ID,
       name: MODEL_NAME,
       modelString: MODEL_STRING,
-      description: "OpenAI gpt-image-1 — photorealistic, supports custom sizes",
-      // No `aspectRatios` in capabilities — gpt-image-1 takes `size`, not
-      // OpenAI-style aspectRatio. The tool handler skips the field when
-      // capabilities don't advertise it, and the SDK defaults to the
-      // model's native size (1024x1024).
+      description: "OpenAI dall-e-3 — photorealistic, supports custom sizes",
+      // No `aspectRatios` in capabilities — the tool handler skips
+      // `aspectRatio` when capabilities don't advertise it, and the SDK
+      // defaults to dall-e-3's native 1024x1024 size.
       capabilities: {},
       userSelectable: true,
       provider: providerRow,
@@ -130,10 +129,7 @@ describe("openai-compatible image gen — OpenAI dall-e-3 (recorded)", () => {
     });
     expect(tool).toBeDefined();
 
-    const result = await tool!.handler(
-      { prompt: PROMPT, model: MODEL_NAME } as never,
-      {} as Service,
-    );
+    const result = await tool!.handler({ prompt: PROMPT, model: MODEL_NAME }, {} as Service);
 
     const parsed = parseGeneratedImagePayload(result);
     expect(parsed).not.toBeNull();
@@ -142,11 +138,12 @@ describe("openai-compatible image gen — OpenAI dall-e-3 (recorded)", () => {
     expect(payload.mediaType).toMatch(/^image\//);
     expect(payload.model).toBe(MODEL_NAME);
 
-    // The recorded fixture must round-trip a non-empty image buffer. The
-    // exact byte count drifts across re-records (different sampling) so we
-    // only assert "got real bytes" — wire-shape coverage is the goal, not
-    // pixel-level fidelity.
+    // Fixture round-trips a non-empty image buffer. The committed fixture is
+    // a stubbed 1x1 transparent PNG (~70 bytes) — wire-shape pinning is the
+    // goal here, not pixel-level fidelity. A fresh recording via
+    // `RECORD=1 OPENAI_API_KEY=…` captures the real ~2MB PNG; trim it back
+    // to the 1x1 stub before committing to keep git history small.
     expect(upload).toHaveBeenCalledTimes(1);
-    expect(uploadedBuffers[0]?.byteLength).toBeGreaterThan(500);
+    expect(uploadedBuffers[0]?.byteLength).toBeGreaterThan(50);
   });
 });

@@ -40,9 +40,9 @@ export type ImageProvider =
  * row.
  *
  * The CHECK on `image_providers.base_url` plus the store-layer guard in
- * `createImageProvider` mean we can rely on `row.baseUrl` being
- * non-null exactly when `row.type === "openai_compatible"`; the
- * `assertNever` branch in the switch is unreachable today.
+ * `createImageProvider` mean `row.baseUrl` is non-null exactly when
+ * `row.type === "openai_compatible"`. The defensive null check inside
+ * that case is for the type system — the runtime path is unreachable.
  */
 export async function buildImageProvider(
   row: ImageProviderRow,

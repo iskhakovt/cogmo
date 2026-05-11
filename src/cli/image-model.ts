@@ -268,8 +268,14 @@ function parseFlags(args: readonly string[]): ParsedFlags {
         out.all = true;
         break;
       default:
-        // Unknown flag — silently ignore (consistent with src/cli/model.ts).
-        break;
+        // Unknown flag — throw rather than swallow. `--ratio` (singular)
+        // silently dropping would register a fixed-size model that the
+        // operator expected to support ratios; the surprise is bad enough
+        // to outweigh shell-level forgiveness. Caught by the outer
+        // try/catch in `runImageModelCli` → rc=2.
+        throw new Error(
+          `Unknown flag "${flag}". Run \`cogmo image-model --help\` for accepted flags.`,
+        );
     }
   }
   return out;

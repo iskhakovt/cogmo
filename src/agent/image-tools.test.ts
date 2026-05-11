@@ -1,3 +1,5 @@
+import type { FalProvider } from "@ai-sdk/fal";
+import type { OpenAICompatibleProvider } from "@ai-sdk/openai-compatible";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ImageModelWithProvider } from "../agent/store/index.js";
 import type { ImageProvider } from "../llm/image-providers.js";
@@ -63,18 +65,31 @@ function falModel(overrides: Partial<ImageModelWithProvider> = {}): ImageModelWi
   };
 }
 
-function fakeFalProvider(): ImageProvider {
-  return {
+/**
+ * Provider stubs return the spy alongside the `ImageProvider` so assertions
+ * can reference the mock function directly. The `as unknown as FalProvider`
+ * / `OpenAICompatibleProvider` casts bridge the minimal stub to the SDK's
+ * full type — only `.image()` / `.imageModel()` is exercised by the handler.
+ */
+function fakeFalProvider(): { imageFn: ReturnType<typeof vi.fn>; provider: ImageProvider } {
+  const imageFn = vi.fn((modelString: string) => ({ kind: "fal-imgmodel", modelString }));
+  const provider: ImageProvider = {
     kind: "fal",
     row: falModel().provider,
-    provider: {
-      image: vi.fn((modelString: string) => ({ kind: "fal-imgmodel", modelString })),
-    } as never,
+    provider: { image: imageFn } as unknown as FalProvider,
   };
+  return { imageFn, provider };
 }
 
-function fakeOaiProvider(): ImageProvider {
-  return {
+function fakeOaiProvider(): {
+  imageModelFn: ReturnType<typeof vi.fn>;
+  provider: ImageProvider;
+} {
+  const imageModelFn = vi.fn((modelString: string) => ({
+    kind: "oai-imgmodel",
+    modelString,
+  }));
+  const provider: ImageProvider = {
     kind: "oai",
     row: {
       id: "provider-2",
@@ -84,10 +99,9 @@ function fakeOaiProvider(): ImageProvider {
       secretId: "sec-2",
       attrs: {},
     },
-    provider: {
-      imageModel: vi.fn((modelString: string) => ({ kind: "oai-imgmodel", modelString })),
-    } as never,
+    provider: { imageModel: imageModelFn } as unknown as OpenAICompatibleProvider,
   };
+  return { imageModelFn, provider };
 }
 
 function fakeAttachments(): AttachmentStore {
@@ -116,7 +130,7 @@ describe("createImageTools", () => {
   });
 
   it("builds a single generate_image tool with names from the catalog", () => {
-    const providers = new Map([["provider-1", fakeFalProvider()]]);
+    const providers = new Map([["provider-1", fakeFalProvider().provider]]);
     const tools = createImageTools({
       models: [falModel()],
       providers,
@@ -130,7 +144,7 @@ describe("createImageTools", () => {
   });
 
   it('marks fixed-size models with "fixed size" in the description', () => {
-    const providers = new Map([["provider-1", fakeFalProvider()]]);
+    const providers = new Map([["provider-1", fakeFalProvider().provider]]);
     const tools = createImageTools({
       models: [
         falModel({
@@ -150,26 +164,18 @@ describe("createImageTools", () => {
     mockGenerateImage.mockResolvedValueOnce({
       image: { uint8Array: new Uint8Array([1, 2, 3]), mediaType: "image/png" },
     });
-    const falProvider = fakeFalProvider();
+    const { imageFn, provider } = fakeFalProvider();
     const attachments = fakeAttachments();
     const [tool] = createImageTools({
       models: [falModel()],
-      providers: new Map([["provider-1", falProvider]]),
+      providers: new Map([["provider-1", provider]]),
       attachments,
     });
-    const result = await tool!.handler(
-      {
-        prompt: "hello",
-        model: "fal/flux-dev",
-      } as never,
-      FAKE_SERVICE,
-    );
+    const result = await tool!.handler({ prompt: "hello", model: "fal/flux-dev" }, FAKE_SERVICE);
 
-    expect(
-      (falProvider.provider as unknown as { image: ReturnType<typeof vi.fn> }).image,
-    ).toHaveBeenCalledWith("fal-ai/flux/dev");
+    expect(imageFn).toHaveBeenCalledWith("fal-ai/flux/dev");
     expect(attachments.upload).toHaveBeenCalled();
-    expect(JSON.parse(result as string)).toMatchObject({
+    expect(JSON.parse(result)).toMatchObject({
       path: "inbound/test.png",
       mediaType: "image/png",
       model: "fal/flux-dev",
@@ -180,23 +186,21 @@ describe("createImageTools", () => {
     mockGenerateImage.mockResolvedValueOnce({
       image: { uint8Array: new Uint8Array([4, 5, 6]), mediaType: "image/png" },
     });
-    const oaiProvider = fakeOaiProvider();
+    const { imageModelFn, provider } = fakeOaiProvider();
     const model = falModel({
       providerId: "provider-2",
       name: "venice/flux",
       modelString: "flux-dev",
-      provider: oaiProvider.row,
+      provider: provider.row,
     });
     const [tool] = createImageTools({
       models: [model],
-      providers: new Map([["provider-2", oaiProvider]]),
+      providers: new Map([["provider-2", provider]]),
       attachments: fakeAttachments(),
     });
-    await tool!.handler({ prompt: "x", model: "venice/flux" } as never, FAKE_SERVICE);
+    await tool!.handler({ prompt: "x", model: "venice/flux" }, FAKE_SERVICE);
 
-    expect(
-      (oaiProvider.provider as unknown as { imageModel: ReturnType<typeof vi.fn> }).imageModel,
-    ).toHaveBeenCalledWith("flux-dev");
+    expect(imageModelFn).toHaveBeenCalledWith("flux-dev");
   });
 
   it("returns a text error for an unsupported aspect ratio (per-model narrowing)", async () => {
@@ -214,7 +218,7 @@ describe("createImageTools", () => {
           capabilities: { aspectRatios: ["21:9"] },
         }),
       ],
-      providers: new Map([["provider-1", fakeFalProvider()]]),
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
       attachments: fakeAttachments(),
     });
     const result = await tool!.handler(
@@ -222,7 +226,7 @@ describe("createImageTools", () => {
         prompt: "x",
         model: "fal/flux-dev",
         aspectRatio: "21:9",
-      } as never,
+      },
       FAKE_SERVICE,
     );
     expect(result).toMatch(/does not support aspect ratio 21:9/);
@@ -246,7 +250,7 @@ describe("createImageTools", () => {
           capabilities: { aspectRatios: ["1:1"] },
         }),
       ],
-      providers: new Map([["provider-1", fakeFalProvider()]]),
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
       attachments: fakeAttachments(),
     });
     const result = await tool!.handler(
@@ -254,7 +258,7 @@ describe("createImageTools", () => {
         prompt: "x",
         model: "fal/fixed",
         aspectRatio: "1:1",
-      } as never,
+      },
       FAKE_SERVICE,
     );
     expect(result).toMatch(/does not accept a custom aspect ratio/);
@@ -271,7 +275,7 @@ describe("createImageTools", () => {
           capabilities: { aspectRatios: ["1:1"] },
         }),
       ],
-      providers: new Map([["provider-1", fakeFalProvider()]]),
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
       attachments: fakeAttachments(),
     });
     await tool!.handler(
@@ -279,7 +283,7 @@ describe("createImageTools", () => {
         prompt: "x",
         model: "fal/no-seed",
         seed: 42,
-      } as never,
+      },
       FAKE_SERVICE,
     );
     expect(mockGenerateImage).toHaveBeenCalledTimes(1);
@@ -293,7 +297,7 @@ describe("createImageTools", () => {
     });
     const [tool] = createImageTools({
       models: [falModel()], // seed: true
-      providers: new Map([["provider-1", fakeFalProvider()]]),
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
       attachments: fakeAttachments(),
     });
     await tool!.handler(
@@ -301,7 +305,7 @@ describe("createImageTools", () => {
         prompt: "x",
         model: "fal/flux-dev",
         seed: 42,
-      } as never,
+      },
       FAKE_SERVICE,
     );
     const callArg = mockGenerateImage.mock.calls[0]?.[0];
@@ -312,11 +316,11 @@ describe("createImageTools", () => {
     mockGenerateImage.mockRejectedValueOnce(new FakeAPICallError("auth failed", false));
     const [tool] = createImageTools({
       models: [falModel()],
-      providers: new Map([["provider-1", fakeFalProvider()]]),
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
       attachments: fakeAttachments(),
     });
     await expect(
-      tool!.handler({ prompt: "x", model: "fal/flux-dev" } as never, FAKE_SERVICE),
+      tool!.handler({ prompt: "x", model: "fal/flux-dev" }, FAKE_SERVICE),
     ).rejects.toBeInstanceOf(AbortError);
   });
 });

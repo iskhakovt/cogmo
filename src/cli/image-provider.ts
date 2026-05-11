@@ -17,6 +17,15 @@ import type { ImageProviderTypeValue } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 
+/**
+ * Provider names round-trip into `secrets.name` as `<name>_api_key`, so the
+ * shape needs to be conservative enough that whitespace, shell
+ * metacharacters, or Unicode can't propagate there. Same shape as
+ * `CANONICAL_NAME_RE` used for compartments / profile classes
+ * (`src/agent/store/index.ts`).
+ */
+const PROVIDER_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+
 const USAGE = `Usage: cogmo image-provider <command> [args]
 
 Commands:
@@ -51,23 +60,28 @@ export async function runImageProviderCli(
   io: CliIo = CONSOLE_IO,
 ): Promise<number> {
   const [command, ...rest] = argv;
-  switch (command) {
-    case undefined:
-    case "help":
-    case "--help":
-    case "-h":
-      io.out(USAGE);
-      return 0;
-    case "list":
-      return listProviders(deps, io);
-    case "add":
-      return addProviderCmd(rest, deps, io);
-    case "remove":
-      return removeProvider(rest, deps, io);
-    default:
-      io.err(`Unknown command: ${command}\n`);
-      io.err(USAGE);
-      return 1;
+  try {
+    switch (command) {
+      case undefined:
+      case "help":
+      case "--help":
+      case "-h":
+        io.out(USAGE);
+        return 0;
+      case "list":
+        return await listProviders(deps, io);
+      case "add":
+        return await addProviderCmd(rest, deps, io);
+      case "remove":
+        return await removeProvider(rest, deps, io);
+      default:
+        io.err(`Unknown command: ${command}\n`);
+        io.err(USAGE);
+        return 1;
+    }
+  } catch (err) {
+    io.err(`Error: ${(err as Error).message}`);
+    return 2;
   }
 }
 
@@ -96,6 +110,15 @@ async function addProviderCmd(
   }
   if (typeArg !== "fal" && typeArg !== "openai_compatible") {
     io.err(`Invalid type "${typeArg}" — expected fal|openai_compatible`);
+    return 2;
+  }
+  if (!PROVIDER_NAME_RE.test(name)) {
+    io.err(
+      `Invalid name "${name}": must start with a lowercase letter and contain only ` +
+        `lowercase letters, digits, hyphens, or underscores (≤32 chars). ` +
+        `This shape is reused as the secret name (\`<name>_api_key\`) — looser ` +
+        `values would let whitespace or shell metacharacters land in \`secrets.name\`.`,
+    );
     return 2;
   }
   const providerType: ImageProviderTypeValue = typeArg;
