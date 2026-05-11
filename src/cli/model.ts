@@ -127,8 +127,14 @@ async function addModelCmd(
   });
   io.out(`Added "${model}" → "${opts.provider}" at position ${result.position}.`);
   io.out(
-    `  effective limits: context=${limits.contextWindow}, max_output=${limits.maxOutputTokens} (source: ${limits.source})`,
+    `  effective limits: context=${limits.contextWindow} (${limits.contextWindowSource}), max_output=${limits.maxOutputTokens} (${limits.maxOutputTokensSource})`,
   );
+  // The agent's per-turn LlmProviderResolver memoizes by model for the
+  // process lifetime (see src/llm/resolver.ts). A running `cogmo serve`
+  // won't pick up this routing change until restart. Mention it instead
+  // of leaving the operator to discover the staleness mid-conversation.
+  io.out("");
+  io.out("Restart `cogmo serve` for the change to take effect (resolver caches per process).");
   return 0;
 }
 
@@ -157,7 +163,11 @@ async function listModels(args: readonly string[], deps: ModelCliDeps, io: CliIo
     // `row.position` is the actual stored value — never the array index.
     // Non-sequential positions are legal (intermediate row deletes), so an
     // index would mislead operators trying to call `cogmo model remove
-    // --position` or read the fallback chain.
+    // --position` or read the fallback chain. Source column collapses to a
+    // single tag when both columns agree (the common case), and shows
+    // `cw=<src>,mo=<src>` when they differ — so a partial DB override
+    // surfaces the LiteLLM contribution the resolver layered on top.
+    const source = formatSource(limits.contextWindowSource, limits.maxOutputTokensSource);
     io.out(
       [
         row.model,
@@ -165,11 +175,15 @@ async function listModels(args: readonly string[], deps: ModelCliDeps, io: CliIo
         String(row.position),
         String(limits.contextWindow),
         String(limits.maxOutputTokens),
-        limits.source,
+        source,
       ].join("\t"),
     );
   }
   return 0;
+}
+
+function formatSource(cwSource: string, moSource: string): string {
+  return cwSource === moSource ? cwSource : `cw=${cwSource},mo=${moSource}`;
 }
 
 async function removeModel(
@@ -283,8 +297,12 @@ function takeValue(args: readonly string[], i: number, flag: string | undefined)
 }
 
 function parsePositiveInt(value: string, label: string): number {
-  const n = Number.parseInt(value, 10);
-  if (!Number.isFinite(n) || n < 0) {
+  // `Number.parseInt("200000abc", 10)` returns 200000 — silently accepting
+  // trailing garbage. `Number(value)` rejects mixed-content strings with
+  // NaN, which `Number.isInteger` then catches. The trim guards against
+  // accidental whitespace from shell pipelines.
+  const n = Number(value.trim());
+  if (!Number.isInteger(n) || n < 0) {
     throw new Error(`${label} expects a non-negative integer, got "${value}"`);
   }
   return n;

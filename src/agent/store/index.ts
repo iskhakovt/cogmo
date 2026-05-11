@@ -607,24 +607,6 @@ export interface AgentStore {
     },
   ): Promise<{ id: string }>;
 
-  /** Resolve the best provider for a model (lowest position). */
-  resolveProviderForModel(
-    tx: Transaction,
-    model: string,
-  ): Promise<
-    | {
-        id: string;
-        name: string;
-        type: string;
-        baseUrl: string | null;
-        secretId: string;
-        attrs: ProviderAttrs;
-        contextWindow: number | null;
-        maxOutputTokens: number | null;
-      }
-    | undefined
-  >;
-
   /**
    * List every provider registered for a model, ordered by position ASC
    * (primary first, then fallbacks). Empty array when no provider is
@@ -1662,41 +1644,6 @@ export class DrizzleAgentStore implements AgentStore {
         })
         .returning({ id: modelProviders.id }),
     );
-  }
-
-  async resolveProviderForModel(
-    tx: Transaction,
-    model: string,
-  ): Promise<
-    | {
-        id: string;
-        name: string;
-        type: string;
-        baseUrl: string | null;
-        secretId: string;
-        attrs: ProviderAttrs;
-        contextWindow: number | null;
-        maxOutputTokens: number | null;
-      }
-    | undefined
-  > {
-    const rows = await tx
-      .select({
-        id: llmProviders.id,
-        name: llmProviders.name,
-        type: llmProviders.type,
-        baseUrl: llmProviders.baseUrl,
-        secretId: llmProviders.secretId,
-        attrs: llmProviders.attrs,
-        contextWindow: modelProviders.contextWindow,
-        maxOutputTokens: modelProviders.maxOutputTokens,
-      })
-      .from(modelProviders)
-      .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
-      .where(eq(modelProviders.model, model))
-      .orderBy(asc(modelProviders.position))
-      .limit(1);
-    return rows[0];
   }
 
   async listProvidersForModel(

@@ -95,7 +95,9 @@ describe("cogmo model add", () => {
     );
     expect(code).toBe(0);
     // Resolver finds x-ai/grok-4.3 in the bundled LiteLLM snapshot.
-    expect(out.join("\n")).toMatch(/source: litellm/);
+    expect(out.join("\n")).toMatch(/context=\d+ \(litellm\)/);
+    expect(out.join("\n")).toMatch(/max_output=\d+ \(litellm\)/);
+    expect(out.join("\n")).toMatch(/Restart `cogmo serve`/);
     expect(store.addModelProvider).toHaveBeenCalledWith(
       FAKE_TX,
       expect.objectContaining({
@@ -134,9 +136,10 @@ describe("cogmo model add", () => {
         maxOutputTokens: 8_000,
       }),
     );
-    // db source signals the row override is winning over the (missing)
-    // LiteLLM entry.
-    expect(out.join("\n")).toMatch(/source: db/);
+    // Both columns came from the row override (no LiteLLM entry for the
+    // local fine-tune slug); per-column sources both render `(db)`.
+    expect(out.join("\n")).toMatch(/context=200000 \(db\)/);
+    expect(out.join("\n")).toMatch(/max_output=8000 \(db\)/);
   });
 });
 
@@ -172,7 +175,35 @@ describe("cogmo model list", () => {
     // Header + one row.
     expect(out.length).toBe(2);
     expect(out[0]).toMatch(/model\tprovider\tposition\tcontext\tmax_output\tsource/);
+    // Both columns came from LiteLLM → source collapses to the shared tag.
     expect(out[1]).toMatch(/^claude-sonnet-4-6\tanthropic\t0\t1000000\t64000\tlitellm$/);
+  });
+
+  it("renders a split `cw=…,mo=…` source tag when the two columns disagree", async () => {
+    // Partial override: row pins maxOutputTokens but leaves contextWindow
+    // to LiteLLM. The list view shows both sources so the operator sees
+    // the LiteLLM contribution they'd otherwise have missed.
+    const store = makeStore({
+      allModels: ["claude-sonnet-4-6"],
+      rowsByModel: {
+        "claude-sonnet-4-6": [
+          {
+            id: "r1",
+            name: "anthropic",
+            type: "anthropic",
+            baseUrl: null,
+            secretId: "s",
+            attrs: {},
+            position: 0,
+            contextWindow: null,
+            maxOutputTokens: 8_000,
+          },
+        ],
+      },
+    });
+    const { io, out } = makeIo();
+    await runModelCli(["list"], { runInTx: tx as never, agentStore: store }, io);
+    expect(out[1]).toMatch(/^claude-sonnet-4-6\tanthropic\t0\t1000000\t8000\tcw=litellm,mo=db$/);
   });
 
   it("displays the stored position, not the array index, when positions are non-sequential", async () => {
@@ -344,5 +375,22 @@ describe("cogmo model — flag parsing", () => {
     );
     expect(code).toBe(2);
     expect(err.join("\n")).toMatch(/--context expects a non-negative integer/);
+  });
+
+  it("rejects a --context value with trailing garbage (parseInt would silently accept)", async () => {
+    // `Number.parseInt("200000abc", 10)` returns 200000 and silently drops
+    // the trailing "abc". Number()+isInteger catches it.
+    const store = makeStore({
+      providers: [{ id: "p1", name: "vllm", type: "openai_compatible" }],
+    });
+    const { io, err } = makeIo();
+    const code = await runModelCli(
+      ["add", "m", "--provider", "vllm", "--context", "200000abc"],
+      { runInTx: tx as never, agentStore: store },
+      io,
+    );
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/--context expects a non-negative integer/);
+    expect(store.addModelProvider).not.toHaveBeenCalled();
   });
 });

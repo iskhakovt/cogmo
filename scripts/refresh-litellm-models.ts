@@ -37,6 +37,28 @@ interface PrunedEntry {
   maxOutputTokens: number;
 }
 
+/**
+ * Cap for `maxOutputTokens` in the pruned snapshot.
+ *
+ * LiteLLM reports `max_output_tokens` as the **model API's documented
+ * limit** — for many flagship models that's the full context window
+ * (xAI's Grok 4.3 reports input=1M and output=1M; Anthropic reports input=
+ * 1M and output=64k). Our resolver treats `maxOutputTokens` as a **budget
+ * setpoint**: `computeBudget = contextWindow - maxOutputTokens - 10_000`.
+ *
+ * Without a cap, models with `max_output == max_input` produce a negative
+ * budget and compaction either misbehaves or fires every turn. 64k is the
+ * upper end of what chat workloads actually emit (Claude Sonnet 4.6
+ * already reports 64k in LiteLLM, and that's the largest output cap we
+ * shipped in the pre-resolver `MODEL_REGISTRY`). Operators who want a
+ * tighter or looser cap pin explicit limits via `cogmo model add
+ * --max-output N`.
+ */
+const MAX_OUTPUT_BUDGET_CAP = 64_000;
+
+/** Mirrors `DEFAULT_SAFETY_BUFFER` in `src/llm/models.ts`. */
+const SAFETY_BUFFER = 10_000;
+
 async function main(): Promise<void> {
   console.log(`Fetching ${UPSTREAM_URL}...`);
   const res = await fetch(UPSTREAM_URL);
@@ -48,24 +70,44 @@ async function main(): Promise<void> {
   const pruned: Record<string, PrunedEntry> = {};
   let kept = 0;
   let skippedNoCtx = 0;
+  let skippedNegativeBudget = 0;
   for (const [key, value] of Object.entries(raw)) {
     if (key === "sample_spec") continue;
     const contextWindow = value.max_input_tokens ?? value.max_tokens;
-    const maxOutputTokens = value.max_output_tokens ?? value.max_tokens;
-    if (typeof contextWindow !== "number" || typeof maxOutputTokens !== "number") {
+    const rawOutput = value.max_output_tokens ?? value.max_tokens;
+    if (typeof contextWindow !== "number" || typeof rawOutput !== "number") {
       skippedNoCtx++;
+      continue;
+    }
+    // Cap output at 64k AND at one-quarter of the context window. The
+    // quarter-of-context cap keeps small models (16k context, where 64k
+    // would still produce a negative budget) sane; the 64k cap keeps
+    // huge-context models from over-reserving output.
+    const maxOutputTokens = Math.min(
+      Math.trunc(rawOutput),
+      Math.trunc(contextWindow / 4),
+      MAX_OUTPUT_BUDGET_CAP,
+    );
+    // Skip entries whose effective budget would be ≤ 0 — typically tiny
+    // models (4k–8k context) and embedding/rerank rows that we never
+    // talk to via the chat path anyway. The resolver falls through to
+    // its conservative default (128k / 4k) for any model dropped here.
+    if (Math.trunc(contextWindow) - maxOutputTokens - SAFETY_BUFFER <= 0) {
+      skippedNegativeBudget++;
       continue;
     }
     pruned[key] = {
       contextWindow: Math.trunc(contextWindow),
-      maxOutputTokens: Math.trunc(maxOutputTokens),
+      maxOutputTokens,
     };
     kept++;
   }
 
   mkdirSync(dirname(OUTPUT), { recursive: true });
   writeFileSync(OUTPUT, `${JSON.stringify(pruned, null, 2)}\n`);
-  console.log(`Wrote ${kept} entries to ${OUTPUT} (skipped ${skippedNoCtx} with no token data)`);
+  console.log(
+    `Wrote ${kept} entries to ${OUTPUT} (skipped ${skippedNoCtx} without token data, ${skippedNegativeBudget} with non-positive budget)`,
+  );
 }
 
 main().catch((err) => {

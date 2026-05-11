@@ -26,19 +26,22 @@
  * exact key wins, then prefixed forms, then aliased forms.
  */
 import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
 export interface LitellmEntry {
   contextWindow: number;
   maxOutputTokens: number;
 }
 
-const SNAPSHOT_PATH = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  // src/llm/litellm-data.ts → repo-root/data/litellm-models.json
-  "../../data/litellm-models.json",
-);
+// Resolve from cwd, not relative to `import.meta.url`. tsup bundles this
+// module into a top-level chunk in `dist/`, so the src→pkg depth (`../../`)
+// doesn't survive the build — `import.meta.url`-relative resolution would
+// look for `/data/...` instead of `/app/data/...` inside the container.
+// Bootstrap already assumes cwd is the project root (cf. `loadHindsightCompat`
+// in `src/boot/checks.ts`, `migrate(...)` reading `./migrations`); this
+// stays consistent with that assumption. The Dockerfile's `WORKDIR /app`
+// + `COPY data/ data/` puts the snapshot at the expected path.
+const SNAPSHOT_PATH = resolve(process.cwd(), "data/litellm-models.json");
 
 let cache: Record<string, LitellmEntry> | null = null;
 

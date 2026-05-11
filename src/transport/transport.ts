@@ -829,12 +829,15 @@ export function createTransport(deps: {
             // a read-only display, not a routing decision, so we don't pay
             // for the per-turn DB read here. resolveLimits never throws:
             // unknown models fall back to the conservative default. We
-            // surface `null` for the default-source case so the UI shows
-            // "model unknown" (sessions-ux renders the budget conditionally
-            // on this null) — the conservative default is a guess, not a
-            // known capacity worth displaying as fact.
+            // surface `null` whenever any column came from the default —
+            // sessions-ux renders the budget conditionally on this null,
+            // and a default-sourced contextWindow would be a guess we'd
+            // rather not display as fact.
             const resolved = resolveLimits(profile.model);
-            const contextBudget = resolved.source === "default" ? null : computeBudget(resolved);
+            const isGuess =
+              resolved.contextWindowSource === "default" ||
+              resolved.maxOutputTokensSource === "default";
+            const contextBudget = isGuess ? null : computeBudget(resolved);
 
             const mcp =
               mcpServers === null

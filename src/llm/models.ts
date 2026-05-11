@@ -35,14 +35,18 @@ export interface ModelLimits {
 }
 
 /**
- * Where the resolver's returned limits came from. Useful for debugging
- * "why is compaction so aggressive on this model" and surfaced by
- * `cogmo model list` per row.
+ * Where the resolver picked each individual column from. Useful for
+ * debugging "why is compaction so aggressive on this model" via
+ * `cogmo model list`, where each row shows the source per column —
+ * a partial DB override (e.g. only `maxOutputTokens` pinned) reports
+ * `db` for that column and `litellm` for the one falling through, so
+ * operators can see the contribution of each layer.
  */
 export type LimitsSource = "db" | "litellm" | "default";
 
 export interface ResolvedLimits extends ModelLimits {
-  source: LimitsSource;
+  contextWindowSource: LimitsSource;
+  maxOutputTokensSource: LimitsSource;
 }
 
 /**
@@ -84,43 +88,40 @@ const DEFAULT_SAFETY_BUFFER = 10_000;
  * the same warning every turn.
  */
 export function resolveLimits(model: string, rowLimits?: PartialLimits): ResolvedLimits {
-  // Row override — only consult both columns. Treat half-set rows
-  // (e.g. only `maxOutputTokens` set) as a partial override that fills
-  // the missing field from the next layer down rather than the default.
-  // This matches the operator's mental model: "I set this one knob, leave
-  // the rest as the resolver decides."
-  if (rowLimits?.contextWindow != null && rowLimits.maxOutputTokens != null) {
-    return {
-      contextWindow: rowLimits.contextWindow,
-      maxOutputTokens: rowLimits.maxOutputTokens,
-      source: "db",
-    };
-  }
-
   const litellm = lookupLitellm(model);
-  const partial: Partial<ModelLimits> = {
-    ...(rowLimits?.contextWindow != null && { contextWindow: rowLimits.contextWindow }),
-    ...(rowLimits?.maxOutputTokens != null && { maxOutputTokens: rowLimits.maxOutputTokens }),
-  };
-
-  if (litellm) {
-    const merged: ResolvedLimits = {
-      contextWindow: partial.contextWindow ?? litellm.contextWindow,
-      maxOutputTokens: partial.maxOutputTokens ?? litellm.maxOutputTokens,
-      // If the row set anything at all, treat the result as a `db` source
-      // so listing surfaces the override. Otherwise it's a clean LiteLLM hit.
-      source: partial.contextWindow != null || partial.maxOutputTokens != null ? "db" : "litellm",
-    };
-    return merged;
+  const cw = pickColumn(
+    rowLimits?.contextWindow,
+    litellm?.contextWindow,
+    DEFAULT_LIMITS.contextWindow,
+  );
+  const mo = pickColumn(
+    rowLimits?.maxOutputTokens,
+    litellm?.maxOutputTokens,
+    DEFAULT_LIMITS.maxOutputTokens,
+  );
+  // Warn once when the model is unknown to LiteLLM AND no DB override
+  // supplied either column — the resolver fell through to the
+  // conservative default everywhere, and the operator probably wants to
+  // know.
+  if (cw.source === "default" && mo.source === "default") {
+    warnFallbackOnce(model);
   }
-
-  warnFallbackOnce(model);
   return {
-    contextWindow: partial.contextWindow ?? DEFAULT_LIMITS.contextWindow,
-    maxOutputTokens: partial.maxOutputTokens ?? DEFAULT_LIMITS.maxOutputTokens,
-    // Half-set + LiteLLM miss = still a `db` partial override; otherwise default.
-    source: partial.contextWindow != null || partial.maxOutputTokens != null ? "db" : "default",
+    contextWindow: cw.value,
+    maxOutputTokens: mo.value,
+    contextWindowSource: cw.source,
+    maxOutputTokensSource: mo.source,
   };
+}
+
+function pickColumn(
+  override: number | null | undefined,
+  litellm: number | undefined,
+  fallback: number,
+): { value: number; source: LimitsSource } {
+  if (override != null) return { value: override, source: "db" };
+  if (litellm != null) return { value: litellm, source: "litellm" };
+  return { value: fallback, source: "default" };
 }
 
 const warnedModels = new Set<string>();
