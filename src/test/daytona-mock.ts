@@ -138,6 +138,14 @@ export type DaytonaMockOptions = DaytonaMockRecordOptions | DaytonaMockReplayOpt
 
 const TOOLBOX_PATH_PREFIX = "/toolbox/";
 
+/**
+ * Placeholder host written into the fixture in place of the mock's
+ * recording-time port. Substituted with the live mock URL on replay
+ * so fixtures stay portable across processes/machines (the port is
+ * always random).
+ */
+const MOCK_URL_PLACEHOLDER = "http://__daytona_mock__";
+
 interface InFlightScenario {
   name: string;
   calls: Call[];
@@ -204,7 +212,7 @@ export class DaytonaMock {
     });
     server.on("upgrade", (req, socket, head) => {
       wss.handleUpgrade(req, socket as Socket, head, (ws) => {
-        mock.#handleWs(ws, req.url ?? "/").catch((err: Error) => {
+        mock.#handleWs(ws, req.url ?? "/", req.headers).catch((err: Error) => {
           log.error({ err: err.message, path: req.url }, "ws handler failed");
           ws.close(1011, "internal");
         });
@@ -254,25 +262,49 @@ export class DaytonaMock {
    * frames in replay are accepted-and-ignored — the
    * `getSessionCommandLogs` contract is server-stream-only.
    */
-  async #handleWs(ws: WebSocket, path: string): Promise<void> {
+  async #handleWs(ws: WebSocket, path: string, headers: IncomingMessage["headers"]): Promise<void> {
     if (this.#opts.mode === "record") {
-      await this.#recordWs(ws, path);
+      await this.#recordWs(ws, path, headers);
     } else {
       this.#replayWs(ws, path);
     }
   }
 
-  async #recordWs(ws: WebSocket, path: string): Promise<void> {
+  async #recordWs(
+    ws: WebSocket,
+    path: string,
+    incomingHeaders: IncomingMessage["headers"],
+  ): Promise<void> {
     if (this.#opts.mode !== "record") return;
     const upstreamUrl = this.#resolveWsUpstreamUrl(path);
     if (!upstreamUrl) {
       ws.close(1011, "no upstream for path");
       return;
     }
+    // Forward the SDK's full header set to the upstream WS. Stripping
+    // hop-by-hop + WS-upgrade headers (the new connection sets its own)
+    // and overwriting `authorization` with our upstream key. The
+    // `x-daytona-*` SDK metadata headers ride along — Daytona's
+    // toolbox-WS proxy gates on those.
+    const wsHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(incomingHeaders)) {
+      if (typeof v !== "string") continue;
+      const lower = k.toLowerCase();
+      if (
+        lower === "host" ||
+        lower === "connection" ||
+        lower === "upgrade" ||
+        lower === "content-length" ||
+        lower.startsWith("sec-websocket-")
+      ) {
+        continue;
+      }
+      wsHeaders[k] = v;
+    }
+    wsHeaders.authorization = `Bearer ${this.#opts.upstreamApiKey}`;
+    log.debug({ path, upstreamUrl }, "ws upgrade");
     const frames: WsFrame[] = [];
-    const upstream = new WebSocket(upstreamUrl, {
-      headers: { Authorization: `Bearer ${this.#opts.upstreamApiKey}` },
-    });
+    const upstream = new WebSocket(upstreamUrl, { headers: wsHeaders });
 
     // Server→client direction. Forward + journal.
     upstream.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
@@ -383,8 +415,9 @@ export class DaytonaMock {
     const base = this.#toolboxUpstreams.get(sandboxId);
     if (!base) return null;
     // Toolbox base is `https://...`; flip the scheme to `wss://` for WS.
+    // Sandbox-id is re-injected for the same reason as `#resolveUpstreamUrl`.
     const wsBase = base.replace(/^http(s?):/, (_, s) => `ws${s}:`).replace(/\/$/, "");
-    return `${wsBase}${subPath}`;
+    return `${wsBase}/${sandboxId}${subPath}`;
   }
 
   async #handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -415,18 +448,24 @@ export class DaytonaMock {
     const upstreamHeaders = this.#prepareUpstreamHeaders(headers);
     if (this.#opts.mode === "record") {
       // Authorization is added only to the OUTBOUND request; never
-      // persisted to the fixture below.
-      upstreamHeaders.Authorization = `Bearer ${this.#opts.upstreamApiKey}`;
+      // persisted to the fixture below. Use the lowercase form to
+      // overwrite the SDK's incoming `authorization` header rather
+      // than emit a duplicate — Node's `fetch()` builds Headers by
+      // `append`-ing, which joins same-name duplicates with a
+      // comma, malforming the Bearer token.
+      upstreamHeaders.authorization = `Bearer ${this.#opts.upstreamApiKey}`;
       if (this.#opts.upstreamOrganizationId) {
-        upstreamHeaders["X-Daytona-Organization-ID"] = this.#opts.upstreamOrganizationId;
+        upstreamHeaders["x-daytona-organization-id"] = this.#opts.upstreamOrganizationId;
       }
     }
 
+    log.debug({ method, upstreamUrl, bodyBytes: body.length }, "forward");
     const upstreamResp = await fetch(upstreamUrl, {
       method,
       headers: upstreamHeaders,
       ...(body.length > 0 && { body: body as unknown as BodyInit }),
     });
+    log.debug({ status: upstreamResp.status, upstreamUrl }, "upstream response");
     const respHeaders: Record<string, string> = {};
     upstreamResp.headers.forEach((v, k) => {
       respHeaders[k] = v;
@@ -444,9 +483,19 @@ export class DaytonaMock {
     if (contentType.includes("application/json") && respBodyBuf.length > 0) {
       try {
         const parsed = JSON.parse(respBodyBuf.toString("utf8")) as unknown;
-        const rewritten = this.#rewriteCreateResponse(method, path, parsed);
-        respBodyJsonForFixture = rewritten;
-        respBodyForClient = Buffer.from(JSON.stringify(rewritten));
+        // Rewrite first so the {sandbox-id → real toolbox} map gets
+        // populated for downstream toolbox-routing in the same record
+        // session. The rewrite uses the placeholder host so the
+        // fixture stays portable across mock-port spawns.
+        const rewrittenForFixture = this.#rewriteCreateResponse(method, path, parsed);
+        // For the SDK in this record session, substitute the
+        // placeholder with the live mock URL so subsequent toolbox
+        // calls actually resolve to us.
+        const rewrittenForClient = this.#materializePlaceholders(
+          JSON.parse(JSON.stringify(rewrittenForFixture)),
+        );
+        respBodyJsonForFixture = rewrittenForFixture;
+        respBodyForClient = Buffer.from(JSON.stringify(rewrittenForClient));
         // Recompute content-length so the proxied response doesn't
         // mismatch its body bytes after rewriting.
         respHeaders["content-length"] = String(respBodyForClient.length);
@@ -526,9 +575,15 @@ export class DaytonaMock {
           res.setHeader(k, v);
         }
         if (call.response.bodyJson !== undefined) {
-          res.end(JSON.stringify(call.response.bodyJson));
+          const materialized = this.#materializePlaceholders(
+            JSON.parse(JSON.stringify(call.response.bodyJson)),
+          );
+          res.end(JSON.stringify(materialized));
         } else if (call.response.bodyText !== undefined) {
-          res.end(call.response.bodyText);
+          const text = call.response.bodyText.includes(MOCK_URL_PLACEHOLDER)
+            ? call.response.bodyText.replaceAll(MOCK_URL_PLACEHOLDER, this.url)
+            : call.response.bodyText;
+          res.end(text);
         } else {
           res.end();
         }
@@ -568,7 +623,13 @@ export class DaytonaMock {
       const subPath = rest.slice(slash); // includes leading '/'
       const base = this.#toolboxUpstreams.get(sandboxId);
       if (!base) return null;
-      return `${base.replace(/\/$/, "")}${subPath}`;
+      // Re-inject sandbox-id into the upstream URL. Daytona's real
+      // `toolboxProxyUrl` is bare (`https://proxy.../toolbox`); the
+      // SDK appends `/<sandbox-id>` to build per-sandbox paths.
+      // Our rewrite mirrors that, so the SDK sends `/toolbox/<id>/...`
+      // to the mock — we strip `/toolbox/<id>` off, look up the bare
+      // upstream base, and add the id back.
+      return `${base.replace(/\/$/, "")}/${sandboxId}${subPath}`;
     }
     // Main API. Strip leading '/' before joining so we don't end up
     // with a double slash that some upstreams 308 on.
@@ -591,8 +652,17 @@ export class DaytonaMock {
   /**
    * If this is a `POST /sandbox` response carrying `toolboxProxyUrl`,
    * remember the real URL and rewrite the response to point at our
-   * mock so the SDK's subsequent toolbox calls hit us. Returns the
-   * (possibly-modified) response body.
+   * mock so the SDK's subsequent toolbox calls hit us. The placeholder
+   * `__daytona_mock__` host is written to the fixture and substituted
+   * for the current mock URL at replay time — keeps fixtures portable
+   * across processes (mock port is random).
+   *
+   * Daytona's real `toolboxProxyUrl` does NOT contain the sandbox-id;
+   * the SDK appends `<sandbox-id>` itself to build per-sandbox URLs
+   * (see Sandbox.js → `axiosInstance.defaults.baseURL = baseUrl + id`).
+   * Our rewrite mirrors that — bare `/toolbox` — so the SDK's
+   * appending math produces `/toolbox/<id>/…` paths the mock can
+   * route by extracting the id.
    */
   #rewriteCreateResponse(method: string, path: string, body: unknown): unknown {
     if (method !== "POST") return body;
@@ -603,8 +673,35 @@ export class DaytonaMock {
     const originalToolbox = obj.toolboxProxyUrl;
     if (typeof id !== "string" || typeof originalToolbox !== "string") return body;
     this.#toolboxUpstreams.set(id, originalToolbox);
-    obj.toolboxProxyUrl = `${this.url}/toolbox/${id}`;
+    obj.toolboxProxyUrl = `${MOCK_URL_PLACEHOLDER}/toolbox`;
     return obj;
+  }
+
+  /**
+   * Walk a JSON body and replace the placeholder host with the
+   * mock's current URL. Recursive, in-place. Returns the same
+   * reference; caller serializes downstream.
+   */
+  #materializePlaceholders(value: unknown): unknown {
+    if (typeof value === "string") {
+      return value.includes(MOCK_URL_PLACEHOLDER)
+        ? value.replaceAll(MOCK_URL_PLACEHOLDER, this.url)
+        : value;
+    }
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        value[i] = this.#materializePlaceholders(value[i]);
+      }
+      return value;
+    }
+    if (typeof value === "object" && value !== null) {
+      const obj = value as Record<string, unknown>;
+      for (const k of Object.keys(obj)) {
+        obj[k] = this.#materializePlaceholders(obj[k]);
+      }
+      return obj;
+    }
+    return value;
   }
 
   async #readBody(req: IncomingMessage): Promise<Buffer> {

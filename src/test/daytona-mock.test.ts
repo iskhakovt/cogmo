@@ -235,18 +235,20 @@ describe("DaytonaMock", () => {
         });
         const body = (await resp.json()) as { id: string; toolboxProxyUrl: string };
         // The SDK saw the rewritten URL pointing at the mock — toolbox
-        // calls will land here too.
+        // calls will land here too. URL is bare `/toolbox` (no
+        // sandbox-id); the SDK appends the id itself per
+        // Sandbox.js → `baseURL = baseUrl + id`.
         expect(body.id).toBe("sb-fake-1");
-        expect(body.toolboxProxyUrl).toBe(`${mock.url}/toolbox/sb-fake-1`);
+        expect(body.toolboxProxyUrl).toBe(`${mock.url}/toolbox`);
         await mock.endScenario();
       } finally {
         await mock.stop();
         await upstream.stop();
       }
 
-      // Fixture contents: original toolboxProxyUrl was rewritten in
-      // the recorded response, so replay sees the same rewritten URL
-      // — no re-rewrite needed at replay time.
+      // Fixture contents: the placeholder is written to disk (not the
+      // recording-time mock URL) so the fixture stays portable across
+      // mock-port spawns. Replay materializes back to the live URL.
       const persisted = JSON.parse(readFileSync(fixturePath, "utf8")) as {
         scenario: string;
         calls: Array<{
@@ -260,7 +262,7 @@ describe("DaytonaMock", () => {
       const recorded = persisted.calls[0];
       expect(recorded?.method).toBe("POST");
       expect(recorded?.path).toBe("/sandbox");
-      expect(recorded?.response.bodyJson?.toolboxProxyUrl).toMatch(/\/toolbox\/sb-fake-1$/);
+      expect(recorded?.response.bodyJson?.toolboxProxyUrl).toBe("http://__daytona_mock__/toolbox");
     });
 
     it("strips Authorization header from recorded request — no real keys on disk", async () => {

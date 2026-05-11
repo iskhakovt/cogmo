@@ -92,6 +92,9 @@ describe("Daytona conformance — create-exec-delete", () => {
       // create-sandbox — SDK reads `id` + `toolboxProxyUrl` off the
       // response. Mock rewrites `toolboxProxyUrl` at record time so it
       // points at the mock itself; replay sees the rewritten URL.
+      // Labels are body-side only — they don't appear in URLs, so the
+      // task-id can stay non-deterministic without breaking
+      // (method, path) fixture matching.
       const sandbox = await daytona.create({
         image: "python:3.14-slim",
         labels: {
@@ -107,8 +110,11 @@ describe("Daytona conformance — create-exec-delete", () => {
 
       // exec session — covers process.createSession +
       // executeSessionCommand + getSessionCommandLogs (WS) +
-      // getSessionCommand + deleteSession.
-      const sessionId = `conformance-${randomUUID().slice(0, 8)}`;
+      // getSessionCommand + deleteSession. `sessionId` is fixed (not
+      // a UUID) because it appears in URL paths; fixture matching is
+      // by `(method, path)`, so a random session id would miss on
+      // every replay.
+      const sessionId = "conformance-session";
       await sandbox.process.createSession(sessionId);
       const start = await sandbox.process.executeSessionCommand(sessionId, {
         command: "echo hello-from-record",

@@ -189,11 +189,23 @@ Store implementations (`DrizzleAgentStore`, `DrizzleTransportStore`) are tested 
 - **Cleanup:** Truncate all tables via `db.execute(sql\`...\`)` between tests. One PGlite instance per test file.
 - **Helper:** `src/test/pglite.ts` — `createTestDatabase()` and `truncateAll()`.
 
-### LLM Mocking with llmock
+### Record/replay mocks (LLM + fal + voice + xAI + Daytona)
 
-`@copilotkit/aimock` provides a deterministic mock LLM HTTP server. Single instance serves both Anthropic Messages API (`POST /v1/messages`) and OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/embeddings`) for Hindsight. Fixture-based routing, request journal for assertions. Replaces both `mock-anthropic` container and Ollama.
+Integration tests run against frozen wire fixtures captured from real upstreams. CI replays for free; recordings happen locally once per drift. Five mocks share the same `RECORD=1` env flag:
 
-**Re-record when requests change.** When adding features that change what LLM or embedding requests are made during integration/e2e tests (new tools in the system prompt, auto-recall, different prompt structure), re-record fixtures via `pnpm test:record` before pushing. CI runs in strict mode — unmatched requests return 503.
+| Mock | Location | What it captures |
+|-|-|-|
+| llmock (`@copilotkit/aimock`) | `test/llmock-setup.ts` | Anthropic `/v1/messages` + OpenAI `/v1/chat/completions` + `/v1/embeddings` (for Hindsight) |
+| fal-mock | `src/test/fal-mock.ts` | fal.ai image generation, scoped `fetch` wrapper |
+| openai-voice-mock | `src/test/openai-voice-mock.ts` | OpenAI `/v1/audio/{speech,transcriptions}` for TTS/STT |
+| xAI llmock | `src/test/xai-grok.integration.test.ts` | One-off llmock proxying `openai → openrouter.ai/api` |
+| daytona-mock | `src/test/daytona-mock.ts` | `@daytonaio/sdk` REST + WebSocket (toolbox proxy, `getSessionCommandLogs`) |
+
+**To re-record:** `pnpm test:record` (or `:e2e`) sets `RECORD=1` and runs the integration tier. Each mock guards on its own upstream API key — only adapters with keys present in `.env` actually record. CI never sets `RECORD=1`; unmatched requests fail with `503` (or `1011` for WS) carrying a "re-record" hint.
+
+**When to re-record:** prompt structure changes, new tools in the system prompt, auto-recall on/off, model swap, SDK version bump for daytona/fal/etc. The failing test's error surface points at the fixture file that needs refreshing.
+
+**Sandbox-id and other stable identifiers in URLs:** fixture matching is `(method, path)` FIFO. Random per-test UUIDs that appear in URLs (`sessionId`, etc.) must be pinned to fixed strings in the test, otherwise the recorded path won't match the replay path. Body-only identifiers (labels, request payloads) can stay random — body comparison is intentionally loose.
 
 ### Integration Test Env Injection
 
