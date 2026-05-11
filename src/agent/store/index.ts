@@ -224,10 +224,9 @@ function previewFromContent(content: unknown): string {
  * opaque 23514.
  */
 function validateImageProviderBaseUrl(type: ImageProviderTypeValue, baseUrl: string | null): void {
-  // Exhaustive switch — a new `image_provider_type` enum value lands at
-  // the `assertNever` branch with a compile error rather than silently
-  // taking the openai_compatible path. Same pattern as `buildProvider`
-  // in src/llm/resolver.ts.
+  // Exhaustive switch over `image_provider_type` — adding an enum value
+  // without a matching case is a compile error. Same pattern as
+  // `buildProvider` in src/llm/resolver.ts.
   switch (type) {
     case "fal":
       if (baseUrl !== null) {
