@@ -373,18 +373,31 @@ function computeAutoStopInterval(expiresAt: Date): number {
 }
 
 /**
- * Map Cogmo's `ResourceLimits` (cpus + memory_bytes + pids) onto
- * Daytona's `Resources` shape. `pids` has no Daytona equivalent and is
- * silently dropped — documented in `design/sandbox.md` → Daytona Backend.
+ * Map Cogmo's `ResourceLimits` (cpus + memory_bytes + pids + optional
+ * disk_bytes) onto Daytona's `Resources` shape. `pids` has no Daytona
+ * equivalent and is silently dropped — documented in `design/sandbox.md`
+ * → Daytona Backend. `disk_bytes` is forwarded only when set so a caller
+ * that omits it accepts the platform default (3 GiB at the time of writing).
  */
-function resourcesFromLimits(limits: { cpus: number; memory_bytes: number; pids: number }): {
+function resourcesFromLimits(limits: {
+  cpus: number;
+  memory_bytes: number;
+  pids: number;
+  disk_bytes?: number | undefined;
+}): {
   cpu: number;
   memory: number;
+  disk?: number;
 } {
-  return {
+  // Daytona's `memory` / `disk` are GiB. Round up so under-provisioning
+  // never happens when the caller passed bytes that don't align cleanly.
+  // Floor at 1 to honor Daytona's per-resource minimum.
+  const result: { cpu: number; memory: number; disk?: number } = {
     cpu: Math.max(1, Math.ceil(limits.cpus)),
-    // Daytona's `memory` is GiB. Round up so under-provisioning never
-    // happens when the caller passed bytes that don't align cleanly.
     memory: Math.max(1, Math.ceil(limits.memory_bytes / (1024 * 1024 * 1024))),
   };
+  if (limits.disk_bytes !== undefined) {
+    result.disk = Math.max(1, Math.ceil(limits.disk_bytes / (1024 * 1024 * 1024)));
+  }
+  return result;
 }

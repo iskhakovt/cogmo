@@ -21,6 +21,11 @@ export const DEFAULT_RESOURCE_LIMITS: ResourceLimits = {
   cpus: 1,
   memory_bytes: 512 * 1024 * 1024,
   pids: 1024,
+  // Daytona-only — skills run a 178 MB image plus <100 MB of scratch in
+  // typical workloads. 1 GiB is the platform minimum and a 3× over-
+  // provision over real usage; the default 3 GiB would waste free-tier
+  // storage across many simultaneous workers. Ignored by local-docker.
+  disk_bytes: 1024 * 1024 * 1024,
 };
 
 /**

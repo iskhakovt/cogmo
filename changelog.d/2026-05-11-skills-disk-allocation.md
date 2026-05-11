@@ -1,0 +1,5 @@
+**Cost optimisation.** Skills tier-2 sandboxes on Daytona were inheriting the platform's default 3 GiB disk allocation, even though the skills image is 178 MB uncompressed and typical Python skill runs write <100 MB of scratch. Across many concurrent workers that wastes free-tier storage and starts billing once total managed storage crosses 5 GiB. `ResourceLimits` now carries an optional `disk_bytes` field; skills `DEFAULT_RESOURCE_LIMITS` sets it to 1 GiB (the platform minimum, still 3× over-provisioned versus real usage). Coding-delegation paths leave `disk_bytes` unset so they continue to receive Daytona's 3 GiB default, which is the right ballpark for repo-clone + node_modules workloads.
+
+Plumbing is Daytona-only: `resourcesFromLimits` in the Daytona client maps `disk_bytes` → `disk` GiB (rounded up, floored at 1) when set, leaving the field unset otherwise. Local-Docker silently ignores `disk_bytes` because runc HostConfig has no native disk quota.
+
+Documented the trade-off in `design/sandbox.md` → Daytona Backend → Out of scope.

@@ -167,12 +167,14 @@ export interface CoreDeps {
 /**
  * Sandbox client + lifecycle handles. Returned by `bootstrapSandbox`.
  *
- * `bootstrapSandbox` ALWAYS runs `reconcileCrashedInstances`, which reaps any
- * managed container whose `cogmo.instance` label doesn't match this run's id.
- * Only `cogmo serve` calls it — running it from a one-shot CLI would reap
- * the live `cogmo serve` instance's coding-task containers (no liveness
- * check on other instance rows). All fields are `null` when the configured
- * backend is unavailable (no `SANDBOX_RUNTIME`, missing `daytona_api_key`).
+ * `bootstrapSandbox` schedules `reconcileCrashedInstances` as a background
+ * task (see `scheduleReconcileCrashedInstances`) — it reaps any managed
+ * container whose `cogmo.instance` label doesn't match this run's id but
+ * does not block boot on the docker-daemon scan. Only `cogmo serve` calls
+ * the stage at all — running it from a one-shot CLI would reap the live
+ * `cogmo serve` instance's coding-task containers (no liveness check on
+ * other instance rows). All fields are `null` when the configured backend
+ * is unavailable (no `SANDBOX_RUNTIME`, missing `daytona_api_key`).
  */
 export interface SandboxDeps {
   sandbox: SandboxClient | null;
@@ -372,12 +374,45 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
 }
 
 /**
+ * Fire-and-forget orphan reaping. The per-minute sandbox reaper (local-docker)
+ * and per-task TTL deletes (both backends) cover ongoing orphans; the boot-
+ * time pass only matters for containers labelled with a *prior* instance id
+ * that the periodic reaper would also catch on its next tick. Deferring it
+ * keeps `cogmo serve` startup independent of how many orphan containers the
+ * daemon happens to be carrying.
+ */
+function scheduleReconcileCrashedInstances(
+  client: SandboxClient,
+  instanceId: string,
+  backendLabel: string,
+): void {
+  void client.reconcileCrashedInstances(instanceId).then(
+    ({ orphansReaped }) => {
+      if (orphansReaped > 0) {
+        logger.warn(
+          { orphansReaped, backendLabel },
+          "reaped orphan sandboxes from prior instance(s)",
+        );
+      }
+    },
+    (err: unknown) => {
+      logger.error(
+        { err, instanceId, backendLabel },
+        "background reconcileCrashedInstances failed",
+      );
+    },
+  );
+}
+
+/**
  * Stage 2: sandbox client + crash-instance reconciliation. Inserts a row
  * into `cogmo_instances` (local-docker backend) so other Cogmo processes
- * can see this instance is live, then reaps any container labeled with a
- * dead instance id. Only `cogmo serve` should call this — running it from
- * a one-shot CLI reaps the live `cogmo serve`'s coding-task containers
- * because the reaper has no liveness check on other instance rows.
+ * can see this instance is live, then schedules an asynchronous pass that
+ * reaps any container labeled with a dead instance id. The reaping is
+ * fire-and-forget — see `scheduleReconcileCrashedInstances`. Only `cogmo
+ * serve` should call this stage — running it from a one-shot CLI reaps the
+ * live `cogmo serve`'s coding-task containers (no liveness check on other
+ * instance rows).
  *
  * Returns `NO_SANDBOX` (all-null) when the configured backend is
  * unavailable: `local-docker` requires `SANDBOX_RUNTIME`; `daytona`
@@ -395,10 +430,7 @@ export async function bootstrapSandbox(
   if (opts.sandboxClientOverride) {
     const sandbox = opts.sandboxClientOverride;
     const sandboxInstanceId = randomUUID();
-    const { orphansReaped } = await sandbox.reconcileCrashedInstances(sandboxInstanceId);
-    if (orphansReaped > 0) {
-      logger.warn({ orphansReaped }, "reaped orphan sandboxes from prior instance(s)");
-    }
+    scheduleReconcileCrashedInstances(sandbox, sandboxInstanceId, sandbox.backendId);
     logger.info(
       { backendId: sandbox.backendId, instanceId: sandboxInstanceId },
       "sandbox client override active (test-only)",
@@ -449,10 +481,7 @@ export async function bootstrapSandbox(
       askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
     });
     const codingSandbox = localDocker;
-    const { orphansReaped } = await localDocker.reconcileCrashedInstances(instance.id);
-    if (orphansReaped > 0) {
-      logger.warn({ orphansReaped }, "reaped orphan containers from prior instance(s)");
-    }
+    scheduleReconcileCrashedInstances(localDocker, instance.id, "local-docker");
     logger.info(
       {
         runtime: env.SANDBOX_RUNTIME,
@@ -491,10 +520,7 @@ export async function bootstrapSandbox(
       ...(env.DAYTONA_API_URL && { apiUrl: env.DAYTONA_API_URL }),
       ...(env.DAYTONA_ORGANIZATION_ID && { organizationId: env.DAYTONA_ORGANIZATION_ID }),
     });
-    const { orphansReaped } = await sandbox.reconcileCrashedInstances(sandboxInstanceId);
-    if (orphansReaped > 0) {
-      logger.warn({ orphansReaped }, "reaped orphan sandboxes from prior instance(s)");
-    }
+    scheduleReconcileCrashedInstances(sandbox, sandboxInstanceId, "daytona");
     logger.info(
       {
         instanceId: sandboxInstanceId,

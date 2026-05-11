@@ -13,12 +13,18 @@ export const ContainerLabelsSchema = z.record(z.string(), z.string());
 export type ContainerLabels = z.infer<typeof ContainerLabelsSchema>;
 
 /**
- * Resource caps applied via Docker `HostConfig`. `cpus` is fractional CPUs (1.5 = 1.5 cores);
- * `memory_bytes` and `pids` map directly to `Memory` and `PidsLimit`.
+ * Resource caps. `cpus` is fractional CPUs (1.5 = 1.5 cores); `memory_bytes`
+ * and `pids` map to Docker `HostConfig.Memory` and `HostConfig.PidsLimit` on
+ * the local backend.
+ *
+ * `disk_bytes` is Daytona-only — local Docker has no built-in disk quota for
+ * runc containers, so the supervisor silently ignores it. Omit to accept the
+ * backend's default (Daytona Cloud: 3 GiB).
  */
 export const ResourceLimitsSchema = z.object({
   cpus: z.number().positive(),
   memory_bytes: z.number().int().positive(),
   pids: z.number().int().positive(),
+  disk_bytes: z.number().int().positive().optional(),
 });
 export type ResourceLimits = z.infer<typeof ResourceLimitsSchema>;
