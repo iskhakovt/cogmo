@@ -436,13 +436,20 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       });
       const toolDefs = turnTools.definitions();
 
+      // Profile passed in from the outer read (`profileForVoice`) so
+      // voice-mode resolution, `composeTurnTools` globs, and the prompt's
+      // `# Tools` / base-prompt sections all come from the same row. A
+      // concurrent `/settings` mid-turn used to land between the outer
+      // read and a second `getProfile` inside this step, leaving the
+      // prompt's tool filter and base-prompt sourced from different
+      // snapshots under READ COMMITTED.
       const systemPrompt = await step.run("assemble-prompt", async () => {
         const ctx = await loadConversationContext(
           { runInTx: deps.runInTx, agentStore, transportStore },
-          { conversationId, profileId },
+          { conversationId, profile: profileForVoice },
         );
         return promptSource.assemble({
-          profile: ctx.profile,
+          profile: profileForVoice,
           rules: ctx.rules,
           voiceMode: voiceModeForTurn,
           toolDefinitions: toolDefs,
