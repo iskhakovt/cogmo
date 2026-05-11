@@ -69,6 +69,18 @@ export interface PushTaskBranchParams {
  * the force-push would silently overwrite a sibling run.
  */
 export async function pushTaskBranchToRemote(p: PushTaskBranchParams): Promise<void> {
+  if (!p.remoteUrl) {
+    // Empty `coding_repos.remote_url` is the fresh-deploy default — the
+    // skills row is auto-seeded with an empty string when the operator
+    // hasn't attached an `origin` to the bare repo yet. Surface the
+    // misconfiguration with a name the operator can act on, instead of
+    // letting git fail with an opaque "fatal: '' does not appear to be a
+    // git repository".
+    throw new Error(
+      "remote_url is empty for this repo — set it via SQL or attach `origin` " +
+        "to the bare repo before delegating coding tasks.",
+    );
+  }
   const runRef = runBranchFor(p.taskId);
   const fetchRefSpec = `+${p.defaultBranch}:refs/remotes/origin/${p.defaultBranch}`;
   const pushRefSpec = `+refs/remotes/origin/${p.defaultBranch}:refs/heads/${runRef}`;
@@ -96,14 +108,47 @@ export interface FetchFeatureBranchParams {
  * effort: origin is the source of truth, and any later operation that
  * needs the feature branch (e.g. a future merge from the host) can fetch
  * again on demand.
+ *
+ * Bare repos (e.g. the skill library at `$COGMO_SKILLS_PATH`) receive the
+ * branch under `refs/heads/<branch>` instead of `refs/remotes/origin/<branch>`.
+ * Bare repos store branches directly as `refs/heads/*` — there's no
+ * "remote-tracking" namespace — and downstream consumers like the skill
+ * runner's `register` flow read from `refs/heads/<branch>`. Without
+ * branching on bareness here, the feature branch lands under a refspec
+ * the consumer doesn't look at, and the round-trip silently strands the
+ * skill author's work. Non-bare mirrors (the common case for user `/repo add` flows) keep
+ * the historical `refs/remotes/origin/*` behaviour so working-tree workflows
+ * stay unsurprising.
  */
 export async function fetchFeatureBranch(p: FetchFeatureBranchParams): Promise<void> {
-  await withGitAskpass(p.identity.pat, async (env) => {
-    await runGit(
-      ["-C", p.localRepoPath, "fetch", p.remoteUrl, `+${p.branch}:refs/remotes/origin/${p.branch}`],
-      env,
+  if (!p.remoteUrl) {
+    // Symmetric guard with `pushTaskBranchToRemote` — see that branch
+    // for the rationale. Lifting the check here too means the
+    // post-task fetch fails at the helper boundary with a clear
+    // operator-facing message rather than inside the askpass scope
+    // where the symptom would be `git fetch ""` with no useful context.
+    throw new Error(
+      "remote_url is empty for this repo — set it via SQL or attach `origin` " +
+        "to the bare repo before delegating coding tasks.",
     );
+  }
+  // Bareness check is a single cheap rev-parse — local-only, no network
+  // or auth. `runGit` without an `env` argument skips the askpass setup,
+  // so we can route every git invocation through the same primitive
+  // instead of forking off an `execFile` path here. Answer is stable
+  // for a given path; the orchestrator drives this once per task, so
+  // caching across calls is unnecessary.
+  const isBare = await isBareRepository(p.localRepoPath);
+  const targetRef = isBare ? `refs/heads/${p.branch}` : `refs/remotes/origin/${p.branch}`;
+
+  await withGitAskpass(p.identity.pat, async (env) => {
+    await runGit(["-C", p.localRepoPath, "fetch", p.remoteUrl, `+${p.branch}:${targetRef}`], env);
   });
+}
+
+async function isBareRepository(repoPath: string): Promise<boolean> {
+  const { stdout } = await runGit(["-C", repoPath, "rev-parse", "--is-bare-repository"]);
+  return stdout.trim() === "true";
 }
 
 export interface LoadIdentityArgs {

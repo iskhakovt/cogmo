@@ -5,7 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { bootstrapSkillsRepo, PRE_RECEIVE_HOOK_CONTENT } from "./repo.js";
+import { mock } from "vitest-mock-extended";
+import type { CodingStore } from "../agent/coding/store/index.js";
+import type { Transactor } from "../db/index.js";
+import {
+  bootstrapSkillsRepo,
+  ensureSkillsCodingRepo,
+  PRE_RECEIVE_HOOK_CONTENT,
+  SKILLS_CODING_REPO_NAME,
+} from "./repo.js";
 
 const execFileP = promisify(execFile);
 
@@ -85,6 +93,24 @@ describe("bootstrapSkillsRepo", () => {
     await bootstrapSkillsRepo({ path: repoPath });
     const second = await bootstrapSkillsRepo({ path: repoPath });
     expect(second.initialized).toBe(false);
+  });
+
+  it("pins HEAD to refs/heads/main on first init", async () => {
+    const repoPath = join(workDir, "skills");
+    await bootstrapSkillsRepo({ path: repoPath });
+    const head = (await git(repoPath, "symbolic-ref", "HEAD")).trim();
+    expect(head).toBe("refs/heads/main");
+  });
+
+  it("converges HEAD to main on an existing repo whose HEAD pointed at master", async () => {
+    const repoPath = join(workDir, "skills");
+    // Simulate a deployment seeded by an older bootstrap (or older git) that
+    // left HEAD on `master`. `git init --bare` with init.defaultBranch unset
+    // matches the legacy state we need to recover from.
+    await execFileP("git", ["init", "--bare", "--initial-branch=master", repoPath]);
+    expect((await git(repoPath, "symbolic-ref", "HEAD")).trim()).toBe("refs/heads/master");
+    await bootstrapSkillsRepo({ path: repoPath });
+    expect((await git(repoPath, "symbolic-ref", "HEAD")).trim()).toBe("refs/heads/main");
   });
 
   it("installs the pre-receive hook with mode 0755 and matching content", async () => {
@@ -192,6 +218,16 @@ describe("bootstrapSkillsRepo", () => {
     expect(main).toBe(sha);
   });
 
+  it("converges to refs/heads/main even on a repo that already had main", async () => {
+    // Defensive — verify the symbolic-ref call is harmless when HEAD is
+    // already correct (no transient bad-state on the second boot).
+    const repoPath = join(workDir, "skills");
+    await bootstrapSkillsRepo({ path: repoPath });
+    expect((await git(repoPath, "symbolic-ref", "HEAD")).trim()).toBe("refs/heads/main");
+    await bootstrapSkillsRepo({ path: repoPath });
+    expect((await git(repoPath, "symbolic-ref", "HEAD")).trim()).toBe("refs/heads/main");
+  });
+
   it("rejects a force-push (non-fast-forward) on a feature branch", async () => {
     const repoPath = join(workDir, "skills");
     const cloneDir = join(workDir, "clone");
@@ -222,5 +258,142 @@ describe("bootstrapSkillsRepo", () => {
       "feature-divergent:refs/heads/feature/x",
     );
     expect(stderr).toMatch(/non-fast-forward/i);
+  });
+});
+
+const FAKE_TX = { __mockTx: true } as never;
+const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
+
+describe("ensureSkillsCodingRepo", () => {
+  it("inserts a `skills` row on first call and reports created: true", async () => {
+    const repoPath = join(workDir, "skills");
+    await bootstrapSkillsRepo({ path: repoPath });
+    const codingStore = mock<CodingStore>();
+    codingStore.getRepoByName.mockResolvedValue(undefined);
+    codingStore.insertRepo.mockImplementation(async (_tx, params) => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      name: params.name,
+      localPath: params.localPath,
+      defaultBranch: params.defaultBranch,
+      remoteUrl: params.remoteUrl,
+      devcontainer: params.devcontainer,
+      allowedBackends: [...params.allowedBackends],
+      verifyCommand: params.verifyCommand,
+      verifyTimeoutSeconds: params.verifyTimeoutSeconds ?? 600,
+      taskTokenBudget: params.taskTokenBudget,
+      taskWallTimeSeconds: params.taskWallTimeSeconds,
+      maxConcurrentTasks: params.maxConcurrentTasks,
+      identityName: params.identityName ?? "default",
+      createdAt: new Date(),
+    }));
+
+    const result = await ensureSkillsCodingRepo(
+      { runInTx: fakeRunInTx, codingStore },
+      { skillsRepoPath: repoPath },
+    );
+
+    expect(result.created).toBe(true);
+    expect(result.name).toBe(SKILLS_CODING_REPO_NAME);
+    expect(result.localPath).toBe(repoPath);
+    expect(result.remoteUrl).toBe(""); // no `origin` configured
+    expect(codingStore.insertRepo).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        name: "skills",
+        localPath: repoPath,
+        defaultBranch: "main",
+        remoteUrl: "",
+        allowedBackends: ["claude"],
+        maxConcurrentTasks: 1,
+      }),
+    );
+  });
+
+  it("is idempotent — second call reports created: false and does not re-insert", async () => {
+    const repoPath = join(workDir, "skills");
+    await bootstrapSkillsRepo({ path: repoPath });
+    const codingStore = mock<CodingStore>();
+    codingStore.getRepoByName.mockResolvedValue({
+      id: "00000000-0000-0000-0000-000000000001",
+      name: "skills",
+      localPath: repoPath,
+      defaultBranch: "main",
+      remoteUrl: "git@github.com:user/skills.git",
+      devcontainer: null,
+      allowedBackends: ["claude"],
+      verifyCommand: "true",
+      verifyTimeoutSeconds: 600,
+      taskTokenBudget: 200_000,
+      taskWallTimeSeconds: 1800,
+      maxConcurrentTasks: 1,
+      identityName: "default",
+      createdAt: new Date(),
+    });
+
+    const result = await ensureSkillsCodingRepo(
+      { runInTx: fakeRunInTx, codingStore },
+      { skillsRepoPath: repoPath },
+    );
+
+    expect(result.created).toBe(false);
+    expect(result.remoteUrl).toBe("git@github.com:user/skills.git");
+    expect(codingStore.insertRepo).not.toHaveBeenCalled();
+  });
+
+  it("picks up the bare repo's `origin` URL when one is configured", async () => {
+    const repoPath = join(workDir, "skills");
+    await bootstrapSkillsRepo({ path: repoPath });
+    await execFileP("git", [
+      "-C",
+      repoPath,
+      "remote",
+      "add",
+      "origin",
+      "git@github.com:operator/cogmo-skills.git",
+    ]);
+    const codingStore = mock<CodingStore>();
+    codingStore.getRepoByName.mockResolvedValue(undefined);
+    codingStore.insertRepo.mockImplementation(async (_tx, params) => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      name: params.name,
+      localPath: params.localPath,
+      defaultBranch: params.defaultBranch,
+      remoteUrl: params.remoteUrl,
+      devcontainer: params.devcontainer,
+      allowedBackends: [...params.allowedBackends],
+      verifyCommand: params.verifyCommand,
+      verifyTimeoutSeconds: params.verifyTimeoutSeconds ?? 600,
+      taskTokenBudget: params.taskTokenBudget,
+      taskWallTimeSeconds: params.taskWallTimeSeconds,
+      maxConcurrentTasks: params.maxConcurrentTasks,
+      identityName: params.identityName ?? "default",
+      createdAt: new Date(),
+    }));
+
+    const result = await ensureSkillsCodingRepo(
+      { runInTx: fakeRunInTx, codingStore },
+      { skillsRepoPath: repoPath },
+    );
+
+    expect(result.created).toBe(true);
+    expect(result.remoteUrl).toBe("git@github.com:operator/cogmo-skills.git");
+    expect(codingStore.insertRepo).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ remoteUrl: "git@github.com:operator/cogmo-skills.git" }),
+    );
+  });
+
+  it("propagates unexpected git failures (not just missing origin)", async () => {
+    const codingStore = mock<CodingStore>();
+
+    // Point at a non-existent repo so `git -C` exits with a non-"no such remote"
+    // error — proves we don't blanket-swallow git errors.
+    await expect(
+      ensureSkillsCodingRepo(
+        { runInTx: fakeRunInTx, codingStore },
+        { skillsRepoPath: join(workDir, "does-not-exist") },
+      ),
+    ).rejects.toThrow();
+    expect(codingStore.getRepoByName).not.toHaveBeenCalled();
   });
 });
