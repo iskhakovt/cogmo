@@ -31,16 +31,16 @@ profiles.model ──→ model_providers.model ──→ llm_providers ──→
 ```sql
 llm_providers (
   id            UUID v7 PK,
-  name          TEXT NOT NULL UNIQUE,           -- 'anthropic-direct', 'openrouter'
-  type          TEXT NOT NULL,                  -- 'anthropic' | 'openai_compatible'
-  base_url      TEXT,                           -- NULL = SDK default endpoint
-  secret_id     UUID NOT NULL FK → secrets,     -- encrypted API key
-  attrs         JSONB NOT NULL,                 -- provider-specific config
+  name          TEXT NOT NULL UNIQUE,             -- 'anthropic-direct', 'openrouter'
+  type          llm_provider_type NOT NULL,       -- pgEnum: 'anthropic' | 'openai_compatible'
+  base_url      TEXT,                             -- NULL = SDK default endpoint
+  secret_id     UUID NOT NULL FK → secrets,       -- encrypted API key
+  attrs         JSONB NOT NULL,                   -- provider-specific config
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 ```
 
-**`type`** is the adapter discriminator — maps to which class to instantiate. Two values today; a third (e.g., `"google"` for Gemini) adds one constructor branch, not a schema change.
+**`type`** is a `pgEnum` adapter discriminator — maps to which class to instantiate. Two values today; a third (e.g., `"google"` for Gemini) adds one constructor branch *and* an `ALTER TYPE ... ADD VALUE` migration, both shipped together (no runtime cost). The enum gives the TS column a literal-union type and makes `switch(row.type)` in `buildProvider` exhaustive without `assertNever`.
 
 **`base_url`** is NULL for providers that use their SDK's default endpoint (Anthropic). Required for OpenAI-compatible providers (OpenRouter, xAI, custom).
 

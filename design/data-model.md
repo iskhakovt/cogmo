@@ -27,8 +27,10 @@ Tables are documented in the design doc that owns their domain:
 | Table | Doc | Notes |
 |-|-|-|
 | `secrets` | [infrastructure.md](infrastructure.md) | Encrypted credentials (AES-256-GCM). Name-keyed. |
-| `llm_providers` | [providers.md](providers.md) | Provider config (type, base_url, secret FK, attrs) |
+| `llm_providers` | [providers.md](providers.md) | Provider config (`pgEnum` type, base_url, secret FK, attrs) |
 | `model_providers` | [providers.md](providers.md) | Model → provider routing with position-based priority. UNIQUE(model, position) prevents ties. `user_selectable` flag gates user-facing model picker. Optional `context_window` / `max_output_tokens` columns let operators pin limits when LiteLLM doesn't know the model; both nullable, fall through to the bundled LiteLLM snapshot then a conservative default. Managed via `cogmo model add/list/remove` or the setup wizard's model picker. |
+| `image_providers` | [image-generation.md](image-generation.md) | Image-gen provider config (`pgEnum` type ∈ {fal, openai_compatible}, base_url, secret FK, attrs). CHECK constraint: `openai_compatible` requires `base_url`, `fal` requires `NULL`. No fallback chain. |
+| `image_models` | [image-generation.md](image-generation.md) | Image model catalog. `name` is LLM-facing (globally unique), `model_string` is API-facing, `description` is read by the LLM at every turn, `capabilities JSONB` declares per-model knobs (aspectRatios, seed, future). `user_selectable` gates LLM exposure. |
 
 `profiles` gains:
 - `summarization_model TEXT` (nullable, replaces `SUMMARIZATION_MODEL` env var).
