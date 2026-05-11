@@ -11,7 +11,7 @@ The Daytona SDK fans calls across two URLs: `apiUrl` for the main API and a per-
 
 Also folded the xAI integration test into the same shape. `scripts/record-xai-fixture.ts` is gone; `src/test/xai-grok.integration.test.ts` now boots its own one-off llmock with `openai → openrouter.ai/api` mapping when `RECORD=1 OPENROUTER_API_KEY=…` is set, recording into the shared `test/fixtures/recorded/` dir. Replay-mode uses the integration tier's shared llmock as before. Same test code records and replays — what runs is what gets captured.
 
-`.env.example` updated with the recording env conventions: `LLMOCK_RECORD=1` for Anthropic/OpenAI fixtures, `RECORD=1` for fal/voice/xAI/Daytona, plus the matching upstream-key vars. Missing keys → that fixture is skipped; one operator can record a subset without holding accounts for every provider.
+Recording is now driven by a single `RECORD=1` env flag — `LLMOCK_RECORD=1` collapsed into it. `pnpm test:record` (and `:e2e`) set `RECORD=1`; `test/llmock-setup.ts` + the pipeline test now check `RECORD` instead. `.env.example` documents only credentials (no recording prose); missing keys → that fixture is skipped, so one operator can record a subset without holding accounts for every provider.
 
 Adds `ws@8.20.0` as a dev dependency (was already present transitively).
 

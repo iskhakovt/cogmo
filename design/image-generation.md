@@ -441,8 +441,8 @@ First call → tool_use. Second call → final text. Loop ends cleanly.
 ### Record workflow
 
 ```
-# First time / after prompt changes:
-LLMOCK_RECORD=1 RECORD=1 FAL_API_KEY=<real> pnpm test:integration
+# First time / after prompt changes (credentials live in .env):
+pnpm test:record
 
 # Subsequent (CI, normal dev):
 pnpm test:integration

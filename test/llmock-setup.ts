@@ -71,11 +71,11 @@ function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {
 /**
  * Create a configured LLMock instance.
  *
- * LLMOCK_RECORD=1: replay existing fixtures, proxy + save new ones.
+ * RECORD=1: replay existing fixtures, proxy + save new ones.
  * Default (CI): strict mode — 503 on unmatched requests, no API calls.
  */
 export function createMock(): LLMock {
-  const recording = process.env.LLMOCK_RECORD === "1";
+  const recording = process.env.RECORD === "1";
 
   const mock = new LLMock({
     port: 0,
