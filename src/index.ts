@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import { createFal } from "@ai-sdk/fal";
 import { S3Client } from "@aws-sdk/client-s3";
 import Docker from "dockerode";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
@@ -45,6 +44,7 @@ import {
 import { type Database, db, type Transactor, transactor } from "./db/index.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
+import { buildImageProvider, type ImageProvider } from "./llm/image-providers.js";
 import type { LlmProvider } from "./llm/provider.js";
 import {
   constantResolver,
@@ -63,6 +63,7 @@ import { createSandboxReaper } from "./sandbox/reaper.js";
 import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
 import { DrizzleSecretsStore } from "./secrets/store/index.js";
+import { ensureFalImageDefaults } from "./setup/seed.js";
 import { bootstrapSkillsRepo } from "./skills/repo.js";
 import { SkillRunnerImpl } from "./skills/runner.js";
 import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
@@ -157,7 +158,6 @@ export interface CoreDeps {
    */
   tavilyKey: string | undefined;
   openrouterKey: string | undefined;
-  falKey: string | undefined;
   resolveProvider: LlmProviderResolver;
   user: { id: string };
   profile: { id: string };
@@ -338,8 +338,6 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   const openrouterKey =
     (await tx((trx) => secretsStore.getSecret(trx, "openrouter_api_key"))) ??
     env.OPENROUTER_API_KEY;
-  const falKey = (await tx((trx) => secretsStore.getSecret(trx, "fal_api_key"))) ?? env.FAL_API_KEY;
-
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL, {
     maxQueryTokens: env.HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
   });
@@ -365,7 +363,6 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     attachmentEncryptionKey,
     tavilyKey,
     openrouterKey,
-    falKey,
     resolveProvider,
     user,
     profile,
@@ -723,14 +720,42 @@ export async function bootstrapRuntime(
 
   // Tool clients live with the agent loop that consumes them. Core
   // exposes credentials as strings; runtime turns them into clients.
-  const falProvider = core.falKey
-    ? createFal({
-        apiKey: core.falKey,
-        ...(opts.falFetchOverride && { fetch: opts.falFetchOverride }),
-      })
-    : undefined;
   const webTools = createWebTools(core.tavilyKey, core.openrouterKey);
-  const imageTools = createImageTools(falProvider, core.attachmentStore);
+
+  // Image gen catalog is DB-driven (image_providers + image_models). On every
+  // boot we (1) idempotently seed the canonical fal catalog if a fal secret
+  // exists — handles both wizard-driven setups and the legacy FAL_API_KEY env
+  // var path; (2) construct one adapter per configured provider via
+  // buildImageProvider; (3) hand the joined catalog to createImageTools, which
+  // builds the Zod enum + tool description from rows. No models configured →
+  // tool not registered. Restart-only — wizard CRUD changes take effect on
+  // next boot (hot-reload tracked as p3).
+  await ensureFalImageDefaults({
+    runInTx: core.runInTx,
+    agentStore: core.agentStore,
+    secretsStore: core.secretsStore,
+    ...(env.FAL_API_KEY && { envFalApiKey: env.FAL_API_KEY }),
+  });
+  const imageProviderRows = await core.runInTx((trx) => core.agentStore.listImageProviders(trx));
+  const imageProviders = new Map<string, ImageProvider>();
+  for (const row of imageProviderRows) {
+    imageProviders.set(
+      row.id,
+      await buildImageProvider(row, {
+        runInTx: core.runInTx,
+        secretsStore: core.secretsStore,
+        ...(opts.falFetchOverride && { fetchOverrides: { fal: opts.falFetchOverride } }),
+      }),
+    );
+  }
+  const imageModelRows = await core.runInTx((trx) =>
+    core.agentStore.listImageModelsWithProvider(trx, { userSelectableOnly: true }),
+  );
+  const imageTools = createImageTools({
+    models: imageModelRows,
+    providers: imageProviders,
+    attachments: core.attachmentStore,
+  });
   const documentTools = createDocumentTools(core.attachmentStore);
 
   const tools = createDefaultTools(

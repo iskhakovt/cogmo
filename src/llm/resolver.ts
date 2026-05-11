@@ -134,6 +134,10 @@ async function buildAdapter(row: ProviderRow, deps: DbResolverDeps): Promise<Llm
     );
   }
 
+  // `row.type` is narrowed to `LlmProviderTypeValue` via the `pgEnum` —
+  // switch is exhaustive without a `default` branch. Adding a new enum value
+  // is a code-and-migration change in one PR; the compiler flags this switch
+  // before the new value can ship silently mis-routed.
   switch (row.type) {
     case "anthropic":
       return new AnthropicProvider(apiKey, row.baseUrl ?? undefined);
@@ -150,8 +154,6 @@ async function buildAdapter(row: ProviderRow, deps: DbResolverDeps): Promise<Llm
         promptCaching: row.attrs.promptCaching ?? false,
       });
     }
-    default:
-      throw new ProviderConfigError(`Unknown provider type: ${row.type}`);
   }
 }
 

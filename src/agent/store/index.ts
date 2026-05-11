@@ -9,6 +9,7 @@ import type { AutoRecallMode } from "../recall-gate.js";
 import {
   CustomCompartmentCapExceededError,
   InvalidNameError,
+  InvalidProviderConfigError,
   ProfileClassInUseError,
   ProfileInUseError,
   ReservedCompartmentNameError,
@@ -21,6 +22,11 @@ import {
   conversations,
   coreMemoryBlocks,
   customCompartments,
+  type ImageModelCapabilities,
+  type ImageProviderAttrs,
+  type ImageProviderTypeValue,
+  imageModels,
+  imageProviders,
   type LlmProviderTypeValue,
   llmProviders,
   messages,
@@ -158,6 +164,36 @@ export interface ConversationSummary {
   lastMessageAt: Date;
 }
 
+/** A row from `image_providers`. `type` is narrowed via the `pgEnum`. */
+export interface ImageProviderRow {
+  id: string;
+  name: string;
+  type: ImageProviderTypeValue;
+  baseUrl: string | null;
+  secretId: string;
+  attrs: ImageProviderAttrs;
+}
+
+/** A row from `image_models`. `capabilities` is the validated JSONB bag. */
+export interface ImageModelRow {
+  id: string;
+  providerId: string;
+  name: string;
+  modelString: string;
+  description: string;
+  capabilities: ImageModelCapabilities;
+  userSelectable: boolean;
+}
+
+/**
+ * Joined view: an `image_models` row with its owning `image_providers` row
+ * inlined. Returned by `listImageModelsWithProvider` so bootstrap can build
+ * the tool catalog without a second round-trip per row.
+ */
+export interface ImageModelWithProvider extends ImageModelRow {
+  provider: ImageProviderRow;
+}
+
 const PREVIEW_MAX_CHARS = 120;
 
 function isTextBlock(b: unknown): b is { type: "text"; text: string } {
@@ -177,6 +213,39 @@ function previewFromContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
   const block = R.find(content, isTextBlock);
   return block ? truncate(block.text, PREVIEW_MAX_CHARS) : "";
+}
+
+/**
+ * Validate `(type, base_url)` for an image provider. Throws
+ * `InvalidProviderConfigError` with a wizard-friendly reason for the
+ * cases the DB CHECK can't express. The DB CHECK still enforces the
+ * coarser `openai_compatible ↔ NOT NULL`, `fal ↔ NULL` invariant — this
+ * guard fires first so the wizard gets a useful message instead of an
+ * opaque 23514.
+ */
+function validateImageProviderBaseUrl(type: ImageProviderTypeValue, baseUrl: string | null): void {
+  if (type === "fal") {
+    if (baseUrl !== null) {
+      throw new InvalidProviderConfigError("fal does not accept a base_url");
+    }
+    return;
+  }
+  // openai_compatible
+  if (baseUrl === null) {
+    throw new InvalidProviderConfigError("openai_compatible requires a base_url");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    throw new InvalidProviderConfigError(`base_url is not a valid URL: ${baseUrl}`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new InvalidProviderConfigError(`base_url must be https (got ${parsed.protocol})`);
+  }
+  if (baseUrl.endsWith("/")) {
+    throw new InvalidProviderConfigError("base_url must not end with a trailing slash");
+  }
 }
 
 export interface AgentStore {
@@ -563,7 +632,7 @@ export interface AgentStore {
     | {
         id: string;
         name: string;
-        type: string;
+        type: LlmProviderTypeValue;
         baseUrl: string | null;
         secretId: string;
         attrs: ProviderAttrs;
@@ -576,7 +645,7 @@ export interface AgentStore {
     ReadonlyArray<{
       id: string;
       name: string;
-      type: string;
+      type: LlmProviderTypeValue;
     }>
   >;
 
@@ -622,7 +691,7 @@ export interface AgentStore {
     ReadonlyArray<{
       id: string;
       name: string;
-      type: string;
+      type: LlmProviderTypeValue;
       baseUrl: string | null;
       secretId: string;
       attrs: ProviderAttrs;
@@ -643,7 +712,7 @@ export interface AgentStore {
       model: string;
       id: string;
       name: string;
-      type: string;
+      type: LlmProviderTypeValue;
       baseUrl: string | null;
       secretId: string;
       attrs: ProviderAttrs;
@@ -664,6 +733,103 @@ export interface AgentStore {
 
   /** Distinct list of every model id with at least one routing row. */
   listAllModels(tx: Transaction): Promise<ReadonlyArray<string>>;
+
+  // --- Image Providers ---
+
+  /**
+   * Create an image-gen provider row. Validates the base_url shape at the
+   * store boundary (https, no trailing slash, parseable) — the DB CHECK
+   * pins the coarser `openai_compatible ↔ NOT NULL`, `fal ↔ NULL`
+   * invariant. Unique-name collisions surface as `UniqueViolationError`.
+   *
+   * `baseUrl` is REQUIRED for `openai_compatible` and FORBIDDEN for `fal`
+   * — the guard raises `InvalidProviderConfigError` with a wizard-friendly
+   * reason before the row reaches the DB.
+   */
+  createImageProvider(
+    tx: Transaction,
+    params: {
+      name: string;
+      type: ImageProviderTypeValue;
+      baseUrl: string | null;
+      secretId: string;
+      attrs: ImageProviderAttrs;
+    },
+  ): Promise<{ id: string }>;
+
+  /** Get an image provider by ID. */
+  getImageProvider(tx: Transaction, providerId: string): Promise<ImageProviderRow | undefined>;
+
+  /** Look up an image provider by its unique name. */
+  findImageProviderByName(tx: Transaction, name: string): Promise<ImageProviderRow | undefined>;
+
+  /** List every image provider. */
+  listImageProviders(tx: Transaction): Promise<ReadonlyArray<ImageProviderRow>>;
+
+  /** Delete an image provider; cascades to its `image_models` rows. */
+  deleteImageProvider(tx: Transaction, providerId: string): Promise<void>;
+
+  // --- Image Models ---
+
+  /**
+   * Create an image-model catalog row. Unique-name collisions surface as
+   * `UniqueViolationError`. The Zod schema on `capabilities` (run inside
+   * `jsonbZod`) validates the bag at write time — invalid aspect ratios
+   * or unexpected fields throw before reaching the DB.
+   */
+  createImageModel(
+    tx: Transaction,
+    params: {
+      providerId: string;
+      name: string;
+      modelString: string;
+      description: string;
+      capabilities: ImageModelCapabilities;
+      userSelectable: boolean;
+    },
+  ): Promise<{ id: string }>;
+
+  /**
+   * Bulk-insert image models keyed on `(providerId, name)`. Rows whose
+   * `name` already exists are skipped (idempotent re-run). Returns the
+   * count of rows actually inserted — operator edits to existing rows
+   * are preserved. Used by `ensureFalImageDefaults`.
+   */
+  upsertImageModelsByName(
+    tx: Transaction,
+    rows: ReadonlyArray<{
+      providerId: string;
+      name: string;
+      modelString: string;
+      description: string;
+      capabilities: ImageModelCapabilities;
+      userSelectable: boolean;
+    }>,
+  ): Promise<number>;
+
+  /**
+   * List every image model. When `userSelectableOnly: true`, filters to
+   * rows the LLM is allowed to pick — bootstrap uses that filter to build
+   * the `generate_image` tool's `model` enum.
+   */
+  listImageModels(
+    tx: Transaction,
+    opts?: { userSelectableOnly?: boolean },
+  ): Promise<ReadonlyArray<ImageModelRow>>;
+
+  /**
+   * Like `listImageModels`, but joins in the owning `image_providers` row
+   * so the caller can build a single tool catalog without per-row
+   * follow-up queries. Sorted by model `name` for stable tool-description
+   * output across boots.
+   */
+  listImageModelsWithProvider(
+    tx: Transaction,
+    opts?: { userSelectableOnly?: boolean },
+  ): Promise<ReadonlyArray<ImageModelWithProvider>>;
+
+  /** Delete a single image model. */
+  deleteImageModel(tx: Transaction, modelId: string): Promise<void>;
 
   // --- Evolution: correction extraction ---
 
@@ -1578,7 +1744,7 @@ export class DrizzleAgentStore implements AgentStore {
     | {
         id: string;
         name: string;
-        type: string;
+        type: LlmProviderTypeValue;
         baseUrl: string | null;
         secretId: string;
         attrs: ProviderAttrs;
@@ -1604,7 +1770,7 @@ export class DrizzleAgentStore implements AgentStore {
     ReadonlyArray<{
       id: string;
       name: string;
-      type: string;
+      type: LlmProviderTypeValue;
     }>
   > {
     return tx
@@ -1654,7 +1820,7 @@ export class DrizzleAgentStore implements AgentStore {
     ReadonlyArray<{
       id: string;
       name: string;
-      type: string;
+      type: LlmProviderTypeValue;
       baseUrl: string | null;
       secretId: string;
       attrs: ProviderAttrs;
@@ -1687,7 +1853,7 @@ export class DrizzleAgentStore implements AgentStore {
       model: string;
       id: string;
       name: string;
-      type: string;
+      type: LlmProviderTypeValue;
       baseUrl: string | null;
       secretId: string;
       attrs: ProviderAttrs;
@@ -1741,6 +1907,134 @@ export class DrizzleAgentStore implements AgentStore {
       .from(modelProviders)
       .orderBy(asc(modelProviders.model));
     return rows.map((r) => r.model);
+  }
+
+  // --- Image Providers ---
+
+  async createImageProvider(
+    tx: Transaction,
+    params: {
+      name: string;
+      type: ImageProviderTypeValue;
+      baseUrl: string | null;
+      secretId: string;
+      attrs: ImageProviderAttrs;
+    },
+  ): Promise<{ id: string }> {
+    validateImageProviderBaseUrl(params.type, params.baseUrl);
+    return translateUniqueViolation(async () =>
+      single(
+        await tx
+          .insert(imageProviders)
+          .values({
+            name: params.name,
+            type: params.type,
+            baseUrl: params.baseUrl,
+            secretId: params.secretId,
+            attrs: params.attrs,
+          })
+          .returning({ id: imageProviders.id }),
+      ),
+    );
+  }
+
+  async getImageProvider(
+    tx: Transaction,
+    providerId: string,
+  ): Promise<ImageProviderRow | undefined> {
+    const rows = await tx
+      .select()
+      .from(imageProviders)
+      .where(eq(imageProviders.id, providerId))
+      .limit(1);
+    return rows[0];
+  }
+
+  async findImageProviderByName(
+    tx: Transaction,
+    name: string,
+  ): Promise<ImageProviderRow | undefined> {
+    const rows = await tx
+      .select()
+      .from(imageProviders)
+      .where(eq(imageProviders.name, name))
+      .limit(1);
+    return rows[0];
+  }
+
+  async listImageProviders(tx: Transaction): Promise<ReadonlyArray<ImageProviderRow>> {
+    return tx.select().from(imageProviders).orderBy(asc(imageProviders.name));
+  }
+
+  async deleteImageProvider(tx: Transaction, providerId: string): Promise<void> {
+    // image_models rows cascade-delete via ON DELETE CASCADE.
+    await tx.delete(imageProviders).where(eq(imageProviders.id, providerId));
+  }
+
+  // --- Image Models ---
+
+  async createImageModel(
+    tx: Transaction,
+    params: {
+      providerId: string;
+      name: string;
+      modelString: string;
+      description: string;
+      capabilities: ImageModelCapabilities;
+      userSelectable: boolean;
+    },
+  ): Promise<{ id: string }> {
+    return translateUniqueViolation(async () =>
+      single(await tx.insert(imageModels).values(params).returning({ id: imageModels.id })),
+    );
+  }
+
+  async upsertImageModelsByName(
+    tx: Transaction,
+    rows: ReadonlyArray<{
+      providerId: string;
+      name: string;
+      modelString: string;
+      description: string;
+      capabilities: ImageModelCapabilities;
+      userSelectable: boolean;
+    }>,
+  ): Promise<number> {
+    if (rows.length === 0) return 0;
+    // Idempotent: skip rows whose `name` already exists. Operator edits to
+    // existing rows survive re-runs of `ensureFalImageDefaults`.
+    const inserted = await tx
+      .insert(imageModels)
+      .values([...rows])
+      .onConflictDoNothing({ target: imageModels.name })
+      .returning({ id: imageModels.id });
+    return inserted.length;
+  }
+
+  async listImageModels(
+    tx: Transaction,
+    opts?: { userSelectableOnly?: boolean },
+  ): Promise<ReadonlyArray<ImageModelRow>> {
+    const where = opts?.userSelectableOnly ? eq(imageModels.userSelectable, true) : undefined;
+    const query = tx.select().from(imageModels).orderBy(asc(imageModels.name));
+    return where ? query.where(where) : query;
+  }
+
+  async listImageModelsWithProvider(
+    tx: Transaction,
+    opts?: { userSelectableOnly?: boolean },
+  ): Promise<ReadonlyArray<ImageModelWithProvider>> {
+    const rows = await tx
+      .select({ model: imageModels, provider: imageProviders })
+      .from(imageModels)
+      .innerJoin(imageProviders, eq(imageModels.providerId, imageProviders.id))
+      .where(opts?.userSelectableOnly ? eq(imageModels.userSelectable, true) : undefined)
+      .orderBy(asc(imageModels.name));
+    return rows.map((r) => ({ ...r.model, provider: r.provider }));
+  }
+
+  async deleteImageModel(tx: Transaction, modelId: string): Promise<void> {
+    await tx.delete(imageModels).where(eq(imageModels.id, modelId));
   }
 
   async hasChannelRules(tx: Transaction, channelType: string): Promise<boolean> {
