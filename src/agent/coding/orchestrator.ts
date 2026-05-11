@@ -780,6 +780,24 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         });
         return session.state;
       });
+      // Honest raw telemetry — backend + start timestamp + reserved
+      // resources. Captured in its own step.run so the timestamp gets
+      // checkpointed (won't get re-stamped on Inngest replay) and so a
+      // failure to write doesn't roll back the sandbox creation.
+      await stepRun("persist-sandbox-created", () =>
+        runInTx((tx) =>
+          store.setTaskResourceUsage(tx, taskId, {
+            sandbox: {
+              backend: sandbox.backendId,
+              created_at: new Date().toISOString(),
+              provisioned: {
+                cpu: defaultResourceLimits.cpus,
+                memory_bytes: defaultResourceLimits.memory_bytes,
+              },
+            },
+          }),
+        ),
+      );
     }
     containerCreated = true;
 
@@ -843,6 +861,9 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         }),
       );
       await stepRun("teardown", () => sandbox.deleteByTaskId(taskId).catch(() => {}));
+      await stepRun("persist-sandbox-deleted", () =>
+        runInTx((tx) => store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString())),
+      );
       // Stream notifications post-commit — wrap so a subscriber failure
       // doesn't bubble into the outer catch, which would write a second
       // (less informative) failed-status overwriting the original reason.
@@ -856,14 +877,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     }
 
     if (result.usage) {
-      // Replace-not-merge semantics today (see CodingStore comment): plan
-      // phase doesn't write resource_usage in slice 2, so the execute
-      // write is the first one and replace is fine. When slice 3+ adds
-      // memory_bytes at task start, this needs to become load+merge+write
-      // here OR the store contract changes to merge. The translation
-      // below maps the backend's camelCase shape onto the snake_case
-      // resource_usage schema (which lives at the storage layer and uses
-      // SQL-friendly naming).
+      // Translate the backend's camelCase shape into the snake_case
+      // `resource_usage` schema used at the storage layer.
       const usage: Record<string, number> = {};
       if (result.usage.inputTokens != null) usage.tokens_input = result.usage.inputTokens;
       if (result.usage.outputTokens != null) usage.tokens_output = result.usage.outputTokens;
@@ -879,6 +894,9 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "pending_verify" })),
     );
     await stepRun("teardown", () => sandbox.deleteByTaskId(taskId).catch(() => {}));
+    await stepRun("persist-sandbox-deleted", () =>
+      runInTx((tx) => store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString())),
+    );
     // Hand off to the slice 4.0h verify orchestrator. The dedicated function
     // re-creates a container with the askpass mount, runs verify → push → PR,
     // and tears down on its own. Emitting after the teardown means a concurrent
@@ -922,6 +940,15 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     }).catch(() => {});
     if (containerCreated) {
       await sandbox.deleteByTaskId(taskId).catch(() => {});
+      // Stamp deleted_at so wall_clock = deleted_at - created_at is
+      // computable for tasks that crash mid-execute. The store
+      // method's WHERE gate makes this a no-op when no sandbox block
+      // was ever persisted (e.g. crash before `persist-sandbox-created`
+      // checkpointed) or when deleted_at is already set, so calling
+      // unconditionally is safe.
+      await runInTx((tx) =>
+        store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString()),
+      ).catch(() => {});
     }
     await executeStream?.fail(reason).catch(() => {});
     return { status: "failed", failureReason: reason };
