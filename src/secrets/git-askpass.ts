@@ -54,13 +54,19 @@ export async function withGitAskpass<T>(pat: string, fn: (env: GitEnv) => Promis
 }
 
 /**
- * Spawn `git` with the supplied args + askpass env and resolve with the
- * combined stdout/stderr text. Rejects with a descriptive error on
- * non-zero exit so callers don't have to thread streams themselves.
+ * Spawn `git` with the supplied args + (optional) askpass env and resolve
+ * with the combined stdout/stderr text. Rejects with a descriptive error
+ * on non-zero exit so callers don't have to thread streams themselves.
+ *
+ * `env` is optional: network-touching ops (fetch/push) pass the askpass
+ * helper to gate credentials and disable terminal prompts; local-only ops
+ * (rev-parse, config reads) omit it so they don't have to stand up an
+ * askpass helper they'd never invoke. When omitted, git inherits the
+ * process's environment unchanged.
  */
 export function runGit(
   args: ReadonlyArray<string>,
-  env: GitEnv,
+  env?: GitEnv,
   opts?: SpawnOptionsWithoutStdio,
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
@@ -69,8 +75,10 @@ export function runGit(
       env: {
         ...process.env,
         ...opts?.env,
-        GIT_ASKPASS: env.GIT_ASKPASS,
-        GIT_TERMINAL_PROMPT: env.GIT_TERMINAL_PROMPT,
+        ...(env && {
+          GIT_ASKPASS: env.GIT_ASKPASS,
+          GIT_TERMINAL_PROMPT: env.GIT_TERMINAL_PROMPT,
+        }),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });

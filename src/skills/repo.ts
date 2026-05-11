@@ -124,11 +124,12 @@ async function readOriginUrl(repoPath: string): Promise<string> {
     const { stdout } = await execFileP("git", ["-C", repoPath, "remote", "get-url", "origin"]);
     return stdout.trim();
   } catch (e) {
-    const stderr = (e as { stderr?: string }).stderr ?? "";
-    // git exits with code 2 + "No such remote 'origin'" when the remote is
-    // unset — the normal state for a fresh bare repo with no user-configured
-    // backup remote. Treat as empty string; surface anything else.
-    if (/no such remote/i.test(stderr)) return "";
+    // `git remote get-url <missing>` exits with code 2 — the dedicated
+    // "no such remote" code. Match on the exit code, not the stderr text,
+    // so a localized git build doesn't quietly start crashing the boot.
+    // Any other non-zero code (corrupt repo, missing git, etc.) bubbles
+    // up — treating those as "no remote" would mask real misconfiguration.
+    if ((e as { code?: number }).code === 2) return "";
     throw e;
   }
 }
