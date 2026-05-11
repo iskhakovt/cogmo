@@ -1,4 +1,4 @@
-# Image Generation `[proposed]`
+# Image Generation `[confirmed]`
 
 How cogmo generates images on behalf of the user — provider-agnostic from day 0.
 
@@ -69,9 +69,20 @@ We evaluated the AI SDK for replacing our `LlmProvider` interface (`AnthropicPro
 
 **Decision:** Use the AI SDK where it's a clear win (image gen) and keep raw SDKs where we need features it doesn't yet support (text LLMs). Revisit when `countTokens` lands and the signature bug is resolved — the AI SDK would then eliminate ~400 lines of adapter code in `src/llm/`.
 
-## Provider: fal.ai `[proposed]`
+## Providers `[confirmed]`
 
-First provider via `@ai-sdk/fal`. fal.ai offers the best combination of model breadth (1000+ models including Flux, SDXL, Seedream, Ideogram, Qwen), speed, simple SDK, and reasonable pricing ($0.02–$0.04/image, no subscription).
+Two provider types, both via Vercel AI SDK adapters. The `type` column on `image_providers` is a `pgEnum` — adding a third value is always a code change (new adapter branch in `buildImageProvider`) *and* a migration (`ALTER TYPE ... ADD VALUE`), both shipped together. The enum gives `switch(provider.type)` exhaustive checking with no `assertNever`.
+
+| Type | Package | Used for |
+|-|-|-|
+| `fal` | `@ai-sdk/fal` | fal.ai (seeded by default when `fal_api_key` is configured) |
+| `openai_compatible` | `@ai-sdk/openai-compatible` | Venice.ai, OpenAI's `/images/generations`, any provider exposing an OpenAI-shaped images endpoint |
+
+The `openai_compatible` adapter calls `provider.imageModel(modelString)` against `${baseURL}/images/generations`. Pin a version of `@ai-sdk/openai-compatible` that exposes `.imageModel()` — verify on upgrade. If a provider's API diverges from the OpenAI shape (bespoke async polling, non-standard size parameter), write a thin `ImageModelV2` (~100 LoC) instead of mangling it through openai-compatible.
+
+### fal.ai (seeded default)
+
+`@ai-sdk/fal`. fal.ai offers the broadest open-source model catalog (Flux, SDXL, Seedream, Ideogram, Qwen — 1000+ models total, with ~6 curated and seeded by default), reasonable pricing ($0.02–$0.04/image, no subscription), and a simple SDK. Seeded via `ensureFalImageDefaults` (`src/setup/seed.ts`) — runs from the wizard after the user provides a `fal_api_key`, and is manually re-runnable.
 
 ```typescript
 import { fal } from "@ai-sdk/fal";
@@ -80,9 +91,9 @@ import { fal } from "@ai-sdk/fal";
 const model = fal.image("fal-ai/flux/dev");
 ```
 
-**Auth:** fal.ai API key stored in `secrets` table (encrypted). Passed at provider construction via `createFal({ apiKey })`. The `@ai-sdk/fal` package also reads `FAL_KEY` env var as fallback for dev.
+**Auth:** API key stored in `secrets` table (encrypted), referenced by `image_providers.secret_id`. Passed at provider construction via `createFal({ apiKey })`. The `@ai-sdk/fal` package also reads `FAL_KEY` env var as fallback for dev.
 
-**Provider-specific params** go through `providerOptions.fal`:
+**Provider-specific params** go through `providerOptions.fal` at the SDK level:
 
 | Param | Type | Notes |
 |-|-|-|
@@ -92,99 +103,113 @@ const model = fal.image("fal-ai/flux/dev");
 | `enableSafetyChecker` | boolean | Default true |
 | `outputFormat` | `"jpeg"` \| `"png"` | Default jpeg |
 
-These are available as escape hatches but not exposed in the tool schema — the LLM shouldn't tune inference hyperparameters.
+These are escape hatches — not exposed in the tool schema. The LLM shouldn't tune inference hyperparameters; the prompt is the lever.
 
-## Tool Definition `[proposed]`
+### Base URL validation
+
+Two layers, for `openai_compatible` providers:
+
+- **DB CHECK** (`chk_image_providers_base_url`) enforces `(type = 'fal' AND base_url IS NULL) OR (type = 'openai_compatible' AND base_url IS NOT NULL)`. Atomic; can't be bypassed by ad-hoc psql or a future store implementer who forgets.
+- **Store guard** (`addImageProvider`) adds URL hygiene the CHECK can't express: must be `https://`, no trailing slash, parseable as a URL. Throws `InvalidProviderConfigError` with a wizard-friendly message.
+
+## Tool Definition `[confirmed]`
+
+The catalog is loaded at bootstrap from `image_models WHERE user_selectable = true`, joined with their `image_providers`. The Zod enum for `model` and the per-model description embedded in the tool prose are built once per process — restart to pick up new models (same caching posture as `LlmProviderResolver`; hot-reload is a deferred p3).
 
 ```typescript
 // src/agent/image-tools.ts
 
 import { generateImage } from "ai";
-import type { FalProvider } from "@ai-sdk/fal";
 
-/** Curated model catalog — hardcoded for v0, promote to DB when operators need it. */
-const MODEL_CATALOG = [
-  "fal-ai/flux/schnell",
-  "fal-ai/flux/dev",
-  "fal-ai/flux-pro/v1.1",
-  "fal-ai/flux-pro/v1.1-ultra",
-  "fal-ai/imagen4/preview",
-  "fal-ai/recraft/v3/text-to-image",
-  "fal-ai/ideogram/character",
-  "fal-ai/qwen-image",
-  "fal-ai/flux-pro/kontext",
-] as const;
+interface ImageModelRow {
+  name: string;                          // LLM-facing key, unique
+  modelString: string;                   // API-facing identifier
+  description: string;                   // one-line "use when..."
+  capabilities: ImageModelCapabilities;  // aspectRatios, seed, future knobs
+  providerId: UUID;
+}
 
-function createImageTools(
-  fal: FalProvider | undefined,
-  attachments: AttachmentStore,
-): ToolSpec[] {
-  return [
-    defineTool({
-      name: "generate_image",
-      description:
-        "Generate an image from a text description. Returns the image to the user.\n\n" +
-        "Choose the model based on task:\n" +
-        "- `fal-ai/flux/schnell` — fastest, cheapest, drafts\n" +
-        "- `fal-ai/flux/dev` — balanced speed/quality (default)\n" +
-        "- `fal-ai/flux-pro/v1.1` / `-ultra` — high quality scenes and portraits\n" +
-        "- `fal-ai/imagen4/preview` — Google Imagen 4, photorealism + typography\n" +
-        "- `fal-ai/recraft/v3/text-to-image` — readable text, logos, vector/illustration, brand colors\n" +
-        "- `fal-ai/ideogram/character` — character consistency across images, strong typography\n" +
-        "- `fal-ai/qwen-image` — autoregressive, complex text rendering and prompt adherence\n" +
-        "- `fal-ai/flux-pro/kontext` — image editing (requires reference image)\n\n" +
-        "Be specific and detailed in the prompt — describe style, composition, colors, mood.",
-      schema: z.object({
-        prompt: z.string().min(1).describe("Detailed image description"),
-        model: z.enum(MODEL_CATALOG).default("fal-ai/flux/dev")
-          .describe("Model — choose based on task (see tool description)"),
-        aspectRatio: z.enum(["1:1", "16:9", "9:16", "4:3", "3:4"]).optional()
-          .describe("Aspect ratio. Default 1:1."),
-        seed: z.number().int().optional().describe("Seed for reproducibility"),
-      }),
-      handler: async (input) => {
-        if (!fal) return "Error: generate_image is not configured (FAL_API_KEY missing).";
+type ImageProvider =
+  | { kind: "fal"; provider: FalProvider }
+  | { kind: "oai"; provider: OpenAICompatibleProvider };
 
-        // Wrap in withRetry — fal returns transient 5xx and 429s. 4xx
-        // (400/401/403/422) are classified as AbortError so withRetry
-        // stops immediately rather than burning the retry budget.
-        const { image } = await withRetry(
-          () => generateImage({
-            model: fal.image(input.model),
-            prompt: input.prompt,
-            ...(input.aspectRatio && { aspectRatio: input.aspectRatio }),
-            ...(input.seed !== undefined && { seed: input.seed }),
-          }),
-          { retries: 2, context: "fal.generateImage" },
-        );
+function createImageTools(deps: {
+  models: ReadonlyArray<ImageModelRow>;
+  providers: ReadonlyMap<UUID, ImageProvider>;
+  attachments: AttachmentStore;
+}): ToolSpec[] {
+  if (deps.models.length === 0) return [];   // no models configured → tool not registered
 
-        const buffer = Buffer.from(image.uint8Array);
-        const path = await attachments.upload(buffer, image.mediaType, "generated");
+  const modelNames = deps.models.map(m => m.name);
+  const modelByName = new Map(deps.models.map(m => [m.name, m]));
 
-        return JSON.stringify({
-          path,
-          mediaType: image.mediaType,
-          model: input.model,
-        });
-      },
+  // Union, not intersection — a fixed-size model would otherwise collapse
+  // every other model's options. Per-model narrowing happens in the handler.
+  const ratioUnion = new Set<string>();
+  for (const m of deps.models) for (const r of m.capabilities.aspectRatios ?? []) ratioUnion.add(r);
+
+  const description = buildToolDescription(deps.models);  // includes per-model ratios
+
+  return [defineTool({
+    name: "generate_image",
+    description,
+    durable: true,
+    schema: z.object({
+      prompt: z.string().min(1),
+      model: z.enum(modelNames as [string, ...string[]])
+        .default(modelNames[0])
+        .describe("Model — choose based on task (see tool description)"),
+      aspectRatio: ratioUnion.size > 0
+        ? z.enum([...ratioUnion] as [string, ...string[]]).optional()
+        : z.undefined(),
+      seed: z.number().int().optional(),
     }),
-  ];
+    handler: async (input) => {
+      const row = modelByName.get(input.model);
+      if (!row) return `Error: unknown model ${input.model}`;
+      const supported = row.capabilities.aspectRatios;
+      if (input.aspectRatio && supported && !supported.includes(input.aspectRatio)) {
+        return `Error: model ${row.name} does not support aspect ratio ${input.aspectRatio}. Supported: ${supported.join(", ")}.`;
+      }
+      const provider = deps.providers.get(row.providerId)!;
+      const imageModel = provider.kind === "fal"
+        ? provider.provider.image(row.modelString)
+        : provider.provider.imageModel(row.modelString);
+      const shouldForwardAspect = input.aspectRatio && supported?.includes(input.aspectRatio);
+      const shouldForwardSeed = input.seed !== undefined && row.capabilities.seed === true;
+      const { image } = await withRetry(
+        () => generateImage({
+          model: imageModel,
+          prompt: input.prompt,
+          ...(shouldForwardAspect && { aspectRatio: input.aspectRatio }),
+          ...(shouldForwardSeed && { seed: input.seed }),
+        }),
+        { retries: 2, context: `image.generate.${row.name}` },
+      );
+      const path = await deps.attachments.upload(
+        Buffer.from(image.uint8Array),
+        image.mediaType,
+        "generated",
+      );
+      return JSON.stringify({ path, mediaType: image.mediaType, model: row.name });
+    },
+  })];
 }
 ```
 
-**Retry semantics:** `generateImage` is wrapped in `withRetry({ retries: 2 })`. The handler classifies fal's 4xx errors (400 bad request, 401 unauthorized, 403 forbidden, 422 validation) as `AbortError` — these are futile to retry. 429 (rate limit) and 5xx fall through to the default exponential-backoff retry. This mirrors `web-tools.ts` for transport-level external API calls.
+**Retry semantics:** `generateImage` is wrapped in `withRetry({ retries: 2 })`. The handler classifies provider 4xx errors (400 bad request, 401 unauthorized, 403 forbidden, 422 validation) as `AbortError` via `APICallError.isRetryable === false` — these are futile to retry. 429 (rate limit) and 5xx fall through to the default exponential-backoff retry. This mirrors `web-tools.ts` for transport-level external API calls.
 
-**Closure injection** (like `createWebTools`), not through `Service`. Image generation is a shared capability, not per-user scoped. The fal provider factory and attachment store are injected at bootstrap, reused across all turns.
+**Closure injection** (like `createWebTools`), not through `Service`. Image generation is a shared capability, not per-user scoped. The provider map and model catalog are loaded at bootstrap and reused across all turns.
 
 **Single image per call.** The tool generates one image. For multiple images, the LLM calls the tool multiple times — it already handles this via the agentic loop. No `n` exposed in the tool schema.
 
 **Tool exposes a small surface.** Only `prompt`, `model`, `aspectRatio`, `seed`. Advanced params (steps, guidance_scale, negative_prompt) are intentionally omitted — the LLM shouldn't tune inference hyperparameters. If the user asks for specific tuning, the prompt description is the right lever.
 
-**Model selection per-call from a curated enum.** fal.ai has 1000+ models — we expose 4-6 curated choices via a Zod enum, with one-line "use when..." guidance in the tool description. The LLM picks per-request based on task (text rendering → Ideogram, detailed portrait → Flux Pro). Hardcoded `MODEL_CATALOG` constant for v0; promote to DB when operator-level customization matters. The constructed `fal.image(modelId)` call happens inside the handler, not at bootstrap.
+**Per-model capability narrowing.** The Zod `aspectRatio` enum is the union of `capabilities.aspectRatios` across all user-selectable models. The handler narrows per the picked model and returns text the LLM can act on (re-pick a ratio or a different model) — not an exception. `seed` similarly: handler drops it for models whose `capabilities.seed` is false/absent. The LLM sees per-model support inline in the tool description.
 
-**Storage prefix.** Generated images use the `"generated"` prefix via `attachments.upload(buffer, mediaType, "generated")`. The `AttachmentStore.upload()` signature gains an optional `prefix` param (default `"inbound"` for backward compatibility).
+**Storage prefix.** Generated images use the `"generated"` prefix via `attachments.upload(buffer, mediaType, "generated")`. The `AttachmentStore.upload()` signature accepts an optional `prefix` param (default `"inbound"` for backward compatibility).
 
-**Graceful degradation.** If `FAL_API_KEY` is missing, the tool is still registered but the handler returns a helpful error. Same pattern as `web_search`/`web_answer` — keeps the LLM informed about what's unavailable rather than silently lacking the capability.
+**Graceful absence.** If `image_models` has zero `user_selectable` rows, the tool is not registered at all — no "configured but unavailable" middle state. Same intent as the prior `FAL_API_KEY`-missing branch, but cleaner now that the tool's presence is data-driven.
 
 ## Outbound Image Delivery `[proposed]`
 
@@ -337,53 +362,47 @@ Combined with `Promise.allSettled`, one slow/failed S3 download doesn't block th
 
 **Web UI (future):** Inline `<img>` tag with base64 data URI or served from AttachmentStore via signed URL.
 
-## Configuration `[proposed]`
-
-### v0: minimal
+## Configuration `[confirmed]`
 
 | What | Where | Notes |
 |-|-|-|
-| fal.ai API key | `secrets` table | Encrypted. Referenced by name during bootstrap. |
-| Default model | Environment or hardcoded | `fal-ai/flux/dev` as default. |
-| Provider package | Code-level | Only `@ai-sdk/fal` installed. No runtime dispatch needed. |
+| Provider credentials | `secrets` table | Encrypted (AES-256-GCM). One row per provider — `fal_api_key`, `venice_api_key`, etc. |
+| Provider routing | `image_providers` table | `(name, type, base_url, secret_id, attrs)`. `type` is `pgEnum image_provider_type`. CHECK constraint pins the `base_url` invariant: `openai_compatible ↔ NOT NULL`, `fal ↔ NULL`. |
+| Model catalog | `image_models` table | `(name, model_string, description, capabilities, user_selectable, provider_id)`. `name` is the LLM-facing key (`UNIQUE`), `model_string` is the API-facing identifier, `description` is read by the LLM at every turn, `capabilities` validated by `ImageModelCapabilitiesSchema` at the store boundary. |
+| fal defaults | `ensureFalImageDefaults` (`src/setup/seed.ts`) | Idempotent (`ON CONFLICT (name) DO NOTHING`). Wizard calls it after `fal_api_key` is provided; manually re-runnable. User edits to existing rows are preserved on re-run. |
 
-No `image_providers` table for v0. The `ImageModel` is constructed at bootstrap from a secret lookup + hardcoded model string. Table earns its keep when a second provider arrives.
+### Why two tables instead of one
 
-### Future: provider table
+The same provider serves many models; routing (`type`, `base_url`, `secret_id`) changes for operational reasons (key rotation, base URL move) independently of the catalog. Splitting matches the `llm_providers` / `model_providers` precedent and lets the wizard rotate a key without re-entering every model.
 
-When multiple image providers are needed, follow the `llm_providers` pattern:
+### Why no `model_providers`-style routing table
 
-```sql
-image_providers (
-  id            UUID v7 PK,
-  name          TEXT NOT NULL UNIQUE,       -- 'fal', 'openai', 'bfl'
-  type          TEXT NOT NULL,              -- adapter discriminator
-  base_url      TEXT,                       -- NULL = SDK default
-  secret_id     UUID NOT NULL FK -> secrets,
-  attrs         JSONB NOT NULL,             -- provider-specific config (default model, etc.)
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-)
-```
+Image gen has no fallback chain (see [Fallback decision](#decisions)). One model = one provider. The relationship lives directly on `image_models.provider_id` with no position column — adding a "second provider for the same model" is just adding another `image_models` row with a different `name` pointing at the alternate provider.
 
-No `model_providers`-style routing table for images — image model selection is per-call (the LLM or user chooses), not per-profile. A simple default model in `attrs` suffices.
+### Why `name` separate from `model_string`
+
+The identifier the provider API expects is provider-specific (`fal-ai/flux/dev` for fal, `flux-dev` for Venice). The LLM-facing key needs to be (a) globally unique across the operator's catalog, (b) stable across `model_string` changes the provider might make, (c) self-describing in logs. Two columns gives the wizard freedom to pick a clean `name` (e.g. `fal/flux-dev`, `venice/flux-uncensored`) while `model_string` matches whatever the provider expects.
+
+### Why `capabilities JSONB`, not separate columns
+
+Aspect ratio support varies across providers (Venice's `image_size` presets, recraft-v3's fixed sizes, future 21:9 cinematic). Seed support varies. Future knobs (image-to-image, negative prompt, max prompt length, output mediaType) will land as new providers do. A `capabilities` JSONB bag validated by `ImageModelCapabilitiesSchema` absorbs all of these without further migrations — same pattern as `profiles.memory_scope`, `coding_tasks.worktree_assignment`.
+
+### Adding a provider via the wizard
+
+1. **Add image provider** → name, type (`fal` / `openai_compatible`), base URL (required for `openai_compatible`), API key (creates a `secrets` row).
+2. Wizard validates the credential. For `openai_compatible`: `GET ${baseURL}/v1/models` with the key. For `fal`: a 1×1 test generation against `fal-ai/flux/schnell`.
+3. **Add image model** → pick provider, name, model_string, description, capabilities (`aspectRatios`, `seed`, …), `user_selectable`. Optional "test generate" button.
+4. Restart cogmo — new providers and models appear in the tool catalog. (Hot-reload is a deferred p3, mirroring the LLM resolver and voice config entries.)
+
+Deleting an `image_providers` row cascades to its `image_models`. Deleting an `image_models` row removes it from the next process boot's tool catalog without affecting historical messages — `messages.content` carries the tool call by `name` only, not by FK.
 
 ### Profile integration
 
-Image generation is a tool — profiles control it via `tool_set`. If `generate_image` is in the profile's `toolSet`, the agent can generate images. If not, it can't. No new profile column needed.
+Image generation is a tool — profiles control it via `tool_set`. If `generate_image` is in the profile's `toolSet` (or matched by a glob), the agent can generate images. If not, it can't. No new profile column needed.
 
-## Future Providers
+## Adding more providers
 
-Adding a provider = `pnpm add @ai-sdk/<provider>`, construct the model, pass to `createImageTools`. Tool and delivery layers unchanged.
-
-| Provider | AI SDK Package | Notes |
-|-|-|-|
-| fal.ai (v0) | `@ai-sdk/fal` | 1000+ models. Flux, SDXL, Seedream, Ideogram, Qwen. |
-| OpenAI | `@ai-sdk/openai` | gpt-image-1. `openai.image("gpt-image-1")`. |
-| Black Forest Labs | `@ai-sdk/black-forest-labs` | FLUX models direct. flux-kontext, flux-pro. |
-| Together AI | `@ai-sdk/togetherai` | Flux variants, SDXL. |
-| Google (Imagen) | `@ai-sdk/google` | Imagen 4 via Vertex AI. |
-| Replicate | `@ai-sdk/replicate` | flux-schnell, recraft-v3. |
-| xAI | `@ai-sdk/xai` | Grok Imagine. |
+Anything with an OpenAI-shaped `/images/generations` endpoint (Venice.ai, OpenAI, custom inference servers) → wizard flow as `openai_compatible`. Anything bespoke (different async pattern, non-standard size parameter) → new `image_provider_type` enum value + adapter branch in `buildImageProvider`, then the same wizard flow.
 
 ## Testing `[confirmed]`
 
@@ -454,8 +473,9 @@ Commit `test/fixtures/fal/*` and `test/fixtures/recorded/*`. Embedding calls (Hi
 
 | Package | Purpose | Size | Status |
 |-|-|-|-|
-| `ai` | Vercel AI SDK core (`generateImage`) | ~200KB | Required (new runtime dep) |
-| `@ai-sdk/fal` | fal.ai provider adapter | ~few KB | Required (new runtime dep) |
+| `ai` | Vercel AI SDK core (`generateImage`) | ~200KB | Required (runtime dep) |
+| `@ai-sdk/fal` | fal.ai provider adapter | ~few KB | Required (runtime dep) |
+| `@ai-sdk/openai-compatible` | OpenAI-shaped images endpoint adapter (Venice, OpenAI, custom) | ~few KB | Required (runtime dep). Pin a version that exposes `.imageModel()` — verify on upgrade. |
 
 The `ai` package also exports `generateText`/`streamText` which we don't use for text LLMs (see rationale above). Tree-shaking eliminates unused code paths at build time.
 
@@ -471,8 +491,9 @@ The `ai` package also exports `generateText`/`streamText` which we don't use for
 | Delivery — streaming channels | Mid-stream via `tool_result` event | Telegram is a streaming adapter — `DeliveryRouter` partitions its sessions into `streamHandles`, `deliverBatch` is never called. Mid-stream delivery via existing `tool_result` event (parsed by adapter) is the only path that reaches Telegram users. Dedup on `runId + path`. |
 | Delivery — batch channels | `deliverBatch(text, images)` wrapped in `step.run("batch-delivery")` | Non-streaming adapters (Direct, future) get images via extended `deliverBatch`. Step-wrap gives exactly-once semantics on Inngest retry + observability; small return value (`{ delivered, failed }`) keeps state lean. `hasBatchTargets()` gate skips S3 downloads entirely for streaming-only setups. `Promise.allSettled` for per-image resilience. |
 | No new `StreamEvent` type | Reuse existing `tool_result` event | Adapter recognizes `name === "generate_image"`, parses output JSON. Zero changes to agent loop or tool handler signatures. |
-| Config (v0) | Secret + hardcoded model catalog | No table until operators need to customize. YAGNI. |
-| Tool surface | prompt, model (enum), aspectRatio, seed | LLM picks model per-call from curated shortlist. Inference hyperparameters omitted — prompt is the lever. |
-| Model selection | Per-call, curated enum in tool schema | fal.ai has 1000+ models — Flux Pro for portraits, Ideogram for text, etc. The LLM must choose per task. Hardcoded `MODEL_CATALOG` constant for v0; DB-backed when operator customization matters. |
+| Catalog storage | `image_providers` + `image_models` tables, `pgEnum` for `type` | User-defined models without redeploy. Mirrors `llm_providers` precedent. Wizard manages the rows. Adding a new provider type is always a code change *and* a migration anyway, so enum vs text costs the same and the enum gives exhaustive `switch` checking. |
+| OpenAI-compat second provider type | `@ai-sdk/openai-compatible` with per-provider `baseURL` | Venice's image endpoint is OpenAI-shaped; the AI SDK adapter covers it without bespoke code. Custom `ImageModelV2` is the fallback for non-OAI-shaped endpoints. |
+| Per-model capabilities | `capabilities JSONB` validated by `ImageModelCapabilitiesSchema` | Aspect ratio support varies across providers/models; future knobs (seed, image input, negative prompt, max prompt length) land without migrations. Tool description lists per-model ratios; handler narrows the LLM's pick per model and returns text errors the LLM can recover from. Zod-validated at the store boundary on read and write. |
+| Tool surface | prompt, model (enum), aspectRatio, seed | LLM picks model per-call from the configured user-selectable catalog. Inference hyperparameters omitted — prompt is the lever. |
 | Storage prefix | `generated/` for tool output | AttachmentStore `upload()` gains optional `prefix` param (default `"inbound"`). Backward compatible. |
 | Test mock | Scoped `fetch` interceptor (`createFalFetch`) passed via `createFal({ fetch })` | llmock is LLM-API-specific and can't cover fal. MSW was tried first but `onUnhandledRequest: "bypass"` mangled Anthropic streaming auth headers through llmock. Per-library fetch injection via the SDK's own `fetch` option avoids that class of interaction and touches nothing outside fal. Record/replay fixtures follow llmock's spirit. |

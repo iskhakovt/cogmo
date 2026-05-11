@@ -21,6 +21,7 @@ import {
   conversations,
   coreMemoryBlocks,
   customCompartments,
+  type LlmProviderTypeValue,
   llmProviders,
   messages,
   modelProviders,
@@ -547,7 +548,7 @@ export interface AgentStore {
     tx: Transaction,
     params: {
       name: string;
-      type: string;
+      type: LlmProviderTypeValue;
       baseUrl?: string;
       secretId: string;
       attrs: ProviderAttrs;
@@ -1522,7 +1523,7 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     params: {
       name: string;
-      type: string;
+      type: LlmProviderTypeValue;
       baseUrl?: string;
       secretId: string;
       attrs: ProviderAttrs;

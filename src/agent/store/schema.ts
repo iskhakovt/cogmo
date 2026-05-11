@@ -48,6 +48,25 @@ export const voiceMode = pgEnum("voice_mode", ["auto", "always", "never"]);
  */
 export const conversationStatus = pgEnum("conversation_status", ["active", "errored"]);
 
+/**
+ * LLM provider adapter discriminator. Maps to which `LlmProvider` class is
+ * constructed in `buildProvider` (`src/llm/resolver.ts`). Adding a new value
+ * is always a code change (new adapter constructor) AND a migration anyway,
+ * so the enum cost equals the prior text-column cost while gaining
+ * exhaustive `switch` checking.
+ */
+export const llmProviderType = pgEnum("llm_provider_type", ["anthropic", "openai_compatible"]);
+export type LlmProviderTypeValue = (typeof llmProviderType.enumValues)[number];
+
+/**
+ * Image provider adapter discriminator. `fal` uses `@ai-sdk/fal` (no base
+ * URL), `openai_compatible` uses `@ai-sdk/openai-compatible` against
+ * `${base_url}/images/generations`. See `design/image-generation.md` →
+ * Providers.
+ */
+export const imageProviderType = pgEnum("image_provider_type", ["fal", "openai_compatible"]);
+export type ImageProviderTypeValue = (typeof imageProviderType.enumValues)[number];
+
 // --- JSONB shapes ---
 
 /**
@@ -93,6 +112,36 @@ export const ProfileMemoryScopeSchema = z.object({
 });
 export type ProfileMemoryScope = z.infer<typeof ProfileMemoryScopeSchema>;
 
+/**
+ * `image_providers.attrs` — adapter-specific knobs. `headers` sets extra
+ * default headers on the OpenAI-compatible SDK client (e.g. for tenant
+ * routing or usage attribution). Fal has no documented use today.
+ */
+export const ImageProviderAttrsSchema = z.object({
+  headers: z.record(z.string(), z.string()).optional(),
+});
+export type ImageProviderAttrs = z.infer<typeof ImageProviderAttrsSchema>;
+
+/**
+ * `image_models.capabilities` — per-model knob bag. Read by the LLM (via the
+ * tool description) and by the tool handler (to validate the LLM's pick).
+ *
+ * `aspectRatios` — ratios the LLM may pick for this model. Absent → the tool
+ *   handler ignores the LLM's `aspectRatio` arg for this model (fixed-size
+ *   models like recraft-v3 character/embedding variants).
+ * `seed` — whether `seed` is honored. Absent treated as false; advertised in
+ *   the tool description so the LLM doesn't ask for reproducibility from a
+ *   non-deterministic model.
+ *
+ * Forward-extensible: add `imageInput`, `negativePrompt`, `maxPromptLength`,
+ * `outputMediaType`, etc. without a migration as new providers land.
+ */
+export const ImageModelCapabilitiesSchema = z.object({
+  aspectRatios: z.array(z.enum(["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21"])).optional(),
+  seed: z.boolean().optional(),
+});
+export type ImageModelCapabilities = z.infer<typeof ImageModelCapabilitiesSchema>;
+
 // --- Tables ---
 
 export const users = pgTable("users", {
@@ -103,7 +152,7 @@ export const users = pgTable("users", {
 export const llmProviders = pgTable("llm_providers", {
   id: pk(),
   name: text("name").notNull().unique(),
-  type: text("type").notNull(), // 'anthropic' | 'openai_compatible'
+  type: llmProviderType("type").notNull(),
   baseUrl: text("base_url"), // NULL = SDK default endpoint
   secretId: uuid("secret_id")
     .notNull()
@@ -130,6 +179,66 @@ export const modelProviders = pgTable(
     unique("uq_model_position").on(t.model, t.position),
   ],
 );
+
+/**
+ * Provider rows for image generation. `type` discriminates the adapter:
+ * `fal` uses `@ai-sdk/fal` (no base URL), `openai_compatible` uses
+ * `@ai-sdk/openai-compatible` against `${base_url}/images/generations`.
+ *
+ * The CHECK constraint pins the base_url invariant at the DB layer
+ * (`fal ↔ NULL`, `openai_compatible ↔ NOT NULL`). The store layer adds URL
+ * hygiene (https, no trailing slash) on top with a typed
+ * `InvalidProviderConfigError`.
+ *
+ * No fallback chain — unlike `llm_providers` + `model_providers`, image
+ * generation has no transparent cross-provider retry. A failed image gen
+ * surfaces directly to the LLM via the tool result.
+ */
+export const imageProviders = pgTable(
+  "image_providers",
+  {
+    id: pk(),
+    name: text("name").notNull().unique(),
+    type: imageProviderType("type").notNull(),
+    baseUrl: text("base_url"), // NULL for fal, NOT NULL for openai_compatible (CHECK enforced)
+    secretId: uuid("secret_id")
+      .notNull()
+      .references(() => secrets.id),
+    attrs: jsonbZod("attrs", ImageProviderAttrsSchema).notNull(),
+    createdAt: ts(),
+  },
+  (t) => [
+    check(
+      "chk_image_providers_base_url",
+      sql`(${t.type} = 'fal' AND ${t.baseUrl} IS NULL) OR (${t.type} = 'openai_compatible' AND ${t.baseUrl} IS NOT NULL)`,
+    ),
+  ],
+);
+
+/**
+ * Catalog of image models the LLM can pick from. `name` is the LLM-facing
+ * key (globally unique, round-trips via the tool's `model` arg) — convention
+ * is `<provider-name>/<slug>` e.g. `fal/flux-dev`, `venice/flux-uncensored`.
+ * `model_string` is the API-facing identifier passed to
+ * `provider.image(...)` / `provider.imageModel(...)`. `description` is read
+ * by the LLM at every turn — write a one-line "use when..." hint, same
+ * voice as the legacy `MODEL_CATALOG` blurbs. `capabilities` declares the
+ * per-model knobs (see schema). `user_selectable` mirrors
+ * `model_providers.user_selectable`: false keeps a model in the catalog
+ * without exposing it to the LLM (deprecation, experimental).
+ */
+export const imageModels = pgTable("image_models", {
+  id: pk(),
+  providerId: uuid("provider_id")
+    .notNull()
+    .references(() => imageProviders.id, { onDelete: "cascade" }),
+  name: text("name").notNull().unique(),
+  modelString: text("model_string").notNull(),
+  description: text("description").notNull(),
+  capabilities: jsonbZod("capabilities", ImageModelCapabilitiesSchema).notNull(),
+  userSelectable: boolean("user_selectable").notNull(),
+  createdAt: ts(),
+});
 
 /**
  * Per-user registry of named "custom compartments" — extensions of the
