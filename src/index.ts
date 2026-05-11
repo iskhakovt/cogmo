@@ -765,7 +765,6 @@ export async function bootstrapRuntime(
   );
   const promptSource = new DefaultPromptSource({
     timezone: env.USER_TIMEZONE,
-    toolDefinitions: () => tools.definitions(),
     serviceGuidance: [
       MEMORY_PROMPT_GUIDANCE,
       FILES_PROMPT_GUIDANCE,

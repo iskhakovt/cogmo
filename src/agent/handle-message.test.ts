@@ -1,6 +1,10 @@
 import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { ProviderConfigError } from "../llm/resolver.js";
+import type { McpRegistry } from "../mcp/registry.js";
+import type { SkillRunner } from "../skills/runner.js";
+import { expectDefined } from "../test/assertions.js";
 import {
   mockAgentStore,
   mockDeliveryHandle,
@@ -14,6 +18,7 @@ import {
 } from "../test/factories.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
+import type { ImageToolsLoader } from "./image-tools-loader.js";
 import { ToolRegistry } from "./tools.js";
 
 function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
@@ -80,14 +85,15 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    // assemble now receives pre-loaded data (profile + rules), not a
-    // store reference. The use case `loadConversationContext` does the
-    // loading inside one transaction; the prompt source is a pure
-    // formatter.
+    // assemble now receives pre-loaded data (profile + rules + the per-turn
+    // tool catalog), not a store reference. The use case
+    // `loadConversationContext` does the loading inside one transaction;
+    // the prompt source is a pure formatter.
     expect(deps.promptSource.assemble).toHaveBeenCalledWith({
       profile: expect.objectContaining({ id: "profile-1" }),
       rules: [],
       voiceMode: false,
+      toolDefinitions: expect.any(Array),
     });
   });
 
@@ -1118,6 +1124,195 @@ describe("createHandleMessage", () => {
 
     const passedTools = (deps.runStreamingAgentLoop as any).mock.calls[0][0].tools;
     expect(passedTools.snapshot()).toHaveLength(0);
+  });
+
+  describe("per-turn tool catalog flows into promptSource.assemble", () => {
+    // Regression guards for the prompt-introspection bug: the `# Tools`
+    // section in the system prompt was built from the static bootstrap
+    // catalog while `composeTurnTools` advertised a wider per-turn set
+    // (built-ins + image + skills + MCP) to the LLM API. The model could
+    // call those tools but couldn't see them in its own self-description.
+    // These tests pin that every per-turn source surfaces in the
+    // `toolDefinitions` arg, and that the prompt catalog stays in sync
+    // with the registry handed to `runStreamingAgentLoop`.
+
+    function toolNames(defs: ReadonlyArray<{ name: string }>): string[] {
+      return defs.map((d) => d.name);
+    }
+
+    function profileWithAllTools() {
+      return {
+        id: "profile-1",
+        userId: null,
+        name: "assistant",
+        basePrompt: "test",
+        model: "claude-sonnet-4-6",
+        summarizationModel: null,
+        extractionModel: null,
+        autoRecall: "heuristic" as const,
+        toolSet: ["*"],
+      };
+    }
+
+    function firstAssembleArg(deps: HandleMessageDeps) {
+      const [call] = expectDefined(
+        vi.mocked(deps.promptSource.assemble).mock.calls[0],
+        "promptSource.assemble call",
+      );
+      return call;
+    }
+
+    it("surfaces image tools in the toolDefinitions arg", async () => {
+      const imageToolsLoader = mock<ImageToolsLoader>();
+      imageToolsLoader.getTools.mockResolvedValue([
+        {
+          name: "generate_image",
+          description: "generate",
+          inputSchema: { type: "object", properties: {} },
+          handler: async () => "ok",
+        },
+      ]);
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
+        }),
+        imageToolsLoader,
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(toolNames(firstAssembleArg(deps).toolDefinitions ?? [])).toContain("generate_image");
+    });
+
+    it("surfaces skill tools in the toolDefinitions arg", async () => {
+      const skillRunner = mock<SkillRunner>();
+      skillRunner.listToolDefs.mockResolvedValue([
+        {
+          name: "echo",
+          description: "echo a number",
+          inputs: { type: "object", properties: {} },
+          tier: "wasm",
+          riskTier: "notify",
+          gitSha: "abc1234",
+        },
+      ]);
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
+        }),
+        skillRunner,
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(toolNames(firstAssembleArg(deps).toolDefinitions ?? [])).toContain("echo");
+    });
+
+    it("surfaces MCP tools in the toolDefinitions arg", async () => {
+      const mcpRegistry = mock<McpRegistry>();
+      mcpRegistry.resolveTools.mockResolvedValue([
+        {
+          name: "mcp__github__create_pr",
+          description: "open a PR",
+          inputSchema: { type: "object", properties: {} },
+          durable: true,
+          handler: async () => "ok",
+        },
+      ]);
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
+        }),
+        mcpRegistry,
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(toolNames(firstAssembleArg(deps).toolDefinitions ?? [])).toContain(
+        "mcp__github__create_pr",
+      );
+    });
+
+    it("passes an empty toolDefinitions array when profile.toolSet is empty", async () => {
+      const builtIns = new ToolRegistry();
+      builtIns.register({
+        name: "memory_recall",
+        description: "recall",
+        inputSchema: { type: "object", properties: {} },
+        handler: async () => "ok",
+      });
+      const deps = mockDeps({
+        tools: builtIns,
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({ ...profileWithAllTools(), toolSet: [] }),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(firstAssembleArg(deps).toolDefinitions).toEqual([]);
+    });
+
+    it("toolDefinitions in assemble matches the tool names in runStreamingAgentLoop.tools", async () => {
+      // Single source of truth: the catalog the model sees in its prompt
+      // must be the same set we advertise to the LLM API. A future
+      // refactor that splits these two call sites should fail here.
+      const builtIns = new ToolRegistry();
+      builtIns.register({
+        name: "memory_recall",
+        description: "recall",
+        inputSchema: { type: "object", properties: {} },
+        handler: async () => "ok",
+      });
+      const mcpRegistry = mock<McpRegistry>();
+      mcpRegistry.resolveTools.mockResolvedValue([
+        {
+          name: "mcp__github__create_pr",
+          description: "open a PR",
+          inputSchema: { type: "object", properties: {} },
+          durable: true,
+          handler: async () => "ok",
+        },
+      ]);
+      const deps = mockDeps({
+        tools: builtIns,
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
+        }),
+        mcpRegistry,
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      const [loopCall] = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "runStreamingAgentLoop call",
+      );
+      const promptNames = toolNames(firstAssembleArg(deps).toolDefinitions ?? []).sort();
+      const apiNames = toolNames(loopCall.tools.definitions()).sort();
+      expect(promptNames).toEqual(apiNames);
+      expect(promptNames).toEqual(["mcp__github__create_pr", "memory_recall"]);
+    });
   });
 
   describe("per-turn provider dispatch", () => {

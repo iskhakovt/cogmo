@@ -3,20 +3,23 @@ import type { TransportStore } from "../../transport/store/index.js";
 import type { AgentStore, Profile } from "../store/index.js";
 
 /**
- * Compose the per-turn context the prompt assembler needs: the
- * active `Profile`, the channel types currently delivering the
- * conversation, and the steering rules at the intersection. Three
- * reads share one tx — under Postgres' default READ COMMITTED, that
- * means each statement still sees its own freshly-committed snapshot,
- * so a concurrent session-close or rule-promotion can land between
- * the reads. We accept that here: the profile is effectively immutable
- * during a turn, and channel-types / rules drift in a non-harmful way
- * for prompt assembly. If a strictly consistent snapshot is ever
- * needed, lift to REPEATABLE READ at the outer `db.transaction(cb,
- * { isolationLevel: "repeatable read" })` boundary — Drizzle accepts
- * the config there but not on nested `tx.transaction(cb)` (savepoints
- * don't carry their own isolation). Our `Transactor` doesn't surface
- * this knob today; widen its signature when the first caller needs it.
+ * Compose the steering-rule context the prompt assembler needs: the
+ * channel types currently delivering the conversation and the steering
+ * rules at the intersection of `(profile, channels)`. Two reads share
+ * one tx — under Postgres' default READ COMMITTED a concurrent
+ * session-close or rule-promotion can land between them; that drift is
+ * non-harmful for prompt assembly. If a strictly consistent snapshot
+ * is ever needed, lift to REPEATABLE READ at the outer
+ * `db.transaction(cb, { isolationLevel: "repeatable read" })` boundary
+ * — Drizzle accepts the config there but not on nested
+ * `tx.transaction(cb)` (savepoints don't carry their own isolation).
+ * Our `Transactor` doesn't surface this knob today; widen its
+ * signature when the first caller needs it.
+ *
+ * The `Profile` row is NOT re-read here — the orchestrator passes the
+ * row it already loaded for voice-mode + tool-catalog resolution, so a
+ * concurrent `/settings` mid-turn can't make the prompt's tool-filter
+ * disagree with its base prompt.
  *
  * Use-case shape: `function name(deps, args)` in a kebab-case file
  * under the relevant domain folder. `deps` carries store interfaces +
@@ -30,11 +33,15 @@ export interface LoadConversationContextDeps {
 
 export interface LoadConversationContextArgs {
   conversationId: string;
-  profileId: string;
+  /**
+   * Pre-loaded profile from the orchestrator. `undefined` when the
+   * profile row was missing (deleted mid-turn, etc.); in that case the
+   * use case skips the rule lookup since rules are scoped to a profile.
+   */
+  profile: Profile | undefined;
 }
 
 export interface ConversationContext {
-  profile: Profile | undefined;
   channelTypes: ReadonlyArray<string>;
   rules: ReadonlyArray<{ rule: string }>;
 }
@@ -44,9 +51,10 @@ export async function loadConversationContext(
   args: LoadConversationContextArgs,
 ): Promise<ConversationContext> {
   return deps.runInTx(async (tx) => {
-    const profile = await deps.agentStore.getProfile(tx, args.profileId);
     const channelTypes = await deps.transportStore.getActiveChannelTypes(tx, args.conversationId);
-    const rules = await deps.agentStore.getActiveRules(tx, args.profileId, channelTypes);
-    return { profile, channelTypes, rules };
+    const rules = args.profile
+      ? await deps.agentStore.getActiveRules(tx, args.profile.id, channelTypes)
+      : [];
+    return { channelTypes, rules };
   });
 }

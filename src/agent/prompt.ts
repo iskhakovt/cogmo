@@ -17,6 +17,14 @@ export interface AssembleContext {
    * "Prompt injection".
    */
   voiceMode?: boolean;
+  /**
+   * Per-turn tool catalog rendered into the `# Tools` section. Passed in by
+   * the orchestrator after `composeTurnTools` resolves built-ins + image +
+   * skill + MCP tools against the profile's globs, so the prompt reflects
+   * exactly what the API call advertises this turn. Omit (or pass an empty
+   * array) to suppress the section.
+   */
+  toolDefinitions?: ReadonlyArray<ToolDefinition>;
 }
 
 export interface PromptSource {
@@ -40,7 +48,6 @@ Your response will be spoken aloud. Keep it short and natural — one or two sen
 export interface PromptSourceConfig {
   timezone?: string;
   getUserContext?: () => Promise<string | null>;
-  toolDefinitions?: () => ToolDefinition[];
   serviceGuidance?: string[];
 }
 
@@ -48,26 +55,26 @@ export interface PromptSourceConfig {
  * Default prompt source: identity + user context + tools (auto-generated)
  * + service guidance + steering rules + current time.
  *
- * Tool guidance is compiled from the tool registry — adding a tool
- * automatically updates the system prompt. Service guidance is provided
- * by each namespace implementation — adding a namespace means exporting
- * a guidance string from the implementation file.
+ * The `# Tools` section is rendered from the per-turn `toolDefinitions`
+ * supplied via `AssembleContext` — the orchestrator passes the same catalog
+ * it advertises to the LLM API, so built-ins, image, skill, and MCP tools
+ * are all introspectable by the model. Service guidance is provided by each
+ * namespace implementation — adding a namespace means exporting a guidance
+ * string from the implementation file.
  */
 export class DefaultPromptSource implements PromptSource {
   #timezone: string;
   #getUserContext: () => Promise<string | null>;
-  #toolDefinitions: () => ToolDefinition[];
   #serviceGuidance: string[];
 
   constructor(config: PromptSourceConfig = {}) {
     this.#timezone = config.timezone ?? "UTC";
     this.#getUserContext = config.getUserContext ?? (async () => null);
-    this.#toolDefinitions = config.toolDefinitions ?? (() => []);
     this.#serviceGuidance = config.serviceGuidance ?? [];
   }
 
   async assemble(ctx: AssembleContext): Promise<string> {
-    const { profile, rules, voiceMode } = ctx;
+    const { profile, rules, voiceMode, toolDefinitions } = ctx;
     const userContext = await this.#getUserContext();
 
     const parts: string[] = [];
@@ -82,8 +89,8 @@ export class DefaultPromptSource implements PromptSource {
       parts.push(`# User\n\n${ONBOARDING}`);
     }
 
-    // Tools — auto-generated from registry
-    const tools = this.#toolDefinitions();
+    // Tools — rendered from the per-turn catalog
+    const tools = toolDefinitions ?? [];
     if (tools.length > 0) {
       const toolList = tools.map((t) => `- **${t.name}**: ${t.description}`).join("\n");
       parts.push(
