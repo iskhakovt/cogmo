@@ -17,7 +17,10 @@ const log = logger.child({ component: "skills.worker.sysbox" });
  * is the per-task systemd slice; this is a per-container fence to catch
  * fork bombs, not a budget.
  */
-export const DEFAULT_RESOURCE_LIMITS: ResourceLimits = {
+// `Required<ResourceLimits>` — disk_bytes is optional on the schema but the
+// skills default always sets it, so consumers can read it without a narrowing
+// branch.
+export const DEFAULT_RESOURCE_LIMITS: Required<ResourceLimits> = {
   cpus: 1,
   memory_bytes: 512 * 1024 * 1024,
   pids: 1024,

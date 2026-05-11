@@ -381,11 +381,8 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
  * keeps `cogmo serve` startup independent of how many orphan containers the
  * daemon happens to be carrying.
  */
-function scheduleReconcileCrashedInstances(
-  client: SandboxClient,
-  instanceId: string,
-  backendLabel: string,
-): void {
+function scheduleReconcileCrashedInstances(client: SandboxClient, instanceId: string): void {
+  const backendLabel = client.backendId;
   void client.reconcileCrashedInstances(instanceId).then(
     ({ orphansReaped }) => {
       if (orphansReaped > 0) {
@@ -430,7 +427,7 @@ export async function bootstrapSandbox(
   if (opts.sandboxClientOverride) {
     const sandbox = opts.sandboxClientOverride;
     const sandboxInstanceId = randomUUID();
-    scheduleReconcileCrashedInstances(sandbox, sandboxInstanceId, sandbox.backendId);
+    scheduleReconcileCrashedInstances(sandbox, sandboxInstanceId);
     logger.info(
       { backendId: sandbox.backendId, instanceId: sandboxInstanceId },
       "sandbox client override active (test-only)",
@@ -481,7 +478,7 @@ export async function bootstrapSandbox(
       askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
     });
     const codingSandbox = localDocker;
-    scheduleReconcileCrashedInstances(localDocker, instance.id, "local-docker");
+    scheduleReconcileCrashedInstances(localDocker, instance.id);
     logger.info(
       {
         runtime: env.SANDBOX_RUNTIME,
@@ -520,7 +517,7 @@ export async function bootstrapSandbox(
       ...(env.DAYTONA_API_URL && { apiUrl: env.DAYTONA_API_URL }),
       ...(env.DAYTONA_ORGANIZATION_ID && { organizationId: env.DAYTONA_ORGANIZATION_ID }),
     });
-    scheduleReconcileCrashedInstances(sandbox, sandboxInstanceId, "daytona");
+    scheduleReconcileCrashedInstances(sandbox, sandboxInstanceId);
     logger.info(
       {
         instanceId: sandboxInstanceId,

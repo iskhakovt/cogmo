@@ -379,6 +379,15 @@ function computeAutoStopInterval(expiresAt: Date): number {
  * → Daytona Backend. `disk_bytes` is forwarded only when set so a caller
  * that omits it accepts the platform default (3 GiB at the time of writing).
  */
+const GIB = 1024 * 1024 * 1024;
+
+// Round up so under-provisioning never happens when the caller passed bytes
+// that don't align cleanly to a GiB boundary, then floor at 1 to honor
+// Daytona's per-resource minimum.
+function daytonaUnit(n: number): number {
+  return Math.max(1, Math.ceil(n));
+}
+
 function resourcesFromLimits(limits: {
   cpus: number;
   memory_bytes: number;
@@ -389,15 +398,12 @@ function resourcesFromLimits(limits: {
   memory: number;
   disk?: number;
 } {
-  // Daytona's `memory` / `disk` are GiB. Round up so under-provisioning
-  // never happens when the caller passed bytes that don't align cleanly.
-  // Floor at 1 to honor Daytona's per-resource minimum.
   const result: { cpu: number; memory: number; disk?: number } = {
-    cpu: Math.max(1, Math.ceil(limits.cpus)),
-    memory: Math.max(1, Math.ceil(limits.memory_bytes / (1024 * 1024 * 1024))),
+    cpu: daytonaUnit(limits.cpus),
+    memory: daytonaUnit(limits.memory_bytes / GIB),
   };
   if (limits.disk_bytes !== undefined) {
-    result.disk = Math.max(1, Math.ceil(limits.disk_bytes / (1024 * 1024 * 1024)));
+    result.disk = daytonaUnit(limits.disk_bytes / GIB);
   }
   return result;
 }
