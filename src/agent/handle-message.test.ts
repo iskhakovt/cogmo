@@ -1121,6 +1121,240 @@ describe("createHandleMessage", () => {
     expect(passedTools.snapshot()).toHaveLength(0);
   });
 
+  describe("per-turn tool catalog flows into promptSource.assemble", () => {
+    // Regression guards for the prompt-introspection bug: the `# Tools`
+    // section in the system prompt was built from the static bootstrap
+    // catalog while `composeTurnTools` advertised a wider per-turn set
+    // (built-ins + image + skills + MCP) to the LLM API. The model could
+    // call those tools but couldn't see them in its own self-description.
+    // These tests pin that every per-turn source surfaces in the
+    // `toolDefinitions` arg, and that the prompt catalog stays in sync
+    // with the registry handed to `runStreamingAgentLoop`.
+
+    function toolNames(defs: ReadonlyArray<{ name: string }>): string[] {
+      return defs.map((d) => d.name);
+    }
+
+    function profileWithAllTools() {
+      return {
+        id: "profile-1",
+        userId: null,
+        name: "assistant",
+        basePrompt: "test",
+        model: "claude-sonnet-4-6",
+        summarizationModel: null,
+        extractionModel: null,
+        autoRecall: "heuristic" as const,
+        toolSet: ["*"],
+      };
+    }
+
+    it("surfaces image tools in the toolDefinitions arg", async () => {
+      const generateImage = {
+        name: "generate_image",
+        description: "generate",
+        inputSchema: { type: "object" as const, properties: {} },
+        handler: async () => "ok",
+      };
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
+        }),
+        imageToolsLoader: { getTools: vi.fn().mockResolvedValue([generateImage]) } as never,
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      const assembleCall = (deps.promptSource.assemble as any).mock.calls[0][0];
+      expect(toolNames(assembleCall.toolDefinitions)).toContain("generate_image");
+    });
+
+    it("surfaces skill tools in the toolDefinitions arg", async () => {
+      const skillRunner = {
+        register: vi.fn(),
+        approveDeploy: vi.fn(),
+        denyDeploy: vi.fn(),
+        rollback: vi.fn(),
+        deregister: vi.fn(),
+        enable: vi.fn(),
+        list: vi.fn().mockResolvedValue([]),
+        listAll: vi.fn().mockResolvedValue([]),
+        listToolDefs: vi.fn().mockResolvedValue([
+          {
+            name: "echo",
+            description: "echo a number",
+            inputs: { type: "object", properties: {} },
+            tier: "wasm",
+            riskTier: "notify",
+            gitSha: "abc1234",
+          },
+        ]),
+        invoke: vi.fn(),
+      };
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
+        }),
+        skillRunner: skillRunner as never,
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      const assembleCall = (deps.promptSource.assemble as any).mock.calls[0][0];
+      expect(toolNames(assembleCall.toolDefinitions)).toContain("echo");
+    });
+
+    it("surfaces MCP tools in the toolDefinitions arg", async () => {
+      const mcpTool = {
+        name: "mcp__github__create_pr",
+        description: "open a PR",
+        inputSchema: { type: "object" as const, properties: {} },
+        durable: true,
+        handler: async () => "ok",
+      };
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "assistant",
+            basePrompt: "test",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            toolSet: ["*"],
+          }),
+        }),
+        mcpRegistry: {
+          start: vi.fn(),
+          stop: vi.fn(),
+          resolveTools: vi.fn().mockResolvedValue([mcpTool]),
+          toolBudget: () => 25,
+          addServer: vi.fn(),
+          removeServer: vi.fn(),
+          listServers: vi.fn(),
+          approveServer: vi.fn(),
+          approveTool: vi.fn(),
+          rejectTool: vi.fn(),
+        },
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      const assembleCall = (deps.promptSource.assemble as any).mock.calls[0][0];
+      expect(toolNames(assembleCall.toolDefinitions)).toContain("mcp__github__create_pr");
+    });
+
+    it("passes an empty toolDefinitions array when profile.toolSet is empty", async () => {
+      const builtIns = new ToolRegistry();
+      builtIns.register({
+        name: "memory_recall",
+        description: "recall",
+        inputSchema: { type: "object", properties: {} },
+        handler: async () => "ok",
+      });
+      const deps = mockDeps({
+        tools: builtIns,
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "assistant",
+            basePrompt: "test",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            toolSet: [],
+          }),
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      const assembleCall = (deps.promptSource.assemble as any).mock.calls[0][0];
+      expect(assembleCall.toolDefinitions).toEqual([]);
+    });
+
+    it("toolDefinitions in assemble matches the tool names in runStreamingAgentLoop.tools", async () => {
+      // Single source of truth: the catalog the model sees in its prompt
+      // must be the same set we advertise to the LLM API. A future
+      // refactor that splits these two call sites should fail here.
+      const builtIns = new ToolRegistry();
+      builtIns.register({
+        name: "memory_recall",
+        description: "recall",
+        inputSchema: { type: "object", properties: {} },
+        handler: async () => "ok",
+      });
+      const mcpTool = {
+        name: "mcp__github__create_pr",
+        description: "open a PR",
+        inputSchema: { type: "object" as const, properties: {} },
+        durable: true,
+        handler: async () => "ok",
+      };
+      const deps = mockDeps({
+        tools: builtIns,
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "assistant",
+            basePrompt: "test",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "heuristic",
+            toolSet: ["*"],
+          }),
+        }),
+        mcpRegistry: {
+          start: vi.fn(),
+          stop: vi.fn(),
+          resolveTools: vi.fn().mockResolvedValue([mcpTool]),
+          toolBudget: () => 25,
+          addServer: vi.fn(),
+          removeServer: vi.fn(),
+          listServers: vi.fn(),
+          approveServer: vi.fn(),
+          approveTool: vi.fn(),
+          rejectTool: vi.fn(),
+        },
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      const assembleCall = (deps.promptSource.assemble as any).mock.calls[0][0];
+      const loopCall = (deps.runStreamingAgentLoop as any).mock.calls[0][0];
+      const promptNames = toolNames(assembleCall.toolDefinitions).sort();
+      const apiNames = toolNames(loopCall.tools.definitions()).sort();
+      expect(promptNames).toEqual(apiNames);
+      expect(promptNames).toEqual(["mcp__github__create_pr", "memory_recall"]);
+    });
+  });
+
   describe("per-turn provider dispatch", () => {
     it("resolves the provider for the snapshot's model and threads it into the loop", async () => {
       const turnProvider = mockProvider();
