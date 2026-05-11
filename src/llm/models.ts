@@ -41,7 +41,8 @@ const MODEL_REGISTRY: ReadonlyMap<string, ModelLimits> = new Map([
   ["anthropic/claude-opus-4.6", { contextWindow: 1_000_000, maxOutputTokens: 128_000 }],
   ["anthropic/claude-sonnet-4.6", { contextWindow: 1_000_000, maxOutputTokens: 64_000 }],
   ["anthropic/claude-haiku-4.5", { contextWindow: 200_000, maxOutputTokens: 64_000 }],
-  // xAI Grok
+  // xAI Grok — ordered by release date (xAI's `4.3` shipped after `4.20`,
+  // so semver-descending would put them in the wrong chronological order).
   ["x-ai/grok-4.3", { contextWindow: 1_000_000, maxOutputTokens: 32_000 }],
   ["x-ai/grok-4.20", { contextWindow: 2_000_000, maxOutputTokens: 32_000 }],
   ["x-ai/grok-4.1-fast", { contextWindow: 2_000_000, maxOutputTokens: 30_000 }],
@@ -72,13 +73,7 @@ const MODEL_REGISTRY: ReadonlyMap<string, ModelLimits> = new Map([
   // StepFun
   ["stepfun/step-3.5-flash", { contextWindow: 262_144, maxOutputTokens: 32_768 }],
   // NVIDIA Nemotron — free tier
-  [
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    {
-      contextWindow: 262_144,
-      maxOutputTokens: 32_768,
-    },
-  ],
+  ["nvidia/nemotron-3-super-120b-a12b:free", { contextWindow: 262_144, maxOutputTokens: 32_768 }],
   // OpenRouter's own preview model
   ["openrouter/owl-alpha", { contextWindow: 1_048_576, maxOutputTokens: 262_144 }],
 ]);
