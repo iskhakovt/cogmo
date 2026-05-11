@@ -1,0 +1,213 @@
+import { describe, expect, it, vi } from "vitest";
+import type {
+  AgentStore,
+  ImageModelRow,
+  ImageModelWithProvider,
+  ImageProviderRow,
+} from "../agent/store/index.js";
+import { runImageModelCli } from "./image-model.js";
+
+const FAKE_TX = { __mockTx: true } as never;
+const tx = ((cb: (t: never) => Promise<unknown>) => cb(FAKE_TX)) as never;
+
+function makeIo() {
+  const out: string[] = [];
+  const err: string[] = [];
+  return {
+    io: { out: (line: string) => out.push(line), err: (line: string) => err.push(line) },
+    out,
+    err,
+  };
+}
+
+function fakeProvider(overrides: Partial<ImageProviderRow> = {}): ImageProviderRow {
+  return {
+    id: "p-1",
+    name: "fal",
+    type: "fal",
+    baseUrl: null,
+    secretId: "sec-1",
+    attrs: {},
+    ...overrides,
+  };
+}
+
+function fakeModel(
+  overrides: Partial<ImageModelRow> = {},
+  providerOverrides: Partial<ImageProviderRow> = {},
+): ImageModelWithProvider {
+  return {
+    id: "m-1",
+    providerId: "p-1",
+    name: "fal/flux-dev",
+    modelString: "fal-ai/flux/dev",
+    description: "balanced",
+    capabilities: { aspectRatios: ["1:1"], seed: true },
+    userSelectable: true,
+    ...overrides,
+    provider: fakeProvider(providerOverrides),
+  };
+}
+
+describe("runImageModelCli", () => {
+  it("prints USAGE on no command", async () => {
+    const { io, out } = makeIo();
+    const agentStore = {} as AgentStore;
+    const rc = await runImageModelCli([], { runInTx: tx, agentStore }, io);
+    expect(rc).toBe(0);
+    expect(out.join("\n")).toMatch(/Usage: cogmo image-model/);
+  });
+
+  it("rejects `add` without --provider", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {} as AgentStore;
+    const rc = await runImageModelCli(["add", "fal/x"], { runInTx: tx, agentStore }, io);
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--provider is required/);
+  });
+
+  it("rejects `add` without --model-string or --description", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {} as AgentStore;
+    const rc = await runImageModelCli(
+      ["add", "fal/x", "--provider", "fal"],
+      { runInTx: tx, agentStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--model-string is required/);
+  });
+
+  it("creates a model with parsed capabilities", async () => {
+    const { io, out } = makeIo();
+    const createImageModel = vi.fn().mockResolvedValue({ id: "m-new" });
+    const agentStore = {
+      findImageProviderByName: vi.fn().mockResolvedValue(fakeProvider()),
+      createImageModel,
+    } as unknown as AgentStore;
+    const rc = await runImageModelCli(
+      [
+        "add",
+        "fal/custom",
+        "--provider",
+        "fal",
+        "--model-string",
+        "fal-ai/custom",
+        "--description",
+        "test row",
+        "--ratios",
+        "1:1,16:9",
+        "--seed",
+      ],
+      { runInTx: tx, agentStore },
+      io,
+    );
+    expect(rc).toBe(0);
+    expect(createImageModel).toHaveBeenCalledWith(
+      FAKE_TX,
+      expect.objectContaining({
+        providerId: "p-1",
+        name: "fal/custom",
+        modelString: "fal-ai/custom",
+        description: "test row",
+        capabilities: { aspectRatios: ["1:1", "16:9"], seed: true },
+        userSelectable: true,
+      }),
+    );
+    expect(out.join("\n")).toMatch(/Added image model "fal\/custom"/);
+  });
+
+  it("honours --no-selectable", async () => {
+    const { io } = makeIo();
+    const createImageModel = vi.fn().mockResolvedValue({ id: "m-hidden" });
+    const agentStore = {
+      findImageProviderByName: vi.fn().mockResolvedValue(fakeProvider()),
+      createImageModel,
+    } as unknown as AgentStore;
+    await runImageModelCli(
+      [
+        "add",
+        "fal/hidden",
+        "--provider",
+        "fal",
+        "--model-string",
+        "fal-ai/hidden",
+        "--description",
+        "experimental",
+        "--no-selectable",
+      ],
+      { runInTx: tx, agentStore },
+      io,
+    );
+    expect(createImageModel).toHaveBeenCalledWith(
+      FAKE_TX,
+      expect.objectContaining({ userSelectable: false }),
+    );
+  });
+
+  it("rejects an unknown aspect ratio in --ratios", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {} as AgentStore;
+    const rc = await runImageModelCli(
+      [
+        "add",
+        "fal/x",
+        "--provider",
+        "fal",
+        "--model-string",
+        "fal-ai/x",
+        "--description",
+        "x",
+        "--ratios",
+        "horizontal",
+      ],
+      { runInTx: tx, agentStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/Error: --ratios got "horizontal"/);
+  });
+
+  it("lists models with --all and provider filter", async () => {
+    const { io, out } = makeIo();
+    const agentStore = {
+      listImageModelsWithProvider: vi.fn().mockImplementation(async (_t, opts) => {
+        // Hidden row only appears when userSelectableOnly is false (--all).
+        if (opts?.userSelectableOnly) {
+          return [fakeModel({ name: "fal/visible" })];
+        }
+        return [
+          fakeModel({ name: "fal/visible" }),
+          fakeModel({ name: "fal/hidden", userSelectable: false }),
+        ];
+      }),
+    } as unknown as AgentStore;
+    const rc = await runImageModelCli(["list", "--all"], { runInTx: tx, agentStore }, io);
+    expect(rc).toBe(0);
+    expect(out.join("\n")).toMatch(/fal\/visible/);
+    expect(out.join("\n")).toMatch(/fal\/hidden/);
+  });
+
+  it("removes a model by name", async () => {
+    const { io, out } = makeIo();
+    const deleteImageModel = vi.fn().mockResolvedValue(undefined);
+    const agentStore = {
+      listImageModels: vi.fn().mockResolvedValue([fakeModel({ name: "fal/flux-dev" })]),
+      deleteImageModel,
+    } as unknown as AgentStore;
+    const rc = await runImageModelCli(["remove", "fal/flux-dev"], { runInTx: tx, agentStore }, io);
+    expect(rc).toBe(0);
+    expect(deleteImageModel).toHaveBeenCalledWith(FAKE_TX, "m-1");
+    expect(out.join("\n")).toMatch(/Removed image model "fal\/flux-dev"/);
+  });
+
+  it("reports not-found when removing an unknown model", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {
+      listImageModels: vi.fn().mockResolvedValue([]),
+    } as unknown as AgentStore;
+    const rc = await runImageModelCli(["remove", "ghost"], { runInTx: tx, agentStore }, io);
+    expect(rc).toBe(1);
+    expect(err.join("\n")).toMatch(/No image model named "ghost"/);
+  });
+});

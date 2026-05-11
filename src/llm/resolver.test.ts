@@ -172,14 +172,13 @@ describe("createDbProviderResolver — error matrix", () => {
     await expect(resolve("m")).rejects.toThrow(/"broken".*requires a base URL/);
   });
 
-  it("throws ProviderConfigError on unknown provider type", async () => {
-    const { agentStore, secretsStore } = makeDeps({
-      rows: [row({ type: "google" })],
-    });
-    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
-    await expect(resolve("m")).rejects.toThrow(ProviderConfigError);
-    await expect(resolve("m")).rejects.toThrow(/Unknown provider type: google/);
-  });
+  // Removed: "throws ProviderConfigError on unknown provider type". The
+  // `llm_provider_type` pgEnum + the resolver's exhaustive `switch(row.type)`
+  // make an unknown runtime value structurally unreachable — Postgres rejects
+  // out-of-enum writes (PG code 22P02, covered by image-schema.test.ts), and
+  // adding a new enum value without a matching case branch is a compile-time
+  // error. The legacy `default: throw new ProviderConfigError(...)` branch is
+  // gone (see PR 220 review feedback).
 
   it("does NOT wrap transient DB errors as ProviderConfigError", async () => {
     // Drives the cache-no-poison test below — a plain Error here proves

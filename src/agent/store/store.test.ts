@@ -2693,4 +2693,367 @@ describe("DrizzleAgentStore", () => {
       ).rejects.toThrow();
     });
   });
+
+  describe("image providers", () => {
+    async function seedSecret(name: string) {
+      return tx((trx) => secretsStore.putSecret(trx, { name, plaintext: "sk-test" }));
+    }
+
+    it("creates a fal provider (base_url null)", async () => {
+      const { id: secretId } = await seedSecret("fal_api_key");
+      const { id } = await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "fal",
+          type: "fal",
+          baseUrl: null,
+          secretId,
+          attrs: {},
+        }),
+      );
+      const row = await tx((trx) => store.getImageProvider(trx, id));
+      expect(row).toMatchObject({ name: "fal", type: "fal", baseUrl: null });
+    });
+
+    it("creates an openai_compatible provider with base_url", async () => {
+      const { id: secretId } = await seedSecret("venice_api_key");
+      const { id } = await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "venice",
+          type: "openai_compatible",
+          baseUrl: "https://api.venice.ai/api/v1",
+          secretId,
+          attrs: {},
+        }),
+      );
+      const row = await tx((trx) => store.findImageProviderByName(trx, "venice"));
+      expect(row).toMatchObject({
+        id,
+        name: "venice",
+        type: "openai_compatible",
+        baseUrl: "https://api.venice.ai/api/v1",
+      });
+    });
+
+    it("rejects fal with a base_url at the store boundary (InvalidProviderConfigError)", async () => {
+      const { id: secretId } = await seedSecret("fal_api_key");
+      const { InvalidProviderConfigError } = await import("./errors.js");
+      await expect(
+        tx((trx) =>
+          store.createImageProvider(trx, {
+            name: "fal",
+            type: "fal",
+            baseUrl: "https://fal.run",
+            secretId,
+            attrs: {},
+          }),
+        ),
+      ).rejects.toBeInstanceOf(InvalidProviderConfigError);
+    });
+
+    it("rejects openai_compatible without base_url at the store boundary", async () => {
+      const { id: secretId } = await seedSecret("venice_api_key");
+      const { InvalidProviderConfigError } = await import("./errors.js");
+      await expect(
+        tx((trx) =>
+          store.createImageProvider(trx, {
+            name: "venice",
+            type: "openai_compatible",
+            baseUrl: null,
+            secretId,
+            attrs: {},
+          }),
+        ),
+      ).rejects.toBeInstanceOf(InvalidProviderConfigError);
+    });
+
+    it("rejects non-https base_url", async () => {
+      const { id: secretId } = await seedSecret("rogue_api_key");
+      const { InvalidProviderConfigError } = await import("./errors.js");
+      await expect(
+        tx((trx) =>
+          store.createImageProvider(trx, {
+            name: "rogue",
+            type: "openai_compatible",
+            baseUrl: "http://insecure.example.com/v1",
+            secretId,
+            attrs: {},
+          }),
+        ),
+      ).rejects.toBeInstanceOf(InvalidProviderConfigError);
+    });
+
+    it("rejects trailing-slash base_url", async () => {
+      const { id: secretId } = await seedSecret("rogue_api_key");
+      const { InvalidProviderConfigError } = await import("./errors.js");
+      await expect(
+        tx((trx) =>
+          store.createImageProvider(trx, {
+            name: "rogue",
+            type: "openai_compatible",
+            baseUrl: "https://api.venice.ai/api/v1/",
+            secretId,
+            attrs: {},
+          }),
+        ),
+      ).rejects.toBeInstanceOf(InvalidProviderConfigError);
+    });
+
+    it("rejects duplicate provider names (UniqueViolationError)", async () => {
+      const { id: secretId } = await seedSecret("fal_api_key");
+      await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "fal",
+          type: "fal",
+          baseUrl: null,
+          secretId,
+          attrs: {},
+        }),
+      );
+      const { UniqueViolationError } = await import("./errors.js");
+      await expect(
+        tx((trx) =>
+          store.createImageProvider(trx, {
+            name: "fal",
+            type: "fal",
+            baseUrl: null,
+            secretId,
+            attrs: {},
+          }),
+        ),
+      ).rejects.toBeInstanceOf(UniqueViolationError);
+    });
+
+    it("lists providers ordered by name", async () => {
+      const { id: s1 } = await seedSecret("fal_api_key");
+      const { id: s2 } = await seedSecret("venice_api_key");
+      await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "venice",
+          type: "openai_compatible",
+          baseUrl: "https://api.venice.ai/api/v1",
+          secretId: s2,
+          attrs: {},
+        }),
+      );
+      await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "fal",
+          type: "fal",
+          baseUrl: null,
+          secretId: s1,
+          attrs: {},
+        }),
+      );
+      const rows = await tx((trx) => store.listImageProviders(trx));
+      expect(rows.map((r) => r.name)).toEqual(["fal", "venice"]);
+    });
+
+    it("deleteImageProvider cascades to image_models", async () => {
+      const { id: secretId } = await seedSecret("fal_api_key");
+      const { id: providerId } = await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "fal",
+          type: "fal",
+          baseUrl: null,
+          secretId,
+          attrs: {},
+        }),
+      );
+      await tx((trx) =>
+        store.createImageModel(trx, {
+          providerId,
+          name: "fal/flux-dev",
+          modelString: "fal-ai/flux/dev",
+          description: "default",
+          capabilities: { aspectRatios: ["1:1"], seed: true },
+          userSelectable: true,
+        }),
+      );
+
+      await tx((trx) => store.deleteImageProvider(trx, providerId));
+
+      expect(await tx((trx) => store.getImageProvider(trx, providerId))).toBeUndefined();
+      expect(await tx((trx) => store.listImageModels(trx))).toEqual([]);
+    });
+  });
+
+  describe("image models", () => {
+    async function seedProvider(name = "fal") {
+      const { id: secretId } = await tx((trx) =>
+        secretsStore.putSecret(trx, { name: `${name}_api_key`, plaintext: "sk-test" }),
+      );
+      return tx((trx) =>
+        store.createImageProvider(trx, {
+          name,
+          type: "fal",
+          baseUrl: null,
+          secretId,
+          attrs: {},
+        }),
+      );
+    }
+
+    it("creates and lists image models", async () => {
+      const { id: providerId } = await seedProvider();
+      await tx((trx) =>
+        store.createImageModel(trx, {
+          providerId,
+          name: "fal/flux-dev",
+          modelString: "fal-ai/flux/dev",
+          description: "default",
+          capabilities: { aspectRatios: ["1:1", "16:9"], seed: true },
+          userSelectable: true,
+        }),
+      );
+      const rows = await tx((trx) => store.listImageModels(trx));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        name: "fal/flux-dev",
+        modelString: "fal-ai/flux/dev",
+        capabilities: { aspectRatios: ["1:1", "16:9"], seed: true },
+      });
+    });
+
+    it("rejects duplicate model names (UniqueViolationError)", async () => {
+      const { id: providerId } = await seedProvider();
+      await tx((trx) =>
+        store.createImageModel(trx, {
+          providerId,
+          name: "fal/flux-dev",
+          modelString: "fal-ai/flux/dev",
+          description: "default",
+          capabilities: {},
+          userSelectable: true,
+        }),
+      );
+      const { UniqueViolationError } = await import("./errors.js");
+      await expect(
+        tx((trx) =>
+          store.createImageModel(trx, {
+            providerId,
+            name: "fal/flux-dev",
+            modelString: "fal-ai/flux/dev",
+            description: "duplicate",
+            capabilities: {},
+            userSelectable: true,
+          }),
+        ),
+      ).rejects.toBeInstanceOf(UniqueViolationError);
+    });
+
+    it("upsertImageModelsByName skips existing names (idempotent)", async () => {
+      const { id: providerId } = await seedProvider();
+      const rows = [
+        {
+          providerId,
+          name: "fal/a",
+          modelString: "fal-ai/a",
+          description: "first",
+          capabilities: {},
+          userSelectable: true,
+        },
+        {
+          providerId,
+          name: "fal/b",
+          modelString: "fal-ai/b",
+          description: "second",
+          capabilities: {},
+          userSelectable: true,
+        },
+      ];
+      const first = await tx((trx) => store.upsertImageModelsByName(trx, rows));
+      expect(first).toBe(2);
+
+      // Re-run with the same names plus a new one. Existing rows are
+      // preserved (no overwrite of `description`); only the new row is
+      // inserted.
+      const second = await tx((trx) =>
+        store.upsertImageModelsByName(trx, [
+          {
+            providerId,
+            name: "fal/a",
+            modelString: "fal-ai/a",
+            description: "edited", // would-be edit; must be ignored
+            capabilities: {},
+            userSelectable: true,
+          },
+          {
+            providerId,
+            name: "fal/c",
+            modelString: "fal-ai/c",
+            description: "third",
+            capabilities: {},
+            userSelectable: true,
+          },
+        ]),
+      );
+      expect(second).toBe(1);
+
+      const all = await tx((trx) => store.listImageModels(trx));
+      expect(all.map((m) => m.name).sort()).toEqual(["fal/a", "fal/b", "fal/c"]);
+      const a = all.find((m) => m.name === "fal/a");
+      expect(a?.description).toBe("first"); // preserved across the conflict-skip path
+    });
+
+    it("listImageModelsWithProvider filters to user_selectable when asked", async () => {
+      const { id: providerId } = await seedProvider();
+      await tx((trx) =>
+        store.upsertImageModelsByName(trx, [
+          {
+            providerId,
+            name: "fal/visible",
+            modelString: "fal-ai/x",
+            description: "shown",
+            capabilities: {},
+            userSelectable: true,
+          },
+          {
+            providerId,
+            name: "fal/hidden",
+            modelString: "fal-ai/y",
+            description: "hidden",
+            capabilities: {},
+            userSelectable: false,
+          },
+        ]),
+      );
+      const all = await tx((trx) => store.listImageModelsWithProvider(trx));
+      const onlySelectable = await tx((trx) =>
+        store.listImageModelsWithProvider(trx, { userSelectableOnly: true }),
+      );
+      expect(all.map((m) => m.name).sort()).toEqual(["fal/hidden", "fal/visible"]);
+      expect(onlySelectable.map((m) => m.name)).toEqual(["fal/visible"]);
+      expect(onlySelectable[0]?.provider.name).toBe("fal");
+    });
+
+    it("deleteImageModel removes a single row without touching siblings", async () => {
+      const { id: providerId } = await seedProvider();
+      await tx((trx) =>
+        store.upsertImageModelsByName(trx, [
+          {
+            providerId,
+            name: "fal/keep",
+            modelString: "x",
+            description: "keep",
+            capabilities: {},
+            userSelectable: true,
+          },
+          {
+            providerId,
+            name: "fal/drop",
+            modelString: "y",
+            description: "drop",
+            capabilities: {},
+            userSelectable: true,
+          },
+        ]),
+      );
+      const allBefore = await tx((trx) => store.listImageModels(trx));
+      const drop = allBefore.find((m) => m.name === "fal/drop");
+      expect(drop).toBeDefined();
+      await tx((trx) => store.deleteImageModel(trx, drop!.id));
+      const after = await tx((trx) => store.listImageModels(trx));
+      expect(after.map((m) => m.name)).toEqual(["fal/keep"]);
+    });
+  });
 });
