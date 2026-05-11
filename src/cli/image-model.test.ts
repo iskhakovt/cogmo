@@ -145,6 +145,60 @@ describe("runImageModelCli", () => {
     );
   });
 
+  it("accepts --image-input required and writes it into capabilities", async () => {
+    const { io } = makeIo();
+    const createImageModel = vi.fn().mockResolvedValue({ id: "m-edit" });
+    const agentStore = {
+      findImageProviderByName: vi.fn().mockResolvedValue(fakeProvider()),
+      createImageModel,
+    } as unknown as AgentStore;
+    await runImageModelCli(
+      [
+        "add",
+        "fal/edit",
+        "--provider",
+        "fal",
+        "--model-string",
+        "fal-ai/edit",
+        "--description",
+        "edits an image",
+        "--image-input",
+        "required",
+      ],
+      { runInTx: tx, agentStore },
+      io,
+    );
+    expect(createImageModel).toHaveBeenCalledWith(
+      FAKE_TX,
+      expect.objectContaining({
+        capabilities: { imageInput: "required" },
+      }),
+    );
+  });
+
+  it("rejects --image-input with an unknown value", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {} as AgentStore;
+    const rc = await runImageModelCli(
+      [
+        "add",
+        "fal/edit",
+        "--provider",
+        "fal",
+        "--model-string",
+        "fal-ai/edit",
+        "--description",
+        "x",
+        "--image-input",
+        "kinda",
+      ],
+      { runInTx: tx, agentStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--image-input got "kinda"/);
+  });
+
   it("rejects an unknown aspect ratio in --ratios", async () => {
     const { io, err } = makeIo();
     const agentStore = {} as AgentStore;

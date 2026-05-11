@@ -50,20 +50,43 @@ export function parseGeneratedImagePayload(raw: string): GeneratedImagePayload |
  * Build the LLM-facing tool description from the loaded model catalog.
  * Each user-selectable model contributes one line with its `description`
  * and the ratios it accepts (or "fixed size" when `capabilities.aspectRatios`
- * is absent/empty). The prose ending is constant across deployments.
+ * is absent/empty). Models that accept a reference image carry a
+ * `[needs reference image]` / `[optional reference image]` hint so the LLM
+ * knows when to populate `referenceImage`. The prose ending is constant
+ * across deployments.
  */
-function buildToolDescription(models: ReadonlyArray<ImageModelWithProvider>): string {
+function buildToolDescription(
+  models: ReadonlyArray<ImageModelWithProvider>,
+  anyImageInput: boolean,
+): string {
   const lines = models.map((m) => {
     const ratios = m.capabilities.aspectRatios;
     const ratioHint =
       ratios && ratios.length > 0 ? ` (ratios: ${ratios.join(", ")})` : " (fixed size)";
-    return `- \`${m.name}\` — ${m.description}${ratioHint}`;
+    const imageInputHint =
+      m.capabilities.imageInput === "required"
+        ? " [needs reference image]"
+        : m.capabilities.imageInput === "optional"
+          ? " [optional reference image]"
+          : "";
+    return `- \`${m.name}\` — ${m.description}${ratioHint}${imageInputHint}`;
   });
+  const referenceImageNote = anyImageInput
+    ? [
+        "",
+        "For models marked `[needs reference image]` or `[optional reference image]`, " +
+          "pass `referenceImage` — an AttachmentStore path (e.g. `inbound/abc.png` from a " +
+          "user-uploaded image, or `generated/xyz.png` from an image you previously " +
+          "generated). The `prompt` describes the edit; the reference image is what " +
+          "you're editing.",
+      ]
+    : [];
   return [
     "Generate an image from a text description. The image is returned to the user.",
     "",
     "Choose the model based on the task:",
     ...lines,
+    ...referenceImageNote,
     "",
     "Write a detailed prompt — describe subject, style, composition, colors, and mood. " +
       "The prompt is the main lever for image quality.",
@@ -106,10 +129,12 @@ export function createImageTools(deps: {
       ? z.enum([...ratioUnion] as [string, ...string[]]).optional()
       : z.never().optional();
 
+  const anyImageInput = deps.models.some((m) => m.capabilities.imageInput !== undefined);
+
   return [
     defineTool({
       name: "generate_image",
-      description: buildToolDescription(deps.models),
+      description: buildToolDescription(deps.models, anyImageInput),
       // Durable: each call bills $0.02-$0.04 and uploads to AttachmentStore.
       // On Inngest retry the cached JSON result (path + mediaType) replays,
       // so we neither re-bill the provider nor produce duplicate uploads.
@@ -122,6 +147,13 @@ export function createImageTools(deps: {
           .describe("Model — choose based on task (see tool description)"),
         aspectRatio: aspectRatioField.describe("Aspect ratio (if model supports it)"),
         seed: z.number().int().optional().describe("Seed (if model honors it)"),
+        referenceImage: z
+          .string()
+          .optional()
+          .describe(
+            "AttachmentStore path of an image to edit. Only valid for models " +
+              "marked `[needs reference image]` or `[optional reference image]`.",
+          ),
       }),
       handler: async (input) => {
         const row = modelByName.get(input.model);
@@ -147,6 +179,35 @@ export function createImageTools(deps: {
           return `Error: model ${row.name} does not support aspect ratio ${input.aspectRatio}. ${hint}`;
         }
 
+        // Reference-image gating. Three text-recoverable error shapes the
+        // LLM can act on: (a) required-but-missing → re-call with the path;
+        // (b) supplied-but-unsupported by this model → pick a different
+        // model or drop the field; (c) supplied to a non-fal provider →
+        // pick a fal model (the only validated path today). The fetch
+        // itself is wrapped: an attachment-store miss surfaces as a text
+        // error rather than a thrown rejection that crashes the turn.
+        const imageInputCap = row.capabilities.imageInput;
+        if (imageInputCap === "required" && !input.referenceImage) {
+          return (
+            `Error: model ${row.name} is an image-editing model and requires ` +
+            "`referenceImage` — pass the AttachmentStore path of the image you want to edit."
+          );
+        }
+        if (input.referenceImage && imageInputCap === undefined) {
+          return `Error: model ${row.name} does not accept a reference image. Drop \`referenceImage\` or pick a model marked \`[needs reference image]\` or \`[optional reference image]\`.`;
+        }
+        if (input.referenceImage && provider.kind !== "fal") {
+          return `Error: reference images are only supported by fal providers today (got ${provider.kind}). Pick a fal-backed model marked \`[needs reference image]\`.`;
+        }
+        let referenceImageBytes: Buffer | undefined;
+        if (input.referenceImage) {
+          try {
+            referenceImageBytes = await deps.attachments.download(input.referenceImage);
+          } catch (err) {
+            return `Error: couldn't load referenceImage "${input.referenceImage}": ${(err as Error).message}`;
+          }
+        }
+
         const imageModel =
           provider.kind === "fal"
             ? provider.provider.image(row.modelString)
@@ -154,6 +215,16 @@ export function createImageTools(deps: {
         const shouldForwardAspect =
           input.aspectRatio !== undefined && supportedRatios.includes(input.aspectRatio);
         const shouldForwardSeed = input.seed !== undefined && row.capabilities.seed === true;
+
+        // The AI SDK's `prompt` field accepts either `string` (text-only) or
+        // `{ text, images }` (image input). The latter is a fal-provider
+        // extension at runtime — the SDK's public type only declares `string`,
+        // so we type the value precisely here and cast only at the
+        // `generateImage` call site.
+        type GeneratePromptArg = string | { text: string; images: Buffer[] };
+        const promptArg: GeneratePromptArg = referenceImageBytes
+          ? { text: input.prompt, images: [referenceImageBytes] }
+          : input.prompt;
 
         const { image } = await withRetry(
           async () => {
@@ -164,7 +235,12 @@ export function createImageTools(deps: {
               // `!== undefined` re-narrows for `exactOptionalPropertyTypes`.
               return await generateImage({
                 model: imageModel,
-                prompt: input.prompt,
+                // `prompt` accepts the object shape at runtime for fal but the
+                // public `generateImage` signature only declares `string`
+                // (provider-specific extension surfaced via fal's
+                // `prompt.images` — see vercel/ai #11573 thread on
+                // ai-sdk-providers/fal docs).
+                prompt: promptArg as unknown as string,
                 ...(shouldForwardAspect &&
                   input.aspectRatio !== undefined && {
                     aspectRatio: input.aspectRatio as `${number}:${number}`,

@@ -312,6 +312,149 @@ describe("createImageTools", () => {
     expect(callArg).toMatchObject({ seed: 42 });
   });
 
+  it("rejects a call to a model with imageInput:required when referenceImage is missing", async () => {
+    const [tool] = createImageTools({
+      models: [
+        falModel({
+          name: "fal/flux-kontext",
+          modelString: "fal-ai/flux-pro/kontext",
+          description: "image editing",
+          capabilities: { aspectRatios: ["1:1"], imageInput: "required" },
+        }),
+      ],
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
+      attachments: fakeAttachments(),
+    });
+    const result = await tool!.handler(
+      { prompt: "make it sepia", model: "fal/flux-kontext" },
+      FAKE_SERVICE,
+    );
+    expect(result).toMatch(/requires `referenceImage`/);
+    expect(mockGenerateImage).not.toHaveBeenCalled();
+  });
+
+  it("rejects referenceImage when the picked model is text-only", async () => {
+    const [tool] = createImageTools({
+      models: [falModel()],
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
+      attachments: fakeAttachments(),
+    });
+    const result = await tool!.handler(
+      {
+        prompt: "x",
+        model: "fal/flux-dev",
+        referenceImage: "inbound/photo.png",
+      },
+      FAKE_SERVICE,
+    );
+    expect(result).toMatch(/does not accept a reference image/);
+    expect(mockGenerateImage).not.toHaveBeenCalled();
+  });
+
+  it("rejects referenceImage for non-fal providers (today)", async () => {
+    const { provider } = fakeOaiProvider();
+    const model = falModel({
+      providerId: "provider-2",
+      name: "venice/edit",
+      modelString: "edit-model",
+      capabilities: { imageInput: "optional" },
+      provider: provider.row,
+    });
+    const [tool] = createImageTools({
+      models: [model],
+      providers: new Map([["provider-2", provider]]),
+      attachments: fakeAttachments(),
+    });
+    const result = await tool!.handler(
+      {
+        prompt: "make changes",
+        model: "venice/edit",
+        referenceImage: "inbound/photo.png",
+      },
+      FAKE_SERVICE,
+    );
+    expect(result).toMatch(/only supported by fal providers today/);
+    expect(mockGenerateImage).not.toHaveBeenCalled();
+  });
+
+  it("forwards reference image bytes via the `prompt` object shape on fal", async () => {
+    mockGenerateImage.mockResolvedValueOnce({
+      image: { uint8Array: new Uint8Array([1]), mediaType: "image/png" },
+    });
+    const refBytes = Buffer.from([0xff, 0xd8, 0xff]); // first JPEG bytes
+    const attachments = fakeAttachments();
+    attachments.download = vi.fn().mockResolvedValue(refBytes);
+    const [tool] = createImageTools({
+      models: [
+        falModel({
+          name: "fal/flux-kontext",
+          modelString: "fal-ai/flux-pro/kontext",
+          capabilities: { aspectRatios: ["1:1"], imageInput: "required" },
+        }),
+      ],
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
+      attachments,
+    });
+    await tool!.handler(
+      {
+        prompt: "make it watercolor",
+        model: "fal/flux-kontext",
+        referenceImage: "inbound/cat.png",
+      },
+      FAKE_SERVICE,
+    );
+    expect(attachments.download).toHaveBeenCalledWith("inbound/cat.png");
+    const callArg = mockGenerateImage.mock.calls[0]?.[0];
+    expect(callArg).toMatchObject({
+      prompt: {
+        text: "make it watercolor",
+        images: [refBytes],
+      },
+    });
+  });
+
+  it("surfaces AttachmentStore download failures as text errors", async () => {
+    const attachments = fakeAttachments();
+    attachments.download = vi.fn().mockRejectedValue(new Error("no such key"));
+    const [tool] = createImageTools({
+      models: [
+        falModel({
+          name: "fal/flux-kontext",
+          modelString: "fal-ai/flux-pro/kontext",
+          capabilities: { aspectRatios: ["1:1"], imageInput: "required" },
+        }),
+      ],
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
+      attachments,
+    });
+    const result = await tool!.handler(
+      {
+        prompt: "x",
+        model: "fal/flux-kontext",
+        referenceImage: "inbound/missing.png",
+      },
+      FAKE_SERVICE,
+    );
+    expect(result).toMatch(/couldn't load referenceImage/);
+    expect(mockGenerateImage).not.toHaveBeenCalled();
+  });
+
+  it("annotates the tool description with imageInput hints", () => {
+    const [tool] = createImageTools({
+      models: [
+        falModel(),
+        falModel({
+          name: "fal/flux-kontext",
+          capabilities: { aspectRatios: ["1:1"], imageInput: "required" },
+        }),
+      ],
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
+      attachments: fakeAttachments(),
+    });
+    expect(tool!.description).toMatch(/\[needs reference image\]/);
+    expect(tool!.description).toMatch(/referenceImage/);
+  });
+
   it("promotes non-retryable APICallErrors to AbortError", async () => {
     mockGenerateImage.mockRejectedValueOnce(new FakeAPICallError("auth failed", false));
     const [tool] = createImageTools({
