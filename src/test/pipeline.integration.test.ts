@@ -48,11 +48,11 @@ beforeAll(async () => {
   // Wire app in-process and register Inngest functions via connect mode (WebSocket).
   // Connect mode self-registers with the Inngest dev server — no discovery needed.
   // providerOverride: tests use llmock fixtures, not a real LLM provider from DB.
-  // In LLMOCK_RECORD=1, llmock proxies to real Anthropic and forwards the
+  // In RECORD=1, llmock proxies to real Anthropic and forwards the
   // Authorization header as-is — pass the real key when recording.
   const { AnthropicProvider } = await import("../llm/anthropic.js");
   const anthropicKey =
-    process.env.LLMOCK_RECORD === "1" ? (process.env.ANTHROPIC_API_KEY ?? "test-key") : "test-key";
+    process.env.RECORD === "1" ? (process.env.ANTHROPIC_API_KEY ?? "test-key") : "test-key";
   const provider = new AnthropicProvider(anthropicKey, inject("llmockBaseUrl"));
 
   // Scoped fetch wrapper for fal.ai traffic — intercepts fal endpoints only,
@@ -160,7 +160,7 @@ async function loadInboundOgg(): Promise<Buffer> {
   } catch {
     if (process.env.RECORD !== "1") {
       throw new Error(
-        `Missing fixture ${INBOUND_OGG_PATH}. Run once with RECORD=1 LLMOCK_RECORD=1 OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-... pnpm test:integration to seed (voice + LLM fixtures are both required).`,
+        `Missing fixture ${INBOUND_OGG_PATH}. Run once with \`pnpm test:record\` to seed (voice + LLM fixtures are both required; ensure OPENAI_API_KEY + ANTHROPIC_API_KEY are set in .env).`,
       );
     }
     const apiKey = process.env.OPENAI_API_KEY;
@@ -315,7 +315,7 @@ describe("message pipeline", () => {
       .returning({ id: channelSessions.id });
 
     // User prompt must match the llmock fixture trigger. Record mode
-    // (LLMOCK_RECORD=1) captures the LLM round trip; replay uses the saved
+    // (RECORD=1) captures the LLM round trip; replay uses the saved
     // tool_use { name: "generate_image" } response.
     const [inbound] = await db
       .insert(inboundMessages)

@@ -23,8 +23,8 @@
     "typecheck": "tsc",
     "test": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
-    "test:record": "LLMOCK_RECORD=1 vitest run --project integration",
-    "test:record:e2e": "LLMOCK_RECORD=1 vitest run --project e2e",
+    "test:record": "RECORD=1 vitest run --project integration",
+    "test:record:e2e": "RECORD=1 vitest run --project e2e",
     "test:e2e": "vitest run --project e2e",
     "test:all": "vitest run",
     "test:watch": "vitest --project unit",
@@ -102,6 +102,7 @@
     "@types/picomatch": "^4.0.3",
     "@types/semver": "^7.7.1",
     "@types/split2": "4.2.3",
+    "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^4.1.5",
     "dotenv": "^17.3.1",
     "drizzle-kit": "^0.31.10",
@@ -113,7 +114,8 @@
     "type-fest": "^5.6.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5",
-    "vitest-mock-extended": "4.0.0"
+    "vitest-mock-extended": "4.0.0",
+    "ws": "^8.20.0"
   },
   "pnpm": {
     "overrides": {
