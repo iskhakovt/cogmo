@@ -161,9 +161,9 @@ export async function runObserver(
   // rewrapped as `NonRetriableError` so Inngest doesn't burn its
   // single retry on a misconfiguration; transient infra errors keep
   // their plain shape and follow the default retry path.
-  let provider: Awaited<ReturnType<typeof resolveProvider>>;
+  let provider: Awaited<ReturnType<typeof resolveProvider>>["provider"];
   try {
-    provider = await resolveProvider(model);
+    ({ provider } = await resolveProvider(model));
   } catch (err) {
     if (err instanceof ProviderConfigError) {
       throw new NonRetriableError(err.message, { cause: err });

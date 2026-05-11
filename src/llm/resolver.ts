@@ -1,13 +1,16 @@
 /**
- * LLM provider resolver — model → `LlmProvider` lookup, evaluated per
- * call.
+ * LLM provider resolver — model → `{ provider, limits }` lookup, evaluated
+ * per call.
  *
  * The agent loop reads `profiles.model` from the per-turn snapshot, so the
  * provider that serves it must be chosen **after** the snapshot is loaded,
  * not at bootstrap. The resolver type abstracts that lookup; the DB-backed
  * implementation in {@link createDbProviderResolver} reads `model_providers`,
- * decrypts each row's API key, and wraps the ordered candidate list in a
- * `FallbackLlmProvider` (single-row chains stay no-op pass-throughs).
+ * decrypts each row's API key, wraps the ordered candidate list in a
+ * `FallbackLlmProvider` (single-row chains stay no-op pass-throughs), and
+ * surfaces the primary row's optional context-window / max-output overrides
+ * alongside the provider so the caller can resolve effective limits without
+ * a second DB read.
  *
  * Per-model results are memoized for the process lifetime — provider
  * adapters and decrypted secrets are immutable for a given row, and the
@@ -20,10 +23,24 @@ import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { FallbackLlmProvider } from "./fallback.js";
+import type { PartialLimits } from "./models.js";
 import { OpenAICompatibleProvider } from "./openai-compat.js";
 import type { LlmProvider } from "./provider.js";
 
-export type LlmProviderResolver = (model: string) => Promise<LlmProvider>;
+/**
+ * One resolved (model → provider) routing decision. The primary row's
+ * optional limit columns ride along so callers don't have to make a second
+ * DB read to compute the context budget. `limits.contextWindow` /
+ * `maxOutputTokens` are `null` when the operator hasn't set an override —
+ * the caller hands them to {@link resolveLimits} which layers the LiteLLM
+ * snapshot and conservative default.
+ */
+export interface ResolvedLlm {
+  provider: LlmProvider;
+  limits: PartialLimits;
+}
+
+export type LlmProviderResolver = (model: string) => Promise<ResolvedLlm>;
 
 /**
  * Permanent provider-resolution failures — missing routing row, missing
@@ -56,13 +73,13 @@ export interface DbResolverDeps {
  * rewraps the former as `NonRetriableError`.
  */
 export function createDbProviderResolver(deps: DbResolverDeps): LlmProviderResolver {
-  const cache = new Map<string, Promise<LlmProvider>>();
+  const cache = new Map<string, Promise<ResolvedLlm>>();
 
   return (model: string) => {
     const cached = cache.get(model);
     if (cached) return cached;
 
-    const promise = buildProvider(model, deps).catch((err) => {
+    const promise = buildResolved(model, deps).catch((err) => {
       // Don't poison the cache on transient errors (DB blip, secret missing
       // mid-rotation) — drop the entry so the next turn retries.
       cache.delete(model);
@@ -73,7 +90,7 @@ export function createDbProviderResolver(deps: DbResolverDeps): LlmProviderResol
   };
 }
 
-async function buildProvider(model: string, deps: DbResolverDeps): Promise<LlmProvider> {
+async function buildResolved(model: string, deps: DbResolverDeps): Promise<ResolvedLlm> {
   const rows = await deps.runInTx((tx) => deps.agentStore.listProvidersForModel(tx, model));
   if (rows.length === 0) {
     throw new ProviderConfigError(
@@ -88,7 +105,23 @@ async function buildProvider(model: string, deps: DbResolverDeps): Promise<LlmPr
   // DB reads on first miss for fallback chains; only matters when N > 1
   // but cheap to do right. Matches the snippet in `design/providers.md`.
   const providers = await Promise.all(rows.map((row) => buildAdapter(row, deps)));
-  return new FallbackLlmProvider(providers);
+  // Limits come from the primary row (position 0). Fallback rows can carry
+  // their own limits in the schema, but we currently apply only the
+  // primary's — the fallback wrapper picks one chain per turn and we don't
+  // recompute the budget mid-turn if it switches providers.
+  const primary = rows[0];
+  if (!primary) {
+    // Defensive: rows.length > 0 above guarantees this, but the type checker
+    // doesn't know `rows[0]` is non-undefined under noUncheckedIndexedAccess.
+    throw new ProviderConfigError(`No primary provider row for model "${model}"`);
+  }
+  return {
+    provider: new FallbackLlmProvider(providers),
+    limits: {
+      contextWindow: primary.contextWindow,
+      maxOutputTokens: primary.maxOutputTokens,
+    },
+  };
 }
 
 type ProviderRow = Awaited<ReturnType<AgentStore["listProvidersForModel"]>>[number];
@@ -124,8 +157,17 @@ async function buildAdapter(row: ProviderRow, deps: DbResolverDeps): Promise<Llm
 
 /**
  * Trivial resolver that returns the same provider for every model. Used by
- * tests and by the `providerOverride` bootstrap option.
+ * tests and by the `providerOverride` bootstrap option. Limits default to
+ * `{ null, null }` — the caller's resolver layer falls through to LiteLLM
+ * or the conservative default. Pass an explicit `limits` to pin them.
  */
-export function constantResolver(provider: LlmProvider): LlmProviderResolver {
-  return () => Promise.resolve(provider);
+export function constantResolver(
+  provider: LlmProvider,
+  limits?: PartialLimits,
+): LlmProviderResolver {
+  const resolved: ResolvedLlm = {
+    provider,
+    limits: limits ?? { contextWindow: null, maxOutputTokens: null },
+  };
+  return () => Promise.resolve(resolved);
 }

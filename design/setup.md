@@ -38,7 +38,8 @@ The wizard is a linear sequence of steps. Each step:
 | Migrations | Yes | Drizzle's own check |
 | Default user + profile | Yes | Row count → idempotent seed |
 | LLM provider (type + API key) | Yes (at least one) | `GET /v1/models` or Anthropic equivalent |
-| Link default profile → provider | Yes | — |
+| Pick at least one model for the provider | Yes | Discovered via `/v1/models`, surfaced via searchable `autocomplete` picker. OpenRouter responses include inline `context_length` / `max_completion_tokens` that flow straight into the row override; other providers fall back to the bundled LiteLLM snapshot at resolver time. Custom endpoints that don't expose `/v1/models` (or return 404) fall back to free-form text input. External-API failures prompt `retry / skip / abort` rather than auto-advancing. |
+| Loop: add another model for this provider? | No | Same picker; defaults to "no" |
 | Tavily API key | No | Ping Tavily endpoint |
 | OpenRouter key for web_answer | No | Ping endpoint |
 | Hindsight URL | Yes | `GET /health` |
@@ -85,6 +86,9 @@ For CI, IaC, or Docker entrypoint scripts. Reads from env vars with the `COGMO_`
 | `COGMO_LLM_PROVIDER_TYPE` | Provider type (`anthropic` \| `openrouter` \| `openai` \| `custom`) | Yes |
 | `COGMO_LLM_API_KEY` (+ `_FILE`) | Provider API key | Yes |
 | `COGMO_LLM_BASE_URL` | Provider base URL (required when type is `custom`) | Optional |
+| `COGMO_LLM_MODEL` | Model id to route to this provider. Defaults to the seeded profile's model when omitted, preserving the legacy "wire the provider, leave the model alone" flow. | Optional |
+| `COGMO_LLM_CONTEXT_WINDOW` | Explicit context window override stored on the routing row. Omit to let the resolver fall through to the bundled LiteLLM snapshot → conservative default. | Optional |
+| `COGMO_LLM_MAX_OUTPUT_TOKENS` | Explicit max-output-tokens override on the routing row. Same fallback semantics. | Optional |
 | `COGMO_TELEGRAM_BOT_TOKEN` (+ `_FILE`) | Telegram bot token | Optional |
 | `COGMO_TELEGRAM_ALLOWED_USERS` | Comma-separated Telegram user IDs | Required with token |
 | `COGMO_TAVILY_API_KEY` (+ `_FILE`) | Tavily API key | Optional |
@@ -104,9 +108,24 @@ Exits 0 on success, non-zero on missing required env vars or validation failures
 
 **Status:** `[confirmed]`. Implemented in `src/setup/non-interactive.ts`. See `src/setup/env.ts` for the Zod schema.
 
+### Post-setup CLI
+
+Provider and model management after first-run lives in dedicated subcommands so operators don't have to re-run the whole wizard to add a single model:
+
+| Command | Purpose |
+|-|-|
+| `cogmo provider add <type> <name> <api-key> [base-url]` | Register a new provider. Validates the key the same way the wizard does. |
+| `cogmo provider list` | Show registered providers (name, type, base URL). |
+| `cogmo provider remove <name>` | Delete a provider; cascades to its `model_providers` rows. |
+| `cogmo model add <id> --provider <name> [--context N --max-output N --position N]` | Insert a routing row. `--context` / `--max-output` override the bundled LiteLLM defaults; omit to let the resolver pick. |
+| `cogmo model list [--model <id>] [--provider <name>]` | Show routing rows with effective limits and source (`db`/`litellm`/`default`). |
+| `cogmo model remove <id> [--provider <name>]` | Remove one row or every row for the model. |
+
+Both CLIs share their domain functions with the wizard (`src/agent/provider/add-provider.ts`, `src/agent/provider/add-model-routing.ts`) — the wizard is a thin interactive front-end over the same code path.
+
 ### Library
 
-`@clack/prompts` — modern CLI TUI with masked input, spinners, confirm prompts, multi-select. ~30 KB, MIT.
+`@clack/prompts` — modern CLI TUI with masked input, spinners, confirm prompts, multi-select, and (new) `autocomplete` for searchable pickers used by the model step. ~30 KB, MIT.
 
 ## What the wizard does NOT do
 

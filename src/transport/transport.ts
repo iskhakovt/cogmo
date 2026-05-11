@@ -26,7 +26,7 @@ import type {
 import type { ProfileMemoryScope, ToolSet } from "../agent/store/schema.js";
 import type { Transaction, Transactor } from "../db/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
-import { computeBudget } from "../llm/models.js";
+import { computeBudget, resolveLimits } from "../llm/models.js";
 import { logger } from "../logger.js";
 import {
   type McpServer,
@@ -130,10 +130,10 @@ export interface CurrentConversation {
  *
  * `lastTurn` is `null` until the first assistant row exists. `mcp` is `null`
  * when the deployment has no MCP registry wired (`mcp_disabled` in other
- * surfaces). `contextBudget` is `null` when the active model is not in the
- * registry — defensive against operator-set models that haven't been
- * registered (next inbound would fail anyway, but `/status` should still
- * render).
+ * surfaces). `contextBudget` is `null` when the model is unknown to both
+ * the DB override and the bundled LiteLLM snapshot — the resolver still
+ * returns a conservative default for the agent loop, but `/status` would
+ * mislead by displaying that guess as fact, so we elide it instead.
  */
 export interface ConversationStatusSummary {
   conversationId: string;
@@ -825,15 +825,16 @@ export function createTransport(deps: {
             ]);
             if (!stats) return err({ code: "conversation_not_found" as const });
 
-            // computeBudget throws on unknown models — degrade to null so /status
-            // still renders. The next real inbound would fail anyway; surfacing
-            // that here would block status visibility on a misconfigured profile.
-            let contextBudget: number | null;
-            try {
-              contextBudget = computeBudget(profile.model);
-            } catch {
-              contextBudget = null;
-            }
+            // Resolve effective limits without a row override — `/status` is
+            // a read-only display, not a routing decision, so we don't pay
+            // for the per-turn DB read here. resolveLimits never throws:
+            // unknown models fall back to the conservative default. We
+            // surface `null` for the default-source case so the UI shows
+            // "model unknown" (sessions-ux renders the budget conditionally
+            // on this null) — the conservative default is a guess, not a
+            // known capacity worth displaying as fact.
+            const resolved = resolveLimits(profile.model);
+            const contextBudget = resolved.source === "default" ? null : computeBudget(resolved);
 
             const mcp =
               mcpServers === null

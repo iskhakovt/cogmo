@@ -80,6 +80,8 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     listProvidersForModel: vi.fn().mockResolvedValue([]),
     getNextModelProviderPosition: vi.fn().mockResolvedValue(0),
     removeModelProvidersByProvider: vi.fn().mockResolvedValue(undefined),
+    removeModelProvider: vi.fn().mockResolvedValue(undefined),
+    listAllModels: vi.fn().mockResolvedValue([]),
     listProfileClasses: vi.fn().mockResolvedValue([]),
     createProfileClass: vi.fn().mockResolvedValue({
       id: "class-1",
@@ -429,7 +431,13 @@ export function mockResolver(
       if (!provider) {
         return Promise.reject(new Error(`mockResolver: no provider configured for "${model}"`));
       }
-      return Promise.resolve(provider);
+      // Mock: no row override; the resolver layer falls through to LiteLLM
+      // / default. Tests that need explicit limits should override at the
+      // resolveLimits layer or use `constantResolver(provider, { ... })`.
+      return Promise.resolve({
+        provider,
+        limits: { contextWindow: null, maxOutputTokens: null },
+      });
     };
   }
   return constantResolver(arg ?? mockProvider());

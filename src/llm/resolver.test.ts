@@ -16,6 +16,8 @@ type ProviderRow = {
   baseUrl: string | null;
   secretId: string;
   attrs: { promptCaching?: boolean; headers?: Record<string, string> };
+  contextWindow: number | null;
+  maxOutputTokens: number | null;
 };
 
 function row(overrides: Partial<ProviderRow> = {}): ProviderRow {
@@ -26,6 +28,8 @@ function row(overrides: Partial<ProviderRow> = {}): ProviderRow {
     baseUrl: null,
     secretId: "secret-1",
     attrs: {},
+    contextWindow: null,
+    maxOutputTokens: null,
     ...overrides,
   };
 }
@@ -60,7 +64,7 @@ describe("createDbProviderResolver — happy path", () => {
   it("returns a FallbackLlmProvider that wraps the configured chain", async () => {
     const { agentStore, secretsStore } = makeDeps();
     const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
-    const provider = await resolve("claude-sonnet-4-6");
+    const { provider } = await resolve("claude-sonnet-4-6");
     expect(provider).toBeInstanceOf(FallbackLlmProvider);
   });
 
@@ -75,7 +79,7 @@ describe("createDbProviderResolver — happy path", () => {
       rows: [row({ type: "anthropic", baseUrl: "https://custom.anthropic.test" })],
     });
     const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
-    const provider = await resolve("m");
+    const { provider } = await resolve("m");
     expect(provider).toBeInstanceOf(FallbackLlmProvider);
     expect(provider.name).toBe("anthropic");
   });
@@ -92,7 +96,7 @@ describe("createDbProviderResolver — happy path", () => {
       ],
     });
     const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
-    const provider = await resolve("grok-4");
+    const { provider } = await resolve("grok-4");
     expect(provider).toBeInstanceOf(FallbackLlmProvider);
     // Single-row fallback wrapper inherits the inner provider's name; the
     // OpenAI-compatible adapter copies `name` from its constructor arg,
@@ -114,11 +118,27 @@ describe("createDbProviderResolver — happy path", () => {
       ],
     });
     const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
-    const provider = await resolve("m");
+    const { provider } = await resolve("m");
     // anthropic adapter's inner name is hardcoded to "anthropic"; the second
     // row uses its DB `name` ("fallback-or"). Composite shape proves both
     // adapters were constructed in order.
     expect(provider.name).toBe("fallback(anthropic,fallback-or)");
+  });
+
+  it("surfaces the primary row's optional limits alongside the provider", async () => {
+    const { agentStore, secretsStore } = makeDeps({
+      rows: [row({ contextWindow: 500_000, maxOutputTokens: 16_000 })],
+    });
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
+    const { limits } = await resolve("m");
+    expect(limits).toEqual({ contextWindow: 500_000, maxOutputTokens: 16_000 });
+  });
+
+  it("surfaces null limits when the primary row has no override", async () => {
+    const { agentStore, secretsStore } = makeDeps();
+    const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
+    const { limits } = await resolve("m");
+    expect(limits).toEqual({ contextWindow: null, maxOutputTokens: null });
   });
 });
 
@@ -205,7 +225,7 @@ describe("createDbProviderResolver — caching", () => {
 
     await expect(resolve("flaky")).rejects.toThrow(/transient db error/);
     // Second call must retry, not return the cached rejection
-    const provider = await resolve("flaky");
+    const { provider } = await resolve("flaky");
     expect(provider).toBeInstanceOf(FallbackLlmProvider);
     expect(listProvidersForModel).toHaveBeenCalledTimes(2);
   });
@@ -214,6 +234,7 @@ describe("createDbProviderResolver — caching", () => {
     const { agentStore, secretsStore, listProvidersForModel, getSecretById } = makeDeps();
     const resolve = createDbProviderResolver({ runInTx: fakeRunInTx, agentStore, secretsStore });
     const [a, b, c] = await Promise.all([resolve("m"), resolve("m"), resolve("m")]);
+    // Same memoized ResolvedLlm wrapper across calls.
     expect(a).toBe(b);
     expect(b).toBe(c);
     // Even with three parallel calls, the underlying lookup runs once.
@@ -226,7 +247,19 @@ describe("constantResolver", () => {
   it("returns the same provider for every model", async () => {
     const provider = mockProvider();
     const resolve = constantResolver(provider);
-    expect(await resolve("anything")).toBe(provider);
-    expect(await resolve("else")).toBe(provider);
+    expect((await resolve("anything")).provider).toBe(provider);
+    expect((await resolve("else")).provider).toBe(provider);
+  });
+
+  it("defaults limits to null/null when none are passed", async () => {
+    const provider = mockProvider();
+    const resolve = constantResolver(provider);
+    expect((await resolve("m")).limits).toEqual({ contextWindow: null, maxOutputTokens: null });
+  });
+
+  it("propagates explicit limits when passed", async () => {
+    const provider = mockProvider();
+    const resolve = constantResolver(provider, { contextWindow: 200_000, maxOutputTokens: 8_000 });
+    expect((await resolve("m")).limits).toEqual({ contextWindow: 200_000, maxOutputTokens: 8_000 });
   });
 });

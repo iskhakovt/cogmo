@@ -47,6 +47,18 @@ async function dispatch(cmd: string): Promise<number> {
       const { skillRunner } = await bootstrapSkillRunner(core, NO_SANDBOX);
       return runSkillsCli(process.argv.slice(3), skillRunner);
     }
+    case "provider": {
+      const { runProviderCli } = await import("./cli/provider.js");
+      const { bootstrapCore } = await import("./index.js");
+      const { agentStore, runInTx, secretsStore } = await bootstrapCore();
+      return runProviderCli(process.argv.slice(3), { agentStore, runInTx, secretsStore });
+    }
+    case "model": {
+      const { runModelCli } = await import("./cli/model.js");
+      const { bootstrapCore } = await import("./index.js");
+      const { agentStore, runInTx } = await bootstrapCore();
+      return runModelCli(process.argv.slice(3), { agentStore, runInTx });
+    }
     case "migrate-memories":
     case "backfill": {
       const { runMigrateMemoriesCli, runBackfillProfileClassCli } = await import(
@@ -74,7 +86,9 @@ async function dispatch(cmd: string): Promise<number> {
     }
     default:
       console.error(`Unknown command: ${cmd}`);
-      console.error("Usage: main.js [serve|seed|setup|gen-key|skills|migrate-memories|backfill]");
+      console.error(
+        "Usage: main.js [serve|seed|setup|gen-key|provider|model|skills|migrate-memories|backfill]",
+      );
       return 1;
   }
 }

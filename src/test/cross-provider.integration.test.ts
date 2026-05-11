@@ -139,7 +139,7 @@ afterAll(async () => {
 describe("createDbProviderResolver — DB-backed cross-provider routing", () => {
   it("resolves the anthropic model to an Anthropic adapter", async () => {
     const resolve = createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
-    const provider = await resolve(MODEL_ANTHROPIC);
+    const { provider } = await resolve(MODEL_ANTHROPIC);
     expect(provider).toBeInstanceOf(FallbackLlmProvider);
     // Single-row chain: FallbackLlmProvider inherits the inner provider's
     // name. AnthropicProvider hardcodes `name = "anthropic"`.
@@ -148,7 +148,7 @@ describe("createDbProviderResolver — DB-backed cross-provider routing", () => 
 
   it("resolves the xAI model to an OpenAI-compatible adapter", async () => {
     const resolve = createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
-    const provider = await resolve(MODEL_XAI);
+    const { provider } = await resolve(MODEL_XAI);
     expect(provider).toBeInstanceOf(FallbackLlmProvider);
     // OpenAICompatibleProvider's name comes from its constructor arg, which
     // we plumb from the DB row. Different shape than the anthropic adapter.
@@ -162,8 +162,8 @@ describe("createDbProviderResolver — DB-backed cross-provider routing", () => 
     // The whole point of per-turn dispatch: two models, two adapter
     // instances. Bootstrap-only resolution would have produced one
     // singleton and ignored the second model entirely.
-    expect(a).not.toBe(b);
-    expect(a.name).not.toBe(b.name);
+    expect(a.provider).not.toBe(b.provider);
+    expect(a.provider.name).not.toBe(b.provider.name);
   });
 
   it("memoizes per model — second resolution returns the same instance", async () => {
@@ -184,7 +184,7 @@ describe("createDbProviderResolver — DB-backed cross-provider routing", () => 
 
   it("anthropic adapter completes a real chat round-trip via llmock /v1/messages", async () => {
     const resolve = createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
-    const provider = await resolve(MODEL_ANTHROPIC);
+    const { provider } = await resolve(MODEL_ANTHROPIC);
     const response = await provider.chat({
       model: MODEL_ANTHROPIC,
       system: "test",
@@ -208,7 +208,7 @@ describe("createDbProviderResolver — DB-backed cross-provider routing", () => 
 
   it("openai-compatible adapter completes a real chat round-trip via llmock /v1/chat/completions", async () => {
     const resolve = createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
-    const provider = await resolve(MODEL_XAI);
+    const { provider } = await resolve(MODEL_XAI);
     const response = await provider.chat({
       model: MODEL_XAI,
       system: "test",

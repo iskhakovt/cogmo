@@ -295,7 +295,11 @@ describe("runObserver — real PG + recording memory mock", () => {
         runInTx: fakeRunInTx,
         agentStore: store,
         transportStore,
-        resolveProvider: () => Promise.resolve(stub.provider),
+        resolveProvider: () =>
+          Promise.resolve({
+            provider: stub.provider,
+            limits: { contextWindow: null, maxOutputTokens: null },
+          }),
         memory: recorder.memory,
       },
     );
@@ -320,7 +324,11 @@ describe("runObserver — real PG + recording memory mock", () => {
       runInTx: fakeRunInTx,
       agentStore: store,
       transportStore,
-      resolveProvider: () => Promise.resolve(stub.provider),
+      resolveProvider: () =>
+        Promise.resolve({
+          provider: stub.provider,
+          limits: { contextWindow: null, maxOutputTokens: null },
+        }),
       memory: recorder.memory,
     });
     expect(result).toEqual({ status: "skipped", reason: "too_short" });
@@ -346,7 +354,11 @@ describe("runObserver — real PG + recording memory mock", () => {
       runInTx: fakeRunInTx,
       agentStore: store,
       transportStore,
-      resolveProvider: () => Promise.resolve(stub.provider),
+      resolveProvider: () =>
+        Promise.resolve({
+          provider: stub.provider,
+          limits: { contextWindow: null, maxOutputTokens: null },
+        }),
       memory: recorder.memory,
     });
 
@@ -397,7 +409,11 @@ describe("runObserver — real PG + recording memory mock", () => {
       runInTx: fakeRunInTx,
       agentStore: store,
       transportStore,
-      resolveProvider: () => Promise.resolve(stub.provider),
+      resolveProvider: () =>
+        Promise.resolve({
+          provider: stub.provider,
+          limits: { contextWindow: null, maxOutputTokens: null },
+        }),
       memory: recorder.memory,
     });
 
@@ -428,7 +444,11 @@ describe("runObserver — real PG + recording memory mock", () => {
       runInTx: fakeRunInTx,
       agentStore: store,
       transportStore,
-      resolveProvider: () => Promise.resolve(stub.provider),
+      resolveProvider: () =>
+        Promise.resolve({
+          provider: stub.provider,
+          limits: { contextWindow: null, maxOutputTokens: null },
+        }),
       memory: recorder.memory,
     });
 
@@ -470,7 +490,11 @@ describe("runObserver — real PG + recording memory mock", () => {
       runInTx: fakeRunInTx,
       agentStore: store,
       transportStore,
-      resolveProvider: () => Promise.resolve(stub.provider),
+      resolveProvider: () =>
+        Promise.resolve({
+          provider: stub.provider,
+          limits: { contextWindow: null, maxOutputTokens: null },
+        }),
       memory: recorder.memory,
     });
 
@@ -501,7 +525,11 @@ describe("runObserver — real PG + recording memory mock", () => {
       runInTx: fakeRunInTx,
       agentStore: store,
       transportStore,
-      resolveProvider: () => Promise.resolve(stub.provider),
+      resolveProvider: () =>
+        Promise.resolve({
+          provider: stub.provider,
+          limits: { contextWindow: null, maxOutputTokens: null },
+        }),
       memory: recorder.memory,
     });
 
@@ -569,7 +597,11 @@ describe("runObserver — real PG + recording memory mock", () => {
       runInTx: fakeRunInTx,
       agentStore: store,
       transportStore,
-      resolveProvider: () => Promise.resolve(stub.provider),
+      resolveProvider: () =>
+        Promise.resolve({
+          provider: stub.provider,
+          limits: { contextWindow: null, maxOutputTokens: null },
+        }),
       memory: recorder.memory,
     });
 
@@ -627,7 +659,8 @@ describe("runObserver — real PG + recording memory mock", () => {
       runInTx: fakeRunInTx,
       agentStore: store,
       transportStore,
-      resolveProvider: () => Promise.resolve(provider),
+      resolveProvider: () =>
+        Promise.resolve({ provider, limits: { contextWindow: null, maxOutputTokens: null } }),
       memory: recorder.memory,
     });
 
@@ -707,7 +740,8 @@ describe("runObserver — real PG + recording memory mock", () => {
       runInTx: fakeRunInTx,
       agentStore: store,
       transportStore,
-      resolveProvider: () => Promise.resolve(provider),
+      resolveProvider: () =>
+        Promise.resolve({ provider, limits: { contextWindow: null, maxOutputTokens: null } }),
       memory: recorder.memory,
     });
 
