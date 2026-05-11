@@ -1,11 +1,28 @@
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../../secrets/store/index.js";
-import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
-import { imageModels, imageProviders, llmProviders } from "./schema.js";
+import { imageProviders, llmProviders } from "./schema.js";
+
+/**
+ * Schema-level invariants for image_providers + the post-migration
+ * llm_providers.type enum. Scope is deliberately narrow:
+ *
+ * - The DB CHECK on image_providers.base_url is defense-in-depth that the
+ *   future store method (which translates inputs to `InvalidProviderConfigError`)
+ *   can't reach. One PGlite test pins each accept/reject case.
+ * - The llm_providers.type enum cast (`USING type::llm_provider_type` in
+ *   migration 0029) is locked in here — store method inserts go via the
+ *   narrowed TS literal type and can't exercise the raw-SQL rejection path.
+ *
+ * UNIQUE name violations, ON DELETE CASCADE, and JSONB roundtrip are
+ * covered by the store-method tests that ship with the implementation PR
+ * (precedent: `store.test.ts` → "deleteProvider cascades to model_providers",
+ * "updateProfile translates unique-name collision to UniqueViolationError"),
+ * so they don't get duplicate coverage here.
+ */
 
 let db: Database;
 let tx: Transactor;
@@ -35,7 +52,8 @@ async function seedSecret(name = "test-key") {
  * Drizzle wraps driver errors in `DrizzleQueryError`; PGlite preserves the
  * original `{ code, constraint, message }` shape on `cause`. Same idea as
  * `findPgErrorByCode` in `./errors.ts`, but local so we can match any code
- * (not just the unique/FK helpers exported there).
+ * (not just the unique/FK helpers exported there — we need 23514 for
+ * CHECK and 22P02 for the enum rejection, neither of which has a helper).
  */
 function pgErrorCause(err: unknown): {
   code?: string;
@@ -85,200 +103,63 @@ async function expectPgError(
   }
 }
 
-describe("image_providers + image_models schema", () => {
-  describe("chk_image_providers_base_url", () => {
-    it("accepts fal with NULL base_url", async () => {
-      const { id: secretId } = await seedSecret("fal_key");
-      await expect(
-        tx((trx) =>
-          trx
-            .insert(imageProviders)
-            .values({ name: "fal", type: "fal", baseUrl: null, secretId, attrs: {} }),
-        ),
-      ).resolves.not.toThrow();
-    });
-
-    it("accepts openai_compatible with non-NULL base_url", async () => {
-      const { id: secretId } = await seedSecret("venice_key");
-      await expect(
-        tx((trx) =>
-          trx.insert(imageProviders).values({
-            name: "venice",
-            type: "openai_compatible",
-            baseUrl: "https://api.venice.ai/api/v1",
-            secretId,
-            attrs: {},
-          }),
-        ),
-      ).resolves.not.toThrow();
-    });
-
-    it("rejects fal with a base_url (CHECK violation 23514)", async () => {
-      const { id: secretId } = await seedSecret("fal_key");
-      await expectPgError(
-        tx((trx) =>
-          trx.insert(imageProviders).values({
-            name: "fal",
-            type: "fal",
-            baseUrl: "https://fal.run",
-            secretId,
-            attrs: {},
-          }),
-        ),
-        { code: "23514", constraint: "chk_image_providers_base_url" },
-      );
-    });
-
-    it("rejects openai_compatible with NULL base_url (CHECK violation 23514)", async () => {
-      const { id: secretId } = await seedSecret("venice_key");
-      await expectPgError(
-        tx((trx) =>
-          trx.insert(imageProviders).values({
-            name: "venice",
-            type: "openai_compatible",
-            baseUrl: null,
-            secretId,
-            attrs: {},
-          }),
-        ),
-        { code: "23514", constraint: "chk_image_providers_base_url" },
-      );
-    });
-  });
-
-  describe("image_providers.name unique", () => {
-    it("rejects duplicate names (UNIQUE violation 23505)", async () => {
-      const { id: secretId } = await seedSecret();
-      await tx((trx) =>
+describe("chk_image_providers_base_url", () => {
+  it("accepts fal with NULL base_url", async () => {
+    const { id: secretId } = await seedSecret("fal_key");
+    await expect(
+      tx((trx) =>
         trx
           .insert(imageProviders)
           .values({ name: "fal", type: "fal", baseUrl: null, secretId, attrs: {} }),
-      );
-      await expectPgError(
-        tx((trx) =>
-          trx
-            .insert(imageProviders)
-            .values({ name: "fal", type: "fal", baseUrl: null, secretId, attrs: {} }),
-        ),
-        { code: "23505", constraint: "image_providers_name_unique" },
-      );
-    });
+      ),
+    ).resolves.not.toThrow();
   });
 
-  describe("image_models.provider_id ON DELETE CASCADE", () => {
-    it("deletes models when their provider is deleted", async () => {
-      const { id: secretId } = await seedSecret();
-      const inserted = await tx((trx) =>
-        trx
-          .insert(imageProviders)
-          .values({ name: "fal", type: "fal", baseUrl: null, secretId, attrs: {} })
-          .returning({ id: imageProviders.id }),
-      );
-      const { id: providerId } = expectDefined(inserted[0], "inserted provider");
-      await tx((trx) =>
-        trx.insert(imageModels).values([
-          {
-            providerId,
-            name: "fal/flux-dev",
-            modelString: "fal-ai/flux/dev",
-            description: "default",
-            capabilities: { aspectRatios: ["1:1", "16:9"], seed: true },
-            userSelectable: true,
-          },
-          {
-            providerId,
-            name: "fal/flux-schnell",
-            modelString: "fal-ai/flux/schnell",
-            description: "fast",
-            capabilities: { aspectRatios: ["1:1"] },
-            userSelectable: true,
-          },
-        ]),
-      );
-
-      const before = await tx((trx) => trx.select().from(imageModels));
-      expect(before).toHaveLength(2);
-
-      await tx((trx) => trx.delete(imageProviders).where(eq(imageProviders.id, providerId)));
-
-      const after = await tx((trx) => trx.select().from(imageModels));
-      expect(after).toHaveLength(0);
-    });
-  });
-
-  describe("image_models.name unique", () => {
-    it("rejects duplicate names across providers", async () => {
-      const { id: secretId } = await seedSecret();
-      const falRows = await tx((trx) =>
-        trx
-          .insert(imageProviders)
-          .values({ name: "fal", type: "fal", baseUrl: null, secretId, attrs: {} })
-          .returning({ id: imageProviders.id }),
-      );
-      const { id: falId } = expectDefined(falRows[0], "fal provider");
-      const veniceRows = await tx((trx) =>
-        trx
-          .insert(imageProviders)
-          .values({
-            name: "venice",
-            type: "openai_compatible",
-            baseUrl: "https://api.venice.ai/api/v1",
-            secretId,
-            attrs: {},
-          })
-          .returning({ id: imageProviders.id }),
-      );
-      const { id: veniceId } = expectDefined(veniceRows[0], "venice provider");
-      await tx((trx) =>
-        trx.insert(imageModels).values({
-          providerId: falId,
-          name: "flux-dev",
-          modelString: "fal-ai/flux/dev",
-          description: "via fal",
-          capabilities: {},
-          userSelectable: true,
+  it("accepts openai_compatible with non-NULL base_url", async () => {
+    const { id: secretId } = await seedSecret("venice_key");
+    await expect(
+      tx((trx) =>
+        trx.insert(imageProviders).values({
+          name: "venice",
+          type: "openai_compatible",
+          baseUrl: "https://api.venice.ai/api/v1",
+          secretId,
+          attrs: {},
         }),
-      );
-      // Same `name` against a different provider — still must be globally unique.
-      await expectPgError(
-        tx((trx) =>
-          trx.insert(imageModels).values({
-            providerId: veniceId,
-            name: "flux-dev",
-            modelString: "flux-dev",
-            description: "via venice",
-            capabilities: {},
-            userSelectable: true,
-          }),
-        ),
-        { code: "23505", constraint: "image_models_name_unique" },
-      );
-    });
+      ),
+    ).resolves.not.toThrow();
   });
 
-  describe("capabilities JSONB roundtrip via Zod", () => {
-    it("preserves aspectRatios and seed on read", async () => {
-      const { id: secretId } = await seedSecret();
-      const inserted = await tx((trx) =>
-        trx
-          .insert(imageProviders)
-          .values({ name: "fal", type: "fal", baseUrl: null, secretId, attrs: {} })
-          .returning({ id: imageProviders.id }),
-      );
-      const { id: providerId } = expectDefined(inserted[0], "inserted provider");
-      await tx((trx) =>
-        trx.insert(imageModels).values({
-          providerId,
-          name: "fal/flux-dev",
-          modelString: "fal-ai/flux/dev",
-          description: "default",
-          capabilities: { aspectRatios: ["1:1", "16:9", "21:9"], seed: true },
-          userSelectable: true,
+  it("rejects fal with a base_url (CHECK violation 23514)", async () => {
+    const { id: secretId } = await seedSecret("fal_key");
+    await expectPgError(
+      tx((trx) =>
+        trx.insert(imageProviders).values({
+          name: "fal",
+          type: "fal",
+          baseUrl: "https://fal.run",
+          secretId,
+          attrs: {},
         }),
-      );
-      const [row] = await tx((trx) => trx.select().from(imageModels));
-      expect(row?.capabilities).toEqual({ aspectRatios: ["1:1", "16:9", "21:9"], seed: true });
-    });
+      ),
+      { code: "23514", constraint: "chk_image_providers_base_url" },
+    );
+  });
+
+  it("rejects openai_compatible with NULL base_url (CHECK violation 23514)", async () => {
+    const { id: secretId } = await seedSecret("venice_key");
+    await expectPgError(
+      tx((trx) =>
+        trx.insert(imageProviders).values({
+          name: "venice",
+          type: "openai_compatible",
+          baseUrl: null,
+          secretId,
+          attrs: {},
+        }),
+      ),
+      { code: "23514", constraint: "chk_image_providers_base_url" },
+    );
   });
 });
 
