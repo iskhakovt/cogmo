@@ -44,7 +44,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { Daytona } from "@daytonaio/sdk";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { DaytonaMock, type DaytonaMockOptions } from "./daytona-mock.js";
 
 const FIXTURE_DIR = "./test/fixtures/daytona";
@@ -274,14 +274,28 @@ describe("Daytona conformance — python-upload-fail", () => {
       // started bleeding into stdout (or vice versa), this would fail.
       expect(stderrChunks.join("")).toContain("hello-stderr");
 
-      const finalCmd = await sandbox.process.getSessionCommand(sessionId, cmdId);
       // Non-zero exit lookup — different code path than the happy
       // case in `create-exec-delete`. Daytona occasionally reports
-      // exitCode=null on a fast-completed command race; tolerate
-      // that, but if a value is present it MUST be 2.
-      if (finalCmd.exitCode !== undefined && finalCmd.exitCode !== null) {
-        expect(finalCmd.exitCode).toBe(2);
-      }
+      // `exitCode=null` on the first GET when a fast-completed
+      // command races against the toolbox's command-record write.
+      // `vi.waitFor` re-runs the GET until the predicate holds (or
+      // throws on a wall-clock deadline) so we actually exercise the
+      // non-zero exit path — a conditional skip would silently pass
+      // when the race triggered. Each retry re-runs the same SDK
+      // call, so the record-mode fixture journals every iteration
+      // and replay FIFO-matches the same sequence; the final
+      // entry lands the populated exitCode.
+      const finalCmd = await vi.waitFor(
+        async () => {
+          const got = await sandbox.process.getSessionCommand(sessionId, cmdId);
+          if (got.exitCode === null || got.exitCode === undefined) {
+            throw new Error("exit code not yet populated");
+          }
+          return got;
+        },
+        { timeout: 10_000, interval: 200 },
+      );
+      expect(finalCmd.exitCode).toBe(2);
 
       await sandbox.process.deleteSession(sessionId);
       await sandbox.delete();
