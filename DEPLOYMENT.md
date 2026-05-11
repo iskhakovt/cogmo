@@ -93,16 +93,89 @@ All configuration is via environment variables. The schema is in [`src/env.ts`](
 
 ### Optional
 
+Defaults below match the in-image expectations: persistent-state paths align with `/var/lib/cogmo`, socket and askpass paths sit under `/run/cogmo`. Override only when bind-mounts or runtime configuration demand it.
+
+#### Inngest
+
 | Variable | Default | Purpose |
 |-|-|-|
 | `INNGEST_MODE` | `connect` | `connect` (long-poll, recommended) or `serve` (HTTP). |
+| `INNGEST_SERVE_PORT` | `3000` | HTTP port the SDK listens on when `INNGEST_MODE=serve`. Ignored in `connect` mode. |
 | `INNGEST_EVENT_KEY` | — | Required if your Inngest deployment is keyed. |
 | `INNGEST_SIGNING_KEY` | — | Required if your Inngest deployment is keyed. |
+
+#### Logging & locale
+
+| Variable | Default | Purpose |
+|-|-|-|
 | `LOG_LEVEL` | `info` | `fatal` / `error` / `warn` / `info` / `debug` / `trace`. |
 | `USER_TIMEZONE` | `UTC` | Used for `get_current_time` and scheduling. |
+
+#### Memory (Hindsight)
+
+| Variable | Default | Purpose |
+|-|-|-|
+| `HINDSIGHT_RECALL_MAX_QUERY_TOKENS` | `500` | Truncation budget for recall queries, in tokens. Must match Hindsight's `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS`. Bump on both sides if long multi-turn context needs to flow into the recall query — but past ~1500 tokens semantic-search quality degrades regardless of the cap. |
+
+#### Object storage
+
+| Variable | Default | Purpose |
+|-|-|-|
 | `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION` | — / `cogmo-files` / — / — / `us-east-1` | Object storage for the file tools and image attachments. MinIO works. |
 | `S3_CLIENT_ENCRYPT` | — | `true` / `1` enables client-side AES-256-GCM for **both** attachments and workspace files. Bucket sees only opaque ciphertext bodies (attachments uploaded as `.bin` with `Content-Type: application/octet-stream`; workspace files written with `Content-Type: application/octet-stream`). Reads transparently fall back to plaintext when the magic prefix is absent, so the flag is safe to flip on a populated bucket. **Object keys remain plaintext** — matches the AWS S3 Encryption Client convention; if file names need to stay secret, choose non-revealing names. **Caveats**: rotating `COGMO_MASTER_KEY` requires re-encrypting every existing object; bucket loses direct-browser-serve; flipping the flag *off* with encrypted blobs in the bucket leaves them unreadable. Off by default. |
-| `HINDSIGHT_RECALL_MAX_QUERY_TOKENS` | `500` | Truncation budget for recall queries, in tokens. Must match Hindsight's `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS`. Bump on both sides if long multi-turn context needs to flow into the recall query — but past ~1500 tokens semantic-search quality degrades regardless of the cap. |
+
+#### Session & debounce
+
+| Variable | Default | Purpose |
+|-|-|-|
+| `SESSION_IDLE_TIMEOUT_MINUTES` | `60` | Channel-session idle timeout. The next inbound message after this gap starts a fresh conversation. |
+| `DEBOUNCE_IDLE_SECONDS` | `3` | Quiet window after the last inbound message before the orchestrator fires. Tunes responsiveness vs. batching. |
+| `DEBOUNCE_MAXWAIT_SECONDS` | `30` | Hard cap on debounce wait — even in a streaming burst the orchestrator fires by this deadline. |
+| `DEBOUNCE_RESUME_POLICY` | `debounce` | `debounce` / `flush` / `await_input` — behaviour when new messages arrive mid-turn. See [`design/transport/`](design/transport/). |
+
+#### Sandbox backend
+
+| Variable | Default | Purpose |
+|-|-|-|
+| `SANDBOX_BACKEND` | `local-docker` | `local-docker` or `daytona`. `local-docker` needs `SANDBOX_RUNTIME` set; `daytona` needs `daytona_api_key` in the encrypted `secrets` table (seeded via `cogmo setup`). |
+| `SANDBOX_RUNTIME` | — | OCI runtime for sandbox containers. `sysbox` in production, `runc` in dev / CI. When unset the sandbox module doesn't initialize and coding-delegation features fail with a clear error on first use. Only consulted when `SANDBOX_BACKEND=local-docker`. |
+| `DAYTONA_API_URL` | `https://app.daytona.io/api` | Daytona Cloud or self-hosted base URL. Only consulted when `SANDBOX_BACKEND=daytona`. |
+| `DAYTONA_ORGANIZATION_ID` | — | Daytona organization id. Only needed when the API key is scoped to multiple orgs and the default isn't the right one. |
+| `SANDBOX_PROXY_SOCKET_DIR` | `/run/cogmo/sockets` | Host directory for per-task Docker proxy sockets. Each task container gets `<dir>/<taskId>.sock` bind-mounted at `/var/run/docker.sock` so child-container creation flows through the proxy (label injection, runtime override, deny rules). Created at boot if missing. |
+| `SANDBOX_HOST_DOCKER_SOCKET` | `/var/run/docker.sock` | Host Docker socket the proxy forwards to. Override only for rootless Docker / snap / unusual installs. |
+| `SANDBOX_ASKPASS_DIR` | `/run/cogmo/askpass` | Host root for per-task git-askpass material (PAT, SSH signing key, helper script). Bind-mounted at `/.cogmo-askpass/` per task; wiped on task stop. |
+
+#### Coding delegation
+
+See [`design/coding-delegation.md`](design/coding-delegation.md) for the full lifecycle.
+
+| Variable | Default | Purpose |
+|-|-|-|
+| `COGMO_REPOS_DIR` | `/var/lib/cogmo/repos` | Host root for git clones registered via `/repo add`. Bind-mount this for persistence. |
+| `COGMO_WORKTREES_DIR` | `/var/lib/cogmo/worktrees` | Host root for per-task git worktrees. Regenerable. |
+| `COGMO_DEVBASE_IMAGE` | `ghcr.io/iskhakovt/cogmo-devbase:<VERSION>` | Base image for task containers when a repo has no `.devcontainer/`. Defaults to the matched-version image inside the cogmo container, or `:latest` outside. Override at deploy time to pin or roll back. |
+| `CODING_TASK_IDLE_TTL_MINUTES` | `20` | Idle TTL after which a task container is reaped. |
+| `CODING_TASK_GRACE_SECONDS` | `120` | Grace period after a task reaches a terminal status before container teardown. |
+
+#### Skills runtime
+
+See [`design/skills.md`](design/skills.md) for two-tier (Pyodide + sysbox) execution and warm-pool sizing.
+
+| Variable | Default | Purpose |
+|-|-|-|
+| `COGMO_SKILLS_PATH` | `/var/lib/cogmo/skills` | Host path of the bare git repo backing the skill library. **Authoritative — losing it means losing every registered skill.** Bind-mount this for persistence. |
+| `COGMO_SKILLS_IMAGE` | `ghcr.io/iskhakovt/cogmo-skills:<VERSION>` | Base image for tier-2 (sysbox) skill workers. Same matched-version semantics as `COGMO_DEVBASE_IMAGE`. |
+| `COGMO_SKILLS_POOL_MIN` | `0` | Always-warm tier-2 worker count. With the default `0` the pool is lazy-constructed on first tier-2 invocation and drops back to zero idle workers after `COGMO_SKILLS_POOL_IDLE_SHUTDOWN_MS`. First invoke per idle period pays a cold start (~1-2 s on Local-Docker, ~30 s warm-snapshot or 60-120 s first-build on Daytona). Set `1` for steady-state ~300 ms interactive latency at the cost of one always-running worker. |
+| `COGMO_SKILLS_POOL_IDLE_SHUTDOWN_MS` | `1800000` (30 min) | Idle threshold before warm tier-2 workers above `COGMO_SKILLS_POOL_MIN` are torn down. Daytona deployments should set lower (e.g. `300000` = 5 min) to release the billable sandbox sooner. Sweep cadence is fixed at 60 s. |
+
+#### MCP
+
+| Variable | Default | Purpose |
+|-|-|-|
+| `MCP_TOOL_BUDGET` | `25` | Maximum MCP tools surfaced to the LLM per turn after profile-glob filtering. Cap exists because LLM tool-selection accuracy degrades past ~30 tools and each tool definition costs ~250-400 prompt tokens. Native and skill tools don't count against this budget. |
+| `MCP_CALL_TIMEOUT_MS` | `30000` | Per-call timeout for MCP tool dispatch. |
+| `MCP_IDLE_EVICTION_MS` | `600000` (10 min) | Idle threshold after which a live MCP connection is closed. |
+| `MCP_EVICTION_INTERVAL_MS` | `60000` | How often the idle-eviction sweep runs. Set `0` to disable. |
 
 LLM provider keys, Telegram bot tokens, Tavily/fal.ai keys, and similar credentials are **not** env vars — they live encrypted in the DB after `cogmo setup`. Putting secrets in env files is explicitly discouraged; use host secret management ([sops-nix](https://github.com/Mic92/sops-nix), [Vault](https://www.vaultproject.io/), systemd `LoadCredential`, Docker secrets via `_FILE`, etc.) for `COGMO_MASTER_KEY` and `DATABASE_URL`.
 

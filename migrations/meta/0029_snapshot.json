@@ -1,6 +1,6 @@
 {
-  "id": "8fced9ea-4628-4fe6-8e8b-82f0d8dbc64d",
-  "prevId": "2acc94bd-0a8b-41e1-b66c-9893078b0b4c",
+  "id": "8925ee0d-6078-4f1c-88f9-d8241b774a99",
+  "prevId": "8fced9ea-4628-4fe6-8e8b-82f0d8dbc64d",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -641,6 +641,164 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.image_models": {
+      "name": "image_models",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "uuidv7()"
+        },
+        "provider_id": {
+          "name": "provider_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model_string": {
+          "name": "model_string",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "capabilities": {
+          "name": "capabilities",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_selectable": {
+          "name": "user_selectable",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "image_models_provider_id_image_providers_id_fk": {
+          "name": "image_models_provider_id_image_providers_id_fk",
+          "tableFrom": "image_models",
+          "tableTo": "image_providers",
+          "columnsFrom": ["provider_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "image_models_name_unique": {
+          "name": "image_models_name_unique",
+          "nullsNotDistinct": false,
+          "columns": ["name"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.image_providers": {
+      "name": "image_providers",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "uuidv7()"
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "type": {
+          "name": "type",
+          "type": "image_provider_type",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "base_url": {
+          "name": "base_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "secret_id": {
+          "name": "secret_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "attrs": {
+          "name": "attrs",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "image_providers_secret_id_secrets_id_fk": {
+          "name": "image_providers_secret_id_secrets_id_fk",
+          "tableFrom": "image_providers",
+          "tableTo": "secrets",
+          "columnsFrom": ["secret_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "image_providers_name_unique": {
+          "name": "image_providers_name_unique",
+          "nullsNotDistinct": false,
+          "columns": ["name"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "chk_image_providers_base_url": {
+          "name": "chk_image_providers_base_url",
+          "value": "(\"image_providers\".\"type\" = 'fal' AND \"image_providers\".\"base_url\" IS NULL) OR (\"image_providers\".\"type\" = 'openai_compatible' AND \"image_providers\".\"base_url\" IS NOT NULL)"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.llm_providers": {
       "name": "llm_providers",
       "schema": "",
@@ -660,7 +818,8 @@
         },
         "type": {
           "name": "type",
-          "type": "text",
+          "type": "llm_provider_type",
+          "typeSchema": "public",
           "primaryKey": false,
           "notNull": true
         },
@@ -2960,6 +3119,16 @@
       "name": "conversation_status",
       "schema": "public",
       "values": ["active", "errored"]
+    },
+    "public.image_provider_type": {
+      "name": "image_provider_type",
+      "schema": "public",
+      "values": ["fal", "openai_compatible"]
+    },
+    "public.llm_provider_type": {
+      "name": "llm_provider_type",
+      "schema": "public",
+      "values": ["anthropic", "openai_compatible"]
     },
     "public.pending_memory_source": {
       "name": "pending_memory_source",

@@ -201,8 +201,15 @@
     {
       "idx": 28,
       "version": "7",
-      "when": 1778503443422,
-      "tag": "0028_image_providers_and_provider_enums",
+      "when": 1778496335062,
+      "tag": "0028_elite_serpent_society",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1778504388107,
+      "tag": "0029_image_providers_and_provider_enums",
       "breakpoints": true
     }
   ]

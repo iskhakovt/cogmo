@@ -14,5 +14,12 @@ declare module "vitest" {
     hindsightUrl: string;
     defaultUserId: string;
     llmockBaseUrl: string;
+    /**
+     * Docker container ID of the running app container. Provided by the
+     * e2e setup; absent for unit/integration setups (those don't build
+     * the image at all). Tests that need to invoke the bundled binary
+     * for a one-shot CLI assertion can `docker exec` against this id.
+     */
+    appContainerId: string;
   }
 }

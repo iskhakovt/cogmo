@@ -1123,7 +1123,10 @@ describe("createHandleMessage", () => {
   describe("per-turn provider dispatch", () => {
     it("resolves the provider for the snapshot's model and threads it into the loop", async () => {
       const turnProvider = mockProvider();
-      const resolveProvider = vi.fn().mockResolvedValue(turnProvider);
+      const resolveProvider = vi.fn().mockResolvedValue({
+        provider: turnProvider,
+        limits: { contextWindow: null, maxOutputTokens: null },
+      });
       const deps = mockDeps({
         resolveProvider,
         agentStore: mockAgentStore({
@@ -1175,7 +1178,10 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 10, outputTokens: 5 },
       });
       const provider = mockProvider({ countTokens, chat });
-      const resolveProvider = vi.fn().mockResolvedValue(provider);
+      const resolveProvider = vi.fn().mockResolvedValue({
+        provider,
+        limits: { contextWindow: null, maxOutputTokens: null },
+      });
       const deps = mockDeps({
         resolveProvider,
         agentStore: mockAgentStore({
@@ -1223,8 +1229,9 @@ describe("createHandleMessage", () => {
       const summaryProvider = mockProvider({ chat: summaryChat });
 
       const resolveProvider = vi.fn().mockImplementation(async (model: string) => {
-        if (model === "claude-sonnet-4-6") return turnProvider;
-        if (model === "claude-haiku-4-5-20251001") return summaryProvider;
+        const limits = { contextWindow: null, maxOutputTokens: null };
+        if (model === "claude-sonnet-4-6") return { provider: turnProvider, limits };
+        if (model === "claude-haiku-4-5-20251001") return { provider: summaryProvider, limits };
         throw new Error(`unexpected model ${model}`);
       });
 
@@ -1294,7 +1301,9 @@ describe("createHandleMessage", () => {
       const turnProvider = mockProvider({ countTokens });
 
       const resolveProvider = vi.fn().mockImplementation(async (model: string) => {
-        if (model === "claude-sonnet-4-6") return turnProvider;
+        if (model === "claude-sonnet-4-6") {
+          return { provider: turnProvider, limits: { contextWindow: null, maxOutputTokens: null } };
+        }
         // A misconfigured summarization model would throw here. The whole
         // point of the test is that we never get this far.
         throw new Error(`summarization model "${model}" not configured`);

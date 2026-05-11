@@ -611,14 +611,17 @@ describe("createTransport", () => {
       expect(res._unsafeUnwrap()?.lastTurn).toBeNull();
     });
 
-    it("returns contextBudget=null when the active model is not in the registry", async () => {
+    it("returns contextBudget=null when the model is unknown to both DB and LiteLLM", async () => {
+      // Resolver still returns a conservative default for the agent loop,
+      // but `/status` elides the budget so the UI doesn't display the
+      // resolver's guess as fact.
       const agentStore = makeAgentStore({
         getProfile: vi.fn().mockResolvedValue({
           id: "p1",
           userId: "user-1",
           name: "main",
           basePrompt: "",
-          model: "removed-model-id",
+          model: "totally-made-up-model-xyz-2099",
           summarizationModel: null,
           extractionModel: null,
           autoRecall: "heuristic",

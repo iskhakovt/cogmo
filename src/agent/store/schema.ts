@@ -161,7 +161,14 @@ export const llmProviders = pgTable("llm_providers", {
   createdAt: ts(),
 });
 
-/** For a given model, which providers can serve it and in what order. */
+/**
+ * For a given model, which providers can serve it and in what order.
+ *
+ * `contextWindow` / `maxOutputTokens` are nullable user-set overrides. The
+ * resolver layers them: row override → bundled LiteLLM JSON snapshot →
+ * conservative default. Operators only need to set them when LiteLLM doesn't
+ * know the model id and the conservative default (128k/4k) is too small.
+ */
 export const modelProviders = pgTable(
   "model_providers",
   {
@@ -172,6 +179,8 @@ export const modelProviders = pgTable(
       .references(() => llmProviders.id, { onDelete: "cascade" }),
     position: integer("position").notNull(), // 0 = primary, 1 = first fallback, ...
     userSelectable: boolean("user_selectable").notNull(), // false = internal-only (hidden from /model picker)
+    contextWindow: integer("context_window"), // null → resolver falls back
+    maxOutputTokens: integer("max_output_tokens"), // null → resolver falls back
     createdAt: ts(),
   },
   (t) => [

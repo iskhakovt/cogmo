@@ -387,16 +387,25 @@ async function persistProvider(deps: PersistDeps, answers: NonInteractiveAnswers
   );
 
   await deps.runInTx(async (tx) => {
-    const defaultProfile = await deps.agentStore.getDefaultProfile(tx);
-    if (!defaultProfile) return;
-    const profile = await deps.agentStore.getProfile(tx, defaultProfile.id);
-    if (!profile) return;
-    const nextPosition = await deps.agentStore.getNextModelProviderPosition(tx, profile.model);
+    // Default to the seeded profile's model when COGMO_LLM_MODEL is omitted —
+    // preserves the legacy "set up the provider, leave the model alone"
+    // behaviour for callers that haven't migrated to the new env vars.
+    let model = answers.llmModel;
+    if (!model) {
+      const defaultProfile = await deps.agentStore.getDefaultProfile(tx);
+      if (!defaultProfile) return;
+      const profile = await deps.agentStore.getProfile(tx, defaultProfile.id);
+      if (!profile) return;
+      model = profile.model;
+    }
+    const nextPosition = await deps.agentStore.getNextModelProviderPosition(tx, model);
     await deps.agentStore.addModelProvider(tx, {
-      model: profile.model,
+      model,
       providerId,
       position: nextPosition,
       userSelectable: true,
+      contextWindow: answers.llmContextWindow ?? null,
+      maxOutputTokens: answers.llmMaxOutputTokens ?? null,
     });
   });
 }
