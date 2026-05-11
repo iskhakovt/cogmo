@@ -52,48 +52,89 @@ const FIXTURE_DIR = "./test/fixtures/daytona";
 /** Operator-set: `RECORD=1` flips this test (and fal/voice) into record mode. */
 const IS_RECORD = process.env.RECORD === "1";
 
-interface ScenarioState {
-  mock: DaytonaMock | null;
-  recordable: boolean;
-  runnable: boolean;
+interface ScenarioHandle {
+  /**
+   * `true` when `RECORD=1` and `DAYTONA_API_KEY` are both set — the
+   * scenario will proxy to real Daytona and write the fixture on
+   * `endScenario()`.
+   */
+  readonly recordable: boolean;
+  /**
+   * Whether `test/fixtures/daytona/<name>.json` is on disk. Surfaced
+   * separately from `runnable` so the marker test can identify which
+   * dimension is missing on failure ("no fixture" vs "no record-mode
+   * trigger").
+   */
+  readonly fixtureExists: boolean;
+  /**
+   * `recordable || fixtureExists`. When false, the scenario skips
+   * with a visible marker assertion.
+   */
+  readonly runnable: boolean;
+  /** Use in `beforeAll`. No-op when `runnable === false`. */
+  init: () => Promise<void>;
+  /** Use in `afterAll`. No-op when `init` was a no-op. */
+  shutdown: () => Promise<void>;
+  /**
+   * Returns the live mock. Throws when called before `init()`
+   * completes or after `shutdown()` runs — narrower contract than
+   * exposing a nullable field, no per-call-site null check.
+   */
+  getMock: () => DaytonaMock;
 }
 
 /**
- * Resolve mock mode for one scenario based on env + fixture presence.
- * Recording requires `RECORD=1` + `DAYTONA_API_KEY`; replay requires the
- * fixture file. When neither holds, the scenario skips with a visible
- * marker assertion.
+ * Build a per-scenario handle. The mock instance lives inside the
+ * closure — callers can't reach into it accidentally, and the
+ * vitest lifecycle is wired via the returned `init` / `shutdown`
+ * functions. Subsumes the older `scenarioState()` + `createScenarioMock()`
+ * pair so the two-step "compute mode → create mock" rule lives in
+ * one place.
  */
-function scenarioState(scenarioName: string): ScenarioState {
+function setupScenario(scenarioName: string): ScenarioHandle {
   const fixturePath = `${FIXTURE_DIR}/${scenarioName}.json`;
   const fixtureExists = existsSync(fixturePath);
   const recordable = IS_RECORD && !!process.env.DAYTONA_API_KEY;
   const runnable = recordable || fixtureExists;
-  return { mock: null, recordable, runnable };
-}
+  let mock: DaytonaMock | null = null;
 
-async function createScenarioMock(
-  scenarioName: string,
-  state: ScenarioState,
-): Promise<DaytonaMock | null> {
-  if (!state.runnable) return null;
-  const fixturePath = `${FIXTURE_DIR}/${scenarioName}.json`;
-  const opts: DaytonaMockOptions = state.recordable
-    ? {
-        mode: "record",
-        fixturePath,
-        upstreamUrl: process.env.DAYTONA_API_URL ?? "https://app.daytona.io/api",
-        upstreamApiKey: process.env.DAYTONA_API_KEY ?? "",
-        ...(process.env.DAYTONA_ORGANIZATION_ID && {
-          upstreamOrganizationId: process.env.DAYTONA_ORGANIZATION_ID,
-        }),
+  return {
+    recordable,
+    fixtureExists,
+    runnable,
+    init: async () => {
+      if (!runnable) return;
+      const opts: DaytonaMockOptions = recordable
+        ? {
+            mode: "record",
+            fixturePath,
+            upstreamUrl: process.env.DAYTONA_API_URL ?? "https://app.daytona.io/api",
+            upstreamApiKey: process.env.DAYTONA_API_KEY ?? "",
+            ...(process.env.DAYTONA_ORGANIZATION_ID && {
+              upstreamOrganizationId: process.env.DAYTONA_ORGANIZATION_ID,
+            }),
+          }
+        : { mode: "replay", fixturePath };
+      mock = await DaytonaMock.create(opts);
+      if (recordable) {
+        mock.beginScenario(scenarioName);
       }
-    : { mode: "replay", fixturePath };
-  const mock = await DaytonaMock.create(opts);
-  if (state.recordable) {
-    mock.beginScenario(scenarioName);
-  }
-  return mock;
+    },
+    shutdown: async () => {
+      if (mock) {
+        await mock.stop();
+        mock = null;
+      }
+    },
+    getMock: () => {
+      if (!mock) {
+        throw new Error(
+          `scenario "${scenarioName}": getMock() called before init() or after shutdown()`,
+        );
+      }
+      return mock;
+    },
+  };
 }
 
 function makeDaytonaClient(mock: DaytonaMock, recordable: boolean): Daytona {
@@ -107,7 +148,7 @@ function makeDaytonaClient(mock: DaytonaMock, recordable: boolean): Daytona {
   });
 }
 
-const CONFORMANCE_LABELS = (): Record<string, string> => ({
+const makeConformanceLabels = (): Record<string, string> => ({
   "cogmo.managed": "true",
   "cogmo.task": randomUUID(),
   "cogmo.role": "root",
@@ -117,27 +158,23 @@ const CONFORMANCE_LABELS = (): Record<string, string> => ({
 // ─── Scenario 1: happy path ─────────────────────────────────────────
 
 describe("Daytona conformance — create-exec-delete", () => {
-  const state = scenarioState("create-exec-delete");
+  const scenario = setupScenario("create-exec-delete");
 
-  beforeAll(async () => {
-    state.mock = await createScenarioMock("create-exec-delete", state);
-  });
-  afterAll(async () => {
-    if (state.mock) await state.mock.stop();
-  });
+  beforeAll(scenario.init);
+  afterAll(scenario.shutdown);
 
-  it.skipIf(!state.runnable)(
+  it.skipIf(!scenario.runnable)(
     "create → exec-stream → delete round-trips through @daytonaio/sdk",
     async () => {
-      if (!state.mock) throw new Error("mock not initialized");
-      const daytona = makeDaytonaClient(state.mock, state.recordable);
+      const mock = scenario.getMock();
+      const daytona = makeDaytonaClient(mock, scenario.recordable);
 
       // Labels are body-side only — they don't appear in URLs, so the
       // task-id can stay non-deterministic without breaking
       // (method, path) fixture matching.
       const sandbox = await daytona.create({
         image: "python:3.14-slim",
-        labels: CONFORMANCE_LABELS(),
+        labels: makeConformanceLabels(),
         autoStopInterval: 5,
       });
       expect(typeof sandbox.id).toBe("string");
@@ -177,19 +214,21 @@ describe("Daytona conformance — create-exec-delete", () => {
       await sandbox.process.deleteSession(sessionId);
       await sandbox.delete();
 
-      if (state.recordable && state.mock) {
-        await state.mock.endScenario();
+      if (scenario.recordable) {
+        await mock.endScenario();
       }
     },
     120_000,
   );
 
-  it.skipIf(state.runnable)(
+  it.skipIf(scenario.runnable)(
     "fixture missing — set RECORD=1 + DAYTONA_API_KEY and re-run to capture",
     () => {
-      // Marker: prints the gap loudly in CI output instead of
-      // silently skipping the whole describe block.
-      expect(state.runnable).toBe(false);
+      // Marker: prints the gap loudly in CI output. Asserting both
+      // dimensions separately so the failure message identifies which
+      // one is the cause (no fixture vs. no record-mode trigger).
+      expect(scenario.fixtureExists).toBe(false);
+      expect(IS_RECORD).toBe(false);
     },
   );
 });
@@ -217,24 +256,20 @@ sys.exit(2)
 `;
 
 describe("Daytona conformance — python-upload-fail", () => {
-  const state = scenarioState("python-upload-fail");
+  const scenario = setupScenario("python-upload-fail");
 
-  beforeAll(async () => {
-    state.mock = await createScenarioMock("python-upload-fail", state);
-  });
-  afterAll(async () => {
-    if (state.mock) await state.mock.stop();
-  });
+  beforeAll(scenario.init);
+  afterAll(scenario.shutdown);
 
-  it.skipIf(!state.runnable)(
+  it.skipIf(!scenario.runnable)(
     "upload python script → run → stderr + stdout streamed → exit 2",
     async () => {
-      if (!state.mock) throw new Error("mock not initialized");
-      const daytona = makeDaytonaClient(state.mock, state.recordable);
+      const mock = scenario.getMock();
+      const daytona = makeDaytonaClient(mock, scenario.recordable);
 
       const sandbox = await daytona.create({
         image: "python:3.14-slim",
-        labels: CONFORMANCE_LABELS(),
+        labels: makeConformanceLabels(),
         autoStopInterval: 5,
       });
 
@@ -300,17 +335,18 @@ describe("Daytona conformance — python-upload-fail", () => {
       await sandbox.process.deleteSession(sessionId);
       await sandbox.delete();
 
-      if (state.recordable && state.mock) {
-        await state.mock.endScenario();
+      if (scenario.recordable) {
+        await mock.endScenario();
       }
     },
     120_000,
   );
 
-  it.skipIf(state.runnable)(
+  it.skipIf(scenario.runnable)(
     "fixture missing — set RECORD=1 + DAYTONA_API_KEY and re-run to capture",
     () => {
-      expect(state.runnable).toBe(false);
+      expect(scenario.fixtureExists).toBe(false);
+      expect(IS_RECORD).toBe(false);
     },
   );
 });
