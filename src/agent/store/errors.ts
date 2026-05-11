@@ -121,6 +121,24 @@ export class ReservedCompartmentNameError extends Error {
   }
 }
 
+/**
+ * Thrown by `createImageProvider` when the proposed config violates the
+ * store-layer URL hygiene rules that the DB CHECK can't express (e.g.
+ * `base_url` must be `https://`, must not have a trailing slash, must be
+ * parseable as a URL). The DB CHECK pins the coarser invariant
+ * (`openai_compatible` requires `base_url`, `fal` forbids it); this guard
+ * adds the wizard-friendly details on top.
+ *
+ * Distinct from `UniqueViolationError` (name collision) and the raw
+ * CHECK rejection that surfaces if a caller bypasses the store guard.
+ */
+export class InvalidProviderConfigError extends Error {
+  constructor(public readonly reason: string) {
+    super(`invalid provider config: ${reason}`);
+    this.name = "InvalidProviderConfigError";
+  }
+}
+
 interface PgUniqueViolation {
   code: "23505";
   constraint_name?: string;

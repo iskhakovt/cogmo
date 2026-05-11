@@ -9,7 +9,7 @@
         "toolCalls": [
           {
             "name": "generate_image",
-            "arguments": "{\"prompt\":\"A cute tabby cat wearing a colorful top hat, sitting upright with a friendly expression. The cat has bright green eyes and orange and black striped fur. The hat is a classic tall top hat in deep purple with a red band around it. The scene is set against a soft, warm background with gentle lighting. The style is whimsical and charming, with detailed fur texture and expressive eyes. The composition centers the cat prominently in the frame.\",\"model\":\"fal-ai/flux/dev\"}",
+            "arguments": "{\"prompt\":\"A cute tabby cat wearing a colorful top hat, sitting upright with a friendly expression. The cat has bright green eyes and orange and black striped fur. The hat is a classic tall top hat in deep purple with a red band around it. The scene is set against a soft, warm background with gentle lighting. The style is whimsical and charming, with detailed fur texture and expressive eyes. The composition centers the cat prominently in the frame.\",\"model\":\"fal/flux-dev\"}",
             "id": "toolu_01XhHNjADQbfPRwgWys5weUz"
           }
         ]

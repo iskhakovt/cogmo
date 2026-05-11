@@ -1,0 +1,16 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "endpoint": "image",
+        "userMessage": "A serene watercolor mountain landscape at golden hour, soft brushstrokes."
+      },
+      "response": {
+        "image": {
+          "b64Json": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        },
+        "status": 200
+      }
+    }
+  ]
+}

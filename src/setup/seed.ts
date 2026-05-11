@@ -1,6 +1,8 @@
 import type { AgentStore } from "../agent/store/index.js";
+import type { ImageModelCapabilities } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
+import type { SecretsStore } from "../secrets/store/index.js";
 import type { TransportStore } from "../transport/store/index.js";
 
 export const DEFAULT_BASE_PROMPT = `You are a personal AI assistant. You are helpful, concise, and direct.
@@ -114,4 +116,158 @@ export async function seedDefaults(
   const profileId = await ensureDefaultProfile(runInTx, agentStore);
   await ensureDirectChannel(runInTx, transportStore, userId);
   return { userId, profileId };
+}
+
+// --- Image gen seed (fal defaults) ---
+
+const FAL_DEFAULT_RATIOS: NonNullable<ImageModelCapabilities["aspectRatios"]> = [
+  "1:1",
+  "16:9",
+  "9:16",
+  "4:3",
+  "3:4",
+];
+
+interface FalDefaultModel {
+  name: string;
+  modelString: string;
+  description: string;
+  capabilities: ImageModelCapabilities;
+}
+
+/**
+ * Canonical curated fal model catalog seeded by `ensureFalImageDefaults`.
+ * Mirrors the legacy hardcoded `MODEL_CATALOG` from `src/agent/image-tools.ts`,
+ * plus per-model capability metadata that the LLM reads at every turn.
+ *
+ * Re-seeding via `ON CONFLICT (name) DO NOTHING` preserves operator edits.
+ * Adding a new entry takes effect the next time `ensureFalImageDefaults`
+ * runs (boot or `pnpm seed-images`); changing an existing entry's
+ * description / capabilities here will NOT overwrite a row the operator
+ * has already touched.
+ */
+const FAL_DEFAULT_MODELS: ReadonlyArray<FalDefaultModel> = [
+  {
+    name: "fal/flux-schnell",
+    modelString: "fal-ai/flux/schnell",
+    description: "fastest, cheapest, good for quick iteration or drafts",
+    capabilities: { aspectRatios: [...FAL_DEFAULT_RATIOS], seed: true },
+  },
+  {
+    name: "fal/flux-dev",
+    modelString: "fal-ai/flux/dev",
+    description: "balanced speed/quality, good default for general use",
+    capabilities: { aspectRatios: [...FAL_DEFAULT_RATIOS], seed: true },
+  },
+  {
+    name: "fal/flux-pro-v1.1",
+    modelString: "fal-ai/flux-pro/v1.1",
+    description: "higher quality, detailed scenes and portraits",
+    capabilities: { aspectRatios: [...FAL_DEFAULT_RATIOS], seed: true },
+  },
+  {
+    name: "fal/flux-pro-ultra",
+    modelString: "fal-ai/flux-pro/v1.1-ultra",
+    description: "highest quality, longer wait, slower iteration",
+    capabilities: { aspectRatios: [...FAL_DEFAULT_RATIOS], seed: true },
+  },
+  {
+    name: "fal/imagen4",
+    modelString: "fal-ai/imagen4/preview",
+    description: "Google Imagen 4 — photorealism, accurate typography, strong prompt adherence",
+    capabilities: { aspectRatios: [...FAL_DEFAULT_RATIOS] },
+  },
+  {
+    name: "fal/recraft-v3",
+    modelString: "fal-ai/recraft/v3/text-to-image",
+    description: "best for readable text, logos, vector/illustration, brand assets",
+    capabilities: { aspectRatios: [...FAL_DEFAULT_RATIOS] },
+  },
+  {
+    name: "fal/ideogram-character",
+    modelString: "fal-ai/ideogram/character",
+    description: "consistent character across multiple images; strong typography",
+    capabilities: { aspectRatios: [...FAL_DEFAULT_RATIOS] },
+  },
+  {
+    name: "fal/qwen-image",
+    modelString: "fal-ai/qwen-image",
+    description: "autoregressive — strong complex text rendering and prompt adherence",
+    capabilities: { aspectRatios: [...FAL_DEFAULT_RATIOS], seed: true },
+  },
+  {
+    name: "fal/flux-kontext",
+    modelString: "fal-ai/flux-pro/kontext",
+    description: "image editing — use when modifying an existing image",
+    capabilities: { aspectRatios: [...FAL_DEFAULT_RATIOS], seed: true },
+  },
+];
+
+/**
+ * Seed the canonical `fal` image-gen provider and its default model catalog.
+ *
+ * Behaviour:
+ * - If a `fal_api_key` secret already exists, use it.
+ * - Else if `envFalApiKey` is set (the legacy `FAL_API_KEY` env var path),
+ *   materialize it into a `fal_api_key` secret — dev-convenience continuity
+ *   so single-machine setups don't need to run the wizard before seeing
+ *   image gen come online.
+ * - Else return `{ skipped: true }` — nothing to seed.
+ *
+ * Once a secret exists, ensure an `image_providers` row named `fal` exists
+ * (link to the secret), and upsert the canonical model catalog by `name`.
+ * Idempotent: re-running preserves operator edits to existing rows.
+ */
+export async function ensureFalImageDefaults(deps: {
+  runInTx: Transactor;
+  agentStore: AgentStore;
+  secretsStore: SecretsStore;
+  envFalApiKey?: string;
+}): Promise<
+  | { skipped: true; reason: "no_fal_secret" }
+  | { seeded: true; providerCreated: boolean; modelsInserted: number }
+> {
+  return deps.runInTx(async (tx) => {
+    let secretMeta = await deps.secretsStore.getSecretMeta(tx, "fal_api_key");
+    if (!secretMeta && deps.envFalApiKey) {
+      const { id } = await deps.secretsStore.putSecret(tx, {
+        name: "fal_api_key",
+        plaintext: deps.envFalApiKey,
+        description: "fal.ai API key (materialized from FAL_API_KEY env var)",
+      });
+      secretMeta = { id, name: "fal_api_key", description: null, validatedAt: null };
+      logger.info({ secretId: id }, "materialized fal_api_key from FAL_API_KEY env var");
+    }
+    if (!secretMeta) return { skipped: true, reason: "no_fal_secret" };
+
+    const existing = await deps.agentStore.findImageProviderByName(tx, "fal");
+    const providerId = existing
+      ? existing.id
+      : (
+          await deps.agentStore.createImageProvider(tx, {
+            name: "fal",
+            type: "fal",
+            baseUrl: null,
+            secretId: secretMeta.id,
+            attrs: {},
+          })
+        ).id;
+
+    const inserted = await deps.agentStore.upsertImageModelsByName(
+      tx,
+      FAL_DEFAULT_MODELS.map((m) => ({
+        providerId,
+        name: m.name,
+        modelString: m.modelString,
+        description: m.description,
+        capabilities: m.capabilities,
+        userSelectable: true,
+      })),
+    );
+    logger.info(
+      { providerId, providerCreated: !existing, modelsInserted: inserted },
+      "seeded fal image defaults",
+    );
+    return { seeded: true, providerCreated: !existing, modelsInserted: inserted };
+  });
 }

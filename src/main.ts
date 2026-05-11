@@ -59,6 +59,18 @@ async function dispatch(cmd: string): Promise<number> {
       const { agentStore, runInTx } = await bootstrapCore();
       return runModelCli(process.argv.slice(3), { agentStore, runInTx });
     }
+    case "image-provider": {
+      const { runImageProviderCli } = await import("./cli/image-provider.js");
+      const { bootstrapCore } = await import("./index.js");
+      const { agentStore, runInTx, secretsStore } = await bootstrapCore();
+      return runImageProviderCli(process.argv.slice(3), { agentStore, runInTx, secretsStore });
+    }
+    case "image-model": {
+      const { runImageModelCli } = await import("./cli/image-model.js");
+      const { bootstrapCore } = await import("./index.js");
+      const { agentStore, runInTx } = await bootstrapCore();
+      return runImageModelCli(process.argv.slice(3), { agentStore, runInTx });
+    }
     case "migrate-memories":
     case "backfill": {
       const { runMigrateMemoriesCli, runBackfillProfileClassCli } = await import(
@@ -87,7 +99,7 @@ async function dispatch(cmd: string): Promise<number> {
     default:
       console.error(`Unknown command: ${cmd}`);
       console.error(
-        "Usage: main.js [serve|seed|setup|gen-key|provider|model|skills|migrate-memories|backfill]",
+        "Usage: main.js [serve|seed|setup|gen-key|provider|model|image-provider|image-model|skills|migrate-memories|backfill]",
       );
       return 1;
   }

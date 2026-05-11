@@ -1,12 +1,10 @@
-import type { createFal } from "@ai-sdk/fal";
 import { APICallError, generateImage } from "ai";
 import { z } from "zod";
+import type { ImageModelWithProvider } from "../agent/store/index.js";
+import type { ImageProvider } from "../llm/image-providers.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
 import { defineTool, type ToolSpec } from "./tools.js";
-
-/** fal provider factory — returned by `createFal({ apiKey })`. */
-export type FalProvider = ReturnType<typeof createFal>;
 
 /**
  * The shape returned by the `generate_image` tool's text result (JSON-encoded).
@@ -49,104 +47,150 @@ export function parseGeneratedImagePayload(raw: string): GeneratedImagePayload |
 }
 
 /**
- * Curated image-generation models.
- *
- * fal.ai hosts 1000+ models — exposing all of them would flood the LLM.
- * This shortlist covers the common tradeoffs (speed, quality, text rendering,
- * editing). Promote to DB when operator-level customization matters.
+ * Build the LLM-facing tool description from the loaded model catalog.
+ * Each user-selectable model contributes one line with its `description`
+ * and the ratios it accepts (or "fixed size" when `capabilities.aspectRatios`
+ * is absent/empty). The prose ending is constant across deployments.
  */
-export const MODEL_CATALOG = [
-  "fal-ai/flux/schnell",
-  "fal-ai/flux/dev",
-  "fal-ai/flux-pro/v1.1",
-  "fal-ai/flux-pro/v1.1-ultra",
-  "fal-ai/imagen4/preview",
-  "fal-ai/recraft/v3/text-to-image",
-  "fal-ai/ideogram/character",
-  "fal-ai/qwen-image",
-  "fal-ai/flux-pro/kontext",
-] as const;
-
-const TOOL_DESCRIPTION =
-  "Generate an image from a text description. The image is returned to the user.\n\n" +
-  "Choose the model based on the task:\n" +
-  "- `fal-ai/flux/schnell` — fastest, cheapest, good for quick iteration or drafts\n" +
-  "- `fal-ai/flux/dev` — balanced speed/quality, good default for general use\n" +
-  "- `fal-ai/flux-pro/v1.1` — higher quality, detailed scenes and portraits\n" +
-  "- `fal-ai/flux-pro/v1.1-ultra` — highest quality, longer wait, slower iteration\n" +
-  "- `fal-ai/imagen4/preview` — Google Imagen 4: photorealism, accurate typography, strong prompt adherence\n" +
-  "- `fal-ai/recraft/v3/text-to-image` — best for images with readable text, logos, vector/illustration styles, brand assets\n" +
-  "- `fal-ai/ideogram/character` — best when the same character must appear consistently across multiple images; also strong at typography\n" +
-  "- `fal-ai/qwen-image` — autoregressive model, strong at complex text rendering and detailed prompt adherence\n" +
-  "- `fal-ai/flux-pro/kontext` — image editing (best when the user wants you to modify an existing image)\n\n" +
-  "Write a detailed prompt — describe subject, style, composition, colors, and mood. " +
-  "The prompt is the main lever for image quality.";
+function buildToolDescription(models: ReadonlyArray<ImageModelWithProvider>): string {
+  const lines = models.map((m) => {
+    const ratios = m.capabilities.aspectRatios;
+    const ratioHint =
+      ratios && ratios.length > 0 ? ` (ratios: ${ratios.join(", ")})` : " (fixed size)";
+    return `- \`${m.name}\` — ${m.description}${ratioHint}`;
+  });
+  return [
+    "Generate an image from a text description. The image is returned to the user.",
+    "",
+    "Choose the model based on the task:",
+    ...lines,
+    "",
+    "Write a detailed prompt — describe subject, style, composition, colors, and mood. " +
+      "The prompt is the main lever for image quality.",
+  ].join("\n");
+}
 
 /**
- * Create image generation tools.
+ * Build the `generate_image` tool from the loaded image catalog.
  *
- * Closure-injected — the fal provider factory and attachment store are
- * baked in at bootstrap. If `fal` is undefined (no API key configured),
- * the tool is still registered but the handler returns a helpful error.
- * Same graceful-degradation pattern as `createWebTools`.
+ * Inputs are loaded at bootstrap and reused across every turn — same
+ * caching posture as `LlmProviderResolver`. Hot-reload is a deferred p3.
+ *
+ * Returns `[]` (no tool registered) when `models.length === 0`. Cleaner
+ * than registering a tool that always errors — the LLM simply doesn't
+ * see `generate_image` in its tool list.
  */
-export function createImageTools(
-  fal: FalProvider | undefined,
-  attachments: AttachmentStore,
-): ToolSpec[] {
+export function createImageTools(deps: {
+  models: ReadonlyArray<ImageModelWithProvider>;
+  providers: ReadonlyMap<string, ImageProvider>;
+  attachments: AttachmentStore;
+}): ToolSpec[] {
+  if (deps.models.length === 0) return [];
+
+  const modelNames = deps.models.map((m) => m.name);
+  const modelByName = new Map(deps.models.map((m) => [m.name, m]));
+
+  // Union, not intersection — a fixed-size model would otherwise collapse
+  // every other model's options. Per-model narrowing happens in the
+  // handler so the LLM gets a contextual error when it picks an
+  // unsupported ratio.
+  const ratioUnion = new Set<string>();
+  for (const m of deps.models) {
+    for (const r of m.capabilities.aspectRatios ?? []) ratioUnion.add(r);
+  }
+
+  // Zod's `z.enum` requires a non-empty literal tuple; build it once.
+  const modelEnum = z.enum(modelNames as [string, ...string[]]);
+  const aspectRatioField =
+    ratioUnion.size > 0
+      ? z.enum([...ratioUnion] as [string, ...string[]]).optional()
+      : z.never().optional();
+
   return [
     defineTool({
       name: "generate_image",
-      description: TOOL_DESCRIPTION,
+      description: buildToolDescription(deps.models),
       // Durable: each call bills $0.02-$0.04 and uploads to AttachmentStore.
       // On Inngest retry the cached JSON result (path + mediaType) replays,
-      // so we neither re-bill fal nor produce duplicate uploaded blobs.
+      // so we neither re-bill the provider nor produce duplicate uploads.
       durable: true,
       schema: z.object({
         prompt: z.string().min(1).describe("Detailed image description"),
-        model: z
-          .enum(MODEL_CATALOG)
-          .default("fal-ai/flux/dev")
+        model: modelEnum
+          // biome-ignore lint/style/noNonNullAssertion: length>0 guarded above
+          .default(modelNames[0]!)
           .describe("Model — choose based on task (see tool description)"),
-        aspectRatio: z
-          .enum(["1:1", "16:9", "9:16", "4:3", "3:4"])
-          .optional()
-          .describe("Aspect ratio. Default 1:1."),
-        seed: z.number().int().optional().describe("Seed for reproducibility"),
+        aspectRatio: aspectRatioField.describe("Aspect ratio (if model supports it)"),
+        seed: z.number().int().optional().describe("Seed (if model honors it)"),
       }),
       handler: async (input) => {
-        if (!fal) return "Error: generate_image is not configured (FAL_API_KEY missing).";
+        const row = modelByName.get(input.model);
+        if (!row) return `Error: unknown model ${input.model}`;
+        const provider = deps.providers.get(row.providerId);
+        if (!provider) {
+          // Should never happen — the bootstrap loop populates `providers`
+          // from the same DB rows we used to build `models`. If it does,
+          // something has gone badly wrong; surface to the LLM rather than
+          // crashing the turn.
+          return `Error: model ${row.name} references unknown provider`;
+        }
+
+        // Treat absent and [] identically — both mean "model accepts no
+        // aspectRatio". Both surface as a text error the LLM can recover
+        // from (re-pick a ratio or pick a different model), not silent drop.
+        const supportedRatios = row.capabilities.aspectRatios ?? [];
+        if (input.aspectRatio && !supportedRatios.includes(input.aspectRatio)) {
+          const hint =
+            supportedRatios.length > 0
+              ? `Supported: ${supportedRatios.join(", ")}.`
+              : "This model does not accept a custom aspect ratio.";
+          return `Error: model ${row.name} does not support aspect ratio ${input.aspectRatio}. ${hint}`;
+        }
+
+        const imageModel =
+          provider.kind === "fal"
+            ? provider.provider.image(row.modelString)
+            : provider.provider.imageModel(row.modelString);
+        const shouldForwardAspect =
+          input.aspectRatio !== undefined && supportedRatios.includes(input.aspectRatio);
+        const shouldForwardSeed = input.seed !== undefined && row.capabilities.seed === true;
 
         const { image } = await withRetry(
           async () => {
             try {
+              // AI SDK types aspectRatio as `${number}:${number}`. Our Zod
+              // enum validated the value against the same shape; the cast
+              // bridges the literal-template typing. Explicit
+              // `!== undefined` re-narrows for `exactOptionalPropertyTypes`.
               return await generateImage({
-                model: fal.image(input.model),
+                model: imageModel,
                 prompt: input.prompt,
-                ...(input.aspectRatio && { aspectRatio: input.aspectRatio }),
-                ...(input.seed !== undefined && { seed: input.seed }),
+                ...(shouldForwardAspect &&
+                  input.aspectRatio !== undefined && {
+                    aspectRatio: input.aspectRatio as `${number}:${number}`,
+                  }),
+                ...(shouldForwardSeed && input.seed !== undefined && { seed: input.seed }),
               });
             } catch (err) {
-              // Use the AI SDK's structured APICallError rather than
-              // substring-matching the message — handles auth/validation/
-              // content-policy failures deterministically. The SDK sets
-              // `isRetryable: false` for 4xx except 429 (rate limit).
+              // Structured 4xx classification — same intent as the previous
+              // fal-only handler. `isRetryable: false` on 4xx (except 429)
+              // means re-trying the same request burns budget without
+              // helping; promote to AbortError so withRetry stops.
               if (APICallError.isInstance(err) && err.isRetryable === false) {
                 throw new AbortError(err.message);
               }
               throw err;
             }
           },
-          { retries: 2, context: "fal.generateImage" },
+          { retries: 2, context: `image.generate.${row.name}` },
         );
 
         const buffer = Buffer.from(image.uint8Array);
-        const path = await attachments.upload(buffer, image.mediaType, "generated");
-
+        const path = await deps.attachments.upload(buffer, image.mediaType, "generated");
         return JSON.stringify({
           path,
           mediaType: image.mediaType,
-          model: input.model,
+          model: row.name,
         });
       },
     }),
