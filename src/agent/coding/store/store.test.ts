@@ -618,7 +618,7 @@ describe("DrizzleCodingStore", () => {
       );
       // Second call attempts to overwrite — WHERE clause gates on
       // deleted_at IS NULL, so this is a no-op.
-      await tx((trx) => store.setTaskSandboxDeletedAt(trx, t.id, "2026-05-11T14:99:99.000Z"));
+      await tx((trx) => store.setTaskSandboxDeletedAt(trx, t.id, "2026-05-11T14:30:00.000Z"));
       const row = await tx((trx) => store.getTask(trx, t.id));
       expect(row?.resourceUsage?.sandbox?.deleted_at).toBe("2026-05-11T14:05:00.000Z");
     });

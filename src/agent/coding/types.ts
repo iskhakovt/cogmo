@@ -109,7 +109,9 @@ export const ResourceUsageSchema = z
      * Execute-phase sandbox lifecycle. Captured Cogmo-side, so it works
      * uniformly across backends without depending on per-sandbox usage
      * APIs we don't have. `backend` mirrors `SandboxClient.backendId`
-     * (free-form string — test fakes use suffixes like `daytona-fake`).
+     * (free-form string — production values are `local-docker` /
+     * `daytona`; test fakes pick whatever identifier their fixture
+     * uses).
      */
     sandbox: z
       .object({
