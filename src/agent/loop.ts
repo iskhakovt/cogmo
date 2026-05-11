@@ -316,6 +316,14 @@ export async function runStreamingAgentLoop(
     }
 
     const { events, response } = provider.chatStream(chatParams);
+    // Adapters reject `response` independently when the events stream
+    // throws (anthropic.ts, openai-compat.ts, and fallback.ts all do this).
+    // The success path below awaits `response` after draining `events`, but
+    // a `for await` throw skips that await — leaving the parallel rejection
+    // dangling. Node's default `unhandledRejection=throw` then terminates
+    // the process. The noop suppresses the unhandled-rejection signal; an
+    // `await response` later still surfaces the same error normally.
+    response.catch(() => {});
 
     // Stream events + reconstruct content blocks for the messages array
     const contentBlocks: ContentBlock[] = [];
