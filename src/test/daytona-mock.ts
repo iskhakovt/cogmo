@@ -713,9 +713,27 @@ export class DaytonaMock {
     for (const [k, v] of Object.entries(headers)) {
       if (typeof v !== "string") continue;
       const lower = k.toLowerCase();
-      // Hop-by-hop + host are connection-scoped and would confuse
-      // upstream if forwarded as-is.
-      if (lower === "host" || lower === "connection" || lower === "content-length") continue;
+      // Hop-by-hop + connection-scoped headers must not be forwarded.
+      // `transfer-encoding: chunked` is the one that bites — Node's
+      // `fetch()` (undici) sets its own transfer encoding based on
+      // the body Buffer and throws `InvalidArgumentError` if it sees
+      // one on input. `host` would route to the wrong vhost.
+      // `content-length` would conflict with fetch's recomputed
+      // length on a body we've fully read into a Buffer.
+      if (
+        lower === "host" ||
+        lower === "connection" ||
+        lower === "content-length" ||
+        lower === "transfer-encoding" ||
+        lower === "keep-alive" ||
+        lower === "proxy-authenticate" ||
+        lower === "proxy-authorization" ||
+        lower === "te" ||
+        lower === "trailers" ||
+        lower === "upgrade"
+      ) {
+        continue;
+      }
       out[k] = v;
     }
     return out;
