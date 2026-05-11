@@ -63,7 +63,7 @@ import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
 import { DrizzleSecretsStore } from "./secrets/store/index.js";
 import { ensureFalImageDefaults } from "./setup/seed.js";
-import { bootstrapSkillsRepo } from "./skills/repo.js";
+import { bootstrapSkillsRepo, ensureSkillsCodingRepo } from "./skills/repo.js";
 import { SkillRunnerImpl } from "./skills/runner.js";
 import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
 import { DrizzleSkillStore } from "./skills/store/index.js";
@@ -261,6 +261,14 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   const codingStore = new DrizzleCodingStore();
   const mcpStore = new DrizzleMcpStore();
   const skillStore = new DrizzleSkillStore();
+
+  // DB half of the skills-repo bootstrap: insert the `coding_repos` row that
+  // `delegate_coding({ repo: "skills" })` resolves against. Idempotent —
+  // skips if the row is already present. Picks up `origin` from the bare
+  // repo so an operator who attached a remote via `git remote add` doesn't
+  // have to re-enter it. Without this, every fresh deployment hits "Repo
+  // not registered: skills" on the first skill-authoring attempt.
+  await ensureSkillsCodingRepo({ runInTx: tx, codingStore }, { skillsRepoPath: skillsRepo.path });
 
   if (!env.COGMO_MASTER_KEY) {
     throw new Error(

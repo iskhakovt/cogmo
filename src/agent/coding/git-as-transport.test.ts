@@ -1,4 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
 import type { GitHubIdentity } from "../../secrets/github.js";
@@ -9,6 +14,8 @@ import {
   pushTaskBranchToRemote,
   runBranchFor,
 } from "./git-as-transport.js";
+
+const execFileP = promisify(execFile);
 
 // Hoisted mock state — `vi.mock` factory references this safely because
 // `vi.hoisted` runs before the import side-effect chain.
@@ -125,13 +132,31 @@ describe("pushTaskBranchToRemote", () => {
 });
 
 describe("fetchFeatureBranch", () => {
-  it("fetches the feature branch into refs/remotes/origin/<branch>", async () => {
+  // Real temp git repos so the in-helper `git rev-parse --is-bare-repository`
+  // call has something to evaluate. Only the network-touching fetch is mocked.
+  let workDir: string;
+  let bareRepoPath: string;
+  let nonBareRepoPath: string;
+
+  beforeEach(async () => {
+    workDir = await mkdtemp(join(tmpdir(), "git-as-transport-test-"));
+    bareRepoPath = join(workDir, "bare");
+    nonBareRepoPath = join(workDir, "mirror");
+    await execFileP("git", ["init", "--bare", bareRepoPath]);
+    await execFileP("git", ["init", nonBareRepoPath]);
+  });
+
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  it("fetches the feature branch into refs/remotes/origin/<branch> for non-bare mirrors", async () => {
     gitMocks.runGit.mockReset();
     gitMocks.runGit.mockResolvedValue({ stdout: "", stderr: "" });
     gitMocks.withGitAskpass.mockClear();
 
     await fetchFeatureBranch({
-      localRepoPath: "/srv/cogmo/repos/example",
+      localRepoPath: nonBareRepoPath,
       remoteUrl: "https://github.com/owner/example.git",
       branch: "cogmo/abc123",
       identity,
@@ -141,10 +166,36 @@ describe("fetchFeatureBranch", () => {
     expect(gitMocks.runGit).toHaveBeenCalledTimes(1);
     expect(gitMocks.runGit.mock.calls[0]?.[0]).toEqual([
       "-C",
-      "/srv/cogmo/repos/example",
+      nonBareRepoPath,
       "fetch",
       "https://github.com/owner/example.git",
       "+cogmo/abc123:refs/remotes/origin/cogmo/abc123",
+    ]);
+  });
+
+  it("fetches into refs/heads/<branch> for bare repos (skills library path)", async () => {
+    // The bare-repo branch is what closes the Daytona bridge for skills:
+    // `register_skill` reads `refs/heads/<branch>` from `$COGMO_SKILLS_PATH`,
+    // so a fetch into `refs/remotes/origin/*` would strand the author's work.
+    gitMocks.runGit.mockReset();
+    gitMocks.runGit.mockResolvedValue({ stdout: "", stderr: "" });
+    gitMocks.withGitAskpass.mockClear();
+
+    await fetchFeatureBranch({
+      localRepoPath: bareRepoPath,
+      remoteUrl: "https://github.com/owner/skills.git",
+      branch: "skill/hn-digest-2026-05-11",
+      identity,
+    });
+
+    expect(gitMocks.withGitAskpass).toHaveBeenCalledTimes(1);
+    expect(gitMocks.runGit).toHaveBeenCalledTimes(1);
+    expect(gitMocks.runGit.mock.calls[0]?.[0]).toEqual([
+      "-C",
+      bareRepoPath,
+      "fetch",
+      "https://github.com/owner/skills.git",
+      "+skill/hn-digest-2026-05-11:refs/heads/skill/hn-digest-2026-05-11",
     ]);
   });
 
@@ -154,7 +205,7 @@ describe("fetchFeatureBranch", () => {
 
     await expect(
       fetchFeatureBranch({
-        localRepoPath: "/srv/cogmo/repos/example",
+        localRepoPath: nonBareRepoPath,
         remoteUrl: "https://github.com/owner/example.git",
         branch: "cogmo/abc123",
         identity,
