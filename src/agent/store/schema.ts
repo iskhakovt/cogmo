@@ -126,12 +126,16 @@ export type ImageProviderAttrs = z.infer<typeof ImageProviderAttrsSchema>;
  * `image_models.capabilities` — per-model knob bag. Read by the LLM (via the
  * tool description) and by the tool handler (to validate the LLM's pick).
  *
- * `aspectRatios` — ratios the LLM may pick for this model. Absent → the tool
- *   handler ignores the LLM's `aspectRatio` arg for this model (fixed-size
- *   models like recraft-v3 character/embedding variants).
+ * `aspectRatios` — ratios the LLM may pick for this model. Absent or empty
+ *   array → the model accepts no custom aspect ratio (fixed-size models like
+ *   recraft-v3 character/embedding variants). Both states are treated
+ *   identically by the handler: if the LLM still passes `aspectRatio`, the
+ *   handler returns a text error the LLM can recover from (re-pick a ratio
+ *   or a different model) rather than dropping it silently.
  * `seed` — whether `seed` is honored. Absent treated as false; advertised in
  *   the tool description so the LLM doesn't ask for reproducibility from a
- *   non-deterministic model.
+ *   non-deterministic model. Handler silently drops `seed` for models that
+ *   don't honor it (lower stakes than a bad ratio — the image still renders).
  *
  * Forward-extensible: add `imageInput`, `negativePrompt`, `maxPromptLength`,
  * `outputMediaType`, etc. without a migration as new providers land.

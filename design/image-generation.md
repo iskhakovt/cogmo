@@ -167,15 +167,21 @@ function createImageTools(deps: {
     handler: async (input) => {
       const row = modelByName.get(input.model);
       if (!row) return `Error: unknown model ${input.model}`;
-      const supported = row.capabilities.aspectRatios;
-      if (input.aspectRatio && supported && !supported.includes(input.aspectRatio)) {
-        return `Error: model ${row.name} does not support aspect ratio ${input.aspectRatio}. Supported: ${supported.join(", ")}.`;
+      // Treat absent and [] identically — both mean "model accepts no
+      // aspectRatio". Both surface as a text error the LLM can recover from
+      // (re-pick a ratio or pick a different model), not as silent drop.
+      const supported = row.capabilities.aspectRatios ?? [];
+      if (input.aspectRatio && !supported.includes(input.aspectRatio)) {
+        const hint = supported.length > 0
+          ? `Supported: ${supported.join(", ")}.`
+          : "This model does not accept a custom aspect ratio.";
+        return `Error: model ${row.name} does not support aspect ratio ${input.aspectRatio}. ${hint}`;
       }
       const provider = deps.providers.get(row.providerId)!;
       const imageModel = provider.kind === "fal"
         ? provider.provider.image(row.modelString)
         : provider.provider.imageModel(row.modelString);
-      const shouldForwardAspect = input.aspectRatio && supported?.includes(input.aspectRatio);
+      const shouldForwardAspect = input.aspectRatio && supported.includes(input.aspectRatio);
       const shouldForwardSeed = input.seed !== undefined && row.capabilities.seed === true;
       const { image } = await withRetry(
         () => generateImage({
