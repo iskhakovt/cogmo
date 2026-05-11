@@ -5,31 +5,36 @@ import { runModelCli } from "./model.js";
 const FAKE_TX = { __mockTx: true } as never;
 const tx = (cb: (t: never) => Promise<unknown>) => cb(FAKE_TX) as Promise<unknown>;
 
+interface FakeRoutingRow {
+  id: string;
+  name: string;
+  type: string;
+  baseUrl: string | null;
+  secretId: string;
+  attrs: Record<string, unknown>;
+  position: number;
+  contextWindow: number | null;
+  maxOutputTokens: number | null;
+}
+
 function makeStore(
   opts: {
     providers?: ReadonlyArray<{ id: string; name: string; type: string }>;
-    rowsByModel?: Record<
-      string,
-      ReadonlyArray<{
-        id: string;
-        name: string;
-        type: string;
-        baseUrl: string | null;
-        secretId: string;
-        attrs: Record<string, unknown>;
-        contextWindow: number | null;
-        maxOutputTokens: number | null;
-      }>
-    >;
+    rowsByModel?: Record<string, ReadonlyArray<FakeRoutingRow>>;
     allModels?: ReadonlyArray<string>;
   } = {},
 ) {
+  const allModelProviders: Array<{ model: string } & FakeRoutingRow> = [];
+  for (const [model, rows] of Object.entries(opts.rowsByModel ?? {})) {
+    for (const row of rows) allModelProviders.push({ model, ...row });
+  }
   return {
     listProviders: vi.fn().mockResolvedValue(opts.providers ?? []),
     listProvidersForModel: vi.fn().mockImplementation(async (_tx, model: string) => {
       return opts.rowsByModel?.[model] ?? [];
     }),
     listAllModels: vi.fn().mockResolvedValue(opts.allModels ?? []),
+    listAllModelProviders: vi.fn().mockResolvedValue(allModelProviders),
     addModelProvider: vi.fn().mockResolvedValue({ id: "row-1" }),
     getNextModelProviderPosition: vi.fn().mockResolvedValue(0),
     removeModelProvider: vi.fn().mockResolvedValue(undefined),
@@ -155,6 +160,7 @@ describe("cogmo model list", () => {
             baseUrl: null,
             secretId: "s",
             attrs: {},
+            position: 0,
             contextWindow: null,
             maxOutputTokens: null,
           },
@@ -168,35 +174,104 @@ describe("cogmo model list", () => {
     expect(out[0]).toMatch(/model\tprovider\tposition\tcontext\tmax_output\tsource/);
     expect(out[1]).toMatch(/^claude-sonnet-4-6\tanthropic\t0\t1000000\t64000\tlitellm$/);
   });
-});
 
-describe("cogmo model remove", () => {
-  it("removes one row when --provider is given", async () => {
+  it("displays the stored position, not the array index, when positions are non-sequential", async () => {
+    // Row at position 5 with no other rows — array index would render 0,
+    // misleading anyone trying to `cogmo model remove --position`. Stored
+    // position is what `listProvidersForModel` reads from the DB.
     const store = makeStore({
+      allModels: ["m"],
       rowsByModel: {
         m: [
           {
             id: "r1",
-            name: "p1",
+            name: "p",
             type: "anthropic",
             baseUrl: null,
             secretId: "s",
             attrs: {},
-            contextWindow: null,
-            maxOutputTokens: null,
-          },
-          {
-            id: "r2",
-            name: "p2",
-            type: "anthropic",
-            baseUrl: null,
-            secretId: "s",
-            attrs: {},
+            position: 5,
             contextWindow: null,
             maxOutputTokens: null,
           },
         ],
       },
+    });
+    const { io, out } = makeIo();
+    await runModelCli(["list"], { runInTx: tx as never, agentStore: store }, io);
+    expect(out[1]).toMatch(/^m\tp\t5\t/);
+  });
+
+  it("uses one query for the whole routing table — no per-model fanout", async () => {
+    const store = makeStore({
+      allModels: ["m1", "m2", "m3"],
+      rowsByModel: {
+        m1: [
+          {
+            id: "r1",
+            name: "p",
+            type: "anthropic",
+            baseUrl: null,
+            secretId: "s",
+            attrs: {},
+            position: 0,
+            contextWindow: null,
+            maxOutputTokens: null,
+          },
+        ],
+        m2: [
+          {
+            id: "r2",
+            name: "p",
+            type: "anthropic",
+            baseUrl: null,
+            secretId: "s",
+            attrs: {},
+            position: 0,
+            contextWindow: null,
+            maxOutputTokens: null,
+          },
+        ],
+        m3: [
+          {
+            id: "r3",
+            name: "p",
+            type: "anthropic",
+            baseUrl: null,
+            secretId: "s",
+            attrs: {},
+            position: 0,
+            contextWindow: null,
+            maxOutputTokens: null,
+          },
+        ],
+      },
+    });
+    const { io } = makeIo();
+    await runModelCli(["list"], { runInTx: tx as never, agentStore: store }, io);
+    expect(store.listAllModelProviders).toHaveBeenCalledTimes(1);
+    expect(store.listProvidersForModel).not.toHaveBeenCalled();
+  });
+});
+
+describe("cogmo model remove", () => {
+  function rowFixture(id: string, name: string, position: number): FakeRoutingRow {
+    return {
+      id,
+      name,
+      type: "anthropic",
+      baseUrl: null,
+      secretId: "s",
+      attrs: {},
+      position,
+      contextWindow: null,
+      maxOutputTokens: null,
+    };
+  }
+
+  it("removes one row when --provider is given", async () => {
+    const store = makeStore({
+      rowsByModel: { m: [rowFixture("r1", "p1", 0), rowFixture("r2", "p2", 1)] },
     });
     const { io } = makeIo();
     const code = await runModelCli(
@@ -209,40 +284,65 @@ describe("cogmo model remove", () => {
     expect(store.removeModelProvider).toHaveBeenCalledWith(FAKE_TX, "m", "r2");
   });
 
-  it("removes every row for the model when --provider is omitted", async () => {
+  it("removes every row for the model in one transaction when --provider is omitted", async () => {
     const store = makeStore({
-      rowsByModel: {
-        m: [
-          {
-            id: "r1",
-            name: "p1",
-            type: "anthropic",
-            baseUrl: null,
-            secretId: "s",
-            attrs: {},
-            contextWindow: null,
-            maxOutputTokens: null,
-          },
-          {
-            id: "r2",
-            name: "p2",
-            type: "anthropic",
-            baseUrl: null,
-            secretId: "s",
-            attrs: {},
-            contextWindow: null,
-            maxOutputTokens: null,
-          },
-        ],
-      },
+      rowsByModel: { m: [rowFixture("r1", "p1", 0), rowFixture("r2", "p2", 1)] },
     });
+    const runInTx = vi.fn().mockImplementation((cb) => cb(FAKE_TX));
     const { io } = makeIo();
+    const code = await runModelCli(["remove", "m"], { runInTx, agentStore: store }, io);
+    expect(code).toBe(0);
+    expect(store.removeModelProvider).toHaveBeenCalledTimes(2);
+    // Both deletes share one outer transaction — the loop runs inside a
+    // single `runInTx` callback rather than starting a new tx per row.
+    // (The initial `listProvidersForModel` call is its own tx.)
+    expect(runInTx).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("cogmo model — flag parsing", () => {
+  it("rejects `--flag` consumed as a value for another flag", async () => {
+    const store = makeStore({
+      providers: [{ id: "p1", name: "openrouter", type: "openai_compatible" }],
+    });
+    const { io, err } = makeIo();
+    // `--context` follows `--provider`, so the buggy parser would set
+    // `provider = "--context"` and silently drop the real provider value.
     const code = await runModelCli(
-      ["remove", "m"],
+      ["add", "x-ai/grok-4.3", "--provider", "--context", "200000"],
       { runInTx: tx as never, agentStore: store },
       io,
     );
-    expect(code).toBe(0);
-    expect(store.removeModelProvider).toHaveBeenCalledTimes(2);
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/--provider requires a value/);
+    expect(store.addModelProvider).not.toHaveBeenCalled();
+  });
+
+  it("rejects a flag with no following value", async () => {
+    const store = makeStore({
+      providers: [{ id: "p1", name: "openrouter", type: "openai_compatible" }],
+    });
+    const { io, err } = makeIo();
+    const code = await runModelCli(
+      ["add", "x-ai/grok-4.3", "--provider"],
+      { runInTx: tx as never, agentStore: store },
+      io,
+    );
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/--provider requires a value/);
+  });
+
+  it("rejects a non-numeric --context value", async () => {
+    const store = makeStore({
+      providers: [{ id: "p1", name: "vllm", type: "openai_compatible" }],
+    });
+    const { io, err } = makeIo();
+    const code = await runModelCli(
+      ["add", "m", "--provider", "vllm", "--context", "not-a-number"],
+      { runInTx: tx as never, agentStore: store },
+      io,
+    );
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/--context expects a non-negative integer/);
   });
 });

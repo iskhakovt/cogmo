@@ -628,7 +628,9 @@ export interface AgentStore {
   /**
    * List every provider registered for a model, ordered by position ASC
    * (primary first, then fallbacks). Empty array when no provider is
-   * registered for the model.
+   * registered for the model. `position` reflects the actual stored
+   * value — non-sequential after intermediate rows are deleted, so
+   * callers should never use an array index as a substitute.
    */
   listProvidersForModel(
     tx: Transaction,
@@ -641,6 +643,28 @@ export interface AgentStore {
       baseUrl: string | null;
       secretId: string;
       attrs: ProviderAttrs;
+      position: number;
+      contextWindow: number | null;
+      maxOutputTokens: number | null;
+    }>
+  >;
+
+  /**
+   * Every `model_providers` row joined with its owning `llm_providers`,
+   * ordered by `(model, position)`. Single round trip for the whole
+   * routing table — used by `cogmo model list` so the command doesn't
+   * fan out one query per model.
+   */
+  listAllModelProviders(tx: Transaction): Promise<
+    ReadonlyArray<{
+      model: string;
+      id: string;
+      name: string;
+      type: string;
+      baseUrl: string | null;
+      secretId: string;
+      attrs: ProviderAttrs;
+      position: number;
       contextWindow: number | null;
       maxOutputTokens: number | null;
     }>
@@ -1686,6 +1710,7 @@ export class DrizzleAgentStore implements AgentStore {
       baseUrl: string | null;
       secretId: string;
       attrs: ProviderAttrs;
+      position: number;
       contextWindow: number | null;
       maxOutputTokens: number | null;
     }>
@@ -1698,6 +1723,7 @@ export class DrizzleAgentStore implements AgentStore {
         baseUrl: llmProviders.baseUrl,
         secretId: llmProviders.secretId,
         attrs: llmProviders.attrs,
+        position: modelProviders.position,
         contextWindow: modelProviders.contextWindow,
         maxOutputTokens: modelProviders.maxOutputTokens,
       })
@@ -1705,6 +1731,39 @@ export class DrizzleAgentStore implements AgentStore {
       .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
       .where(eq(modelProviders.model, model))
       .orderBy(asc(modelProviders.position));
+    return rows;
+  }
+
+  async listAllModelProviders(tx: Transaction): Promise<
+    ReadonlyArray<{
+      model: string;
+      id: string;
+      name: string;
+      type: string;
+      baseUrl: string | null;
+      secretId: string;
+      attrs: ProviderAttrs;
+      position: number;
+      contextWindow: number | null;
+      maxOutputTokens: number | null;
+    }>
+  > {
+    const rows = await tx
+      .select({
+        model: modelProviders.model,
+        id: llmProviders.id,
+        name: llmProviders.name,
+        type: llmProviders.type,
+        baseUrl: llmProviders.baseUrl,
+        secretId: llmProviders.secretId,
+        attrs: llmProviders.attrs,
+        position: modelProviders.position,
+        contextWindow: modelProviders.contextWindow,
+        maxOutputTokens: modelProviders.maxOutputTokens,
+      })
+      .from(modelProviders)
+      .innerJoin(llmProviders, eq(modelProviders.providerId, llmProviders.id))
+      .orderBy(asc(modelProviders.model), asc(modelProviders.position));
     return rows;
   }
 

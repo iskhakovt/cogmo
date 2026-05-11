@@ -55,29 +55,31 @@ export async function addProvider(
   args: AddProviderArgs,
 ): Promise<AddProviderResult> {
   const validation = await validateKey(args);
-
   const secretName = `${args.name}_api_key`;
-  const { id: secretId } = await deps.runInTx((tx) =>
-    deps.secretsStore.putSecret(tx, {
+
+  // One transaction wraps secret insert + validation mark + provider
+  // insert. A failing `createProvider` (e.g. duplicate `name` UNIQUE
+  // violation on a re-add) would otherwise leave the secret behind with
+  // no owner — recoverable manually but ugly. With a single tx the
+  // failure rolls everything back atomically.
+  const { providerId, secretId } = await deps.runInTx(async (tx) => {
+    const { id: sId } = await deps.secretsStore.putSecret(tx, {
       name: secretName,
       plaintext: args.apiKey,
       description: `API key for ${args.name}`,
-    }),
-  );
-
-  if (validation.valid) {
-    await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, secretName));
-  }
-
-  const { id: providerId } = await deps.runInTx((tx) =>
-    deps.agentStore.createProvider(tx, {
+    });
+    if (validation.valid) {
+      await deps.secretsStore.markValidated(tx, secretName);
+    }
+    const { id: pId } = await deps.agentStore.createProvider(tx, {
       name: args.name,
       type: args.type,
       ...(args.baseUrl && { baseUrl: args.baseUrl }),
-      secretId,
+      secretId: sId,
       attrs: args.attrs ?? {},
-    }),
-  );
+    });
+    return { providerId: pId, secretId: sId };
+  });
 
   return { providerId, secretId, validation };
 }

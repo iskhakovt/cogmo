@@ -51,23 +51,31 @@ export async function runModelCli(
   io: CliIo = CONSOLE_IO,
 ): Promise<number> {
   const [command, ...rest] = argv;
-  switch (command) {
-    case undefined:
-    case "help":
-    case "--help":
-    case "-h":
-      io.out(USAGE);
-      return 0;
-    case "add":
-      return addModelCmd(rest, deps, io);
-    case "list":
-      return listModels(rest, deps, io);
-    case "remove":
-      return removeModel(rest, deps, io);
-    default:
-      io.err(`Unknown command: ${command}\n`);
-      io.err(USAGE);
-      return 1;
+  try {
+    switch (command) {
+      case undefined:
+      case "help":
+      case "--help":
+      case "-h":
+        io.out(USAGE);
+        return 0;
+      case "add":
+        return await addModelCmd(rest, deps, io);
+      case "list":
+        return await listModels(rest, deps, io);
+      case "remove":
+        return await removeModel(rest, deps, io);
+      default:
+        io.err(`Unknown command: ${command}\n`);
+        io.err(USAGE);
+        return 1;
+    }
+  } catch (err) {
+    // parseFlags + parsePositiveInt throw on operator error (missing
+    // value, bad integer, flag-as-value). Surface as a clean exit-2 rather
+    // than letting the dispatcher's await unwind with a stack trace.
+    io.err(`Error: ${(err as Error).message}`);
+    return 2;
   }
 }
 
@@ -127,8 +135,13 @@ async function addModelCmd(
 async function listModels(args: readonly string[], deps: ModelCliDeps, io: CliIo): Promise<number> {
   const opts = parseFlags(args);
 
-  const allModels = await deps.runInTx((tx) => deps.agentStore.listAllModels(tx));
-  const filtered = opts.model ? allModels.filter((m) => m === opts.model) : allModels;
+  // One join query returns every (model × provider) row. Avoids the per-model
+  // round-trip the earlier shape paid for the common case of listing all
+  // routing rows.
+  const rows = await deps.runInTx((tx) => deps.agentStore.listAllModelProviders(tx));
+  const filtered = rows.filter(
+    (r) => (!opts.model || r.model === opts.model) && (!opts.provider || r.name === opts.provider),
+  );
 
   if (filtered.length === 0) {
     io.out("(no model routing rows)");
@@ -136,27 +149,25 @@ async function listModels(args: readonly string[], deps: ModelCliDeps, io: CliIo
   }
 
   io.out("model\tprovider\tposition\tcontext\tmax_output\tsource");
-  for (const model of filtered) {
-    const rows = await deps.runInTx((tx) => deps.agentStore.listProvidersForModel(tx, model));
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      if (!row) continue;
-      if (opts.provider && row.name !== opts.provider) continue;
-      const limits = resolveLimits(model, {
-        contextWindow: row.contextWindow,
-        maxOutputTokens: row.maxOutputTokens,
-      });
-      io.out(
-        [
-          model,
-          row.name,
-          String(i),
-          String(limits.contextWindow),
-          String(limits.maxOutputTokens),
-          limits.source,
-        ].join("\t"),
-      );
-    }
+  for (const row of filtered) {
+    const limits = resolveLimits(row.model, {
+      contextWindow: row.contextWindow,
+      maxOutputTokens: row.maxOutputTokens,
+    });
+    // `row.position` is the actual stored value — never the array index.
+    // Non-sequential positions are legal (intermediate row deletes), so an
+    // index would mislead operators trying to call `cogmo model remove
+    // --position` or read the fallback chain.
+    io.out(
+      [
+        row.model,
+        row.name,
+        String(row.position),
+        String(limits.contextWindow),
+        String(limits.maxOutputTokens),
+        limits.source,
+      ].join("\t"),
+    );
   }
   return 0;
 }
@@ -190,10 +201,15 @@ async function removeModel(
     return 0;
   }
 
-  // No --provider: delete every row for this model.
-  for (const row of rows) {
-    await deps.runInTx((tx) => deps.agentStore.removeModelProvider(tx, model, row.id));
-  }
+  // No --provider: delete every row for this model in one transaction so
+  // the bulk operation is atomic (no partial state if the process dies
+  // mid-loop) and the DB only sees one round-trip per delete instead of
+  // one per row plus tx overhead.
+  await deps.runInTx(async (tx) => {
+    for (const row of rows) {
+      await deps.agentStore.removeModelProvider(tx, model, row.id);
+    }
+  });
   io.out(`Removed ${rows.length} routing row(s) for "${model}".`);
   return 0;
 }
@@ -216,7 +232,7 @@ function parseFlags(args: readonly string[]): ParsedFlags {
   };
   for (let i = 0; i < args.length; i++) {
     const flag = args[i];
-    const value = args[i + 1];
+    const value = takeValue(args, i, flag);
     switch (flag) {
       case "--provider":
         out.provider = value;
@@ -247,8 +263,26 @@ function parseFlags(args: readonly string[]): ParsedFlags {
   return out;
 }
 
-function parsePositiveInt(value: string | undefined, label: string): number {
-  if (value === undefined) throw new Error(`${label} requires a numeric value`);
+/**
+ * Read the value following a flag, refusing the case where the next token
+ * is itself a flag (e.g. `--provider --context 8000` would otherwise set
+ * `provider = "--context"` and silently drop `--context`'s real value).
+ * `--` is not a flag value, so a literal hyphen has to be quoted by the
+ * shell to reach here — at which point passing it on is the operator's
+ * problem.
+ */
+function takeValue(args: readonly string[], i: number, flag: string | undefined): string {
+  const next = args[i + 1];
+  if (next === undefined) {
+    throw new Error(`${flag ?? "flag"} requires a value`);
+  }
+  if (next.startsWith("--")) {
+    throw new Error(`${flag ?? "flag"} requires a value (got next flag "${next}" instead)`);
+  }
+  return next;
+}
+
+function parsePositiveInt(value: string, label: string): number {
   const n = Number.parseInt(value, 10);
   if (!Number.isFinite(n) || n < 0) {
     throw new Error(`${label} expects a non-negative integer, got "${value}"`);
