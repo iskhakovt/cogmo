@@ -709,6 +709,63 @@ describe("runStreamingAgentLoop", () => {
     });
   });
 
+  it("propagates a mid-stream provider error without leaking an unhandledRejection", async () => {
+    // The streaming adapters reject both the events iterator AND their
+    // `response` promise on a stream-level failure. The loop awaits
+    // `response` only on success, so without an upfront `.catch()` the
+    // dangling rejection would crash the Node process under
+    // `--unhandled-rejections=throw` (Node ≥ 15 default).
+    const failure = new Error("upstream 502");
+    (failure as Error & { status?: number }).status = 502;
+
+    const provider: LlmProvider = {
+      name: "leaky-stream",
+      chat: vi.fn(),
+      countTokens: vi.fn(),
+      chatStream() {
+        const events: AsyncIterable<StreamEvent> = {
+          [Symbol.asyncIterator]() {
+            return {
+              async next(): Promise<IteratorResult<StreamEvent>> {
+                throw failure;
+              },
+            };
+          },
+        };
+        // Bare rejected promise — no pre-attached `.catch`. The loop must
+        // attach one itself; if it doesn't, vitest reports an unhandled
+        // rejection and the test fails.
+        return { events, response: Promise.reject(failure) };
+      },
+    };
+
+    const unhandled: unknown[] = [];
+    const listener = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", listener);
+    try {
+      await expect(
+        runStreamingAgentLoop({
+          provider,
+          model: "test",
+          systemPrompt: "sys",
+          messages: [{ role: "user", content: "hi" }],
+          tools: new ToolRegistry(),
+          service: stubService(),
+          onEvent: async () => {},
+        }),
+      ).rejects.toBe(failure);
+
+      // Flush microtasks + macrotasks so any pending `unhandledRejection`
+      // signal has fired before we assert.
+      await new Promise((r) => setImmediate(r));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", listener);
+    }
+  });
+
   it("captures thinking_delta into content blocks but does not forward to onEvent", async () => {
     const provider = mockStreamProvider([
       {
