@@ -80,6 +80,13 @@ export type PrMetadata = z.infer<typeof PrMetadataSchema>;
  * incrementally as the task runs (memory_bytes at task start from CLAUDE.md
  * `stat`, token counts from `turn.completed` events, container stats from
  * the supervisor's polling). Slice 1 only writes `memory_bytes`.
+ *
+ * The `sandbox` block is honest raw telemetry: start/end timestamps and
+ * provisioned (reserved) resources. Downstream tooling computes derived
+ * quantities — wall_clock = deleted_at - created_at, billable estimate
+ * ≈ wall_clock × provisioned × $rate. No `cpu_seconds` field here because
+ * the Daytona SDK doesn't expose actual CPU consumption per sandbox, and
+ * we don't want a field whose name implies precision the data lacks.
  */
 export const ResourceUsageSchema = z
   .object({
@@ -98,6 +105,26 @@ export const ResourceUsageSchema = z
     tokens_output: z.number().int().nonnegative().optional(),
     /** USD spend reported by the CLI's `result` event, when available. */
     cost_usd: z.number().nonnegative().optional(),
+    /**
+     * Execute-phase sandbox lifecycle. Captured Cogmo-side, so it works
+     * uniformly across backends without depending on per-sandbox usage
+     * APIs we don't have. `backend` mirrors `SandboxClient.backendId`
+     * (free-form string — test fakes use suffixes like `daytona-fake`).
+     */
+    sandbox: z
+      .object({
+        backend: z.string().min(1),
+        created_at: z.string().datetime(),
+        deleted_at: z.string().datetime().optional(),
+        provisioned: z
+          .object({
+            cpu: z.number().nonnegative(),
+            memory_bytes: z.number().int().nonnegative(),
+          })
+          .strict(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type ResourceUsage = z.infer<typeof ResourceUsageSchema>;

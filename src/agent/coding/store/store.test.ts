@@ -484,6 +484,66 @@ describe("DrizzleCodingStore", () => {
       ).rejects.toThrow();
     });
 
+    it("setTaskResourceUsage shallow-merges across calls (prior fields preserved)", async () => {
+      // Phase 3c.5 changed the contract from replace to merge so the
+      // execute orchestrator can write `sandbox` lifecycle at create
+      // time + extend with `deleted_at` at teardown without clobbering
+      // the CLI-reported `tokens_*`/`cost_usd`.
+      const repoId = await seedRepo();
+      const t = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      // First write: sandbox lifecycle at create-container time.
+      await tx((trx) =>
+        store.setTaskResourceUsage(trx, t.id, {
+          sandbox: {
+            backend: "daytona",
+            created_at: "2026-05-11T10:00:00.000Z",
+            provisioned: { cpu: 2, memory_bytes: 2_147_483_648 },
+          },
+        }),
+      );
+      // Second write: CLI usage from result events. Must not clobber sandbox.
+      await tx((trx) =>
+        store.setTaskResourceUsage(trx, t.id, {
+          tokens_input: 5000,
+          tokens_output: 1200,
+          cost_usd: 0.42,
+        }),
+      );
+      // Third write: deleted_at appended. Caller is expected to pass
+      // the full nested object (top-level merge replaces `sandbox`).
+      await tx((trx) =>
+        store.setTaskResourceUsage(trx, t.id, {
+          sandbox: {
+            backend: "daytona",
+            created_at: "2026-05-11T10:00:00.000Z",
+            deleted_at: "2026-05-11T10:05:30.000Z",
+            provisioned: { cpu: 2, memory_bytes: 2_147_483_648 },
+          },
+        }),
+      );
+
+      const row = await tx((trx) => store.getTask(trx, t.id));
+      expect(row?.resourceUsage).toMatchObject({
+        sandbox: {
+          backend: "daytona",
+          created_at: "2026-05-11T10:00:00.000Z",
+          deleted_at: "2026-05-11T10:05:30.000Z",
+          provisioned: { cpu: 2, memory_bytes: 2_147_483_648 },
+        },
+        tokens_input: 5000,
+        tokens_output: 1200,
+        cost_usd: 0.42,
+      });
+    });
+
     it("rejects malformed worktree_assignment via raw SQL on read", async () => {
       const repoId = await seedRepo();
       const t = await tx((trx) =>

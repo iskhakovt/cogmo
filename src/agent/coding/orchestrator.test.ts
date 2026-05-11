@@ -15,6 +15,7 @@ import {
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
@@ -804,6 +805,25 @@ describe("runCodingExecute", () => {
     expect(createCalls).toHaveLength(1);
     expect(createCalls[0]?.taskId).toBe(task.id);
     expect(stopCalls).toEqual([task.id]);
+
+    // Phase 3c.5 — fresh-create branch persists raw sandbox lifecycle
+    // (backend + start/end ISO timestamps + reserved resources) into
+    // `resource_usage.sandbox`. The schema is honest: no computed
+    // cpu_seconds, since the Daytona SDK doesn't expose actual usage.
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    const sb = expectDefined(reloaded?.resourceUsage?.sandbox, "resource_usage.sandbox");
+    expect(sb.backend).toBe("fake");
+    expect(sb.provisioned).toEqual({
+      cpu: RESOURCE_LIMITS.cpus,
+      memory_bytes: RESOURCE_LIMITS.memory_bytes,
+    });
+    // Both timestamps are ISO-8601 datetimes; deleted_at >= created_at.
+    const deletedAtIso = expectDefined(sb.deleted_at, "resource_usage.sandbox.deleted_at");
+    const createdAt = Date.parse(sb.created_at);
+    const deletedAt = Date.parse(deletedAtIso);
+    expect(Number.isFinite(createdAt)).toBe(true);
+    expect(Number.isFinite(deletedAt)).toBe(true);
+    expect(deletedAt).toBeGreaterThanOrEqual(createdAt);
   });
 
   it("backend reports error → status=failed, sandbox stopped, stream failed (not completed)", async () => {

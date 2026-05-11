@@ -780,6 +780,24 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         });
         return session.state;
       });
+      // Honest raw telemetry — backend + start timestamp + reserved
+      // resources. Captured in its own step.run so the timestamp gets
+      // checkpointed (won't get re-stamped on Inngest replay) and so a
+      // failure to write doesn't roll back the sandbox creation.
+      await stepRun("persist-sandbox-created", () =>
+        runInTx((tx) =>
+          store.setTaskResourceUsage(tx, taskId, {
+            sandbox: {
+              backend: sandbox.backendId,
+              created_at: new Date().toISOString(),
+              provisioned: {
+                cpu: defaultResourceLimits.cpus,
+                memory_bytes: defaultResourceLimits.memory_bytes,
+              },
+            },
+          }),
+        ),
+      );
     }
     containerCreated = true;
 
@@ -843,6 +861,9 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         }),
       );
       await stepRun("teardown", () => sandbox.deleteByTaskId(taskId).catch(() => {}));
+      await stepRun("persist-sandbox-deleted", () =>
+        persistSandboxDeleted({ taskId, store, runInTx }),
+      );
       // Stream notifications post-commit — wrap so a subscriber failure
       // doesn't bubble into the outer catch, which would write a second
       // (less informative) failed-status overwriting the original reason.
@@ -879,6 +900,9 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "pending_verify" })),
     );
     await stepRun("teardown", () => sandbox.deleteByTaskId(taskId).catch(() => {}));
+    await stepRun("persist-sandbox-deleted", () =>
+      persistSandboxDeleted({ taskId, store, runInTx }),
+    );
     // Hand off to the slice 4.0h verify orchestrator. The dedicated function
     // re-creates a container with the askpass mount, runs verify → push → PR,
     // and tears down on its own. Emitting after the teardown means a concurrent
@@ -1148,4 +1172,28 @@ async function persistDecision(
       throw err;
     }
   }
+}
+
+/**
+ * Stamp `resource_usage.sandbox.deleted_at` once teardown has run. Loads
+ * the existing `sandbox` block (written at create-container time),
+ * appends `deleted_at`, writes back. No-op when there's no `sandbox`
+ * block (resume-path tasks that never wrote one, or pre-3c.5 rows) or
+ * when `deleted_at` is already set (Inngest replay re-entering this step
+ * after the body completed — the cached return path skips us, this
+ * guard is belt-and-braces).
+ */
+async function persistSandboxDeleted(params: {
+  taskId: string;
+  store: CodingStore;
+  runInTx: Transactor;
+}): Promise<void> {
+  await params.runInTx(async (tx) => {
+    const task = await params.store.getTask(tx, params.taskId);
+    const sb = task?.resourceUsage?.sandbox;
+    if (!sb || sb.deleted_at) return;
+    await params.store.setTaskResourceUsage(tx, params.taskId, {
+      sandbox: { ...sb, deleted_at: new Date().toISOString() },
+    });
+  });
 }

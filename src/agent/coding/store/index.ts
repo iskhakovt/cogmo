@@ -216,15 +216,17 @@ export interface CodingStore {
   setTaskPrMetadata(tx: Transaction, id: string, metadata: PrMetadata): Promise<void>;
 
   /**
-   * **Replace** (not merge) the resource_usage JSONB column with the
-   * supplied object. Slice 1 only writes once per task, so replace is
-   * fine; once slice 2+ stamps `memory_bytes` at task start AND
-   * `tokens_*` later from `result` events, this needs to become a
-   * SQL `||` JSONB merge OR the contract changes to require the caller
-   * to load+merge+write. Bug pre-empted; landing the merge for the
-   * single-write slice would be premature.
+   * **Shallow-merge** `patch` into the existing `resource_usage` JSONB
+   * column. Implemented as load + spread + write under the caller's
+   * transaction — single-user / one-orchestrator-per-task ensures no
+   * concurrent writers race on the same row, so the load+write window
+   * is benign. Top-level fields in `patch` overwrite the existing
+   * values; nested objects (`memory_bytes`, `sandbox`, `provisioned`)
+   * are replaced, not deep-merged. Callers wanting to update one
+   * nested field must read first, merge, and pass the full nested
+   * object.
    */
-  setTaskResourceUsage(tx: Transaction, id: string, usage: ResourceUsage): Promise<void>;
+  setTaskResourceUsage(tx: Transaction, id: string, patch: Partial<ResourceUsage>): Promise<void>;
 
   /**
    * Count non-terminal tasks for a repo. Used to enforce
@@ -502,8 +504,19 @@ export class DrizzleCodingStore implements CodingStore {
     await tx.update(codingTasks).set({ prMetadata: metadata }).where(eq(codingTasks.id, id));
   }
 
-  async setTaskResourceUsage(tx: Transaction, id: string, usage: ResourceUsage): Promise<void> {
-    await tx.update(codingTasks).set({ resourceUsage: usage }).where(eq(codingTasks.id, id));
+  async setTaskResourceUsage(
+    tx: Transaction,
+    id: string,
+    patch: Partial<ResourceUsage>,
+  ): Promise<void> {
+    const rows = await tx
+      .select({ resourceUsage: codingTasks.resourceUsage })
+      .from(codingTasks)
+      .where(eq(codingTasks.id, id))
+      .limit(1);
+    const current = rows[0]?.resourceUsage ?? {};
+    const merged = { ...current, ...patch };
+    await tx.update(codingTasks).set({ resourceUsage: merged }).where(eq(codingTasks.id, id));
   }
 
   async countActiveTasksForRepo(tx: Transaction, repoId: string): Promise<number> {
