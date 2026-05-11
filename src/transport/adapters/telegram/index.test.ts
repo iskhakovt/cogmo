@@ -148,6 +148,7 @@ describe("telegram adapter", () => {
           conversationId: "conv-2",
           status: "active",
           receive: "routed",
+          profileName: "assistant",
         }),
       ),
       emit: vi.fn().mockResolvedValue(ok(undefined)),
@@ -236,7 +237,9 @@ describe("telegram adapter", () => {
     await handlers.get("command:new")!(ctx);
 
     expect(transport.closeSession).toHaveBeenCalledWith("session-1");
-    expect(ctx.reply.mock.calls[0]?.[0]).toBe("New conversation started.");
+    // handleNew now surfaces the profile actually used in the reply; the
+    // mocked createConversation default returns profileName "assistant".
+    expect(ctx.reply.mock.calls[0]?.[0]).toBe('New conversation started with profile "assistant".');
   });
 
   it("mid-dialog text (/profile new flow) does NOT emit to agent", async () => {

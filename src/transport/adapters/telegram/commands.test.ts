@@ -237,10 +237,8 @@ describe("handleNew", () => {
     };
   }
 
-  it("creates a conversation with no profileId when none is passed", async () => {
-    // No profile arg → handleNew must not pass `profileId`, letting the
-    // Transport apply its fallback chain (per-chat default > global default).
-    const createConversation = vi.fn().mockResolvedValue(
+  function mockCreateConversation(profileName: string) {
+    return vi.fn().mockResolvedValue(
       ok({
         id: "s1",
         channelId: "ch",
@@ -248,8 +246,15 @@ describe("handleNew", () => {
         conversationId: "c1",
         status: "active",
         receive: "routed",
+        profileName,
       }),
     );
+  }
+
+  it("creates a conversation with no profileId when none is passed", async () => {
+    // No profile arg → handleNew must not pass `profileId`, letting the
+    // Transport apply its fallback chain (per-chat default > global default).
+    const createConversation = mockCreateConversation("assistant");
     const transport = transportWith({
       resolveSession: vi.fn().mockResolvedValue(null),
       createConversation,
@@ -260,16 +265,7 @@ describe("handleNew", () => {
   });
 
   it("passes the resolved profileId through when the user names a profile", async () => {
-    const createConversation = vi.fn().mockResolvedValue(
-      ok({
-        id: "s1",
-        channelId: "ch",
-        platformAddress: "42",
-        conversationId: "c1",
-        status: "active",
-        receive: "routed",
-      }),
-    );
+    const createConversation = mockCreateConversation("coder");
     const transport = transportWith({
       profiles: { list: vi.fn().mockResolvedValue(ok([profile("p1", "coder")])) },
       resolveSession: vi.fn().mockResolvedValue(null),
@@ -284,41 +280,24 @@ describe("handleNew", () => {
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('with profile "coder"'));
   });
 
-  it("looks up and surfaces the resolved profile name when none was passed", async () => {
+  it("surfaces the profile name returned by createConversation (race-free)", async () => {
     // The fallback (chat default or global default) is opaque to handleNew;
-    // it asks getCurrent so the reply names the profile the user actually
-    // got — making chat-default pins visible without requiring memory.
-    const getCurrent = vi.fn().mockResolvedValue(
-      ok({
-        conversationId: "c1",
-        profileId: "p-pinned",
-        profileName: "doc-mode",
-        model: "claude-sonnet-4-6",
-        voiceMode: null,
-        profileVoiceMode: "auto",
-      }),
-    );
+    // it relies on createConversation's return to name the profile it
+    // actually used. This is atomic with the insert — getCurrent would be
+    // racy against a concurrent /new swapping the active session.
+    const createConversation = mockCreateConversation("doc-mode");
+    // Spy on getCurrent to confirm we DO NOT call it on this path — the
+    // race fix's whole point is removing that follow-up lookup.
+    const getCurrent = vi.fn();
     const transport = transportWith({
       resolveSession: vi.fn().mockResolvedValue(null),
+      createConversation,
       conversations: { getCurrent },
     });
     const ctx = mkCtx();
     await handleNew(transport, ctx);
-    expect(getCurrent).toHaveBeenCalledWith("1", "42");
+    expect(getCurrent).not.toHaveBeenCalled();
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('with profile "doc-mode"'));
-  });
-
-  it("falls back to a generic reply when getCurrent returns null", async () => {
-    // Defensive: if the conversation row vanished between createConversation
-    // and getCurrent (or getCurrent returns an error), the user still gets
-    // a confirmation rather than a misleading "with profile X" claim.
-    const transport = transportWith({
-      resolveSession: vi.fn().mockResolvedValue(null),
-      conversations: { getCurrent: vi.fn().mockResolvedValue(ok(null)) },
-    });
-    const ctx = mkCtx();
-    await handleNew(transport, ctx);
-    expect(ctx.reply).toHaveBeenCalledWith("New conversation started.");
   });
 
   it("closes the existing session before creating a new conversation", async () => {

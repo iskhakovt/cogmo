@@ -230,6 +230,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
         conversationId: "conv-1",
         status: "active",
         receive: "routed",
+        profileName: "assistant",
       }),
     ),
     closeSession: vi.fn().mockResolvedValue(undefined),

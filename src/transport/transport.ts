@@ -240,11 +240,22 @@ export type TransportError =
  */
 export interface Transport {
   resolveSession(platformAddress: string): Promise<Session | null>;
+  /**
+   * Create a new conversation and the channel session that points at it.
+   *
+   * Returns the new session augmented with `profileName` — the name of the
+   * profile actually used, resolved inside the same transaction as the
+   * conversation insert. Callers that surface "started with profile X" use
+   * this directly instead of doing a follow-up `getCurrent` lookup, which
+   * would be racy against a concurrent `createConversation` on the same
+   * `(channelId, platformAddress)` swapping the active session out from
+   * under them.
+   */
   createConversation(
     platformAddress: string,
     platformUserHandle: string,
     opts: { isPrivate: boolean; profileId?: string },
-  ): Promise<Result<Session, TransportError>>;
+  ): Promise<Result<Session & { profileName: string }, TransportError>>;
   closeSession(sessionId: string): Promise<void>;
   emit(
     sessionId: string,
@@ -715,6 +726,12 @@ export function createTransport(deps: {
           profileId,
           isPrivate: opts.isPrivate,
         });
+        // Profile must exist — agentStore.createConversation just succeeded
+        // with this id under the same FK, so the only way `getProfile`
+        // returns null is a torn tx or schema bug. Surface it as
+        // profile_not_found rather than crashing on a null deref.
+        const profile = await agentStore.getProfile(tx, profileId);
+        if (!profile) return err({ code: "profile_not_found" as const });
         const params = {
           channelId,
           platformAddress,
@@ -723,7 +740,7 @@ export function createTransport(deps: {
           receive: "routed" as const,
         };
         const { id } = await transportStore.createSession(tx, params);
-        return ok({ id, ...params });
+        return ok({ id, ...params, profileName: profile.name });
       });
     },
 

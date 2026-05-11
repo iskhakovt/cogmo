@@ -155,6 +155,43 @@ describe("createTransport", () => {
         isPrivate: true,
       });
     });
+
+    it("returns the resolved profile name on the success value", async () => {
+      // The reply layer in handleNew consumes this to surface the profile
+      // actually used — atomic with the insert, so it's race-free against
+      // a concurrent /new swapping the active session.
+      const agentStore = mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({
+          id: "profile-1",
+          userId: null,
+          name: "doc-mode",
+          basePrompt: "",
+          model: "claude-sonnet-4-6",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "heuristic",
+          voiceMode: "auto",
+          toolSet: [],
+          memoryScope: null,
+          profileClass: null,
+        }),
+      });
+      const { transport } = setup({ agentStore });
+      const result = await transport.createConversation("addr-1", "handle-1", { isPrivate: true });
+      expect(result._unsafeUnwrap()).toMatchObject({ profileName: "doc-mode" });
+    });
+
+    it("returns profile_not_found when getProfile resolves to null after insert", async () => {
+      // Defensive: agentStore.createConversation just succeeded with this id
+      // under the same FK, so getProfile returning null would mean a torn tx
+      // or schema bug. Surface a typed error rather than crashing on null.
+      const agentStore = mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue(null),
+      });
+      const { transport } = setup({ agentStore });
+      const result = await transport.createConversation("addr-1", "handle-1", { isPrivate: true });
+      expect(result._unsafeUnwrapErr()).toEqual({ code: "profile_not_found" });
+    });
   });
 
   describe("chats.setDefaultProfile", () => {

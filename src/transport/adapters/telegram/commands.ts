@@ -782,23 +782,13 @@ export async function handleNew(transport: Transport, ctx: TelegramCommandContex
     await ctx.reply(errorMessage(result.error));
     return;
   }
-  // Surface the profile actually used. When the user passed an explicit name
-  // we already know it; otherwise we look it up so the chat-default pin
-  // becomes visible (without this, a chat pinned to a non-global default
-  // would silently start conversations on it and the user would have to
-  // remember the binding).
-  let resolvedName = profileName;
-  if (!resolvedName) {
-    const current = await transport.conversations.getCurrent(handle, addr);
-    if (current.isOk() && current.value) {
-      resolvedName = current.value.profileName;
-    }
-  }
-  await ctx.reply(
-    resolvedName
-      ? `New conversation started with profile "${resolvedName}".`
-      : "New conversation started.",
-  );
+  // Surface the profile actually used. createConversation returns the
+  // resolved name in its success value, so the reply names the profile of
+  // the conversation we just created — atomic with the insert, and
+  // race-free against a concurrent /new on the same chat (which would
+  // otherwise swap the "current" session out from under us if we asked
+  // getCurrent after the fact).
+  await ctx.reply(`New conversation started with profile "${result.value.profileName}".`);
 }
 
 function ambiguityMessage(name: string, matches: ReadonlyArray<Profile>): string {
