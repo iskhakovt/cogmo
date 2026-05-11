@@ -224,27 +224,34 @@ function previewFromContent(content: unknown): string {
  * opaque 23514.
  */
 function validateImageProviderBaseUrl(type: ImageProviderTypeValue, baseUrl: string | null): void {
-  if (type === "fal") {
-    if (baseUrl !== null) {
-      throw new InvalidProviderConfigError("fal does not accept a base_url");
+  // Exhaustive switch — a new `image_provider_type` enum value lands at
+  // the `assertNever` branch with a compile error rather than silently
+  // taking the openai_compatible path. Same pattern as `buildProvider`
+  // in src/llm/resolver.ts.
+  switch (type) {
+    case "fal":
+      if (baseUrl !== null) {
+        throw new InvalidProviderConfigError("fal does not accept a base_url");
+      }
+      return;
+    case "openai_compatible": {
+      if (baseUrl === null) {
+        throw new InvalidProviderConfigError("openai_compatible requires a base_url");
+      }
+      let parsed: URL;
+      try {
+        parsed = new URL(baseUrl);
+      } catch {
+        throw new InvalidProviderConfigError(`base_url is not a valid URL: ${baseUrl}`);
+      }
+      if (parsed.protocol !== "https:") {
+        throw new InvalidProviderConfigError(`base_url must be https (got ${parsed.protocol})`);
+      }
+      if (baseUrl.endsWith("/")) {
+        throw new InvalidProviderConfigError("base_url must not end with a trailing slash");
+      }
+      return;
     }
-    return;
-  }
-  // openai_compatible
-  if (baseUrl === null) {
-    throw new InvalidProviderConfigError("openai_compatible requires a base_url");
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(baseUrl);
-  } catch {
-    throw new InvalidProviderConfigError(`base_url is not a valid URL: ${baseUrl}`);
-  }
-  if (parsed.protocol !== "https:") {
-    throw new InvalidProviderConfigError(`base_url must be https (got ${parsed.protocol})`);
-  }
-  if (baseUrl.endsWith("/")) {
-    throw new InvalidProviderConfigError("base_url must not end with a trailing slash");
   }
 }
 
