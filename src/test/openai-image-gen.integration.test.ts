@@ -47,13 +47,22 @@ import type { AttachmentStore } from "../transport/attachment-store.js";
  * string here means the existing fixture stops matching.
  */
 const PROMPT = "A serene watercolor mountain landscape at golden hour, soft brushstrokes.";
-const MODEL_STRING = "gpt-image-1";
-const MODEL_NAME = "openai/gpt-image-1";
+// dall-e-3 (not gpt-image-1/2): `@ai-sdk/openai-compatible` sends
+// `response_format` on every image request — a dall-e-era field. The
+// gpt-image-* line uses `output_format` instead and rejects unknown
+// params with HTTP 400 ("Unknown parameter: 'response_format'"). dall-e-3
+// accepts the SDK's defaults, is still publicly available, and exercises
+// the same wire shape this test exists to pin (POST
+// /v1/images/generations + `data[0].b64_json` response). When operators
+// want gpt-image-* they should configure a dedicated `openai` adapter
+// rather than the generic `openai_compatible` one — tracked separately.
+const MODEL_STRING = "dall-e-3";
+const MODEL_NAME = "openai/dall-e-3";
 const PROVIDER_ID = "test-provider-openai-images";
 
 const FAKE_TX: Transactor = async (cb) => cb({} as never);
 
-describe("openai-compatible image gen — OpenAI gpt-image-1 (recorded)", () => {
+describe("openai-compatible image gen — OpenAI dall-e-3 (recorded)", () => {
   it("generates an image end-to-end through buildImageProvider → llmock fixture", async () => {
     const llmockBaseUrl = inject("llmockBaseUrl");
     // Real key forwarded only in record mode — replay never touches the
