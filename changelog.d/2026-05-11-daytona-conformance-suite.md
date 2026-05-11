@@ -1,0 +1,18 @@
+Phase 3c.6 — Daytona conformance suite via record/replay. Catches the SDK shape drift + WS framing changes that the host-side `FakeDaytonaSandboxClient` (3c.1) doesn't see, while keeping per-PR CI cost at zero.
+
+New `src/test/daytona-mock.ts` is a record/replay HTTP+WS proxy modeled on the LLMock-style pattern already used for xAI and Hindsight in this codebase. Two surfaces:
+
+- **HTTP** — `node:http` server. Record mode forwards requests to upstream Daytona (with the operator's real `DAYTONA_API_KEY` from env) and journals `(method, path, body)` + response into a fixture file. Replay mode matches incoming requests by `(method, path)` in FIFO order and returns the recorded response; unmatched → 503 with a "re-record" hint. Authorization headers are stripped before journaling — fixtures never contain real keys.
+- **WebSocket** — `ws` package, attached to the same HTTP server via `noServer`+`upgrade` so one port serves both. Record mode opens a parallel upstream WS, forwards frames in both directions, journals the full frame log. Replay mode emits recorded server→client frames in order via `queueMicrotask`, ignores client→server frames (the Daytona `getSessionCommandLogs` contract is server-stream-only). Close codes + reasons round-trip.
+
+The Daytona SDK fans calls across two URLs: `apiUrl` for the main API and a per-sandbox `toolboxProxyUrl` returned in the `create` response. The mock rewrites `toolboxProxyUrl` to `<mock-url>/toolbox/<sandbox-id>/` at record time so all subsequent toolbox traffic (`process.*`, `fs.*`, `git.*`, WS logs) lands on the mock too. The rewrite is baked into the recorded response, so replay needs no per-call URL transforms.
+
+`src/test/daytona-conformance.integration.test.ts` runs `@daytonaio/sdk` against the mock end-to-end: `daytona.create()` → `process.createSession` → `process.executeSessionCommand` → `process.getSessionCommandLogs` (WS) → `process.getSessionCommand` → `process.deleteSession` → `sandbox.delete()`. Same `RECORD=1` env trigger as the existing `fal-mock` / `openai-voice-mock` integration: when set with `DAYTONA_API_KEY`, the test proxies to real Daytona and writes the fixture; without the flag, it replays from `test/fixtures/daytona/create-exec-delete.json`. The fixture isn't committed yet — operator runs `RECORD=1 DAYTONA_API_KEY=… pnpm test:integration …conformance…` once. Until then the test is skipped with a visible marker assertion.
+
+Also folded the xAI integration test into the same shape. `scripts/record-xai-fixture.ts` is gone; `src/test/xai-grok.integration.test.ts` now boots its own one-off llmock with `openai → openrouter.ai/api` mapping when `RECORD=1 OPENROUTER_API_KEY=…` is set, recording into the shared `test/fixtures/recorded/` dir. Replay-mode uses the integration tier's shared llmock as before. Same test code records and replays — what runs is what gets captured.
+
+Recording is now driven by a single `RECORD=1` env flag — `LLMOCK_RECORD=1` collapsed into it. `pnpm test:record` (and `:e2e`) set `RECORD=1`; `test/llmock-setup.ts` + the pipeline test now check `RECORD` instead. `.env.example` documents only credentials (no recording prose); missing keys → that fixture is skipped, so one operator can record a subset without holding accounts for every provider.
+
+Adds `ws@8.20.0` as a dev dependency (was already present transitively).
+
+Re-record trigger: when this test fails in CI, SDK or wire shape has drifted upstream → re-run the recording locally and commit the updated fixture. Gaps not covered (deferred to future slices): state-machine transitions taking real time (auto-stop, auto-archive, image-build progress) and per-account region/runner quirks — both need the deferred nightly real-API job.
