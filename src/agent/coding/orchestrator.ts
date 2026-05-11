@@ -862,7 +862,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       );
       await stepRun("teardown", () => sandbox.deleteByTaskId(taskId).catch(() => {}));
       await stepRun("persist-sandbox-deleted", () =>
-        persistSandboxDeleted({ taskId, store, runInTx }),
+        runInTx((tx) => store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString())),
       );
       // Stream notifications post-commit — wrap so a subscriber failure
       // doesn't bubble into the outer catch, which would write a second
@@ -901,7 +901,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     );
     await stepRun("teardown", () => sandbox.deleteByTaskId(taskId).catch(() => {}));
     await stepRun("persist-sandbox-deleted", () =>
-      persistSandboxDeleted({ taskId, store, runInTx }),
+      runInTx((tx) => store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString())),
     );
     // Hand off to the slice 4.0h verify orchestrator. The dedicated function
     // re-creates a container with the askpass mount, runs verify → push → PR,
@@ -1172,28 +1172,4 @@ async function persistDecision(
       throw err;
     }
   }
-}
-
-/**
- * Stamp `resource_usage.sandbox.deleted_at` once teardown has run. Loads
- * the existing `sandbox` block (written at create-container time),
- * appends `deleted_at`, writes back. No-op when there's no `sandbox`
- * block (resume-path tasks that never wrote one, or pre-3c.5 rows) or
- * when `deleted_at` is already set (Inngest replay re-entering this step
- * after the body completed — the cached return path skips us, this
- * guard is belt-and-braces).
- */
-async function persistSandboxDeleted(params: {
-  taskId: string;
-  store: CodingStore;
-  runInTx: Transactor;
-}): Promise<void> {
-  await params.runInTx(async (tx) => {
-    const task = await params.store.getTask(tx, params.taskId);
-    const sb = task?.resourceUsage?.sandbox;
-    if (!sb || sb.deleted_at) return;
-    await params.store.setTaskResourceUsage(tx, params.taskId, {
-      sandbox: { ...sb, deleted_at: new Date().toISOString() },
-    });
-  });
 }

@@ -1,7 +1,13 @@
-import { and, asc, count, desc, eq, inArray, ne } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
-import type { DevcontainerSpec, PrMetadata, ResourceUsage, WorktreeAssignment } from "../types.js";
+import {
+  type DevcontainerSpec,
+  type PrMetadata,
+  type ResourceUsage,
+  ResourceUsageSchema,
+  type WorktreeAssignment,
+} from "../types.js";
 import { codingRepos, codingTasks, codingToolDecisions } from "./schema.js";
 
 export type CodingBackend = "claude" | "codex";
@@ -217,16 +223,23 @@ export interface CodingStore {
 
   /**
    * **Shallow-merge** `patch` into the existing `resource_usage` JSONB
-   * column. Implemented as load + spread + write under the caller's
-   * transaction — single-user / one-orchestrator-per-task ensures no
-   * concurrent writers race on the same row, so the load+write window
-   * is benign. Top-level fields in `patch` overwrite the existing
-   * values; nested objects (`memory_bytes`, `sandbox`, `provisioned`)
-   * are replaced, not deep-merged. Callers wanting to update one
-   * nested field must read first, merge, and pass the full nested
-   * object.
+   * column via Postgres `||` — atomic, single statement, no read.
+   * Top-level fields in `patch` overwrite the existing values; nested
+   * objects (`memory_bytes`, `sandbox`, `provisioned`) are replaced
+   * wholesale, not deep-merged. Callers wanting to extend one nested
+   * field's keys must either use a targeted method (e.g.
+   * `setTaskSandboxDeletedAt`) or pass the full nested object.
    */
   setTaskResourceUsage(tx: Transaction, id: string, patch: Partial<ResourceUsage>): Promise<void>;
+
+  /**
+   * Stamp `resource_usage.sandbox.deleted_at` to `deletedAt` via
+   * `jsonb_set` — single atomic UPDATE, no read. No-op when the
+   * `sandbox` block isn't present (resume-path tasks that never wrote
+   * one, or pre-3c.5 rows) or when `deleted_at` is already set
+   * (idempotency under Inngest replay).
+   */
+  setTaskSandboxDeletedAt(tx: Transaction, id: string, deletedAt: string): Promise<void>;
 
   /**
    * Count non-terminal tasks for a repo. Used to enforce
@@ -509,14 +522,42 @@ export class DrizzleCodingStore implements CodingStore {
     id: string,
     patch: Partial<ResourceUsage>,
   ): Promise<void> {
-    const rows = await tx
-      .select({ resourceUsage: codingTasks.resourceUsage })
-      .from(codingTasks)
-      .where(eq(codingTasks.id, id))
-      .limit(1);
-    const current = rows[0]?.resourceUsage ?? {};
-    const merged = { ...current, ...patch };
-    await tx.update(codingTasks).set({ resourceUsage: merged }).where(eq(codingTasks.id, id));
+    // Validate the patch on its own so a malformed patch fails here at
+    // the write boundary rather than at the next `fromDriver` read.
+    // The raw-SQL update below bypasses the `jsonbZod` toDriver path
+    // that would otherwise run validation. ResourceUsageSchema's
+    // top-level fields are all optional already, but `.partial()`
+    // signals intent and is robust to a future required field.
+    const validated = ResourceUsageSchema.partial().parse(patch);
+    await tx
+      .update(codingTasks)
+      .set({
+        // Postgres JSONB `||` is shallow-merge — top-level keys in the
+        // patch overwrite the existing column, nested objects replace
+        // wholesale (matches the contract on the interface). COALESCE
+        // handles the null-column case before any writes.
+        resourceUsage: sql`COALESCE(${codingTasks.resourceUsage}, '{}'::jsonb) || ${JSON.stringify(validated)}::jsonb`,
+      })
+      .where(eq(codingTasks.id, id));
+  }
+
+  async setTaskSandboxDeletedAt(tx: Transaction, id: string, deletedAt: string): Promise<void> {
+    // `jsonb_set` updates the nested `sandbox.deleted_at` path
+    // atomically. The WHERE clause gates on (a) the `sandbox` block
+    // existing (resume-path tasks may not have one) and (b)
+    // `deleted_at` being unset, which makes the call idempotent under
+    // Inngest replay even if the cached return path were ever skipped.
+    await tx.execute(sql`
+      UPDATE coding_tasks
+      SET resource_usage = jsonb_set(
+        resource_usage,
+        '{sandbox,deleted_at}',
+        to_jsonb(${deletedAt}::text)
+      )
+      WHERE id = ${id}
+        AND resource_usage->'sandbox' IS NOT NULL
+        AND (resource_usage->'sandbox'->>'deleted_at') IS NULL
+    `);
   }
 
   async countActiveTasksForRepo(tx: Transaction, repoId: string): Promise<number> {

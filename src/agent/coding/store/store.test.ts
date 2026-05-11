@@ -544,6 +544,85 @@ describe("DrizzleCodingStore", () => {
       });
     });
 
+    it("setTaskSandboxDeletedAt stamps the nested path atomically", async () => {
+      const repoId = await seedRepo();
+      const t = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      await tx((trx) =>
+        store.setTaskResourceUsage(trx, t.id, {
+          sandbox: {
+            backend: "daytona",
+            created_at: "2026-05-11T12:00:00.000Z",
+            provisioned: { cpu: 2, memory_bytes: 2_147_483_648 },
+          },
+          tokens_input: 1000,
+        }),
+      );
+      await tx((trx) => store.setTaskSandboxDeletedAt(trx, t.id, "2026-05-11T12:03:14.000Z"));
+
+      const row = await tx((trx) => store.getTask(trx, t.id));
+      expect(row?.resourceUsage?.sandbox?.deleted_at).toBe("2026-05-11T12:03:14.000Z");
+      // Sibling fields on the sandbox block and other top-level fields
+      // are preserved — jsonb_set targets only the nested path.
+      expect(row?.resourceUsage?.sandbox?.backend).toBe("daytona");
+      expect(row?.resourceUsage?.sandbox?.created_at).toBe("2026-05-11T12:00:00.000Z");
+      expect(row?.resourceUsage?.tokens_input).toBe(1000);
+    });
+
+    it("setTaskSandboxDeletedAt is a no-op when sandbox block is absent", async () => {
+      const repoId = await seedRepo();
+      const t = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      // No sandbox block was ever written — resume-path task or legacy row.
+      await tx((trx) => store.setTaskResourceUsage(trx, t.id, { tokens_input: 500 }));
+      await tx((trx) => store.setTaskSandboxDeletedAt(trx, t.id, "2026-05-11T13:00:00.000Z"));
+      const row = await tx((trx) => store.getTask(trx, t.id));
+      expect(row?.resourceUsage?.sandbox).toBeUndefined();
+      expect(row?.resourceUsage?.tokens_input).toBe(500);
+    });
+
+    it("setTaskSandboxDeletedAt is idempotent — does not overwrite existing deleted_at", async () => {
+      const repoId = await seedRepo();
+      const t = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      await tx((trx) =>
+        store.setTaskResourceUsage(trx, t.id, {
+          sandbox: {
+            backend: "daytona",
+            created_at: "2026-05-11T14:00:00.000Z",
+            deleted_at: "2026-05-11T14:05:00.000Z",
+            provisioned: { cpu: 2, memory_bytes: 2_147_483_648 },
+          },
+        }),
+      );
+      // Second call attempts to overwrite — WHERE clause gates on
+      // deleted_at IS NULL, so this is a no-op.
+      await tx((trx) => store.setTaskSandboxDeletedAt(trx, t.id, "2026-05-11T14:99:99.000Z"));
+      const row = await tx((trx) => store.getTask(trx, t.id));
+      expect(row?.resourceUsage?.sandbox?.deleted_at).toBe("2026-05-11T14:05:00.000Z");
+    });
+
     it("rejects malformed worktree_assignment via raw SQL on read", async () => {
       const repoId = await seedRepo();
       const t = await tx((trx) =>
