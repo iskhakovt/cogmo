@@ -80,14 +80,15 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    // assemble now receives pre-loaded data (profile + rules), not a
-    // store reference. The use case `loadConversationContext` does the
-    // loading inside one transaction; the prompt source is a pure
-    // formatter.
+    // assemble now receives pre-loaded data (profile + rules + the per-turn
+    // tool catalog), not a store reference. The use case
+    // `loadConversationContext` does the loading inside one transaction;
+    // the prompt source is a pure formatter.
     expect(deps.promptSource.assemble).toHaveBeenCalledWith({
       profile: expect.objectContaining({ id: "profile-1" }),
       rules: [],
       voiceMode: false,
+      toolDefinitions: expect.any(Array),
     });
   });
 
