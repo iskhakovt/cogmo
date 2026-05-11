@@ -66,13 +66,16 @@ export interface BootstrapSkillsRepoResult {
  * that tightens the policy takes effect on existing deployments. The repo
  * itself is only created on first call.
  *
- * HEAD is pinned to `refs/heads/main` unconditionally. `git init` honours the
- * host's `init.defaultBranch` config (still `master` on older git or hosts
- * that never opted in), and the `pre-receive` hook gates only `main` — a
- * HEAD pointing at `master` would let direct pushes to `master` slip the
- * gate and would hand any pre-first-register clone an empty `master`
- * working tree. The `symbolic-ref` call runs on every boot so existing
- * deployments converge without an operator step.
+ * HEAD is pinned to `refs/heads/main` unconditionally via `symbolic-ref`.
+ * `git init` honours the host's `init.defaultBranch` config (still `master`
+ * on older git or hosts that never opted in), and the `pre-receive` hook
+ * gates only `main` — a HEAD pointing at `master` would let direct pushes
+ * to `master` slip the gate and would hand any pre-first-register clone
+ * an empty `master` working tree. The `symbolic-ref` call runs on every
+ * boot so existing deployments converge without an operator step; we
+ * deliberately don't pass `--initial-branch=main` to `git init` because
+ * it's a 2.28+-only flag and the `symbolic-ref` line below makes the same
+ * guarantee on every git version without a compat gate.
  */
 export async function bootstrapSkillsRepo(params: {
   path: string;
@@ -83,7 +86,7 @@ export async function bootstrapSkillsRepo(params: {
   const initialized = !existsSync(join(repoPath, "HEAD"));
   if (initialized) {
     log.info({ path: repoPath }, "initializing bare skills repo");
-    await execFileP("git", ["init", "--bare", "--initial-branch=main", repoPath]);
+    await execFileP("git", ["init", "--bare", repoPath]);
   }
 
   await execFileP("git", ["-C", repoPath, "symbolic-ref", "HEAD", "refs/heads/main"]);
