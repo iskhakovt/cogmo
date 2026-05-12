@@ -1,4 +1,4 @@
-FROM mirror.gcr.io/library/node:24-slim@sha256:03eae3ef7e88a9de535496fb488d67e02b9d96a063a8967bae657744ecd513f2 AS base
+FROM mirror.gcr.io/library/node:26-slim@sha256:424cafd2a035ed2b2d74acc3142b68b426fb62a47742c80a75e7117db02d6b30 AS base
 RUN corepack enable
 
 FROM base AS build
