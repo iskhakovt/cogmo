@@ -2,7 +2,7 @@ import { ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockAttachmentStore, mockTransport } from "../../../test/factories.js";
 import type { StreamingAdapter } from "../../types.js";
-import { setup } from "./index.js";
+import { findTelegramSplitBoundary, rebalanceCodeFence, setup } from "./index.js";
 
 // Mock grammy
 const handlers = new Map<string, any>();
@@ -798,10 +798,14 @@ describe("telegram adapter", () => {
         mockBotApi.editMessageText.mockClear();
 
         // 4 chunks × 1100 chars = 4400 chars total, crosses the 4000-char
-        // chunk target after the third push.
+        // chunk target after the third push. Pre-compute the base time so
+        // each iteration sets an absolute, predictable Date.now value
+        // (re-reading Date.now inside the loop would compound with the spy
+        // installed on the previous iteration).
         const chunk = "x".repeat(1100);
+        const t0 = Date.now();
         for (let i = 0; i < 4; i++) {
-          vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1000);
+          vi.spyOn(Date, "now").mockReturnValue(t0 + (i + 1) * 1000);
           await handle.push({ type: "text_delta", text: chunk });
         }
         await handle.finish();
@@ -817,8 +821,7 @@ describe("telegram adapter", () => {
         }
       });
 
-      it("findTelegramSplitBoundary prefers high-quality breaks", async () => {
-        const { findTelegramSplitBoundary } = await import("./index.js");
+      it("findTelegramSplitBoundary prefers high-quality breaks", () => {
         // Paragraph break wins over later line breaks / spaces.
         const a = `${"a".repeat(2000)}\n\n${"b".repeat(1000)}\n${"c".repeat(1000)}`;
         expect(findTelegramSplitBoundary(a, 3500)).toBe(2002);
@@ -848,9 +851,7 @@ describe("telegram adapter", () => {
         expect(findTelegramSplitBoundary(e, 100)).toBe(99);
       });
 
-      it("rebalanceCodeFence closes an open fence on head and reopens on tail", async () => {
-        const { rebalanceCodeFence } = await import("./index.js");
-
+      it("rebalanceCodeFence closes an open fence on head and reopens on tail", () => {
         // Split lands inside an open fenced block: close + reopen with lang.
         const head = "Here is the code:\n\n```python\ndef foo():\n  return 1";
         const tail = "\nx = foo()\n```\nDone.";
@@ -902,18 +903,30 @@ describe("telegram adapter", () => {
         });
         await handle.finish();
 
-        const allBodies = [
-          ...mockBotApi.sendMessage.mock.calls.map((c) => c[1] as string),
-          ...mockBotApi.editMessageText.mock.calls.map((c) => c[2] as string),
+        // Only HTML-rendered calls represent the finalized state of a chunk.
+        // Plain-text edits during streaming carry no `parse_mode` and don't
+        // assert anything about formatting — they get replaced by an HTML
+        // render at finalize.
+        const isHtml = (opts: unknown): boolean =>
+          typeof opts === "object" &&
+          opts !== null &&
+          (opts as { parse_mode?: string }).parse_mode === "HTML";
+        const renderedBodies = [
+          ...mockBotApi.sendMessage.mock.calls
+            .filter((c) => isHtml(c[2]))
+            .map((c) => c[1] as string),
+          ...mockBotApi.editMessageText.mock.calls
+            .filter((c) => isHtml(c[3]))
+            .map((c) => c[2] as string),
         ];
-        expect(allBodies.length).toBeGreaterThan(1);
+        // More than one rendered chunk (we split mid-fence) — proves the
+        // rotation actually happened, not just a single oversized message.
+        expect(renderedBodies.length).toBeGreaterThan(1);
 
-        // Every chunk that contains body content must have it inside <pre> —
-        // not in a <p> (which is what marked emits when the continuation
-        // lacks an opening fence). And no chunk leaks raw triple-backticks.
-        for (const b of allBodies) {
+        for (const b of renderedBodies) {
           if (b.includes("marker_token")) {
-            // Body must be inside a <pre> block, not a <p>.
+            // Body must be inside a <pre> block, not a <p> (which is what
+            // marked emits when the continuation lacks an opening fence).
             const preBlock = b.match(/<pre[\s\S]*?<\/pre>/);
             expect(preBlock).not.toBeNull();
             expect(preBlock?.[0]).toContain("marker_token");

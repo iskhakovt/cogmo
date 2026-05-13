@@ -69,22 +69,25 @@ export const channelType = "telegram";
 // render still exceeds the cap fall back to plain text.
 const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
 const TELEGRAM_CHUNK_TARGET = 4000;
+// Anything smaller than this in the head produces a sliver of a message; we'd
+// rather hard-cut later in the source than emit a sub-half-screen first chunk.
+// Empirical choice — fits a short Telegram message bubble (~3-4 lines of text
+// in the standard mobile UI).
+const TELEGRAM_MIN_HEAD_CHARS = 500;
 
-/**
- * Find a clean split point in `text` no later than `target`. Prefers higher-
- * quality boundaries (paragraph > line > sentence > word) and falls back to a
- * hard char split if no break exists in [target/2, target]. The returned
- * index is the slice point — `text.slice(0, idx)` is the head, the rest is
- * the tail.
- */
 /**
  * If `head` ends inside an open fenced code block, close the fence at the
  * end of `head` and re-open it at the start of `tail` with the same language
  * tag. Otherwise return the pair unchanged. Indented (non-fenced) code
  * blocks need no rebalancing — they have no delimiters.
  *
- * Triple-backtick fences are matched on their own line. The state machine
- * just toggles on each fence line; nested fences with matching length cancel.
+ * Scope: backtick fences only, recognised on a line with no leading indent.
+ * Tilde fences (~~~) and indented fences (up to 3 leading spaces under
+ * CommonMark) aren't handled — they're vanishingly rare in LLM output. The
+ * state machine toggles on each fence line, which matches CommonMark when
+ * the document only uses 3-backtick fences. Inline single-backtick code
+ * spans (\`like this\`) are also out of scope — a split inside one leaks a
+ * literal backtick at the boundary.
  */
 export function rebalanceCodeFence(head: string, tail: string): { head: string; tail: string } {
   const fenceLineRe = /^(?:`{3,})(\w*)/;
@@ -108,12 +111,16 @@ export function rebalanceCodeFence(head: string, tail: string): { head: string; 
   return { head: closedHead, tail: openedTail };
 }
 
+/**
+ * Find a clean split point in `text` no later than `target`. Prefers higher-
+ * quality boundaries (paragraph > line > sentence > word) and falls back to a
+ * hard char split if no break exists in [TELEGRAM_MIN_HEAD_CHARS, target].
+ * The returned index is the slice point — `text.slice(0, idx)` is the head,
+ * the rest is the tail.
+ */
 export function findTelegramSplitBoundary(text: string, target: number): number {
   if (text.length <= target) return text.length;
-  // Reject boundaries close to the start — a sub-500-char head wastes a
-  // message. Above that, prefer the highest-quality separator anywhere in
-  // [minIdx, target].
-  const minIdx = Math.min(500, Math.floor(target * 0.25));
+  const minIdx = Math.min(TELEGRAM_MIN_HEAD_CHARS, Math.floor(target * 0.25));
   for (const sep of ["\n\n", "\n", ". ", "! ", "? ", " "]) {
     const idx = text.lastIndexOf(sep, target - sep.length);
     if (idx >= minIdx) return idx + sep.length;
@@ -425,7 +432,6 @@ class TelegramStreamHandle implements StreamHandle {
         } else {
           await this.#bot.api.editMessageText(this.#chatId, this.#messageId, body, opts);
         }
-        this.#lastEditTime = Date.now();
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "";
         if (msg.includes("can't parse entities")) {
@@ -443,6 +449,10 @@ class TelegramStreamHandle implements StreamHandle {
         }
       } finally {
         this.#messageId = null;
+        // Reset the throttle clock so the first edit on the new message
+        // fires immediately — finalize is a transition, not a rate-limited
+        // operation.
+        this.#lastEditTime = 0;
       }
     });
     await this.#pending;
