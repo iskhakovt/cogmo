@@ -612,6 +612,41 @@ describe("OpenAICompatibleProvider", () => {
       // No thinking content leaked into the message
       expect(JSON.stringify(assistantMsg)).not.toContain("internal reasoning");
     });
+
+    it("drops an assistant turn whose only content is thinking blocks", async () => {
+      // Reproduces the prod failure where `clearOldThinking` (or cross-provider
+      // history reuse) leaves an older assistant turn with no text/tool_use,
+      // only zeroed thinking. Sending `{role:"assistant", content: null}`
+      // without `tool_calls` makes OpenAI-compatible backends 400 with
+      // messages like "list object has no element 0".
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "m",
+        usage: { prompt_tokens: 10, completion_tokens: 1 },
+      });
+
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          { role: "user", content: "first turn" },
+          {
+            role: "assistant",
+            content: [{ type: "thinking", thinking: "", signature: "sig" }],
+          },
+          { role: "user", content: "follow up" },
+        ],
+      });
+
+      const args = firstCreateArgs();
+      // [0] system, [1] user "first turn", [2] user "follow up" — the
+      // thinking-only assistant turn was dropped, not sent as `content: null`.
+      expect(args.messages).toHaveLength(3);
+      expect(getMessage(args, 0).role).toBe("system");
+      expect(getMessage(args, 1)).toMatchObject({ role: "user", content: "first turn" });
+      expect(getMessage(args, 2)).toMatchObject({ role: "user", content: "follow up" });
+    });
   });
 
   describe("document blocks in messages", () => {
