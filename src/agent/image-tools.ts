@@ -130,9 +130,11 @@ export function createImageTools(deps: {
   // Build a slash-free identifier per model for the LLM-facing enum (see
   // `imageModelSlug` for why). The map from slug back to the canonical row
   // is what the handler consults; row.name retains the original AI SDK
-  // path for downstream calls.
-  const modelSlugs = deps.models.map((m) => imageModelSlug(m.name));
+  // path for downstream calls. Single pass — collision check is a stateful
+  // scan over previously-seen slugs, and the slug also feeds the enum
+  // array.
   const modelBySlug = new Map<string, ImageModelWithProvider>();
+  const modelSlugs: string[] = [];
   for (const m of deps.models) {
     const slug = imageModelSlug(m.name);
     const existing = modelBySlug.get(slug);
@@ -144,6 +146,7 @@ export function createImageTools(deps: {
       );
     }
     modelBySlug.set(slug, m);
+    modelSlugs.push(slug);
   }
 
   // Union, not intersection — a fixed-size model would otherwise collapse
