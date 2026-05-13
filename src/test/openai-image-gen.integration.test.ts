@@ -32,7 +32,6 @@ import { describe, expect, inject, it, vi } from "vitest";
 import {
   createImageTools,
   type GeneratedImagePayload,
-  imageModelSlug,
   parseGeneratedImagePayload,
 } from "../agent/image-tools.js";
 import type { Service } from "../agent/service.js";
@@ -59,6 +58,12 @@ const PROMPT = "A serene watercolor mountain landscape at golden hour, soft brus
 // rather than the generic `openai_compatible` one — tracked separately.
 const MODEL_STRING = "dall-e-3";
 const MODEL_NAME = "openai/dall-e-3";
+// LLM-facing slug for MODEL_NAME (see imageModelSlug). Pinned as a literal
+// rather than derived through `imageModelSlug(MODEL_NAME)` so a regression
+// in the slug rule fails this test loudly instead of silently following the
+// new behaviour. The unit tests in src/agent/image-tools.test.ts pin the
+// rule itself; this constant pins the contract at the integration boundary.
+const MODEL_SLUG = "dall-e-3";
 const PROVIDER_ID = "test-provider-openai-images";
 
 const FAKE_TX: Transactor = async (cb) => cb({} as never);
@@ -133,10 +138,7 @@ describe("openai-compatible image gen — OpenAI dall-e-3 (recorded)", () => {
     // The tool's `model` enum exposes the slug (slash-free, for xAI
     // grammar-compiler compatibility); the payload's `model` field carries
     // the canonical row name. See PR #240.
-    const result = await tool!.handler(
-      { prompt: PROMPT, model: imageModelSlug(MODEL_NAME) },
-      {} as Service,
-    );
+    const result = await tool!.handler({ prompt: PROMPT, model: MODEL_SLUG }, {} as Service);
 
     const parsed = parseGeneratedImagePayload(result);
     expect(parsed).not.toBeNull();
