@@ -77,6 +77,37 @@ const TELEGRAM_CHUNK_TARGET = 4000;
  * index is the slice point — `text.slice(0, idx)` is the head, the rest is
  * the tail.
  */
+/**
+ * If `head` ends inside an open fenced code block, close the fence at the
+ * end of `head` and re-open it at the start of `tail` with the same language
+ * tag. Otherwise return the pair unchanged. Indented (non-fenced) code
+ * blocks need no rebalancing — they have no delimiters.
+ *
+ * Triple-backtick fences are matched on their own line. The state machine
+ * just toggles on each fence line; nested fences with matching length cancel.
+ */
+export function rebalanceCodeFence(head: string, tail: string): { head: string; tail: string } {
+  const fenceLineRe = /^(?:`{3,})(\w*)/;
+  let inFence = false;
+  let fenceLang = "";
+  for (const line of head.split("\n")) {
+    const m = line.match(fenceLineRe);
+    if (!m) continue;
+    if (!inFence) {
+      inFence = true;
+      fenceLang = m[1] ?? "";
+    } else {
+      inFence = false;
+      fenceLang = "";
+    }
+  }
+  if (!inFence) return { head, tail };
+  const closedHead = head.endsWith("\n") ? `${head}\`\`\`` : `${head}\n\`\`\``;
+  const opener = fenceLang ? `\`\`\`${fenceLang}\n` : "```\n";
+  const openedTail = `${opener}${tail}`;
+  return { head: closedHead, tail: openedTail };
+}
+
 export function findTelegramSplitBoundary(text: string, target: number): number {
   if (text.length <= target) return text.length;
   // Reject boundaries close to the start — a sub-500-char head wastes a
@@ -363,8 +394,10 @@ class TelegramStreamHandle implements StreamHandle {
   async #drainOverflow(): Promise<void> {
     while (this.#accumulated.length > TELEGRAM_CHUNK_TARGET) {
       const splitIdx = findTelegramSplitBoundary(this.#accumulated, TELEGRAM_CHUNK_TARGET);
-      const head = this.#accumulated.slice(0, splitIdx);
-      this.#accumulated = this.#accumulated.slice(splitIdx);
+      const rawHead = this.#accumulated.slice(0, splitIdx);
+      const rawTail = this.#accumulated.slice(splitIdx);
+      const { head, tail } = rebalanceCodeFence(rawHead, rawTail);
+      this.#accumulated = tail;
       await this.#finalizeChunk(head);
     }
   }

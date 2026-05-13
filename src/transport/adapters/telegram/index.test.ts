@@ -847,6 +847,81 @@ describe("telegram adapter", () => {
         // surrogate (index 99); helper returns 99 instead.
         expect(findTelegramSplitBoundary(e, 100)).toBe(99);
       });
+
+      it("rebalanceCodeFence closes an open fence on head and reopens on tail", async () => {
+        const { rebalanceCodeFence } = await import("./index.js");
+
+        // Split lands inside an open fenced block: close + reopen with lang.
+        const head = "Here is the code:\n\n```python\ndef foo():\n  return 1";
+        const tail = "\nx = foo()\n```\nDone.";
+        const out = rebalanceCodeFence(head, tail);
+        expect(out.head).toBe(`${head}\n\`\`\``);
+        expect(out.tail).toBe(`\`\`\`python\n${tail}`);
+
+        // Already balanced — passthrough.
+        const balancedHead = "Code:\n\n```\nx\n```\n\nMore prose.";
+        const balancedTail = "Next paragraph.";
+        expect(rebalanceCodeFence(balancedHead, balancedTail)).toEqual({
+          head: balancedHead,
+          tail: balancedTail,
+        });
+
+        // No code in head at all — passthrough.
+        expect(rebalanceCodeFence("just text", " more")).toEqual({
+          head: "just text",
+          tail: " more",
+        });
+
+        // Fence without a language tag — reopen as bare ```.
+        const noLangHead = "```\nplain code\nmore";
+        expect(rebalanceCodeFence(noLangHead, "\nstill code").tail).toBe("```\n\nstill code");
+      });
+
+      it("a long code block split mid-fence renders every chunk inside <pre>", async () => {
+        // The bug without rebalancing: head ends inside an open fence; tail
+        // starts with raw body text (no opening fence). marked auto-closes
+        // the head's fence at EOF (so head looks fine), but the tail renders
+        // the continuation as paragraph text — code shows as plain prose
+        // with no monospace formatting, and the trailing ``` becomes literal
+        // backticks. Rebalancing restores the fence on the tail.
+        const adapter = await createStreamingAdapter();
+        const handle = await adapter.openStream("42", "run-1");
+
+        mockBotApi.sendMessage.mockClear();
+        mockBotApi.editMessageText.mockClear();
+        mockBotApi.sendMessage
+          .mockResolvedValueOnce({ message_id: 100 })
+          .mockResolvedValue({ message_id: 200 });
+
+        // Distinctive body content lets us locate the code in the rendered
+        // output. 5000+ chars guarantees at least one mid-fence split.
+        const body = "marker_token\n".repeat(400);
+        await handle.push({
+          type: "text_delta",
+          text: `Output:\n\n\`\`\`python\n${body}\`\`\``,
+        });
+        await handle.finish();
+
+        const allBodies = [
+          ...mockBotApi.sendMessage.mock.calls.map((c) => c[1] as string),
+          ...mockBotApi.editMessageText.mock.calls.map((c) => c[2] as string),
+        ];
+        expect(allBodies.length).toBeGreaterThan(1);
+
+        // Every chunk that contains body content must have it inside <pre> —
+        // not in a <p> (which is what marked emits when the continuation
+        // lacks an opening fence). And no chunk leaks raw triple-backticks.
+        for (const b of allBodies) {
+          if (b.includes("marker_token")) {
+            // Body must be inside a <pre> block, not a <p>.
+            const preBlock = b.match(/<pre[\s\S]*?<\/pre>/);
+            expect(preBlock).not.toBeNull();
+            expect(preBlock?.[0]).toContain("marker_token");
+          }
+          // No literal triple-backticks left over from an unclosed fence.
+          expect(b).not.toMatch(/```/);
+        }
+      });
     });
   });
 
