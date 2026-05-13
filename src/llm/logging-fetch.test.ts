@@ -1,16 +1,27 @@
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
+import { z } from "zod";
+import { expectDefined } from "../test/assertions.js";
 import { withFailureLogging } from "./logging-fetch.js";
 
-function fakeLogger(): { log: Logger; errorCalls: Array<{ obj: unknown; msg: string }> } {
-  const errorCalls: Array<{ obj: unknown; msg: string }> = [];
-  const log = {
-    error: (obj: unknown, msg: string) => {
-      errorCalls.push({ obj, msg });
-    },
-  } as unknown as Logger;
-  return { log, errorCalls };
-}
+/**
+ * Shape of the structured payload `withFailureLogging` passes to
+ * `log.error`. Zod-parsed in tests so reads are typed without `as` casts
+ * (pino's `LogFn` overload erases the payload type at the mock-call site).
+ */
+const FailureLogPayload = z
+  .object({
+    providerName: z.string(),
+    url: z.string(),
+    method: z.string(),
+    status: z.number().optional(),
+    headers: z.record(z.string(), z.string()),
+    requestBody: z.string(),
+    responseBody: z.string().optional(),
+    err: z.unknown().optional(),
+  })
+  .passthrough();
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -19,11 +30,24 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+/**
+ * Pull the parsed payload + message off the n-th `log.error` call.
+ * Throws (via `expectDefined`) if the call is missing.
+ */
+function failureCall(
+  log: Logger,
+  index = 0,
+): { payload: z.infer<typeof FailureLogPayload>; msg: string } {
+  const call = expectDefined(vi.mocked(log.error).mock.calls[index], `log.error call ${index}`);
+  const [obj, msg] = call;
+  return { payload: FailureLogPayload.parse(obj), msg: typeof msg === "string" ? msg : "" };
+}
+
 describe("withFailureLogging", () => {
   it("does not log when the response is OK", async () => {
-    const inner = vi.fn(async () => jsonResponse(200, { ok: true }));
-    const { log, errorCalls } = fakeLogger();
-    const wrapped = withFailureLogging(inner as unknown as typeof fetch, log, "openrouter");
+    const inner = vi.fn<typeof fetch>(async () => jsonResponse(200, { ok: true }));
+    const log = mock<Logger>();
+    const wrapped = withFailureLogging(inner, log, "openrouter");
 
     const res = await wrapped("https://example/v1/chat", {
       method: "POST",
@@ -32,8 +56,7 @@ describe("withFailureLogging", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(errorCalls).toHaveLength(0);
-    // Inner fetch saw the original request.
+    expect(log.error).not.toHaveBeenCalled();
     expect(inner).toHaveBeenCalledTimes(1);
   });
 
@@ -61,9 +84,9 @@ describe("withFailureLogging", () => {
     Request.prototype.clone = cloneSpy as typeof Request.prototype.clone;
 
     try {
-      const inner = vi.fn(async () => jsonResponse(200, { ok: true }));
-      const { log } = fakeLogger();
-      const wrapped = withFailureLogging(inner as unknown as typeof fetch, log, "test");
+      const inner = vi.fn<typeof fetch>(async () => jsonResponse(200, { ok: true }));
+      const log = mock<Logger>();
+      const wrapped = withFailureLogging(inner, log, "test");
 
       await wrapped("https://example/v1/chat", {
         method: "POST",
@@ -77,11 +100,11 @@ describe("withFailureLogging", () => {
   });
 
   it("logs the full request + response body on a 4xx/5xx", async () => {
-    const inner = vi.fn(async () =>
+    const inner = vi.fn<typeof fetch>(async () =>
       jsonResponse(502, { error: { message: "Invalid grammar request" } }),
     );
-    const { log, errorCalls } = fakeLogger();
-    const wrapped = withFailureLogging(inner as unknown as typeof fetch, log, "openrouter");
+    const log = mock<Logger>();
+    const wrapped = withFailureLogging(inner, log, "openrouter");
 
     const requestBody = JSON.stringify({
       model: "x-ai/grok-4.3",
@@ -94,28 +117,19 @@ describe("withFailureLogging", () => {
     });
 
     expect(res.status).toBe(502);
-    expect(errorCalls).toHaveLength(1);
-    const entry = errorCalls[0]?.obj as {
-      providerName: string;
-      url: string;
-      method: string;
-      status: number;
-      requestBody: string;
-      responseBody: string;
-      headers: Record<string, string>;
-    };
-    expect(entry.providerName).toBe("openrouter");
-    expect(entry.url).toBe("https://openrouter.ai/api/v1/chat/completions");
-    expect(entry.method).toBe("POST");
-    expect(entry.status).toBe(502);
-    expect(entry.requestBody).toBe(requestBody);
-    expect(entry.responseBody).toContain("Invalid grammar request");
+    const { payload } = failureCall(log);
+    expect(payload.providerName).toBe("openrouter");
+    expect(payload.url).toBe("https://openrouter.ai/api/v1/chat/completions");
+    expect(payload.method).toBe("POST");
+    expect(payload.status).toBe(502);
+    expect(payload.requestBody).toBe(requestBody);
+    expect(payload.responseBody).toContain("Invalid grammar request");
   });
 
   it("redacts authorization-style headers", async () => {
-    const inner = vi.fn(async () => jsonResponse(400, { error: "bad request" }));
-    const { log, errorCalls } = fakeLogger();
-    const wrapped = withFailureLogging(inner as unknown as typeof fetch, log, "anthropic");
+    const inner = vi.fn<typeof fetch>(async () => jsonResponse(400, { error: "bad request" }));
+    const log = mock<Logger>();
+    const wrapped = withFailureLogging(inner, log, "anthropic");
 
     await wrapped("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -124,60 +138,65 @@ describe("withFailureLogging", () => {
         authorization: "Bearer sk-real-key",
         "x-api-key": "sk-also-secret",
         "anthropic-api-key": "sk-also-secret",
+        "openrouter-api-key": "sk-or-secret",
         "content-type": "application/json",
       },
     });
 
-    const headers = (errorCalls[0]?.obj as { headers: Record<string, string> }).headers;
-    expect(headers.authorization).toBe("[REDACTED]");
-    expect(headers["x-api-key"]).toBe("[REDACTED]");
-    expect(headers["anthropic-api-key"]).toBe("[REDACTED]");
-    expect(headers["content-type"]).toBe("application/json");
-    // No partial leak of the secret.
-    expect(JSON.stringify(headers)).not.toContain("sk-real-key");
-    expect(JSON.stringify(headers)).not.toContain("sk-also-secret");
+    const { payload } = failureCall(log);
+    expect(payload.headers.authorization).toBe("[REDACTED]");
+    expect(payload.headers["x-api-key"]).toBe("[REDACTED]");
+    expect(payload.headers["anthropic-api-key"]).toBe("[REDACTED]");
+    expect(payload.headers["openrouter-api-key"]).toBe("[REDACTED]");
+    expect(payload.headers["content-type"]).toBe("application/json");
+    // No partial leak of any secret.
+    const serialized = JSON.stringify(payload.headers);
+    expect(serialized).not.toContain("sk-real-key");
+    expect(serialized).not.toContain("sk-also-secret");
+    expect(serialized).not.toContain("sk-or-secret");
   });
 
   it("truncates the request body at the 100KB limit with a marker", async () => {
-    const inner = vi.fn(async () => jsonResponse(400, { error: "too big" }));
-    const { log, errorCalls } = fakeLogger();
-    const wrapped = withFailureLogging(inner as unknown as typeof fetch, log, "test");
+    const inner = vi.fn<typeof fetch>(async () => jsonResponse(400, { error: "too big" }));
+    const log = mock<Logger>();
+    const wrapped = withFailureLogging(inner, log, "test");
 
     const huge = "x".repeat(200 * 1024); // 200KB
     await wrapped("https://example/v1/chat", { method: "POST", body: huge });
 
-    const entry = errorCalls[0]?.obj as { requestBody: string };
-    expect(entry.requestBody.length).toBeLessThan(huge.length);
-    expect(entry.requestBody).toMatch(/\[truncated at \d+ bytes\]$/);
-    expect(entry.requestBody.startsWith("x".repeat(100))).toBe(true);
+    const { payload } = failureCall(log);
+    expect(payload.requestBody.length).toBeLessThan(huge.length);
+    expect(payload.requestBody).toMatch(/\[truncated at \d+ bytes\]$/);
+    expect(payload.requestBody.startsWith("x".repeat(100))).toBe(true);
   });
 
   it("logs and rethrows when the inner fetch throws", async () => {
     const networkErr = new Error("ECONNREFUSED");
-    const inner = vi.fn(async () => {
+    const inner = vi.fn<typeof fetch>(async () => {
       throw networkErr;
     });
-    const { log, errorCalls } = fakeLogger();
-    const wrapped = withFailureLogging(inner as unknown as typeof fetch, log, "openai");
+    const log = mock<Logger>();
+    const wrapped = withFailureLogging(inner, log, "openai");
 
     await expect(wrapped("https://example/v1/chat", { method: "POST", body: "{}" })).rejects.toBe(
       networkErr,
     );
 
-    expect(errorCalls).toHaveLength(1);
-    expect(errorCalls[0]?.msg).toMatch(/threw/);
-    const entry = errorCalls[0]?.obj as { err: unknown; requestBody: string };
-    expect(entry.err).toBe(networkErr);
-    expect(entry.requestBody).toBe("{}");
+    const { payload, msg } = failureCall(log);
+    expect(msg).toMatch(/threw/);
+    expect(payload.err).toBe(networkErr);
+    expect(payload.requestBody).toBe("{}");
   });
 
   it("returns the original (unread) response body to the caller on failure", async () => {
     // Cloning behaviour: the body we logged must not consume the body the
     // SDK consumer needs. Confirms the consumer can still .json() the
     // response after our wrapper logged its content.
-    const inner = vi.fn(async () => jsonResponse(429, { error: { code: "rate_limit" } }));
-    const { log } = fakeLogger();
-    const wrapped = withFailureLogging(inner as unknown as typeof fetch, log, "test");
+    const inner = vi.fn<typeof fetch>(async () =>
+      jsonResponse(429, { error: { code: "rate_limit" } }),
+    );
+    const log = mock<Logger>();
+    const wrapped = withFailureLogging(inner, log, "test");
 
     const res = await wrapped("https://example/v1/chat", { method: "POST", body: "{}" });
     const parsed = (await res.json()) as { error: { code: string } };
@@ -187,31 +206,29 @@ describe("withFailureLogging", () => {
   it("handles GET requests with no body — logs an empty requestBody", async () => {
     // Anthropic SDK uses GET for endpoints like `client.models.list()`.
     // With no body, `Request.body` is null and the reader path is skipped.
-    const inner = vi.fn(async () => jsonResponse(404, { error: { type: "not_found" } }));
-    const { log, errorCalls } = fakeLogger();
-    const wrapped = withFailureLogging(inner as unknown as typeof fetch, log, "anthropic");
+    const inner = vi.fn<typeof fetch>(async () =>
+      jsonResponse(404, { error: { type: "not_found" } }),
+    );
+    const log = mock<Logger>();
+    const wrapped = withFailureLogging(inner, log, "anthropic");
 
     const res = await wrapped("https://api.anthropic.com/v1/models/missing", {
       method: "GET",
     });
 
     expect(res.status).toBe(404);
-    expect(errorCalls).toHaveLength(1);
-    const entry = errorCalls[0]?.obj as {
-      method: string;
-      requestBody: string;
-      responseBody: string;
-    };
-    expect(entry.method).toBe("GET");
-    expect(entry.requestBody).toBe("");
-    expect(entry.responseBody).toContain("not_found");
+    const { payload } = failureCall(log);
+    expect(payload.method).toBe("GET");
+    expect(payload.requestBody).toBe("");
+    expect(payload.responseBody).toContain("not_found");
   });
 
   it("truncates correctly when the body arrives as multiple chunks", async () => {
-    // Production bodies are chunked by undici / the Node fetch implementation;
-    // the streaming reader has to walk multiple chunks and stop at the byte
-    // budget. Build a body via a hand-rolled ReadableStream of small chunks
-    // that collectively cross the limit, and verify only the prefix lands.
+    // Production bodies are chunked by undici / the Node fetch
+    // implementation; the streaming reader has to walk multiple chunks and
+    // stop at the byte budget. Build a body via a hand-rolled ReadableStream
+    // of small chunks that collectively cross the limit, and verify only
+    // the prefix lands.
     const CHUNK_SIZE = 4 * 1024; // 4KB chunks
     const TOTAL_CHUNKS = 40; // 160KB total, crosses the 100KB cap
     const chunk = new TextEncoder().encode("y".repeat(CHUNK_SIZE));
@@ -221,9 +238,9 @@ describe("withFailureLogging", () => {
         controller.close();
       },
     });
-    const inner = vi.fn(async () => jsonResponse(400, { error: "too big" }));
-    const { log, errorCalls } = fakeLogger();
-    const wrapped = withFailureLogging(inner as unknown as typeof fetch, log, "test");
+    const inner = vi.fn<typeof fetch>(async () => jsonResponse(400, { error: "too big" }));
+    const log = mock<Logger>();
+    const wrapped = withFailureLogging(inner, log, "test");
 
     await wrapped("https://example/v1/chat", {
       method: "POST",
@@ -233,10 +250,51 @@ describe("withFailureLogging", () => {
       duplex: "half",
     } as RequestInit & { duplex: "half" });
 
-    const entry = errorCalls[0]?.obj as { requestBody: string };
-    expect(entry.requestBody.length).toBeLessThan(CHUNK_SIZE * TOTAL_CHUNKS);
-    expect(entry.requestBody).toMatch(/\[truncated at \d+ bytes\]$/);
+    const { payload } = failureCall(log);
+    expect(payload.requestBody.length).toBeLessThan(CHUNK_SIZE * TOTAL_CHUNKS);
+    expect(payload.requestBody).toMatch(/\[truncated at \d+ bytes\]$/);
     // The visible prefix is all 'y' (no chunk boundary leaked anything else).
-    expect(entry.requestBody.startsWith("y".repeat(100))).toBe(true);
+    expect(payload.requestBody.startsWith("y".repeat(100))).toBe(true);
+  });
+
+  it("returns '<read failed>' instead of throwing when the body is already locked", async () => {
+    // Defensive: if another interceptor (or a future maintainer) locks the
+    // body before we read, getReader() throws synchronously. The wrapper's
+    // failure-log path must not bubble that exception out — it would mask
+    // the real upstream error and drop the response. Lock the clone's body
+    // pre-emptively to drive this branch.
+    const inner = vi.fn<typeof fetch>(async (input) => {
+      const req = input instanceof Request ? input : new Request(input);
+      // Drain the original request to ensure baseFetch is well-behaved,
+      // then return a failing response.
+      await req.text();
+      return jsonResponse(500, { error: "boom" });
+    });
+    const log = mock<Logger>();
+    const wrapped = withFailureLogging(inner, log, "test");
+
+    // Pre-acquire (and never release) a reader on every Request clone so
+    // the wrapper's safeReadTextWithLimit hits the locked-stream path.
+    const originalClone = Request.prototype.clone;
+    const lockingClone = vi.fn(function (this: Request): Request {
+      const cloned = originalClone.call(this);
+      cloned.body?.getReader(); // lock and discard — never released
+      return cloned;
+    });
+    Request.prototype.clone = lockingClone as typeof Request.prototype.clone;
+
+    try {
+      const res = await wrapped("https://example/v1/chat", { method: "POST", body: "{}" });
+      expect(res.status).toBe(500);
+      const { payload } = failureCall(log);
+      expect(payload.requestBody).toBe("<read failed>");
+      // The upstream error body is still readable because its clone was
+      // also taken via the same patched clone — locked too — so it reads
+      // as "<read failed>". The important assertion is that we logged
+      // (not threw) and surfaced the upstream 500.
+      expect(payload.status).toBe(500);
+    } finally {
+      Request.prototype.clone = originalClone;
+    }
   });
 });

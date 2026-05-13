@@ -2,26 +2,28 @@
  * `fetch` wrapper that logs the full outbound request body and the upstream
  * response body whenever an LLM call fails.
  *
- * Why this exists: the OpenAI and Anthropic SDKs surface `err.status` and
- * `err.message` on their `APIError` subclasses, but neither carries the
- * request body. When grok-4.3 started 502'ing on tool schemas with `/` in
- * an `enum` (see PR #240), production logs gave us "Invalid arguments
- * passed to the model" and nothing else — we had to reproduce locally with
- * progressively-narrowing payloads to find the offending field. A
- * request-body dump at the failure boundary would have made the diagnosis
- * a one-line ops task.
+ * Interception strategy: both the OpenAI and Anthropic SDKs are Stainless-
+ * generated and accept a `{ fetch }` constructor option. A swapped fetch is
+ * the only point that owns both the outbound `Request` and the inbound
+ * `Response` — neither SDK exposes the request body on its `APIError`, and
+ * neither has an `onRequest` / `onError` hook. The SDKs also offer a
+ * `logger` + `logLevel: "debug"` knob, but that logs every success too and
+ * only partially redacts headers.
  *
- * Interception strategy: both SDKs are Stainless-generated and accept a
- * `{ fetch }` constructor option. The fetch wrapper is the only point that
- * owns both the outbound `Request` and the inbound `Response`. The SDKs
- * also expose `logger` + `logLevel: "debug"`, but that logs every success
- * too (too noisy) and only partially redacts headers (not enough); the
- * `fetch` swap is the standard recommendation in the ecosystem.
+ * Failure-only: a cheap `req.clone()` runs up front (stream tee — shares
+ * the underlying chunks, no copy). The inner fetch consumes the original;
+ * the clone's body stays unread until the failure branch decides to log,
+ * so the success path pays only the tee cost. One trade-off: the clone
+ * holds a reference to the underlying body until the SDK consumer fully
+ * drains the response, so for streaming SSE responses with a multi-MB
+ * request body, that body lives slightly longer than it otherwise would.
+ * Negligible at single-user scale.
  *
- * Failure-only: we buffer the request body once at entry (Request streams
- * are one-shot, so we clone before reading), call the inner fetch, and
- * emit a log only when `!res.ok` or the call throws. Successful requests
- * stay silent.
+ * Scope: targets JSON request/response bodies, which is what both SDKs
+ * emit for chat/messages endpoints. Binary bodies (image gen, voice) and
+ * SSE error events that arrive mid-200-stream are out of scope — the
+ * former would log as UTF-8 replacement chars, the latter never reaches
+ * `!res.ok`.
  */
 
 import type { Logger } from "pino";
@@ -34,6 +36,7 @@ const REDACTED_HEADERS = new Set([
   "authorization",
   "x-api-key",
   "anthropic-api-key",
+  "openrouter-api-key",
   "proxy-authorization",
   "cookie",
 ]);
@@ -108,19 +111,24 @@ export function withFailureLogging(
  * reader once the limit is hit so we never buffer a multi-megabyte body
  * just to throw most of it away.
  *
- * Never throws — on any stream failure returns a placeholder so the rest
- * of the log record still goes through.
+ * Never throws — on any stream failure (including `getReader()` rejecting
+ * because the body is already locked) returns `"<read failed>"` so the
+ * rest of the log record still goes through.
  */
 async function safeReadTextWithLimit(
   source: { body: ReadableStream<Uint8Array> | null },
   limit: number,
 ): Promise<string> {
   if (!source.body) return "";
-  const reader = source.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let bytesRead = 0;
-  let truncated = false;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   try {
+    // `getReader()` throws synchronously if the stream is already locked —
+    // keep it inside the try so the failure path still logs the rest of
+    // the record instead of bubbling out to the wrapper's outer catch.
+    reader = source.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let bytesRead = 0;
+    let truncated = false;
     while (bytesRead < limit) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -139,21 +147,21 @@ async function safeReadTextWithLimit(
       const { done } = await reader.read();
       if (!done) truncated = true;
     }
+    const combined = new Uint8Array(bytesRead);
+    let offset = 0;
+    for (const c of chunks) {
+      combined.set(c, offset);
+      offset += c.byteLength;
+    }
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(combined);
+    return truncated ? `${text}\n… [truncated at ${limit} bytes]` : text;
   } catch {
     return "<read failed>";
   } finally {
     // Fire-and-forget: cancelling can hang on certain stream sources, and
     // we've already extracted everything we need.
-    reader.cancel().catch(() => {});
+    if (reader !== null) reader.cancel().catch(() => {});
   }
-  const combined = new Uint8Array(bytesRead);
-  let offset = 0;
-  for (const c of chunks) {
-    combined.set(c, offset);
-    offset += c.byteLength;
-  }
-  const text = new TextDecoder("utf-8", { fatal: false }).decode(combined);
-  return truncated ? `${text}\n… [truncated at ${limit} bytes]` : text;
 }
 
 /**
