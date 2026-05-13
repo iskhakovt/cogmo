@@ -5,9 +5,11 @@ import type { Transaction } from "../../db/index.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { truncate } from "../../util/string.js";
 import { isCoreCompartment } from "../evolution/memory-extraction-schema.js";
+import { imageModelSlug } from "../image-tools.js";
 import type { AutoRecallMode } from "../recall-gate.js";
 import {
   CustomCompartmentCapExceededError,
+  ImageModelSlugCollisionError,
   InvalidNameError,
   InvalidProviderConfigError,
   ProfileClassInUseError,
@@ -778,10 +780,12 @@ export interface AgentStore {
   // --- Image Models ---
 
   /**
-   * Create an image-model catalog row. Unique-name collisions surface as
-   * `UniqueViolationError`. The Zod schema on `capabilities` (run inside
-   * `jsonbZod`) validates the bag at write time — invalid aspect ratios
-   * or unexpected fields throw before reaching the DB.
+   * Create an image-model catalog row. Exact-name collisions surface as
+   * `UniqueViolationError`; slug collisions (e.g. `replicate/flux-pro`
+   * when `fal-ai/flux-pro` already exists) surface as
+   * `ImageModelSlugCollisionError`. The Zod schema on `capabilities` (run
+   * inside `jsonbZod`) validates the bag at write time — invalid aspect
+   * ratios or unexpected fields throw before reaching the DB.
    */
   createImageModel(
     tx: Transaction,
@@ -799,7 +803,9 @@ export interface AgentStore {
    * Bulk-insert image models keyed on `(providerId, name)`. Rows whose
    * `name` already exists are skipped (idempotent re-run). Returns the
    * count of rows actually inserted — operator edits to existing rows
-   * are preserved. Used by `ensureFalImageDefaults`.
+   * are preserved. Used by `ensureFalImageDefaults`. A new row whose
+   * `name` slug-collides with an existing or sibling row throws
+   * `ImageModelSlugCollisionError`.
    */
   upsertImageModelsByName(
     tx: Transaction,
@@ -1990,6 +1996,17 @@ export class DrizzleAgentStore implements AgentStore {
       userSelectable: boolean;
     },
   ): Promise<{ id: string }> {
+    // Slug-collision pre-check (see ImageModelSlugCollisionError). Catalog
+    // size is tiny (~10 rows in practice); a SELECT-then-check is simpler
+    // than a SQL-expression unique index and surfaces a clear typed error.
+    const slug = imageModelSlug(params.name);
+    const existing = await tx.select({ name: imageModels.name }).from(imageModels);
+    const collision = existing.find(
+      (r) => r.name !== params.name && imageModelSlug(r.name) === slug,
+    );
+    if (collision) {
+      throw new ImageModelSlugCollisionError(params.name, collision.name, slug);
+    }
     return translateUniqueViolation(async () =>
       single(await tx.insert(imageModels).values(params).returning({ id: imageModels.id })),
     );
@@ -2007,6 +2024,24 @@ export class DrizzleAgentStore implements AgentStore {
     }>,
   ): Promise<number> {
     if (rows.length === 0) return 0;
+    // Slug-collision pre-check across (existing rows ∪ new rows in this
+    // batch). Rows whose `name` matches an existing row are skipped (the
+    // idempotent path used by ensureFalImageDefaults); a different new
+    // name with a colliding slug throws.
+    const existingNames = (await tx.select({ name: imageModels.name }).from(imageModels)).map(
+      (r) => r.name,
+    );
+    const existingByName = new Set(existingNames);
+    const seenSlugs = new Map<string, string>(existingNames.map((n) => [imageModelSlug(n), n]));
+    for (const row of rows) {
+      if (existingByName.has(row.name)) continue;
+      const slug = imageModelSlug(row.name);
+      const collision = seenSlugs.get(slug);
+      if (collision !== undefined && collision !== row.name) {
+        throw new ImageModelSlugCollisionError(row.name, collision, slug);
+      }
+      seenSlugs.set(slug, row.name);
+    }
     // Idempotent: skip rows whose `name` already exists. Operator edits to
     // existing rows survive re-runs of `ensureFalImageDefaults`.
     const inserted = await tx
