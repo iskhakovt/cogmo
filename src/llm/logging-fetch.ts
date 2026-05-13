@@ -59,11 +59,17 @@ export function withFailureLogging(
 ): typeof fetch {
   return async (input, init) => {
     const req = new Request(input, init);
-    const reqBody = await safeReadTextWithLimit(req.clone(), BODY_LOG_LIMIT_BYTES);
+    // Tee the body now (cheap — streams share underlying chunks) but defer
+    // the actual read until the failure path. Successful requests skip the
+    // copy entirely, which is the dominant case at runtime.
+    const reqClone = req.clone();
     try {
       const res = await baseFetch(req);
       if (!res.ok) {
-        const resBody = await safeReadTextWithLimit(res.clone(), BODY_LOG_LIMIT_BYTES);
+        const [reqBody, resBody] = await Promise.all([
+          safeReadTextWithLimit(reqClone, BODY_LOG_LIMIT_BYTES),
+          safeReadTextWithLimit(res.clone(), BODY_LOG_LIMIT_BYTES),
+        ]);
         log.error(
           {
             providerName,
@@ -79,6 +85,7 @@ export function withFailureLogging(
       }
       return res;
     } catch (err) {
+      const reqBody = await safeReadTextWithLimit(reqClone, BODY_LOG_LIMIT_BYTES);
       log.error(
         {
           providerName,
@@ -96,21 +103,57 @@ export function withFailureLogging(
 }
 
 /**
- * Read the body as text up to `limit` bytes; never throws. On read failure
- * returns a placeholder so the rest of the log record still goes through.
+ * Read up to `limit` bytes of `source.body`'s stream, decode as UTF-8, and
+ * append a `[truncated …]` marker if the source had more. Cancels the
+ * reader once the limit is hit so we never buffer a multi-megabyte body
+ * just to throw most of it away.
+ *
+ * Never throws — on any stream failure returns a placeholder so the rest
+ * of the log record still goes through.
  */
 async function safeReadTextWithLimit(
-  source: { text(): Promise<string> },
+  source: { body: ReadableStream<Uint8Array> | null },
   limit: number,
 ): Promise<string> {
-  let body: string;
+  if (!source.body) return "";
+  const reader = source.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytesRead = 0;
+  let truncated = false;
   try {
-    body = await source.text();
+    while (bytesRead < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const take = Math.min(value.byteLength, limit - bytesRead);
+      chunks.push(take === value.byteLength ? value : value.subarray(0, take));
+      bytesRead += take;
+      if (take < value.byteLength) {
+        // More data in this chunk than we want — mark truncated and stop.
+        truncated = true;
+        break;
+      }
+    }
+    // Reached the byte budget on a chunk boundary — probe whether the
+    // source had more, so the marker is accurate.
+    if (!truncated && bytesRead >= limit) {
+      const { done } = await reader.read();
+      if (!done) truncated = true;
+    }
   } catch {
     return "<read failed>";
+  } finally {
+    // Fire-and-forget: cancelling can hang on certain stream sources, and
+    // we've already extracted everything we need.
+    reader.cancel().catch(() => {});
   }
-  if (body.length <= limit) return body;
-  return `${body.slice(0, limit)}\n… [truncated, full body ${body.length} bytes]`;
+  const combined = new Uint8Array(bytesRead);
+  let offset = 0;
+  for (const c of chunks) {
+    combined.set(c, offset);
+    offset += c.byteLength;
+  }
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(combined);
+  return truncated ? `${text}\n… [truncated at ${limit} bytes]` : text;
 }
 
 /**

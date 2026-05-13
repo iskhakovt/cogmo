@@ -37,6 +37,45 @@ describe("withFailureLogging", () => {
     expect(inner).toHaveBeenCalledTimes(1);
   });
 
+  it("does not consume the request body on the success path", async () => {
+    // Lazy-read invariant for the success path: the cloned body must stay
+    // unread, so the only buffering cost on a happy request is the cheap
+    // stream tee from req.clone(). Spy on the wrapper's clone to confirm
+    // its stream reader is never acquired when the call succeeds.
+    let cloneReaderAcquired = 0;
+    const originalClone = Request.prototype.clone;
+    const cloneSpy = vi.fn(function (this: Request): Request {
+      const cloned = originalClone.call(this);
+      const body = cloned.body;
+      if (body) {
+        const realGetReader = body.getReader.bind(
+          body,
+        ) as () => ReadableStreamDefaultReader<Uint8Array>;
+        body.getReader = (() => {
+          cloneReaderAcquired++;
+          return realGetReader();
+        }) as typeof body.getReader;
+      }
+      return cloned;
+    });
+    Request.prototype.clone = cloneSpy as typeof Request.prototype.clone;
+
+    try {
+      const inner = vi.fn(async () => jsonResponse(200, { ok: true }));
+      const { log } = fakeLogger();
+      const wrapped = withFailureLogging(inner as unknown as typeof fetch, log, "test");
+
+      await wrapped("https://example/v1/chat", {
+        method: "POST",
+        body: '{"hello":"world"}',
+      });
+
+      expect(cloneReaderAcquired).toBe(0);
+    } finally {
+      Request.prototype.clone = originalClone;
+    }
+  });
+
   it("logs the full request + response body on a 4xx/5xx", async () => {
     const inner = vi.fn(async () =>
       jsonResponse(502, { error: { message: "Invalid grammar request" } }),
@@ -109,7 +148,7 @@ describe("withFailureLogging", () => {
 
     const entry = errorCalls[0]?.obj as { requestBody: string };
     expect(entry.requestBody.length).toBeLessThan(huge.length);
-    expect(entry.requestBody).toMatch(/\[truncated, full body \d+ bytes\]$/);
+    expect(entry.requestBody).toMatch(/\[truncated at \d+ bytes\]$/);
     expect(entry.requestBody.startsWith("x".repeat(100))).toBe(true);
   });
 
@@ -143,5 +182,61 @@ describe("withFailureLogging", () => {
     const res = await wrapped("https://example/v1/chat", { method: "POST", body: "{}" });
     const parsed = (await res.json()) as { error: { code: string } };
     expect(parsed.error.code).toBe("rate_limit");
+  });
+
+  it("handles GET requests with no body — logs an empty requestBody", async () => {
+    // Anthropic SDK uses GET for endpoints like `client.models.list()`.
+    // With no body, `Request.body` is null and the reader path is skipped.
+    const inner = vi.fn(async () => jsonResponse(404, { error: { type: "not_found" } }));
+    const { log, errorCalls } = fakeLogger();
+    const wrapped = withFailureLogging(inner as unknown as typeof fetch, log, "anthropic");
+
+    const res = await wrapped("https://api.anthropic.com/v1/models/missing", {
+      method: "GET",
+    });
+
+    expect(res.status).toBe(404);
+    expect(errorCalls).toHaveLength(1);
+    const entry = errorCalls[0]?.obj as {
+      method: string;
+      requestBody: string;
+      responseBody: string;
+    };
+    expect(entry.method).toBe("GET");
+    expect(entry.requestBody).toBe("");
+    expect(entry.responseBody).toContain("not_found");
+  });
+
+  it("truncates correctly when the body arrives as multiple chunks", async () => {
+    // Production bodies are chunked by undici / the Node fetch implementation;
+    // the streaming reader has to walk multiple chunks and stop at the byte
+    // budget. Build a body via a hand-rolled ReadableStream of small chunks
+    // that collectively cross the limit, and verify only the prefix lands.
+    const CHUNK_SIZE = 4 * 1024; // 4KB chunks
+    const TOTAL_CHUNKS = 40; // 160KB total, crosses the 100KB cap
+    const chunk = new TextEncoder().encode("y".repeat(CHUNK_SIZE));
+    const bodyStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < TOTAL_CHUNKS; i++) controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+    const inner = vi.fn(async () => jsonResponse(400, { error: "too big" }));
+    const { log, errorCalls } = fakeLogger();
+    const wrapped = withFailureLogging(inner as unknown as typeof fetch, log, "test");
+
+    await wrapped("https://example/v1/chat", {
+      method: "POST",
+      body: bodyStream,
+      // Required for streaming bodies under Node's fetch (otherwise
+      // `new Request` rejects).
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+
+    const entry = errorCalls[0]?.obj as { requestBody: string };
+    expect(entry.requestBody.length).toBeLessThan(CHUNK_SIZE * TOTAL_CHUNKS);
+    expect(entry.requestBody).toMatch(/\[truncated at \d+ bytes\]$/);
+    // The visible prefix is all 'y' (no chunk boundary leaked anything else).
+    expect(entry.requestBody.startsWith("y".repeat(100))).toBe(true);
   });
 });
