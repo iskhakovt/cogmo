@@ -32,6 +32,7 @@ import { describe, expect, inject, it, vi } from "vitest";
 import {
   createImageTools,
   type GeneratedImagePayload,
+  imageModelSlug,
   parseGeneratedImagePayload,
 } from "../agent/image-tools.js";
 import type { Service } from "../agent/service.js";
@@ -129,7 +130,13 @@ describe("openai-compatible image gen — OpenAI dall-e-3 (recorded)", () => {
     });
     expect(tool).toBeDefined();
 
-    const result = await tool!.handler({ prompt: PROMPT, model: MODEL_NAME }, {} as Service);
+    // The tool's `model` enum exposes the slug (slash-free, for xAI
+    // grammar-compiler compatibility); the payload's `model` field carries
+    // the canonical row name. See PR #240.
+    const result = await tool!.handler(
+      { prompt: PROMPT, model: imageModelSlug(MODEL_NAME) },
+      {} as Service,
+    );
 
     const parsed = parseGeneratedImagePayload(result);
     expect(parsed).not.toBeNull();
