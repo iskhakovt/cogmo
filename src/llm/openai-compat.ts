@@ -1,5 +1,7 @@
 import { getEncoding, type Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
+import { logger } from "../logger.js";
+import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
 import type {
@@ -63,6 +65,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       apiKey: config.apiKey,
       baseURL: config.baseURL,
       defaultHeaders: config.headers,
+      fetch: withFailureLogging(globalThis.fetch, logger, name),
     });
   }
 
