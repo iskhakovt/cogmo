@@ -331,6 +331,14 @@ function buildMessages(
         },
       }));
 
+      // OpenAI rejects `{role:"assistant", content: null}` with no tool_calls.
+      // An assistant turn whose only content was thinking (now stripped, or
+      // never visible to OpenAI-compatible endpoints) carries no information
+      // the model can use — drop it rather than send a malformed message.
+      if (textContent === "" && toolCalls.length === 0) {
+        continue;
+      }
+
       result.push({
         role: "assistant",
         content: textContent || null,
