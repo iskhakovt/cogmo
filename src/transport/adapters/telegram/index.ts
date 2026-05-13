@@ -62,6 +62,40 @@ import { postSkillsApprovalKeyboard } from "./skills-approval-poster.js";
 
 export const channelType = "telegram";
 
+// Telegram caps a single text message at 4096 chars. Streaming edits that
+// crossed this cap previously raised MESSAGE_TOO_LONG, killing the conversation
+// at the boundary. We rotate to a new message before the source text reaches
+// 4000 chars (leaving headroom for HTML tag expansion); chunks whose HTML
+// render still exceeds the cap fall back to plain text.
+const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
+const TELEGRAM_CHUNK_TARGET = 4000;
+
+/**
+ * Find a clean split point in `text` no later than `target`. Prefers higher-
+ * quality boundaries (paragraph > line > sentence > word) and falls back to a
+ * hard char split if no break exists in [target/2, target]. The returned
+ * index is the slice point — `text.slice(0, idx)` is the head, the rest is
+ * the tail.
+ */
+export function findTelegramSplitBoundary(text: string, target: number): number {
+  if (text.length <= target) return text.length;
+  // Reject boundaries close to the start — a sub-500-char head wastes a
+  // message. Above that, prefer the highest-quality separator anywhere in
+  // [minIdx, target].
+  const minIdx = Math.min(500, Math.floor(target * 0.25));
+  for (const sep of ["\n\n", "\n", ". ", "! ", "? ", " "]) {
+    const idx = text.lastIndexOf(sep, target - sep.length);
+    if (idx >= minIdx) return idx + sep.length;
+  }
+  // No natural break — hard cut. JS strings index UTF-16 code units; never
+  // slice between the two halves of a surrogate pair, or Telegram receives
+  // malformed UTF-8 and rejects the message.
+  let idx = target;
+  const code = text.charCodeAt(idx - 1);
+  if (code >= 0xd800 && code <= 0xdbff) idx -= 1;
+  return idx;
+}
+
 class TelegramAdapter implements Adapter, StreamingAdapter {
   #bot: Bot;
   #attachments: AttachmentStore;
@@ -199,6 +233,9 @@ class TelegramStreamHandle implements StreamHandle {
     }
     // other tool_results: skip — LLM will summarize
 
+    // Drain any overflow eagerly, bypassing the throttle — once accumulated
+    // crosses the chunk target, further edits to the same message would 400.
+    await this.#drainOverflow();
     await this.#throttledEdit();
   }
 
@@ -266,31 +303,28 @@ class TelegramStreamHandle implements StreamHandle {
 
   async finish(): Promise<void> {
     await this.#pending;
-    if (this.#accumulated && this.#messageId) {
-      // Final edit with HTML formatting
-      const rendered = renderTelegramHtml(this.#accumulated);
-      try {
-        await this.#bot.api.editMessageText(this.#chatId, this.#messageId, rendered.text, {
-          ...(rendered.parseMode && { parse_mode: rendered.parseMode }),
-        });
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "";
-        if (msg.includes("can't parse entities")) {
-          logger.warn("telegram: stream finish HTML parse failed, keeping plain text");
-        } else if (!msg.includes("message is not modified")) {
-          throw err;
-        }
-      }
-    } else if (this.#accumulated) {
-      await this.#edit(this.#accumulated);
+    await this.#drainOverflow();
+    if (this.#accumulated) {
+      await this.#finalizeChunk(this.#accumulated);
+      this.#accumulated = "";
     }
     this.#onDone();
   }
 
   async abort(error: string): Promise<void> {
     await this.#pending;
+    // Drain any mid-stream overflow first so the error tail lands on the last
+    // partial chunk, not floating in its own message.
+    await this.#drainOverflow();
     const text = this.#accumulated ? `${this.#accumulated}\n\n⚠️ ${error}` : `⚠️ ${error}`;
-    await this.#edit(text);
+    this.#accumulated = text;
+    // Appending the tail may push us back over the cap — drain once more,
+    // then emit whatever remains as plain text (no HTML render on errors).
+    await this.#drainOverflow();
+    if (this.#accumulated) {
+      await this.#edit(this.#accumulated);
+      this.#accumulated = "";
+    }
     this.#onDone();
   }
 
@@ -316,6 +350,71 @@ class TelegramStreamHandle implements StreamHandle {
         // Telegram returns 400 "message is not modified" for no-op edits — ignore
         const msg = err instanceof Error ? err.message : "";
         if (!msg.includes("message is not modified")) throw err;
+      }
+    });
+    await this.#pending;
+  }
+
+  /**
+   * Split `#accumulated` into Telegram-sized chunks. Each head is finalized
+   * (HTML-rendered into its own message) and `#messageId` is reset so the
+   * tail starts a fresh message. Repeats until what remains fits.
+   */
+  async #drainOverflow(): Promise<void> {
+    while (this.#accumulated.length > TELEGRAM_CHUNK_TARGET) {
+      const splitIdx = findTelegramSplitBoundary(this.#accumulated, TELEGRAM_CHUNK_TARGET);
+      const head = this.#accumulated.slice(0, splitIdx);
+      this.#accumulated = this.#accumulated.slice(splitIdx);
+      await this.#finalizeChunk(head);
+    }
+  }
+
+  /**
+   * Send/edit one finalized message with HTML rendering, then freeze it by
+   * clearing `#messageId`. Falls back to plain text if the rendered output
+   * exceeds Telegram's char cap or fails entity parsing.
+   */
+  async #finalizeChunk(text: string): Promise<void> {
+    if (!text) return;
+    this.#pending = this.#pending.then(async () => {
+      const rendered = renderTelegramHtml(text);
+      const useHtml =
+        rendered.parseMode != null && rendered.text.length <= TELEGRAM_MAX_MESSAGE_LENGTH;
+      const body = useHtml ? rendered.text : text;
+      const opts = useHtml && rendered.parseMode ? { parse_mode: rendered.parseMode } : undefined;
+      try {
+        if (this.#messageId == null) {
+          const sent = opts
+            ? await this.#bot.api.sendMessage(this.#chatId, body, opts)
+            : await this.#bot.api.sendMessage(this.#chatId, body);
+          // Don't store sent.message_id — this chunk is final, the next chunk
+          // (if any) creates a new message.
+          void sent;
+        } else {
+          if (opts) {
+            await this.#bot.api.editMessageText(this.#chatId, this.#messageId, body, opts);
+          } else {
+            await this.#bot.api.editMessageText(this.#chatId, this.#messageId, body);
+          }
+        }
+        this.#lastEditTime = Date.now();
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "";
+        if (msg.includes("can't parse entities")) {
+          // On the edit path the message already shows the plain-text body
+          // from prior throttled edits, so no follow-up call is needed. On
+          // the send path the chunk hasn't been delivered yet — retry plain.
+          if (this.#messageId == null) {
+            logger.warn("telegram: chunk HTML parse failed, retrying as plain text");
+            await this.#bot.api.sendMessage(this.#chatId, text);
+          } else {
+            logger.warn("telegram: stream finish HTML parse failed, keeping plain text");
+          }
+        } else if (!msg.includes("message is not modified")) {
+          throw err;
+        }
+      } finally {
+        this.#messageId = null;
       }
     });
     await this.#pending;

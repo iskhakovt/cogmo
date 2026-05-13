@@ -747,6 +747,107 @@ describe("telegram adapter", () => {
         "Let me search.\n🔍 web_search...\n",
       );
     });
+
+    describe("4096-char overflow", () => {
+      // Reproduces the prod MESSAGE_TOO_LONG class of failure: cumulative
+      // streaming edits crossed Telegram's per-message char cap, every edit
+      // after that point 400'd, and the conversation was marked errored.
+      // The fix rotates to a fresh message before the cap; the assertions
+      // here guard that every call to send/edit fits inside the cap.
+
+      const TELEGRAM_CAP = 4096;
+
+      it("a single push larger than the cap splits into multiple messages", async () => {
+        const adapter = await createStreamingAdapter();
+        const handle = await adapter.openStream("42", "run-1");
+
+        mockBotApi.sendMessage.mockClear();
+        mockBotApi.editMessageText.mockClear();
+        // Each paragraph is ~1100 chars; eight of them = ~8800 chars (>2x cap).
+        // Paragraph boundaries are natural split points the boundary finder
+        // should prefer.
+        const para = `${"x".repeat(1100)}`;
+        const big = Array(8).fill(para).join("\n\n");
+        await handle.push({ type: "text_delta", text: big });
+        await handle.finish();
+
+        const sendCalls = mockBotApi.sendMessage.mock.calls;
+        const editCalls = mockBotApi.editMessageText.mock.calls;
+        // Multiple physical messages, not one 8800-char edit.
+        expect(sendCalls.length + editCalls.length).toBeGreaterThan(1);
+        for (const [, body] of sendCalls) {
+          expect(typeof body).toBe("string");
+          expect((body as string).length).toBeLessThanOrEqual(TELEGRAM_CAP);
+        }
+        for (const [, , body] of editCalls) {
+          expect(typeof body).toBe("string");
+          expect((body as string).length).toBeLessThanOrEqual(TELEGRAM_CAP);
+        }
+      });
+
+      it("cumulative pushes that cross the cap rotate to a new message", async () => {
+        const adapter = await createStreamingAdapter();
+        const handle = await adapter.openStream("42", "run-1");
+
+        mockBotApi.sendMessage.mockClear();
+        // Two messages so the test can observe the rotation: send first, then
+        // a fresh sendMessage after the cap is crossed (with a different id).
+        mockBotApi.sendMessage
+          .mockResolvedValueOnce({ message_id: 100 })
+          .mockResolvedValue({ message_id: 200 });
+        mockBotApi.editMessageText.mockClear();
+
+        // 4 chunks × 1100 chars = 4400 chars total, crosses the 4000-char
+        // chunk target after the third push.
+        const chunk = "x".repeat(1100);
+        for (let i = 0; i < 4; i++) {
+          vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1000);
+          await handle.push({ type: "text_delta", text: chunk });
+        }
+        await handle.finish();
+
+        // At least one sendMessage after the original (a rotation happened),
+        // and every payload fits the cap.
+        expect(mockBotApi.sendMessage.mock.calls.length).toBeGreaterThanOrEqual(2);
+        for (const [, body] of mockBotApi.sendMessage.mock.calls) {
+          expect((body as string).length).toBeLessThanOrEqual(TELEGRAM_CAP);
+        }
+        for (const [, , body] of mockBotApi.editMessageText.mock.calls) {
+          expect((body as string).length).toBeLessThanOrEqual(TELEGRAM_CAP);
+        }
+      });
+
+      it("findTelegramSplitBoundary prefers high-quality breaks", async () => {
+        const { findTelegramSplitBoundary } = await import("./index.js");
+        // Paragraph break wins over later line breaks / spaces.
+        const a = `${"a".repeat(2000)}\n\n${"b".repeat(1000)}\n${"c".repeat(1000)}`;
+        expect(findTelegramSplitBoundary(a, 3500)).toBe(2002);
+
+        // No paragraph break — falls through to single line break.
+        const b = `${"a".repeat(2000)}\n${"b".repeat(2500)}`;
+        expect(findTelegramSplitBoundary(b, 3500)).toBe(2001);
+
+        // No newline — sentence boundary.
+        const c = `${"a".repeat(1500)}. ${"b".repeat(2500)}`;
+        expect(findTelegramSplitBoundary(c, 3500)).toBe(1502);
+
+        // No natural break in the acceptable window → hard split at target.
+        const d = "x".repeat(5000);
+        expect(findTelegramSplitBoundary(d, 3500)).toBe(3500);
+
+        // Text shorter than target — no split.
+        expect(findTelegramSplitBoundary("short", 3500)).toBe(5);
+
+        // Hard split must not land between halves of a surrogate pair —
+        // 😀 (U+1F600) is two UTF-16 code units. Cutting at `target` would
+        // split it; the helper backs off by one to keep the pair intact.
+        const emoji = "😀"; // length 2 in UTF-16
+        const e = "x".repeat(99) + emoji + "y".repeat(100);
+        // No natural breaks → hard split. target=100 falls on the high
+        // surrogate (index 99); helper returns 99 instead.
+        expect(findTelegramSplitBoundary(e, 100)).toBe(99);
+      });
+    });
   });
 
   describe("generated images (mid-stream)", () => {
