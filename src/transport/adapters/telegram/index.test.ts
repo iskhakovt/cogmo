@@ -2,7 +2,7 @@ import { ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockAttachmentStore, mockTransport } from "../../../test/factories.js";
 import type { StreamingAdapter } from "../../types.js";
-import { setup } from "./index.js";
+import { findTelegramSplitBoundary, rebalanceCodeFence, setup } from "./index.js";
 
 // Mock grammy
 const handlers = new Map<string, any>();
@@ -746,6 +746,195 @@ describe("telegram adapter", () => {
         100,
         "Let me search.\n🔍 web_search...\n",
       );
+    });
+
+    describe("4096-char overflow", () => {
+      // Reproduces the prod MESSAGE_TOO_LONG class of failure: cumulative
+      // streaming edits crossed Telegram's per-message char cap, every edit
+      // after that point 400'd, and the conversation was marked errored.
+      // The fix rotates to a fresh message before the cap; the assertions
+      // here guard that every call to send/edit fits inside the cap.
+
+      const TELEGRAM_CAP = 4096;
+
+      it("a single push larger than the cap splits into multiple messages", async () => {
+        const adapter = await createStreamingAdapter();
+        const handle = await adapter.openStream("42", "run-1");
+
+        mockBotApi.sendMessage.mockClear();
+        mockBotApi.editMessageText.mockClear();
+        // Each paragraph is ~1100 chars; eight of them = ~8800 chars (>2x cap).
+        // Paragraph boundaries are natural split points the boundary finder
+        // should prefer.
+        const para = `${"x".repeat(1100)}`;
+        const big = Array(8).fill(para).join("\n\n");
+        await handle.push({ type: "text_delta", text: big });
+        await handle.finish();
+
+        const sendCalls = mockBotApi.sendMessage.mock.calls;
+        const editCalls = mockBotApi.editMessageText.mock.calls;
+        // Multiple physical messages, not one 8800-char edit.
+        expect(sendCalls.length + editCalls.length).toBeGreaterThan(1);
+        for (const [, body] of sendCalls) {
+          expect(typeof body).toBe("string");
+          expect((body as string).length).toBeLessThanOrEqual(TELEGRAM_CAP);
+        }
+        for (const [, , body] of editCalls) {
+          expect(typeof body).toBe("string");
+          expect((body as string).length).toBeLessThanOrEqual(TELEGRAM_CAP);
+        }
+      });
+
+      it("cumulative pushes that cross the cap rotate to a new message", async () => {
+        const adapter = await createStreamingAdapter();
+        const handle = await adapter.openStream("42", "run-1");
+
+        mockBotApi.sendMessage.mockClear();
+        // Two messages so the test can observe the rotation: send first, then
+        // a fresh sendMessage after the cap is crossed (with a different id).
+        mockBotApi.sendMessage
+          .mockResolvedValueOnce({ message_id: 100 })
+          .mockResolvedValue({ message_id: 200 });
+        mockBotApi.editMessageText.mockClear();
+
+        // 4 chunks × 1100 chars = 4400 chars total, crosses the 4000-char
+        // chunk target after the third push. Pre-compute the base time so
+        // each iteration sets an absolute, predictable Date.now value
+        // (re-reading Date.now inside the loop would compound with the spy
+        // installed on the previous iteration).
+        const chunk = "x".repeat(1100);
+        const t0 = Date.now();
+        for (let i = 0; i < 4; i++) {
+          vi.spyOn(Date, "now").mockReturnValue(t0 + (i + 1) * 1000);
+          await handle.push({ type: "text_delta", text: chunk });
+        }
+        await handle.finish();
+
+        // At least one sendMessage after the original (a rotation happened),
+        // and every payload fits the cap.
+        expect(mockBotApi.sendMessage.mock.calls.length).toBeGreaterThanOrEqual(2);
+        for (const [, body] of mockBotApi.sendMessage.mock.calls) {
+          expect((body as string).length).toBeLessThanOrEqual(TELEGRAM_CAP);
+        }
+        for (const [, , body] of mockBotApi.editMessageText.mock.calls) {
+          expect((body as string).length).toBeLessThanOrEqual(TELEGRAM_CAP);
+        }
+      });
+
+      it("findTelegramSplitBoundary prefers high-quality breaks", () => {
+        // Paragraph break wins over later line breaks / spaces.
+        const a = `${"a".repeat(2000)}\n\n${"b".repeat(1000)}\n${"c".repeat(1000)}`;
+        expect(findTelegramSplitBoundary(a, 3500)).toBe(2002);
+
+        // No paragraph break — falls through to single line break.
+        const b = `${"a".repeat(2000)}\n${"b".repeat(2500)}`;
+        expect(findTelegramSplitBoundary(b, 3500)).toBe(2001);
+
+        // No newline — sentence boundary.
+        const c = `${"a".repeat(1500)}. ${"b".repeat(2500)}`;
+        expect(findTelegramSplitBoundary(c, 3500)).toBe(1502);
+
+        // No natural break in the acceptable window → hard split at target.
+        const d = "x".repeat(5000);
+        expect(findTelegramSplitBoundary(d, 3500)).toBe(3500);
+
+        // Text shorter than target — no split.
+        expect(findTelegramSplitBoundary("short", 3500)).toBe(5);
+
+        // Hard split must not land between halves of a surrogate pair —
+        // 😀 (U+1F600) is two UTF-16 code units. Cutting at `target` would
+        // split it; the helper backs off by one to keep the pair intact.
+        const emoji = "😀"; // length 2 in UTF-16
+        const e = "x".repeat(99) + emoji + "y".repeat(100);
+        // No natural breaks → hard split. target=100 falls on the high
+        // surrogate (index 99); helper returns 99 instead.
+        expect(findTelegramSplitBoundary(e, 100)).toBe(99);
+      });
+
+      it("rebalanceCodeFence closes an open fence on head and reopens on tail", () => {
+        // Split lands inside an open fenced block: close + reopen with lang.
+        const head = "Here is the code:\n\n```python\ndef foo():\n  return 1";
+        const tail = "\nx = foo()\n```\nDone.";
+        const out = rebalanceCodeFence(head, tail);
+        expect(out.head).toBe(`${head}\n\`\`\``);
+        expect(out.tail).toBe(`\`\`\`python\n${tail}`);
+
+        // Already balanced — passthrough.
+        const balancedHead = "Code:\n\n```\nx\n```\n\nMore prose.";
+        const balancedTail = "Next paragraph.";
+        expect(rebalanceCodeFence(balancedHead, balancedTail)).toEqual({
+          head: balancedHead,
+          tail: balancedTail,
+        });
+
+        // No code in head at all — passthrough.
+        expect(rebalanceCodeFence("just text", " more")).toEqual({
+          head: "just text",
+          tail: " more",
+        });
+
+        // Fence without a language tag — reopen as bare ```.
+        const noLangHead = "```\nplain code\nmore";
+        expect(rebalanceCodeFence(noLangHead, "\nstill code").tail).toBe("```\n\nstill code");
+      });
+
+      it("a long code block split mid-fence renders every chunk inside <pre>", async () => {
+        // The bug without rebalancing: head ends inside an open fence; tail
+        // starts with raw body text (no opening fence). marked auto-closes
+        // the head's fence at EOF (so head looks fine), but the tail renders
+        // the continuation as paragraph text — code shows as plain prose
+        // with no monospace formatting, and the trailing ``` becomes literal
+        // backticks. Rebalancing restores the fence on the tail.
+        const adapter = await createStreamingAdapter();
+        const handle = await adapter.openStream("42", "run-1");
+
+        mockBotApi.sendMessage.mockClear();
+        mockBotApi.editMessageText.mockClear();
+        mockBotApi.sendMessage
+          .mockResolvedValueOnce({ message_id: 100 })
+          .mockResolvedValue({ message_id: 200 });
+
+        // Distinctive body content lets us locate the code in the rendered
+        // output. 5000+ chars guarantees at least one mid-fence split.
+        const body = "marker_token\n".repeat(400);
+        await handle.push({
+          type: "text_delta",
+          text: `Output:\n\n\`\`\`python\n${body}\`\`\``,
+        });
+        await handle.finish();
+
+        // Only HTML-rendered calls represent the finalized state of a chunk.
+        // Plain-text edits during streaming carry no `parse_mode` and don't
+        // assert anything about formatting — they get replaced by an HTML
+        // render at finalize.
+        const isHtml = (opts: unknown): boolean =>
+          typeof opts === "object" &&
+          opts !== null &&
+          (opts as { parse_mode?: string }).parse_mode === "HTML";
+        const renderedBodies = [
+          ...mockBotApi.sendMessage.mock.calls
+            .filter((c) => isHtml(c[2]))
+            .map((c) => c[1] as string),
+          ...mockBotApi.editMessageText.mock.calls
+            .filter((c) => isHtml(c[3]))
+            .map((c) => c[2] as string),
+        ];
+        // More than one rendered chunk (we split mid-fence) — proves the
+        // rotation actually happened, not just a single oversized message.
+        expect(renderedBodies.length).toBeGreaterThan(1);
+
+        for (const b of renderedBodies) {
+          if (b.includes("marker_token")) {
+            // Body must be inside a <pre> block, not a <p> (which is what
+            // marked emits when the continuation lacks an opening fence).
+            const preBlock = b.match(/<pre[\s\S]*?<\/pre>/);
+            expect(preBlock).not.toBeNull();
+            expect(preBlock?.[0]).toContain("marker_token");
+          }
+          // No literal triple-backticks left over from an unclosed fence.
+          expect(b).not.toMatch(/```/);
+        }
+      });
     });
   });
 

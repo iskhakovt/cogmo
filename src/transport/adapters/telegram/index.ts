@@ -62,6 +62,78 @@ import { postSkillsApprovalKeyboard } from "./skills-approval-poster.js";
 
 export const channelType = "telegram";
 
+// Telegram caps a single text message at 4096 chars. Streaming edits that
+// crossed this cap previously raised MESSAGE_TOO_LONG, killing the conversation
+// at the boundary. We rotate to a new message before the source text reaches
+// 4000 chars (leaving headroom for HTML tag expansion); chunks whose HTML
+// render still exceeds the cap fall back to plain text.
+const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
+const TELEGRAM_CHUNK_TARGET = 4000;
+// Anything smaller than this in the head produces a sliver of a message; we'd
+// rather hard-cut later in the source than emit a sub-half-screen first chunk.
+// Empirical choice — fits a short Telegram message bubble (~3-4 lines of text
+// in the standard mobile UI).
+const TELEGRAM_MIN_HEAD_CHARS = 500;
+
+/**
+ * If `head` ends inside an open fenced code block, close the fence at the
+ * end of `head` and re-open it at the start of `tail` with the same language
+ * tag. Otherwise return the pair unchanged. Indented (non-fenced) code
+ * blocks need no rebalancing — they have no delimiters.
+ *
+ * Scope: backtick fences only, recognised on a line with no leading indent.
+ * Tilde fences (~~~) and indented fences (up to 3 leading spaces under
+ * CommonMark) aren't handled — they're vanishingly rare in LLM output. The
+ * state machine toggles on each fence line, which matches CommonMark when
+ * the document only uses 3-backtick fences. Inline single-backtick code
+ * spans (\`like this\`) are also out of scope — a split inside one leaks a
+ * literal backtick at the boundary.
+ */
+export function rebalanceCodeFence(head: string, tail: string): { head: string; tail: string } {
+  const fenceLineRe = /^(?:`{3,})(\w*)/;
+  let inFence = false;
+  let fenceLang = "";
+  for (const line of head.split("\n")) {
+    const m = line.match(fenceLineRe);
+    if (!m) continue;
+    if (!inFence) {
+      inFence = true;
+      fenceLang = m[1] ?? "";
+    } else {
+      inFence = false;
+      fenceLang = "";
+    }
+  }
+  if (!inFence) return { head, tail };
+  const closedHead = head.endsWith("\n") ? `${head}\`\`\`` : `${head}\n\`\`\``;
+  const opener = fenceLang ? `\`\`\`${fenceLang}\n` : "```\n";
+  const openedTail = `${opener}${tail}`;
+  return { head: closedHead, tail: openedTail };
+}
+
+/**
+ * Find a clean split point in `text` no later than `target`. Prefers higher-
+ * quality boundaries (paragraph > line > sentence > word) and falls back to a
+ * hard char split if no break exists in [TELEGRAM_MIN_HEAD_CHARS, target].
+ * The returned index is the slice point — `text.slice(0, idx)` is the head,
+ * the rest is the tail.
+ */
+export function findTelegramSplitBoundary(text: string, target: number): number {
+  if (text.length <= target) return text.length;
+  const minIdx = Math.min(TELEGRAM_MIN_HEAD_CHARS, Math.floor(target * 0.25));
+  for (const sep of ["\n\n", "\n", ". ", "! ", "? ", " "]) {
+    const idx = text.lastIndexOf(sep, target - sep.length);
+    if (idx >= minIdx) return idx + sep.length;
+  }
+  // No natural break — hard cut. JS strings index UTF-16 code units; never
+  // slice between the two halves of a surrogate pair, or Telegram receives
+  // malformed UTF-8 and rejects the message.
+  let idx = target;
+  const code = text.charCodeAt(idx - 1);
+  if (code >= 0xd800 && code <= 0xdbff) idx -= 1;
+  return idx;
+}
+
 class TelegramAdapter implements Adapter, StreamingAdapter {
   #bot: Bot;
   #attachments: AttachmentStore;
@@ -199,6 +271,9 @@ class TelegramStreamHandle implements StreamHandle {
     }
     // other tool_results: skip — LLM will summarize
 
+    // Drain any overflow eagerly, bypassing the throttle — once accumulated
+    // crosses the chunk target, further edits to the same message would 400.
+    await this.#drainOverflow();
     await this.#throttledEdit();
   }
 
@@ -266,31 +341,28 @@ class TelegramStreamHandle implements StreamHandle {
 
   async finish(): Promise<void> {
     await this.#pending;
-    if (this.#accumulated && this.#messageId) {
-      // Final edit with HTML formatting
-      const rendered = renderTelegramHtml(this.#accumulated);
-      try {
-        await this.#bot.api.editMessageText(this.#chatId, this.#messageId, rendered.text, {
-          ...(rendered.parseMode && { parse_mode: rendered.parseMode }),
-        });
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "";
-        if (msg.includes("can't parse entities")) {
-          logger.warn("telegram: stream finish HTML parse failed, keeping plain text");
-        } else if (!msg.includes("message is not modified")) {
-          throw err;
-        }
-      }
-    } else if (this.#accumulated) {
-      await this.#edit(this.#accumulated);
+    await this.#drainOverflow();
+    if (this.#accumulated) {
+      await this.#finalizeChunk(this.#accumulated);
+      this.#accumulated = "";
     }
     this.#onDone();
   }
 
   async abort(error: string): Promise<void> {
     await this.#pending;
+    // Drain any mid-stream overflow first so the error tail lands on the last
+    // partial chunk, not floating in its own message.
+    await this.#drainOverflow();
     const text = this.#accumulated ? `${this.#accumulated}\n\n⚠️ ${error}` : `⚠️ ${error}`;
-    await this.#edit(text);
+    this.#accumulated = text;
+    // Appending the tail may push us back over the cap — drain once more,
+    // then emit whatever remains as plain text (no HTML render on errors).
+    await this.#drainOverflow();
+    if (this.#accumulated) {
+      await this.#edit(this.#accumulated);
+      this.#accumulated = "";
+    }
     this.#onDone();
   }
 
@@ -316,6 +388,71 @@ class TelegramStreamHandle implements StreamHandle {
         // Telegram returns 400 "message is not modified" for no-op edits — ignore
         const msg = err instanceof Error ? err.message : "";
         if (!msg.includes("message is not modified")) throw err;
+      }
+    });
+    await this.#pending;
+  }
+
+  /**
+   * Split `#accumulated` into Telegram-sized chunks. Each head is finalized
+   * (HTML-rendered into its own message) and `#messageId` is reset so the
+   * tail starts a fresh message. Repeats until what remains fits.
+   */
+  async #drainOverflow(): Promise<void> {
+    while (this.#accumulated.length > TELEGRAM_CHUNK_TARGET) {
+      const splitIdx = findTelegramSplitBoundary(this.#accumulated, TELEGRAM_CHUNK_TARGET);
+      const rawHead = this.#accumulated.slice(0, splitIdx);
+      const rawTail = this.#accumulated.slice(splitIdx);
+      const { head, tail } = rebalanceCodeFence(rawHead, rawTail);
+      this.#accumulated = tail;
+      await this.#finalizeChunk(head);
+    }
+  }
+
+  /**
+   * Send/edit one finalized message with HTML rendering, then freeze it by
+   * clearing `#messageId`. Falls back to plain text if the rendered output
+   * exceeds Telegram's char cap or fails entity parsing.
+   */
+  async #finalizeChunk(text: string): Promise<void> {
+    if (!text) return;
+    this.#pending = this.#pending.then(async () => {
+      const rendered = renderTelegramHtml(text);
+      const useHtml =
+        rendered.parseMode != null && rendered.text.length <= TELEGRAM_MAX_MESSAGE_LENGTH;
+      const body = useHtml ? rendered.text : text;
+      const opts = useHtml && rendered.parseMode ? { parse_mode: rendered.parseMode } : undefined;
+      try {
+        // grammY accepts `undefined` for the optional `other` parameter, so
+        // pass `opts` directly — when no HTML formatting applies it's just
+        // undefined. The send-path return is discarded: this chunk is final
+        // and the next chunk creates a fresh message.
+        if (this.#messageId == null) {
+          await this.#bot.api.sendMessage(this.#chatId, body, opts);
+        } else {
+          await this.#bot.api.editMessageText(this.#chatId, this.#messageId, body, opts);
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "";
+        if (msg.includes("can't parse entities")) {
+          // On the edit path the message already shows the plain-text body
+          // from prior throttled edits, so no follow-up call is needed. On
+          // the send path the chunk hasn't been delivered yet — retry plain.
+          if (this.#messageId == null) {
+            logger.warn("telegram: chunk HTML parse failed, retrying as plain text");
+            await this.#bot.api.sendMessage(this.#chatId, text);
+          } else {
+            logger.warn("telegram: stream finish HTML parse failed, keeping plain text");
+          }
+        } else if (!msg.includes("message is not modified")) {
+          throw err;
+        }
+      } finally {
+        this.#messageId = null;
+        // Reset the throttle clock so the first edit on the new message
+        // fires immediately — finalize is a transition, not a rate-limited
+        // operation.
+        this.#lastEditTime = 0;
       }
     });
     await this.#pending;
