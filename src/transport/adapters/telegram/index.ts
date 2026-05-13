@@ -416,19 +416,14 @@ class TelegramStreamHandle implements StreamHandle {
       const body = useHtml ? rendered.text : text;
       const opts = useHtml && rendered.parseMode ? { parse_mode: rendered.parseMode } : undefined;
       try {
+        // grammY accepts `undefined` for the optional `other` parameter, so
+        // pass `opts` directly — when no HTML formatting applies it's just
+        // undefined. The send-path return is discarded: this chunk is final
+        // and the next chunk creates a fresh message.
         if (this.#messageId == null) {
-          const sent = opts
-            ? await this.#bot.api.sendMessage(this.#chatId, body, opts)
-            : await this.#bot.api.sendMessage(this.#chatId, body);
-          // Don't store sent.message_id — this chunk is final, the next chunk
-          // (if any) creates a new message.
-          void sent;
+          await this.#bot.api.sendMessage(this.#chatId, body, opts);
         } else {
-          if (opts) {
-            await this.#bot.api.editMessageText(this.#chatId, this.#messageId, body, opts);
-          } else {
-            await this.#bot.api.editMessageText(this.#chatId, this.#messageId, body);
-          }
+          await this.#bot.api.editMessageText(this.#chatId, this.#messageId, body, opts);
         }
         this.#lastEditTime = Date.now();
       } catch (err: unknown) {
