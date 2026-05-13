@@ -139,6 +139,31 @@ export class InvalidProviderConfigError extends Error {
   }
 }
 
+/**
+ * Thrown by `createImageModel` / `upsertImageModelsByName` when the new
+ * row's `name` would slug-collide with an existing row (e.g. inserting
+ * `replicate/flux-pro` while `fal-ai/flux-pro` is already registered;
+ * both reduce to slug `flux-pro`). The slug is what reaches the LLM —
+ * see `imageModelSlug` and the xAI grammar-compiler issue PR #240
+ * documented — so distinct catalog entries must produce distinct slugs.
+ * Catch at the insert boundary so the operator gets a clear message
+ * pointing at the offending row, instead of a boot-time `createImageTools`
+ * throw at the next process restart.
+ */
+export class ImageModelSlugCollisionError extends Error {
+  constructor(
+    public readonly newName: string,
+    public readonly existingName: string,
+    public readonly slug: string,
+  ) {
+    super(
+      `image model "${newName}" would collide on slug "${slug}" with existing model "${existingName}". ` +
+        `Rename one of them so the last path segment is unique (the LLM sees only the segment after the last "/").`,
+    );
+    this.name = "ImageModelSlugCollisionError";
+  }
+}
+
 interface PgUniqueViolation {
   code: "23505";
   constraint_name?: string;

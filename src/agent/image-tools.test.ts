@@ -8,6 +8,7 @@ import { AbortError } from "../util/with-retry.js";
 import {
   createImageTools,
   type GeneratedImagePayload,
+  imageModelSlug,
   parseGeneratedImagePayload,
 } from "./image-tools.js";
 import type { Service } from "./service.js";
@@ -119,6 +120,22 @@ function fakeAttachments(): AttachmentStore {
 // handler arity.
 const FAKE_SERVICE = {} as Service;
 
+describe("imageModelSlug", () => {
+  it("strips the provider prefix from a single-slash name", () => {
+    expect(imageModelSlug("fal-ai/flux-pro")).toBe("flux-pro");
+    expect(imageModelSlug("fal/flux-dev")).toBe("flux-dev");
+  });
+
+  it("strips up to the last slash on multi-segment names", () => {
+    expect(imageModelSlug("openrouter/x-ai/grok-4.3")).toBe("grok-4.3");
+    expect(imageModelSlug("fal-ai/flux-pro/kontext")).toBe("kontext");
+  });
+
+  it("returns the input unchanged when there is no slash", () => {
+    expect(imageModelSlug("flux-dev")).toBe("flux-dev");
+  });
+});
+
 describe("createImageTools", () => {
   it("returns [] when no models are configured", () => {
     const tools = createImageTools({
@@ -127,6 +144,53 @@ describe("createImageTools", () => {
       attachments: fakeAttachments(),
     });
     expect(tools).toEqual([]);
+  });
+
+  it("emits a slash-free `model` enum in the tool schema (xAI grammar guard)", () => {
+    // Regression: xAI's grok-* family rejects tool parameter enum values
+    // containing `/` because its grammar compiler treats the character
+    // specially. Stripping the provider prefix to a slug keeps the same
+    // identifier safe across providers — see imageModelSlug for the link
+    // back to the upstream issues.
+    const [tool] = createImageTools({
+      models: [
+        falModel({ name: "fal-ai/flux-pro" }),
+        falModel({
+          id: "model-2",
+          name: "fal-ai/recraft-v3",
+          modelString: "fal-ai/recraft-v3",
+        }),
+      ],
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
+      attachments: fakeAttachments(),
+    });
+    const schema = tool!.inputSchema as unknown as {
+      properties: { model: { enum: string[] } };
+    };
+    expect(schema.properties.model.enum).toEqual(["flux-pro", "recraft-v3"]);
+    for (const value of schema.properties.model.enum) {
+      expect(value).not.toContain("/");
+    }
+  });
+
+  it("throws at registration when two model names share a slug", () => {
+    // Two providers both serve a model with the same last-path-segment name.
+    // Catch the collision at boot, not at the LLM's first tool call.
+    expect(() =>
+      createImageTools({
+        models: [
+          falModel({ name: "fal-ai/flux-pro" }),
+          falModel({
+            id: "model-2",
+            providerId: "provider-2",
+            name: "replicate/flux-pro",
+            modelString: "replicate/flux-pro",
+          }),
+        ],
+        providers: new Map([["provider-1", fakeFalProvider().provider]]),
+        attachments: fakeAttachments(),
+      }),
+    ).toThrow(/collision after slug normalisation/);
   });
 
   it("builds a single generate_image tool with names from the catalog", () => {
@@ -138,7 +202,10 @@ describe("createImageTools", () => {
     });
     expect(tools).toHaveLength(1);
     expect(tools[0]?.name).toBe("generate_image");
-    expect(tools[0]?.description).toContain("fal/flux-dev");
+    // Description uses slug, not the canonical "fal/flux-dev" path — the
+    // LLM-facing identifier must be slash-free (see imageModelSlug).
+    expect(tools[0]?.description).toContain("flux-dev");
+    expect(tools[0]?.description).not.toContain("fal/flux-dev");
     expect(tools[0]?.description).toContain("balanced default");
     expect(tools[0]?.description).toContain("ratios: 1:1, 16:9");
   });
@@ -171,10 +238,12 @@ describe("createImageTools", () => {
       providers: new Map([["provider-1", provider]]),
       attachments,
     });
-    const result = await tool!.handler({ prompt: "hello", model: "fal/flux-dev" }, FAKE_SERVICE);
+    const result = await tool!.handler({ prompt: "hello", model: "flux-dev" }, FAKE_SERVICE);
 
     expect(imageFn).toHaveBeenCalledWith("fal-ai/flux/dev");
     expect(attachments.upload).toHaveBeenCalled();
+    // The payload's `model` is the canonical row name (operator/log-facing),
+    // not the LLM-facing slug. See GeneratedImagePayload.
     expect(JSON.parse(result)).toMatchObject({
       path: "inbound/test.png",
       mediaType: "image/png",
@@ -198,7 +267,7 @@ describe("createImageTools", () => {
       providers: new Map([["provider-2", provider]]),
       attachments: fakeAttachments(),
     });
-    await tool!.handler({ prompt: "x", model: "venice/flux" }, FAKE_SERVICE);
+    await tool!.handler({ prompt: "x", model: "flux" }, FAKE_SERVICE);
 
     expect(imageModelFn).toHaveBeenCalledWith("flux-dev");
   });
@@ -224,7 +293,7 @@ describe("createImageTools", () => {
     const result = await tool!.handler(
       {
         prompt: "x",
-        model: "fal/flux-dev",
+        model: "flux-dev",
         aspectRatio: "21:9",
       },
       FAKE_SERVICE,
@@ -256,7 +325,7 @@ describe("createImageTools", () => {
     const result = await tool!.handler(
       {
         prompt: "x",
-        model: "fal/fixed",
+        model: "fixed",
         aspectRatio: "1:1",
       },
       FAKE_SERVICE,
@@ -281,7 +350,7 @@ describe("createImageTools", () => {
     await tool!.handler(
       {
         prompt: "x",
-        model: "fal/no-seed",
+        model: "no-seed",
         seed: 42,
       },
       FAKE_SERVICE,
@@ -303,7 +372,7 @@ describe("createImageTools", () => {
     await tool!.handler(
       {
         prompt: "x",
-        model: "fal/flux-dev",
+        model: "flux-dev",
         seed: 42,
       },
       FAKE_SERVICE,
@@ -326,7 +395,7 @@ describe("createImageTools", () => {
       attachments: fakeAttachments(),
     });
     const result = await tool!.handler(
-      { prompt: "make it sepia", model: "fal/flux-kontext" },
+      { prompt: "make it sepia", model: "flux-kontext" },
       FAKE_SERVICE,
     );
     expect(result).toMatch(/requires `referenceImage`/);
@@ -342,7 +411,7 @@ describe("createImageTools", () => {
     const result = await tool!.handler(
       {
         prompt: "x",
-        model: "fal/flux-dev",
+        model: "flux-dev",
         referenceImage: "inbound/photo.png",
       },
       FAKE_SERVICE,
@@ -368,7 +437,7 @@ describe("createImageTools", () => {
     const result = await tool!.handler(
       {
         prompt: "make changes",
-        model: "venice/edit",
+        model: "edit",
         referenceImage: "inbound/photo.png",
       },
       FAKE_SERVICE,
@@ -398,7 +467,7 @@ describe("createImageTools", () => {
     await tool!.handler(
       {
         prompt: "make it watercolor",
-        model: "fal/flux-kontext",
+        model: "flux-kontext",
         referenceImage: "inbound/cat.png",
       },
       FAKE_SERVICE,
@@ -430,7 +499,7 @@ describe("createImageTools", () => {
     const result = await tool!.handler(
       {
         prompt: "x",
-        model: "fal/flux-kontext",
+        model: "flux-kontext",
         referenceImage: "inbound/missing.png",
       },
       FAKE_SERVICE,
@@ -463,7 +532,7 @@ describe("createImageTools", () => {
       attachments: fakeAttachments(),
     });
     await expect(
-      tool!.handler({ prompt: "x", model: "fal/flux-dev" }, FAKE_SERVICE),
+      tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE),
     ).rejects.toBeInstanceOf(AbortError);
   });
 });
@@ -471,12 +540,12 @@ describe("createImageTools", () => {
 describe("parseGeneratedImagePayload", () => {
   it("returns the payload for valid JSON", () => {
     const parsed = parseGeneratedImagePayload(
-      JSON.stringify({ path: "inbound/x.png", mediaType: "image/png", model: "fal/flux-dev" }),
+      JSON.stringify({ path: "inbound/x.png", mediaType: "image/png", model: "flux-dev" }),
     );
     const expected: GeneratedImagePayload = {
       path: "inbound/x.png",
       mediaType: "image/png",
-      model: "fal/flux-dev",
+      model: "flux-dev",
     };
     expect(parsed).toEqual(expected);
   });

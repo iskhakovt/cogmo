@@ -2941,6 +2941,63 @@ describe("DrizzleAgentStore", () => {
       ).rejects.toBeInstanceOf(UniqueViolationError);
     });
 
+    it("createImageModel rejects a slug collision with a distinct existing name", async () => {
+      // Two distinct full names (`fal-ai/flux-pro` and `replicate/flux-pro`)
+      // both reduce to slug `flux-pro` — the LLM-facing identifier. Catch
+      // at the insert boundary instead of at next-boot createImageTools.
+      const { id: providerId } = await seedProvider();
+      await tx((trx) =>
+        store.createImageModel(trx, {
+          providerId,
+          name: "fal-ai/flux-pro",
+          modelString: "fal-ai/flux-pro",
+          description: "first",
+          capabilities: {},
+          userSelectable: true,
+        }),
+      );
+      const { ImageModelSlugCollisionError } = await import("./errors.js");
+      await expect(
+        tx((trx) =>
+          store.createImageModel(trx, {
+            providerId,
+            name: "replicate/flux-pro",
+            modelString: "replicate/flux-pro",
+            description: "second",
+            capabilities: {},
+            userSelectable: true,
+          }),
+        ),
+      ).rejects.toBeInstanceOf(ImageModelSlugCollisionError);
+    });
+
+    it("upsertImageModelsByName rejects a slug collision in the batch", async () => {
+      const { id: providerId } = await seedProvider();
+      const { ImageModelSlugCollisionError } = await import("./errors.js");
+      await expect(
+        tx((trx) =>
+          store.upsertImageModelsByName(trx, [
+            {
+              providerId,
+              name: "fal-ai/flux-pro",
+              modelString: "fal-ai/flux-pro",
+              description: "first",
+              capabilities: {},
+              userSelectable: true,
+            },
+            {
+              providerId,
+              name: "replicate/flux-pro",
+              modelString: "replicate/flux-pro",
+              description: "second",
+              capabilities: {},
+              userSelectable: true,
+            },
+          ]),
+        ),
+      ).rejects.toBeInstanceOf(ImageModelSlugCollisionError);
+    });
+
     it("upsertImageModelsByName skips existing names (idempotent)", async () => {
       const { id: providerId } = await seedProvider();
       const rows = [

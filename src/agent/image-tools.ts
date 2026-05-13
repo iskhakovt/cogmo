@@ -2,6 +2,7 @@ import { APICallError, generateImage } from "ai";
 import { z } from "zod";
 import type { ImageModelWithProvider } from "../agent/store/index.js";
 import type { ImageProvider } from "../llm/image-providers.js";
+import { logger } from "../logger.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
 import { defineTool, type ToolSpec } from "./tools.js";
@@ -17,7 +18,12 @@ import { defineTool, type ToolSpec } from "./tools.js";
 export interface GeneratedImagePayload {
   path: string;
   mediaType: string;
-  /** Model the LLM picked. Informational — not used by delivery. */
+  /**
+   * Model the LLM picked, in the canonical form stored as the row's `name`
+   * (e.g. `fal-ai/flux-pro`) — **not** the slug we hand to the LLM (see
+   * `imageModelSlug`). Informational — not used by delivery. Operators
+   * reading logs / future analytics consumers want the canonical identifier.
+   */
   model?: string;
 }
 
@@ -47,6 +53,23 @@ export function parseGeneratedImagePayload(raw: string): GeneratedImagePayload |
 }
 
 /**
+ * Slug derived from a model name for use in the LLM-facing tool schema.
+ *
+ * xAI's grok-* family compiles tool JSON Schema into a constrained-decoding
+ * grammar server-side; the grammar compiler rejects any `enum` literal that
+ * contains `/` (see https://github.com/vercel/ai/issues/8024 and
+ * https://github.com/zed-industries/zed/issues/34185 for the broader cluster).
+ * Stripping the provider prefix gives us a slash-free identifier that's
+ * still unique within a typical catalog (and `createImageTools` verifies
+ * uniqueness at registration so collisions surface at boot, not at the
+ * user's first turn).
+ */
+export function imageModelSlug(name: string): string {
+  const idx = name.lastIndexOf("/");
+  return idx === -1 ? name : name.slice(idx + 1);
+}
+
+/**
  * Build the LLM-facing tool description from the loaded model catalog.
  * Each user-selectable model contributes one line with its `description`
  * and the ratios it accepts (or "fixed size" when `capabilities.aspectRatios`
@@ -69,7 +92,7 @@ function buildToolDescription(
         : m.capabilities.imageInput === "optional"
           ? " [optional reference image]"
           : "";
-    return `- \`${m.name}\` — ${m.description}${ratioHint}${imageInputHint}`;
+    return `- \`${imageModelSlug(m.name)}\` — ${m.description}${ratioHint}${imageInputHint}`;
   });
   const referenceImageNote = anyImageInput
     ? [
@@ -110,8 +133,27 @@ export function createImageTools(deps: {
 }): ToolSpec[] {
   if (deps.models.length === 0) return [];
 
-  const modelNames = deps.models.map((m) => m.name);
-  const modelByName = new Map(deps.models.map((m) => [m.name, m]));
+  // Build a slash-free identifier per model for the LLM-facing enum (see
+  // `imageModelSlug` for why). The map from slug back to the canonical row
+  // is what the handler consults; row.name retains the original AI SDK
+  // path for downstream calls. Single pass — collision check is a stateful
+  // scan over previously-seen slugs, and the slug also feeds the enum
+  // array.
+  const modelBySlug = new Map<string, ImageModelWithProvider>();
+  const modelSlugs: string[] = [];
+  for (const m of deps.models) {
+    const slug = imageModelSlug(m.name);
+    const existing = modelBySlug.get(slug);
+    if (existing) {
+      throw new Error(
+        `Image model name collision after slug normalisation: "${slug}" maps to ` +
+          `both "${existing.name}" and "${m.name}". Disambiguate the names so ` +
+          `each model has a unique last path segment.`,
+      );
+    }
+    modelBySlug.set(slug, m);
+    modelSlugs.push(slug);
+  }
 
   // Union, not intersection — a fixed-size model would otherwise collapse
   // every other model's options. Per-model narrowing happens in the
@@ -123,7 +165,7 @@ export function createImageTools(deps: {
   }
 
   // Zod's `z.enum` requires a non-empty literal tuple; build it once.
-  const modelEnum = z.enum(modelNames as [string, ...string[]]);
+  const modelEnum = z.enum(modelSlugs as [string, ...string[]]);
   const aspectRatioField =
     ratioUnion.size > 0
       ? z.enum([...ratioUnion] as [string, ...string[]]).optional()
@@ -143,7 +185,7 @@ export function createImageTools(deps: {
         prompt: z.string().min(1).describe("Detailed image description"),
         model: modelEnum
           // biome-ignore lint/style/noNonNullAssertion: length>0 guarded above
-          .default(modelNames[0]!)
+          .default(modelSlugs[0]!)
           .describe("Model — choose based on task (see tool description)"),
         aspectRatio: aspectRatioField.describe("Aspect ratio (if model supports it)"),
         seed: z.number().int().optional().describe("Seed (if model honors it)"),
@@ -156,15 +198,20 @@ export function createImageTools(deps: {
           ),
       }),
       handler: async (input) => {
-        const row = modelByName.get(input.model);
+        const row = modelBySlug.get(input.model);
         if (!row) return `Error: unknown model ${input.model}`;
         const provider = deps.providers.get(row.providerId);
         if (!provider) {
           // Should never happen — the bootstrap loop populates `providers`
           // from the same DB rows we used to build `models`. If it does,
           // something has gone badly wrong; surface to the LLM rather than
-          // crashing the turn.
-          return `Error: model ${row.name} references unknown provider`;
+          // crashing the turn. Log the canonical row name (not the slug)
+          // since this branch only fires on operator-facing misconfiguration.
+          logger.error(
+            { rowName: row.name, providerId: row.providerId, slug: input.model },
+            "generate_image: model row references a provider not present in the image-providers map",
+          );
+          return `Error: model ${input.model} references unknown provider`;
         }
 
         // Treat absent and [] identically — both mean "model accepts no
@@ -176,7 +223,7 @@ export function createImageTools(deps: {
             supportedRatios.length > 0
               ? `Supported: ${supportedRatios.join(", ")}.`
               : "This model does not accept a custom aspect ratio.";
-          return `Error: model ${row.name} does not support aspect ratio ${input.aspectRatio}. ${hint}`;
+          return `Error: model ${input.model} does not support aspect ratio ${input.aspectRatio}. ${hint}`;
         }
 
         // Reference-image gating. Three text-recoverable error shapes the
@@ -189,12 +236,12 @@ export function createImageTools(deps: {
         const imageInputCap = row.capabilities.imageInput;
         if (imageInputCap === "required" && !input.referenceImage) {
           return (
-            `Error: model ${row.name} is an image-editing model and requires ` +
+            `Error: model ${input.model} is an image-editing model and requires ` +
             "`referenceImage` — pass the AttachmentStore path of the image you want to edit."
           );
         }
         if (input.referenceImage && imageInputCap === undefined) {
-          return `Error: model ${row.name} does not accept a reference image. Drop \`referenceImage\` or pick a model marked \`[needs reference image]\` or \`[optional reference image]\`.`;
+          return `Error: model ${input.model} does not accept a reference image. Drop \`referenceImage\` or pick a model marked \`[needs reference image]\` or \`[optional reference image]\`.`;
         }
         if (input.referenceImage && provider.kind !== "fal") {
           return `Error: reference images are only supported by fal providers today (got ${provider.kind}). Pick a fal-backed model marked \`[needs reference image]\`.`;
