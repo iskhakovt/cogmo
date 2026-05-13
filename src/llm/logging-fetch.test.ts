@@ -63,12 +63,11 @@ describe("withFailureLogging", () => {
   it("does not consume the request body on the success path", async () => {
     // Lazy-read invariant for the success path: the cloned body must stay
     // unread, so the only buffering cost on a happy request is the cheap
-    // stream tee from req.clone(). Spy on the wrapper's clone to confirm
-    // its stream reader is never acquired when the call succeeds.
+    // stream tee from req.clone(). Inject a clone factory that counts
+    // getReader acquisitions — no prototype mutation, no global cleanup.
     let cloneReaderAcquired = 0;
-    const originalClone = Request.prototype.clone;
-    const cloneSpy = vi.fn(function (this: Request): Request {
-      const cloned = originalClone.call(this);
+    const cloneRequest = (req: Request): Request => {
+      const cloned = req.clone();
       const body = cloned.body;
       if (body) {
         const realGetReader = body.getReader.bind(
@@ -80,23 +79,18 @@ describe("withFailureLogging", () => {
         }) as typeof body.getReader;
       }
       return cloned;
+    };
+
+    const inner = vi.fn<typeof fetch>(async () => jsonResponse(200, { ok: true }));
+    const log = mock<Logger>();
+    const wrapped = withFailureLogging(inner, log, "test", { cloneRequest });
+
+    await wrapped("https://example/v1/chat", {
+      method: "POST",
+      body: '{"hello":"world"}',
     });
-    Request.prototype.clone = cloneSpy as typeof Request.prototype.clone;
 
-    try {
-      const inner = vi.fn<typeof fetch>(async () => jsonResponse(200, { ok: true }));
-      const log = mock<Logger>();
-      const wrapped = withFailureLogging(inner, log, "test");
-
-      await wrapped("https://example/v1/chat", {
-        method: "POST",
-        body: '{"hello":"world"}',
-      });
-
-      expect(cloneReaderAcquired).toBe(0);
-    } finally {
-      Request.prototype.clone = originalClone;
-    }
+    expect(cloneReaderAcquired).toBe(0);
   });
 
   it("logs the full request + response body on a 4xx/5xx", async () => {
@@ -261,40 +255,30 @@ describe("withFailureLogging", () => {
     // Defensive: if another interceptor (or a future maintainer) locks the
     // body before we read, getReader() throws synchronously. The wrapper's
     // failure-log path must not bubble that exception out — it would mask
-    // the real upstream error and drop the response. Lock the clone's body
-    // pre-emptively to drive this branch.
+    // the real upstream error and drop the response. Inject a clone factory
+    // that pre-acquires the reader (never releasing it) so the wrapper's
+    // safeReadTextWithLimit hits the locked-stream path.
     const inner = vi.fn<typeof fetch>(async (input) => {
       const req = input instanceof Request ? input : new Request(input);
-      // Drain the original request to ensure baseFetch is well-behaved,
-      // then return a failing response.
       await req.text();
       return jsonResponse(500, { error: "boom" });
     });
     const log = mock<Logger>();
-    const wrapped = withFailureLogging(inner, log, "test");
-
-    // Pre-acquire (and never release) a reader on every Request clone so
-    // the wrapper's safeReadTextWithLimit hits the locked-stream path.
-    const originalClone = Request.prototype.clone;
-    const lockingClone = vi.fn(function (this: Request): Request {
-      const cloned = originalClone.call(this);
+    const cloneRequest = (req: Request): Request => {
+      const cloned = req.clone();
       cloned.body?.getReader(); // lock and discard — never released
       return cloned;
-    });
-    Request.prototype.clone = lockingClone as typeof Request.prototype.clone;
+    };
+    const wrapped = withFailureLogging(inner, log, "test", { cloneRequest });
 
-    try {
-      const res = await wrapped("https://example/v1/chat", { method: "POST", body: "{}" });
-      expect(res.status).toBe(500);
-      const { payload } = failureCall(log);
-      expect(payload.requestBody).toBe("<read failed>");
-      // The upstream error body is still readable because its clone was
-      // also taken via the same patched clone — locked too — so it reads
-      // as "<read failed>". The important assertion is that we logged
-      // (not threw) and surfaced the upstream 500.
-      expect(payload.status).toBe(500);
-    } finally {
-      Request.prototype.clone = originalClone;
-    }
+    const res = await wrapped("https://example/v1/chat", { method: "POST", body: "{}" });
+    expect(res.status).toBe(500);
+    const { payload } = failureCall(log);
+    expect(payload.requestBody).toBe("<read failed>");
+    // The upstream error body is still readable here because we only
+    // locked the request-side clone (`res.clone()` is untouched), so the
+    // response body logs normally.
+    expect(payload.status).toBe(500);
+    expect(payload.responseBody).toContain("boom");
   });
 });

@@ -50,6 +50,16 @@ const REDACTED_HEADERS = new Set([
 const BODY_LOG_LIMIT_BYTES = 100 * 1024;
 
 /**
+ * Optional knobs. `cloneRequest` exists purely so tests can observe the
+ * lazy-read invariant on the success path (count `getReader` acquisitions
+ * on the wrapper's clone) without mutating `Request.prototype`. Production
+ * callers should never set it.
+ */
+export interface FailureLoggingOptions {
+  cloneRequest?: (req: Request) => Request;
+}
+
+/**
  * Wrap a `fetch` so that failed LLM requests log their full payload.
  *
  * Pass the result into the LLM SDK constructors:
@@ -59,19 +69,21 @@ export function withFailureLogging(
   baseFetch: typeof fetch,
   log: Logger,
   providerName: string,
+  opts: FailureLoggingOptions = {},
 ): typeof fetch {
+  const cloneRequest = opts.cloneRequest ?? ((req: Request) => req.clone());
   return async (input, init) => {
     const req = new Request(input, init);
     // Tee the body now (cheap — streams share underlying chunks) but defer
     // the actual read until the failure path. Successful requests skip the
     // copy entirely, which is the dominant case at runtime.
-    const reqClone = req.clone();
+    const reqClone = cloneRequest(req);
     try {
       const res = await baseFetch(req);
       if (!res.ok) {
         const [reqBody, resBody] = await Promise.all([
-          safeReadTextWithLimit(reqClone, BODY_LOG_LIMIT_BYTES),
-          safeReadTextWithLimit(res.clone(), BODY_LOG_LIMIT_BYTES),
+          safeReadTextWithLimit(reqClone, BODY_LOG_LIMIT_BYTES, log),
+          safeReadTextWithLimit(res.clone(), BODY_LOG_LIMIT_BYTES, log),
         ]);
         log.error(
           {
@@ -88,7 +100,7 @@ export function withFailureLogging(
       }
       return res;
     } catch (err) {
-      const reqBody = await safeReadTextWithLimit(reqClone, BODY_LOG_LIMIT_BYTES);
+      const reqBody = await safeReadTextWithLimit(reqClone, BODY_LOG_LIMIT_BYTES, log);
       log.error(
         {
           providerName,
@@ -118,6 +130,7 @@ export function withFailureLogging(
 async function safeReadTextWithLimit(
   source: { body: ReadableStream<Uint8Array> | null },
   limit: number,
+  log: Logger,
 ): Promise<string> {
   if (!source.body) return "";
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
@@ -158,9 +171,15 @@ async function safeReadTextWithLimit(
   } catch {
     return "<read failed>";
   } finally {
-    // Fire-and-forget: cancelling can hang on certain stream sources, and
-    // we've already extracted everything we need.
-    if (reader !== null) reader.cancel().catch(() => {});
+    // Fire-and-forget on the happy path — we've already extracted the
+    // bytes we wanted, and `cancel()` on some sources resolves slowly.
+    // The rejection surfaces at debug level so an operator can find it
+    // by turning up verbosity without flooding default logs.
+    if (reader !== null) {
+      reader.cancel().catch((err: unknown) => {
+        log.debug({ err }, "logging-fetch: post-read stream cancel rejected");
+      });
+    }
   }
 }
 
