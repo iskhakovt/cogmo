@@ -242,10 +242,12 @@ describe("createImageTools", () => {
 
     expect(imageFn).toHaveBeenCalledWith("fal-ai/flux/dev");
     expect(attachments.upload).toHaveBeenCalled();
+    // The payload's `model` is the canonical row name (operator/log-facing),
+    // not the LLM-facing slug. See GeneratedImagePayload.
     expect(JSON.parse(result)).toMatchObject({
       path: "inbound/test.png",
       mediaType: "image/png",
-      model: "flux-dev",
+      model: "fal/flux-dev",
     });
   });
 

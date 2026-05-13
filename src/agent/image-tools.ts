@@ -2,6 +2,7 @@ import { APICallError, generateImage } from "ai";
 import { z } from "zod";
 import type { ImageModelWithProvider } from "../agent/store/index.js";
 import type { ImageProvider } from "../llm/image-providers.js";
+import { logger } from "../logger.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
 import { defineTool, type ToolSpec } from "./tools.js";
@@ -17,7 +18,12 @@ import { defineTool, type ToolSpec } from "./tools.js";
 export interface GeneratedImagePayload {
   path: string;
   mediaType: string;
-  /** Model the LLM picked. Informational — not used by delivery. */
+  /**
+   * Model the LLM picked, in the canonical form stored as the row's `name`
+   * (e.g. `fal-ai/flux-pro`) — **not** the slug we hand to the LLM (see
+   * `imageModelSlug`). Informational — not used by delivery. Operators
+   * reading logs / future analytics consumers want the canonical identifier.
+   */
   model?: string;
 }
 
@@ -199,7 +205,12 @@ export function createImageTools(deps: {
           // Should never happen — the bootstrap loop populates `providers`
           // from the same DB rows we used to build `models`. If it does,
           // something has gone badly wrong; surface to the LLM rather than
-          // crashing the turn.
+          // crashing the turn. Log the canonical row name (not the slug)
+          // since this branch only fires on operator-facing misconfiguration.
+          logger.error(
+            { rowName: row.name, providerId: row.providerId, slug: input.model },
+            "generate_image: model row references a provider not present in the image-providers map",
+          );
           return `Error: model ${input.model} references unknown provider`;
         }
 
@@ -302,7 +313,7 @@ export function createImageTools(deps: {
         return JSON.stringify({
           path,
           mediaType: image.mediaType,
-          model: input.model,
+          model: row.name,
         });
       },
     }),
