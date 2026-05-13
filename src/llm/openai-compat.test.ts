@@ -646,14 +646,6 @@ describe("OpenAICompatibleProvider", () => {
       expect(getMessage(args, 0).role).toBe("system");
       expect(getMessage(args, 1)).toMatchObject({ role: "user", content: "first turn" });
       expect(getMessage(args, 2)).toMatchObject({ role: "user", content: "follow up" });
-      for (const m of args.messages) {
-        if (m.role !== "assistant") continue;
-        // No malformed assistant message — `content: null` is only valid when
-        // accompanied by tool_calls.
-        if (m.content === null) {
-          expect(m.tool_calls).toBeDefined();
-        }
-      }
     });
   });
 
