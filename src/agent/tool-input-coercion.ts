@@ -53,28 +53,31 @@ function walk(value: unknown, schema: unknown, path: string, out: string[]): unk
 
   if (isPlainObject(value) && isPlainObject(schema.properties)) {
     const properties = schema.properties;
-    const rewritten: Record<string, unknown> = { ...value };
-    let mutated = false;
+    let rewritten: Record<string, unknown> | undefined;
     for (const [key, propSchema] of Object.entries(properties)) {
-      if (!(key in rewritten)) continue;
-      const child = walk(rewritten[key], propSchema, joinPath(path, key), out);
-      if (child !== rewritten[key]) {
+      if (!(key in value)) continue;
+      const originalChild = value[key];
+      const child = walk(originalChild, propSchema, joinPath(path, key), out);
+      if (child !== originalChild) {
+        if (rewritten === undefined) rewritten = { ...value };
         rewritten[key] = child;
-        mutated = true;
       }
     }
-    return mutated ? rewritten : value;
+    return rewritten ?? value;
   }
 
   if (Array.isArray(value) && schema.items !== undefined) {
     const items = schema.items;
-    let mutated = false;
-    const rewritten = value.map((item, i) => {
+    let rewritten: unknown[] | undefined;
+    for (let i = 0; i < value.length; i++) {
+      const item = value[i];
       const child = walk(item, items, joinPath(path, String(i)), out);
-      if (child !== item) mutated = true;
-      return child;
-    });
-    return mutated ? rewritten : value;
+      if (child !== item) {
+        if (rewritten === undefined) rewritten = [...value];
+        rewritten[i] = child;
+      }
+    }
+    return rewritten ?? value;
   }
 
   return value;
@@ -85,8 +88,15 @@ function expectedKind(schema: Record<string, unknown>): ExpectedKind {
   if (t === "object") return "object";
   if (t === "array") return "array";
   if (Array.isArray(t)) {
-    if (t.includes("object")) return "object";
-    if (t.includes("array")) return "array";
+    // JSON Schema allows `type: ["string", "null"]` etc. for nullable values.
+    // Only coerce when one non-null entry remains — `["object", "null"]` →
+    // "object", but a mixed set like `["string", "object"]` keeps the string
+    // legitimate and must not be coerced.
+    const nonNull = t.filter((v) => v !== "null");
+    if (nonNull.length === 1) {
+      if (nonNull[0] === "object") return "object";
+      if (nonNull[0] === "array") return "array";
+    }
   }
 
   // Union-of-objects (or union-of-arrays) is unambiguous; mixed unions are not.

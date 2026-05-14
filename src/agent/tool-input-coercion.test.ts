@@ -136,6 +136,33 @@ describe("coerceToolInput", () => {
     expect(coercedPaths).toEqual(["items.0"]);
   });
 
+  it('coerces when type is a nullable-tagged tuple like ["object", "null"]', () => {
+    // Hand-rolled JSON Schema using the `type: [...]` form for nullables —
+    // walker must treat the single non-null entry as the unambiguous kind.
+    const schema: JsonSchema = {
+      type: "object",
+      properties: {
+        outer: { type: ["object", "null"], properties: { inner: { type: "string" } } },
+      },
+    };
+    const { value, coercedPaths } = coerceToolInput({ outer: '{"inner":"x"}' }, schema);
+    expect(value).toEqual({ outer: { inner: "x" } });
+    expect(coercedPaths).toEqual(["outer"]);
+  });
+
+  it("does not coerce when type is a mixed tuple that also allows strings", () => {
+    // `["string", "object"]` means the schema legitimately accepts a string —
+    // coercion would corrupt the caller's intent.
+    const schema: JsonSchema = {
+      type: "object",
+      properties: { payload: { type: ["string", "object"] } },
+    };
+    const input = { payload: '{"x":1}' };
+    const { value, coercedPaths } = coerceToolInput(input, schema);
+    expect(value).toEqual(input);
+    expect(coercedPaths).toEqual([]);
+  });
+
   it("returns the same reference when nothing changes (cheap fast path)", () => {
     const schema = jsonSchema(z.object({ outer: z.object({ inner: z.string() }) }));
     const input = { outer: { inner: "ok" } };
