@@ -88,6 +88,8 @@ function createWebSearch(apiKey: string | undefined): ToolSpec {
     description:
       "Search the web for current information. Returns titles, URLs, and snippets. " +
       "Use this when you need to find facts, recent events, or multiple sources to compare.",
+    // Independent read-only HTTP call — no shared state with siblings.
+    parallelSafe: true,
     schema: z.object({
       query: z.string().describe("Search query"),
       maxResults: z
@@ -152,6 +154,8 @@ function createWebAnswer(apiKey: string | undefined): ToolSpec {
     // `web_search` (Tavily) and `fetch_url` are cheaper and stay non-durable —
     // wasted retries there are acceptable.
     durable: true,
+    // Independent read-only HTTP call — no shared state with siblings.
+    parallelSafe: true,
     schema: z.object({
       question: z.string().describe("The question to answer"),
     }),
@@ -212,6 +216,8 @@ function createFetchUrl(tavilyApiKey: string | undefined): ToolSpec {
       "Fetch and extract the main content from a URL. " +
       "Returns cleaned article text for web pages, or raw text for non-HTML content. " +
       "Use this when you need to read a specific web page.",
+    // Independent read-only HTTP call — no shared state with siblings.
+    parallelSafe: true,
     schema: z.object({
       url: z.string().url().describe("The URL to fetch (http or https only)"),
     }),

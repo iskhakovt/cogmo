@@ -181,6 +181,11 @@ export function createImageTools(deps: {
       // On Inngest retry the cached JSON result (path + mediaType) replays,
       // so we neither re-bill the provider nor produce duplicate uploads.
       durable: true,
+      // Each call hits an independent provider endpoint and stores its
+      // upload under a fresh AttachmentStore key — no shared mutable state
+      // between sibling calls, so the LLM's "generate N candidates" turn
+      // fans out via Promise.all instead of running serially.
+      parallelSafe: true,
       schema: z.object({
         prompt: z.string().min(1).describe("Detailed image description"),
         model: modelEnum

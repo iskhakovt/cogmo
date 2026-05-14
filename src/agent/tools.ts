@@ -33,6 +33,23 @@ export interface ToolSpec {
    * running outside Inngest). See `design/crash-recovery.md`.
    */
   durable?: boolean;
+  /**
+   * Opt-in concurrent execution when the LLM emits multiple tool_use blocks
+   * in one turn. `true` declares that this tool has no externally observable
+   * ordering dependency on sibling tool calls — its handler can run via
+   * `Promise.all` alongside other parallelSafe tools.
+   *
+   * The agent loop fans out only when *every* tool_use in a turn maps to a
+   * parallelSafe spec. A single unsafe entry forces the whole batch back to
+   * sequential — conservative semantics that preserves the existing ordering
+   * guarantees for writes against shared state (e.g. core_memory).
+   *
+   * Safe choices: pure read-only HTTP (web search/fetch), independent
+   * provider calls (image generation), pure compute. Unsafe choices: writes
+   * against shared state (core memory blocks, the same file path), anything
+   * whose side effects can race with siblings.
+   */
+  parallelSafe?: boolean;
 }
 
 /**
@@ -50,6 +67,8 @@ export function defineTool<T>(opts: {
   handler: (input: T, service: Service) => Promise<string>;
   /** See `ToolSpec.durable`. */
   durable?: boolean;
+  /** See `ToolSpec.parallelSafe`. */
+  parallelSafe?: boolean;
 }): ToolSpec {
   // z.toJSONSchema returns Zod's JSONSchema7-flavoured shape; our internal
   // JsonSchema type is a narrower subset that the LLM providers accept.
@@ -63,6 +82,7 @@ export function defineTool<T>(opts: {
       return opts.handler(parsed, service);
     },
     ...(opts.durable !== undefined && { durable: opts.durable }),
+    ...(opts.parallelSafe !== undefined && { parallelSafe: opts.parallelSafe }),
   };
 }
 

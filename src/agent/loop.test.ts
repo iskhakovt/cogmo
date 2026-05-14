@@ -413,6 +413,155 @@ describe("runAgentLoop", () => {
 
     expect(receivedService).toBe(svc);
   });
+
+  // --- Parallel tool fan-out ---
+  //
+  // When every tool_use in a turn maps to a parallelSafe spec, the loop runs
+  // them via Promise.all. A barrier-style handler proves real concurrency:
+  // each call waits on a shared promise that only resolves after all calls
+  // have started, so sequential execution would deadlock.
+  it("fans out parallelSafe tools concurrently", async () => {
+    const provider = mockProvider([
+      {
+        content: [
+          { type: "tool_use", id: "t1", name: "gen", input: { n: 1 } },
+          { type: "tool_use", id: "t2", name: "gen", input: { n: 2 } },
+          { type: "tool_use", id: "t3", name: "gen", input: { n: 3 } },
+        ],
+        stopReason: "tool_use",
+        model: "mock-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      textResponse("Three done"),
+    ]);
+
+    let started = 0;
+    let releaseStartBarrier!: () => void;
+    const allStarted = new Promise<void>((resolve) => {
+      releaseStartBarrier = resolve;
+    });
+
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "gen",
+        description: "gen",
+        schema: z.object({ n: z.number() }),
+        parallelSafe: true,
+        handler: async (input) => {
+          started++;
+          if (started === 3) releaseStartBarrier();
+          await allStarted;
+          return `out-${input.n}`;
+        },
+      }),
+    );
+
+    const result = await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "gen three" }],
+      tools,
+      service: stubService(),
+    });
+
+    // Order of results matches order of tool_use blocks (Promise.all preserves
+    // input order in its resolved tuple).
+    expect(result.messages[2]!.content).toEqual([
+      { type: "tool_result", toolUseId: "t1", content: "out-1" },
+      { type: "tool_result", toolUseId: "t2", content: "out-2" },
+      { type: "tool_result", toolUseId: "t3", content: "out-3" },
+    ]);
+  });
+
+  // Conservative fallback: a single non-parallelSafe block forces the entire
+  // batch back to sequential execution. The barrier never resolves under that
+  // path, so we'd deadlock — assert with timestamps instead. The unsafe
+  // handler records its end time; the safe handler runs after.
+  it("falls back to sequential when any tool in the batch is unsafe", async () => {
+    const provider = mockProvider([
+      {
+        content: [
+          { type: "tool_use", id: "t1", name: "unsafe", input: {} },
+          { type: "tool_use", id: "t2", name: "safe", input: {} },
+        ],
+        stopReason: "tool_use",
+        model: "mock-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      textResponse("Mixed done"),
+    ]);
+
+    const order: string[] = [];
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "unsafe",
+        description: "unsafe",
+        schema: z.object({}),
+        handler: async () => {
+          await new Promise((r) => setTimeout(r, 5));
+          order.push("unsafe-done");
+          return "u";
+        },
+      }),
+    );
+    tools.register(
+      defineTool({
+        name: "safe",
+        description: "safe",
+        schema: z.object({}),
+        parallelSafe: true,
+        handler: async () => {
+          order.push("safe-start");
+          return "s";
+        },
+      }),
+    );
+
+    await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "mixed" }],
+      tools,
+      service: stubService(),
+    });
+
+    expect(order).toEqual(["unsafe-done", "safe-start"]);
+  });
+
+  // Single-tool turns are common; the fan-out code path is gated on
+  // `length > 1` so they stay on the sequential branch. Functionally
+  // indistinguishable from the caller's perspective; this just locks in
+  // that the optimisation doesn't accidentally regress the simple case.
+  it("does not invoke Promise.all for a single parallelSafe tool", async () => {
+    const provider = mockProvider([toolUseResponse("safe", "t1", {}), textResponse("done")]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "safe",
+        description: "safe",
+        schema: z.object({}),
+        parallelSafe: true,
+        handler: async () => "ok",
+      }),
+    );
+
+    const result = await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "one" }],
+      tools,
+      service: stubService(),
+    });
+
+    expect(result.messages[2]!.content).toEqual([
+      { type: "tool_result", toolUseId: "t1", content: "ok" },
+    ]);
+  });
 });
 
 // --- Streaming agent loop tests ---
