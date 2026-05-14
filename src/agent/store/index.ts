@@ -1054,6 +1054,15 @@ export interface AgentStore {
   ): Promise<ReadonlyArray<ScheduledTask>>;
 
   /**
+   * Count scheduled tasks for a user. Faster than `listScheduledTasks`
+   * when the caller only needs the total (e.g. the per-user cap check
+   * in `SchedulingService.create`). Counts BOTH enabled and disabled
+   * rows so a graveyard of disabled tasks can't bypass the cap by
+   * toggling — same scope as `listScheduledTasks` default.
+   */
+  countScheduledTasks(tx: Transaction, userId: string): Promise<number>;
+
+  /**
    * Lock and return up to `limit` rows whose `next_run_at <= now` and that
    * are enabled, in `next_run_at` order. Uses `FOR UPDATE SKIP LOCKED` so
    * concurrent ticker runs (e.g. a retried Inngest step) don't double-pick
@@ -2582,6 +2591,14 @@ export class DrizzleAgentStore implements AgentStore {
       .where(where)
       .orderBy(desc(scheduledTasks.createdAt));
     return rows.map(rowToScheduledTask);
+  }
+
+  async countScheduledTasks(tx: Transaction, userId: string): Promise<number> {
+    const rows = await tx
+      .select({ value: count() })
+      .from(scheduledTasks)
+      .where(eq(scheduledTasks.userId, userId));
+    return rows[0]?.value ?? 0;
   }
 
   async lockDueScheduledTasks(

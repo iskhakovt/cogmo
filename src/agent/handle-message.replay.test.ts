@@ -98,6 +98,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
       model: "mock-model",
       iterations: 1,
     }),
+    userTimezone: "UTC",
     ...overrides,
   };
 }
