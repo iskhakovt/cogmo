@@ -948,7 +948,13 @@ export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
     await p.password({
       message: "Paste your OpenAI API key (used for both TTS and STT):",
       validate: (v) => {
-        if (!v || v.length < 10) return "API key seems too short";
+        if (!v) return "API key is required";
+        // sk- catches both legacy (sk-…) and project (sk-proj-…) keys.
+        // Length floor is a sanity check — real keys are 51+ chars; 20
+        // rejects obviously-typo'd prefixes without false-positives on
+        // any current OpenAI key format.
+        if (!v.startsWith("sk-")) return "OpenAI keys start with sk-";
+        if (v.length < 20) return "API key seems too short";
         return undefined;
       },
     }),
@@ -989,7 +995,11 @@ export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
     s.stop("Voice key validated.");
     probeOk = true;
   } catch (err) {
-    s.stop(`Voice probe failed: ${(err as Error).message}`);
+    const message = err instanceof Error ? err.message : String(err);
+    s.stop(`Voice probe failed: ${message}`);
+    p.log.warn(
+      "If the model is tier-locked or the name is wrong, re-run setup and pick a different TTS model.",
+    );
     const saveAnyway = await p.confirm({
       message: "Save the config anyway? Voice replies will error on first use.",
       initialValue: false,
@@ -1023,9 +1033,19 @@ export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
     });
   });
 
-  p.log.success(
-    `Voice configured (TTS=${ttsModel}/${ttsVoice}, STT=${sttModel}). Restart the server to pick up changes.`,
-  );
+  // Distinct copy on the save-anyway branch so operators don't confuse a
+  // probe-skipped save with a probe-validated one. `validated_at` on the
+  // secret already encodes the same signal, but the wizard's terminal
+  // line is what the operator actually reads.
+  if (probeOk) {
+    p.log.success(
+      `Voice configured (TTS=${ttsModel}/${ttsVoice}, STT=${sttModel}). Restart the server to pick up changes.`,
+    );
+  } else {
+    p.log.warn(
+      `Voice config saved UNVALIDATED — probe failed; first voice reply will surface any auth issue (TTS=${ttsModel}/${ttsVoice}, STT=${sttModel}). Restart the server to pick up changes.`,
+    );
+  }
 }
 
 async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
