@@ -39,6 +39,7 @@ import { createInlineMcpEchoRunner } from "./mcp-inline-server.js";
 let inngestBaseUrl: string;
 let connection: Awaited<ReturnType<typeof connect>>;
 let mcpRunnerClose: () => Promise<void>;
+let bootstrapped: Awaited<ReturnType<typeof bootstrap>>;
 
 interface CapturedOutbound {
   platformAddress: string;
@@ -63,10 +64,11 @@ beforeAll(async () => {
     process.env.RECORD === "1" ? (process.env.ANTHROPIC_API_KEY ?? "test-key") : "test-key";
   const provider = new AnthropicProvider(anthropicKey, inject("llmockBaseUrl"));
 
-  const { inngest, functions } = await bootstrap({
+  bootstrapped = await bootstrap({
     providerOverride: provider,
     mcpRunnerOverride: runner,
   });
+  const { inngest, functions } = bootstrapped;
 
   const captureOutbound = inngest.createFunction(
     { id: "test-mcp-capture-outbound", triggers: [directOutbound] },
@@ -86,6 +88,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (connection) await connection.close();
+  // Stop the registry before tearing down the inline MCP server so the
+  // client-side pool closes its connections cleanly (matches the pattern
+  // in bootstrap-daytona.integration.test.ts).
+  if (bootstrapped) await bootstrapped.mcpRegistry.stop();
   if (mcpRunnerClose) await mcpRunnerClose();
 });
 
