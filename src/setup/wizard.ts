@@ -7,11 +7,14 @@
  * See design/setup.md for the UX contract.
  */
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import * as p from "@clack/prompts";
 import {
   CLAUDE_CODE_OAUTH_TOKEN_SECRET,
   CLAUDE_CODE_OAUTH_TOKEN_SECRET_DESCRIPTION,
 } from "../agent/coding/auth.js";
+import { DrizzleCodingStore } from "../agent/coding/store/index.js";
 import { addModelRouting } from "../agent/provider/add-model-routing.js";
 import { addProvider } from "../agent/provider/add-provider.js";
 import {
@@ -26,6 +29,7 @@ import {
   type ProviderAttrs,
 } from "../agent/store/schema.js";
 import { type Transactor, transactor } from "../db/transactor.js";
+import { env } from "../env.js";
 import {
   DAYTONA_API_KEY_SECRET,
   DAYTONA_API_KEY_SECRET_DESCRIPTION,
@@ -40,6 +44,12 @@ import {
 } from "../secrets/github.js";
 import { generateSshKeyPair } from "../secrets/ssh-keygen.js";
 import { DrizzleSecretsStore, type SecretsStore } from "../secrets/store/index.js";
+import {
+  type ConfigureSkillsRemoteError,
+  type ConfigureSkillsRemoteMode,
+  configureSkillsRemote,
+} from "../skills/configure-remote.js";
+import { bootstrapSkillsRepo } from "../skills/repo.js";
 import type { TransportStore } from "../transport/store/index.js";
 import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
@@ -1208,6 +1218,171 @@ async function stepConfigureDaytona(deps: WizardDeps): Promise<void> {
   p.log.success("Daytona API key stored.");
 }
 
+async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void> {
+  const skillsRepoPath = env.COGMO_SKILLS_PATH;
+
+  // Bootstrap the bare repo so we have something to attach `origin` to.
+  // Idempotent — no-op when the repo already exists.
+  const skillsRepo = await bootstrapSkillsRepo({ path: skillsRepoPath });
+  if (skillsRepo.initialized) {
+    p.log.info(`Initialized bare skills repo at ${skillsRepoPath}`);
+  }
+
+  const codingStore = new DrizzleCodingStore();
+
+  // If origin is already attached, offer keep / replace before re-prompting
+  // for a choice — mirrors the Daytona / GitHub-identity step UX.
+  const currentOrigin = await readOriginUrl(skillsRepoPath);
+  if (currentOrigin) {
+    const action = await p.select({
+      message: `Skills bare repo's origin is already attached:\n  ${currentOrigin}\nWhat would you like to do?`,
+      options: [
+        { value: "keep", label: "Keep current origin" },
+        { value: "replace", label: "Replace with a different URL" },
+      ],
+    });
+    cancelGuard(action);
+    if (action === "keep") {
+      // Even when keeping origin, run configureSkillsRemote(own, currentOrigin)
+      // so the DB row's `remote_url` is synced — the wizard may be the first
+      // step in a recovery where the row drifted from the bare repo's config.
+      const result = await configureSkillsRemote(
+        { runInTx: deps.runInTx, codingStore, skillsRepoPath },
+        { kind: "own", remoteUrl: currentOrigin },
+      );
+      if (result.isErr()) {
+        renderConfigureError(result.error);
+        return;
+      }
+      p.log.success("Skills remote verified and DB row synced.");
+      return;
+    }
+  }
+
+  const mode = await collectSkillsRemoteMode(deps);
+  if (mode === null) return;
+  const result = await configureSkillsRemote(
+    { runInTx: deps.runInTx, codingStore, skillsRepoPath },
+    mode,
+  );
+  if (result.isErr()) {
+    renderConfigureError(result.error);
+    return;
+  }
+  if (result.value.kind === "skipped") {
+    p.log.warn("Skills remote not configured — re-run `cogmo migrate skills-remote` when ready.");
+    return;
+  }
+  p.log.success(
+    `Skills remote configured (${result.value.originAction}): ${result.value.remoteUrl}`,
+  );
+}
+
+/** Prompt the operator for own / auto-provision / skip and return the mode
+ * payload, or null when the operator cancels mid-prompt (interpreted as skip). */
+async function collectSkillsRemoteMode(
+  deps: WizardDeps,
+): Promise<ConfigureSkillsRemoteMode | null> {
+  const identity = await deps.runInTx((tx) =>
+    resolveGitHubIdentity(tx, deps.secretsStore, DEFAULT_GITHUB_IDENTITY_NAME),
+  );
+  const hasGitHubIdentity = identity.isOk();
+
+  // Build options as `select`'s value-typed array. Skip is the explicit
+  // last option (rather than relying on cancel) so the operator can pick
+  // it intentionally without ambiguity.
+  const options: { value: "own" | "auto-provision" | "skip"; label: string; hint?: string }[] = [
+    { value: "own", label: "Use my own remote", hint: "paste a pre-created URL" },
+  ];
+  if (hasGitHubIdentity) {
+    options.push({
+      value: "auto-provision",
+      label: "Auto-provision on GitHub",
+      hint: "create private `cogmo-skills` repo using configured PAT",
+    });
+  }
+  options.push({
+    value: "skip",
+    label: "Skip — configure later via `cogmo migrate skills-remote`",
+  });
+
+  const choice = cancelGuard(
+    await p.select({
+      message: "How should the skills repo's remote be configured?",
+      options,
+    }),
+  );
+
+  if (choice === "skip") return { kind: "skip" };
+
+  if (choice === "own") {
+    const url = cancelGuard(
+      await p.text({
+        message: "Paste the remote URL (https://… or git@host:…):",
+        placeholder: "git@github.com:you/cogmo-skills.git",
+        validate: (v) => {
+          if (!v || v.trim().length === 0) return "URL is required";
+          return undefined;
+        },
+      }),
+    );
+    const ownMode: ConfigureSkillsRemoteMode = { kind: "own", remoteUrl: url.trim() };
+    if (identity.isOk()) ownMode.identity = identity.value;
+    return ownMode;
+  }
+
+  // auto-provision — gated above on hasGitHubIdentity so this branch
+  // can only fire when `identity.isOk()`.
+  if (!identity.isOk()) return null;
+  return { kind: "auto-provision", identity: identity.value };
+}
+
+/** Format a `configureSkillsRemote` error as operator-readable wizard output. */
+function renderConfigureError(error: ConfigureSkillsRemoteError): void {
+  switch (error.kind) {
+    case "url_invalid":
+      p.log.error(`Invalid URL: ${error.reason}`);
+      break;
+    case "remote_unreachable":
+      p.log.error(`Remote unreachable: ${error.reason}`);
+      p.log.info(
+        "Check the URL, credentials, and network. For HTTPS URLs, the GitHub identity's PAT must have access.",
+      );
+      break;
+    case "remote_empty":
+      p.log.error(
+        `Remote has no \`refs/heads/main\` to fetch. Initialize the remote first ` +
+          `(GitHub: \`gh repo create --add-readme\`; Gitea/Forgejo: tick "Initialize Repository") and retry.`,
+      );
+      break;
+    case "auto_provision_failed":
+      p.log.error(
+        `Auto-provision failed${error.status ? ` (HTTP ${error.status})` : ""}: ${error.reason}`,
+      );
+      break;
+    case "auto_provision_repo_exists":
+      p.log.error(
+        `\`${error.repoName}\` already exists on the configured GitHub account. ` +
+          `Re-run setup and pick "Use my own remote" pointing at the existing repo.`,
+      );
+      break;
+  }
+  p.log.warn("Re-run `cogmo setup` or `cogmo migrate skills-remote` to retry.");
+}
+
+const execFileP = promisify(execFile);
+
+/** Read `origin` URL from the bare repo — returns null if unset. */
+async function readOriginUrl(repoPath: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileP("git", ["-C", repoPath, "remote", "get-url", "origin"]);
+    return stdout.trim();
+  } catch (e) {
+    if ((e as { code?: number }).code === 2) return null;
+    throw e;
+  }
+}
+
 async function stepValidateHindsight(): Promise<void> {
   const s = p.spinner();
   s.start("Checking Hindsight memory server...");
@@ -1311,9 +1486,13 @@ export async function runWizard(deps: {
   // Step 8: Daytona managed sandbox (optional — required when SANDBOX_BACKEND=daytona)
   await stepConfigureDaytona(wizardDeps);
 
-  // Step 9: Hindsight check
+  // Step 9: Skills repo remote (required for `delegate_coding({repo:"skills"})`;
+  // skippable — operator can re-run `cogmo migrate skills-remote` later)
+  await stepConfigureSkillsRemote(wizardDeps);
+
+  // Step 10: Hindsight check
   await stepValidateHindsight();
 
-  // Step 10: Summary + next-steps
+  // Step 11: Summary + next-steps
   await stepSummary(wizardDeps, botUsername);
 }

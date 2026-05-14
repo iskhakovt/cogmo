@@ -976,4 +976,318 @@ effects:
       expect(await tx((trx) => store.getSkillByName(trx, "would-be-skill"))).toBeUndefined();
     });
   });
+
+  describe("remote mirror after register / approve / rollback", () => {
+    /**
+     * Standard skills setup + a second bare repo acting as the configured
+     * remote. After register/approve/rollback, the remote's main should
+     * equal the skills bare repo's main — without this the Daytona-backed
+     * coding flow would clone a stale skill set.
+     */
+    async function setupRepoWithRemote(): Promise<RepoSetup & { remote: string }> {
+      const base = await setupRepo();
+      const remote = join(base.bare, "..", "skills-remote.git");
+      await execFileP("git", ["init", "--bare", "--initial-branch=main", remote]);
+      // Initialize the remote with one commit so main exists — matches the
+      // wizard's precondition (refuses empty remotes).
+      const seed = join(base.bare, "..", "seed");
+      await mkdir(seed);
+      await execFileP("git", ["init", "-b", "main", seed]);
+      await execFileP("git", ["-C", seed, "config", "user.email", "seed@test"]);
+      await execFileP("git", ["-C", seed, "config", "user.name", "seed"]);
+      await execFileP("git", ["-C", seed, "config", "commit.gpgsign", "false"]);
+      await execFileP("git", ["-C", seed, "commit", "--allow-empty", "-m", "init"]);
+      await execFileP("git", ["-C", seed, "push", remote, "main:refs/heads/main"]);
+      await rm(seed, { recursive: true, force: true });
+      // Attach the remote as `origin` on the skills bare repo, then fetch
+      // main so local matches remote — mirrors what configureSkillsRemote
+      // does at wizard time.
+      await execFileP("git", ["-C", base.bare, "remote", "add", "origin", remote]);
+      await execFileP("git", [
+        "-C",
+        base.bare,
+        "fetch",
+        remote,
+        "+refs/heads/main:refs/heads/main",
+      ]);
+      // Also pull main into the work clone so feature branches descend from
+      // the seed commit — otherwise the branch sha has no ancestry with
+      // main and register rejects with `non_fast_forward`. Mirrors the
+      // production sandbox flow where the agent clones from the remote and
+      // commits on top of main.
+      await execFileP("git", ["-C", base.work, "pull", base.bare, "main"]);
+      return { ...base, remote };
+    }
+
+    it("pushes new main SHA to remote after a successful register", async () => {
+      const repoWithRemote = await setupRepoWithRemote();
+      try {
+        const runner = await SkillRunnerImpl.create({
+          store,
+          runInTx: tx,
+          memory: makeMockMemory(),
+          secretsStore: makeMockSecrets(),
+          files: {
+            read: vi.fn().mockResolvedValue(""),
+            write: vi.fn().mockResolvedValue(undefined),
+            list: vi.fn().mockResolvedValue([]),
+          },
+          user: { id: "user-1", timezone: "UTC" },
+          memoryBankId: "bank-1",
+          skillsRepoPath: repoWithRemote.bare,
+        });
+
+        const sha = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/echo",
+          manifest: ECHO_MANIFEST,
+          body: ECHO_BODY,
+        });
+
+        const result = await runner.register({ branch: "skill/echo" });
+        expect(result.status).toBe("live");
+        expect(result.gitSha).toBe(sha);
+
+        // The crux: remote main now equals the registered SHA. Without the
+        // mirror push, this would still be the seed commit.
+        const remoteMain = (
+          await execFileP("git", ["-C", repoWithRemote.remote, "rev-parse", "refs/heads/main"])
+        ).stdout.trim();
+        expect(remoteMain).toBe(sha);
+      } finally {
+        await repoWithRemote.cleanup();
+      }
+    });
+
+    it("register still reports live even if the remote push fails", async () => {
+      // Setup the remote, then point origin at a non-existent path so the
+      // push fails. Register should still complete — local is the truth.
+      const repoWithRemote = await setupRepoWithRemote();
+      await execFileP("git", [
+        "-C",
+        repoWithRemote.bare,
+        "remote",
+        "set-url",
+        "origin",
+        join(repoWithRemote.bare, "..", "does-not-exist.git"),
+      ]);
+
+      try {
+        const runner = await makeRunnerForRepo(repoWithRemote.bare);
+
+        const sha = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/echo",
+          manifest: ECHO_MANIFEST,
+          body: ECHO_BODY,
+        });
+
+        const result = await runner.register({ branch: "skill/echo" });
+        expect(result.status).toBe("live");
+        expect(result.gitSha).toBe(sha);
+        // Local main advanced even though remote push failed.
+        expect(await getMainSha(repoWithRemote.bare)).toBe(sha);
+      } finally {
+        await repoWithRemote.cleanup();
+      }
+    });
+
+    /**
+     * Manifest that classifies into the `approve` tier — `sends_message`
+     * is destructive enough that register lands as `pending_approval`,
+     * not `live`. The classifier sees the declared effect and routes here
+     * without needing the body to actually call any messaging API.
+     */
+    const APPROVE_MANIFEST = `---
+name: notifier
+description: sends user notifications
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+effects:
+  - sends_message
+---
+`;
+
+    it("approveDeploy pushes the approved SHA to remote", async () => {
+      const repoWithRemote = await setupRepoWithRemote();
+      try {
+        const runner = await makeRunnerForRepo(repoWithRemote.bare);
+        const sha = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/notifier",
+          manifest: APPROVE_MANIFEST,
+          body: ECHO_BODY,
+        });
+
+        // Register lands as pending_approval (sends_message → approve tier)
+        // and leaves both local and remote main on the seed commit.
+        const reg = await runner.register({ branch: "skill/notifier" });
+        expect(reg.status).toBe("pending_approval");
+        const pendingId = reg.pendingId;
+        if (!pendingId) throw new Error("expected pendingId");
+        const seedSha = (
+          await execFileP("git", ["-C", repoWithRemote.remote, "rev-parse", "refs/heads/main"])
+        ).stdout.trim();
+
+        // Approve. Local main should advance to the deploy sha AND the
+        // remote should follow — the regression case is "approve advances
+        // local but leaves remote on the seed commit", which would silently
+        // break Daytona-backed coding tasks operating on the skill.
+        const approved = await runner.approveDeploy({ pendingId });
+        expect(approved.status).toBe("live");
+        expect(approved.gitSha).toBe(sha);
+
+        const remoteMainAfter = (
+          await execFileP("git", ["-C", repoWithRemote.remote, "rev-parse", "refs/heads/main"])
+        ).stdout.trim();
+        expect(remoteMainAfter).toBe(sha);
+        expect(remoteMainAfter).not.toBe(seedSha);
+      } finally {
+        await repoWithRemote.cleanup();
+      }
+    });
+
+    it("rollback pushes the rewound SHA to remote via --force-with-lease", async () => {
+      const repoWithRemote = await setupRepoWithRemote();
+      try {
+        const runner = await makeRunnerForRepo(repoWithRemote.bare);
+
+        // v1 → register, advances local + remote main.
+        const v1 = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/echo-v1",
+          manifest: ECHO_MANIFEST,
+          body: ECHO_BODY,
+        });
+        await runner.register({ branch: "skill/echo-v1" });
+        // v2 → register again, advances further.
+        const updatedManifest = ECHO_MANIFEST.replace(
+          "a tier-1 skill that echoes one int field",
+          "v2 description",
+        );
+        const v2 = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/echo-v2",
+          manifest: updatedManifest,
+          body: ECHO_BODY,
+        });
+        await runner.register({ branch: "skill/echo-v2" });
+
+        // Sanity: remote main is at v2 before rollback.
+        expect(
+          (
+            await execFileP("git", ["-C", repoWithRemote.remote, "rev-parse", "refs/heads/main"])
+          ).stdout.trim(),
+        ).toBe(v2);
+
+        // Rollback to v1 — rewinds local main backwards. The mirror push
+        // uses --force-with-lease so the remote follows.
+        const result = await runner.rollback({ name: "echo", toGitSha: v1 });
+        expect(result.status).toBe("live");
+        expect(result.gitSha).toBe(v1);
+
+        expect(await getMainSha(repoWithRemote.bare)).toBe(v1);
+        expect(
+          (
+            await execFileP("git", ["-C", repoWithRemote.remote, "rev-parse", "refs/heads/main"])
+          ).stdout.trim(),
+        ).toBe(v1);
+      } finally {
+        await repoWithRemote.cleanup();
+      }
+    });
+
+    it("rollback's --force-with-lease refuses to overwrite a divergent remote", async () => {
+      // After register but before rollback, manually move remote main to a
+      // sha unrelated to the local-observed sha. The lease check should
+      // fail; remote main stays put; local rollback still succeeds (local
+      // is authoritative per the design contract).
+      const repoWithRemote = await setupRepoWithRemote();
+      try {
+        const runner = await makeRunnerForRepo(repoWithRemote.bare);
+
+        const v1 = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/echo-v1",
+          manifest: ECHO_MANIFEST,
+          body: ECHO_BODY,
+        });
+        await runner.register({ branch: "skill/echo-v1" });
+        const v2 = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "skill/echo-v2",
+          manifest: ECHO_MANIFEST.replace(
+            "a tier-1 skill that echoes one int field",
+            "v2 description",
+          ),
+          body: ECHO_BODY,
+        });
+        await runner.register({ branch: "skill/echo-v2" });
+
+        // Out-of-band: someone (a bad actor, a misconfigured CI, an
+        // operator running raw git) advances remote main to a divergent
+        // sha. Push from the work clone with `+` to force.
+        const divergent = await pushFeatureBranch({
+          work: repoWithRemote.work,
+          branch: "rogue",
+          manifest: ECHO_MANIFEST.replace("a tier-1 skill that echoes one int field", "divergent"),
+          body: ECHO_BODY,
+        });
+        await execFileP("git", [
+          "-C",
+          repoWithRemote.work,
+          "push",
+          "-f",
+          repoWithRemote.remote,
+          `${divergent}:refs/heads/main`,
+        ]);
+
+        // Now rollback. Local rolls back to v1; remote push uses
+        // --force-with-lease=refs/heads/main:<v2> (our observed local-pre-
+        // rollback sha). Remote is at `divergent`, lease check fails,
+        // push aborts. The mirror is non-blocking, so rollback still
+        // reports `live`.
+        const result = await runner.rollback({ name: "echo", toGitSha: v1 });
+        expect(result.status).toBe("live");
+        expect(result.gitSha).toBe(v1);
+
+        // Local rolled back as expected.
+        expect(await getMainSha(repoWithRemote.bare)).toBe(v1);
+        // Remote retained the divergent sha — lease check did its job.
+        expect(
+          (
+            await execFileP("git", ["-C", repoWithRemote.remote, "rev-parse", "refs/heads/main"])
+          ).stdout.trim(),
+        ).toBe(divergent);
+        // Sanity: divergent is not v1 — otherwise this test would trivially
+        // pass.
+        expect(divergent).not.toBe(v1);
+        void v2; // referenced only in the comment above, satisfy noUnusedVariables
+      } finally {
+        await repoWithRemote.cleanup();
+      }
+    });
+
+    /** Construct a runner against an arbitrary skills bare repo. Extracted
+     * because the three new tests above all need it with the same mock
+     * memory / files / secrets setup. */
+    async function makeRunnerForRepo(skillsRepoPath: string): Promise<SkillRunnerImpl> {
+      return SkillRunnerImpl.create({
+        store,
+        runInTx: tx,
+        memory: makeMockMemory(),
+        secretsStore: makeMockSecrets(),
+        files: {
+          read: vi.fn().mockResolvedValue(""),
+          write: vi.fn().mockResolvedValue(undefined),
+          list: vi.fn().mockResolvedValue([]),
+        },
+        user: { id: "user-1", timezone: "UTC" },
+        memoryBankId: "bank-1",
+        skillsRepoPath,
+      });
+    }
+  });
 });

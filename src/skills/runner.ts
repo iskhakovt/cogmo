@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { Ajv, type ValidateFunction } from "ajv";
 import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
@@ -5,6 +7,8 @@ import { defaultSkillsImage } from "../env.js";
 import { logger } from "../logger.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SandboxClient } from "../sandbox/index.js";
+import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
+import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
 import { type CtxUser, DefaultCtxHandler } from "./ctx-handler.js";
@@ -71,6 +75,22 @@ export function mapManifestResourceLimits(resources: SkillManifest["resources"] 
 const log = logger.child({ component: "skills.runner" });
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
+
+const execFileP = promisify(execFile);
+
+/** Read `origin` URL from the bare skills repo. Returns null when no
+ * `origin` is configured (`git remote get-url` exits 2); propagates any
+ * other git failure so the caller doesn't paper over corruption or a
+ * missing-git environment as "no remote configured". */
+async function readBareRepoOrigin(repoPath: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileP("git", ["-C", repoPath, "remote", "get-url", "origin"]);
+    return stdout.trim();
+  } catch (e) {
+    if ((e as { code?: number }).code === 2) return null;
+    throw e;
+  }
+}
 
 function rowToSummary(r: SkillRow): SkillSummary {
   return {
@@ -519,6 +539,13 @@ export class SkillRunnerImpl implements SkillRunner {
       }),
     );
 
+    // Mirror the new main SHA to the configured remote so a Daytona-backed
+    // coding task cloning from origin sees the just-registered skill. Best-
+    // effort — local state is authoritative.
+    if (result.kind === "live") {
+      await this.#mirrorMainToRemote(branchSha);
+    }
+
     return this.#registerResultToRpc({
       name: manifest.name,
       branchSha,
@@ -628,6 +655,9 @@ export class SkillRunnerImpl implements SkillRunner {
         body,
         inputsValidator,
       });
+      // Mirror the new main SHA to the configured remote — same rationale as
+      // register's mirror call.
+      await this.#mirrorMainToRemote(deploy.gitSha);
       return {
         name: result.skill.name,
         riskTier: result.skill.riskTier,
@@ -753,6 +783,14 @@ export class SkillRunnerImpl implements SkillRunner {
         manifest,
         body,
         inputsValidator,
+      });
+      // Rollback rewinds main backwards, so the remote push needs `force`. We
+      // gate with `--force-with-lease=refs/heads/main:<mainSha>` — if anything
+      // moved remote main between our last fetch and this push, the lease
+      // fails and the operator is told to investigate rather than silently
+      // overwriting a divergent remote.
+      await this.#mirrorMainToRemote(targetSha, {
+        force: { expectedRemoteSha: mainSha ?? ZERO_SHA },
       });
     }
 
@@ -1102,6 +1140,73 @@ export class SkillRunnerImpl implements SkillRunner {
       );
     }
     return this.#skillsRepoPath;
+  }
+
+  /**
+   * Mirror the bare repo's `refs/heads/main` to its configured `origin` after
+   * a successful `register` / `approveDeploy` / `rollback`. Without this, the
+   * local bare repo's main advances but the remote stays stale, and any
+   * Daytona-backed coding task cloning from the remote (see
+   * `design/sandbox.md` → git-remote transport) operates on an outdated
+   * skill set.
+   *
+   * Non-blocking failure: if the push fails (network blip, lease check
+   * failed, credentials revoked), the local register is *still* the truth.
+   * We log a warning and let the next register reconcile, or the operator
+   * run `git -C $COGMO_SKILLS_PATH push origin main` manually. Throwing
+   * here would force a rollback of the DB transaction that already committed
+   * — strictly worse than eventual consistency.
+   *
+   * Concurrency model: `register` is the only legitimate writer of remote
+   * main. `force` is opt-in for `rollback` (which intentionally rewrites
+   * history); register/approve use fast-forward push which fails clearly
+   * if the remote has somehow drifted.
+   */
+  async #mirrorMainToRemote(
+    newSha: string,
+    options?: { force: { expectedRemoteSha: string } },
+  ): Promise<void> {
+    const repoPath = this.#requireRepoPath("mirrorMainToRemote");
+
+    const remoteUrl = await readBareRepoOrigin(repoPath);
+    if (!remoteUrl) {
+      log.warn(
+        { newSha, repoPath },
+        "skills bare repo has no `origin` — skipping remote mirror (configure via `cogmo migrate-skills-remote`)",
+      );
+      return;
+    }
+
+    // HTTPS URLs need credential helper; SSH URLs use ssh-agent / deploy keys.
+    // We only resolve the GitHub identity for HTTPS to avoid pulling a
+    // possibly-missing secret on SSH-only setups.
+    let pat: string | null = null;
+    if (remoteUrl.startsWith("https://")) {
+      const identity = await this.#runInTx((tx) =>
+        resolveGitHubIdentity(tx, this.#secretsStore, DEFAULT_GITHUB_IDENTITY_NAME),
+      );
+      if (identity.isOk()) pat = identity.value.pat;
+    }
+
+    const args = ["-C", repoPath, "push"];
+    if (options?.force) {
+      args.push(`--force-with-lease=refs/heads/main:${options.force.expectedRemoteSha}`);
+    }
+    args.push(remoteUrl, `${newSha}:refs/heads/main`);
+
+    try {
+      if (pat) {
+        await withGitAskpass(pat, (env) => runGit(args, env));
+      } else {
+        await runGit(args);
+      }
+      log.info({ newSha, remoteUrl }, "mirrored skills main to remote");
+    } catch (e) {
+      log.warn(
+        { newSha, remoteUrl, error: (e as Error).message },
+        "skills remote mirror push failed; local state is authoritative — retry with `git -C $COGMO_SKILLS_PATH push origin main`",
+      );
+    }
   }
 
   #compileInputsValidator(manifest: SkillManifest, contextName: string): ValidateFunction {
