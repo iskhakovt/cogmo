@@ -298,16 +298,15 @@ describe("configureSkillsRemote", () => {
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error.kind).toBe("remote_diverged");
-    // Local main MUST be untouched — that's the whole point of the safety
-    // check. The original force-fetch implementation would have left local
-    // at the remote's SHA here, orphaning `localSha`.
+    // Local main must be untouched — fast-forward fetch's rejection is
+    // the data-loss-safety guarantee the diverged variant encodes.
     expect(await readMainSha(skillsPath)).toBe(localSha);
   });
 
   it("own + publish refuses to overwrite divergent remote commits (local_diverged)", async () => {
-    // The inverse of remote_diverged: local and remote have unrelated
-    // histories, operator selects publish. Pushing would orphan the
-    // remote's commits. Helper must refuse, remote must be untouched.
+    // Inverse of remote_diverged: local and remote have unrelated
+    // histories, operator selects publish. Push must refuse, remote
+    // must be untouched.
     const skillsPath = join(workDir, "skills.git");
     await bootstrapSkillsRepo({ path: skillsPath });
     await seedSkillsBare(skillsPath, "local-only commit");

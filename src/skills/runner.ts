@@ -771,7 +771,10 @@ export class SkillRunnerImpl implements SkillRunner {
       // gate with `--force-with-lease=refs/heads/main:<mainSha>` — if anything
       // moved remote main between our last fetch and this push, the lease
       // fails and the operator is told to investigate rather than silently
-      // overwriting a divergent remote.
+      // overwriting a divergent remote. `mainSha` is null when local main is
+      // unborn (first ever register-then-rollback before any pushes
+      // succeeded); `ZERO_SHA` is git's convention for "ref must not exist"
+      // in lease syntax, which is the correct lease for that edge.
       await this.#mirrorMainToRemote(targetSha, {
         force: { expectedRemoteSha: mainSha ?? ZERO_SHA },
       });

@@ -119,10 +119,8 @@ export const PRE_RECEIVE_HOOK_CONTENT: string = PRE_RECEIVE_HOOK;
  * silently swallowing it would mask a corrupt repo or missing git as "no
  * remote", which is a worse failure mode than crashing.
  *
- * Exported so the wizard, the `cogmo migrate-skills-remote` CLI, the
- * `configureSkillsRemote` helper, and the runner's mirror-push path can all
- * share one implementation — drift between four copies (one returning `""`,
- * the rest `null`) was a real review finding.
+ * Shared across the wizard, the `cogmo migrate-skills-remote` CLI, the
+ * `configureSkillsRemote` helper, and the runner's mirror-push path.
  */
 export async function readOriginUrl(repoPath: string): Promise<string | null> {
   try {

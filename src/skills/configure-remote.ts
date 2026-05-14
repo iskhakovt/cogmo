@@ -1,36 +1,22 @@
 /**
  * Wizard + one-shot CLI helper for configuring the skills bare repo's
- * `origin` and syncing `coding_repos.skills.remote_url`.
- *
- * Industry tooling (`gh repo create --source --push`, `git clone`,
- * Pro Git §2.1) is one-directional with explicit mode: an "attach to a
- * fresh remote" tool pushes; a "clone an existing remote" tool fetches.
- * The caller picks the mode at invocation. Bidirectional auto-detect
- * isn't shipped anywhere we surveyed, and a tool that silently flips
- * direction based on local state is the exact data-loss surprise the
- * convention exists to avoid.
- *
- * So this helper is one-directional per call:
+ * `origin` and syncing `coding_repos.skills.remote_url`. One-directional
+ * per call — the caller picks `publish` or `adopt` at invocation:
  *
  *   - `own + direction:"adopt"` — fetch remote `main` into local. Refuses
- *     when remote is empty or when local has commits that fetch would
- *     overwrite (git's fast-forward rejection, surfaced as
- *     `remote_diverged`).
+ *     when remote is empty (`remote_empty`) or when local has commits
+ *     that fetch would overwrite (`remote_diverged`).
  *   - `own + direction:"publish"` — push local `main` to remote. Refuses
- *     when local is empty or when remote has commits that push would
- *     overwrite (`local_diverged`).
- *   - `auto-provision` — Cogmo creates the GitHub repo. The direction is
- *     fully determined by local state: empty local gets a `auto_init:
- *     true` remote and adopts the README seed; populated local gets a
- *     `auto_init: false` empty remote and publishes its skills. The
- *     operator's choice of "auto-provision" already delegates the
- *     direction to Cogmo — no hidden mode-flip across different operator
- *     intents.
+ *     when local is empty (`local_empty`) or when remote has commits
+ *     that push would overwrite (`local_diverged`).
+ *   - `auto-provision` — Cogmo creates the GitHub repo and picks direction
+ *     from local state: empty local gets `auto_init: true` and adopts the
+ *     README seed; populated local gets `auto_init: false` and publishes
+ *     its skills.
  *   - `skip` — no-op with logged warning.
  *
  * Wizard / CLI inspect local state up front and present mode-appropriate
- * prompt text ("publish to a new remote" vs. "fetch from a pre-populated
- * remote") so the operator always sees what's about to happen.
+ * prompts so the operator always sees what's about to happen.
  *
  * After the transfer the helper calls `ensureSkillsCodingRepo` to sync
  * `coding_repos.skills.remote_url` — the orchestrator picks up the new
@@ -38,12 +24,14 @@
  */
 
 import { execFile } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { RequestError } from "@octokit/request-error";
 import { Octokit } from "@octokit/rest";
 import { err, ok, type Result } from "neverthrow";
 import { parseRemoteUrl } from "../agent/coding/draft-pr.js";
-import type { CodingStore } from "../agent/coding/store/index.js";
+import type { CodingRepoRow, CodingStore } from "../agent/coding/store/index.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
@@ -52,6 +40,7 @@ import {
   type EnsureSkillsCodingRepoResult,
   ensureSkillsCodingRepo,
   readOriginUrl,
+  SKILLS_CODING_REPO_NAME,
 } from "./repo.js";
 
 const execFileP = promisify(execFile);
@@ -98,6 +87,11 @@ export type ConfigureSkillsRemoteSuccess =
       /** Whether the bare repo's `origin` was newly attached, replaced, or already correct. */
       originAction: "attached" | "updated" | "unchanged";
       ensured: EnsureSkillsCodingRepoResult;
+      /** Path to the JSON dump of the prior `coding_repos.skills` row,
+       * written before any mutation. Null when there was no row to back up
+       * (fresh install). The caller (wizard / CLI) logs this so the operator
+       * can roll back manually if needed. */
+      backupPath: string | null;
     };
 
 export type ConfigureSkillsRemoteError =
@@ -120,6 +114,11 @@ export type ConfigureSkillsRemoteError =
    * outside the helper (`git fetch` first, then re-run; or force-overwrite
    * intentionally with raw git). */
   | { kind: "local_diverged"; remoteUrl: string; localSha: string; remoteSha: string }
+  /** Transfer succeeded but `git remote add` / `set-url` failed (FS error,
+   * server-side hook reject on a misconfigured bare repo, etc.). Bare repo
+   * may be left without an attached origin even though the transfer landed —
+   * re-run the helper to retry. */
+  | { kind: "origin_attach_failed"; remoteUrl: string; reason: string }
   | { kind: "auto_provision_failed"; reason: string; status?: number }
   /** 422 on create — most often the operator already has `cogmo-skills`.
    * Surfaced separately so the UI can suggest switching to `own + adopt`
@@ -177,11 +176,10 @@ export async function configureSkillsRemote(
     return err({ kind: "local_empty", remoteUrl });
   }
 
-  // Transfer FIRST (using the URL directly, no need for origin to be
-  // attached). If it fails, the bare repo's `origin` config is untouched
-  // and the next boot's `ensureSkillsCodingRepo` won't sync a stale URL
-  // into the DB row. Industry convention: a tool that fails to publish
-  // / adopt shouldn't leave behind a half-configured remote.
+  // Transfer first (URL passed directly to git; no need to attach
+  // origin yet). If transfer fails, the bare repo's `origin` config is
+  // untouched and the next boot's `ensureSkillsCodingRepo` won't sync a
+  // stale URL into the DB row.
   //
   // Fast-forward only (no `+` in the refspec). git rejects on non-FF,
   // which we map to `*_diverged` so operators see a structured error
@@ -199,18 +197,50 @@ export async function configureSkillsRemote(
     if (transfer.error.kind === "remote_unreachable") {
       return err({ kind: "remote_unreachable", remoteUrl, reason: transfer.error.reason });
     }
+    // For *_diverged, both sides must have main: the empty-source
+    // preconditions above guarantee `localMainSha` (publish) and
+    // `remoteMainSha` (adopt) are non-null, and the surviving SHA is
+    // probed up front. `localSha`/`remoteSha` empty would mean a probe
+    // returned null after a transient git failure — surface that as a
+    // boundary violation rather than silently rendering "localSha: " to
+    // the operator.
+    if (localMainSha === null || remoteMainSha === null) {
+      throw new Error(
+        `configureSkillsRemote: ${transfer.error.kind} fired but state probe returned null (localMainSha=${String(
+          localMainSha,
+        )}, remoteMainSha=${String(remoteMainSha)})`,
+      );
+    }
     return err({
       kind: transfer.error.kind,
       remoteUrl,
-      localSha: localMainSha ?? "",
-      remoteSha: remoteMainSha ?? "",
+      localSha: localMainSha,
+      remoteSha: remoteMainSha,
     });
   }
 
   // Transfer succeeded — now persist the operator's intent by attaching
   // (or replacing) origin. From the bare repo's view, origin always
-  // reflects the URL we just successfully transferred to/from.
-  const originAction = await attachOrigin(deps.skillsRepoPath, remoteUrl);
+  // reflects the URL we just successfully transferred to/from. Failure
+  // here is rare (FS errors, hook reject on a misconfigured bare repo)
+  // but surfaced as a structured `origin_attach_failed` error rather
+  // than a thrown exception so the helper's Result contract holds end-
+  // to-end.
+  const attached = await attachOrigin(deps.skillsRepoPath, remoteUrl);
+  if (attached.isErr()) {
+    return err({ kind: "origin_attach_failed", remoteUrl, reason: attached.error });
+  }
+  const originAction = attached.value;
+
+  // Backup the current row (if any) before ensureSkillsCodingRepo
+  // potentially updates `remote_url`. Operator-recoverable trace of the
+  // pre-change state — the CLI's path was the prior backup convention;
+  // moved inside the helper so both the CLI and the wizard's `replace`
+  // path get it without duplicating fs logic across callers.
+  const existingRow = await deps.runInTx((tx) =>
+    deps.codingStore.getRepoByName(tx, SKILLS_CODING_REPO_NAME),
+  );
+  const backupPath = existingRow ? await writeBackup(existingRow) : null;
 
   const ensured = await ensureSkillsCodingRepo(
     { runInTx: deps.runInTx, codingStore: deps.codingStore },
@@ -218,10 +248,28 @@ export async function configureSkillsRemote(
   );
 
   log.info(
-    { remoteUrl, direction, originAction, ensuredKind: ensured.kind },
+    { remoteUrl, direction, originAction, ensuredKind: ensured.kind, backupPath },
     "skills remote configured",
   );
-  return ok({ kind: "configured", remoteUrl, direction, originAction, ensured });
+  return ok({
+    kind: "configured",
+    remoteUrl,
+    direction,
+    originAction,
+    ensured,
+    backupPath,
+  });
+}
+
+/** Directory the helper writes pre-mutation row dumps to. Same convention as
+ * `cogmo migrate-memories` — `.dev/skills-backups/<iso-timestamp>.json`. */
+const BACKUP_DIR = ".dev/skills-backups";
+
+async function writeBackup(row: CodingRepoRow): Promise<string> {
+  await mkdir(BACKUP_DIR, { recursive: true });
+  const path = join(BACKUP_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+  await writeFile(path, JSON.stringify(row, null, 2));
+  return path;
 }
 
 interface ResolvedTarget {
@@ -278,15 +326,19 @@ async function resolveTarget(
 async function attachOrigin(
   repoPath: string,
   remoteUrl: string,
-): Promise<"attached" | "updated" | "unchanged"> {
-  const currentOrigin = await readOriginUrl(repoPath);
-  if (currentOrigin === remoteUrl) return "unchanged";
-  if (currentOrigin === null) {
-    await execFileP("git", ["-C", repoPath, "remote", "add", "origin", remoteUrl]);
-    return "attached";
+): Promise<Result<"attached" | "updated" | "unchanged", string>> {
+  try {
+    const currentOrigin = await readOriginUrl(repoPath);
+    if (currentOrigin === remoteUrl) return ok("unchanged");
+    if (currentOrigin === null) {
+      await execFileP("git", ["-C", repoPath, "remote", "add", "origin", remoteUrl]);
+      return ok("attached");
+    }
+    await execFileP("git", ["-C", repoPath, "remote", "set-url", "origin", remoteUrl]);
+    return ok("updated");
+  } catch (e) {
+    return err((e as Error).message);
   }
-  await execFileP("git", ["-C", repoPath, "remote", "set-url", "origin", remoteUrl]);
-  return "updated";
 }
 
 interface TransferParams {
@@ -329,17 +381,29 @@ async function runTransfer(p: TransferParams): Promise<Result<void, TransferErro
   }
 }
 
-/** Match the strings git emits on non-fast-forward rejection across `fetch`
- * and `push`. Covers both the standard message and the localized variants
- * we've seen on common distros. Adding new variants is cheap — adding a
- * match catches the case as a structured error instead of an
- * unhelpful `remote_unreachable`. */
+/** Match the strings git emits specifically for non-fast-forward rejection
+ * across `fetch` and `push`. Patterns are anchored to non-FF wording —
+ * a bare `[rejected]` token would also fire on auth failures and
+ * server-side policy rejections (pre-receive hook decline, branch
+ * protection, etc.), which then get mis-labeled as `local_diverged` /
+ * `remote_diverged` and send the operator down the wrong remediation
+ * path.
+ *
+ * git push uses two variants of the rejection label: `(non-fast-forward)`
+ * (legacy) and `(fetch first)` (current — appears when the remote has
+ * commits not in local). Both mean non-FF. The "Updates were rejected
+ * because" hint prefix is the canonical operator-facing signal — git emits
+ * one of two trailers ("tip of your current branch is behind" or "remote
+ * contains work that you do not have locally") depending on which
+ * variant fired. Matching the hint prefix catches both with one
+ * pattern. */
 function isNonFastForwardError(stderr: string): boolean {
   return (
-    /non-fast-forward/i.test(stderr) ||
-    /rejected\b/i.test(stderr) ||
     /\(non-fast-forward\)/i.test(stderr) ||
-    /would not be a fast-forward/i.test(stderr)
+    /\(fetch first\)/i.test(stderr) ||
+    /Updates were rejected because/i.test(stderr) ||
+    /is not a fast[- ]forward/i.test(stderr) ||
+    /would not be a fast[- ]forward/i.test(stderr)
   );
 }
 

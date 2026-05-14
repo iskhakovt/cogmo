@@ -1274,6 +1274,9 @@ async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void> {
     p.log.warn("Skills remote not configured — re-run `cogmo migrate-skills-remote` when ready.");
     return;
   }
+  if (result.value.backupPath) {
+    p.log.info(`Backed up previous \`coding_repos.skills\` row to ${result.value.backupPath}`);
+  }
   const directionVerb = result.value.direction === "publish" ? "published to" : "adopted from";
   p.log.success(`Skills remote ${directionVerb}: ${result.value.remoteUrl}`);
 }

@@ -23,8 +23,6 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { promisify } from "node:util";
 import * as p from "@clack/prompts";
 import type { CodingStore } from "../agent/coding/store/index.js";
@@ -37,8 +35,6 @@ import {
   configureSkillsRemote,
 } from "./configure-remote.js";
 import { bootstrapSkillsRepo, readOriginUrl, SKILLS_CODING_REPO_NAME } from "./repo.js";
-
-const BACKUP_DIR = ".dev/skills-backups";
 
 export interface MigrateSkillsRemoteCliDeps {
   runInTx: Transactor;
@@ -89,20 +85,15 @@ export async function runMigrateSkillsRemoteCli(
     "Current state",
   );
 
-  // Backup before mutate. Only meaningful when a row exists — a missing
-  // row is the "fresh install" case with nothing to restore.
-  if (existingRow) {
-    const backupPath = await makeBackupPath();
-    await writeFile(backupPath, JSON.stringify(existingRow, null, 2));
-    p.log.info(`Backed up current row to ${backupPath}`);
-  }
-
   const mode = await collectMode(deps, localMainSha);
   if (mode === "cancelled") {
     p.outro("Cancelled.");
     return 130;
   }
 
+  // `configureSkillsRemote` writes the backup itself (and returns the
+  // path on success) so wizard and CLI share one backup-before-mutate
+  // path. The CLI surfaces the path here for the operator's audit trail.
   const result = await configureSkillsRemote(deps, mode);
 
   if (result.isErr()) {
@@ -116,6 +107,9 @@ export async function runMigrateSkillsRemoteCli(
     return 0;
   }
 
+  if (result.value.backupPath) {
+    p.log.info(`Backed up previous \`coding_repos.skills\` row to ${result.value.backupPath}`);
+  }
   const directionVerb = result.value.direction === "publish" ? "published to" : "adopted from";
   p.outro(
     `Skills remote ${directionVerb}: ${result.value.remoteUrl}\n` +
@@ -166,7 +160,10 @@ async function collectMode(
   if (hasGitHubIdentity) {
     options.push({ value: "auto-provision", label: "Auto-provision on GitHub", hint: autoHint });
   }
-  options.push({ value: "skip", label: "Skip — keep current state" });
+  options.push({
+    value: "skip",
+    label: "Skip — configure later via `cogmo migrate-skills-remote`",
+  });
 
   const choice = await p.select({ message: promptMessage, options });
   if (p.isCancel(choice)) return "cancelled";
@@ -253,11 +250,6 @@ function renderConfigureError(error: ConfigureSkillsRemoteError): void {
       );
       break;
   }
-}
-
-async function makeBackupPath(): Promise<string> {
-  await mkdir(BACKUP_DIR, { recursive: true });
-  return join(BACKUP_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
 }
 
 const execFileP = promisify(execFile);
