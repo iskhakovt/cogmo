@@ -750,4 +750,37 @@ describe("SysboxWorkerPool", () => {
 
     await pool.dispose();
   });
+
+  // Coverage of the L420-429 path: a worker recycles in `#postInvoke`, no
+  // waiter is queued, but pool dropped below min so a *background*
+  // replacement spawn is kicked. If that spawn fails, the catch logs warn
+  // and the pool simply stays below min until the next invoke triggers a
+  // fresh spawn — the failure must NOT propagate to the original invoke's
+  // result (which already completed successfully).
+  it("background replacement spawn failure leaves pool below min without breaking the completed invoke", async () => {
+    const h = buildPoolHarness({
+      scripts: [
+        // First worker returns non-reusable → triggers recycle + background spawn.
+        { invokes: [{ ok: true, output: { done: true }, workerReusable: false }] },
+        // Slot index 1 is the background replacement spawn — make it fail.
+      ],
+      spawnFails: [1],
+      poolOptions: { min: 1, max: 1 },
+    });
+    const pool = await h.pool;
+
+    const result = await pool.invoke(invokeParams("t-1"));
+    expect(result.ok).toBe(true); // original invoke succeeded
+    expect(result.output).toEqual({ done: true });
+
+    // Give the background catch a tick to fire.
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    // Pool attempted the replacement spawn (and it failed) — pool now
+    // below min, but invoke result was already returned and stable.
+    expect(h.spawnCount()).toBeGreaterThanOrEqual(2);
+    expect(pool.stats().total).toBe(0);
+
+    await pool.dispose();
+  });
 });
