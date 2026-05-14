@@ -41,6 +41,7 @@ import {
 import { generateSshKeyPair } from "../secrets/ssh-keygen.js";
 import { DrizzleSecretsStore, type SecretsStore } from "../secrets/store/index.js";
 import type { TransportStore } from "../transport/store/index.js";
+import { OpenAIVoiceProvider } from "../voice/openai.js";
 import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
   type DaytonaProbeOpts,
@@ -67,7 +68,7 @@ function cancelGuard<T>(value: T | symbol): T {
 
 // --- Types ---
 
-interface WizardDeps {
+export interface WizardDeps {
   runInTx: Transactor;
   agentStore: AgentStore;
   transportStore: TransportStore;
@@ -878,6 +879,152 @@ function parseWizardRatios(raw: string): ReadonlyArray<ImageAspectRatio> | undef
   return validated.length > 0 ? validated : undefined;
 }
 
+const VOICE_SECRET_NAME = "openai_voice_key";
+const DEFAULT_TTS_MODEL = "gpt-4o-mini-tts";
+const DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe";
+const DEFAULT_TTS_VOICE = "alloy";
+
+/**
+ * Six classic OpenAI TTS voices that work across all `gpt-4o-mini-tts` /
+ * `tts-1` checkpoints. Newer voices (ash, ballad, coral, sage, verse) are
+ * available on `gpt-4o-mini-tts` only and aren't worth a per-model voice
+ * list in the wizard — operators wanting them can rotate via re-running
+ * setup and entering a custom voice id via the CLI later if needed.
+ */
+const OPENAI_TTS_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"] as const;
+
+/**
+ * Configure voice (TTS + STT). Optional — only operators who want
+ * Telegram voice replies need this. Re-runnable: existing config offers
+ * keep / replace / remove. The "remove" branch deletes the `voice_config`
+ * row so bootstrap stops constructing a voice provider on next restart.
+ *
+ * Reuses a single OpenAI key for both directions (one `secrets` row, two
+ * FK columns pointing at it). No "reuse the LLM provider's key" shortcut
+ * — voice traffic hits `/v1/audio/{speech,transcriptions}` which most
+ * OpenAI-compatible providers (OpenRouter, Venice, custom proxies) don't
+ * serve. See design/voice.md → "Credential entry".
+ */
+export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
+  const existing = await deps.runInTx((tx) => deps.agentStore.getVoiceConfig(tx));
+
+  if (existing) {
+    const action = await p.select({
+      message: `Voice is configured (TTS=${existing.ttsModel}/${existing.ttsVoice}). What would you like to do?`,
+      options: [
+        { value: "keep", label: "Keep current configuration" },
+        { value: "replace", label: "Reconfigure" },
+        { value: "remove", label: "Remove voice configuration" },
+      ],
+    });
+    cancelGuard(action);
+    if (action === "keep") return;
+    if (action === "remove") {
+      await deps.runInTx((tx) => deps.agentStore.deleteVoiceConfig(tx));
+      p.log.success("Voice configuration removed. Restart the server to release the provider.");
+      return;
+    }
+  } else {
+    const proceed = await p.confirm({
+      message: "Configure voice replies (TTS + STT)? (optional)",
+      initialValue: false,
+    });
+    if (!cancelGuard(proceed)) return;
+  }
+
+  p.note(
+    [
+      "Voice uses OpenAI's /v1/audio/speech (TTS) and",
+      "/v1/audio/transcriptions (STT). Other OpenAI-compatible providers",
+      "(OpenRouter, Venice, etc.) don't serve these endpoints, so voice",
+      "needs its own OpenAI key.",
+      "",
+      "Get one at https://platform.openai.com/api-keys",
+    ].join("\n"),
+    "Where to get an OpenAI voice key",
+  );
+
+  const apiKey = cancelGuard(
+    await p.password({
+      message: "Paste your OpenAI API key (used for both TTS and STT):",
+      validate: (v) => {
+        if (!v || v.length < 10) return "API key seems too short";
+        return undefined;
+      },
+    }),
+  );
+
+  const ttsModel = cancelGuard(
+    await p.text({
+      message: "TTS model:",
+      placeholder: DEFAULT_TTS_MODEL,
+      defaultValue: DEFAULT_TTS_MODEL,
+    }),
+  );
+  const ttsVoice = cancelGuard(
+    await p.select({
+      message: "Voice:",
+      options: OPENAI_TTS_VOICES.map((v) => ({ value: v, label: v })),
+      initialValue: DEFAULT_TTS_VOICE,
+    }),
+  );
+  const sttModel = cancelGuard(
+    await p.text({
+      message: "STT model:",
+      placeholder: DEFAULT_STT_MODEL,
+      defaultValue: DEFAULT_STT_MODEL,
+    }),
+  );
+
+  // Live probe — one short TTS round-trip (~$0.0002 at gpt-4o-mini-tts
+  // pricing). Validates the key, model, and voice in one shot against the
+  // actual /v1/audio/speech endpoint, catching wrong-account / wrong-tier
+  // failures the wizard can't see at paste-time.
+  const s = p.spinner();
+  s.start("Validating voice key (1-word TTS probe)...");
+  let probeOk = false;
+  try {
+    const probe = new OpenAIVoiceProvider({ apiKey });
+    await probe.tts({ text: "hi", voice: ttsVoice, model: ttsModel, format: "ogg" });
+    s.stop("Voice key validated.");
+    probeOk = true;
+  } catch (err) {
+    s.stop(`Voice probe failed: ${(err as Error).message}`);
+    const saveAnyway = await p.confirm({
+      message: "Save the config anyway? Voice replies will error on first use.",
+      initialValue: false,
+    });
+    if (!cancelGuard(saveAnyway)) return;
+  }
+
+  const { id: secretId } = await deps.runInTx((tx) =>
+    deps.secretsStore.putSecret(tx, {
+      name: VOICE_SECRET_NAME,
+      plaintext: apiKey,
+      description: "OpenAI API key for voice (TTS + STT)",
+    }),
+  );
+  if (probeOk) {
+    await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, VOICE_SECRET_NAME));
+  }
+
+  await deps.runInTx((tx) =>
+    deps.agentStore.upsertVoiceConfig(tx, {
+      ttsSecretId: secretId,
+      sttSecretId: secretId,
+      ttsProvider: "openai",
+      ttsModel,
+      ttsVoice,
+      sttProvider: "openai",
+      sttModel,
+    }),
+  );
+
+  p.log.success(
+    `Voice configured (TTS=${ttsModel}/${ttsVoice}, STT=${sttModel}). Restart the server to pick up changes.`,
+  );
+}
+
 async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) =>
     resolveGitHubIdentity(tx, deps.secretsStore, DEFAULT_GITHUB_IDENTITY_NAME),
@@ -1228,11 +1375,15 @@ async function stepSummary(deps: WizardDeps, botUsername?: string): Promise<void
   const telegramChannel = await deps.runInTx((tx) =>
     deps.transportStore.getChannelByType(tx, "telegram"),
   );
+  const voiceConfig = await deps.runInTx((tx) => deps.agentStore.getVoiceConfig(tx));
 
   const lines: string[] = [];
   lines.push(`Providers: ${providers.map((p) => p.name).join(", ") || "none"}`);
   lines.push(`Secrets: ${secrets.length} stored`);
   lines.push(`Telegram: ${telegramChannel ? "configured" : "not configured"}`);
+  lines.push(
+    `Voice: ${voiceConfig ? `configured (${voiceConfig.ttsModel}/${voiceConfig.ttsVoice})` : "not configured"}`,
+  );
 
   p.note(lines.join("\n"), "Setup complete");
 
@@ -1302,18 +1453,21 @@ export async function runWizard(deps: {
   // Step 5: OpenAI-compatible image providers (Venice, OpenAI gpt-image, custom)
   await stepConfigureImageProviders(wizardDeps);
 
-  // Step 6: GitHub identity for the coding-delegation pipeline (optional)
+  // Step 6: Voice (TTS + STT) — paired with image providers as optional output modality
+  await stepConfigureVoice(wizardDeps);
+
+  // Step 7: GitHub identity for the coding-delegation pipeline (optional)
   await stepConfigureGitHubIdentity(wizardDeps);
 
-  // Step 7: Claude Code subscription auth for the coding-delegation pipeline (optional)
+  // Step 8: Claude Code subscription auth for the coding-delegation pipeline (optional)
   await stepConfigureClaudeCodeAuth(wizardDeps);
 
-  // Step 8: Daytona managed sandbox (optional — required when SANDBOX_BACKEND=daytona)
+  // Step 9: Daytona managed sandbox (optional — required when SANDBOX_BACKEND=daytona)
   await stepConfigureDaytona(wizardDeps);
 
-  // Step 9: Hindsight check
+  // Step 10: Hindsight check
   await stepValidateHindsight();
 
-  // Step 10: Summary + next-steps
+  // Step 11: Summary + next-steps
   await stepSummary(wizardDeps, botUsername);
 }

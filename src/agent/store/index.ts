@@ -331,9 +331,35 @@ export interface AgentStore {
         sttProvider: string;
         sttModel: string;
         sttBaseUrl: string | null;
+        createdAt: Date;
       }
     | undefined
   >;
+
+  /**
+   * Insert or overwrite the singleton voice configuration row. The
+   * `singleton` column carries a UNIQUE constraint, so `ON CONFLICT
+   * (singleton) DO UPDATE` rotates the existing row in place — the row id
+   * and `created_at` are preserved across config updates so they reflect
+   * when voice was first configured, not last touched.
+   */
+  upsertVoiceConfig(
+    tx: Transaction,
+    params: {
+      ttsSecretId: string;
+      sttSecretId: string;
+      ttsProvider: string;
+      ttsModel: string;
+      ttsVoice: string;
+      ttsBaseUrl?: string | null;
+      sttProvider: string;
+      sttModel: string;
+      sttBaseUrl?: string | null;
+    },
+  ): Promise<{ id: string }>;
+
+  /** Delete the singleton voice configuration row. No-op when none exists. */
+  deleteVoiceConfig(tx: Transaction): Promise<void>;
 
   /** Insert a message (user or assistant). Returns the new message ID. `profileId` + `model` stamp the turn snapshot (see design/transport/overview.md → Profile and Model Stamping). */
   insertMessage(
@@ -1031,6 +1057,47 @@ export class DrizzleAgentStore implements AgentStore {
     // the most recent config rather than picking arbitrarily.
     const rows = await tx.select().from(voiceConfig).orderBy(desc(voiceConfig.createdAt)).limit(1);
     return rows[0];
+  }
+
+  async upsertVoiceConfig(
+    tx: Transaction,
+    params: {
+      ttsSecretId: string;
+      sttSecretId: string;
+      ttsProvider: string;
+      ttsModel: string;
+      ttsVoice: string;
+      ttsBaseUrl?: string | null;
+      sttProvider: string;
+      sttModel: string;
+      sttBaseUrl?: string | null;
+    },
+  ): Promise<{ id: string }> {
+    const values = {
+      ttsSecretId: params.ttsSecretId,
+      sttSecretId: params.sttSecretId,
+      ttsProvider: params.ttsProvider,
+      ttsModel: params.ttsModel,
+      ttsVoice: params.ttsVoice,
+      ttsBaseUrl: params.ttsBaseUrl ?? null,
+      sttProvider: params.sttProvider,
+      sttModel: params.sttModel,
+      sttBaseUrl: params.sttBaseUrl ?? null,
+    };
+    return single(
+      await tx
+        .insert(voiceConfig)
+        .values(values)
+        .onConflictDoUpdate({
+          target: voiceConfig.singleton,
+          set: values,
+        })
+        .returning({ id: voiceConfig.id }),
+    );
+  }
+
+  async deleteVoiceConfig(tx: Transaction): Promise<void> {
+    await tx.delete(voiceConfig);
   }
 
   async insertMessage(

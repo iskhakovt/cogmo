@@ -32,6 +32,8 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     setConversationStatus: vi.fn().mockResolvedValue(undefined),
     setConversationVoiceMode: vi.fn().mockResolvedValue(undefined),
     getVoiceConfig: vi.fn().mockResolvedValue(undefined),
+    upsertVoiceConfig: vi.fn().mockResolvedValue({ id: "voice-config-1" }),
+    deleteVoiceConfig: vi.fn().mockResolvedValue(undefined),
     insertMessage: vi.fn().mockResolvedValue({ id: "msg-1" }),
     insertMessages: vi.fn().mockResolvedValue({ id: "msg-1" }),
     getLastAssistantMessage: vi.fn().mockResolvedValue(null),
