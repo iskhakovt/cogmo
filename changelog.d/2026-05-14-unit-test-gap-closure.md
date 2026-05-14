@@ -41,9 +41,7 @@ One related gap deferred: worker-wasm host lifecycle failures
 `host.test.ts` doesn't have. Kept as a standalone p3 in `todo.md`.
 
 Total: 9 test files touched, +85 tests added (245 → 330 across these
-files), all passing under `pnpm test`. Coverage utilities added at
-`scripts/merge-coverage.ts`, `scripts/coverage-gaps.ts`, and
-`scripts/coverage-gaps-detail.ts` for future sweeps.
+files), all passing under `pnpm test`.
 
 ### Sandbox: `DockerFacade` and `mock<T>()` cleanup
 
