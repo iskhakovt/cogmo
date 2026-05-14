@@ -265,12 +265,13 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   const mcpStore = new DrizzleMcpStore();
   const skillStore = new DrizzleSkillStore();
 
-  // DB half of the skills-repo bootstrap: insert the `coding_repos` row that
-  // `delegate_coding({ repo: "skills" })` resolves against. Idempotent —
-  // skips if the row is already present. Picks up `origin` from the bare
-  // repo so an operator who attached a remote via `git remote add` doesn't
-  // have to re-enter it. Without this, every fresh deployment hits "Repo
-  // not registered: skills" on the first skill-authoring attempt.
+  // DB half of the skills-repo bootstrap: keep `coding_repos.skills.remote_url`
+  // in sync with the bare repo's `origin`. Idempotent — inserts on first run,
+  // updates on subsequent boots after the operator changes origin via the
+  // wizard or `cogmo migrate-skills-remote`, no-ops when already in sync.
+  // When the bare repo has no origin yet, the call returns `skipped_no_origin`
+  // and `delegate_coding({ repo: "skills" })` will fail with a clear message
+  // until the wizard/CLI runs.
   await ensureSkillsCodingRepo({ runInTx: tx, codingStore }, { skillsRepoPath: skillsRepo.path });
 
   if (!env.COGMO_MASTER_KEY) {

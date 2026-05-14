@@ -184,6 +184,50 @@ describe("DrizzleCodingStore", () => {
     it("getRepoByName returns null for unknown name", async () => {
       expect(await tx((trx) => store.getRepoByName(trx, "nope"))).toBeUndefined();
     });
+
+    it("updateRepoRemoteUrl updates only `remote_url`, leaves other columns alone", async () => {
+      // Seed with a known remote, then swap it. Reload the full row to make
+      // sure no other column drifted — `updateRepoRemoteUrl` is the only
+      // mutation we accept on the otherwise insert-once `coding_repos`
+      // table, so a future regression that widens the UPDATE would silently
+      // overwrite columns the operator didn't intend to touch.
+      const inserted = await tx((trx) =>
+        store.insertRepo(trx, {
+          name: "skills",
+          localPath: "/var/lib/cogmo/skills",
+          ...REPO_DEFAULTS,
+          remoteUrl: "git@github.com:user/old-skills.git",
+        }),
+      );
+
+      await tx((trx) =>
+        store.updateRepoRemoteUrl(trx, inserted.id, "git@github.com:user/new-skills.git"),
+      );
+
+      const reloaded = await tx((trx) => store.getRepoById(trx, inserted.id));
+      expect(reloaded?.remoteUrl).toBe("git@github.com:user/new-skills.git");
+      // Every other column unchanged.
+      expect(reloaded?.name).toBe(inserted.name);
+      expect(reloaded?.localPath).toBe(inserted.localPath);
+      expect(reloaded?.defaultBranch).toBe(inserted.defaultBranch);
+      expect(reloaded?.allowedBackends).toEqual(inserted.allowedBackends);
+      expect(reloaded?.verifyCommand).toBe(inserted.verifyCommand);
+      expect(reloaded?.taskTokenBudget).toBe(inserted.taskTokenBudget);
+      expect(reloaded?.taskWallTimeSeconds).toBe(inserted.taskWallTimeSeconds);
+      expect(reloaded?.maxConcurrentTasks).toBe(inserted.maxConcurrentTasks);
+      expect(reloaded?.identityName).toBe(inserted.identityName);
+      expect(reloaded?.verifyTimeoutSeconds).toBe(inserted.verifyTimeoutSeconds);
+      expect(reloaded?.createdAt.getTime()).toBe(inserted.createdAt.getTime());
+    });
+
+    it("updateRepoRemoteUrl on an unknown id is a silent no-op", async () => {
+      // UPDATE … WHERE id = <nonexistent> affects zero rows; not an error.
+      // Caller responsibility to verify the row exists before calling — we
+      // don't pretend to enforce it here.
+      await expect(
+        tx((trx) => store.updateRepoRemoteUrl(trx, "00000000-0000-0000-0000-000000000000", "x")),
+      ).resolves.toBeUndefined();
+    });
   });
 
   describe("tasks", () => {

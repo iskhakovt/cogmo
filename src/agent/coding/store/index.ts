@@ -133,6 +133,16 @@ export interface CodingStore {
   /** List all repos in name order. */
   listRepos(tx: Transaction): Promise<readonly CodingRepoRow[]>;
 
+  /**
+   * Update `remote_url` for an existing repo. Single-field method (not a
+   * generic `updateRepo`) because operator-driven remote changes are the
+   * one update we accept on the otherwise insert-once `coding_repos` table —
+   * narrow surface keeps the "prefer immutable rows" invariant intact for
+   * every other column. Used by `configureSkillsRemote` when the operator
+   * picks a new URL via the wizard or the `migrate-skills-remote` CLI.
+   */
+  updateRepoRemoteUrl(tx: Transaction, id: string, remoteUrl: string): Promise<void>;
+
   /** Delete a repo. Caller is responsible for cleaning up associated tasks first. */
   removeRepo(tx: Transaction, id: string): Promise<void>;
 
@@ -381,6 +391,10 @@ export class DrizzleCodingStore implements CodingStore {
 
   async listRepos(tx: Transaction): Promise<readonly CodingRepoRow[]> {
     return tx.select().from(codingRepos).orderBy(asc(codingRepos.name));
+  }
+
+  async updateRepoRemoteUrl(tx: Transaction, id: string, remoteUrl: string): Promise<void> {
+    await tx.update(codingRepos).set({ remoteUrl }).where(eq(codingRepos.id, id));
   }
 
   async removeRepo(tx: Transaction, id: string): Promise<void> {

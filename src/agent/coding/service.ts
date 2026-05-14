@@ -70,6 +70,17 @@ export function createCodingService(
 
       const repo = await deps.runInTx((tx) => deps.codingStore.getRepoByName(tx, input.repoName));
       if (!repo) {
+        // The `skills` row is auto-managed (inserted by `ensureSkillsCodingRepo`
+        // on boot once the bare repo has an `origin` configured). Operators
+        // hitting "skills not registered" are usually one wizard step away,
+        // not in a "no /repo add yet" state — point them at the dedicated
+        // CLI rather than the generic registry surface.
+        if (input.repoName === "skills") {
+          throw new Error(
+            "Skills repo isn't configured yet. Run `cogmo migrate-skills-remote` " +
+              "(or re-run `cogmo setup`) to attach a remote and register the row.",
+          );
+        }
         throw new Error(
           `Repo not registered: ${input.repoName}. Use /repo list to see available repos.`,
         );

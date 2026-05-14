@@ -265,82 +265,32 @@ const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 describe("ensureSkillsCodingRepo", () => {
-  it("inserts a `skills` row on first call and reports created: true", async () => {
+  it("skips insert when bare repo has no origin and reports skipped_no_origin", async () => {
+    // Without origin attached, the bare repo can't participate in the
+    // Daytona git-remote transport. We refuse to write a `remote_url=''`
+    // row — the wizard / `cogmo migrate-skills-remote` CLI is the path to
+    // attach a remote.
     const repoPath = join(workDir, "skills");
     await bootstrapSkillsRepo({ path: repoPath });
     const codingStore = mock<CodingStore>();
     codingStore.getRepoByName.mockResolvedValue(undefined);
-    codingStore.insertRepo.mockImplementation(async (_tx, params) => ({
-      id: "00000000-0000-0000-0000-000000000001",
-      name: params.name,
-      localPath: params.localPath,
-      defaultBranch: params.defaultBranch,
-      remoteUrl: params.remoteUrl,
-      devcontainer: params.devcontainer,
-      allowedBackends: [...params.allowedBackends],
-      verifyCommand: params.verifyCommand,
-      verifyTimeoutSeconds: params.verifyTimeoutSeconds ?? 600,
-      taskTokenBudget: params.taskTokenBudget,
-      taskWallTimeSeconds: params.taskWallTimeSeconds,
-      maxConcurrentTasks: params.maxConcurrentTasks,
-      identityName: params.identityName ?? "default",
-      createdAt: new Date(),
-    }));
 
     const result = await ensureSkillsCodingRepo(
       { runInTx: fakeRunInTx, codingStore },
       { skillsRepoPath: repoPath },
     );
 
-    expect(result.created).toBe(true);
-    expect(result.name).toBe(SKILLS_CODING_REPO_NAME);
-    expect(result.localPath).toBe(repoPath);
-    expect(result.remoteUrl).toBe(""); // no `origin` configured
-    expect(codingStore.insertRepo).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        name: "skills",
-        localPath: repoPath,
-        defaultBranch: "main",
-        remoteUrl: "",
-        allowedBackends: ["claude"],
-        maxConcurrentTasks: 1,
-      }),
-    );
-  });
-
-  it("is idempotent — second call reports created: false and does not re-insert", async () => {
-    const repoPath = join(workDir, "skills");
-    await bootstrapSkillsRepo({ path: repoPath });
-    const codingStore = mock<CodingStore>();
-    codingStore.getRepoByName.mockResolvedValue({
-      id: "00000000-0000-0000-0000-000000000001",
-      name: "skills",
-      localPath: repoPath,
-      defaultBranch: "main",
-      remoteUrl: "git@github.com:user/skills.git",
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      verifyTimeoutSeconds: 600,
-      taskTokenBudget: 200_000,
-      taskWallTimeSeconds: 1800,
-      maxConcurrentTasks: 1,
-      identityName: "default",
-      createdAt: new Date(),
-    });
-
-    const result = await ensureSkillsCodingRepo(
-      { runInTx: fakeRunInTx, codingStore },
-      { skillsRepoPath: repoPath },
-    );
-
-    expect(result.created).toBe(false);
-    expect(result.remoteUrl).toBe("git@github.com:user/skills.git");
+    expect(result.kind).toBe("skipped_no_origin");
+    if (result.kind === "skipped_no_origin") {
+      expect(result.localPath).toBe(repoPath);
+    }
+    // Critically: we don't read the DB or insert anything when origin is
+    // missing — the missing origin alone is enough to short-circuit.
+    expect(codingStore.getRepoByName).not.toHaveBeenCalled();
     expect(codingStore.insertRepo).not.toHaveBeenCalled();
   });
 
-  it("picks up the bare repo's `origin` URL when one is configured", async () => {
+  it("inserts a `skills` row with the bare repo's origin URL on first run", async () => {
     const repoPath = join(workDir, "skills");
     await bootstrapSkillsRepo({ path: repoPath });
     await execFileP("git", [
@@ -375,12 +325,112 @@ describe("ensureSkillsCodingRepo", () => {
       { skillsRepoPath: repoPath },
     );
 
-    expect(result.created).toBe(true);
-    expect(result.remoteUrl).toBe("git@github.com:operator/cogmo-skills.git");
+    expect(result.kind).toBe("created");
+    if (result.kind === "created") {
+      expect(result.name).toBe(SKILLS_CODING_REPO_NAME);
+      expect(result.localPath).toBe(repoPath);
+      expect(result.remoteUrl).toBe("git@github.com:operator/cogmo-skills.git");
+    }
     expect(codingStore.insertRepo).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ remoteUrl: "git@github.com:operator/cogmo-skills.git" }),
+      expect.objectContaining({
+        name: "skills",
+        localPath: repoPath,
+        defaultBranch: "main",
+        remoteUrl: "git@github.com:operator/cogmo-skills.git",
+        allowedBackends: ["claude"],
+        maxConcurrentTasks: 1,
+      }),
     );
+  });
+
+  it("returns unchanged when row matches bare repo origin", async () => {
+    const repoPath = join(workDir, "skills");
+    await bootstrapSkillsRepo({ path: repoPath });
+    await execFileP("git", [
+      "-C",
+      repoPath,
+      "remote",
+      "add",
+      "origin",
+      "git@github.com:user/skills.git",
+    ]);
+    const codingStore = mock<CodingStore>();
+    codingStore.getRepoByName.mockResolvedValue({
+      id: "00000000-0000-0000-0000-000000000001",
+      name: "skills",
+      localPath: repoPath,
+      defaultBranch: "main",
+      remoteUrl: "git@github.com:user/skills.git",
+      devcontainer: null,
+      allowedBackends: ["claude"],
+      verifyCommand: "true",
+      verifyTimeoutSeconds: 600,
+      taskTokenBudget: 200_000,
+      taskWallTimeSeconds: 1800,
+      maxConcurrentTasks: 1,
+      identityName: "default",
+      createdAt: new Date(),
+    });
+
+    const result = await ensureSkillsCodingRepo(
+      { runInTx: fakeRunInTx, codingStore },
+      { skillsRepoPath: repoPath },
+    );
+
+    expect(result.kind).toBe("unchanged");
+    if (result.kind === "unchanged") {
+      expect(result.remoteUrl).toBe("git@github.com:user/skills.git");
+    }
+    expect(codingStore.insertRepo).not.toHaveBeenCalled();
+    expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
+  });
+
+  it("updates stale remote_url when bare repo origin changes", async () => {
+    const repoPath = join(workDir, "skills");
+    await bootstrapSkillsRepo({ path: repoPath });
+    await execFileP("git", [
+      "-C",
+      repoPath,
+      "remote",
+      "add",
+      "origin",
+      "git@github.com:user/new-skills.git",
+    ]);
+    const codingStore = mock<CodingStore>();
+    codingStore.getRepoByName.mockResolvedValue({
+      id: "00000000-0000-0000-0000-000000000001",
+      name: "skills",
+      localPath: repoPath,
+      defaultBranch: "main",
+      remoteUrl: "git@github.com:user/old-skills.git",
+      devcontainer: null,
+      allowedBackends: ["claude"],
+      verifyCommand: "true",
+      verifyTimeoutSeconds: 600,
+      taskTokenBudget: 200_000,
+      taskWallTimeSeconds: 1800,
+      maxConcurrentTasks: 1,
+      identityName: "default",
+      createdAt: new Date(),
+    });
+
+    const result = await ensureSkillsCodingRepo(
+      { runInTx: fakeRunInTx, codingStore },
+      { skillsRepoPath: repoPath },
+    );
+
+    expect(result.kind).toBe("updated");
+    if (result.kind === "updated") {
+      expect(result.remoteUrl).toBe("git@github.com:user/new-skills.git");
+      expect(result.previousRemoteUrl).toBe("git@github.com:user/old-skills.git");
+    }
+    expect(codingStore.updateRepoRemoteUrl).toHaveBeenCalledWith(
+      expect.anything(),
+      "00000000-0000-0000-0000-000000000001",
+      "git@github.com:user/new-skills.git",
+    );
+    expect(codingStore.insertRepo).not.toHaveBeenCalled();
   });
 
   it("propagates unexpected git failures (not just missing origin)", async () => {
