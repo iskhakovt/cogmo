@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase } from "../test/pglite.js";
@@ -42,9 +43,7 @@ async function pickFreePort(): Promise<number> {
   });
 }
 
-const dummySecrets = {
-  getSecret: async (_tx: unknown, _name: string) => undefined,
-} as unknown as SecretsStore;
+const dummySecrets: SecretsStore = mock<SecretsStore>();
 
 let tx: Transactor;
 let close: () => Promise<void>;
@@ -67,8 +66,13 @@ beforeAll(async () => {
       () => reject(new Error("server-everything did not become ready in 15s")),
       15_000,
     );
+    // Accumulate stderr — the readiness banner could land split across two
+    // `data` events, in which case a per-chunk substring check would silently
+    // miss it and the test would hang to the 15s timeout.
+    let stderrBuf = "";
     const onReady = (chunk: Buffer) => {
-      if (chunk.toString().includes(`listening on port ${port}`)) {
+      stderrBuf += chunk.toString();
+      if (stderrBuf.includes(`listening on port ${port}`)) {
         clearTimeout(timer);
         resolve();
       }

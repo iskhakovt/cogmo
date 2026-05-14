@@ -2,6 +2,7 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { SdkMcpConnection } from "./client.js";
 
 /**
@@ -127,11 +128,7 @@ describe("SdkMcpConnection", () => {
   });
 
   it("calls terminateSession() before close for streamable-http transports", async () => {
-    const client = fakeClient();
-    // Real instance so the `instanceof` check matches — we patch
-    // `terminateSession` and `close` to capture invocation order without
-    // standing up a live HTTP server.
-    const httpTransport = new StreamableHTTPClientTransport(new URL("https://example.test/mcp"));
+    const { client, httpTransport } = setupHttpConn();
     const order: string[] = [];
     const terminateSession = vi
       .spyOn(httpTransport, "terminateSession")
@@ -142,14 +139,8 @@ describe("SdkMcpConnection", () => {
       order.push("close");
       httpTransport.onclose?.();
     });
-    client.close = vi.fn(async () => {
-      await httpTransport.close();
-    }) as unknown as Client["close"];
 
-    const conn = new SdkMcpConnection(
-      client as unknown as Client,
-      httpTransport as unknown as Transport,
-    );
+    const conn = new SdkMcpConnection(client, httpTransport as unknown as Transport);
     await conn.connect();
     await conn.close();
 
@@ -158,21 +149,38 @@ describe("SdkMcpConnection", () => {
     expect(order).toEqual(["terminate", "close"]);
   });
 
+  it("bounds terminateSession with a timeout so a hung peer doesn't block close", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, httpTransport } = setupHttpConn();
+      // Simulate a server that accepts the DELETE but never responds —
+      // exactly the half-open / hung-peer scenario the timeout exists for.
+      vi.spyOn(httpTransport, "terminateSession").mockImplementation(() => new Promise(() => {}));
+      vi.spyOn(httpTransport, "close").mockImplementation(async () => {
+        httpTransport.onclose?.();
+      });
+
+      const conn = new SdkMcpConnection(client, httpTransport as unknown as Transport);
+      await conn.connect();
+
+      const closePromise = conn.close();
+      // Advance past the 2s cap; close must complete after the race resolves.
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(closePromise).resolves.toBeUndefined();
+      expect(client.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("swallows terminateSession errors so close still completes", async () => {
-    const client = fakeClient();
-    const httpTransport = new StreamableHTTPClientTransport(new URL("https://example.test/mcp"));
+    const { client, httpTransport } = setupHttpConn();
     vi.spyOn(httpTransport, "terminateSession").mockRejectedValue(new Error("server gone"));
     vi.spyOn(httpTransport, "close").mockImplementation(async () => {
       httpTransport.onclose?.();
     });
-    client.close = vi.fn(async () => {
-      await httpTransport.close();
-    }) as unknown as Client["close"];
 
-    const conn = new SdkMcpConnection(
-      client as unknown as Client,
-      httpTransport as unknown as Transport,
-    );
+    const conn = new SdkMcpConnection(client, httpTransport as unknown as Transport);
     await conn.connect();
 
     const cb = vi.fn();
@@ -181,3 +189,22 @@ describe("SdkMcpConnection", () => {
     expect(cb).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * The HTTP tests need a real {@link StreamableHTTPClientTransport} so the
+ * `instanceof` guard in `SdkMcpConnection.close()` fires; the SDK Client
+ * is fully mocked via `mock<T>()` (per CLAUDE.md mocking guidance), with
+ * `client.close()` wired to propagate into the transport so the existing
+ * `onclose` plumbing still fires.
+ */
+function setupHttpConn(): {
+  client: ReturnType<typeof mock<Client>>;
+  httpTransport: StreamableHTTPClientTransport;
+} {
+  const client = mock<Client>();
+  const httpTransport = new StreamableHTTPClientTransport(new URL("https://example.test/mcp"));
+  client.close.mockImplementation(async () => {
+    await httpTransport.close();
+  });
+  return { client, httpTransport };
+}

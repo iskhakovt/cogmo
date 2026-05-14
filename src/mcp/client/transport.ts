@@ -34,10 +34,11 @@ export async function createTransport(
       // SDK 1.25 types `StreamableHTTPClientTransport.sessionId` as `string |
       // undefined`, but the `Transport` interface declares it `sessionId?:
       // string` — incompatible under `exactOptionalPropertyTypes`. Runtime
-      // behaviour is identical; the cast bridges the type gap.
+      // behaviour is identical; the cast bridges the type gap at the one
+      // place where it surfaces.
       return new StreamableHTTPClientTransport(new URL(config.url), {
         requestInit: { headers },
-      }) as unknown as Transport;
+      }) as Transport;
     }
     case "sse":
       throw new Error(
