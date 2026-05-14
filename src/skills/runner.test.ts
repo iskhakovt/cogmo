@@ -82,7 +82,7 @@ async def run(inputs, ctx):
     return {"echo": inputs["x"] + 1}
 `;
 
-describe("SkillRunnerImpl", { timeout: 60_000 }, () => {
+describe("SkillRunnerImpl", () => {
   it("registers a skill and lists it", async () => {
     const runner = await makeRunner();
     await runner.__registerForTests({
@@ -596,7 +596,7 @@ def main(inputs, ctx):
     return {"ok": True}
 `;
 
-describe("SkillRunnerImpl tier-2 pool lifecycle", { timeout: 60_000 }, () => {
+describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
   let createSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
