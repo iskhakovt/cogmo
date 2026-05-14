@@ -1,5 +1,15 @@
 import { defineConfig } from "vitest/config";
 
+/** Files that load Pyodide (3–6s cold-start per WASM init). Routed to
+ * the `unit-pyodide` project so their parallelism is capped. */
+const PYODIDE_HEAVY_UNIT_GLOBS: readonly string[] = [
+  "src/skills/runner.test.ts",
+  "src/skills/runner.register.test.ts",
+  "src/skills/authoring-bootstrap.test.ts",
+  "src/skills/worker-wasm/**/*.test.ts",
+  "src/skills/pyodide-version.test.ts",
+];
+
 export default defineConfig({
   test: {
     reporters: ["default", "junit"],
@@ -15,7 +25,12 @@ export default defineConfig({
           name: "unit",
           environment: "node",
           include: ["src/**/*.test.ts"],
-          exclude: ["src/**/*.integration.test.ts", "src/**/*.e2e.test.ts"],
+          // Pyodide-heavy files routed to `unit-pyodide` (capped parallelism).
+          exclude: [
+            "src/**/*.integration.test.ts",
+            "src/**/*.e2e.test.ts",
+            ...PYODIDE_HEAVY_UNIT_GLOBS,
+          ],
           // PGlite `pushSchema` runs in `beforeAll` of every store test file
           // and takes 2–7s each under parallel CPU contention. The default
           // 10s hookTimeout flakes once enough store files exist.
@@ -29,6 +44,24 @@ export default defineConfig({
             // (e.g. `db/index.ts`, `health.ts`) needs them populated.
             // Unit tests mock the actual stores — these placeholders
             // exist purely to satisfy the schema, the URLs are never hit.
+            HINDSIGHT_URL: "http://localhost:8080",
+            INNGEST_BASE_URL: "http://localhost:8288",
+          },
+        },
+      },
+      {
+        test: {
+          // Caps parallelism so Vitest's default `maxForks = os.cpus()`
+          // doesn't oversubscribe disk/CPU during WASM cold-start. `2`
+          // matches CI's effective parallelism (2-core runners).
+          name: "unit-pyodide",
+          environment: "node",
+          include: PYODIDE_HEAVY_UNIT_GLOBS,
+          poolOptions: { forks: { maxForks: 2, minForks: 1 } },
+          hookTimeout: 30_000,
+          testTimeout: 30_000,
+          env: {
+            NODE_ENV: "test",
             HINDSIGHT_URL: "http://localhost:8080",
             INNGEST_BASE_URL: "http://localhost:8288",
           },

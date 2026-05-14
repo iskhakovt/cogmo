@@ -522,7 +522,9 @@ inputs:
   });
 });
 
-describe("UTF-8 / non-ASCII body — locks the JSON-as-Python-literal contract", () => {
+describe("UTF-8 / non-ASCII body — locks the JSON-as-Python-literal contract", {
+  timeout: 60_000,
+}, () => {
   it("a skill body containing emoji and non-BMP chars round-trips through Pyodide", async () => {
     const runner = await makeRunner();
     // Body intentionally contains: emoji (non-BMP — surrogate pair),
