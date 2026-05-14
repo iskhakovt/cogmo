@@ -208,17 +208,124 @@ The inline DB read is itself idempotent (a secret decrypt has no side effects), 
 
 ## Agent Self-Scheduling `[proposed]`
 
-The agent can create scheduled tasks by sending events that trigger Inngest functions, or by using the Inngest REST API to create new function triggers.
+One primitive — `scheduled_tasks` — covers both agent-authored reminders ("remind me to take meds at 9am every day") and user/wizard-authored recurring jobs (morning briefing, ingestion polling). Morning briefings, calendar/email polling, and "every weekday at 9am check X" are all instances of the same primitive, not special-cased Inngest cron functions.
+
+### Why not a runtime `inngest.createFunction`
+
+Inngest cron triggers are declared statically on `createFunction` and registered at SDK boot. There is no SDK call, REST endpoint, or `step.cron` primitive for adding/removing cron triggers at runtime; Inngest's REST API exposes run reads, not function CRUD. Open issues (`inngest/inngest` #3219, #2631) confirm cron handling is still a moving target. So dynamic schedules must live in our DB and be dispatched by a static ticker, not in Inngest's function registry.
+
+### Pattern: DB-backed registry + 1-min ticker + fan-out
+
+```
+scheduled_tasks (
+  id              UUID v7 PK,
+  user_id         UUID NOT NULL FK → users,
+  profile_id      UUID NOT NULL FK → profiles,
+  kind            schedule_kind NOT NULL,        -- pgEnum: 'recurring' | 'one_off'
+  cron            TEXT,                          -- nullable: only for kind='recurring'
+  timezone        TEXT NOT NULL,                 -- IANA tz, e.g. "Europe/London"
+  prompt          TEXT NOT NULL,                 -- replayed as user-role message into agent loop
+  next_run_at     TIMESTAMPTZ NOT NULL,
+  last_run_at     TIMESTAMPTZ,
+  enabled         BOOLEAN NOT NULL,
+  catchup_missed  BOOLEAN NOT NULL,              -- false = fire-latest-only, true = backfill
+  source          schedule_source NOT NULL,      -- pgEnum: 'agent' | 'wizard' | 'manual'
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
 
 ```typescript
-// Tool: schedule_task — agent sends an event that creates a cron function
-async function scheduleTask(args: { name: string; cron: string; prompt: string }) {
-  await inngest.send({
-    name: "task/scheduled",
-    data: { name: args.name, cron: args.cron, prompt: args.prompt },
-  });
-}
+// Ticker: static cron, runs every minute. One per deployment.
+const scheduledTaskTicker = inngest.createFunction(
+  { id: "scheduled-task-ticker", triggers: [{ cron: "* * * * *" }] },
+  async ({ step }) => {
+    const due = await step.run("lock-due", () =>
+      runInTx(async (tx) =>
+        tx.execute(sql`
+          SELECT id, user_id, profile_id, prompt, cron, timezone, next_run_at, kind
+          FROM scheduled_tasks
+          WHERE enabled AND next_run_at <= now()
+          ORDER BY next_run_at
+          FOR UPDATE SKIP LOCKED
+          LIMIT 100
+        `).then(rows => rows.map(advance)) // computes next next_run_at via croner
+      )
+    );
+    if (due.length === 0) return { fired: 0 };
+    await step.sendEvent("fan-out", due.map(t => ({
+      name: "agent/scheduled-task.fire",
+      data: { taskId: t.id, scheduledFor: t.next_run_at.toISOString(), prompt: t.prompt, userId: t.user_id, profileId: t.profile_id },
+      id: `${t.id}:${t.next_run_at.toISOString()}`, // Inngest event idempotency key
+    })));
+    return { fired: due.length };
+  },
+);
+
+// Fire handler: synthetic conversation turn. Re-enters the agent loop.
+const scheduledTaskFire = inngest.createFunction(
+  { id: "scheduled-task-fire", triggers: [{ event: "agent/scheduled-task.fire" }] },
+  async ({ event, step }) => {
+    // Identical shape to inbound message processing, minus transport.
+    // Prompt body includes scheduledFor so the model can say "this was meant for 09:00, now 10:30".
+  },
+);
 ```
+
+Why not pure per-row `step.sleepUntil`: it works for one-offs but is awkward for recurring tasks (each task needs a self-restarting workflow; edit/delete require cancellation tokens via `step.waitForEvent`). Why not `pg_cron`: SQL-only, can't re-enter the agent loop, requires superuser. Why not `pg_boss` / `BullMQ`: adding a second queue duplicates the durability we already get from Inngest.
+
+The fan-out shape matches `src/agent/coding/cleanup-orphan-run-branches.ts` and the documented "Fan-out cron" pattern above — per-row failures don't block siblings, each fire gets its own retry budget and dashboard lane.
+
+### One-off shortcut
+
+For one-offs ≤1 year (the `step.sleepUntil` cap on Inngest's paid plan; 7d on free), the agent can skip the table:
+
+```typescript
+await inngest.send({
+  name: "agent/scheduled-task.fire",
+  data: { /* synthetic */ },
+  ts: Date.now() + delayMs,
+});
+```
+
+Inngest defers the function start to `ts`, durably, without consuming concurrency while waiting. One-offs beyond 1 year go through the table.
+
+### Agent tool surface
+
+```typescript
+schedule_task({ cron: string, prompt: string, timezone?: string, kind?: "recurring" | "one_off", catchupMissed?: boolean }) → Result<{ id, nextRunAt }, ValidationError>
+list_tasks() → Array<{ id, cron, prompt, nextRunAt, enabled }>
+remove_task({ id }) → Result<void, NotFound>
+```
+
+Cron strings are validated with `croner` (zero-dep, `Intl.DateTimeFormat`-backed for IANA tz). The handler restricts to standard 5-field cron (rejecting croner's optional 6-field-with-seconds form so "minutes" stays the smallest unit) and enforces a per-user task cap (start at 50). Validation errors are structured (`unsupported_field_count` / `invalid_timezone` / `malformed` / `interval_too_short` / `no_next_occurrence`) so the LLM can self-correct from the `tool_result` — the openclaw#9283 cautionary tale shows unstructured cron errors cause infinite retry loops.
+
+DST contract (verified empirically in `src/agent/scheduling/cron.test.ts`):
+- **Spring forward**: a cron targeting a missing local hour shifts to the next valid instant. "Every day at 01:00 local" in `Europe/London` fires once at 02:00 BST on the DST-start day (= 01:00 UTC), then resumes normal cadence. Preserves "fires daily" semantics across the transition.
+- **Fall back**: a cron targeting a repeated local hour fires once at the first occurrence and skips the second. "Every day at 01:00 local" fires at 01:00 BST, not again at 01:00 GMT the same day.
+
+### Synthetic conversation turn
+
+When a fire event lands, the orchestrator:
+
+1. Loads the task's `user_id` + `profile_id`.
+2. Builds a scoped `Service` (memory bank, files, etc.) identical to an inbound-message turn.
+3. Constructs a synthetic user-role message containing the stored prompt and the scheduled-for timestamp (so the model is self-aware about catch-up: "this was meant to fire at 09:00, it's now 10:30").
+4. Runs the agent loop. Output is routed through `DeliveryRouter` to `getReceiveAllSessions(userId)` — whatever channels the user has online for that profile.
+5. Audit-logs `source: 'scheduled_task'`.
+
+### Idempotency, drift, catch-up
+
+| Concern | Approach |
+|-|-|
+| Idempotency | Inngest event `id = ${task_id}:${next_run_at.toISOString()}`. Advance `next_run_at` inside the same tx as the emit, so a retry produces a different key. |
+| Drift | Each fire computes the next occurrence by passing the just-fired `next_run_at` to `croner.nextRun(after)` in the user's tz — anchored to the schedule, not to `now()`. |
+| Catch-up on outage | Default: fire-latest-only. After downtime the ticker finds `next_run_at <= now()` and emits one event using *that* `next_run_at`. The scheduled-for timestamp goes into the prompt so the model can be self-aware. `catchup_missed: true` rows backfill every missed occurrence. |
+| Multi-user from day 1 | `user_id NOT NULL`. The fire event carries `{ userId, profileId, taskId }`; `Service` is scoped to that user just like for an inbound turn. |
+| Schema evolution | Append-only column policy; `next_run_at` is recomputed from `cron` on every fire, so editing the row mid-flight is safe. |
+
+### Industry precedents
+
+ChatGPT Tasks (Jan 2025), Hermes Agent's `cron_create`, AnythingLLM scheduled agents, and Temporal's "ambient agents" all converge on the cron-as-tool pattern with an executor that replays a stored prompt under the user's identity. The `request_heartbeat=true` pattern from Letta/MemGPT is the in-loop continuation primitive; it complements rather than replaces durable cron.
 
 ## Connection Modes `[confirmed]`
 

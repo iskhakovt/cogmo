@@ -60,7 +60,7 @@ INGESTION (scheduled, headless)              RETRIEVAL (interactive)
 |-|-|-|
 | Real-time | User says "remember X" | User intent, immediate `retain()` |
 | Post-conversation (Observer) | Chat idle ~5 min | Bot code extracts facts from transcript |
-| Scheduled ingestion | Inngest cron function | Pull email/calendar/etc, extract, `retain()` |
+| Scheduled ingestion | `scheduled_tasks` row + ticker fan-out (see [scheduling.md](scheduling.md)) | Pull email/calendar/etc, extract, `retain()` |
 
 ## Two-Tier Memory `[confirmed]`
 

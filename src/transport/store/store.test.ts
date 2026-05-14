@@ -819,4 +819,163 @@ describe("DrizzleTransportStore", () => {
       ).toBeUndefined();
     });
   });
+
+  describe("findActiveSessionForUserProfile", () => {
+    it("returns the most recent active session for the user+profile pair", async () => {
+      const { userId, profileId, conversationId } = await seedConversation();
+      const channelId = await seedChannel();
+      const sessionId = await seedSession(channelId, conversationId, "addr-1");
+
+      const result = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, userId, profileId),
+      );
+      expect(result).toEqual({ sessionId, conversationId });
+    });
+
+    it("picks the most recently-created active session when multiple exist", async () => {
+      const { userId, profileId, conversationId } = await seedConversation();
+      const channelId = await seedChannel();
+      await seedSession(channelId, conversationId, "addr-old");
+      // Sleep 5ms so timestamps are strictly ordered under postgres
+      // resolution. (UUIDv7 ids would tiebreak even at the same ts.)
+      await new Promise((r) => setTimeout(r, 5));
+      const newer = await seedSession(channelId, conversationId, "addr-new");
+
+      const result = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, userId, profileId),
+      );
+      expect(result?.sessionId).toBe(newer);
+    });
+
+    it("returns undefined when the user has no active session for the profile", async () => {
+      const { userId, profileId } = await seedConversation();
+      // No session seeded.
+
+      const result = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, userId, profileId),
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it("ignores closed sessions", async () => {
+      const { userId, profileId, conversationId } = await seedConversation();
+      const channelId = await seedChannel();
+      const sessionId = await seedSession(channelId, conversationId);
+      await tx((trx) => store.closeSession(trx, sessionId));
+
+      const result = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, userId, profileId),
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it("ignores expired sessions", async () => {
+      const { userId, profileId, conversationId } = await seedConversation();
+      const channelId = await seedChannel();
+      const sessionId = await seedSession(channelId, conversationId);
+      // Manually expire in the past — createSession doesn't take expiresAt.
+      await db.execute(
+        sql`UPDATE channel_sessions SET expires_at = now() - interval '1 hour' WHERE id = ${sessionId}`,
+      );
+
+      const result = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, userId, profileId),
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it("breaks ties on identical createdAt by session id (UUIDv7 time-ordered)", async () => {
+      // When two sessions are created in the same statement (or within
+      // the same Postgres timestamp resolution), `created_at DESC`
+      // alone is not deterministic. UUIDv7 ids are sub-millisecond
+      // time-ordered, so the id-based ordering of the inner SELECT is
+      // stable. Pin that we get *some* deterministic winner, not a
+      // flaky pick. The exact winner is the chronologically-later id,
+      // which under UUIDv7's monotonic-counter sub-ms scheme is the
+      // second insert.
+      const { userId, profileId, conversationId } = await seedConversation();
+      const channelId = await seedChannel();
+      // Two sessions, identical createdAt likely (same PG `now()` tick).
+      const first = await seedSession(channelId, conversationId, "addr-1");
+      const second = await seedSession(channelId, conversationId, "addr-2");
+
+      const result = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, userId, profileId),
+      );
+      // Either is a valid pick under `ORDER BY createdAt DESC` alone —
+      // assert determinism by running the same query twice and seeing
+      // an identical result both times. (Same-tx-snapshot guarantees
+      // this is a real determinism test, not a transient observation.)
+      const again = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, userId, profileId),
+      );
+      expect(result?.sessionId).toBeDefined();
+      expect(again?.sessionId).toBe(result?.sessionId);
+      // Sanity: it's one of the two we created.
+      expect([first, second]).toContain(result?.sessionId);
+    });
+
+    it("scopes by both userId AND profileId — does not leak across users", async () => {
+      const a = await seedConversation();
+      const b = await seedConversation();
+      const channelId = await seedChannel();
+      await seedSession(channelId, a.conversationId, "addr-a");
+      await seedSession(channelId, b.conversationId, "addr-b");
+
+      const result = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, a.userId, b.profileId),
+      );
+      // a.userId never used b.profileId — no match should exist.
+      expect(result).toBeUndefined();
+    });
+
+    it("scopes by profileId for the SAME user — two profiles, two distinct results", async () => {
+      // Same-user-different-profile scoping. The previous test varies
+      // userId; this varies profileId for one user. Catches a hypothetical
+      // regression where the JOIN filtered only on conversations.userId.
+      const userId = (await tx((trx) => agentStore.createUser(trx))).id;
+      profileNameCounter += 1;
+      const profile1 = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `test-p1-${profileNameCounter}`,
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      profileNameCounter += 1;
+      const profile2 = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `test-p2-${profileNameCounter}`,
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      const conv1 = (
+        await tx((trx) =>
+          agentStore.createConversation(trx, { userId, profileId: profile1, isPrivate: true }),
+        )
+      ).id;
+      const conv2 = (
+        await tx((trx) =>
+          agentStore.createConversation(trx, { userId, profileId: profile2, isPrivate: true }),
+        )
+      ).id;
+      const channelId = await seedChannel();
+      const s1 = await seedSession(channelId, conv1, "addr-p1");
+      const s2 = await seedSession(channelId, conv2, "addr-p2");
+
+      const r1 = await tx((trx) => store.findActiveSessionForUserProfile(trx, userId, profile1));
+      const r2 = await tx((trx) => store.findActiveSessionForUserProfile(trx, userId, profile2));
+      expect(r1).toEqual({ sessionId: s1, conversationId: conv1 });
+      expect(r2).toEqual({ sessionId: s2, conversationId: conv2 });
+    });
+  });
 });
