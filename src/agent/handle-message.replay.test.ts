@@ -32,6 +32,7 @@ import {
   mockResolver,
   mockToolRegistry,
   mockTransportStore,
+  spyOnInngestSend,
 } from "../test/factories.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
@@ -40,7 +41,8 @@ import { createHandleMessage } from "./handle-message.js";
 // inside the function under test don't try to reach a real Inngest dev server.
 // @inngest/test mocks step.* on the ctx, but the engine internally invokes
 // `inngest._send` (not the public `send`). Without this stub each test waits
-// ~2s for an ECONNREFUSED retry.
+// ~2s for an ECONNREFUSED retry. The cast that bridges Inngest's private
+// `_send` to `vi.spyOn` lives in `spyOnInngestSend` (src/test/factories.ts).
 //
 // Failure modes:
 //   - If Inngest renames or removes `_send`, `vi.spyOn` throws synchronously
@@ -51,12 +53,11 @@ import { createHandleMessage } from "./handle-message.js";
 //     The first test below has an `expect(sendSpy).toHaveBeenCalled()` anchor
 //     to catch this — it would otherwise reintroduce the ECONNREFUSED delay
 //     silently.
-let sendSpy: ReturnType<typeof vi.spyOn>;
+let sendSpy: ReturnType<typeof spyOnInngestSend>;
 
 beforeEach(() => {
-  sendSpy = vi
-    .spyOn(inngest as unknown as { _send: () => Promise<unknown> }, "_send")
-    .mockResolvedValue({ ids: [] });
+  sendSpy = spyOnInngestSend(inngest);
+  sendSpy.mockResolvedValue({ ids: [] });
 });
 
 afterEach(() => {

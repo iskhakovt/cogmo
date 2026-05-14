@@ -115,13 +115,16 @@
 
 ### Phase 2 — memory automation & ingestion
 
-- [ ] `p2` Morning briefing — Inngest cron function (Phase 2)
-- [ ] `p2` Post-conversation extraction — Inngest delayed function (Phase 2)
-- [ ] `p2` Memory consolidation — daily `reflect()` via Inngest cron (Phase 2)
-- [ ] `p2` Agent self-scheduling tools (Phase 2)
-- [ ] `p2` Claude Agent SDK integration — background tasks via subscription (Phase 2)
-- [ ] `p2` First ingestion agent: Gmail via MCP (Phase 2) — depends on MCP client Phase D below
-- [ ] `p2` First ingestion agent: Google Calendar via MCP (Phase 2) — depends on MCP client Phase D below
+- [ ] `p2` `scheduled_tasks` table + 1-min ticker dispatcher (Phase 2) — `pgEnum` `schedule_kind` ∈ {`recurring`, `one_off`} and `schedule_source` ∈ {`agent`, `wizard`, `manual`}; `next_run_at` cron-anchored via `croner` + IANA tz; ticker `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 100`; fan-out via `step.sendEvent` with event id `${task_id}:${next_run_at.toISOString()}`; advance `next_run_at` in the same tx as the emit. Foundation for everything else in Phase 2. See [design/scheduling.md](design/scheduling.md) → Agent Self-Scheduling.
+- [ ] `p2` `schedule_task` / `list_tasks` / `remove_task` agent tools (Phase 2) — `croner` validation, min-interval ≥60s, per-user cap (start 50), structured `Result<TaskCreated, ValidationError>` so the LLM self-corrects. One-offs ≤1y shortcut to `inngest.send({ ts })` without writing a row; >1y goes through the table. Depends on the table.
+- [ ] `p2` Synthetic conversation turn on `agent/scheduled-task.fire` (Phase 2) — load user+profile, build scoped `Service`, replay stored prompt as user-role message with scheduled-for timestamp embedded so the model is self-aware about catch-up. Output through `DeliveryRouter` to receive-all sessions for the profile. Audit `source: 'scheduled_task'`. Depends on the table.
+- [ ] `p2` Wizard recurring-tasks step (Phase 2) — opt-in flow that writes a single `scheduled_tasks` row per recurring action (morning briefing is the canonical example, not a special-cased function). Re-runnable, removable via `/schedules`. Depends on the agent tools.
+- [ ] `p2` `/schedules` channel command (Phase 2) — view enabled + disabled, disable/enable/delete; identity-checked transport entry point; mirror `/skills`. Depends on the table.
+- [ ] `p2` Memory consolidation — daily `reflect()` via static Inngest cron (Phase 2) — genuinely system-wide, not user-defined; stays as a hard-coded cron.
+- [ ] `p2` First ingestion agent: Gmail via MCP (Phase 2) — depends on MCP client Phase D below; polling cadence is itself a `scheduled_tasks` row, not a hard-coded cron.
+- [ ] `p2` First ingestion agent: Google Calendar via MCP (Phase 2) — same shape as Gmail.
+- [ ] `p2` Dual-mode monitoring for ingestion — embedding scan first, LLM only when relevant (Phase 2).
+- [ ] `p3` `platformTs` ordering invariant under stale-fire downstream — integration test that drives a scheduled-task fire whose `next_run_at` is days in the past (post-outage catchup), persists the synthetic inbound with `platform_ts = scheduledFor`, then asserts `handle-message` + history compaction + the assistant reply path treat the stale `platform_ts` consistently (no out-of-order ordering in compaction, no "this is a duplicate" guard mis-firing). Belongs in the integration tier alongside the real-Inngest items in PROGRESS.md — fire-handler unit tests pin the inbound-side invariant (`platformTs === scheduledFor`), this catches what downstream layers do with that. Promote when integration-tier Inngest is in place.
 
 ### MCP client phases B–D
 

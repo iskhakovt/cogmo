@@ -218,6 +218,13 @@
       "when": 1778535466476,
       "tag": "0030_breezy_wallop",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1778756128219,
+      "tag": "0031_mighty_dagger",
+      "breakpoints": true
     }
   ]
 }
