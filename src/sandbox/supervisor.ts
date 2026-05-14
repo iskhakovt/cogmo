@@ -4,6 +4,7 @@ import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import { cleanupAskpass } from "./askpass.js";
 import { taskSliceName } from "./cgroup-parent.js";
+import type { DockerContainer, DockerFacade } from "./docker-facade.js";
 import type {
   ExecOptions,
   ExecResult,
@@ -19,6 +20,11 @@ import type { CogmoSocketProxy } from "./proxy/index.js";
 import { assertRuntimeAvailable, dockerRuntimeName, type SandboxRuntime } from "./runtime.js";
 import type { SandboxStore } from "./store/index.js";
 import type { ContainerLabels } from "./types.js";
+
+// Dockerode's `Container.create` accepts `Mounts` typed as `MountSettings[]`.
+// We need the type alias to construct the spec without pulling in the full
+// `Docker` namespace at the value position.
+type DockerodeMountSettings = Docker.MountSettings;
 
 const log = logger.child({ component: "sandbox" });
 
@@ -41,7 +47,7 @@ class DisposedError extends Error {
 }
 
 interface CreateOptions {
-  docker: Docker;
+  docker: DockerFacade;
   store: SandboxStore;
   runInTx: Transactor;
   runtime: SandboxRuntime;
@@ -84,7 +90,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
   readonly backendId = "local-docker";
   readonly capabilities = CAPABILITIES;
 
-  #docker: Docker;
+  #docker: DockerFacade;
   #store: SandboxStore;
   #runInTx: Transactor;
   #runtime: SandboxRuntime;
@@ -225,7 +231,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     // mcr.microsoft.com/devcontainers/base:ubuntu-24.04). Skills tier-2
     // omits the home volume entirely. When custom devcontainer support
     // grows, the mount target needs to become image-declared.
-    const mounts: Docker.MountSettings[] = spec.homeVolume
+    const mounts: DockerodeMountSettings[] = spec.homeVolume
       ? [{ Type: "volume", Source: spec.homeVolume.volumeName, Target: HOME_VOLUME_TARGET }]
       : [];
 
@@ -241,7 +247,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     // bill the user's Console account instead of their Max/Pro subscription.
     const envList = spec.env ? Object.entries(spec.env).map(([k, v]) => `${k}=${v}`) : undefined;
 
-    let container: Docker.Container;
+    let container: DockerContainer;
     try {
       container = await this.#docker.createContainer({
         Image: spec.image,
@@ -478,7 +484,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
  * `execStreaming` instead.
  */
 async function execBuffered(
-  docker: Docker,
+  docker: DockerFacade,
   dockerId: string,
   cmd: readonly string[],
   opts: ExecOptions = {},
@@ -542,7 +548,7 @@ class BoundedBuffer {
 }
 
 async function execStreaming(
-  docker: Docker,
+  docker: DockerFacade,
   dockerId: string,
   cmd: readonly string[],
   opts: ExecOptions = {},
