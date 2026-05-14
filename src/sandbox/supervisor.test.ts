@@ -6,11 +6,11 @@
  * and bind-mounts the returned socket path.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { mock } from "vitest-mock-extended";
+import { mock, mockDeep } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
 import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import type { DockerContainer, DockerFacade, DockerImage, DockerModem } from "./docker-facade.js";
+import type { DockerContainer, DockerFacade, DockerImage } from "./docker-facade.js";
 import { LocalDockerSandboxClient } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import type { TaskScope } from "./proxy/types.js";
@@ -98,23 +98,17 @@ function fakeDocker(opts: { dockerId: string; failStart?: boolean } = { dockerId
 }
 
 /**
- * `mock<DockerFacade>()` with the always-needed defaults populated.
- * Returns the typed mock proxy plus the auto-mocked `DockerContainer` that
- * `getContainer` resolves to — most tests just need to point a specific
- * `inspect` resolution at it. Per-test overrides happen via the standard
- * `.mockResolvedValue` / `.mockReturnValue` API.
+ * `mockDeep<DockerFacade>()` with the always-needed defaults populated.
+ * `mockDeep` (not `mock`) so nested objects like `modem` auto-mock too —
+ * plain `mock<T>()` returns `undefined` for nested object properties.
  */
 function mockDockerFacade(): {
-  docker: ReturnType<typeof mock<DockerFacade>>;
+  docker: ReturnType<typeof mockDeep<DockerFacade>>;
   container: ReturnType<typeof mock<DockerContainer>>;
 } {
-  const docker = mock<DockerFacade>();
+  const docker = mockDeep<DockerFacade>();
   docker.info.mockResolvedValue({ Runtimes: { runc: { path: "runc" } } });
   docker.listContainers.mockResolvedValue([]);
-  // `mock<T>()` doesn't deep-mock nested object properties — `modem` shows
-  // up as `undefined` until we explicitly construct it. Assign the inner
-  // mock so callers can `vi.mocked(docker.modem.followProgress)`.
-  docker.modem = mock<DockerModem>();
   const container = mock<DockerContainer>();
   container.inspect.mockResolvedValue({ State: { Status: "running" }, HostConfig: {} });
   docker.getContainer.mockReturnValue(container);
@@ -770,12 +764,44 @@ describe("LocalDockerSandboxClient — resume + tryResumeByTaskId (crash recover
     expect(session).toBeNull();
   });
 
-  it("tryResumeByTaskId: depth>0 children are skipped — only depth=0 root sessions resume", async () => {
-    // A task that spawned sibling docker-in-docker containers must not
-    // resume into one of them; the contract is "root session", not
-    // "any descendant".
+  it("tryResumeByTaskId: only a depth>0 row exists → null (filter, not just ordering)", async () => {
+    // The contract is "root session", not "any descendant". A task with
+    // only a sibling docker-in-docker child must NOT resume into it.
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const taskId = "019d0000-0000-7000-8000-000000000c02";
+    await tx((trx) =>
+      store.insertContainer(trx, {
+        dockerId: "docker-child-only",
+        parentId: null,
+        rootTaskId: taskId,
+        depth: 1,
+        image: "alpine",
+        runtime: "runc",
+        labels: {},
+        resourceLimits: RESOURCE_LIMITS,
+        ttlExpiresAt: new Date(Date.now() + 60_000),
+        instanceId: inst.id,
+      }),
+    );
+
+    const { docker } = mockDockerFacade();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    const session = await sandbox.tryResumeByTaskId(taskId);
+    expect(session).toBeNull();
+  });
+
+  it("tryResumeByTaskId: depth=0 row wins when a depth>0 sibling also exists", async () => {
+    // Ordering invariant — `listContainersForTask` returns DESC by depth,
+    // and the filter picks the first depth=0 row.
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const taskId = "019d0000-0000-7000-8000-000000000c0a";
     const parent = await tx((trx) =>
       store.insertContainer(trx, {
         dockerId: "docker-parent",
@@ -790,7 +816,6 @@ describe("LocalDockerSandboxClient — resume + tryResumeByTaskId (crash recover
         instanceId: inst.id,
       }),
     );
-    // Child at depth=1.
     await tx((trx) =>
       store.insertContainer(trx, {
         dockerId: "docker-child",
@@ -979,7 +1004,7 @@ describe("LocalDockerSandboxClient — ensureImagePresent (first-boot image pull
     // Real `PassThrough` is a `NodeJS.ReadableStream` — supervisor passes
     // it opaquely to modem.followProgress and awaits the completion callback.
     docker.pull.mockResolvedValue(new PassThrough());
-    vi.mocked(docker.modem.followProgress).mockImplementation((_stream, cb) => {
+    docker.modem.followProgress.mockImplementation((_stream, cb) => {
       cb(null); // success
     });
     const sandbox = await LocalDockerSandboxClient.create({
@@ -1024,7 +1049,7 @@ describe("LocalDockerSandboxClient — ensureImagePresent (first-boot image pull
     image.inspect.mockRejectedValue(Object.assign(new Error("no such image"), { statusCode: 404 }));
     docker.getImage.mockReturnValue(image);
     docker.pull.mockResolvedValue(new PassThrough());
-    vi.mocked(docker.modem.followProgress).mockImplementation((_stream, cb) => {
+    docker.modem.followProgress.mockImplementation((_stream, cb) => {
       cb(new Error("pull aborted: disk full"));
     });
     const sandbox = await LocalDockerSandboxClient.create({

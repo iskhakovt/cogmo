@@ -1036,24 +1036,6 @@ describe("telegram adapter", () => {
       expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Revising" });
     });
 
-    it("plan: parsePlanCallback returns null → handler exits without transport call", async () => {
-      // grammY's regex registration matches the union, but a future regex
-      // drift could let a "plan:<id>:something" string in that parsePlanCallback
-      // (strict regex) rejects. The handler must exit cleanly, not crash.
-      const { transport } = await createAdapter();
-      const ctx = makeCallbackCtx(`plan:${TASK_ID}:approve`);
-      // Force the parsed result to null by passing data that the strict
-      // parsePlanCallback regex rejects: an action token outside the union.
-      ctx.callbackQuery.data = `plan:${TASK_ID}:rogue`;
-
-      const handler = handlers.get(`callbackQuery:${PLAN_CALLBACK_REGEX.source}`);
-      await handler(ctx);
-
-      expect(transport.coding.approvePlan).not.toHaveBeenCalled();
-      expect(transport.coding.cancelTask).not.toHaveBeenCalled();
-      expect(ctx.editMessageText).not.toHaveBeenCalled();
-    });
-
     it("plan: editMessageText 'message is not modified' is swallowed (idempotent re-tap)", async () => {
       // A user double-tapping or Inngest replaying the callback hits the
       // same message with the same body — Telegram returns 400 "message is

@@ -540,36 +540,9 @@ effects:
     });
 
     it("target_missing_source when SKILL.md is gone at the deploy sha", async () => {
-      // Force-push the feature branch backward to a commit that doesn't
-      // have SKILL.md, then re-resolve the deploy's gitSha → gitShow on
-      // SKILL.md throws file_not_found, mapped to target_missing_source.
-      //
-      // Construction: register the deploy, then garbage-collect the sha
-      // pointed at by the deploy row by force-pushing an unrelated commit
-      // over `skill/notifier`. The deploy row still references the
-      // original sha; reading SKILL.md at that sha now fails because the
-      // commit is unreachable. (Real reproduction: a branch was rebased
-      // away between register and approve.)
-      //
-      // Simpler reproduction: register an approve-tier deploy from a
-      // branch tip, then run `git update-ref -d` on the feature branch
-      // before approve. The deploy row's gitSha is now unreachable from
-      // any ref — but the loose object is still on disk, so SKILL.md
-      // reads still succeed until `git gc` runs. Achieving a true
-      // file_not_found requires either gc or a fresh commit that drops
-      // the file.
-      //
-      // We force file_not_found directly: register a deploy that DOES
-      // include SKILL.md, then advance the feature branch to a new
-      // commit that deletes SKILL.md, and approve referencing the OLD
-      // sha but with a forced state where SKILL.md no longer exists at
-      // that sha. That's not actually possible — git objects are
-      // immutable.
-      //
-      // What IS testable: approve referencing an entirely unrelated
-      // valid sha that has no SKILL.md (the runner's gitShow path will
-      // file_not_found). Drive this by patching the deploy row's
-      // gitSha column to point at a commit lacking SKILL.md.
+      // Patch the deploy's git_sha column to point at a commit lacking
+      // SKILL.md — simulates the original branch being rebased away
+      // between register and approve so gitShow throws file_not_found.
       const runner = await makeRunner();
       const pendingId = await makePendingDeploy(runner);
 
