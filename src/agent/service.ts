@@ -10,6 +10,7 @@ import type {
 } from "../memory/provider.js";
 import type { SkillsService } from "../skills/skills-service.js";
 import type { CodingService } from "./coding/service.js";
+import type { SchedulingService } from "./scheduling/scheduling-service.js";
 import type { ProfileMemoryScope } from "./store/schema.js";
 
 /**
@@ -92,6 +93,13 @@ export interface Service {
    * always populates it.
    */
   skills?: SkillsService;
+  /**
+   * Scheduling surface — `schedule_task` / `list_tasks` / `remove_task`
+   * agent tools, the wizard's recurring-tasks step, and `/schedules`.
+   * Optional so tests can opt out; production wiring always populates
+   * it (factory in `src/agent/scheduling/scheduling-service.ts`).
+   */
+  scheduling?: SchedulingService;
 }
 
 /**
@@ -125,6 +133,7 @@ export function createService(
   stageRetain: StageRetainFn,
   coding?: CodingService,
   skills?: SkillsService,
+  scheduling?: SchedulingService,
 ): Service {
   return {
     memory: {
@@ -147,6 +156,7 @@ export function createService(
     coreMemory,
     ...(coding !== undefined && { coding }),
     ...(skills !== undefined && { skills }),
+    ...(scheduling !== undefined && { scheduling }),
   };
 }
 
