@@ -25,6 +25,7 @@ export const coreMemoryRead = defineTool({
   description:
     "Read all core memory blocks. These are already visible in your system prompt, " +
     "but use this tool if you need to inspect the raw content or check what blocks exist.",
+  parallelSafe: true,
   schema: z.object({}),
   handler: async (_input, service) => {
     const blocks = await service.coreMemory.get();

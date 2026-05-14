@@ -105,6 +105,20 @@ The `ToolRegistry` holds `ToolSpec` entries. The agentic loop uses it to:
 
 The orchestrator constructs scoped `Service` once per conversation turn and passes it to the agentic loop. The loop threads it through `executeToolCalls` to each handler.
 
+### Concurrent Tool Execution `[confirmed]`
+
+Claude (and most modern tool-use protocols) can emit multiple `tool_use` blocks in a single assistant turn. The protocol requires every `tool_use.id` answered by exactly one `tool_result` before the next inference, so the orchestrator collects results for the whole batch before continuing — synchronous fan-out, not async-continue. Long-running detached work belongs on the scheduling tables, not the tool executor.
+
+**Opt-in safety.** Each `ToolSpec` carries an optional `parallelSafe: boolean` (default `false`). `true` declares the handler has no observable ordering dependency on sibling tool calls — independent provider calls, read-only HTTP, pure compute. `false` is required for any handler that writes shared state where a concurrent sibling write or read could race (`core_memory_update`, `write_file`, `delegate_coding`, `register_skill`).
+
+**Consecutive coalescing.** `executeToolCalls` walks the LLM's emission order, folds each maximal run of parallelSafe entries into one `Promise.all`, and leaves every unsafe entry as its own singleton group. A mix like `[image, image, image, core_memory_update, web_search]` yields three groups — `{img, img, img}` → `{update}` → `{search}` — fanned out within each, sequenced between.
+
+**Why consecutive coalescing rather than group-by-safety:** the LLM's emission order is treated as load-bearing for unsafe writes. If the model emits `[read_file, write_file, read_file]`, the second read should observe the write. Reordering by safety would let safe reads run concurrently with — or before — the write. Two adjacent unsafe entries also stay split into singletons, so `[write_file(p), write_file(p)]` still runs serially.
+
+**Unknown tools** short-circuit to an error `tool_result` with no side effects and coalesce with safe runs.
+
+Reference: `executeToolCalls` in `src/agent/loop.ts`. See `design/decisions.md` for the tradeoff that drove this shape.
+
 ## Routing: Agents-as-Tools `[proposed]`
 
 Define each sub-agent as a tool. Claude's native tool selection handles routing. No router agent needed. Sub-agents are just nested `runAgentLoop()` calls with their own system prompts and tool sets.

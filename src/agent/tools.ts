@@ -33,6 +33,16 @@ export interface ToolSpec {
    * running outside Inngest). See `design/crash-recovery.md`.
    */
   durable?: boolean;
+  /**
+   * Declares the handler has no ordering dependency on sibling tool calls in
+   * the same turn. Consecutive parallelSafe entries in the LLM's tool_use
+   * sequence run via `Promise.all`; unsafe entries run individually between
+   * those groups, preserving emission order.
+   *
+   * Safe: read-only HTTP, independent provider calls, pure compute. Unsafe:
+   * writes against shared state (core memory blocks, same file path).
+   */
+  parallelSafe?: boolean;
 }
 
 /**
@@ -50,6 +60,8 @@ export function defineTool<T>(opts: {
   handler: (input: T, service: Service) => Promise<string>;
   /** See `ToolSpec.durable`. */
   durable?: boolean;
+  /** See `ToolSpec.parallelSafe`. */
+  parallelSafe?: boolean;
 }): ToolSpec {
   // z.toJSONSchema returns Zod's JSONSchema7-flavoured shape; our internal
   // JsonSchema type is a narrower subset that the LLM providers accept.
@@ -63,6 +75,7 @@ export function defineTool<T>(opts: {
       return opts.handler(parsed, service);
     },
     ...(opts.durable !== undefined && { durable: opts.durable }),
+    ...(opts.parallelSafe !== undefined && { parallelSafe: opts.parallelSafe }),
   };
 }
 
@@ -117,6 +130,7 @@ export function createDefaultTools(
         "Returns the current date, time, day of week, and timezone. " +
         "Use for scheduling, deadlines, or time questions. The system prompt includes the time " +
         "when the conversation started — call this tool for long-running sessions or exact time.",
+      parallelSafe: true,
       schema: z.object({
         timezone: z
           .string()

@@ -413,6 +413,260 @@ describe("runAgentLoop", () => {
 
     expect(receivedService).toBe(svc);
   });
+
+  // --- Parallel tool fan-out ---
+  //
+  // Barrier-style handlers prove real concurrency: each handler waits on a
+  // shared promise that only resolves after N peers have started, so
+  // sequential execution would deadlock.
+  it("fans out parallelSafe tools concurrently", async () => {
+    const provider = mockProvider([
+      {
+        content: [
+          { type: "tool_use", id: "t1", name: "gen", input: { n: 1 } },
+          { type: "tool_use", id: "t2", name: "gen", input: { n: 2 } },
+          { type: "tool_use", id: "t3", name: "gen", input: { n: 3 } },
+        ],
+        stopReason: "tool_use",
+        model: "mock-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      textResponse("Three done"),
+    ]);
+
+    let started = 0;
+    let releaseStartBarrier!: () => void;
+    const allStarted = new Promise<void>((resolve) => {
+      releaseStartBarrier = resolve;
+    });
+
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "gen",
+        description: "gen",
+        schema: z.object({ n: z.number() }),
+        parallelSafe: true,
+        handler: async (input) => {
+          started++;
+          if (started === 3) releaseStartBarrier();
+          await allStarted;
+          return `out-${input.n}`;
+        },
+      }),
+    );
+
+    const result = await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "gen three" }],
+      tools,
+      service: stubService(),
+    });
+
+    expect(result.messages[2]!.content).toEqual([
+      { type: "tool_result", toolUseId: "t1", content: "out-1" },
+      { type: "tool_result", toolUseId: "t2", content: "out-2" },
+      { type: "tool_result", toolUseId: "t3", content: "out-3" },
+    ]);
+  });
+
+  // [safe, safe, unsafe, safe, safe] → fan out → unsafe → fan out.
+  it("coalesces consecutive parallelSafe runs around unsafe entries", async () => {
+    const provider = mockProvider([
+      {
+        content: [
+          { type: "tool_use", id: "s1", name: "safe", input: { n: 1 } },
+          { type: "tool_use", id: "s2", name: "safe", input: { n: 2 } },
+          { type: "tool_use", id: "u", name: "unsafe", input: {} },
+          { type: "tool_use", id: "s3", name: "safe", input: { n: 3 } },
+          { type: "tool_use", id: "s4", name: "safe", input: { n: 4 } },
+        ],
+        stopReason: "tool_use",
+        model: "mock-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      textResponse("Done"),
+    ]);
+
+    function makeBarrier(expected: number): {
+      enter: () => Promise<void>;
+    } {
+      let started = 0;
+      let release!: () => void;
+      const ready = new Promise<void>((r) => {
+        release = r;
+      });
+      return {
+        enter: async () => {
+          started++;
+          if (started === expected) release();
+          await ready;
+        },
+      };
+    }
+    const groupA = makeBarrier(2);
+    const groupB = makeBarrier(2);
+    const order: string[] = [];
+
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "safe",
+        description: "safe",
+        schema: z.object({ n: z.number() }),
+        parallelSafe: true,
+        handler: async (input) => {
+          const barrier = input.n <= 2 ? groupA : groupB;
+          await barrier.enter();
+          order.push(`safe-${input.n}`);
+          return `out-${input.n}`;
+        },
+      }),
+    );
+    tools.register(
+      defineTool({
+        name: "unsafe",
+        description: "unsafe",
+        schema: z.object({}),
+        handler: async () => {
+          order.push("unsafe");
+          return "u";
+        },
+      }),
+    );
+
+    const result = await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "mixed" }],
+      tools,
+      service: stubService(),
+    });
+
+    expect(result.messages[2]!.content).toEqual([
+      { type: "tool_result", toolUseId: "s1", content: "out-1" },
+      { type: "tool_result", toolUseId: "s2", content: "out-2" },
+      { type: "tool_result", toolUseId: "u", content: "u" },
+      { type: "tool_result", toolUseId: "s3", content: "out-3" },
+      { type: "tool_result", toolUseId: "s4", content: "out-4" },
+    ]);
+    const unsafeIdx = order.indexOf("unsafe");
+    expect(unsafeIdx).toBe(2);
+    expect(new Set(order.slice(0, 2))).toEqual(new Set(["safe-1", "safe-2"]));
+    expect(new Set(order.slice(3))).toEqual(new Set(["safe-3", "safe-4"]));
+  });
+
+  it("runs back-to-back unsafe tools strictly sequentially", async () => {
+    const provider = mockProvider([
+      {
+        content: [
+          { type: "tool_use", id: "u1", name: "step", input: { tag: "first" } },
+          { type: "tool_use", id: "u2", name: "step", input: { tag: "second" } },
+        ],
+        stopReason: "tool_use",
+        model: "mock-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      textResponse("done"),
+    ]);
+
+    let active = 0;
+    let maxConcurrent = 0;
+    const order: string[] = [];
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "step",
+        description: "side-effecting step",
+        schema: z.object({ tag: z.string() }),
+        handler: async (input) => {
+          active++;
+          maxConcurrent = Math.max(maxConcurrent, active);
+          await new Promise((r) => setTimeout(r, 5));
+          order.push(input.tag);
+          active--;
+          return `done-${input.tag}`;
+        },
+      }),
+    );
+
+    await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "two writes" }],
+      tools,
+      service: stubService(),
+    });
+
+    expect(maxConcurrent).toBe(1);
+    expect(order).toEqual(["first", "second"]);
+  });
+
+  // [safe, unknown, safe] with a 2-barrier on the safes. Coalescing requires
+  // treating unknown tools as parallelSafe; if unknown were treated as unsafe
+  // the groups would be [[safe], [unknown], [safe]] — each safe alone — and
+  // the barrier would never release.
+  it("coalesces unknown tools with adjacent parallelSafe entries", async () => {
+    const provider = mockProvider([
+      {
+        content: [
+          { type: "tool_use", id: "s1", name: "safe", input: {} },
+          { type: "tool_use", id: "x1", name: "ghost", input: {} },
+          { type: "tool_use", id: "s2", name: "safe", input: {} },
+        ],
+        stopReason: "tool_use",
+        model: "mock-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      textResponse("done"),
+    ]);
+
+    let started = 0;
+    let releaseBarrier!: () => void;
+    const ready = new Promise<void>((r) => {
+      releaseBarrier = r;
+    });
+
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "safe",
+        description: "safe",
+        schema: z.object({}),
+        parallelSafe: true,
+        handler: async () => {
+          started++;
+          if (started === 2) releaseBarrier();
+          await ready;
+          return "ok";
+        },
+      }),
+    );
+
+    const result = await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "safe + ghost + safe" }],
+      tools,
+      service: stubService(),
+    });
+
+    expect(result.messages[2]!.content).toEqual([
+      { type: "tool_result", toolUseId: "s1", content: "ok" },
+      {
+        type: "tool_result",
+        toolUseId: "x1",
+        content: 'Error: unknown tool "ghost"',
+        isError: true,
+      },
+      { type: "tool_result", toolUseId: "s2", content: "ok" },
+    ]);
+  });
 });
 
 // --- Streaming agent loop tests ---
