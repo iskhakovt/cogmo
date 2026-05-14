@@ -32,6 +32,7 @@ import { DefaultPromptSource } from "./agent/prompt.js";
 import { createRecoverConversation } from "./agent/recover-conversation.js";
 import { createScheduledTaskFireHandler } from "./agent/scheduling/fire-handler.js";
 import { createScheduledTaskTicker } from "./agent/scheduling/ticker.js";
+import { schedulingTools } from "./agent/scheduling/tools.js";
 import type { Service } from "./agent/service.js";
 import { CORE_MEMORY_PROMPT_GUIDANCE, MEMORY_PROMPT_GUIDANCE } from "./agent/service.js";
 import { DrizzleAgentStore } from "./agent/store/index.js";
@@ -760,6 +761,7 @@ export async function bootstrapRuntime(
       ...fileTools,
       ...coreMemoryTools,
       ...documentTools,
+      ...schedulingTools,
       delegateCodingTool,
       registerSkillTool,
     ],
@@ -925,6 +927,7 @@ export async function bootstrapRuntime(
     codingServiceFactory,
     skillRunner,
     mcpRegistry,
+    userTimezone: env.USER_TIMEZONE,
     ...(ttsProvider && { ttsProvider }),
     ...(sttProvider && { sttProvider }),
     ...(voiceCfgForTurn && { voiceConfig: voiceCfgForTurn }),

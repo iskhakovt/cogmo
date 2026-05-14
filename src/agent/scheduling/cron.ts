@@ -121,7 +121,14 @@ export function computeNextRun(expression: string, timezone: string, after: Date
   return next;
 }
 
-function isValidTimezone(timezone: string): boolean {
+/**
+ * True if `timezone` is accepted by the runtime's `Intl.DateTimeFormat`
+ * (IANA names like `Europe/London`, legacy abbreviations like `EST`,
+ * offset strings like `+01:00` — whatever Intl accepts). Exported so
+ * non-cron paths (one-off scheduling, wizard tz pre-check) can reuse
+ * the same gate without re-parsing a cron expression.
+ */
+export function isValidTimezone(timezone: string): boolean {
   try {
     // Constructing a formatter with an unknown TZ throws `RangeError:
     // Invalid time zone specified`. This is the cheapest way to validate

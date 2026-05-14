@@ -31,6 +31,7 @@ import type { ImageToolsLoader } from "./image-tools-loader.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
 import { shouldSkipRecall } from "./recall-gate.js";
+import { createSchedulingService } from "./scheduling/scheduling-service.js";
 import type { Service } from "./service.js";
 import { createService } from "./service.js";
 import type { AgentStore } from "./store/index.js";
@@ -105,6 +106,13 @@ export interface HandleMessageDeps {
    * (voice id + model). Only consumed when ttsProvider is also present.
    */
   voiceConfig?: { ttsVoice: string; ttsModel: string };
+  /**
+   * IANA timezone used as the default when an agent tool (e.g.
+   * `schedule_task`) doesn't supply one. Sourced from `env.USER_TIMEZONE`
+   * — single-user POSIX-style convention, same value the prompt source
+   * already surfaces to the LLM. See design/scheduling.md.
+   */
+  userTimezone: string;
 }
 
 /**
@@ -539,6 +547,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             conversationId,
           })
         : undefined;
+      // Scheduling service is scoped per-turn to (userId, profileId)
+      // so `schedule_task` / `list_tasks` / `remove_task` can't leak
+      // across users. Always constructed when handle-message runs —
+      // unlike coding/skills there's no env-gated absence.
+      const schedulingService = createSchedulingService({
+        runInTx: deps.runInTx,
+        agentStore: deps.agentStore,
+        userId,
+        profileId,
+        defaultTimezone: deps.userTimezone,
+      });
       const service = createService(
         memory,
         userId,
@@ -566,6 +585,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         },
         codingService,
         skillsService,
+        schedulingService,
       );
 
       // Auto-recall: search memory for context relevant to this message, via

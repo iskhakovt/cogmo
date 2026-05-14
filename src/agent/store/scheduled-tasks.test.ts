@@ -354,4 +354,40 @@ describe("DrizzleAgentStore — scheduled_tasks", () => {
 
     await expect(tx((trx) => store.deleteScheduledTask(trx, created.id))).resolves.toBeUndefined();
   });
+
+  it("countScheduledTasks returns 0 for a user with no tasks", async () => {
+    const { userId } = await seed();
+    expect(await tx((trx) => store.countScheduledTasks(trx, userId))).toBe(0);
+  });
+
+  it("countScheduledTasks counts all rows including disabled (matches cap-scope contract)", async () => {
+    const { userId, profileId } = await seed();
+    await tx((trx) => store.createScheduledTask(trx, recurringParams(userId, profileId)));
+    await tx((trx) =>
+      store.createScheduledTask(trx, recurringParams(userId, profileId, { cron: "0 10 * * *" })),
+    );
+    const disabled = await tx((trx) =>
+      store.createScheduledTask(trx, recurringParams(userId, profileId, { cron: "0 11 * * *" })),
+    );
+    await tx((trx) => store.setScheduledTaskEnabled(trx, disabled.id, false));
+
+    // Disabled row counted — no graveyard bypass.
+    expect(await tx((trx) => store.countScheduledTasks(trx, userId))).toBe(3);
+  });
+
+  it("countScheduledTasks scopes to the user — does not see other users' rows", async () => {
+    const a = await seed();
+    const b = await seed();
+    await tx((trx) => store.createScheduledTask(trx, recurringParams(a.userId, a.profileId)));
+    await tx((trx) => store.createScheduledTask(trx, recurringParams(b.userId, b.profileId)));
+    await tx((trx) =>
+      store.createScheduledTask(
+        trx,
+        recurringParams(b.userId, b.profileId, { cron: "0 10 * * *" }),
+      ),
+    );
+
+    expect(await tx((trx) => store.countScheduledTasks(trx, a.userId))).toBe(1);
+    expect(await tx((trx) => store.countScheduledTasks(trx, b.userId))).toBe(2);
+  });
 });
