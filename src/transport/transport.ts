@@ -5,6 +5,7 @@ import { err, ok, type Result } from "neverthrow";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import { isCoreCompartment } from "../agent/evolution/memory-extraction-schema.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
+import type { ScheduledTaskSummary } from "../agent/scheduling/scheduling-service.js";
 import {
   CustomCompartmentCapExceededError,
   InvalidNameError,
@@ -45,6 +46,7 @@ import {
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { SkillRunner } from "../skills/runner.js";
 import type { SkillRiskTier, SkillStore, SkillTier } from "../skills/store/index.js";
+import { isUuid } from "../util/uuid.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { InboundContent } from "./content.js";
 import type { Session, TransportStore } from "./store/index.js";
@@ -185,21 +187,15 @@ export interface SkillListEntry {
 
 /**
  * One row of `scheduling.list` — the operator-facing projection of a
- * `scheduled_tasks` row. Mirrors `ScheduledTaskSummary` from
- * `src/agent/scheduling/scheduling-service.ts` but lives at the
- * transport layer so callers (Telegram adapter, future CLI) don't
- * import service internals.
+ * `scheduled_tasks` row. Aliased to `ScheduledTaskSummary` from the
+ * service layer (identical fields, single source of truth). Kept as a
+ * transport-namespace re-export so adapter authors get a name that
+ * reads naturally at this layer and don't have to grep for the
+ * service-layer name. If the two surfaces ever need to diverge
+ * (e.g. admin-only fields like `sourceUserHandle` in a multi-tenant
+ * future), break the alias then.
  */
-export interface ScheduledTaskAdminEntry {
-  id: string;
-  kind: "recurring" | "one_off";
-  cron: string | null;
-  prompt: string;
-  timezone: string;
-  nextRunAt: Date;
-  lastRunAt: Date | null;
-  enabled: boolean;
-}
+export type ScheduledTaskAdminEntry = ScheduledTaskSummary;
 
 export type TransportError =
   | { code: "session_not_found"; sessionId: string }
@@ -1828,7 +1824,7 @@ export function createTransport(deps: {
       },
 
       async delete(platformUserHandle, id) {
-        if (!UUID_RE.test(id)) {
+        if (!isUuid(id)) {
           return err({ code: "schedule_id_malformed" as const, id });
         }
         // Identity resolve + ownership check + delete in one tx so
@@ -2055,7 +2051,7 @@ export function createTransport(deps: {
     id: string,
     enabled: boolean,
   ): Promise<Result<{ id: string; alreadyAtState: boolean }, TransportError>> {
-    if (!UUID_RE.test(id)) {
+    if (!isUuid(id)) {
       return err({ code: "schedule_id_malformed" as const, id });
     }
     return await runInTx(async (tx) => {
@@ -2073,15 +2069,6 @@ export function createTransport(deps: {
     });
   }
 }
-
-/**
- * UUID-shape pattern matching v1-v8 + the two RFC-4122 sentinel
- * values (nil + max). Used at admin transport entry points to reject
- * malformed ids BEFORE the DB hit, avoiding raw PG 22P02 errors that
- * would otherwise escape the Result envelope.
- */
-const UUID_RE =
-  /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
 
 /**
  * Project a `ScheduledTask` row onto the transport-layer admin entry

@@ -3503,8 +3503,9 @@ describe("handleSchedules", () => {
     const ctx = mkCtx();
     await handleSchedules(transport, ctx);
     const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
-    expect(reply).not.toContain("and ");
-    expect(reply).not.toContain("more");
+    // Match the truncation-footer pattern specifically, not the
+    // bare word "and " (which could appear in future copy).
+    expect(reply).not.toMatch(/and \d+ more/);
   });
 
   // --- /schedules disable <id> ---

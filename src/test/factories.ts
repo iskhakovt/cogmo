@@ -393,17 +393,23 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
     },
     scheduling: {
       list: vi.fn().mockResolvedValue(ok([])),
+      // Echo the id the caller passed instead of a hardcoded constant.
+      // Matches the real contract (transport returns the id it just
+      // acted on) and prevents silent test passes where a test
+      // inadvertently exercises the default mock with a different id.
       disable: vi
         .fn()
-        .mockResolvedValue(
-          ok({ id: "019e2900-0000-7000-8000-000000000001", alreadyAtState: false }),
+        .mockImplementation((_handle: string, id: string) =>
+          Promise.resolve(ok({ id, alreadyAtState: false })),
         ),
       enable: vi
         .fn()
-        .mockResolvedValue(
-          ok({ id: "019e2900-0000-7000-8000-000000000001", alreadyAtState: false }),
+        .mockImplementation((_handle: string, id: string) =>
+          Promise.resolve(ok({ id, alreadyAtState: false })),
         ),
-      delete: vi.fn().mockResolvedValue(ok({ id: "019e2900-0000-7000-8000-000000000001" })),
+      delete: vi
+        .fn()
+        .mockImplementation((_handle: string, id: string) => Promise.resolve(ok({ id }))),
     },
     mcp: {
       toolBudget: vi.fn().mockReturnValue(25),

@@ -1962,13 +1962,12 @@ export async function handleSchedules(
  * included so the user can copy it into a follow-up
  * `/schedules disable|enable|delete <id>` command.
  *
- * Caps the rendered list at `MAX_DISPLAY` so the message can't blow
- * past Telegram's 4096-char per-message limit. Each task line is
- * ~210 chars worst case (UUID + truncated prompt + ISO timestamp +
- * formatting); MAX_DISPLAY × 210 + header + footer stays comfortably
- * under 4096. When the user has more tasks than fit, we surface the
- * count + nudge them toward `list_tasks` (the agent tool) which has
- * no length cap.
+ * Caps the rendered list at `MAX_SCHEDULE_DISPLAY` so the message
+ * can't blow past Telegram's 4096-char per-message limit. Worst-case
+ * sizing: 15 tasks × ~210 chars/task = ~3150 chars body + ~100 chars
+ * header/footer chrome ≈ 3250 chars, comfortable margin under 4096.
+ * When the user has more tasks than fit, we surface the count + nudge
+ * them toward `list_tasks` (the agent tool) which has no length cap.
  *
  * Note: `ctx.reply` does NOT auto-rotate — the streaming-text
  * rotator from PR #239 only applies to the assistant-text path.
@@ -1976,9 +1975,16 @@ export async function handleSchedules(
 const MAX_SCHEDULE_DISPLAY = 15;
 
 function formatScheduleList(tasks: ReadonlyArray<ScheduledTaskAdminEntry>): string {
+  // Sort: enabled-first, then nextRunAt ASC, then id ASC. Explicit
+  // id tiebreak makes the output deterministic on identical
+  // nextRunAt — UUIDv7 is time-ordered so an id ASC tiebreak
+  // approximates insertion order, which is what a human reader
+  // expects ("the older of two ties shows first").
   const sorted = [...tasks].sort((a, b) => {
     if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
-    return a.nextRunAt.getTime() - b.nextRunAt.getTime();
+    const dt = a.nextRunAt.getTime() - b.nextRunAt.getTime();
+    if (dt !== 0) return dt;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
   const visible = sorted.slice(0, MAX_SCHEDULE_DISPLAY);
   const header = `Scheduled tasks (${tasks.length}):`;
