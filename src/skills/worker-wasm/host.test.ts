@@ -21,7 +21,7 @@ function noopHandler(): CtxHandler {
   return { handle: vi.fn().mockResolvedValue(null) };
 }
 
-describe("runOnWorker (Pyodide)", { timeout: 60_000 }, () => {
+describe("runOnWorker (Pyodide)", () => {
   it("runs a trivial echo skill end-to-end", async () => {
     const result = await runOnWorker({
       taskId: "task-1",

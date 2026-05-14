@@ -1,13 +1,23 @@
 import { defineConfig } from "vitest/config";
 
-/** Files that load Pyodide (3–6s cold-start per WASM init). Routed to
- * the `unit-pyodide` project so their parallelism is capped. */
+/** Defaults to 2 — matches the parallelism of CI's 2-core runners.
+ * Override with `PYODIDE_MAX_FORKS=N` on bigger dev boxes if 2 leaves
+ * perf on the table. */
+const PYODIDE_MAX_FORKS = (() => {
+  const v = Number(process.env.PYODIDE_MAX_FORKS);
+  return Number.isFinite(v) && v >= 1 ? v : 2;
+})();
+
+/** Files that actually load Pyodide (3–6s cold-start per WASM init).
+ * Routed to the `unit-pyodide` project so their parallelism is capped.
+ * Membership rule: file must directly load Pyodide (`loadPyodide`,
+ * `runOnWorker`) or transitively via `SkillRunner.invoke()` calls. Files
+ * that only call `register()` (no Pyodide; tree-sitter classifier
+ * instead) or assert on a pinned version (no WASM load) stay in `unit`. */
 const PYODIDE_HEAVY_UNIT_GLOBS: readonly string[] = [
   "src/skills/runner.test.ts",
   "src/skills/runner.register.test.ts",
-  "src/skills/authoring-bootstrap.test.ts",
   "src/skills/worker-wasm/**/*.test.ts",
-  "src/skills/pyodide-version.test.ts",
 ];
 
 /** Shared by both unit projects. `HINDSIGHT_URL` + `INNGEST_BASE_URL` are
@@ -53,13 +63,17 @@ export default defineConfig({
         test: {
           // Caps parallelism so Vitest's default `maxForks = os.cpus()`
           // doesn't oversubscribe disk/CPU during WASM cold-start. `2`
-          // matches CI's effective parallelism (2-core runners).
+          // matches CI's effective parallelism; bigger dev boxes can
+          // override via `PYODIDE_MAX_FORKS`.
           name: "unit-pyodide",
           environment: "node",
           include: PYODIDE_HEAVY_UNIT_GLOBS,
-          poolOptions: { forks: { maxForks: 2, minForks: 1 } },
+          poolOptions: { forks: { maxForks: PYODIDE_MAX_FORKS } },
           hookTimeout: 30_000,
-          testTimeout: 30_000,
+          // 60s covers full Pyodide cold-start + a non-trivial WASM run.
+          // Tighter per-test budgets (e.g. host.test.ts's 15s wall-clock
+          // cap test) still apply via inline `{ timeout }` overrides.
+          testTimeout: 60_000,
           env: UNIT_ENV,
         },
       },
