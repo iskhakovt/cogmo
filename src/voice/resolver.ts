@@ -51,18 +51,24 @@ export function createDbVoiceResolver(deps: DbVoiceResolverDeps): VoiceProviderR
   let cache: CacheEntry | undefined;
 
   return async () => {
-    const row = await deps.runInTx((tx) => deps.agentStore.getVoiceConfig(tx));
-    if (!row) {
+    // Single tx for the row + both secret reads — atomic snapshot, and
+    // saves a round trip when TTS and STT share a secret_id (the wizard's
+    // "use the same key" shortcut produces this).
+    const snapshot = await deps.runInTx(async (tx) => {
+      const row = await deps.agentStore.getVoiceConfig(tx);
+      if (!row) return undefined;
+      const ttsKey = await deps.secretsStore.getSecretById(tx, row.ttsSecretId);
+      const sttKey =
+        row.sttSecretId === row.ttsSecretId
+          ? ttsKey
+          : await deps.secretsStore.getSecretById(tx, row.sttSecretId);
+      return { row, ttsKey, sttKey };
+    });
+    if (!snapshot) {
       cache = undefined;
       return undefined;
     }
-
-    const [ttsKey, sttKey] = await deps.runInTx((tx) =>
-      Promise.all([
-        deps.secretsStore.getSecretById(tx, row.ttsSecretId),
-        deps.secretsStore.getSecretById(tx, row.sttSecretId),
-      ]),
-    );
+    const { row, ttsKey, sttKey } = snapshot;
     if (!ttsKey || !sttKey) {
       logger.warn(
         { ttsSecretId: row.ttsSecretId, sttSecretId: row.sttSecretId },
