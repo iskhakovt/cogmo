@@ -31,11 +31,8 @@ export async function createTransport(
       });
     case "http": {
       const headers = await resolveVarMap(config.headers, secrets, runInTx);
-      // SDK 1.25 types `StreamableHTTPClientTransport.sessionId` as `string |
-      // undefined`, but the `Transport` interface declares it `sessionId?:
-      // string` — incompatible under `exactOptionalPropertyTypes`. Runtime
-      // behaviour is identical; the cast bridges the type gap at the one
-      // place where it surfaces.
+      // SDK declares `sessionId: string | undefined`; `Transport` declares
+      // `sessionId?: string` — incompatible under `exactOptionalPropertyTypes`.
       return new StreamableHTTPClientTransport(new URL(config.url), {
         requestInit: { headers },
       }) as Transport;

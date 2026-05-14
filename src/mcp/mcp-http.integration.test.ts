@@ -69,10 +69,13 @@ beforeAll(async () => {
     // Accumulate stderr — the readiness banner could land split across two
     // `data` events, in which case a per-chunk substring check would silently
     // miss it and the test would hang to the 15s timeout.
+    // Known fragility: depends on server-everything's "listening on port"
+    // log line; if upstream rewords that string the test hangs to the timer.
     let stderrBuf = "";
     const onReady = (chunk: Buffer) => {
       stderrBuf += chunk.toString();
       if (stderrBuf.includes(`listening on port ${port}`)) {
+        serverProc.stderr?.off("data", onReady);
         clearTimeout(timer);
         resolve();
       }
