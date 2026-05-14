@@ -87,6 +87,29 @@ export type ScheduleKindValue = (typeof scheduleKind.enumValues)[number];
 export const scheduleSource = pgEnum("schedule_source", ["agent", "wizard", "manual"]);
 export type ScheduleSourceValue = (typeof scheduleSource.enumValues)[number];
 
+/**
+ * TTS provider adapter discriminator. Maps to which `TtsProvider` class the
+ * voice resolver builds (`src/voice/resolver.ts`). `openai` and
+ * `openai_compatible` both use `OpenAIVoiceProvider`; the enum split keeps
+ * the operator's intent visible (and lets the wizard prompt for a baseURL on
+ * `openai_compatible` only). `elevenlabs` builds `ElevenLabsTtsProvider`.
+ */
+export const ttsProviderType = pgEnum("tts_provider_type", [
+  "openai",
+  "openai_compatible",
+  "elevenlabs",
+]);
+export type TtsProviderTypeValue = (typeof ttsProviderType.enumValues)[number];
+
+/**
+ * STT provider adapter discriminator. ElevenLabs is intentionally absent —
+ * only TTS routes through ElevenLabs in this slice; STT stays on OpenAI's
+ * `/v1/audio/transcriptions` (or any compatible provider that serves the
+ * same endpoint, e.g. Groq).
+ */
+export const sttProviderType = pgEnum("stt_provider_type", ["openai", "openai_compatible"]);
+export type SttProviderTypeValue = (typeof sttProviderType.enumValues)[number];
+
 // --- JSONB shapes ---
 
 /**
@@ -551,9 +574,10 @@ export const pendingMemories = pgTable(
  * Voice provider configuration — singleton row by convention (zero or one).
  * Credentials live in the encrypted `secrets` table (no env-only path); the
  * FKs decouple TTS from STT so swapping providers is a single secret-id
- * update, not a wholesale rewire. Slice 1 supports `tts_provider = 'openai'`
- * and `stt_provider = 'openai'`; ElevenLabs / Deepgram pluggable later.
- * See design/voice.md.
+ * update, not a wholesale rewire. TTS supports `openai`, `openai_compatible`
+ * (any provider serving `/v1/audio/speech`, e.g. self-hosted relays), and
+ * `elevenlabs`. STT supports `openai` and `openai_compatible` (e.g. Groq,
+ * which serves `/v1/audio/transcriptions`). See design/voice.md.
  */
 export const voiceConfig = pgTable(
   "voice_config",
@@ -565,11 +589,11 @@ export const voiceConfig = pgTable(
     sttSecretId: uuid("stt_secret_id")
       .notNull()
       .references(() => secrets.id),
-    ttsProvider: text("tts_provider").notNull(),
+    ttsProvider: ttsProviderType("tts_provider").notNull(),
     ttsModel: text("tts_model").notNull(),
     ttsVoice: text("tts_voice").notNull(),
     ttsBaseUrl: text("tts_base_url"), // NULL = SDK default
-    sttProvider: text("stt_provider").notNull(),
+    sttProvider: sttProviderType("stt_provider").notNull(),
     sttModel: text("stt_model").notNull(),
     sttBaseUrl: text("stt_base_url"), // NULL = SDK default
     /**
