@@ -101,9 +101,7 @@ voice_config (
 
 **Singleton enforced (UNIQUE + CHECK)** — exactly zero or one row, pinned at the DB level via a `singleton boolean NOT NULL DEFAULT TRUE` column with `UNIQUE` and `CHECK (singleton = TRUE)`. A second insert violates the unique constraint at write time rather than relying on convention; `getVoiceConfig` also `ORDER BY created_at DESC` as defense-in-depth in case the constraint is somehow bypassed (manual psql, broken migration). The wizard creates the row when the operator opts into voice; reads return null when voice is unconfigured. If a future need for multiple voice configs emerges (per-profile voice character, per-channel TTS provider), promote to `voice_providers` + `voice_models` mirroring `llm_providers` + `model_providers` — but don't pre-build that machinery.
 
-**Reusing existing OpenAI credentials.** The wizard offers "use the same key as the OpenAI LLM provider" — which inserts new `voice_config.tts_secret_id` / `stt_secret_id` rows pointing at the same `secrets` row already used by the LLM provider. Decoupled at the FK level so swapping TTS to ElevenLabs is a single secret-id update, not a wholesale rewire.
-
-**Env fallback for dev.** `ConfigResolver` (DB-first env-fallback, already used elsewhere) accepts `VOICE_TTS_API_KEY` / `VOICE_STT_API_KEY` so `pnpm dev` and CI work without running the wizard. Production paths always read from `secrets` via `voice_config`. The env path doesn't write to the DB — it's truly an escape hatch, not a primary path.
+**Credential entry.** The wizard prompts for a fresh OpenAI API key dedicated to voice (stored as the `openai_voice_key` secret). Both `voice_config.tts_secret_id` and `voice_config.stt_secret_id` point at it initially; the FK split keeps a future TTS-on-ElevenLabs swap to a single column update. No "reuse the LLM provider's key" shortcut — voice traffic hits `/v1/audio/{speech,transcriptions}`, which some OpenAI-compatible providers (OpenRouter, custom proxies) don't serve, so making the operator paste the key once is clearer than offering a reuse path that silently fails on a subset of providers.
 
 ### Data model `[confirmed]`
 

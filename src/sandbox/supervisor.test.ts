@@ -5,11 +5,12 @@
  * stub proxy to verify the supervisor calls the proxy in the right order
  * and bind-mounts the returned socket path.
  */
-import type Docker from "dockerode";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { mock, mockDeep } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
 import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
+import type { DockerContainer, DockerFacade, DockerImage } from "./docker-facade.js";
 import { LocalDockerSandboxClient } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import type { TaskScope } from "./proxy/types.js";
@@ -57,12 +58,14 @@ interface DockerCreateCallArgs {
 }
 
 /**
- * Minimal dockerode stub — enough to drive createTaskContainer. The shape
- * is far smaller than the real `Docker` type; the cast is centralised here
- * so call sites can pass `docker` without a per-call `as any`.
+ * Stateful dockerode stub — drives `createTaskContainer` AND records the
+ * `createContainer` arg list so tests can assert on the spec the supervisor
+ * built. Uses `mock<DockerFacade>()` + `mock<DockerContainer>()` so each
+ * method on the surface is auto-mocked; the few we care about get explicit
+ * `mockImplementation`s for call-tracking and stateful behaviour.
  */
 function fakeDocker(opts: { dockerId: string; failStart?: boolean } = { dockerId: "docker-abc" }): {
-  docker: Docker;
+  docker: ReturnType<typeof mock<DockerFacade>>;
   calls: { create: DockerCreateCallArgs[]; start: number; remove: number };
 } {
   const calls: { create: DockerCreateCallArgs[]; start: number; remove: number } = {
@@ -70,29 +73,46 @@ function fakeDocker(opts: { dockerId: string; failStart?: boolean } = { dockerId
     start: 0,
     remove: 0,
   };
-  const start = vi.fn(async () => {
+  const container = mock<DockerContainer>();
+  // mock<>() leaves `readonly id` as an auto-mock; pin it to the requested
+  // docker id so assertions on `state.dockerId` work without further setup.
+  Object.defineProperty(container, "id", { value: opts.dockerId, configurable: true });
+  container.start.mockImplementation(async () => {
     calls.start += 1;
     if (opts.failStart) throw new Error("boom");
   });
-  const remove = vi.fn(async () => {
+  container.remove.mockImplementation(async () => {
     calls.remove += 1;
   });
-  const inspect = vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} }));
-  const docker = {
-    createContainer: vi.fn(async (spec: DockerCreateCallArgs) => {
-      calls.create.push(spec);
-      return { id: opts.dockerId, start, remove, inspect };
-    }),
-    listContainers: vi.fn(async () => []),
-    getContainer: () => ({ inspect, kill: vi.fn(), remove }),
-    // Default `info` returns just runc; tests that need a different runtime
-    // map call `docker.info.mockResolvedValueOnce(...)` to override.
-    info: vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } })),
-    // The real dockerode `Docker` exposes ~50 methods; this stub covers the
-    // few `createTaskContainer` reaches for. `as unknown as Docker` is the
-    // single boundary cast — call sites stay typed.
-  } as unknown as Docker;
+  container.inspect.mockResolvedValue({ State: { Status: "running" }, HostConfig: {} });
+
+  const docker = mock<DockerFacade>();
+  docker.info.mockResolvedValue({ Runtimes: { runc: { path: "runc" } } });
+  docker.listContainers.mockResolvedValue([]);
+  docker.createContainer.mockImplementation(async (spec): Promise<DockerContainer> => {
+    calls.create.push(spec as DockerCreateCallArgs);
+    return container;
+  });
+  docker.getContainer.mockReturnValue(container);
   return { docker, calls };
+}
+
+/**
+ * `mockDeep<DockerFacade>()` with the always-needed defaults populated.
+ * `mockDeep` (not `mock`) so nested objects like `modem` auto-mock too —
+ * plain `mock<T>()` returns `undefined` for nested object properties.
+ */
+function mockDockerFacade(): {
+  docker: ReturnType<typeof mockDeep<DockerFacade>>;
+  container: ReturnType<typeof mock<DockerContainer>>;
+} {
+  const docker = mockDeep<DockerFacade>();
+  docker.info.mockResolvedValue({ Runtimes: { runc: { path: "runc" } } });
+  docker.listContainers.mockResolvedValue([]);
+  const container = mock<DockerContainer>();
+  container.inspect.mockResolvedValue({ State: { Status: "running" }, HostConfig: {} });
+  docker.getContainer.mockReturnValue(container);
+  return { docker, container };
 }
 
 /** Stub proxy that records register/unregister calls. */
@@ -249,9 +269,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
   it("rolls back the proxy registration when Docker createContainer fails", async () => {
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = fakeDocker();
-    docker.createContainer = vi.fn(async () => {
-      throw new Error("daemon refused");
-    });
+    docker.createContainer.mockRejectedValue(new Error("daemon refused"));
     const { proxy, registers, unregisters } = fakeProxy();
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
@@ -436,7 +454,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       listContainers: vi.fn(async () => []),
       getContainer: () => ({ inspect, kill, remove }),
       info: vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } })),
-    } as unknown as Docker;
+    } as unknown as DockerFacade;
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
@@ -595,7 +613,7 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
       // demuxStream is normally dockerode's frame parser — bypass it
       // since we're not feeding real Docker frames.
       modem: { demuxStream: vi.fn() },
-    } as unknown as Docker;
+    } as unknown as DockerFacade;
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
@@ -623,5 +641,425 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
     if (timeoutHandle) clearTimeout(timeoutHandle);
 
     expect(winner).toBe("done");
+  });
+});
+
+/**
+ * Crash-recovery contract — when the orchestrator retries a step via Inngest,
+ * the supervisor must rehydrate the prior sandbox session against the live
+ * Docker daemon, not blindly trust serialized state. Two entry points serve
+ * this:
+ *
+ *   - `resume(state)` — caller already has a serialized state blob (e.g. from
+ *     a step's previous return value).
+ *   - `tryResumeByTaskId(taskId)` — caller only knows the rootTaskId and asks
+ *     the supervisor to find the right row.
+ *
+ * Both inspect the container against Docker; a 404 means the reaper got it,
+ * the row's status was lying, or someone deleted it out-of-band — none of
+ * which should crash the orchestrator. See `design/crash-recovery.md`.
+ */
+describe("LocalDockerSandboxClient — resume + tryResumeByTaskId (crash recovery)", () => {
+  it("resume: inspect succeeds + DB row present → returns a wrapped session", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    // Seed a container row that resume() will look up.
+    const taskId = "019d0000-0000-7000-8000-000000000b01";
+    const row = await tx((trx) =>
+      store.insertContainer(trx, {
+        dockerId: "docker-resume-1",
+        parentId: null,
+        rootTaskId: taskId,
+        depth: 0,
+        image: "alpine",
+        runtime: "runc",
+        labels: {},
+        resourceLimits: RESOURCE_LIMITS,
+        ttlExpiresAt: new Date(Date.now() + 60_000),
+        instanceId: inst.id,
+      }),
+    );
+
+    const { docker, container } = mockDockerFacade();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    const session = await sandbox.resume({
+      type: "local-docker",
+      taskId,
+      containerRowId: row.id,
+      dockerId: "docker-resume-1",
+    });
+
+    expect(session.state.dockerId).toBe("docker-resume-1");
+    expect(container.inspect).toHaveBeenCalledOnce();
+  });
+
+  it("resume: throws when no DB row exists for the docker id (orphan state blob)", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+
+    const { docker } = mockDockerFacade();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    await expect(
+      sandbox.resume({
+        type: "local-docker",
+        taskId: "019d0000-0000-7000-8000-000000000b02",
+        containerRowId: "019d0000-0000-7000-8000-000000000b03",
+        dockerId: "docker-orphan",
+      }),
+    ).rejects.toThrow(/no DB row/);
+  });
+
+  it("resume: propagates docker.inspect errors (caller decides retry vs delete)", async () => {
+    // A 404 here means "Docker no longer has this container" — the
+    // resume contract is "verify the container is still present"; if
+    // it isn't, the caller's exception handler decides whether to
+    // start fresh or surface the error.
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, container } = mockDockerFacade();
+    container.inspect.mockRejectedValue(
+      Object.assign(new Error("no such container"), { statusCode: 404 }),
+    );
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    await expect(
+      sandbox.resume({
+        type: "local-docker",
+        taskId: "019d0000-0000-7000-8000-000000000b04",
+        containerRowId: "019d0000-0000-7000-8000-000000000b05",
+        dockerId: "docker-gone",
+      }),
+    ).rejects.toThrow(/no such container/);
+  });
+
+  it("tryResumeByTaskId: no rows for taskId → null", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker } = mockDockerFacade();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    const session = await sandbox.tryResumeByTaskId("019d0000-0000-7000-8000-000000000c01");
+    expect(session).toBeNull();
+  });
+
+  it("tryResumeByTaskId: only a depth>0 row exists → null (filter, not just ordering)", async () => {
+    // The contract is "root session", not "any descendant". A task with
+    // only a sibling docker-in-docker child must NOT resume into it.
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const taskId = "019d0000-0000-7000-8000-000000000c02";
+    await tx((trx) =>
+      store.insertContainer(trx, {
+        dockerId: "docker-child-only",
+        parentId: null,
+        rootTaskId: taskId,
+        depth: 1,
+        image: "alpine",
+        runtime: "runc",
+        labels: {},
+        resourceLimits: RESOURCE_LIMITS,
+        ttlExpiresAt: new Date(Date.now() + 60_000),
+        instanceId: inst.id,
+      }),
+    );
+
+    const { docker } = mockDockerFacade();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    const session = await sandbox.tryResumeByTaskId(taskId);
+    expect(session).toBeNull();
+  });
+
+  it("tryResumeByTaskId: depth=0 row wins when a depth>0 sibling also exists", async () => {
+    // Ordering invariant — `listContainersForTask` returns DESC by depth,
+    // and the filter picks the first depth=0 row.
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const taskId = "019d0000-0000-7000-8000-000000000c0a";
+    const parent = await tx((trx) =>
+      store.insertContainer(trx, {
+        dockerId: "docker-parent",
+        parentId: null,
+        rootTaskId: taskId,
+        depth: 0,
+        image: "alpine",
+        runtime: "runc",
+        labels: {},
+        resourceLimits: RESOURCE_LIMITS,
+        ttlExpiresAt: new Date(Date.now() + 60_000),
+        instanceId: inst.id,
+      }),
+    );
+    await tx((trx) =>
+      store.insertContainer(trx, {
+        dockerId: "docker-child",
+        parentId: parent.id,
+        rootTaskId: taskId,
+        depth: 1,
+        image: "alpine",
+        runtime: "runc",
+        labels: {},
+        resourceLimits: RESOURCE_LIMITS,
+        ttlExpiresAt: new Date(Date.now() + 60_000),
+        instanceId: inst.id,
+      }),
+    );
+
+    const { docker } = mockDockerFacade();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    const session = await sandbox.tryResumeByTaskId(taskId);
+    expect(session?.state.dockerId).toBe("docker-parent");
+  });
+
+  it("tryResumeByTaskId: docker.inspect returns 404 → skips that row, continues", async () => {
+    // Two depth=0 candidates: the first is gone from Docker (404), the
+    // second is live. Resume must walk past the dead row.
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const taskId = "019d0000-0000-7000-8000-000000000c03";
+    await tx((trx) =>
+      store.insertContainer(trx, {
+        dockerId: "docker-dead",
+        parentId: null,
+        rootTaskId: taskId,
+        depth: 0,
+        image: "alpine",
+        runtime: "runc",
+        labels: {},
+        resourceLimits: RESOURCE_LIMITS,
+        ttlExpiresAt: new Date(Date.now() + 60_000),
+        instanceId: inst.id,
+      }),
+    );
+    await tx((trx) =>
+      store.insertContainer(trx, {
+        dockerId: "docker-alive",
+        parentId: null,
+        rootTaskId: taskId,
+        depth: 0,
+        image: "alpine",
+        runtime: "runc",
+        labels: {},
+        resourceLimits: RESOURCE_LIMITS,
+        ttlExpiresAt: new Date(Date.now() + 60_000),
+        instanceId: inst.id,
+      }),
+    );
+
+    const deadContainer = mock<DockerContainer>();
+    deadContainer.inspect.mockRejectedValue(
+      Object.assign(new Error("no such container"), { statusCode: 404 }),
+    );
+    const aliveContainer = mock<DockerContainer>();
+    aliveContainer.inspect.mockResolvedValue({
+      State: { Status: "running" },
+      HostConfig: {},
+    });
+    const { docker } = mockDockerFacade();
+    docker.getContainer.mockImplementation((id: string) =>
+      id === "docker-dead" ? deadContainer : aliveContainer,
+    );
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    const session = await sandbox.tryResumeByTaskId(taskId);
+    expect(session?.state.dockerId).toBe("docker-alive");
+    expect(deadContainer.inspect).toHaveBeenCalledOnce();
+    expect(aliveContainer.inspect).toHaveBeenCalledOnce();
+  });
+
+  it("tryResumeByTaskId: docker.inspect non-404 errors propagate (don't silently skip)", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const taskId = "019d0000-0000-7000-8000-000000000c04";
+    await tx((trx) =>
+      store.insertContainer(trx, {
+        dockerId: "docker-flaky",
+        parentId: null,
+        rootTaskId: taskId,
+        depth: 0,
+        image: "alpine",
+        runtime: "runc",
+        labels: {},
+        resourceLimits: RESOURCE_LIMITS,
+        ttlExpiresAt: new Date(Date.now() + 60_000),
+        instanceId: inst.id,
+      }),
+    );
+
+    const { docker, container } = mockDockerFacade();
+    container.inspect.mockRejectedValue(
+      Object.assign(new Error("daemon unreachable"), { statusCode: 503 }),
+    );
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    await expect(sandbox.tryResumeByTaskId(taskId)).rejects.toThrow(/daemon unreachable/);
+  });
+
+  it("tryResumeByTaskId: a row whose State.Status is not 'running' is skipped", async () => {
+    // Container exists on the daemon but isn't actually running (paused,
+    // exited, etc.) — supervisor must not return a stale session.
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const taskId = "019d0000-0000-7000-8000-000000000c05";
+    await tx((trx) =>
+      store.insertContainer(trx, {
+        dockerId: "docker-paused",
+        parentId: null,
+        rootTaskId: taskId,
+        depth: 0,
+        image: "alpine",
+        runtime: "runc",
+        labels: {},
+        resourceLimits: RESOURCE_LIMITS,
+        ttlExpiresAt: new Date(Date.now() + 60_000),
+        instanceId: inst.id,
+      }),
+    );
+
+    const { docker, container } = mockDockerFacade();
+    container.inspect.mockResolvedValue({ State: { Status: "paused" }, HostConfig: {} });
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    const session = await sandbox.tryResumeByTaskId(taskId);
+    expect(session).toBeNull();
+  });
+});
+
+describe("LocalDockerSandboxClient — ensureImagePresent (first-boot image pull)", () => {
+  it("inspect succeeds → no pull, returns silently", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker } = mockDockerFacade();
+    const image = mock<DockerImage>();
+    image.inspect.mockResolvedValue({ Id: "sha256:abc" });
+    docker.getImage.mockReturnValue(image);
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    await sandbox.ensureImagePresent("alpine:3.20");
+
+    expect(image.inspect).toHaveBeenCalledOnce();
+    expect(docker.pull).not.toHaveBeenCalled();
+  });
+
+  it("inspect 404 → pulls + waits for followProgress to complete", async () => {
+    const { PassThrough } = await import("node:stream");
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker } = mockDockerFacade();
+    const image = mock<DockerImage>();
+    image.inspect.mockRejectedValue(Object.assign(new Error("no such image"), { statusCode: 404 }));
+    docker.getImage.mockReturnValue(image);
+    // Real `PassThrough` is a `NodeJS.ReadableStream` — supervisor passes
+    // it opaquely to modem.followProgress and awaits the completion callback.
+    docker.pull.mockResolvedValue(new PassThrough());
+    docker.modem.followProgress.mockImplementation((_stream, cb) => {
+      cb(null); // success
+    });
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    await sandbox.ensureImagePresent("alpine:3.20");
+
+    expect(docker.pull).toHaveBeenCalledWith("alpine:3.20");
+    expect(docker.modem.followProgress).toHaveBeenCalledOnce();
+  });
+
+  it("inspect non-404 error → propagates (caller decides retry vs surface)", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker } = mockDockerFacade();
+    const image = mock<DockerImage>();
+    image.inspect.mockRejectedValue(Object.assign(new Error("ECONNREFUSED"), { statusCode: 500 }));
+    docker.getImage.mockReturnValue(image);
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    await expect(sandbox.ensureImagePresent("alpine")).rejects.toThrow(/ECONNREFUSED/);
+  });
+
+  it("followProgress callback error → ensureImagePresent rejects", async () => {
+    // A pull that starts but fails mid-stream (network blip, disk full)
+    // must surface as a rejected promise; the supervisor mustn't return
+    // success while the image is half-pulled.
+    const { PassThrough } = await import("node:stream");
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker } = mockDockerFacade();
+    const image = mock<DockerImage>();
+    image.inspect.mockRejectedValue(Object.assign(new Error("no such image"), { statusCode: 404 }));
+    docker.getImage.mockReturnValue(image);
+    docker.pull.mockResolvedValue(new PassThrough());
+    docker.modem.followProgress.mockImplementation((_stream, cb) => {
+      cb(new Error("pull aborted: disk full"));
+    });
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+
+    await expect(sandbox.ensureImagePresent("alpine")).rejects.toThrow(/disk full/);
   });
 });

@@ -1,6 +1,6 @@
 import type { Readable, Writable } from "node:stream";
-import type Docker from "dockerode";
 import { z } from "zod";
+import type { DockerFacade } from "./docker-facade.js";
 import type { SandboxStore } from "./store/index.js";
 import type { ResourceLimits } from "./types.js";
 
@@ -276,7 +276,7 @@ export interface SandboxClient<TState extends SandboxSessionState = SandboxSessi
 }
 
 export interface SandboxDeps {
-  docker: Docker;
+  docker: DockerFacade;
   store: SandboxStore;
 }
 

@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RequestError } from "@octokit/request-error";
 import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -268,5 +269,108 @@ describe("sweepRepo", () => {
       errors: 1,
     });
     expect(oct.calls.deleteRef).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns zeros when the repo row was deleted between fan-out and sweep", async () => {
+    // Fan-out emits a list of repos; one of them could be deleted between
+    // the list query and the per-repo sweep firing. The sweeper must
+    // log-info and return zeros, NOT throw and re-poison the function.
+    const oct = fakeOctokit([]);
+    const result = await sweepRepo(
+      {
+        runInTx: tx,
+        store,
+        secretsStore: fakeSecretsStore(),
+        octokitFactory: oct.factory as never,
+      },
+      "019d0000-0000-7000-8000-000000000099", // unknown repoId
+      stepRun,
+    );
+
+    expect(result).toEqual({
+      repoId: "019d0000-0000-7000-8000-000000000099",
+      deleted: 0,
+      skipped: 0,
+      errors: 0,
+    });
+    // Never reached the GitHub side.
+    expect(oct.calls.paginate).not.toHaveBeenCalled();
+  });
+
+  it("returns zeros when the repo's remote URL is unparseable", async () => {
+    // A malformed remoteUrl (e.g. someone hand-edited `coding_repos` to a
+    // local path) means parseRemoteUrl returns null. The sweep must not
+    // try to call GitHub.
+    const repo = await tx((trx) =>
+      store.insertRepo(trx, {
+        name: "broken",
+        localPath: `${baseDir}/broken-repo`,
+        defaultBranch: "main",
+        // Not a recognisable GitHub remote shape.
+        remoteUrl: "not-a-url-at-all",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 60,
+        maxConcurrentTasks: 1,
+      }),
+    );
+
+    const oct = fakeOctokit([]);
+    const result = await sweepRepo(
+      {
+        runInTx: tx,
+        store,
+        secretsStore: fakeSecretsStore(),
+        octokitFactory: oct.factory as never,
+      },
+      repo.id,
+      stepRun,
+    );
+
+    expect(result).toEqual({ repoId: repo.id, deleted: 0, skipped: 0, errors: 0 });
+    expect(oct.calls.paginate).not.toHaveBeenCalled();
+  });
+
+  it("treats GitHub 404 + 422 on deleteRef as 'ref already gone' (logs info, increments deleted)", async () => {
+    // GitHub returns 422 when you try to delete a ref that doesn't exist;
+    // some setups return 404. Either way the operational result is "the
+    // ref is gone, which is what we wanted" — must not increment errors.
+    const repo = await seedRepo();
+    const taskA = await insertTaskWithStatus(repo.id, "pr_open");
+    const taskB = await insertTaskWithStatus(repo.id, "pr_open");
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600 * 1000);
+    await db.execute(
+      sql`UPDATE coding_tasks SET created_at = ${eightDaysAgo} WHERE id IN (${taskA.id}, ${taskB.id})`,
+    );
+
+    const oct = fakeOctokit([
+      `refs/heads/cogmo/run/${taskA.id}`,
+      `refs/heads/cogmo/run/${taskB.id}`,
+    ]);
+    let call = 0;
+    oct.calls.deleteRef.mockImplementation(async () => {
+      call++;
+      // First call: simulate GitHub 422; second: 404. Both swallowed.
+      const err = new RequestError("Reference does not exist", call === 1 ? 422 : 404, {
+        request: { method: "DELETE", url: "https://api.github.com/...", headers: {} },
+      });
+      throw err;
+    });
+
+    const result = await sweepRepo(
+      {
+        runInTx: tx,
+        store,
+        secretsStore: fakeSecretsStore(),
+        octokitFactory: oct.factory as never,
+      },
+      repo.id,
+      stepRun,
+    );
+
+    expect(result.deleted).toBe(2); // counted as deleted (ref ended up gone)
+    expect(result.errors).toBe(0); // 404/422 are NOT errors
   });
 });

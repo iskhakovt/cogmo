@@ -285,3 +285,73 @@ describe("ProfileDialogs - isolation", () => {
     expect(dialogs.has(200)).toBe(false);
   });
 });
+
+/**
+ * `friendlyError` is the dialog's user-visible error copy. The mapping is
+ * private — drive each branch by making `transport.profiles.create` (or
+ * `update`) return the corresponding error from save-confirmation. The
+ * `model_unavailable` branch is covered by `surfaces create errors` further
+ * up; this block fills in the rest.
+ */
+describe("ProfileDialogs - friendlyError mapping", () => {
+  async function driveSaveError(errorPayload: {
+    code: string;
+    reason?: string;
+    model?: string;
+  }): Promise<string | undefined> {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        create: vi
+          .fn()
+          // The cast lets us inject error shapes the typed union doesn't
+          // strictly include — friendlyError is defensively typed to accept
+          // any { code: string } and we exercise the default branch too.
+          .mockResolvedValue(err(errorPayload as never)),
+        update: vi.fn().mockResolvedValue(ok({} as never)),
+        delete: vi.fn().mockResolvedValue(ok(undefined)),
+      },
+      models: { list: vi.fn().mockResolvedValue(["claude-sonnet-4-6"]) },
+    });
+    const dialogs = new ProfileDialogs();
+    await dialogs.startNew(transport, mkCtx(), "coder");
+    await dialogs.handleMessage(transport, mkCtx("a prompt"));
+    await dialogs.handleMessage(transport, mkCtx("claude-sonnet-4-6"));
+    const ctx = mkCtx("save");
+    await dialogs.handleMessage(transport, ctx);
+    return ctx.reply.mock.calls.at(-1)?.[0] as string | undefined;
+  }
+
+  it("profile_name_taken → 'A profile with that name already exists.'", async () => {
+    const reply = await driveSaveError({ code: "profile_name_taken" });
+    expect(reply).toBe("A profile with that name already exists.");
+  });
+
+  it("access_denied → 'Access denied — <reason>.' (interpolates reason)", async () => {
+    const reply = await driveSaveError({
+      code: "access_denied",
+      reason: "you must own the profile",
+    });
+    expect(reply).toBe("Access denied — you must own the profile.");
+  });
+
+  it("access_denied with no reason → 'Access denied — .' (empty interpolation, no crash)", async () => {
+    const reply = await driveSaveError({ code: "access_denied" });
+    expect(reply).toBe("Access denied — .");
+  });
+
+  it("profile_not_found → 'Profile not found.'", async () => {
+    const reply = await driveSaveError({ code: "profile_not_found" });
+    expect(reply).toBe("Profile not found.");
+  });
+
+  it("identity_rejected → 'You're not authorized on this bot.'", async () => {
+    const reply = await driveSaveError({ code: "identity_rejected" });
+    expect(reply).toBe("You're not authorized on this bot.");
+  });
+
+  it("unknown code → 'Something went wrong.' (default fallback)", async () => {
+    const reply = await driveSaveError({ code: "some_future_error" });
+    expect(reply).toBe("Something went wrong.");
+  });
+});

@@ -22,18 +22,16 @@
  * helper already supports both modes programmatically.
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import * as p from "@clack/prompts";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { Transactor } from "../db/index.js";
-import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { configureSkillsRemote } from "./configure-remote.js";
 import {
-  type ConfigureSkillsRemoteError,
-  type ConfigureSkillsRemoteMode,
-  configureSkillsRemote,
-} from "./configure-remote.js";
+  collectSkillsRemoteMode,
+  readLocalMainSha,
+  renderConfigureError,
+} from "./configure-remote-prompts.js";
 import { bootstrapSkillsRepo, readOriginUrl, SKILLS_CODING_REPO_NAME } from "./repo.js";
 
 export interface MigrateSkillsRemoteCliDeps {
@@ -85,7 +83,9 @@ export async function runMigrateSkillsRemoteCli(
     "Current state",
   );
 
-  const mode = await collectMode(deps, localMainSha);
+  // CLI cancel = sentinel return → exit code 130 (SIGINT convention).
+  // T = "cancelled", so the union narrows on the check below.
+  const mode = await collectSkillsRemoteMode(deps, localMainSha, () => "cancelled" as const);
   if (mode === "cancelled") {
     p.outro("Cancelled.");
     return 130;
@@ -116,157 +116,4 @@ export async function runMigrateSkillsRemoteCli(
       `  origin: ${result.value.originAction}; DB row: ${result.value.ensured.kind}`,
   );
   return 0;
-}
-
-/**
- * Prompt for own / auto-provision / skip. Returns `"cancelled"` when the
- * operator hits Ctrl-C / Esc — caller maps that to exit code 130.
- *
- * Prompt text and `own`'s `direction` follow local state (the
- * `localMainSha` argument). Inline duplicate of the wizard's
- * `collectSkillsRemoteMode` rather than a shared helper: only two
- * callers, the @clack/prompts integration is the bulk of the code, and
- * the cancel-handling shape differs (wizard throws `WizardCancelled`;
- * CLI returns sentinel).
- */
-async function collectMode(
-  deps: MigrateSkillsRemoteCliDeps,
-  localMainSha: string | null,
-): Promise<ConfigureSkillsRemoteMode | "cancelled"> {
-  const identity = await deps.runInTx((tx) =>
-    resolveGitHubIdentity(tx, deps.secretsStore, DEFAULT_GITHUB_IDENTITY_NAME),
-  );
-  const hasGitHubIdentity = identity.isOk();
-  const direction: "adopt" | "publish" = localMainSha === null ? "adopt" : "publish";
-
-  const promptMessage =
-    direction === "adopt"
-      ? "Skills bare repo is empty. How should it be configured?"
-      : "Skills bare repo has commits already. How should the remote be configured?";
-
-  const ownLabel = direction === "adopt" ? "Adopt an existing remote" : "Publish to a fresh remote";
-  const ownHint =
-    direction === "adopt"
-      ? "paste URL of a pre-populated repo; Cogmo fetches main"
-      : "paste URL of an empty repo; Cogmo pushes main";
-  const autoHint =
-    direction === "adopt"
-      ? "Cogmo creates a private `cogmo-skills` repo with a README seed"
-      : "Cogmo creates an empty private `cogmo-skills` repo and pushes your skills";
-
-  const options: { value: "own" | "auto-provision" | "skip"; label: string; hint?: string }[] = [
-    { value: "own", label: ownLabel, hint: ownHint },
-  ];
-  if (hasGitHubIdentity) {
-    options.push({ value: "auto-provision", label: "Auto-provision on GitHub", hint: autoHint });
-  }
-  options.push({
-    value: "skip",
-    label: "Skip — configure later via `cogmo migrate-skills-remote`",
-  });
-
-  const choice = await p.select({ message: promptMessage, options });
-  if (p.isCancel(choice)) return "cancelled";
-
-  if (choice === "skip") return { kind: "skip" };
-
-  if (choice === "own") {
-    const url = await p.text({
-      message:
-        direction === "adopt"
-          ? "Paste the URL of the remote to adopt (https://… or git@host:…):"
-          : "Paste the URL of an empty remote to publish to (https://… or git@host:…):",
-      placeholder: "git@github.com:you/cogmo-skills.git",
-      validate: (v) => {
-        if (!v || v.trim().length === 0) return "URL is required";
-        return undefined;
-      },
-    });
-    if (p.isCancel(url)) return "cancelled";
-    const ownMode: ConfigureSkillsRemoteMode = {
-      kind: "own",
-      direction,
-      remoteUrl: url.trim(),
-    };
-    if (identity.isOk()) ownMode.identity = identity.value;
-    return ownMode;
-  }
-
-  // auto-provision — gated above on hasGitHubIdentity so identity.isOk() here.
-  if (!identity.isOk()) return "cancelled";
-  return { kind: "auto-provision", identity: identity.value };
-}
-
-/** Format a `configureSkillsRemote` error as operator-readable CLI output.
- * Mirrors the wizard's renderer one-for-one — kept inline for the same
- * reason as `collectMode`. */
-function renderConfigureError(error: ConfigureSkillsRemoteError): void {
-  switch (error.kind) {
-    case "url_invalid":
-      p.log.error(`Invalid URL: ${error.reason}`);
-      break;
-    case "remote_unreachable":
-      p.log.error(`Remote unreachable: ${error.reason}`);
-      p.log.info(
-        "Check the URL, credentials, and network. For HTTPS URLs, the GitHub identity's PAT must have access.",
-      );
-      break;
-    case "remote_empty":
-      p.log.error(
-        `Remote has no \`refs/heads/main\` to adopt. Pick "Publish to a fresh remote" instead, ` +
-          `or initialize the remote first (GitHub: \`gh repo create --add-readme\`).`,
-      );
-      break;
-    case "local_empty":
-      p.log.error(
-        'Local skills bare repo has no commits to publish. Pick "Adopt an existing remote" instead.',
-      );
-      break;
-    case "remote_diverged":
-      p.log.error(
-        `Adopt would orphan local commits. Local main is ${error.localSha.slice(0, 7)}; ` +
-          `remote main is ${error.remoteSha.slice(0, 7)} and isn't a descendant. ` +
-          `Resolve outside the helper: push local first (\`git push origin main\` from $COGMO_SKILLS_PATH) ` +
-          `or delete local main intentionally (\`git update-ref -d refs/heads/main\`) and re-run.`,
-      );
-      break;
-    case "local_diverged":
-      p.log.error(
-        `Publish would orphan remote commits. Local main is ${error.localSha.slice(0, 7)}; ` +
-          `remote main is ${error.remoteSha.slice(0, 7)} and isn't an ancestor. ` +
-          `Resolve outside the helper: fetch remote first (\`git fetch origin main\` from $COGMO_SKILLS_PATH), ` +
-          `merge or rebase, then re-run.`,
-      );
-      break;
-    case "auto_provision_failed":
-      p.log.error(
-        `Auto-provision failed${error.status ? ` (HTTP ${error.status})` : ""}: ${error.reason}`,
-      );
-      break;
-    case "auto_provision_repo_exists":
-      p.log.error(
-        `\`${error.repoName}\` already exists on the configured GitHub account. ` +
-          `Re-run and pick "Adopt an existing remote" pointing at the existing repo.`,
-      );
-      break;
-  }
-}
-
-const execFileP = promisify(execFile);
-
-/** Read local `refs/heads/main` sha — returns null when main is unborn.
- * Used to pick adopt-vs-publish direction in `collectMode`. */
-async function readLocalMainSha(repoPath: string): Promise<string | null> {
-  try {
-    const { stdout } = await execFileP("git", [
-      "-C",
-      repoPath,
-      "rev-parse",
-      "--verify",
-      "refs/heads/main",
-    ]);
-    return stdout.trim();
-  } catch {
-    return null;
-  }
 }

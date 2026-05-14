@@ -1,5 +1,8 @@
-import { ok } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PERMISSION_CALLBACK_REGEX } from "../../../agent/coding/permission-keyboard.js";
+import { PLAN_CALLBACK_REGEX } from "../../../agent/coding/plan-keyboard.js";
+import { SKILLS_APPROVAL_CALLBACK_REGEX } from "../../../skills/skills-keyboard.js";
 import { mockAttachmentStore, mockTransport } from "../../../test/factories.js";
 import type { StreamingAdapter } from "../../types.js";
 import { findTelegramSplitBoundary, rebalanceCodeFence, setup } from "./index.js";
@@ -13,6 +16,7 @@ const mockBotApi = {
   sendPhoto: vi.fn().mockResolvedValue({ message_id: 101 }),
   sendVoice: vi.fn().mockResolvedValue({ message_id: 102 }),
   sendAudio: vi.fn().mockResolvedValue({ message_id: 103 }),
+  sendDocument: vi.fn().mockResolvedValue({ message_id: 104 }),
   getFile: vi.fn().mockResolvedValue({ file_path: "photos/file_1.jpg" }),
   setMyCommands: vi.fn().mockResolvedValue(true),
 };
@@ -1165,6 +1169,390 @@ describe("telegram adapter", () => {
       });
       expect(mockBotApi.sendAudio).toHaveBeenCalledTimes(1);
       expect(mockBotApi.sendVoice).not.toHaveBeenCalled();
+    });
+  });
+
+  // Inline-keyboard callbackQuery handlers are wired in setup() with three
+  // regexes (plan / permission / skills approval). The pure handler logic
+  // lives in commands.ts and is tested there; this block exercises the
+  // adapter-side wiring — does the registered handler dispatch to the right
+  // transport call, edit the original message, send the toast, and (where
+  // applicable) reply with the follow-up? A regex shape or parse* signature
+  // drift would silently brick the buttons without this coverage.
+  describe("callback query dispatch", () => {
+    // Pinned UUIDs for callback data — must match the regex shape.
+    const TASK_ID = "00000000-0000-0000-0000-000000000001";
+    const PENDING_ID = "00000000-0000-0000-0000-000000000002";
+    const REQUEST_ID_SHORT = "abc123";
+
+    function makeCallbackCtx(data: string, fromId = 111) {
+      return {
+        from: { id: fromId },
+        callbackQuery: { data },
+        editMessageText: vi.fn().mockResolvedValue({}),
+        answerCallbackQuery: vi.fn().mockResolvedValue(true),
+        reply: vi.fn().mockResolvedValue({}),
+      };
+    }
+
+    it("plan: approve → coding.approvePlan, editMessageText clears keyboard, answers toast", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeCallbackCtx(`plan:${TASK_ID}:approve`);
+
+      const handler = handlers.get(`callbackQuery:${PLAN_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.coding.approvePlan).toHaveBeenCalledWith(TASK_ID, "111");
+      expect(ctx.editMessageText).toHaveBeenCalledWith(expect.stringContaining("Plan approved"), {
+        reply_markup: { inline_keyboard: [] },
+      });
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Approved" });
+    });
+
+    it("plan: revise → cancelTask + ctx.reply with the follow-up prompt", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeCallbackCtx(`plan:${TASK_ID}:revise`);
+
+      const handler = handlers.get(`callbackQuery:${PLAN_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.coding.cancelTask).toHaveBeenCalledWith(
+        TASK_ID,
+        "111",
+        "user requested revisions",
+      );
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("what you'd like changed"));
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Revising" });
+    });
+
+    it("plan: editMessageText 'message is not modified' is swallowed (idempotent re-tap)", async () => {
+      // A user double-tapping or Inngest replaying the callback hits the
+      // same message with the same body — Telegram returns 400 "message is
+      // not modified". The handler must not rethrow.
+      const { transport } = await createAdapter();
+      const ctx = makeCallbackCtx(`plan:${TASK_ID}:approve`);
+      ctx.editMessageText = vi.fn().mockRejectedValueOnce(new Error("message is not modified"));
+
+      const handler = handlers.get(`callbackQuery:${PLAN_CALLBACK_REGEX.source}`);
+      await expect(handler(ctx)).resolves.not.toThrow();
+
+      expect(transport.coding.approvePlan).toHaveBeenCalled();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Approved" });
+    });
+
+    it("permission: deny → respondPermission with decision=deny, scope=once", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeCallbackCtx(`perm:${TASK_ID}:${REQUEST_ID_SHORT}:d`);
+
+      const handler = handlers.get(`callbackQuery:${PERMISSION_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.coding.respondPermission).toHaveBeenCalledWith(
+        {
+          taskId: TASK_ID,
+          requestIdShort: REQUEST_ID_SHORT,
+          decision: "deny",
+          scope: "once",
+        },
+        "111",
+      );
+      expect(ctx.editMessageText).toHaveBeenCalledWith("❌ Denied.", {
+        reply_markup: { inline_keyboard: [] },
+      });
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Denied" });
+    });
+
+    it("permission: allow_task → respondPermission with decision=allow, scope=task", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeCallbackCtx(`perm:${TASK_ID}:${REQUEST_ID_SHORT}:t`);
+
+      const handler = handlers.get(`callbackQuery:${PERMISSION_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.coding.respondPermission).toHaveBeenCalledWith(
+        expect.objectContaining({ decision: "allow", scope: "task" }),
+        "111",
+      );
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Allowed for task" });
+    });
+
+    it("skill approval: approve → skills.approveDeploy, edit shows skill name + git sha", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeCallbackCtx(`skill:${PENDING_ID}:approve`);
+
+      const handler = handlers.get(`callbackQuery:${SKILLS_APPROVAL_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.skills.approveDeploy).toHaveBeenCalledWith(PENDING_ID, "111");
+      const editArgs = ctx.editMessageText.mock.calls[0];
+      expect(editArgs?.[0]).toContain("echo"); // skillName from mock
+      expect(editArgs?.[0]).toContain("abc1234"); // gitSha from mock
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Approved" });
+    });
+
+    it("skill approval: deny → skills.denyDeploy", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeCallbackCtx(`skill:${PENDING_ID}:deny`);
+
+      const handler = handlers.get(`callbackQuery:${SKILLS_APPROVAL_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.skills.denyDeploy).toHaveBeenCalledWith(PENDING_ID, "111");
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Denied" });
+    });
+
+    it("missing callbackQuery.data exits early without dispatching", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeCallbackCtx(`plan:${TASK_ID}:approve`);
+      // Force the early-exit path by clearing data after the regex match.
+      ctx.callbackQuery = { data: "" };
+
+      const handler = handlers.get(`callbackQuery:${PLAN_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.coding.approvePlan).not.toHaveBeenCalled();
+    });
+  });
+
+  // The text-message path's branches around session resolution: identity
+  // rejection on createConversation and emit-failure on transport.emit. Both
+  // are silent error paths today (info or error log, no user-visible reply);
+  // a regression that turns either into an exception would crash the bot's
+  // event loop.
+  describe("identity rejection + emit failure (text path)", () => {
+    it("createConversation → identity_rejected: emit not called, no throw", async () => {
+      const { transport } = await createAdapter({
+        resolveSession: vi.fn().mockResolvedValue(null),
+        createConversation: vi
+          .fn()
+          .mockResolvedValue(err({ code: "identity_rejected" as const, handle: "111" })),
+      });
+
+      await expect(
+        handlers.get("on:message:text")(makeCtx(111, "hi from stranger", 42)),
+      ).resolves.not.toThrow();
+
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
+
+    it("createConversation → non-identity error: emit not called, no throw", async () => {
+      const { transport } = await createAdapter({
+        resolveSession: vi.fn().mockResolvedValue(null),
+        createConversation: vi.fn().mockResolvedValue(err({ code: "channel_not_found" as const })),
+      });
+
+      await expect(handlers.get("on:message:text")(makeCtx(111, "hi", 42))).resolves.not.toThrow();
+
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
+
+    it("transport.emit → error: handler logs and returns without throwing", async () => {
+      // emit returning err is the "couldn't enqueue the inbound event" case.
+      // The bot must not crash — the next message gets its own chance.
+      const { transport } = await createAdapter({
+        emit: vi.fn().mockResolvedValue(err({ code: "session_not_found" as const })),
+      });
+
+      await expect(
+        handlers.get("on:message:text")(makeCtx(111, "test", 42)),
+      ).resolves.not.toThrow();
+
+      expect(transport.emit).toHaveBeenCalledOnce();
+    });
+  });
+
+  // deliver() (the non-streaming batch send path) has its own try/catch that
+  // mirrors finish()'s HTML-parse fallback. Streaming already has a test
+  // ("finish falls back to plain text when HTML parse fails"); this covers
+  // the non-stream code path used by tool-result documents, voice fallbacks,
+  // and any direct deliver() caller.
+  describe("deliver HTML parse fallback", () => {
+    it("retries with stripped tags when sendMessage throws 'can't parse entities'", async () => {
+      const { adapter } = await createAdapter();
+      mockBotApi.sendMessage
+        .mockRejectedValueOnce(new Error("can't parse entities at byte offset 17"))
+        .mockResolvedValueOnce({ message_id: 200 });
+
+      await adapter.deliver("42", {
+        text: "<b>bold</b> and <broken",
+        parseMode: "HTML",
+      });
+
+      expect(mockBotApi.sendMessage).toHaveBeenCalledTimes(2);
+      const first = mockBotApi.sendMessage.mock.calls[0];
+      const second = mockBotApi.sendMessage.mock.calls[1];
+      // First call: HTML attempt with parse_mode
+      expect(first?.[2]).toEqual({ parse_mode: "HTML" });
+      // Second call: stripped, no parse_mode option
+      expect(second?.[1]).not.toContain("<b>");
+      expect(second?.[1]).toContain("bold");
+      expect(second?.[2]).toBeUndefined();
+    });
+
+    it("rethrows unrelated sendMessage errors (no silent swallow)", async () => {
+      const { adapter } = await createAdapter();
+      mockBotApi.sendMessage.mockRejectedValueOnce(new Error("403 Forbidden: bot was blocked"));
+
+      await expect(adapter.deliver("42", { text: "anything", parseMode: "HTML" })).rejects.toThrow(
+        "403 Forbidden",
+      );
+      // Did NOT fall through to a second attempt — the fallback is HTML-specific.
+      expect(mockBotApi.sendMessage).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // Generated-document delivery via the streaming handle's `send_document`
+  // tool_result path — mirrors the generated-image tests but exercises the
+  // sendDocument code path that was uncovered.
+  describe("generated documents (mid-stream)", () => {
+    async function createAdapterWithAttachments(downloadImpl?: typeof Buffer.from) {
+      const transport = mockTransport({
+        resolveSession: vi.fn().mockResolvedValue({
+          id: "session-1",
+          channelId: "tg-ch",
+          platformAddress: "42",
+          conversationId: "conv-1",
+          status: "active",
+          receive: "routed",
+        }),
+      });
+      const attachments = mockAttachmentStore({
+        download: vi
+          .fn()
+          .mockResolvedValue(downloadImpl ? downloadImpl([1, 2, 3]) : Buffer.from([1, 2, 3])),
+      });
+      const result = await setup({
+        channelId: "tg-ch",
+        credentials: { token: "fake" },
+        transport,
+        attachments,
+      });
+      return { adapter: result.adapter as unknown as StreamingAdapter, attachments };
+    }
+
+    it("sends generated document via sendDocument with the provided filename", async () => {
+      const { adapter, attachments } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({
+        type: "tool_result",
+        name: "send_document",
+        output: JSON.stringify({
+          path: "generated/report.pdf",
+          mediaType: "application/pdf",
+          name: "report.pdf",
+        }),
+      });
+
+      expect(attachments.download).toHaveBeenCalledWith("generated/report.pdf");
+      expect(mockBotApi.sendDocument).toHaveBeenCalledTimes(1);
+      const [chatId, inputFile] = mockBotApi.sendDocument.mock.calls[0] ?? [];
+      expect(chatId).toBe(42);
+      const file = inputFile as { data: Buffer; filename: string };
+      expect(file.data).toEqual(Buffer.from([1, 2, 3]));
+      // The filename surfaces in Telegram's UI — must match what the LLM picked.
+      expect(file.filename).toBe("report.pdf");
+    });
+
+    it("dedups send_document tool_result within the same run", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+      const event = {
+        type: "tool_result" as const,
+        name: "send_document",
+        output: JSON.stringify({
+          path: "generated/x.pdf",
+          mediaType: "application/pdf",
+          name: "x.pdf",
+        }),
+      };
+      await handle.push(event);
+      await handle.push(event);
+
+      expect(mockBotApi.sendDocument).toHaveBeenCalledTimes(1);
+    });
+
+    it("retries the document after a failed sendDocument (dedup only marks success)", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+      const event = {
+        type: "tool_result" as const,
+        name: "send_document",
+        output: JSON.stringify({
+          path: "generated/x.pdf",
+          mediaType: "application/pdf",
+          name: "x.pdf",
+        }),
+      };
+
+      mockBotApi.sendDocument.mockRejectedValueOnce(new Error("network blip"));
+      await handle.push(event);
+      await handle.push(event);
+
+      expect(mockBotApi.sendDocument).toHaveBeenCalledTimes(2);
+    });
+
+    it("skips when payload is malformed (missing fields → parser returns null)", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+
+      // Missing `name` — parser rejects.
+      await handle.push({
+        type: "tool_result",
+        name: "send_document",
+        output: JSON.stringify({ path: "p", mediaType: "application/pdf" }),
+      });
+      // Not JSON at all.
+      await handle.push({
+        type: "tool_result",
+        name: "send_document",
+        output: "not json",
+      });
+
+      expect(mockBotApi.sendDocument).not.toHaveBeenCalled();
+    });
+
+    it("skips tool_result with isError=true", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({
+        type: "tool_result",
+        name: "send_document",
+        output: JSON.stringify({
+          path: "x.pdf",
+          mediaType: "application/pdf",
+          name: "x.pdf",
+        }),
+        isError: true,
+      });
+
+      expect(mockBotApi.sendDocument).not.toHaveBeenCalled();
+    });
+
+    it("strips the send_document placeholder from accumulated text after delivery", async () => {
+      const { adapter } = await createAdapterWithAttachments();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "Here's your file." });
+      await handle.push({ type: "tool_start", id: "t1", name: "send_document", input: {} });
+      await handle.push({
+        type: "tool_result",
+        name: "send_document",
+        output: JSON.stringify({
+          path: "generated/x.pdf",
+          mediaType: "application/pdf",
+          name: "x.pdf",
+        }),
+      });
+      await handle.push({ type: "text_delta", text: " Done." });
+      await handle.finish();
+
+      const lastEdit = mockBotApi.editMessageText.mock.calls.at(-1);
+      const editedText = lastEdit?.[2] as string;
+      expect(editedText).not.toContain("🔍 send_document");
+      expect(editedText).toContain("your file");
+      expect(editedText).toContain("Done");
     });
   });
 });

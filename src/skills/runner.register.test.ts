@@ -3,12 +3,14 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
+import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -453,6 +455,191 @@ tier: wasm
       await expect(
         runner.denyDeploy({ pendingId: "00000000-0000-0000-0000-000000000000" }),
       ).resolves.toBeUndefined();
+    });
+  });
+
+  // The approveDeploy / rollback rejection paths are the runner's
+  // failure-mode contract — downstream code (Telegram approval keyboard
+  // toast text, skills CLI exit codes) keys off the reason strings. Each
+  // branch returns a distinct `rejectedResult(...)` reason; this block
+  // exercises one per test so a string drift surfaces immediately.
+  describe("approveDeploy: rejection matrix", () => {
+    const APPROVE_MANIFEST = `---
+name: notifier
+description: a skill that sends notifications to the user
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+effects:
+  - sends_message
+---
+`;
+
+    async function makePendingDeploy(runner: Awaited<ReturnType<typeof makeRunner>>) {
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/notifier",
+        manifest: APPROVE_MANIFEST,
+        body: ECHO_BODY,
+      });
+      const reg = await runner.register({ branch: "skill/notifier" });
+      if (reg.status !== "pending_approval" || !reg.pendingId) {
+        throw new Error(`expected pending_approval, got ${reg.status}`);
+      }
+      return reg.pendingId;
+    }
+
+    it("deploy_not_found when pendingId doesn't exist", async () => {
+      const runner = await makeRunner();
+      const result = await runner.approveDeploy({
+        pendingId: "00000000-0000-0000-0000-000000000099",
+      });
+      expect(result.status).toBe("rejected");
+      expect(result.errors?.[0]).toMatch(/deploy_not_found/);
+      expect(result.gitSha).toBe("");
+    });
+
+    it("deploy_not_pending on a second approve of the same pendingId", async () => {
+      // Idempotency: the row is flipped to live after the first approve.
+      // The second approve sees status='live' and short-circuits with a
+      // distinct error code so the operator gets a useful toast instead of
+      // a silent no-op.
+      const runner = await makeRunner();
+      const pendingId = await makePendingDeploy(runner);
+      const first = await runner.approveDeploy({ pendingId });
+      expect(first.status).toBe("live");
+
+      const second = await runner.approveDeploy({ pendingId });
+      expect(second.status).toBe("rejected");
+      expect(second.errors?.[0]).toMatch(/deploy_not_pending/);
+      expect(second.errors?.[0]).toMatch(/live/);
+    });
+
+    it("non_fast_forward_at_approve_time when main moved past deploy.gitSha", async () => {
+      // Pending deploy A is created, then a different feature branch is
+      // registered → main advances past A's sha. Approving A is no longer
+      // a fast-forward.
+      const runner = await makeRunner();
+      const pendingId = await makePendingDeploy(runner);
+
+      // A second, unrelated auto-tier skill lands first → main advances.
+      // (`echo` declares no destructive effects, so it lands live.)
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo-leap",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      const leap = await runner.register({ branch: "skill/echo-leap" });
+      expect(leap.status).toBe("live");
+
+      // Now approve the original pending — main has moved.
+      const result = await runner.approveDeploy({ pendingId });
+      expect(result.status).toBe("rejected");
+      expect(result.errors?.[0]).toMatch(/non_fast_forward_at_approve_time/);
+    });
+
+    it("target_missing_source when SKILL.md is gone at the deploy sha", async () => {
+      // Patch the deploy's git_sha column to point at a commit lacking
+      // SKILL.md — simulates the original branch being rebased away
+      // between register and approve so gitShow throws file_not_found.
+      const runner = await makeRunner();
+      const pendingId = await makePendingDeploy(runner);
+
+      // Push a commit with no SKILL.md to a parallel branch.
+      await execFileP("git", ["-C", repo.work, "rm", "SKILL.md", "skill.py"]);
+      await execFileP("git", [
+        "-C",
+        repo.work,
+        "commit",
+        "-m",
+        "drop skill files",
+        "--allow-empty",
+      ]);
+      const noFilesSha = (
+        await execFileP("git", ["-C", repo.work, "rev-parse", "HEAD"])
+      ).stdout.trim();
+      await execFileP("git", [
+        "-C",
+        repo.work,
+        "push",
+        "origin",
+        `HEAD:refs/heads/scratch-nofiles`,
+      ]);
+
+      // Patch the deploy row to point at the no-files sha. Direct SQL —
+      // simulates the original branch having been rebased away.
+      await tx(async (trx) => {
+        await trx.execute(
+          sql`UPDATE skill_deploys SET git_sha = ${noFilesSha} WHERE id = ${pendingId}`,
+        );
+      });
+
+      const result = await runner.approveDeploy({ pendingId });
+      expect(result.status).toBe("rejected");
+      expect(result.errors?.[0]).toMatch(/target_missing_source/);
+    });
+  });
+
+  describe("rollback: rejection matrix", () => {
+    it("target_sha_not_found when the target sha is unknown to the repo", async () => {
+      const runner = await makeRunner();
+      // Register echo first so the skill row exists.
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo" });
+
+      // A non-hex ref name that doesn't resolve. (Sha-shaped hex strings
+      // pass `git rev-parse --verify` regardless of whether the object
+      // actually exists — only a missing *ref* name triggers
+      // ref_not_found from revParse.)
+      const result = await runner.rollback({
+        name: "echo",
+        toGitSha: "refs/heads/totally-missing-ref",
+      });
+      expect(result.status).toBe("rejected");
+      expect(result.errors?.[0]).toMatch(/target_sha_not_found/);
+    });
+
+    it("target_missing_source when SKILL.md is absent at the target sha", async () => {
+      const runner = await makeRunner();
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/echo" });
+
+      // Push a commit with no SKILL.md to a parallel branch.
+      await execFileP("git", ["-C", repo.work, "rm", "SKILL.md", "skill.py"]);
+      await execFileP("git", [
+        "-C",
+        repo.work,
+        "commit",
+        "-m",
+        "drop skill files",
+        "--allow-empty",
+      ]);
+      const noFilesSha = (
+        await execFileP("git", ["-C", repo.work, "rev-parse", "HEAD"])
+      ).stdout.trim();
+      await execFileP("git", [
+        "-C",
+        repo.work,
+        "push",
+        "origin",
+        `HEAD:refs/heads/scratch-nofiles`,
+      ]);
+
+      const result = await runner.rollback({ name: "echo", toGitSha: noFilesSha });
+      expect(result.status).toBe("rejected");
+      expect(result.errors?.[0]).toMatch(/target_missing_source/);
     });
   });
 
@@ -986,19 +1173,14 @@ effects:
      */
     async function setupRepoWithRemote(): Promise<RepoSetup & { remote: string }> {
       const base = await setupRepo();
-      const remote = join(base.bare, "..", "skills-remote.git");
-      await execFileP("git", ["init", "--bare", "--initial-branch=main", remote]);
-      // Initialize the remote with one commit so main exists — matches the
-      // wizard's precondition (refuses empty remotes).
-      const seed = join(base.bare, "..", "seed");
-      await mkdir(seed);
-      await execFileP("git", ["init", "-b", "main", seed]);
-      await execFileP("git", ["-C", seed, "config", "user.email", "seed@test"]);
-      await execFileP("git", ["-C", seed, "config", "user.name", "seed"]);
-      await execFileP("git", ["-C", seed, "config", "commit.gpgsign", "false"]);
-      await execFileP("git", ["-C", seed, "commit", "--allow-empty", "-m", "init"]);
-      await execFileP("git", ["-C", seed, "push", remote, "main:refs/heads/main"]);
-      await rm(seed, { recursive: true, force: true });
+      // Stand-in for the GitHub/Gitea URL Cogmo would attach as origin in
+      // production. Built via the shared bare-repo fixture so the seed
+      // shape stays consistent with configure-remote.test.ts.
+      const { path: remote } = await makePopulatedBareRepo(
+        join(base.bare, ".."),
+        "skills-remote",
+        "skills-remote.git",
+      );
       // Attach the remote as `origin` on the skills bare repo, then fetch
       // main so local matches remote — mirrors what configureSkillsRemote
       // does at wizard time.

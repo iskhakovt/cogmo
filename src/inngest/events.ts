@@ -269,6 +269,33 @@ export const skillsDeployApprovalRequested = eventType("skills/deploy/approval-r
 });
 
 /**
+ * One fire of a user/agent-defined scheduled task. Emitted by the
+ * `scheduled-task-ticker` (1-min cron) for each row whose `next_run_at`
+ * has passed and is still enabled. The fire handler builds a synthetic
+ * conversation turn under the row's `userId` + `profileId` and replays
+ * `prompt` as the user-role message into the agent loop. See
+ * design/scheduling.md → Agent Self-Scheduling.
+ *
+ * The event `id` (set by the ticker, not in the schema) is
+ * `${taskId}:${scheduledFor}` — Inngest dedup'es per id within its
+ * window, so a ticker retry that re-emits the same row produces a no-op.
+ *
+ * `scheduledFor` is the timestamp the row was *supposed* to fire at —
+ * threaded into the prompt by the fire handler so the model is
+ * self-aware when the ticker is late (post-outage catch-up). It is NOT
+ * the wall clock at emit time.
+ */
+export const scheduledTaskFire = eventType("agent/scheduled-task.fire", {
+  schema: z.object({
+    taskId: z.string(),
+    userId: z.string(),
+    profileId: z.string(),
+    scheduledFor: z.string(), // ISO 8601 UTC
+    prompt: z.string(),
+  }),
+});
+
+/**
  * Direct channel — external clients emit this to send messages.
  * The direct-inbound Inngest function translates to inbound/arrived.
  */

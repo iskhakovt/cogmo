@@ -30,6 +30,8 @@ import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
 import { createRecoverConversation } from "./agent/recover-conversation.js";
+import { createScheduledTaskFireHandler } from "./agent/scheduling/fire-handler.js";
+import { createScheduledTaskTicker } from "./agent/scheduling/ticker.js";
 import type { Service } from "./agent/service.js";
 import { CORE_MEMORY_PROMPT_GUIDANCE, MEMORY_PROMPT_GUIDANCE } from "./agent/service.js";
 import { DrizzleAgentStore } from "./agent/store/index.js";
@@ -942,12 +944,32 @@ export async function bootstrapRuntime(
     agentStore: core.agentStore,
   });
 
+  // Scheduled-task ticker — static 1-min cron that locks due rows from
+  // `scheduled_tasks` and fans out `agent/scheduled-task.fire` events.
+  // See `src/agent/scheduling/ticker.ts`.
+  const scheduledTaskTicker = createScheduledTaskTicker(
+    { runInTx: core.runInTx, store: core.agentStore },
+    inngest,
+  );
+
+  // Scheduled-task fire handler — receives `agent/scheduled-task.fire`
+  // events from the ticker, finds the user's active session for the
+  // task's profile, persists a synthetic inbound, and re-enters the
+  // normal pipeline via `inbound/arrived`. See
+  // `src/agent/scheduling/fire-handler.ts`.
+  const scheduledTaskFire = createScheduledTaskFireHandler(
+    { runInTx: core.runInTx, transportStore: core.transportStore },
+    inngest,
+  );
+
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [
     handleMessage,
     idleTimer,
     observer,
     recoverConversation,
+    scheduledTaskTicker,
+    scheduledTaskFire,
     ...debounceFunctions,
     ...channelFunctions,
     ...codingFunctions,

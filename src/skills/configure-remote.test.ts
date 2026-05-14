@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Octokit } from "@octokit/rest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,7 @@ import { mock } from "vitest-mock-extended";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { Transactor } from "../db/index.js";
 import type { GitHubIdentity } from "../secrets/github.js";
+import { makeEmptyBareRepo, makePopulatedBareRepo } from "../test/skills-bare-repo.js";
 import { configureSkillsRemote } from "./configure-remote.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 
@@ -35,35 +36,12 @@ afterEach(async () => {
   await rm(workDir, { recursive: true, force: true });
 });
 
-/**
- * Make a bare repo at `<workDir>/<subdir>/repo.git` with one seed commit on
- * `main`. The `file:///.../<subdir>/repo.git` URL parses cleanly via
- * `parseRemoteUrl`. Returns the URL.
- */
 async function makePopulatedRemote(subdir = "owner"): Promise<string> {
-  const remotePath = join(workDir, subdir, "repo.git");
-  await mkdir(dirname(remotePath), { recursive: true });
-  await execFileP("git", ["init", "--bare", "--initial-branch=main", remotePath]);
-  // Bare repos can't commit directly — seed via a temp working clone.
-  const work = await mkdtemp(join(tmpdir(), "configure-remote-seed-"));
-  try {
-    await execFileP("git", ["init", "-b", "main", work]);
-    await execFileP("git", ["-C", work, "config", "user.email", "t@t"]);
-    await execFileP("git", ["-C", work, "config", "user.name", "t"]);
-    await execFileP("git", ["-C", work, "config", "commit.gpgsign", "false"]);
-    await execFileP("git", ["-C", work, "commit", "--allow-empty", "-m", "init"]);
-    await execFileP("git", ["-C", work, "push", remotePath, "main:refs/heads/main"]);
-  } finally {
-    await rm(work, { recursive: true, force: true });
-  }
-  return `file://${remotePath}`;
+  return (await makePopulatedBareRepo(workDir, subdir)).url;
 }
 
 async function makeEmptyRemote(subdir = "owner", name = "empty.git"): Promise<string> {
-  const remotePath = join(workDir, subdir, name);
-  await mkdir(dirname(remotePath), { recursive: true });
-  await execFileP("git", ["init", "--bare", "--initial-branch=main", remotePath]);
-  return `file://${remotePath}`;
+  return (await makeEmptyBareRepo(workDir, subdir, name)).url;
 }
 
 /**

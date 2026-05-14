@@ -7,8 +7,6 @@
  * See design/setup.md for the UX contract.
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import * as p from "@clack/prompts";
 import {
   CLAUDE_CODE_OAUTH_TOKEN_SECRET,
@@ -44,13 +42,15 @@ import {
 } from "../secrets/github.js";
 import { generateSshKeyPair } from "../secrets/ssh-keygen.js";
 import { DrizzleSecretsStore, type SecretsStore } from "../secrets/store/index.js";
+import { configureSkillsRemote } from "../skills/configure-remote.js";
 import {
-  type ConfigureSkillsRemoteError,
-  type ConfigureSkillsRemoteMode,
-  configureSkillsRemote,
-} from "../skills/configure-remote.js";
+  collectSkillsRemoteMode,
+  readLocalMainSha,
+  renderConfigureError,
+} from "../skills/configure-remote-prompts.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo, readOriginUrl } from "../skills/repo.js";
 import type { TransportStore } from "../transport/store/index.js";
+import { OpenAIVoiceProvider } from "../voice/openai.js";
 import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
   type DaytonaProbeOpts,
@@ -77,7 +77,7 @@ function cancelGuard<T>(value: T | symbol): T {
 
 // --- Types ---
 
-interface WizardDeps {
+export interface WizardDeps {
   runInTx: Transactor;
   agentStore: AgentStore;
   transportStore: TransportStore;
@@ -888,6 +888,175 @@ function parseWizardRatios(raw: string): ReadonlyArray<ImageAspectRatio> | undef
   return validated.length > 0 ? validated : undefined;
 }
 
+const VOICE_SECRET_NAME = "openai_voice_key";
+const DEFAULT_TTS_MODEL = "gpt-4o-mini-tts";
+const DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe";
+const DEFAULT_TTS_VOICE = "alloy";
+
+/**
+ * Six classic OpenAI TTS voices that work across all `gpt-4o-mini-tts` /
+ * `tts-1` checkpoints. Newer voices (ash, ballad, coral, sage, verse) are
+ * available on `gpt-4o-mini-tts` only and aren't worth a per-model voice
+ * list in the wizard — operators wanting them can rotate via re-running
+ * setup and entering a custom voice id via the CLI later if needed.
+ */
+const OPENAI_TTS_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"] as const;
+
+/**
+ * Configure voice (TTS + STT). Optional — only operators who want
+ * Telegram voice replies need this. Re-runnable: existing config offers
+ * keep / replace / remove. The "remove" branch deletes the `voice_config`
+ * row so bootstrap stops constructing a voice provider on next restart.
+ *
+ * Reuses a single OpenAI key for both directions (one `secrets` row, two
+ * FK columns pointing at it). No "reuse the LLM provider's key" shortcut
+ * — voice traffic hits `/v1/audio/{speech,transcriptions}` which most
+ * OpenAI-compatible providers (OpenRouter, Venice, custom proxies) don't
+ * serve. See design/voice.md → "Credential entry".
+ */
+export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
+  const existing = await deps.runInTx((tx) => deps.agentStore.getVoiceConfig(tx));
+
+  if (existing) {
+    const action = await p.select({
+      message: `Voice is configured (TTS=${existing.ttsModel}/${existing.ttsVoice}). What would you like to do?`,
+      options: [
+        { value: "keep", label: "Keep current configuration" },
+        { value: "replace", label: "Reconfigure" },
+        { value: "remove", label: "Remove voice configuration" },
+      ],
+    });
+    cancelGuard(action);
+    if (action === "keep") return;
+    if (action === "remove") {
+      await deps.runInTx((tx) => deps.agentStore.deleteVoiceConfig(tx));
+      p.log.success("Voice configuration removed. Restart the server to release the provider.");
+      return;
+    }
+  } else {
+    const proceed = await p.confirm({
+      message: "Configure voice replies (TTS + STT)? (optional)",
+      initialValue: false,
+    });
+    if (!cancelGuard(proceed)) return;
+  }
+
+  p.note(
+    [
+      "Voice uses OpenAI's /v1/audio/speech (TTS) and",
+      "/v1/audio/transcriptions (STT). Other OpenAI-compatible providers",
+      "(OpenRouter, Venice, etc.) don't serve these endpoints, so voice",
+      "needs its own OpenAI key.",
+      "",
+      "Get one at https://platform.openai.com/api-keys",
+    ].join("\n"),
+    "Where to get an OpenAI voice key",
+  );
+
+  const apiKey = cancelGuard(
+    await p.password({
+      message: "Paste your OpenAI API key (used for both TTS and STT):",
+      validate: (v) => {
+        if (!v) return "API key is required";
+        // sk- catches both legacy (sk-…) and project (sk-proj-…) keys.
+        // Length floor is a sanity check — real keys are 51+ chars; 20
+        // rejects obviously-typo'd prefixes without false-positives on
+        // any current OpenAI key format.
+        if (!v.startsWith("sk-")) return "OpenAI keys start with sk-";
+        if (v.length < 20) return "API key seems too short";
+        return undefined;
+      },
+    }),
+  );
+
+  const ttsModel = cancelGuard(
+    await p.text({
+      message: "TTS model:",
+      placeholder: DEFAULT_TTS_MODEL,
+      defaultValue: DEFAULT_TTS_MODEL,
+    }),
+  );
+  const ttsVoice = cancelGuard(
+    await p.select({
+      message: "Voice:",
+      options: OPENAI_TTS_VOICES.map((v) => ({ value: v, label: v })),
+      initialValue: DEFAULT_TTS_VOICE,
+    }),
+  );
+  const sttModel = cancelGuard(
+    await p.text({
+      message: "STT model:",
+      placeholder: DEFAULT_STT_MODEL,
+      defaultValue: DEFAULT_STT_MODEL,
+    }),
+  );
+
+  // Live probe — one short TTS round-trip (~$0.0002 at gpt-4o-mini-tts
+  // pricing). Validates the key, model, and voice in one shot against the
+  // actual /v1/audio/speech endpoint, catching wrong-account / wrong-tier
+  // failures the wizard can't see at paste-time.
+  const s = p.spinner();
+  s.start("Validating voice key (1-word TTS probe)...");
+  let probeOk = false;
+  try {
+    const probe = new OpenAIVoiceProvider({ apiKey });
+    await probe.tts({ text: "hi", voice: ttsVoice, model: ttsModel, format: "ogg" });
+    s.stop("Voice key validated.");
+    probeOk = true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    s.stop(`Voice probe failed: ${message}`);
+    p.log.warn(
+      "If the model is tier-locked or the name is wrong, re-run setup and pick a different TTS model.",
+    );
+    const saveAnyway = await p.confirm({
+      message: "Save the config anyway? Voice replies will error on first use.",
+      initialValue: false,
+    });
+    if (!cancelGuard(saveAnyway)) return;
+  }
+
+  // Atomic — store the secret, conditionally mark it validated, and link
+  // the voice_config row in a single tx. A crash mid-flight would
+  // otherwise leave an orphan `openai_voice_key` secret with no
+  // voice_config row referencing it; harmless (bootstrap sees no
+  // voice_config → voice stays disabled), but composing into one tx is
+  // the documented store pattern.
+  await deps.runInTx(async (tx) => {
+    const { id: secretId } = await deps.secretsStore.putSecret(tx, {
+      name: VOICE_SECRET_NAME,
+      plaintext: apiKey,
+      description: "OpenAI API key for voice (TTS + STT)",
+    });
+    if (probeOk) {
+      await deps.secretsStore.markValidated(tx, VOICE_SECRET_NAME);
+    }
+    await deps.agentStore.upsertVoiceConfig(tx, {
+      ttsSecretId: secretId,
+      sttSecretId: secretId,
+      ttsProvider: "openai",
+      ttsModel,
+      ttsVoice,
+      sttProvider: "openai",
+      sttModel,
+    });
+  });
+
+  // Distinct copy on the save-anyway branch so operators don't confuse a
+  // probe-skipped save with a probe-validated one. `validated_at` on the
+  // secret already encodes the same signal, but the wizard's terminal
+  // line is what the operator actually reads.
+  if (probeOk) {
+    p.log.success(
+      `Voice configured (TTS=${ttsModel}/${ttsVoice}, STT=${sttModel}). Restart the server to pick up changes.`,
+    );
+  } else {
+    p.log.warn(
+      `Voice config saved UNVALIDATED — probe failed; first voice reply will surface any auth issue (TTS=${ttsModel}/${ttsVoice}, STT=${sttModel}). Restart the server to pick up changes.`,
+    );
+  }
+}
+
 async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) =>
     resolveGitHubIdentity(tx, deps.secretsStore, DEFAULT_GITHUB_IDENTITY_NAME),
@@ -1260,8 +1429,11 @@ async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void> {
     }
   }
 
-  const mode = await collectSkillsRemoteMode(deps, localMainSha);
-  if (mode === null) return;
+  // Wizard cancel = throw WizardCancelled (caught by runSetup's top-level
+  // try/catch for clean exit). T = never, so the return type narrows.
+  const mode = await collectSkillsRemoteMode(deps, localMainSha, () => {
+    throw new WizardCancelled();
+  });
   const result = await configureSkillsRemote(
     { runInTx: deps.runInTx, codingStore, skillsRepoPath },
     mode,
@@ -1279,153 +1451,6 @@ async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void> {
   }
   const directionVerb = result.value.direction === "publish" ? "published to" : "adopted from";
   p.log.success(`Skills remote ${directionVerb}: ${result.value.remoteUrl}`);
-}
-
-/** Prompt for own / auto-provision / skip. Prompt text and `own`'s
- * `direction` follow local state — empty local goes adopt-flavored
- * (fetch from a populated remote), populated local goes publish-flavored
- * (push to a fresh remote). Returns null on operator cancellation. */
-async function collectSkillsRemoteMode(
-  deps: WizardDeps,
-  localMainSha: string | null,
-): Promise<ConfigureSkillsRemoteMode | null> {
-  const identity = await deps.runInTx((tx) =>
-    resolveGitHubIdentity(tx, deps.secretsStore, DEFAULT_GITHUB_IDENTITY_NAME),
-  );
-  const hasGitHubIdentity = identity.isOk();
-  const direction: "adopt" | "publish" = localMainSha === null ? "adopt" : "publish";
-
-  const promptMessage =
-    direction === "adopt"
-      ? "Skills bare repo is empty. How should it be configured?"
-      : "Skills bare repo has commits already. How should the remote be configured?";
-
-  const ownLabel = direction === "adopt" ? "Adopt an existing remote" : "Publish to a fresh remote";
-  const ownHint =
-    direction === "adopt"
-      ? "paste URL of a pre-populated repo; Cogmo fetches main"
-      : "paste URL of an empty repo; Cogmo pushes main";
-  const autoHint =
-    direction === "adopt"
-      ? "Cogmo creates a private `cogmo-skills` repo with a README seed"
-      : "Cogmo creates an empty private `cogmo-skills` repo and pushes your skills";
-
-  const options: { value: "own" | "auto-provision" | "skip"; label: string; hint?: string }[] = [
-    { value: "own", label: ownLabel, hint: ownHint },
-  ];
-  if (hasGitHubIdentity) {
-    options.push({ value: "auto-provision", label: "Auto-provision on GitHub", hint: autoHint });
-  }
-  options.push({
-    value: "skip",
-    label: "Skip — configure later via `cogmo migrate-skills-remote`",
-  });
-
-  const choice = cancelGuard(await p.select({ message: promptMessage, options }));
-
-  if (choice === "skip") return { kind: "skip" };
-
-  if (choice === "own") {
-    const url = cancelGuard(
-      await p.text({
-        message:
-          direction === "adopt"
-            ? "Paste the URL of the remote to adopt (https://… or git@host:…):"
-            : "Paste the URL of an empty remote to publish to (https://… or git@host:…):",
-        placeholder: "git@github.com:you/cogmo-skills.git",
-        validate: (v) => {
-          if (!v || v.trim().length === 0) return "URL is required";
-          return undefined;
-        },
-      }),
-    );
-    const ownMode: ConfigureSkillsRemoteMode = {
-      kind: "own",
-      direction,
-      remoteUrl: url.trim(),
-    };
-    if (identity.isOk()) ownMode.identity = identity.value;
-    return ownMode;
-  }
-
-  // auto-provision — gated above on hasGitHubIdentity so identity.isOk() here.
-  if (!identity.isOk()) return null;
-  return { kind: "auto-provision", identity: identity.value };
-}
-
-/** Format a `configureSkillsRemote` error as operator-readable wizard output. */
-function renderConfigureError(error: ConfigureSkillsRemoteError): void {
-  switch (error.kind) {
-    case "url_invalid":
-      p.log.error(`Invalid URL: ${error.reason}`);
-      break;
-    case "remote_unreachable":
-      p.log.error(`Remote unreachable: ${error.reason}`);
-      p.log.info(
-        "Check the URL, credentials, and network. For HTTPS URLs, the GitHub identity's PAT must have access.",
-      );
-      break;
-    case "remote_empty":
-      p.log.error(
-        `Remote has no \`refs/heads/main\` to adopt. Pick "Publish to a fresh remote" instead, ` +
-          `or initialize the remote first (GitHub: \`gh repo create --add-readme\`).`,
-      );
-      break;
-    case "local_empty":
-      p.log.error(
-        'Local skills bare repo has no commits to publish. Pick "Adopt an existing remote" instead.',
-      );
-      break;
-    case "remote_diverged":
-      p.log.error(
-        `Adopt would orphan local commits. Local main is ${error.localSha.slice(0, 7)}; ` +
-          `remote main is ${error.remoteSha.slice(0, 7)} and isn't a descendant. ` +
-          `Resolve outside the helper: push local first (\`git push origin main\` from $COGMO_SKILLS_PATH) ` +
-          `or delete local main intentionally (\`git update-ref -d refs/heads/main\`) and re-run.`,
-      );
-      break;
-    case "local_diverged":
-      p.log.error(
-        `Publish would orphan remote commits. Local main is ${error.localSha.slice(0, 7)}; ` +
-          `remote main is ${error.remoteSha.slice(0, 7)} and isn't an ancestor. ` +
-          `Resolve outside the helper: fetch remote first (\`git fetch origin main\` from $COGMO_SKILLS_PATH), ` +
-          `merge or rebase, then re-run.`,
-      );
-      break;
-    case "auto_provision_failed":
-      p.log.error(
-        `Auto-provision failed${error.status ? ` (HTTP ${error.status})` : ""}: ${error.reason}`,
-      );
-      break;
-    case "auto_provision_repo_exists":
-      p.log.error(
-        `\`${error.repoName}\` already exists on the configured GitHub account. ` +
-          `Re-run setup and pick "Adopt an existing remote" pointing at the existing repo.`,
-      );
-      break;
-  }
-  p.log.warn("Re-run `cogmo setup` or `cogmo migrate-skills-remote` to retry.");
-}
-
-const execFileP = promisify(execFile);
-
-/** Read local `refs/heads/main` sha — returns null when main is unborn
- * (fresh `git init --bare` state). Used by `stepConfigureSkillsRemote`
- * to pick the adopt-vs-publish direction without inferring inside the
- * helper. */
-async function readLocalMainSha(repoPath: string): Promise<string | null> {
-  try {
-    const { stdout } = await execFileP("git", [
-      "-C",
-      repoPath,
-      "rev-parse",
-      "--verify",
-      "refs/heads/main",
-    ]);
-    return stdout.trim();
-  } catch {
-    return null;
-  }
 }
 
 async function stepValidateHindsight(): Promise<void> {
@@ -1448,11 +1473,15 @@ async function stepSummary(deps: WizardDeps, botUsername?: string): Promise<void
   const telegramChannel = await deps.runInTx((tx) =>
     deps.transportStore.getChannelByType(tx, "telegram"),
   );
+  const voiceConfig = await deps.runInTx((tx) => deps.agentStore.getVoiceConfig(tx));
 
   const lines: string[] = [];
   lines.push(`Providers: ${providers.map((p) => p.name).join(", ") || "none"}`);
   lines.push(`Secrets: ${secrets.length} stored`);
   lines.push(`Telegram: ${telegramChannel ? "configured" : "not configured"}`);
+  lines.push(
+    `Voice: ${voiceConfig ? `configured (${voiceConfig.ttsModel}/${voiceConfig.ttsVoice})` : "not configured"}`,
+  );
 
   p.note(lines.join("\n"), "Setup complete");
 
@@ -1522,22 +1551,25 @@ export async function runWizard(deps: {
   // Step 5: OpenAI-compatible image providers (Venice, OpenAI gpt-image, custom)
   await stepConfigureImageProviders(wizardDeps);
 
-  // Step 6: GitHub identity for the coding-delegation pipeline (optional)
+  // Step 6: Voice (TTS + STT) — paired with image providers as optional output modality
+  await stepConfigureVoice(wizardDeps);
+
+  // Step 7: GitHub identity for the coding-delegation pipeline (optional)
   await stepConfigureGitHubIdentity(wizardDeps);
 
-  // Step 7: Claude Code subscription auth for the coding-delegation pipeline (optional)
+  // Step 8: Claude Code subscription auth for the coding-delegation pipeline (optional)
   await stepConfigureClaudeCodeAuth(wizardDeps);
 
-  // Step 8: Daytona managed sandbox (optional — required when SANDBOX_BACKEND=daytona)
+  // Step 9: Daytona managed sandbox (optional — required when SANDBOX_BACKEND=daytona)
   await stepConfigureDaytona(wizardDeps);
 
-  // Step 9: Skills repo remote (required for `delegate_coding({repo:"skills"})`;
+  // Step 10: Skills repo remote (required for `delegate_coding({repo:"skills"})`;
   // skippable — operator can re-run `cogmo migrate-skills-remote` later)
   await stepConfigureSkillsRemote(wizardDeps);
 
-  // Step 10: Hindsight check
+  // Step 11: Hindsight check
   await stepValidateHindsight();
 
-  // Step 11: Summary + next-steps
+  // Step 12: Summary + next-steps
   await stepSummary(wizardDeps, botUsername);
 }
