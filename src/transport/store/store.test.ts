@@ -819,4 +819,83 @@ describe("DrizzleTransportStore", () => {
       ).toBeUndefined();
     });
   });
+
+  describe("findActiveSessionForUserProfile", () => {
+    it("returns the most recent active session for the user+profile pair", async () => {
+      const { userId, profileId, conversationId } = await seedConversation();
+      const channelId = await seedChannel();
+      const sessionId = await seedSession(channelId, conversationId, "addr-1");
+
+      const result = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, userId, profileId),
+      );
+      expect(result).toEqual({ sessionId, conversationId });
+    });
+
+    it("picks the most recently-created active session when multiple exist", async () => {
+      const { userId, profileId, conversationId } = await seedConversation();
+      const channelId = await seedChannel();
+      await seedSession(channelId, conversationId, "addr-old");
+      // Sleep 5ms so timestamps are strictly ordered under postgres
+      // resolution. (UUIDv7 ids would tiebreak even at the same ts.)
+      await new Promise((r) => setTimeout(r, 5));
+      const newer = await seedSession(channelId, conversationId, "addr-new");
+
+      const result = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, userId, profileId),
+      );
+      expect(result?.sessionId).toBe(newer);
+    });
+
+    it("returns undefined when the user has no active session for the profile", async () => {
+      const { userId, profileId } = await seedConversation();
+      // No session seeded.
+
+      const result = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, userId, profileId),
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it("ignores closed sessions", async () => {
+      const { userId, profileId, conversationId } = await seedConversation();
+      const channelId = await seedChannel();
+      const sessionId = await seedSession(channelId, conversationId);
+      await tx((trx) => store.closeSession(trx, sessionId));
+
+      const result = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, userId, profileId),
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it("ignores expired sessions", async () => {
+      const { userId, profileId, conversationId } = await seedConversation();
+      const channelId = await seedChannel();
+      const sessionId = await seedSession(channelId, conversationId);
+      // Manually expire in the past — createSession doesn't take expiresAt.
+      await db.execute(
+        sql`UPDATE channel_sessions SET expires_at = now() - interval '1 hour' WHERE id = ${sessionId}`,
+      );
+
+      const result = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, userId, profileId),
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it("scopes by both userId AND profileId — does not leak across users", async () => {
+      const a = await seedConversation();
+      const b = await seedConversation();
+      const channelId = await seedChannel();
+      await seedSession(channelId, a.conversationId, "addr-a");
+      await seedSession(channelId, b.conversationId, "addr-b");
+
+      const result = await tx((trx) =>
+        store.findActiveSessionForUserProfile(trx, a.userId, b.profileId),
+      );
+      // a.userId never used b.profileId — no match should exist.
+      expect(result).toBeUndefined();
+    });
+  });
 });

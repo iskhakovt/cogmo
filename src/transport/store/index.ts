@@ -1,5 +1,9 @@
 import { and, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { JsonValue } from "type-fest";
+// Cross-module read: scheduled-task fire routing needs conversations.{user_id, profile_id}
+// joined to channel_sessions. Per CLAUDE.md → Store Pattern, store impls may import
+// any schema; the access boundary is the TransportStore interface.
+import { conversations } from "../../agent/store/schema.js";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { InboundContent } from "../content.js";
@@ -198,6 +202,23 @@ export interface TransportStore {
 
   /** Remove a channel and its sessions/identities. */
   removeChannel(tx: Transaction, channelId: string): Promise<void>;
+
+  /**
+   * Find the most recently active conversation-and-session pair for a
+   * given user + profile. Used by the scheduled-task fire handler to
+   * deliver synthetic inbound messages into the user's currently-open
+   * chat for that profile.
+   *
+   * Returns the most recently created active session whose
+   * `conversation.user_id`/`conversation.profile_id` matches, with its
+   * conversation id. `undefined` when the user has no active sessions
+   * on that profile — fires for offline users no-op.
+   */
+  findActiveSessionForUserProfile(
+    tx: Transaction,
+    userId: string,
+    profileId: string,
+  ): Promise<{ sessionId: string; conversationId: string } | undefined>;
 }
 
 export class DrizzleTransportStore implements TransportStore {
@@ -628,5 +649,35 @@ export class DrizzleTransportStore implements TransportStore {
     await tx.delete(channelSessions).where(eq(channelSessions.channelId, channelId));
     await tx.delete(userIdentities).where(eq(userIdentities.channelId, channelId));
     await tx.delete(channels).where(eq(channels.id, channelId));
+  }
+
+  async findActiveSessionForUserProfile(
+    tx: Transaction,
+    userId: string,
+    profileId: string,
+  ): Promise<{ sessionId: string; conversationId: string } | undefined> {
+    // Joins channel_sessions → conversations to filter by user+profile.
+    // Cross-module JOIN: conversations is owned by agent/store, but per
+    // project convention store implementations may import any schema
+    // (see CLAUDE.md → Store Pattern). Order by session createdAt DESC
+    // so a recently-opened session wins over a long-idle one.
+    const rows = await tx
+      .select({
+        sessionId: channelSessions.id,
+        conversationId: channelSessions.conversationId,
+      })
+      .from(channelSessions)
+      .innerJoin(conversations, eq(conversations.id, channelSessions.conversationId))
+      .where(
+        and(
+          eq(conversations.userId, userId),
+          eq(conversations.profileId, profileId),
+          eq(channelSessions.status, "active"),
+          or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
+        ),
+      )
+      .orderBy(desc(channelSessions.createdAt))
+      .limit(1);
+    return rows[0];
   }
 }

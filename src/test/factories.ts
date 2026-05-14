@@ -2,6 +2,7 @@
  * Shared mock factories for unit tests.
  * Every store interface method is mocked — tests override what they need.
  */
+import type { Inngest } from "inngest";
 import { ok } from "neverthrow";
 import { vi } from "vitest";
 import type { AgentStore } from "../agent/store/index.js";
@@ -123,6 +124,27 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     bulkStagePendingMemories: vi.fn().mockResolvedValue(undefined),
     getPendingMemories: vi.fn().mockResolvedValue([]),
     deletePendingMemories: vi.fn().mockResolvedValue(undefined),
+    createScheduledTask: vi.fn().mockResolvedValue({
+      id: "sched-1",
+      userId: "user-1",
+      profileId: "profile-1",
+      kind: "recurring",
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      prompt: "test",
+      nextRunAt: new Date(0),
+      lastRunAt: null,
+      enabled: true,
+      catchupMissed: false,
+      source: "agent",
+      createdAt: new Date(0),
+    }),
+    getScheduledTask: vi.fn().mockResolvedValue(undefined),
+    listScheduledTasks: vi.fn().mockResolvedValue([]),
+    lockDueScheduledTasks: vi.fn().mockResolvedValue([]),
+    advanceScheduledTask: vi.fn().mockResolvedValue(undefined),
+    setScheduledTaskEnabled: vi.fn().mockResolvedValue(undefined),
+    deleteScheduledTask: vi.fn().mockResolvedValue(undefined),
     // --- Admin (Chunk 3) ---
     listProfiles: vi.fn().mockResolvedValue([]),
     getProfileOwner: vi.fn().mockResolvedValue(null),
@@ -183,6 +205,7 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     getChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     setChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     clearChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
+    findActiveSessionForUserProfile: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -530,4 +553,26 @@ export function mockSecretsStore(overrides?: Partial<SecretsStore>): SecretsStor
     deleteAllSecrets: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
+}
+
+/**
+ * Spy on Inngest's private `_send` method so `step.sendEvent` inside a
+ * function under test doesn't reach a real Inngest dev server (which
+ * would burn ~2s per test on ECONNREFUSED retry).
+ *
+ * The cast is the minimum-overhead workaround:
+ *   - `declare module "inngest"` augmentation fails — the SDK declares
+ *     `_send` internally as private, TS rejects with "Duplicate
+ *     identifier";
+ *   - `vi.mock("../../inngest/client.js")` is heavy and brittle to
+ *     SDK internals;
+ *   - skipping the spy entirely hangs the function under test.
+ *
+ * Returns the MockInstance so callers can chain `.mockResolvedValue` /
+ * `.toHaveBeenCalledWith` etc. The cast is contained here — call-sites
+ * have no `as` of any kind.
+ */
+export function spyOnInngestSend(client: Inngest) {
+  type InngestSendShape = { _send(args: unknown): Promise<{ ids: string[] }> };
+  return vi.spyOn(client as unknown as InngestSendShape, "_send");
 }

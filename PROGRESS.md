@@ -70,15 +70,20 @@ The minimum useful system: talk to it, it remembers things.
 
 The agent does things on its own, not just when you talk to it.
 
-- [ ] Morning briefing — Inngest cron function
-- [ ] Post-conversation extraction — Inngest delayed function
-- [ ] Memory consolidation — daily `reflect()` via Inngest cron
-- [ ] Agent self-scheduling tools — `schedule_task`, `list_tasks`, `remove_task`
-- [ ] Human-in-the-loop — Inngest `step.waitForEvent()` + Telegram callback buttons
+Phase 2 is anchored on one new primitive — **user/agent-defined scheduled tasks** — that subsumes "morning briefing", ingestion polling, and any "remind me at X" surface. Static Inngest crons stay for genuinely system-wide jobs (memory consolidation). See [scheduling.md](design/scheduling.md) → Agent Self-Scheduling.
+
+- [x] Post-conversation extraction — Observer on `conversation/idle` (shipped in Phase 1, runs delayed via `step.sleep("wait-for-silence", "5m")`)
+- [x] Human-in-the-loop — Inngest `step.waitForEvent()` + Telegram callback buttons (shipped via coding slice 2 plan approval + slice 3 tool gate; reusable primitive)
+- [x] Concurrency control — per-conversation FIFO (shipped: `concurrency: { limit: 1, key: "event.data.conversationId" }` in `handle-message`); global cap deferred until measured
+- [ ] `scheduled_tasks` table + 1-min ticker dispatcher — DB-backed registry; `next_run_at` cron-anchored via `cron-parser` + IANA timezone; fan-out via `step.sendEvent` with idempotency key `${task_id}:${next_run_at.toISOString()}`; one-off reminders ≤1y skip the table via `inngest.send({ ts })`
+- [ ] `schedule_task` / `list_tasks` / `remove_task` agent tools — `cron-parser` validation, min-interval ≥60s, per-user task cap; structured `Result<TaskCreated, ValidationError>` so the LLM self-corrects on malformed cron
+- [ ] Synthetic conversation turn on fire — fire handler loads profile, builds scoped `Service`, replays stored prompt as user-role message; audit `source: 'scheduled_task'`; the scheduled-for timestamp is passed into the prompt so the model is self-aware about catch-up
+- [ ] Wizard recurring-tasks step — optional, opt-in flow for "morning briefing at 7:30am" and similar; writes one `scheduled_tasks` row; re-runnable, removable via `/schedules`. Morning briefing is one *instance* of the primitive, not a special-cased function.
+- [ ] `/schedules` channel command — view enabled + disabled, disable/enable/delete; identity-checked transport entry point (mirrors `/skills`)
+- [ ] Memory consolidation — daily `reflect()` via static Inngest cron (genuinely system-wide, not user-defined)
+- [ ] First ingestion agent: Gmail (MCP) — depends on MCP client Phase D (OAuth 2.1 + DCR, see todo); polling cadence is itself a `scheduled_tasks` row that runs an ingestion prompt
+- [ ] First ingestion agent: Google Calendar (MCP) — same shape as Gmail
 - [ ] Dual-mode monitoring for ingestion — embedding scan first, LLM only when relevant
-- [ ] First ingestion agent: Gmail (MCP)
-- [ ] First ingestion agent: Google Calendar (MCP)
-- [ ] Concurrency control — per-conversation FIFO, global concurrency limit via Inngest
 
 (Subscription-backed background coding tasks live in Phase 6 via `claude -p` / `codex exec` subprocess — see [Phase 6: Autonomous Coding + Sandbox](#phase-6-autonomous-coding--sandbox). The Agent SDK path is not used here; it requires API keys, not subscriptions.)
 
