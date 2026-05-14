@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { HostRunner } from "./client/runner.js";
 import { McpRegistryImpl } from "./registry.js";
@@ -150,7 +151,7 @@ describe("MCP HTTP end-to-end against server-everything streamableHttp", () => {
     const tools = await registry.resolveTools({ toolGlobs: ["mcp__everything_http__*"] });
     expect(tools.map((t) => t.name)).toEqual(["mcp__everything_http__echo"]);
 
-    const echoSpec = tools[0]!;
+    const echoSpec = expectDefined(tools[0], "echo tool");
     const result = await echoSpec.handler({ message: "hello http mcp" }, {} as never);
     expect(result).toMatch(/hello http mcp/);
   });
