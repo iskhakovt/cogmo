@@ -22,14 +22,33 @@ import type {
 } from "./scheduling-service.js";
 import { listTasks, removeTask, scheduleTask } from "./tools.js";
 
+/**
+ * Hand-built Service stub with `scheduling` populated. Per CLAUDE.md →
+ * Testing, optional sub-namespaces are spread conditionally rather
+ * than assigned to a `mock<Service>()` Proxy — `mock<Service>()`
+ * auto-mocks every field on access (including the optional ones),
+ * which makes the absent-sub-namespace path untestable. Pair with
+ * `buildServiceWithoutScheduling()` for the graceful-error branch.
+ */
 function buildService(overrides?: Partial<SchedulingService>): Service {
   const scheduling = mock<SchedulingService>();
   if (overrides) Object.assign(scheduling, overrides);
-  // Cast through `unknown` only because mock<Service>() auto-mocks every
-  // optional sub-namespace via Proxy (see CLAUDE.md → Testing). We just
-  // want a minimal stub with `scheduling` set; the tools never touch
-  // other namespaces.
-  return { scheduling } as unknown as Service;
+  return {
+    memory: mock<Service["memory"]>(),
+    files: mock<Service["files"]>(),
+    coreMemory: mock<Service["coreMemory"]>(),
+    scheduling,
+  };
+}
+
+/** Service stub WITHOUT the `scheduling` namespace — drives the
+ * graceful-error branch in each tool. */
+function buildServiceWithoutScheduling(): Service {
+  return {
+    memory: mock<Service["memory"]>(),
+    files: mock<Service["files"]>(),
+    coreMemory: mock<Service["coreMemory"]>(),
+  };
 }
 
 describe("scheduleTask tool", () => {
@@ -79,15 +98,17 @@ describe("scheduleTask tool", () => {
     });
   });
 
-  it("threads catchupMissed through to the service", async () => {
+  it("threads catchupMissed through to the service (nested in recurring schedule)", async () => {
     const create = vi.fn().mockResolvedValue(ok({ id: "task-3", nextRunAt: new Date() }));
     const service = buildService({ create });
 
+    // catchupMissed now lives inside `schedule` (recurring branch) — see
+    // tools.ts schema. Passing it at top level would fail Zod parse
+    // (handled in the schema-rejection tests below).
     await scheduleTask.handler(
       {
-        schedule: { kind: "recurring", cron: "0 9 * * *" },
+        schedule: { kind: "recurring", cron: "0 9 * * *", catchupMissed: true },
         prompt: "x",
-        catchupMissed: true,
       },
       service,
     );
@@ -162,7 +183,7 @@ describe("scheduleTask tool", () => {
   it("returns a graceful message when service.scheduling is absent", async () => {
     const result = await scheduleTask.handler(
       { schedule: { kind: "recurring", cron: "0 9 * * *" }, prompt: "x" },
-      {} as Service,
+      buildServiceWithoutScheduling(),
     );
     expect(result).toMatch(/Scheduling is not available/);
   });
@@ -246,64 +267,106 @@ describe("listTasks tool", () => {
   });
 
   it("returns a graceful message when service.scheduling is absent", async () => {
-    expect(await listTasks.handler({}, {} as Service)).toMatch(/Scheduling is not available/);
-  });
-});
-
-describe("removeTask tool", () => {
-  it("dispatches to service.scheduling.remove and reports success", async () => {
-    const remove = vi.fn().mockResolvedValue(ok(undefined));
-    const service = buildService({ remove });
-
-    const result = await removeTask.handler({ id: "task-1" }, service);
-
-    expect(remove).toHaveBeenCalledWith("task-1");
-    expect(result).toBe("Removed task task-1.");
-  });
-
-  it("renders not_found cleanly", async () => {
-    const service = buildService({
-      remove: vi.fn().mockResolvedValue(err({ kind: "not_found", id: "missing" })),
-    });
-    const result = await removeTask.handler({ id: "missing" }, service);
-    expect(result).toMatch(/no scheduled task with id 'missing'/);
-  });
-
-  it("returns a graceful message when service.scheduling is absent", async () => {
-    expect(await removeTask.handler({ id: "x" }, {} as Service)).toMatch(
+    expect(await listTasks.handler({}, buildServiceWithoutScheduling())).toMatch(
       /Scheduling is not available/,
     );
   });
 });
 
+describe("removeTask tool", () => {
+  // The tool schema enforces `.uuid()` on `id`, so test inputs must
+  // be UUID-shaped. Pinned constants keep the tests readable.
+  const VALID_ID_A = "019e2900-0000-7000-8000-000000000001";
+  const VALID_ID_MISSING = "019e2900-0000-7000-8000-000000000002";
+
+  it("dispatches to service.scheduling.remove and reports success", async () => {
+    const remove = vi.fn().mockResolvedValue(ok(undefined));
+    const service = buildService({ remove });
+
+    const result = await removeTask.handler({ id: VALID_ID_A }, service);
+
+    expect(remove).toHaveBeenCalledWith(VALID_ID_A);
+    expect(result).toBe(`Removed task ${VALID_ID_A}.`);
+  });
+
+  it("renders not_found cleanly", async () => {
+    const service = buildService({
+      remove: vi.fn().mockResolvedValue(err({ kind: "not_found", id: VALID_ID_MISSING })),
+    });
+    const result = await removeTask.handler({ id: VALID_ID_MISSING }, service);
+    expect(result).toMatch(new RegExp(`no scheduled task with id '${VALID_ID_MISSING}'`));
+  });
+
+  it("returns a graceful message when service.scheduling is absent", async () => {
+    expect(
+      await removeTask.handler(
+        { id: "00000000-0000-7000-8000-000000000001" },
+        buildServiceWithoutScheduling(),
+      ),
+    ).toMatch(/Scheduling is not available/);
+  });
+});
+
 describe("Tool schemas reject malformed input", () => {
   // The defineTool wrapper runs schema.parse on raw input before
-  // invoking the handler. These tests exercise the Zod schemas directly
-  // (not through the handler) to lock the rejection surface.
+  // invoking the handler — these tests prove the Zod gate fires.
+  // `ToolSpec.handler` is typed as `(input: Record<string, unknown>, ...)`
+  // so structurally-bad inputs are type-valid; the rejection is a
+  // pure runtime contract from Zod. No casts needed.
 
   it("scheduleTask: rejects schedule.kind outside the union", async () => {
     const service = buildService({ create: vi.fn() });
-    // Deliberately invalid input — defineTool's schema.parse should throw
-    // before the handler body runs. Cast through `unknown` to satisfy TS
-    // while preserving the test intent (the handler signature is typed
-    // against the parsed input).
-    const badInput = { schedule: { kind: "weekly" } } as unknown as Parameters<
-      typeof scheduleTask.handler
-    >[0];
-    await expect(scheduleTask.handler(badInput, service)).rejects.toThrow();
+    await expect(
+      scheduleTask.handler({ schedule: { kind: "weekly" }, prompt: "x" }, service),
+    ).rejects.toThrow();
   });
 
   it("scheduleTask: rejects when prompt is missing", async () => {
     const service = buildService({ create: vi.fn() });
-    const badInput = {
-      schedule: { kind: "recurring", cron: "0 9 * * *" },
-    } as unknown as Parameters<typeof scheduleTask.handler>[0];
-    await expect(scheduleTask.handler(badInput, service)).rejects.toThrow();
+    await expect(
+      scheduleTask.handler({ schedule: { kind: "recurring", cron: "0 9 * * *" } }, service),
+    ).rejects.toThrow();
+  });
+
+  it("scheduleTask: rejects when prompt exceeds the max length", async () => {
+    // Regression guard for the new `prompt.max(MAX_PROMPT_LENGTH)` cap
+    // — a multi-KB prompt would balloon every fire as it's replayed
+    // verbatim into the agent loop.
+    const service = buildService({ create: vi.fn() });
+    const tooLong = "a".repeat(5000);
+    await expect(
+      scheduleTask.handler(
+        { schedule: { kind: "recurring", cron: "0 9 * * *" }, prompt: tooLong },
+        service,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("scheduleTask: rejects catchupMissed on the one_off branch (schema-unrepresentable)", async () => {
+    // catchupMissed lives inside the recurring schema. Passing it
+    // alongside `kind: "one_off"` should fail Zod discriminator parse.
+    const service = buildService({ create: vi.fn() });
+    await expect(
+      scheduleTask.handler(
+        {
+          schedule: { kind: "one_off", runAt: "2099-01-01T00:00:00Z", catchupMissed: true },
+          prompt: "x",
+        },
+        service,
+      ),
+    ).rejects.toThrow();
   });
 
   it("removeTask: rejects when id is missing", async () => {
     const service = buildService({ remove: vi.fn() });
-    const badInput = {} as unknown as Parameters<typeof removeTask.handler>[0];
-    await expect(removeTask.handler(badInput, service)).rejects.toThrow();
+    await expect(removeTask.handler({}, service)).rejects.toThrow();
+  });
+
+  it("removeTask: rejects when id is not a UUID", async () => {
+    // Regression guard: a non-UUID id at the tool boundary would
+    // otherwise reach `getScheduledTask`'s WHERE-on-uuid-column query
+    // and raise PG 22P02, escaping the Result envelope.
+    const service = buildService({ remove: vi.fn() });
+    await expect(removeTask.handler({ id: "not-a-uuid" }, service)).rejects.toThrow();
   });
 });

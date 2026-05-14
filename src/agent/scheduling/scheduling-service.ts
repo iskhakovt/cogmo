@@ -24,12 +24,21 @@ import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
 import type { AgentStore, ScheduledTask, ScheduleKind } from "../store/index.js";
-import { type CronValidationError, computeNextRun, validateCron } from "./cron.js";
+import { type CronValidationError, computeNextRun, isValidTimezone, validateCron } from "./cron.js";
 
 const log = logger.child({ component: "scheduling.service" });
 
 /** Default per-user active-task cap. Higher than ChatGPT Tasks's 10 — single-user scale. */
 export const DEFAULT_SCHEDULED_TASK_CAP = 200;
+
+/**
+ * Maximum prompt length persisted to `scheduled_tasks.prompt`. Every
+ * fire replays the prompt verbatim as a user-role message, so a
+ * multi-KB prompt would balloon every invocation. 4000 chars is
+ * generous for natural-language instructions while bounded enough that
+ * a runaway prompt can't dominate the agent's input budget.
+ */
+export const MAX_PROMPT_LENGTH = 4000;
 
 /**
  * Structured failure modes from the scheduling service. Each kind
@@ -40,6 +49,7 @@ export const DEFAULT_SCHEDULED_TASK_CAP = 200;
 export type SchedulingError =
   | { kind: "validation"; cause: CronValidationError }
   | { kind: "invalid_run_at"; runAt: string; message: string }
+  | { kind: "prompt_too_long"; length: number; maxLength: number }
   | { kind: "task_cap_exceeded"; limit: number; current: number }
   | { kind: "not_found"; id: string };
 
@@ -113,7 +123,29 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
 
   return {
     async create(args) {
+      // Prompt-length cap — defence in depth (the tool schema enforces
+      // the same limit, but the service is the contract for non-tool
+      // callers like the wizard).
+      if (args.prompt.length > MAX_PROMPT_LENGTH) {
+        return err({
+          kind: "prompt_too_long" as const,
+          length: args.prompt.length,
+          maxLength: MAX_PROMPT_LENGTH,
+        });
+      }
+
       const timezone = args.timezone ?? deps.defaultTimezone;
+
+      // Timezone applies symmetrically to both kinds — recurring uses
+      // it for cron interpretation, one-off uses it for display in
+      // `list_tasks`. Validate ABOVE the kind branch so a bogus tz on
+      // a one-off can't slip past `validateCron` and pollute the row.
+      if (!isValidTimezone(timezone)) {
+        return err({
+          kind: "validation" as const,
+          cause: { kind: "invalid_timezone" as const, timezone },
+        });
+      }
 
       let nextRunAt: Date;
       let cron: string | null;
@@ -137,12 +169,20 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
         nextRunAt = parsed.value;
       }
 
-      // Cap check + insert in the same tx so two concurrent creates
-      // can't both squeak past the limit. Count includes disabled
-      // rows so a user can't accumulate a graveyard of disabled
-      // tasks and bypass the cap by toggling. Uses `countScheduledTasks`
-      // (one SELECT COUNT(*)) rather than `listScheduledTasks` so we
-      // don't pull every row's columns just to read `.length`.
+      // Cap check + insert in one tx. Under READ COMMITTED (the
+      // project default per CLAUDE.md), two concurrent creates can
+      // both read `count = cap - 1` and both insert successfully —
+      // the cap is exceeded by one. Accepted at single-user scale,
+      // and named explicitly in CLAUDE.md's Store Pattern docs
+      // ("counting + inserting under an admission cap"). Strict
+      // enforcement would need SERIALIZABLE on the outer tx, an
+      // advisory lock per user, or a unique partial index on
+      // (user_id, row_number); none warranted today.
+      //
+      // Count includes disabled rows so a graveyard can't bypass the
+      // cap by toggling. Uses `countScheduledTasks` (SELECT COUNT(*))
+      // rather than `listScheduledTasks` so we don't pull every
+      // column just to read `.length`.
       const result = await deps.runInTx(async (tx) => {
         const current = await deps.agentStore.countScheduledTasks(tx, deps.userId);
         if (current >= taskCap) {
