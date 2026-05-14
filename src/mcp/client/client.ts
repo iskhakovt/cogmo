@@ -1,9 +1,18 @@
 import { createInterface } from "node:readline";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "../../logger.js";
 import type { McpToolDescriptor } from "../config.js";
+
+/**
+ * Upper bound on the streamable-HTTP `terminateSession` DELETE. Healthy
+ * servers reply in <1s; a longer hang means the peer is gone or the
+ * network is wedged, in which case we'd rather skip cleanup than block
+ * shutdown / pool eviction.
+ */
+const TERMINATE_SESSION_TIMEOUT_MS = 2_000;
 
 /**
  * The connection-shape the rest of the MCP module depends on. Decoupled
@@ -108,6 +117,34 @@ export class SdkMcpConnection implements McpConnection {
 
   async close(): Promise<void> {
     if (this.#closed) return;
+    // Streamable-HTTP servers (Linear, Notion, Atlassian) keep per-session
+    // state keyed by `Mcp-Session-Id`. Explicit DELETE before tearing down
+    // the transport tells the server to release that state — without it,
+    // sessions linger until server-side expiry. Best-effort: server may
+    // respond 405 (per spec), already be gone, or be unreachable. Stdio /
+    // other transports don't have the method; the instanceof check keeps
+    // the abstraction.
+    //
+    // The SDK calls `fetch(url, init)` with only its own internal SSE
+    // abort signal, and undici has no default request timeout — a hung
+    // peer could block the DELETE for ~300s (body timeout). Race against
+    // a short timer so shutdown / eviction stays bounded.
+    if (this.#transport instanceof StreamableHTTPClientTransport) {
+      const transport = this.#transport;
+      try {
+        await Promise.race([
+          transport.terminateSession(),
+          new Promise<void>((_, reject) =>
+            setTimeout(
+              () => reject(new Error("terminateSession timeout")),
+              TERMINATE_SESSION_TIMEOUT_MS,
+            ).unref(),
+          ),
+        ]);
+      } catch (err) {
+        logger.debug({ err }, "MCP streamable-http terminateSession failed; continuing close");
+      }
+    }
     // Don't pre-set #closed — let `client.close()` propagate to the
     // transport, whose `onclose` handler flips state and notifies listeners.
     // This keeps remote-initiated and explicit close paths symmetric.

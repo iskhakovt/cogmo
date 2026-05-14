@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
@@ -5,6 +6,8 @@ import { createTestDatabase } from "../test/pglite.js";
 import { HostRunner } from "./client/runner.js";
 import { McpRegistryImpl } from "./registry.js";
 import { DrizzleMcpStore } from "./store/index.js";
+
+const require = createRequire(import.meta.url);
 
 /**
  * End-to-end integration test against `@modelcontextprotocol/server-everything`,
