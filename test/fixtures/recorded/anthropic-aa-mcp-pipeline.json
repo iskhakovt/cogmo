@@ -1,0 +1,30 @@
+{
+  "_comment": "MCP pipeline integration test fixtures. The 'aa-' prefix forces alphabetic load order ahead of anthropic-image-gen.json, whose turn-1 fixture matches on {turnIndex, hasToolResult} only and would otherwise win against this test's tool_result turn. Our turn-1 fixture's toolName filter scopes us to requests where mcp__echotest__echo is registered, so we never accidentally win against the image-gen test (whose tools list doesn't include it).",
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Please call the echotest echo tool with the message 'PIPELINE_OK' and reply with the result.",
+        "turnIndex": 0
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "mcp__echotest__echo",
+            "arguments": "{\"message\": \"PIPELINE_OK\"}",
+            "id": "toolu_014C8MpLtC48PUtfK3EUxtJG"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "turnIndex": 1,
+        "hasToolResult": true,
+        "toolName": "mcp__echotest__echo"
+      },
+      "response": {
+        "content": "The echo tool returned: PIPELINE_OK"
+      }
+    }
+  ]
+}
