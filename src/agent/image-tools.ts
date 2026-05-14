@@ -181,6 +181,7 @@ export function createImageTools(deps: {
       // On Inngest retry the cached JSON result (path + mediaType) replays,
       // so we neither re-bill the provider nor produce duplicate uploads.
       durable: true,
+      parallelSafe: true,
       schema: z.object({
         prompt: z.string().min(1).describe("Detailed image description"),
         model: modelEnum

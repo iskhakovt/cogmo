@@ -1,11 +1,12 @@
 import { SpanStatusCode, trace } from "@opentelemetry/api";
+import * as R from "remeda";
 import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, Message, StreamEvent, TextBlock, ToolUseBlock } from "../llm/types.js";
 import { logger } from "../logger.js";
 import { agentIterations } from "../metrics.js";
 import { validateHistory } from "./history-invariants.js";
 import type { Service } from "./service.js";
-import type { ToolRegistry } from "./tools.js";
+import type { ToolRegistry, ToolSpec } from "./tools.js";
 
 const tracer = trace.getTracer("cogmo.agent");
 
@@ -173,65 +174,105 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
 }
 
+interface PlannedCall {
+  block: ToolUseBlock;
+  spec: ToolSpec | null;
+}
+
+// Unknown tools short-circuit to an error result with no side effects, so
+// they coalesce with safe runs.
+function isSafeCall(entry: PlannedCall): boolean {
+  return entry.spec === null || entry.spec.parallelSafe === true;
+}
+
 async function executeToolCalls(
   content: ContentBlock[],
   tools: ToolRegistry,
   service: Service,
   stepRun: StepRunner | undefined,
 ): Promise<ContentBlock[]> {
-  const toolUseBlocks = content.filter((b) => b.type === "tool_use");
+  const toolUseBlocks = content.filter((b): b is ToolUseBlock => b.type === "tool_use");
+  if (toolUseBlocks.length === 0) return [];
+
+  const planned: PlannedCall[] = toolUseBlocks.map((block) => ({
+    block,
+    spec: tools.get(block.name) ?? null,
+  }));
+
+  // Coalesce consecutive safe entries; unsafe entries stay as singletons so
+  // [write_file(p), write_file(p)] still runs serially.
+  const groups = R.reduce(
+    planned,
+    (acc, entry) => {
+      const tail = acc.at(-1);
+      // biome-ignore lint/style/noNonNullAssertion: tail non-empty by construction
+      if (isSafeCall(entry) && tail !== undefined && isSafeCall(tail[0]!)) {
+        tail.push(entry);
+      } else {
+        acc.push([entry]);
+      }
+      return acc;
+    },
+    [] as PlannedCall[][],
+  );
+
   const results: ContentBlock[] = [];
-
-  for (const block of toolUseBlocks) {
-    if (block.type !== "tool_use") continue;
-
-    const spec = tools.get(block.name);
-    if (!spec) {
-      results.push({
-        type: "tool_result",
-        toolUseId: block.id,
-        content: `Error: unknown tool "${block.name}"`,
-        isError: true,
-      });
-      continue;
-    }
-
-    const result = await tracer.startActiveSpan(
-      "tool.execute",
-      { attributes: { "cogmo.tool.name": block.name } },
-      async (span) => {
-        try {
-          // Opt-in durability: wrap only when the tool is flagged AND a
-          // runner is provided. The handler body itself runs between stream
-          // events (never during), so wrapping in `step.run` doesn't
-          // reorder `onEvent` emissions. See design/crash-recovery.md.
-          const runHandler = (): Promise<string> =>
-            spec.handler(block.input as Record<string, unknown>, service);
-          const out =
-            spec.durable === true && stepRun
-              ? await stepRun(`tool-${block.name}-${block.id}`, runHandler)
-              : await runHandler();
-          return { type: "tool_result" as const, toolUseId: block.id, content: out };
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          span.recordException(err instanceof Error ? err : new Error(message));
-          span.setStatus({ code: SpanStatusCode.ERROR, message });
-          span.setAttribute("cogmo.tool.error", true);
-          return {
-            type: "tool_result" as const,
-            toolUseId: block.id,
-            content: `Error: ${message}`,
-            isError: true,
-          };
-        } finally {
-          span.end();
-        }
-      },
+  for (const group of groups) {
+    const batch = await Promise.all(
+      group.map(({ block, spec }) => runOne(block, spec, service, stepRun)),
     );
-    results.push(result);
+    results.push(...batch);
+  }
+  return results;
+}
+
+async function runOne(
+  block: ToolUseBlock,
+  spec: ToolSpec | null,
+  service: Service,
+  stepRun: StepRunner | undefined,
+): Promise<ContentBlock> {
+  if (!spec) {
+    return {
+      type: "tool_result",
+      toolUseId: block.id,
+      content: `Error: unknown tool "${block.name}"`,
+      isError: true,
+    };
   }
 
-  return results;
+  return tracer.startActiveSpan(
+    "tool.execute",
+    { attributes: { "cogmo.tool.name": block.name } },
+    async (span) => {
+      try {
+        // Opt-in durability: wrap only when the tool is flagged AND a
+        // runner is provided. The handler body itself runs between stream
+        // events (never during), so wrapping in `step.run` doesn't
+        // reorder `onEvent` emissions. See design/crash-recovery.md.
+        const runHandler = (): Promise<string> =>
+          spec.handler(block.input as Record<string, unknown>, service);
+        const out =
+          spec.durable === true && stepRun
+            ? await stepRun(`tool-${block.name}-${block.id}`, runHandler)
+            : await runHandler();
+        return { type: "tool_result" as const, toolUseId: block.id, content: out };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        span.recordException(err instanceof Error ? err : new Error(message));
+        span.setStatus({ code: SpanStatusCode.ERROR, message });
+        span.setAttribute("cogmo.tool.error", true);
+        return {
+          type: "tool_result" as const,
+          toolUseId: block.id,
+          content: `Error: ${message}`,
+          isError: true,
+        };
+      } finally {
+        span.end();
+      }
+    },
+  );
 }
 
 function buildResult(

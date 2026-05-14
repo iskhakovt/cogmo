@@ -10,6 +10,7 @@ export const memoryRecall = defineTool({
     "Search long-term memory for facts, preferences, or context from past conversations. " +
     "Use at the start of conversations and when context would help. " +
     "Prefer this over asking the user something you might already know.",
+  parallelSafe: true,
   schema: z.object({
     query: z.string().describe("Semantic search query — describe what you're looking for"),
   }),
@@ -48,6 +49,7 @@ export const memoryReflect = defineTool({
   // billable LLM round-trips per call. On Inngest retry the cached synthesized
   // answer replays, avoiding re-running the whole loop.
   durable: true,
+  parallelSafe: true,
   description:
     "Synthesize an answer from long-term memory via an agentic reasoning loop — " +
     "searches memories, follows entity-graph links, and returns a synthesized answer " +

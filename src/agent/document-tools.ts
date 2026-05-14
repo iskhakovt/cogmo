@@ -73,6 +73,7 @@ export function createDocumentTools(attachments: AttachmentStore): ToolSpec[] {
       // Durable: uploads to AttachmentStore. On Inngest retry the cached JSON
       // result (path + mediaType + name) replays, so we don't re-upload.
       durable: true,
+      parallelSafe: true,
       schema: z.object({
         filename: z
           .string()
