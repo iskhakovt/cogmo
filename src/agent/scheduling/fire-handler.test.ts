@@ -90,13 +90,17 @@ describe("createScheduledTaskFireHandler", () => {
 
     // Exactly one event emit through Inngest — inbound/arrived for the
     // resolved conversation. `_send({ fn, payload, ... })` so we pluck
-    // `payload` and assert the event shape.
+    // `payload` and assert the event shape AND the idempotency key.
+    // The key is what Inngest dedup'es against on at-least-once retry;
+    // dropping it would let a sendEvent re-deliver produce two
+    // synthetic-inbound runs through handle-message.
     expect(sendSpy).toHaveBeenCalledTimes(1);
     expect(sendSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         payload: expect.objectContaining({
           name: "inbound/arrived",
           data: { conversationId: "conv-1", inboundMessageId: "inbound-7" },
+          id: "fire:inbound-7",
         }),
       }),
     );
@@ -167,12 +171,15 @@ describe("createScheduledTaskFireHandler", () => {
     // Neither store method was touched — the cached values flowed through.
     expect(transportStore.findActiveSessionForUserProfile).not.toHaveBeenCalled();
     expect(transportStore.persistInbound).not.toHaveBeenCalled();
-    // The trigger event still fired, using the cached inbound id.
+    // Trigger event still fired with the cached inbound id, AND the
+    // idempotency key projects from that cached value (so any retry of
+    // the sendEvent step itself dedups against the same key).
     expect(sendSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         payload: expect.objectContaining({
           name: "inbound/arrived",
           data: { conversationId: "conv-1", inboundMessageId: "inbound-cached" },
+          id: "fire:inbound-cached",
         }),
       }),
     );

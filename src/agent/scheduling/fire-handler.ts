@@ -98,13 +98,21 @@ export function createScheduledTaskFireHandler(deps: ScheduledTaskFireDeps, inng
         ),
       );
 
-      await step.sendEvent(
-        "trigger-handle-message",
-        inboundArrived.create({
+      await step.sendEvent("trigger-handle-message", {
+        ...inboundArrived.create({
           conversationId: target.conversationId,
           inboundMessageId: inbound.id,
         }),
-      );
+        // Idempotency key — Inngest dedup'es events with the same `id`
+        // at the bus, so an at-least-once double-deliver of this send
+        // (lost ack on the first call, retried by Inngest) produces
+        // exactly one `inbound/arrived` downstream. Mirrors the
+        // ticker's per-fire dedup key. `inbound.id` is UUIDv7 from the
+        // cached `persist-inbound` step, so every retry projects the
+        // same value. Prefix scopes the key namespace away from any
+        // other code path that might key off the same inbound id.
+        id: `fire:${inbound.id}`,
+      });
 
       log.info(
         { taskId, conversationId: target.conversationId, inboundId: inbound.id },
