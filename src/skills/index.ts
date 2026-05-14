@@ -2,6 +2,14 @@
 
 export { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
 export { runSkillsCli } from "./cli.js";
+export {
+  AUTO_PROVISION_REPO_NAME,
+  type ConfigureSkillsRemoteDeps,
+  type ConfigureSkillsRemoteError,
+  type ConfigureSkillsRemoteMode,
+  type ConfigureSkillsRemoteSuccess,
+  configureSkillsRemote,
+} from "./configure-remote.js";
 export type { ManifestParseError, ParsedManifest } from "./manifest.js";
 export { parseManifest } from "./manifest.js";
 export { bootstrapSkillsRepo } from "./repo.js";

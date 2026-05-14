@@ -96,10 +96,26 @@ async function dispatch(cmd: string): Promise<number> {
         ? runMigrateMemoriesCli(args, cliDeps)
         : runBackfillProfileClassCli(args, cliDeps);
     }
+    case "migrate-skills-remote": {
+      const { runMigrateSkillsRemoteCli } = await import("./skills/migrations-cli.js");
+      const { bootstrapCore } = await import("./index.js");
+      const { env } = await import("./env.js");
+      // Same data-layer-only bootstrap as `migrate-memories`. Safe to run
+      // alongside `cogmo serve` — the orchestrator re-reads `coding_repos`
+      // per delegation, so any updated `remote_url` is picked up on the
+      // next task without a daemon restart.
+      const { runInTx, codingStore, secretsStore } = await bootstrapCore();
+      return runMigrateSkillsRemoteCli(process.argv.slice(3), {
+        runInTx,
+        codingStore,
+        secretsStore,
+        skillsRepoPath: env.COGMO_SKILLS_PATH,
+      });
+    }
     default:
       console.error(`Unknown command: ${cmd}`);
       console.error(
-        "Usage: main.js [serve|seed|setup|gen-key|provider|model|image-provider|image-model|skills|migrate-memories|backfill]",
+        "Usage: main.js [serve|seed|setup|gen-key|provider|model|image-provider|image-model|skills|migrate-memories|backfill|migrate-skills-remote]",
       );
       return 1;
   }

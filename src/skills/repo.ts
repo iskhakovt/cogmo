@@ -114,36 +114,53 @@ async function installHook(repoPath: string, name: string, content: string): Pro
 export const PRE_RECEIVE_HOOK_CONTENT: string = PRE_RECEIVE_HOOK;
 
 /**
- * Read `origin` URL from a bare repo's git config. Returns `""` if no remote
- * is set. Any other git failure is propagated — silently swallowing it would
- * mask a misconfigured repo as "no remote", which is a worse failure mode
- * than crashing the boot.
+ * Read `origin` URL from a git repo. Returns `null` when no `origin` is set
+ * (`git remote get-url` exits 2); any other git failure is propagated —
+ * silently swallowing it would mask a corrupt repo or missing git as "no
+ * remote", which is a worse failure mode than crashing.
+ *
+ * Shared across the wizard, the `cogmo migrate-skills-remote` CLI, the
+ * `configureSkillsRemote` helper, and the runner's mirror-push path.
  */
-async function readOriginUrl(repoPath: string): Promise<string> {
+export async function readOriginUrl(repoPath: string): Promise<string | null> {
   try {
     const { stdout } = await execFileP("git", ["-C", repoPath, "remote", "get-url", "origin"]);
     return stdout.trim();
   } catch (e) {
-    // `git remote get-url <missing>` exits with code 2 — the dedicated
-    // "no such remote" code. Match on the exit code, not the stderr text,
-    // so a localized git build doesn't quietly start crashing the boot.
-    // Any other non-zero code (corrupt repo, missing git, etc.) bubbles
-    // up — treating those as "no remote" would mask real misconfiguration.
-    if ((e as { code?: number }).code === 2) return "";
+    if ((e as { code?: number }).code === 2) return null;
     throw e;
   }
 }
 
-export interface EnsureSkillsCodingRepoResult {
-  /** True iff this call inserted the row; false iff a row was already present. */
-  created: boolean;
-  /** The repo's `name` (always `SKILLS_CODING_REPO_NAME` — exposed for log clarity). */
-  name: string;
-  /** Resolved local path on disk. */
-  localPath: string;
-  /** Resolved `origin` URL at insert time (empty string if no remote is configured). */
-  remoteUrl: string;
-}
+export type EnsureSkillsCodingRepoResult =
+  | {
+      /** No `origin` on the bare repo. Row is not inserted; `delegate_coding({repo:"skills"})`
+       * will fail until the operator runs the wizard or `cogmo migrate-skills-remote`. */
+      kind: "skipped_no_origin";
+      localPath: string;
+    }
+  | {
+      /** Row inserted on this call. */
+      kind: "created";
+      name: string;
+      localPath: string;
+      remoteUrl: string;
+    }
+  | {
+      /** Existing row's `remote_url` was stale and has been updated to match the bare repo's origin. */
+      kind: "updated";
+      name: string;
+      localPath: string;
+      remoteUrl: string;
+      previousRemoteUrl: string;
+    }
+  | {
+      /** Row already present and in sync — no-op. */
+      kind: "unchanged";
+      name: string;
+      localPath: string;
+      remoteUrl: string;
+    };
 
 export interface EnsureSkillsCodingRepoDeps {
   runInTx: Transactor;
@@ -155,21 +172,26 @@ export interface EnsureSkillsCodingRepoArgs {
 }
 
 /**
- * Idempotently ensure a `coding_repos` row exists for the skill library. The
- * filesystem half is bootstrapped by {@link bootstrapSkillsRepo}; this is the
- * DB half — without it, `delegate_coding({ repo: "skills" })` throws "Repo
- * not registered: skills" even though the bare repo is present on disk and
- * every config knob has an obvious default.
+ * Idempotently ensure `coding_repos.skills` reflects the bare repo's current
+ * `origin`. Called at boot and at the end of {@link configureSkillsRemote}.
  *
- * `remote_url` is read from the bare repo's `origin` config — so an operator
- * who attaches a GitHub/Gitea remote via `git remote add origin …` doesn't
- * have to re-enter the URL. Future changes to that remote do not propagate
- * (this row is insert-once); a future `/repo edit` flow or operator SQL is
- * the path for mutating it.
+ * The bare repo's `origin` is the source of truth — this function mirrors it
+ * into the DB row. Four outcomes (discriminated by `kind`):
  *
- * Defaults match the per-repo knobs that `Transport.repos.add` already uses
- * for user-added repos. `maxConcurrentTasks: 1` is intentional — register is
- * single-writer on `refs/heads/main` and parallel skill-author tasks would
+ *   - `skipped_no_origin` — bare repo has no `origin` attached. We refuse to
+ *     write a `remote_url=""` row because the coding-delegation pipeline
+ *     can't operate without a reachable remote (Daytona clones from it,
+ *     `register` mirrors `main` to it). The wizard / `cogmo migrate
+ *     skills-remote` CLI is the path to attach one.
+ *   - `created` — no row existed, origin is present: row inserted.
+ *   - `updated` — row existed with a stale `remote_url`: column updated. This
+ *     is the one mutation we allow on the otherwise insert-once
+ *     `coding_repos` table; see `CodingStore.updateRepoRemoteUrl`.
+ *   - `unchanged` — row present and in sync.
+ *
+ * Defaults on first insert match the per-repo knobs `Transport.repos.add`
+ * uses for user-added repos. `maxConcurrentTasks: 1` is intentional — register
+ * is single-writer on `refs/heads/main` and parallel skill-author tasks would
  * compete to fast-forward the same ref.
  */
 export async function ensureSkillsCodingRepo(
@@ -178,14 +200,37 @@ export async function ensureSkillsCodingRepo(
 ): Promise<EnsureSkillsCodingRepoResult> {
   const remoteUrl = await readOriginUrl(args.skillsRepoPath);
 
+  if (!remoteUrl) {
+    log.warn(
+      { localPath: args.skillsRepoPath },
+      "skills bare repo has no `origin` configured — `delegate_coding({repo:'skills'})` " +
+        "will fail until the wizard or `cogmo migrate-skills-remote` runs",
+    );
+    return { kind: "skipped_no_origin", localPath: args.skillsRepoPath };
+  }
+
   return deps.runInTx(async (tx) => {
     const existing = await deps.codingStore.getRepoByName(tx, SKILLS_CODING_REPO_NAME);
     if (existing) {
+      if (existing.remoteUrl === remoteUrl) {
+        return {
+          kind: "unchanged",
+          name: existing.name,
+          localPath: existing.localPath,
+          remoteUrl: existing.remoteUrl,
+        };
+      }
+      await deps.codingStore.updateRepoRemoteUrl(tx, existing.id, remoteUrl);
+      log.info(
+        { name: existing.name, previousRemoteUrl: existing.remoteUrl, remoteUrl },
+        "synced skills coding_repos.remote_url from bare repo origin",
+      );
       return {
-        created: false,
+        kind: "updated",
         name: existing.name,
         localPath: existing.localPath,
-        remoteUrl: existing.remoteUrl,
+        remoteUrl,
+        previousRemoteUrl: existing.remoteUrl,
       };
     }
     const row = await deps.codingStore.insertRepo(tx, {
@@ -204,6 +249,6 @@ export async function ensureSkillsCodingRepo(
       { name: row.name, localPath: row.localPath, remoteUrl },
       "registered skills coding_repos row",
     );
-    return { created: true, name: row.name, localPath: row.localPath, remoteUrl: row.remoteUrl };
+    return { kind: "created", name: row.name, localPath: row.localPath, remoteUrl: row.remoteUrl };
   });
 }

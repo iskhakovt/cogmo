@@ -204,29 +204,39 @@ Skills live in git. Versioned, diffable, auditable — necessary for self-evolut
 
 ### Repo location
 
-**Configurable local bare repo, user-owned.** Shape:
+**Local bare repo + synchronized remote, user-owned.** Shape:
 
 ```text
 $COGMO_SKILLS_PATH/                # default /var/lib/cogmo/skills (configurable)
-  .git/                            # initialized by Cogmo if missing
-  summarize-morning-email/
-    SKILL.md
-    skill.py
-  spending-report/
-    SKILL.md
-    skill.py
+  HEAD                             # symbolic-ref → refs/heads/main
+  hooks/
+  objects/
+  refs/                            # bare repo — no working tree
 ```
 
 - Path configured via env var or `settings.local.json`.
-- Cogmo initializes an empty git repo on first boot if the path doesn't exist.
-- User optionally sets a remote (`git remote add origin git@github.com:user/cogmo-skills.git`) for backup and cross-machine sync. Cogmo `git push` / `git pull` on schedule if configured.
-- Coding delegation operates on this repo exactly like it operates on Cogmo itself — worktrees under the skills path, standard git flow, reused [sandbox.md](sandbox.md) + [coding-delegation.md](coding-delegation.md) infrastructure.
+- Cogmo initializes the bare repo on first boot if the path doesn't exist; `HEAD = refs/heads/main` and the `pre-receive` hook are reconciled on every boot so upgrades take effect.
+- **A remote is required.** Any user-owned git URL (private GitHub repo, self-hosted Gitea, Forgejo, etc.) works — Cogmo treats `coding_repos.remote_url` as opaque transport material. Setup collects the URL via one of three operator choices:
+  - **Use my own remote** — operator pastes a pre-created URL they've granted Cogmo's credentials access to. Validated via `git ls-remote` before persisting.
+  - **Auto-provision on GitHub** — Cogmo calls `octokit.repos.createForAuthenticatedUser({ name: "cogmo-skills", private: true, auto_init: true })` and attaches the result as origin. Only available when a GitHub identity is already configured; gated to that one provider because the convenience lives in the wizard only — no permanent provider-specific surface.
+  - **Skip** — defer configuration. `delegate_coding({ repo: "skills" })` fails with a clear message until the standalone `cogmo migrate-skills-remote` CLI is run.
+- The local bare repo is **authoritative** for `register` (`update-ref` writes happen here, atomically). The remote is a synchronized mirror — every successful `register` immediately pushes the new `main` SHA to the remote, so a Daytona sandbox cloning from the remote always sees the latest skill set within the latency of one push.
+- Coding delegation operates on this repo exactly like it operates on user-registered repos — feature-branch flow over the same [sandbox.md](sandbox.md) + [coding-delegation.md](coding-delegation.md) infrastructure. The skills repo's only specialness is the post-`register` push-to-remote step.
+
+**Why local-authoritative with synchronized remote (rather than remote-authoritative):**
+- Filesystem `update-ref` is atomic and provider-agnostic. Routing `register` through a provider API (`octokit.git.updateRef`, Gitea API equivalent) would couple Cogmo to per-forge clients for the one operation we most want to keep crisp.
+- A network blip during the post-`register` push degrades to "register succeeded locally, remote sync deferred" — the local DB row and bare repo are consistent; the next `register` or a manual `git push origin main` reconciles. No half-committed states.
+- The original v1 design relied on filesystem `update-ref` for atomicity. Keeping that, plus the new push leg, preserves the invariant while unblocking the cloud-sandbox transport.
+
+**Why a remote at all (even for local-Docker bind-mount users):** off-host backup of the agent's skill library. A single-host failure should not erase the operator's accumulated personalisation. The marginal setup cost is one URL during the wizard.
+
+**Provider-agnostic in the steady state:** every code path past setup uses plain `git` — clone, push, fetch — with credentials supplied via the askpass helper. The only provider-specific surfaces are (a) the wizard's optional GitHub auto-provision step and (b) the draft-PR opener (`design/coding-delegation.md` → Draft PR step), which currently knows only GitHub; non-GitHub remotes still receive pushes, with the PR step degrading to "branch pushed, open the PR yourself."
 
 **Why not inside the Cogmo repo:** skills are personal, per-deployment. Committing them to a fork of Cogmo creates merge conflicts on upstream pull, leaks private workflows through misconfigured remotes, and couples release cadences that naturally diverge.
 
-**Why not a separate shared repo (`cogmo-skills`):** user's personal skills shouldn't sit in a shared public repo either. A local user-owned repo with an optional user-owned remote is the right ownership model.
+**Why not a single shared `cogmo-skills` repo across users:** personal skills shouldn't sit in a shared public repo. The auto-provision flow creates a *private* repo under the operator's own account — the model is "each operator owns their own `cogmo-skills`," not "Cogmo project hosts a shared one."
 
-**Why no git server in Cogmo:** most commits auto-apply directly to `main` (see risk tiering below), so there's no PR UI to build. Multi-machine sync, if needed later, uses the user's own remote (GitHub private, self-hosted Gitea, etc.) — no reason to reimplement a git server.
+**Why no git server in Cogmo:** most commits auto-apply directly to `main` (see risk tiering below), so there's no PR UI to build. Operators bring their own forge (GitHub, Gitea, etc.) — Cogmo doesn't reimplement that surface.
 
 **Bundled base skills:** none initially. Agent bootstraps by authoring skills as needed. If patterns emerge that should ship with Cogmo, promote them to a `base-skills/` directory inside the Cogmo repo in a later iteration.
 
@@ -234,31 +244,17 @@ $COGMO_SKILLS_PATH/                # default /var/lib/cogmo/skills (configurable
 
 Hard rules enforced on the skills repo:
 
-- **`main` is advanced only by Cogmo's `register` RPC.** Direct pushes to `main` from any other source (agent, human, tool, CI) are rejected *unconditionally*. Agents work on feature branches; the orchestrator is the sole merger. This makes "classified and live" atomic with "present on `main`" — no transient "committed but rejected" state can exist.
+- **`main` is advanced only by Cogmo's `register` RPC.** Direct pushes to `main` from any other source (agent, human, tool, CI) are rejected unconditionally. Agents work on feature branches; the orchestrator is the sole merger. This makes "classified and live" atomic with "present on `main`" — no transient "committed but rejected" state can exist.
 
-  Enforced by a `pre-receive` hook on the bare repo:
+  **Primary enforcement: remote-side branch protection.** The operator configures `main` protection on the remote (GitHub branch protection rule; Gitea/Forgejo equivalent). The agent's sandbox-side pushes target feature branches (`cogmo/<idShort>`), so they never attempt `main`; Cogmo's `register`-side push uses an authenticated identity with bypass so the legitimate path still works.
 
-  ```bash
-  while read oldrev newrev refname; do
-    # No push may update main — ever. Cogmo advances main via filesystem update-ref, not push.
-    if [[ "$refname" == "refs/heads/main" ]]; then
-      echo "Direct pushes to main are not allowed. Use 'cogmo skills register'."
-      exit 1
-    fi
-    # Force-push denied on any branch (feature branches included).
-    if [[ "$oldrev" != "0"* && "$newrev" != "0"* ]]; then
-      git merge-base --is-ancestor "$oldrev" "$newrev" || {
-        echo "Force push not allowed on $refname"; exit 1;
-      }
-    fi
-  done
-  ```
+  **Secondary enforcement: bare-repo `pre-receive` hook.** Installed by `bootstrapSkillsRepo` against direct `git push <bare-repo>` from a misconfigured CI script or operator typo. In normal operation the hook is bypassed — `register` uses filesystem `update-ref`, and `fetchFeatureBranch` uses `git fetch` (write-side ref update with no `receive-pack`). The hook is defense-in-depth, not the primary gate.
 
-  Cogmo advances `main` via `git update-ref refs/heads/main <sha>` directly on the bare repo's filesystem. This bypasses the hook by design — hooks only fire on `push`, not on `update-ref`. No env-var escape hatch for the hook; that would be a footgun (anything in Cogmo's env could bypass). The filesystem-write path is the sole merge mechanism, and it's available only to Cogmo (who owns the filesystem).
+  `register` is a two-leg operation: `git update-ref refs/heads/main <sha>` on the bare repo's filesystem, then `git push origin <sha>:refs/heads/main` to the remote. Push failure surfaces to the operator and leaves the local advance in place; the next `register` (or a manual push) reconciles. The filesystem-write path is the sole merge mechanism and is available only to Cogmo.
 
-- **No force push, no history rewrite on any branch.** `skills.git_sha` references point to specific commits — if history is rewritten, those SHAs dangle and the live skill becomes uninvocable. Enforced by:
-  - The pre-receive hook above (non-fast-forward rejected on every branch).
-  - Remote branch protection if a remote is configured (GitHub "require linear history," "do not allow force pushes"; equivalent on Gitea).
+- **No force push, no history rewrite on any branch.** `skill_deploys.git_sha` references point to specific commits — if history is rewritten, those SHAs dangle and the live skill becomes uninvocable. Enforced by:
+  - The bare-repo `pre-receive` hook (non-fast-forward rejected on every branch).
+  - Remote branch protection (GitHub "do not allow force pushes" / "require linear history"; Gitea/Forgejo equivalent).
   - Coding delegation's sandbox proxy refuses any `git push --force`, `git push -f`, or `git update-ref` that would rewrite a reachable commit on its worktree side too.
 
 - **Append-only branches.** Every deploy is a commit added to a feature branch, then merged fast-forward into `main` by `register`. Rollbacks update `main` to a prior SHA (still fast-forward-compatible via `--force-with-lease` from the Cogmo side; to outside observers, main simply moves).

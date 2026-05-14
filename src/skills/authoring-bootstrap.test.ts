@@ -125,6 +125,11 @@ async function setupRepos(): Promise<Repos> {
   // In production this is the operator-attached GitHub/Gitea URL.
   await execFileP("git", ["init", "--bare", "--initial-branch=main", daytonaRemoteBare]);
 
+  // Attach the stand-in remote as origin on the skills bare repo. In
+  // production this is the wizard / `cogmo migrate-skills-remote` step;
+  // `ensureSkillsCodingRepo` reads this origin to fill `coding_repos.remote_url`.
+  await execFileP("git", ["-C", skillsBare, "remote", "add", "origin", daytonaRemoteBare]);
+
   // Worktree the "sandbox" commits in. Configure a hermetic identity so
   // commits are deterministic across machines.
   await mkdir(sandboxWorktree);
@@ -203,9 +208,12 @@ describe("skill authoring bootstrap — boot → fetch → register chain", () =
       { runInTx: tx, codingStore },
       { skillsRepoPath: repos.skillsBare },
     );
-    expect(ensureResult.created).toBe(true);
-    expect(ensureResult.name).toBe(SKILLS_CODING_REPO_NAME);
-    expect(ensureResult.localPath).toBe(repos.skillsBare);
+    expect(ensureResult.kind).toBe("created");
+    if (ensureResult.kind === "created") {
+      expect(ensureResult.name).toBe(SKILLS_CODING_REPO_NAME);
+      expect(ensureResult.localPath).toBe(repos.skillsBare);
+      expect(ensureResult.remoteUrl).toBe(repos.daytonaRemoteBare);
+    }
 
     const row = await tx((trx) => codingStore.getRepoByName(trx, SKILLS_CODING_REPO_NAME));
     expect(row).toBeDefined();
@@ -284,19 +292,23 @@ describe("skill authoring bootstrap — boot → fetch → register chain", () =
   it("ensureSkillsCodingRepo is idempotent across re-boots", async () => {
     // Simulates two boots of the cogmo daemon against the same DB. The
     // second call must not throw a UNIQUE-violation on `coding_repos.name`
-    // and must leave the row untouched.
+    // and, when the bare repo's origin hasn't changed, must report
+    // `unchanged` without updating the row.
     const first = await ensureSkillsCodingRepo(
       { runInTx: tx, codingStore },
       { skillsRepoPath: repos.skillsBare },
     );
-    expect(first.created).toBe(true);
+    expect(first.kind).toBe("created");
 
     const second = await ensureSkillsCodingRepo(
       { runInTx: tx, codingStore },
       { skillsRepoPath: repos.skillsBare },
     );
-    expect(second.created).toBe(false);
-    expect(second.localPath).toBe(repos.skillsBare);
+    expect(second.kind).toBe("unchanged");
+    if (second.kind === "unchanged") {
+      expect(second.localPath).toBe(repos.skillsBare);
+      expect(second.remoteUrl).toBe(repos.daytonaRemoteBare);
+    }
   });
 });
 
