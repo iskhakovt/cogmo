@@ -1,5 +1,3 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { Ajv, type ValidateFunction } from "ajv";
 import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
@@ -22,6 +20,7 @@ import {
   updateRef,
 } from "./git-ops.js";
 import { parseManifest } from "./manifest.js";
+import { readOriginUrl } from "./repo.js";
 import type {
   ExecuteRegisterResult,
   InsertSkillParams,
@@ -75,22 +74,6 @@ export function mapManifestResourceLimits(resources: SkillManifest["resources"] 
 const log = logger.child({ component: "skills.runner" });
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
-
-const execFileP = promisify(execFile);
-
-/** Read `origin` URL from the bare skills repo. Returns null when no
- * `origin` is configured (`git remote get-url` exits 2); propagates any
- * other git failure so the caller doesn't paper over corruption or a
- * missing-git environment as "no remote configured". */
-async function readBareRepoOrigin(repoPath: string): Promise<string | null> {
-  try {
-    const { stdout } = await execFileP("git", ["-C", repoPath, "remote", "get-url", "origin"]);
-    return stdout.trim();
-  } catch (e) {
-    if ((e as { code?: number }).code === 2) return null;
-    throw e;
-  }
-}
 
 function rowToSummary(r: SkillRow): SkillSummary {
   return {
@@ -1168,7 +1151,7 @@ export class SkillRunnerImpl implements SkillRunner {
   ): Promise<void> {
     const repoPath = this.#requireRepoPath("mirrorMainToRemote");
 
-    const remoteUrl = await readBareRepoOrigin(repoPath);
+    const remoteUrl = await readOriginUrl(repoPath);
     if (!remoteUrl) {
       log.warn(
         { newSha, repoPath },

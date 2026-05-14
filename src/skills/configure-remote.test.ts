@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -36,36 +36,96 @@ afterEach(async () => {
 });
 
 /**
- * Make a bare repo at `<workDir>/owner/repo.git` so the resulting
- * `file:///.../owner/repo.git` URL passes `parseRemoteUrl`'s owner/repo
- * segment check. Returns the URL.
+ * Make a bare repo at `<workDir>/<subdir>/repo.git` with one seed commit on
+ * `main`. The `file:///.../<subdir>/repo.git` URL parses cleanly via
+ * `parseRemoteUrl`. Returns the URL.
  */
-async function makePopulatedRemote(): Promise<string> {
-  const remotePath = join(workDir, "owner", "repo.git");
+async function makePopulatedRemote(subdir = "owner"): Promise<string> {
+  const remotePath = join(workDir, subdir, "repo.git");
   await mkdir(dirname(remotePath), { recursive: true });
   await execFileP("git", ["init", "--bare", "--initial-branch=main", remotePath]);
-  // Bare repos can't commit directly — clone, commit, push.
-  const work = join(workDir, "work");
-  await execFileP("git", ["init", "-b", "main", work]);
-  await execFileP("git", ["-C", work, "config", "user.email", "t@t"]);
-  await execFileP("git", ["-C", work, "config", "user.name", "t"]);
-  await execFileP("git", ["-C", work, "config", "commit.gpgsign", "false"]);
-  await execFileP("git", ["-C", work, "commit", "--allow-empty", "-m", "init"]);
-  await execFileP("git", ["-C", work, "push", remotePath, "main:refs/heads/main"]);
-  await rm(work, { recursive: true, force: true });
+  // Bare repos can't commit directly — seed via a temp working clone.
+  const work = await mkdtemp(join(tmpdir(), "configure-remote-seed-"));
+  try {
+    await execFileP("git", ["init", "-b", "main", work]);
+    await execFileP("git", ["-C", work, "config", "user.email", "t@t"]);
+    await execFileP("git", ["-C", work, "config", "user.name", "t"]);
+    await execFileP("git", ["-C", work, "config", "commit.gpgsign", "false"]);
+    await execFileP("git", ["-C", work, "commit", "--allow-empty", "-m", "init"]);
+    await execFileP("git", ["-C", work, "push", remotePath, "main:refs/heads/main"]);
+  } finally {
+    await rm(work, { recursive: true, force: true });
+  }
   return `file://${remotePath}`;
 }
 
-async function makeEmptyRemote(): Promise<string> {
-  const remotePath = join(workDir, "owner", "empty.git");
+async function makeEmptyRemote(subdir = "owner", name = "empty.git"): Promise<string> {
+  const remotePath = join(workDir, subdir, name);
   await mkdir(dirname(remotePath), { recursive: true });
   await execFileP("git", ["init", "--bare", "--initial-branch=main", remotePath]);
   return `file://${remotePath}`;
+}
+
+/**
+ * Seed the skills bare repo with a commit on `refs/heads/main` —
+ * exercises the "local populated" half of the direction state machine.
+ *
+ * Done via `git update-ref` (not `git push`) because the production
+ * `pre-receive` hook installed by `bootstrapSkillsRepo` rejects direct
+ * pushes to main: production `register` uses `update-ref` for the same
+ * reason. The temp working clone first pushes objects under a throwaway
+ * ref the hook allows, then update-ref points main at the same SHA on
+ * the bare repo's filesystem.
+ */
+async function seedSkillsBare(skillsPath: string, message = "local commit"): Promise<string> {
+  const work = await mkdtemp(join(tmpdir(), "configure-remote-skillsseed-"));
+  try {
+    await execFileP("git", ["init", "-b", "main", work]);
+    await execFileP("git", ["-C", work, "config", "user.email", "t@t"]);
+    await execFileP("git", ["-C", work, "config", "user.name", "t"]);
+    await execFileP("git", ["-C", work, "config", "commit.gpgsign", "false"]);
+    await writeFile(join(work, "marker.txt"), message);
+    await execFileP("git", ["-C", work, "add", "."]);
+    await execFileP("git", ["-C", work, "commit", "-m", message]);
+    const { stdout } = await execFileP("git", ["-C", work, "rev-parse", "HEAD"]);
+    const sha = stdout.trim();
+    // Upload objects under a throwaway non-main ref — the hook rejects
+    // direct pushes to main but accepts new refs elsewhere.
+    const stagingRef = `refs/heads/__test-seed-${process.pid}-${Math.random()
+      .toString(36)
+      .slice(2)}`;
+    await execFileP("git", ["-C", work, "push", skillsPath, `HEAD:${stagingRef}`]);
+    // Now point main at the same SHA via filesystem update-ref —
+    // production `register` does the same thing for the same reason.
+    await execFileP("git", ["-C", skillsPath, "update-ref", "refs/heads/main", sha]);
+    // Clean up the staging ref. `git update-ref -d` on the bare repo
+    // bypasses the hook (which only fires on update of main); deleting a
+    // non-main ref via filesystem-level update-ref is unconstrained.
+    await execFileP("git", ["-C", skillsPath, "update-ref", "-d", stagingRef]);
+    return sha;
+  } finally {
+    await rm(work, { recursive: true, force: true });
+  }
 }
 
 async function readOrigin(repoPath: string): Promise<string | null> {
   try {
     const { stdout } = await execFileP("git", ["-C", repoPath, "remote", "get-url", "origin"]);
+    return stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+async function readMainSha(repoPath: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileP("git", [
+      "-C",
+      repoPath,
+      "rev-parse",
+      "--verify",
+      "refs/heads/main",
+    ]);
     return stdout.trim();
   } catch {
     return null;
@@ -113,7 +173,7 @@ describe("configureSkillsRemote", () => {
 
     const result = await configureSkillsRemote(
       { runInTx: fakeRunInTx, codingStore: setupStoreWithNoRow(), skillsRepoPath: skillsPath },
-      { kind: "own", remoteUrl: "   " },
+      { kind: "own", direction: "adopt", remoteUrl: "   " },
     );
 
     expect(result.isErr()).toBe(true);
@@ -127,7 +187,7 @@ describe("configureSkillsRemote", () => {
 
     const result = await configureSkillsRemote(
       { runInTx: fakeRunInTx, codingStore: setupStoreWithNoRow(), skillsRepoPath: skillsPath },
-      { kind: "own", remoteUrl: "not-a-git-url" },
+      { kind: "own", direction: "adopt", remoteUrl: "not-a-git-url" },
     );
 
     expect(result.isErr()).toBe(true);
@@ -135,23 +195,37 @@ describe("configureSkillsRemote", () => {
     expect(await readOrigin(skillsPath)).toBeNull();
   });
 
-  it("own refuses an empty remote with no refs/heads/main", async () => {
+  it("own + adopt refuses an empty remote", async () => {
     const skillsPath = join(workDir, "skills.git");
     await bootstrapSkillsRepo({ path: skillsPath });
     const remoteUrl = await makeEmptyRemote();
 
     const result = await configureSkillsRemote(
       { runInTx: fakeRunInTx, codingStore: setupStoreWithNoRow(), skillsRepoPath: skillsPath },
-      { kind: "own", remoteUrl },
+      { kind: "own", direction: "adopt", remoteUrl },
     );
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error.kind).toBe("remote_empty");
-    // No partial state — origin must still be unset.
     expect(await readOrigin(skillsPath)).toBeNull();
   });
 
-  it("own attaches origin and inserts the DB row when the remote has main", async () => {
+  it("own + publish refuses when local is empty", async () => {
+    const skillsPath = join(workDir, "skills.git");
+    await bootstrapSkillsRepo({ path: skillsPath });
+    const remoteUrl = await makeEmptyRemote();
+
+    const result = await configureSkillsRemote(
+      { runInTx: fakeRunInTx, codingStore: setupStoreWithNoRow(), skillsRepoPath: skillsPath },
+      { kind: "own", direction: "publish", remoteUrl },
+    );
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.kind).toBe("local_empty");
+    expect(await readOrigin(skillsPath)).toBeNull();
+  });
+
+  it("own + adopt fetches into an empty local from a populated remote", async () => {
     const skillsPath = join(workDir, "skills.git");
     await bootstrapSkillsRepo({ path: skillsPath });
     const remoteUrl = await makePopulatedRemote();
@@ -159,128 +233,119 @@ describe("configureSkillsRemote", () => {
 
     const result = await configureSkillsRemote(
       { runInTx: fakeRunInTx, codingStore, skillsRepoPath: skillsPath },
-      { kind: "own", remoteUrl },
+      { kind: "own", direction: "adopt", remoteUrl },
     );
 
     expect(result.isOk()).toBe(true);
     if (result.isOk() && result.value.kind === "configured") {
       expect(result.value.remoteUrl).toBe(remoteUrl);
+      expect(result.value.direction).toBe("adopt");
       expect(result.value.originAction).toBe("attached");
       expect(result.value.ensured.kind).toBe("created");
     }
     expect(await readOrigin(skillsPath)).toBe(remoteUrl);
+    expect(await readMainSha(skillsPath)).not.toBeNull();
     expect(codingStore.insertRepo).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ name: "skills", remoteUrl }),
     );
   });
 
-  it("own updates origin via `git remote set-url` when target differs from current", async () => {
-    // Two populated remotes; attach the first, then call configure with the
-    // second. Origin must point at the second; the DB row's `remote_url`
-    // must be UPDATED (not re-inserted), because the row already existed.
+  it("own + publish pushes a populated local to an empty remote", async () => {
+    // This is the migration case the reviewer flagged: operator has local
+    // skills, attaches a fresh empty remote. Push direction, no data loss.
     const skillsPath = join(workDir, "skills.git");
     await bootstrapSkillsRepo({ path: skillsPath });
-    const firstUrl = await makePopulatedRemote();
-    // Second remote in a different owner/repo path so parseRemoteUrl
-    // distinguishes them.
-    const secondRemote = join(workDir, "owner2", "repo.git");
-    await mkdir(dirname(secondRemote), { recursive: true });
-    await execFileP("git", ["init", "--bare", "--initial-branch=main", secondRemote]);
-    const seed = join(workDir, "seed");
-    await execFileP("git", ["init", "-b", "main", seed]);
-    await execFileP("git", ["-C", seed, "config", "user.email", "t@t"]);
-    await execFileP("git", ["-C", seed, "config", "user.name", "t"]);
-    await execFileP("git", ["-C", seed, "config", "commit.gpgsign", "false"]);
-    await execFileP("git", ["-C", seed, "commit", "--allow-empty", "-m", "init"]);
-    await execFileP("git", ["-C", seed, "push", secondRemote, "main:refs/heads/main"]);
-    await rm(seed, { recursive: true, force: true });
-    const secondUrl = `file://${secondRemote}`;
+    const localSha = await seedSkillsBare(skillsPath);
+    const remoteUrl = await makeEmptyRemote();
+    const remotePath = remoteUrl.replace("file://", "");
+    const codingStore = setupStoreWithNoRow();
 
-    // Pre-attach the first URL via the helper so we're in the same state
-    // production would be after a prior wizard run, then swap.
-    const codingStore = mock<CodingStore>();
-    let storedRow: Awaited<ReturnType<CodingStore["insertRepo"]>> | undefined;
-    codingStore.getRepoByName.mockImplementation(async () => storedRow);
-    codingStore.insertRepo.mockImplementation(async (_tx, params) => {
-      storedRow = {
-        id: "00000000-0000-0000-0000-000000000001",
-        name: params.name,
-        localPath: params.localPath,
-        defaultBranch: params.defaultBranch,
-        remoteUrl: params.remoteUrl,
-        devcontainer: params.devcontainer,
-        allowedBackends: [...params.allowedBackends],
-        verifyCommand: params.verifyCommand,
-        verifyTimeoutSeconds: params.verifyTimeoutSeconds ?? 600,
-        taskTokenBudget: params.taskTokenBudget,
-        taskWallTimeSeconds: params.taskWallTimeSeconds,
-        maxConcurrentTasks: params.maxConcurrentTasks,
-        identityName: params.identityName ?? "default",
-        createdAt: new Date(),
-      };
-      return storedRow;
-    });
-    codingStore.updateRepoRemoteUrl.mockImplementation(async (_tx, id, remoteUrl) => {
-      if (storedRow && storedRow.id === id) storedRow = { ...storedRow, remoteUrl };
-    });
-
-    // Attach first URL.
-    await configureSkillsRemote(
+    const result = await configureSkillsRemote(
       { runInTx: fakeRunInTx, codingStore, skillsRepoPath: skillsPath },
-      { kind: "own", remoteUrl: firstUrl },
-    );
-    expect(await readOrigin(skillsPath)).toBe(firstUrl);
-
-    // Swap to second URL — this is the path the test covers.
-    const swap = await configureSkillsRemote(
-      { runInTx: fakeRunInTx, codingStore, skillsRepoPath: skillsPath },
-      { kind: "own", remoteUrl: secondUrl },
+      { kind: "own", direction: "publish", remoteUrl },
     );
 
-    expect(swap.isOk()).toBe(true);
-    if (swap.isOk() && swap.value.kind === "configured") {
-      expect(swap.value.remoteUrl).toBe(secondUrl);
-      expect(swap.value.originAction).toBe("updated");
-      expect(swap.value.ensured.kind).toBe("updated");
+    expect(result.isOk()).toBe(true);
+    if (result.isOk() && result.value.kind === "configured") {
+      expect(result.value.direction).toBe("publish");
+      expect(result.value.originAction).toBe("attached");
+      expect(result.value.ensured.kind).toBe("created");
     }
-    expect(await readOrigin(skillsPath)).toBe(secondUrl);
-    expect(codingStore.updateRepoRemoteUrl).toHaveBeenCalledWith(
-      expect.anything(),
-      "00000000-0000-0000-0000-000000000001",
-      secondUrl,
+    expect(await readOrigin(skillsPath)).toBe(remoteUrl);
+    // Crux: the remote received the local SHA — no data loss, and local
+    // wasn't overwritten by a fetch.
+    expect(await readMainSha(remotePath)).toBe(localSha);
+    expect(await readMainSha(skillsPath)).toBe(localSha);
+  });
+
+  it("own + adopt refuses to overwrite divergent local commits (remote_diverged)", async () => {
+    // The data-loss-safety regression test for the reviewer's "force fetch
+    // overwrites local main" finding. Local has commits; remote has DIFFERENT
+    // commits. Adopt would orphan local. Helper must refuse.
+    const skillsPath = join(workDir, "skills.git");
+    await bootstrapSkillsRepo({ path: skillsPath });
+    const localSha = await seedSkillsBare(skillsPath, "local-only commit");
+    const remoteUrl = await makePopulatedRemote(); // unrelated history
+    const codingStore = setupStoreWithNoRow();
+
+    const result = await configureSkillsRemote(
+      { runInTx: fakeRunInTx, codingStore, skillsRepoPath: skillsPath },
+      { kind: "own", direction: "adopt", remoteUrl },
     );
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.kind).toBe("remote_diverged");
+    // Local main MUST be untouched — that's the whole point of the safety
+    // check. The original force-fetch implementation would have left local
+    // at the remote's SHA here, orphaning `localSha`.
+    expect(await readMainSha(skillsPath)).toBe(localSha);
+  });
+
+  it("own + publish refuses to overwrite divergent remote commits (local_diverged)", async () => {
+    // The inverse of remote_diverged: local and remote have unrelated
+    // histories, operator selects publish. Pushing would orphan the
+    // remote's commits. Helper must refuse, remote must be untouched.
+    const skillsPath = join(workDir, "skills.git");
+    await bootstrapSkillsRepo({ path: skillsPath });
+    await seedSkillsBare(skillsPath, "local-only commit");
+    const remoteUrl = await makePopulatedRemote();
+    const remotePath = remoteUrl.replace("file://", "");
+    const remoteShaBefore = await readMainSha(remotePath);
+    const codingStore = setupStoreWithNoRow();
+
+    const result = await configureSkillsRemote(
+      { runInTx: fakeRunInTx, codingStore, skillsRepoPath: skillsPath },
+      { kind: "own", direction: "publish", remoteUrl },
+    );
+
+    expect(result.isErr()).toBe(true);
+    if (result.isErr()) expect(result.error.kind).toBe("local_diverged");
+    // Remote main is untouched.
+    expect(await readMainSha(remotePath)).toBe(remoteShaBefore);
   });
 
   it("own returns remote_unreachable for a parseable URL pointing at nothing", async () => {
-    // parseRemoteUrl accepts the URL (owner/repo segments present), but
-    // `git ls-remote` against a nonexistent file:// path fails — the helper
-    // must surface that as `remote_unreachable`, not `url_invalid` or
-    // `remote_empty`. Distinguishes "you typo'd the URL shape" from "the
-    // URL is fine but unreachable."
     const skillsPath = join(workDir, "skills.git");
     await bootstrapSkillsRepo({ path: skillsPath });
     const nonexistent = `file://${join(workDir, "owner", "does-not-exist.git")}`;
 
     const result = await configureSkillsRemote(
       { runInTx: fakeRunInTx, codingStore: setupStoreWithNoRow(), skillsRepoPath: skillsPath },
-      { kind: "own", remoteUrl: nonexistent },
+      { kind: "own", direction: "adopt", remoteUrl: nonexistent },
     );
 
     expect(result.isErr()).toBe(true);
     if (result.isErr()) expect(result.error.kind).toBe("remote_unreachable");
-    // Origin must not have been attached — half-state would be worse than
-    // the clean error.
     expect(await readOrigin(skillsPath)).toBeNull();
   });
 
-  it("own is idempotent — second invocation with same URL yields unchanged", async () => {
+  it("own + adopt is idempotent — second invocation with same URL yields unchanged", async () => {
     const skillsPath = join(workDir, "skills.git");
     await bootstrapSkillsRepo({ path: skillsPath });
     const remoteUrl = await makePopulatedRemote();
 
-    // First pass: insert. Track the row in a closure so the second pass
-    // sees it as already-present, matching the production round-trip.
+    // Track storedRow in a closure so the second pass sees the inserted row.
     let storedRow: Awaited<ReturnType<CodingStore["insertRepo"]>> | undefined;
     const codingStore = mock<CodingStore>();
     codingStore.getRepoByName.mockImplementation(async () => storedRow);
@@ -306,13 +371,16 @@ describe("configureSkillsRemote", () => {
 
     const first = await configureSkillsRemote(
       { runInTx: fakeRunInTx, codingStore, skillsRepoPath: skillsPath },
-      { kind: "own", remoteUrl },
+      { kind: "own", direction: "adopt", remoteUrl },
     );
     expect(first.isOk()).toBe(true);
 
+    // Second pass: local now has main matching remote. Adopt still works
+    // because fast-forward fetch is a no-op when local already equals
+    // remote.
     const second = await configureSkillsRemote(
       { runInTx: fakeRunInTx, codingStore, skillsRepoPath: skillsPath },
-      { kind: "own", remoteUrl },
+      { kind: "own", direction: "adopt", remoteUrl },
     );
 
     expect(second.isOk()).toBe(true);
@@ -322,6 +390,75 @@ describe("configureSkillsRemote", () => {
     }
     expect(codingStore.insertRepo).toHaveBeenCalledTimes(1);
     expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
+  });
+
+  it("auto-provision picks adopt + auto_init:true when local is empty", async () => {
+    const skillsPath = join(workDir, "skills.git");
+    await bootstrapSkillsRepo({ path: skillsPath });
+    // Pre-create the "GitHub repo" Cogmo will think it created, with a
+    // README seed (mirrors `auto_init: true` server-side behavior).
+    const remoteUrl = await makePopulatedRemote("github-stub");
+
+    const createSpy = vi.fn().mockResolvedValue({ data: { clone_url: remoteUrl } });
+    const fakeOctokit = { repos: { createForAuthenticatedUser: createSpy } };
+
+    const codingStore = setupStoreWithNoRow();
+    const result = await configureSkillsRemote(
+      {
+        runInTx: fakeRunInTx,
+        codingStore,
+        skillsRepoPath: skillsPath,
+        octokitFactory: () => fakeOctokit as unknown as Octokit,
+      },
+      { kind: "auto-provision", identity: FAKE_IDENTITY },
+    );
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk() && result.value.kind === "configured") {
+      expect(result.value.direction).toBe("adopt");
+    }
+    // Cogmo asked for a seeded repo (auto_init: true) so it has main to
+    // adopt — the data-loss-free fresh-install path.
+    expect(createSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "cogmo-skills", auto_init: true, private: true }),
+    );
+  });
+
+  it("auto-provision picks publish + auto_init:false when local has commits", async () => {
+    // The reviewer's key data-loss concern. Operator has accumulated
+    // skills locally; running auto-provision must NOT overwrite local
+    // with a fresh README — Cogmo asks GitHub for an empty repo and
+    // pushes local to it.
+    const skillsPath = join(workDir, "skills.git");
+    await bootstrapSkillsRepo({ path: skillsPath });
+    const localSha = await seedSkillsBare(skillsPath, "operator's local skill");
+    const remoteUrl = await makeEmptyRemote("github-stub", "fresh.git");
+    const remotePath = remoteUrl.replace("file://", "");
+
+    const createSpy = vi.fn().mockResolvedValue({ data: { clone_url: remoteUrl } });
+    const fakeOctokit = { repos: { createForAuthenticatedUser: createSpy } };
+
+    const codingStore = setupStoreWithNoRow();
+    const result = await configureSkillsRemote(
+      {
+        runInTx: fakeRunInTx,
+        codingStore,
+        skillsRepoPath: skillsPath,
+        octokitFactory: () => fakeOctokit as unknown as Octokit,
+      },
+      { kind: "auto-provision", identity: FAKE_IDENTITY },
+    );
+
+    expect(result.isOk()).toBe(true);
+    if (result.isOk() && result.value.kind === "configured") {
+      expect(result.value.direction).toBe("publish");
+    }
+    expect(createSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "cogmo-skills", auto_init: false, private: true }),
+    );
+    // Local skill survives + remote received the push — no data loss.
+    expect(await readMainSha(skillsPath)).toBe(localSha);
+    expect(await readMainSha(remotePath)).toBe(localSha);
   });
 
   it("auto-provision surfaces auto_provision_repo_exists on 422", async () => {

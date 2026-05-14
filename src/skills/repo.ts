@@ -114,22 +114,22 @@ async function installHook(repoPath: string, name: string, content: string): Pro
 export const PRE_RECEIVE_HOOK_CONTENT: string = PRE_RECEIVE_HOOK;
 
 /**
- * Read `origin` URL from a bare repo's git config. Returns `""` if no remote
- * is set. Any other git failure is propagated — silently swallowing it would
- * mask a misconfigured repo as "no remote", which is a worse failure mode
- * than crashing the boot.
+ * Read `origin` URL from a git repo. Returns `null` when no `origin` is set
+ * (`git remote get-url` exits 2); any other git failure is propagated —
+ * silently swallowing it would mask a corrupt repo or missing git as "no
+ * remote", which is a worse failure mode than crashing.
+ *
+ * Exported so the wizard, the `cogmo migrate-skills-remote` CLI, the
+ * `configureSkillsRemote` helper, and the runner's mirror-push path can all
+ * share one implementation — drift between four copies (one returning `""`,
+ * the rest `null`) was a real review finding.
  */
-async function readOriginUrl(repoPath: string): Promise<string> {
+export async function readOriginUrl(repoPath: string): Promise<string | null> {
   try {
     const { stdout } = await execFileP("git", ["-C", repoPath, "remote", "get-url", "origin"]);
     return stdout.trim();
   } catch (e) {
-    // `git remote get-url <missing>` exits with code 2 — the dedicated
-    // "no such remote" code. Match on the exit code, not the stderr text,
-    // so a localized git build doesn't quietly start crashing the boot.
-    // Any other non-zero code (corrupt repo, missing git, etc.) bubbles
-    // up — treating those as "no remote" would mask real misconfiguration.
-    if ((e as { code?: number }).code === 2) return "";
+    if ((e as { code?: number }).code === 2) return null;
     throw e;
   }
 }

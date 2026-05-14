@@ -49,7 +49,7 @@ import {
   type ConfigureSkillsRemoteMode,
   configureSkillsRemote,
 } from "../skills/configure-remote.js";
-import { bootstrapSkillsRepo } from "../skills/repo.js";
+import { bootstrapSkillsRepo, ensureSkillsCodingRepo, readOriginUrl } from "../skills/repo.js";
 import type { TransportStore } from "../transport/store/index.js";
 import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
@@ -1230,36 +1230,37 @@ async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void> {
 
   const codingStore = new DrizzleCodingStore();
 
-  // If origin is already attached, offer keep / replace before re-prompting
-  // for a choice — mirrors the Daytona / GitHub-identity step UX.
+  // Read local state once. Direction (publish vs. adopt) is determined by
+  // this; prompts use it for human-readable text. Industry pattern is
+  // one-directional with explicit mode — auto-detect bidirectional transfer
+  // surprised operators in the original Option-A design and was rejected
+  // in code review.
+  const localMainSha = await readLocalMainSha(skillsRepoPath);
+
+  // If origin is already attached, offer keep / replace. Keep just syncs
+  // the DB row (no git transfer) so a re-run wizard doesn't accidentally
+  // fetch/push and clobber state the operator is happy with.
   const currentOrigin = await readOriginUrl(skillsRepoPath);
   if (currentOrigin) {
     const action = await p.select({
       message: `Skills bare repo's origin is already attached:\n  ${currentOrigin}\nWhat would you like to do?`,
       options: [
-        { value: "keep", label: "Keep current origin" },
+        { value: "keep", label: "Keep current origin", hint: "syncs DB row, no git transfer" },
         { value: "replace", label: "Replace with a different URL" },
       ],
     });
     cancelGuard(action);
     if (action === "keep") {
-      // Even when keeping origin, run configureSkillsRemote(own, currentOrigin)
-      // so the DB row's `remote_url` is synced — the wizard may be the first
-      // step in a recovery where the row drifted from the bare repo's config.
-      const result = await configureSkillsRemote(
-        { runInTx: deps.runInTx, codingStore, skillsRepoPath },
-        { kind: "own", remoteUrl: currentOrigin },
+      const ensured = await ensureSkillsCodingRepo(
+        { runInTx: deps.runInTx, codingStore },
+        { skillsRepoPath },
       );
-      if (result.isErr()) {
-        renderConfigureError(result.error);
-        return;
-      }
-      p.log.success("Skills remote verified and DB row synced.");
+      p.log.success(`Skills row in sync (${ensured.kind}).`);
       return;
     }
   }
 
-  const mode = await collectSkillsRemoteMode(deps);
+  const mode = await collectSkillsRemoteMode(deps, localMainSha);
   if (mode === null) return;
   const result = await configureSkillsRemote(
     { runInTx: deps.runInTx, codingStore, skillsRepoPath },
@@ -1270,55 +1271,64 @@ async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void> {
     return;
   }
   if (result.value.kind === "skipped") {
-    p.log.warn("Skills remote not configured — re-run `cogmo migrate skills-remote` when ready.");
+    p.log.warn("Skills remote not configured — re-run `cogmo migrate-skills-remote` when ready.");
     return;
   }
-  p.log.success(
-    `Skills remote configured (${result.value.originAction}): ${result.value.remoteUrl}`,
-  );
+  const directionVerb = result.value.direction === "publish" ? "published to" : "adopted from";
+  p.log.success(`Skills remote ${directionVerb}: ${result.value.remoteUrl}`);
 }
 
-/** Prompt the operator for own / auto-provision / skip and return the mode
- * payload, or null when the operator cancels mid-prompt (interpreted as skip). */
+/** Prompt for own / auto-provision / skip. Prompt text and `own`'s
+ * `direction` follow local state — empty local goes adopt-flavored
+ * (fetch from a populated remote), populated local goes publish-flavored
+ * (push to a fresh remote). Returns null on operator cancellation. */
 async function collectSkillsRemoteMode(
   deps: WizardDeps,
+  localMainSha: string | null,
 ): Promise<ConfigureSkillsRemoteMode | null> {
   const identity = await deps.runInTx((tx) =>
     resolveGitHubIdentity(tx, deps.secretsStore, DEFAULT_GITHUB_IDENTITY_NAME),
   );
   const hasGitHubIdentity = identity.isOk();
+  const direction: "adopt" | "publish" = localMainSha === null ? "adopt" : "publish";
 
-  // Build options as `select`'s value-typed array. Skip is the explicit
-  // last option (rather than relying on cancel) so the operator can pick
-  // it intentionally without ambiguity.
+  const promptMessage =
+    direction === "adopt"
+      ? "Skills bare repo is empty. How should it be configured?"
+      : "Skills bare repo has commits already. How should the remote be configured?";
+
+  const ownLabel = direction === "adopt" ? "Adopt an existing remote" : "Publish to a fresh remote";
+  const ownHint =
+    direction === "adopt"
+      ? "paste URL of a pre-populated repo; Cogmo fetches main"
+      : "paste URL of an empty repo; Cogmo pushes main";
+  const autoHint =
+    direction === "adopt"
+      ? "Cogmo creates a private `cogmo-skills` repo with a README seed"
+      : "Cogmo creates an empty private `cogmo-skills` repo and pushes your skills";
+
   const options: { value: "own" | "auto-provision" | "skip"; label: string; hint?: string }[] = [
-    { value: "own", label: "Use my own remote", hint: "paste a pre-created URL" },
+    { value: "own", label: ownLabel, hint: ownHint },
   ];
   if (hasGitHubIdentity) {
-    options.push({
-      value: "auto-provision",
-      label: "Auto-provision on GitHub",
-      hint: "create private `cogmo-skills` repo using configured PAT",
-    });
+    options.push({ value: "auto-provision", label: "Auto-provision on GitHub", hint: autoHint });
   }
   options.push({
     value: "skip",
-    label: "Skip — configure later via `cogmo migrate skills-remote`",
+    label: "Skip — configure later via `cogmo migrate-skills-remote`",
   });
 
-  const choice = cancelGuard(
-    await p.select({
-      message: "How should the skills repo's remote be configured?",
-      options,
-    }),
-  );
+  const choice = cancelGuard(await p.select({ message: promptMessage, options }));
 
   if (choice === "skip") return { kind: "skip" };
 
   if (choice === "own") {
     const url = cancelGuard(
       await p.text({
-        message: "Paste the remote URL (https://… or git@host:…):",
+        message:
+          direction === "adopt"
+            ? "Paste the URL of the remote to adopt (https://… or git@host:…):"
+            : "Paste the URL of an empty remote to publish to (https://… or git@host:…):",
         placeholder: "git@github.com:you/cogmo-skills.git",
         validate: (v) => {
           if (!v || v.trim().length === 0) return "URL is required";
@@ -1326,13 +1336,16 @@ async function collectSkillsRemoteMode(
         },
       }),
     );
-    const ownMode: ConfigureSkillsRemoteMode = { kind: "own", remoteUrl: url.trim() };
+    const ownMode: ConfigureSkillsRemoteMode = {
+      kind: "own",
+      direction,
+      remoteUrl: url.trim(),
+    };
     if (identity.isOk()) ownMode.identity = identity.value;
     return ownMode;
   }
 
-  // auto-provision — gated above on hasGitHubIdentity so this branch
-  // can only fire when `identity.isOk()`.
+  // auto-provision — gated above on hasGitHubIdentity so identity.isOk() here.
   if (!identity.isOk()) return null;
   return { kind: "auto-provision", identity: identity.value };
 }
@@ -1351,8 +1364,29 @@ function renderConfigureError(error: ConfigureSkillsRemoteError): void {
       break;
     case "remote_empty":
       p.log.error(
-        `Remote has no \`refs/heads/main\` to fetch. Initialize the remote first ` +
-          `(GitHub: \`gh repo create --add-readme\`; Gitea/Forgejo: tick "Initialize Repository") and retry.`,
+        `Remote has no \`refs/heads/main\` to adopt. Pick "Publish to a fresh remote" instead, ` +
+          `or initialize the remote first (GitHub: \`gh repo create --add-readme\`).`,
+      );
+      break;
+    case "local_empty":
+      p.log.error(
+        'Local skills bare repo has no commits to publish. Pick "Adopt an existing remote" instead.',
+      );
+      break;
+    case "remote_diverged":
+      p.log.error(
+        `Adopt would orphan local commits. Local main is ${error.localSha.slice(0, 7)}; ` +
+          `remote main is ${error.remoteSha.slice(0, 7)} and isn't a descendant. ` +
+          `Resolve outside the helper: push local first (\`git push origin main\` from $COGMO_SKILLS_PATH) ` +
+          `or delete local main intentionally (\`git update-ref -d refs/heads/main\`) and re-run.`,
+      );
+      break;
+    case "local_diverged":
+      p.log.error(
+        `Publish would orphan remote commits. Local main is ${error.localSha.slice(0, 7)}; ` +
+          `remote main is ${error.remoteSha.slice(0, 7)} and isn't an ancestor. ` +
+          `Resolve outside the helper: fetch remote first (\`git fetch origin main\` from $COGMO_SKILLS_PATH), ` +
+          `merge or rebase, then re-run.`,
       );
       break;
     case "auto_provision_failed":
@@ -1363,23 +1397,31 @@ function renderConfigureError(error: ConfigureSkillsRemoteError): void {
     case "auto_provision_repo_exists":
       p.log.error(
         `\`${error.repoName}\` already exists on the configured GitHub account. ` +
-          `Re-run setup and pick "Use my own remote" pointing at the existing repo.`,
+          `Re-run setup and pick "Adopt an existing remote" pointing at the existing repo.`,
       );
       break;
   }
-  p.log.warn("Re-run `cogmo setup` or `cogmo migrate skills-remote` to retry.");
+  p.log.warn("Re-run `cogmo setup` or `cogmo migrate-skills-remote` to retry.");
 }
 
 const execFileP = promisify(execFile);
 
-/** Read `origin` URL from the bare repo — returns null if unset. */
-async function readOriginUrl(repoPath: string): Promise<string | null> {
+/** Read local `refs/heads/main` sha — returns null when main is unborn
+ * (fresh `git init --bare` state). Used by `stepConfigureSkillsRemote`
+ * to pick the adopt-vs-publish direction without inferring inside the
+ * helper. */
+async function readLocalMainSha(repoPath: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileP("git", ["-C", repoPath, "remote", "get-url", "origin"]);
+    const { stdout } = await execFileP("git", [
+      "-C",
+      repoPath,
+      "rev-parse",
+      "--verify",
+      "refs/heads/main",
+    ]);
     return stdout.trim();
-  } catch (e) {
-    if ((e as { code?: number }).code === 2) return null;
-    throw e;
+  } catch {
+    return null;
   }
 }
 
