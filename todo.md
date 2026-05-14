@@ -123,6 +123,7 @@
 - [ ] `p2` First ingestion agent: Gmail via MCP (Phase 2) — depends on MCP client Phase D below; polling cadence is itself a `scheduled_tasks` row, not a hard-coded cron.
 - [ ] `p2` First ingestion agent: Google Calendar via MCP (Phase 2) — same shape as Gmail.
 - [ ] `p2` Dual-mode monitoring for ingestion — embedding scan first, LLM only when relevant (Phase 2).
+- [ ] `p3` `platformTs` ordering invariant under stale-fire downstream — integration test that drives a scheduled-task fire whose `next_run_at` is days in the past (post-outage catchup), persists the synthetic inbound with `platform_ts = scheduledFor`, then asserts `handle-message` + history compaction + the assistant reply path treat the stale `platform_ts` consistently (no out-of-order ordering in compaction, no "this is a duplicate" guard mis-firing). Belongs in the integration tier alongside the real-Inngest items in PROGRESS.md — fire-handler unit tests pin the inbound-side invariant (`platformTs === scheduledFor`), this catches what downstream layers do with that. Promote when integration-tier Inngest is in place.
 
 ### MCP client phases B–D
 

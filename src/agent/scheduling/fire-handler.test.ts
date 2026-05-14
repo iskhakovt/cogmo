@@ -124,4 +124,57 @@ describe("createScheduledTaskFireHandler", () => {
 
     expect(find).toHaveBeenCalledWith(expect.anything(), "user-1", "profile-1");
   });
+
+  it("pins the function configuration (event trigger, retries, concurrency)", () => {
+    const transportStore = mockTransportStore();
+    const fn = createScheduledTaskFireHandler({ runInTx, transportStore }, inngest);
+
+    // `opts` is the public readonly InngestFunction config.
+    expect(fn.opts.id).toBe("scheduled-task-fire");
+    expect(fn.opts.retries).toBe(2);
+    expect(fn.opts.concurrency).toEqual({ limit: 1, key: "event.data.taskId" });
+    // Triggered by the scheduled-task fire event.
+    expect(fn.opts.triggers).toHaveLength(1);
+    expect(fn.opts.triggers?.[0]).toMatchObject({ event: "agent/scheduled-task.fire" });
+  });
+
+  it("does NOT re-run persist-inbound when Inngest replays with a cached step result", async () => {
+    // Crash-recovery invariant: a retry that finds `persist-inbound`
+    // already cached must NOT call persistInbound again — otherwise
+    // the same fire would inject the synthetic inbound twice.
+    const transportStore = mockTransportStore({
+      findActiveSessionForUserProfile: vi.fn().mockResolvedValue({
+        sessionId: "session-1",
+        conversationId: "conv-1",
+      }),
+      // If this gets called on replay, the test should fail.
+      persistInbound: vi.fn().mockResolvedValue({ id: "should-not-be-used" }),
+    });
+    const fn = createScheduledTaskFireHandler({ runInTx, transportStore }, inngest);
+
+    await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+      steps: [
+        {
+          id: "find-active-session",
+          handler: () => ({ sessionId: "session-1", conversationId: "conv-1" }),
+        },
+        { id: "persist-inbound", handler: () => ({ id: "inbound-cached" }) },
+      ],
+    }).execute();
+
+    // Neither store method was touched — the cached values flowed through.
+    expect(transportStore.findActiveSessionForUserProfile).not.toHaveBeenCalled();
+    expect(transportStore.persistInbound).not.toHaveBeenCalled();
+    // The trigger event still fired, using the cached inbound id.
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          name: "inbound/arrived",
+          data: { conversationId: "conv-1", inboundMessageId: "inbound-cached" },
+        }),
+      }),
+    );
+  });
 });

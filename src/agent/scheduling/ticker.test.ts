@@ -1,9 +1,14 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { InngestTestEngine } from "@inngest/test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
+import { inngest } from "../../inngest/client.js";
 import type { StepRun } from "../../inngest/index.js";
+import { spyOnInngestSend } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import type { AgentStore } from "../store/index.js";
 import { DrizzleAgentStore } from "../store/index.js";
-import { runScheduledTaskTick } from "./ticker.js";
+import { createScheduledTaskTicker, runScheduledTaskTick } from "./ticker.js";
 
 let db: Database;
 let tx: Transactor;
@@ -252,5 +257,176 @@ describe("runScheduledTaskTick", () => {
 
     expect(events[0]?.scheduledFor).toBe(stale.toISOString());
     expect(events[0]?.scheduledFor).not.toBe(now.toISOString());
+  });
+
+  it("throws loudly if the store yields a recurring row with cron=null (defense in depth)", async () => {
+    // The DB CHECK rejects this combination at insert time, so it
+    // should be unreachable. But if a future change drops the CHECK
+    // or a raw-SQL admin bypass somehow creates the invariant
+    // violation, the ticker must throw rather than silently advance
+    // next_run_at to itself (infinite no-op loop).
+    const fakeStore = mock<Pick<AgentStore, "lockDueScheduledTasks" | "advanceScheduledTask">>();
+    fakeStore.lockDueScheduledTasks.mockResolvedValue([
+      {
+        id: "task-malformed",
+        userId: "user-1",
+        profileId: "profile-1",
+        kind: "recurring",
+        cron: null, // <-- the invariant violation
+        timezone: "UTC",
+        prompt: "x",
+        nextRunAt: new Date("2026-06-01T09:00:00Z"),
+        lastRunAt: null,
+        enabled: true,
+        catchupMissed: false,
+        source: "manual",
+        createdAt: new Date("2026-06-01T00:00:00Z"),
+      },
+    ]);
+
+    await expect(
+      runScheduledTaskTick(
+        {
+          runInTx: tx,
+          store: fakeStore,
+          now: () => new Date("2026-06-01T09:30:00Z"),
+        },
+        stepRun,
+      ),
+    ).rejects.toThrow(/kind='recurring' but cron is null/);
+    // And NEVER advances the row (the throw fires before advanceScheduledTask).
+    expect(fakeStore.advanceScheduledTask).not.toHaveBeenCalled();
+  });
+});
+
+// --- Inngest function-level tests (replay, idempotency, configuration) ---
+
+describe("createScheduledTaskTicker (Inngest wiring)", () => {
+  let sendSpy: ReturnType<typeof spyOnInngestSend>;
+  beforeEach(() => {
+    sendSpy = spyOnInngestSend(inngest);
+    sendSpy.mockResolvedValue({ ids: ["fake"] });
+  });
+  afterEach(() => {
+    sendSpy.mockRestore();
+  });
+
+  it("pins the function configuration (cron, retries, concurrency)", () => {
+    const fn = createScheduledTaskTicker(
+      { runInTx: (cb) => cb({} as never), store: mock<AgentStore>() },
+      inngest,
+    );
+    // `opts` is a public readonly field on InngestFunction.
+    expect(fn.opts.id).toBe("scheduled-task-ticker");
+    expect(fn.opts.retries).toBe(0);
+    expect(fn.opts.concurrency).toEqual({ limit: 1 });
+    expect(fn.opts.triggers).toEqual([{ cron: "* * * * *" }]);
+  });
+
+  it("emits one event per due row with idempotency key '<taskId>:<scheduledFor>'", async () => {
+    // The event id is THE mechanism Inngest uses to dedup the same
+    // fire across ticker retries. Regression-guard the format —
+    // dropping the id would produce silent double-fires.
+    const fakeStore = mock<AgentStore>();
+    fakeStore.lockDueScheduledTasks.mockResolvedValue([
+      {
+        id: "task-A",
+        userId: "user-1",
+        profileId: "profile-1",
+        kind: "recurring",
+        cron: "0 9 * * *",
+        timezone: "UTC",
+        prompt: "a",
+        nextRunAt: new Date("2026-06-01T08:00:00Z"),
+        lastRunAt: null,
+        enabled: true,
+        catchupMissed: false,
+        source: "agent",
+        createdAt: new Date("2026-06-01T00:00:00Z"),
+      },
+      {
+        id: "task-B",
+        userId: "user-1",
+        profileId: "profile-1",
+        kind: "one_off",
+        cron: null,
+        timezone: "UTC",
+        prompt: "b",
+        nextRunAt: new Date("2026-06-01T08:30:00Z"),
+        lastRunAt: null,
+        enabled: true,
+        catchupMissed: false,
+        source: "agent",
+        createdAt: new Date("2026-06-01T00:00:00Z"),
+      },
+    ]);
+    fakeStore.advanceScheduledTask.mockResolvedValue(undefined);
+
+    const fn = createScheduledTaskTicker(
+      {
+        runInTx: tx,
+        store: fakeStore,
+        now: () => new Date("2026-06-01T09:00:00Z"),
+      },
+      inngest,
+    );
+
+    await new InngestTestEngine({
+      function: fn,
+      events: [{ name: "inngest/function.invoked", data: {} } as never],
+    }).execute();
+
+    // Two events, each with the deterministic id.
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const call = sendSpy.mock.calls[0]?.[0] as {
+      payload: Array<{ id: string; data: { taskId: string; scheduledFor: string } }>;
+    };
+    expect(call.payload).toHaveLength(2);
+    for (const event of call.payload) {
+      expect(event.id).toBe(`${event.data.taskId}:${event.data.scheduledFor}`);
+    }
+    // Specific keys, ordered as locked.
+    expect(call.payload.map((e) => e.id)).toEqual([
+      "task-A:2026-06-01T08:00:00.000Z",
+      "task-B:2026-06-01T08:30:00.000Z",
+    ]);
+  });
+
+  it("does NOT re-run lock-and-advance when Inngest replays with a cached step result", async () => {
+    // Crash-recovery invariant: a ticker retry that finds
+    // `lock-and-advance` already cached must NOT call
+    // lockDueScheduledTasks again — that would double-lock + advance
+    // the same rows whose state has already moved on.
+    const fakeStore = mock<AgentStore>();
+    // If the body runs, the test should see this — but it shouldn't.
+    fakeStore.lockDueScheduledTasks.mockResolvedValue([]);
+
+    const fn = createScheduledTaskTicker(
+      { runInTx: tx, store: fakeStore, now: () => new Date() },
+      inngest,
+    );
+
+    // Inject a cached lock-and-advance step that returns one event.
+    // The function body must use this cached value, not re-execute.
+    const cachedEvents = [
+      {
+        taskId: "task-cached",
+        userId: "user-1",
+        profileId: "profile-1",
+        scheduledFor: "2026-06-01T09:00:00.000Z",
+        prompt: "cached",
+      },
+    ];
+    await new InngestTestEngine({
+      function: fn,
+      events: [{ name: "inngest/function.invoked", data: {} } as never],
+      steps: [{ id: "lock-and-advance", handler: () => cachedEvents }],
+    }).execute();
+
+    // The store's lock + advance methods were never touched on the replay.
+    expect(fakeStore.lockDueScheduledTasks).not.toHaveBeenCalled();
+    expect(fakeStore.advanceScheduledTask).not.toHaveBeenCalled();
+    // But the fan-out still went out using the cached events.
+    expect(sendSpy).toHaveBeenCalledTimes(1);
   });
 });

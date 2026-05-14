@@ -288,6 +288,61 @@ describe("DrizzleAgentStore — scheduled_tasks", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("advanceScheduledTask on an unknown id is a no-op (no throw)", async () => {
+    // Contract: the ticker may pick a row, then concurrent psql /
+    // admin code deletes it before advance commits. Advance must
+    // silently no-op rather than throw, so a row-deletion race
+    // doesn't poison the whole ticker batch.
+    await expect(
+      tx((trx) =>
+        store.advanceScheduledTask(trx, "00000000-0000-7000-8000-000000000000", {
+          lastRunAt: new Date(),
+          nextRunAt: new Date(),
+        }),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("createScheduledTask rejects an unknown profile_id via FK", async () => {
+    const { userId } = await seed();
+    const err = await tx((trx) =>
+      store.createScheduledTask(trx, {
+        userId,
+        profileId: "00000000-0000-7000-8000-000000000000",
+        kind: "recurring",
+        cron: "0 9 * * *",
+        timezone: "UTC",
+        prompt: "x",
+        nextRunAt: new Date(),
+        enabled: true,
+        catchupMissed: false,
+        source: "agent",
+      }),
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(flattenErrorChain(err)).toMatch(/scheduled_tasks_profile_id_profiles_id_fk/);
+  });
+
+  it("createScheduledTask rejects an unknown user_id via FK", async () => {
+    const { profileId } = await seed();
+    const err = await tx((trx) =>
+      store.createScheduledTask(trx, {
+        userId: "00000000-0000-7000-8000-000000000000",
+        profileId,
+        kind: "recurring",
+        cron: "0 9 * * *",
+        timezone: "UTC",
+        prompt: "x",
+        nextRunAt: new Date(),
+        enabled: true,
+        catchupMissed: false,
+        source: "agent",
+      }),
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(flattenErrorChain(err)).toMatch(/scheduled_tasks_user_id_users_id_fk/);
+  });
+
   it("deleteScheduledTask removes the row and is idempotent", async () => {
     const { userId, profileId } = await seed();
     const created = await tx((trx) =>
