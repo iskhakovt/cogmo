@@ -997,19 +997,22 @@ export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
     if (!cancelGuard(saveAnyway)) return;
   }
 
-  const { id: secretId } = await deps.runInTx((tx) =>
-    deps.secretsStore.putSecret(tx, {
+  // Atomic — store the secret, conditionally mark it validated, and link
+  // the voice_config row in a single tx. A crash mid-flight would
+  // otherwise leave an orphan `openai_voice_key` secret with no
+  // voice_config row referencing it; harmless (bootstrap sees no
+  // voice_config → voice stays disabled), but composing into one tx is
+  // the documented store pattern.
+  await deps.runInTx(async (tx) => {
+    const { id: secretId } = await deps.secretsStore.putSecret(tx, {
       name: VOICE_SECRET_NAME,
       plaintext: apiKey,
       description: "OpenAI API key for voice (TTS + STT)",
-    }),
-  );
-  if (probeOk) {
-    await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, VOICE_SECRET_NAME));
-  }
-
-  await deps.runInTx((tx) =>
-    deps.agentStore.upsertVoiceConfig(tx, {
+    });
+    if (probeOk) {
+      await deps.secretsStore.markValidated(tx, VOICE_SECRET_NAME);
+    }
+    await deps.agentStore.upsertVoiceConfig(tx, {
       ttsSecretId: secretId,
       sttSecretId: secretId,
       ttsProvider: "openai",
@@ -1017,8 +1020,8 @@ export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
       ttsVoice,
       sttProvider: "openai",
       sttModel,
-    }),
-  );
+    });
+  });
 
   p.log.success(
     `Voice configured (TTS=${ttsModel}/${ttsVoice}, STT=${sttModel}). Restart the server to pick up changes.`,
