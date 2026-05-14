@@ -1,7 +1,7 @@
-import type Docker from "dockerode";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import { DaytonaSandboxClient } from "./daytona/index.js";
+import type { DockerFacade } from "./docker-facade.js";
 import type { SandboxClient } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import type { SandboxRuntime } from "./runtime.js";
@@ -23,7 +23,7 @@ const log = logger.child({ component: "sandbox.factory" });
 export type SandboxBackendOptions =
   | {
       backend: "local-docker";
-      docker: Docker;
+      docker: DockerFacade;
       store: SandboxStore;
       runInTx: Transactor;
       runtime: SandboxRuntime;

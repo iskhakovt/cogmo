@@ -1,4 +1,4 @@
-import type Docker from "dockerode";
+import type { DockerFacade } from "./docker-facade.js";
 
 export type SandboxRuntime = "sysbox" | "runc";
 
@@ -13,7 +13,7 @@ export function dockerRuntimeName(r: SandboxRuntime): "sysbox-runc" | "runc" {
  * misconfiguration fails loudly rather than silently downgrading isolation.
  */
 export async function assertRuntimeAvailable(
-  docker: Docker,
+  docker: DockerFacade,
   runtime: SandboxRuntime,
 ): Promise<void> {
   const target = dockerRuntimeName(runtime);

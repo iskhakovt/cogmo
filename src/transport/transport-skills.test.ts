@@ -18,7 +18,7 @@ import type {
   SkillRunner,
   SkillSummary,
 } from "../skills/runner.js";
-import type { SkillRow, SkillStore } from "../skills/store/index.js";
+import type { SkillDeployRow, SkillRow, SkillStore } from "../skills/store/index.js";
 import { mockAgentStore, mockTransportStore } from "../test/factories.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { TransportStore } from "./store/index.js";
@@ -64,7 +64,8 @@ function makeTransport(opts: {
   transportStore?: TransportStore;
 }) {
   const { runner, store } = opts;
-  const inngest = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Inngest;
+  const inngest = mock<Inngest>();
+  inngest.send.mockResolvedValue({ ids: [] });
   return createTransport({
     channelId: "ch-1",
     defaultUserId: USER_ID,
@@ -248,5 +249,248 @@ describe("Transport.skills.enable", () => {
     const transport = makeTransport({});
     const result = await transport.skills.enable(KNOWN_HANDLE, "echo");
     expect(result._unsafeUnwrapErr()).toEqual({ code: "skills_disabled" });
+  });
+});
+
+/**
+ * `approveDeploy` / `denyDeploy` are the lifecycle pair backing the
+ * skills-approval inline keyboard in the Telegram adapter. Both perform a
+ * pre-check against `SkillStore.getDeployById` to produce precise error
+ * codes ahead of the runner call; the test matrix covers each branch in
+ * isolation. The store is mocked because the contract under test is the
+ * transport-layer mapping, not the SQL.
+ */
+
+const PENDING_ID = "019d0000-0000-7000-8000-000000000020";
+const SKILL_ID = "019d0000-0000-7000-8000-000000000021";
+
+function makeDeployRow(overrides: Partial<SkillDeployRow> = {}): SkillDeployRow {
+  return {
+    id: PENDING_ID,
+    skillId: SKILL_ID,
+    gitSha: "abcdef0abcdef0abcdef0abcdef0abcdef0abcd0",
+    priorGitSha: null,
+    riskTier: "approve",
+    status: "pending_approval",
+    approvedBy: null,
+    classifierLog: {
+      classifier_version: "stub-0",
+      risk_tier: "approve",
+      declared_effects: [],
+      detected_effects: [],
+      declared_secrets: [],
+      validation_errors: [],
+    },
+    createdAt: new Date("2026-05-01T00:00:00Z"),
+    resolvedAt: null,
+    ...overrides,
+  };
+}
+
+describe("Transport.skills.approveDeploy", () => {
+  it("happy path: pending → runner.approveDeploy → ok({pendingId, skillName, gitSha})", async () => {
+    const runner = mock<SkillRunner>();
+    runner.approveDeploy.mockResolvedValue({
+      name: "echo",
+      riskTier: "approve",
+      status: "live",
+      gitSha: "1111111111111111111111111111111111111111",
+    });
+    const store = mock<SkillStore>();
+    store.getDeployById.mockResolvedValue(makeDeployRow());
+    const transport = makeTransport({ runner, store });
+
+    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE);
+
+    expect(result._unsafeUnwrap()).toEqual({
+      pendingId: PENDING_ID,
+      skillName: "echo",
+      gitSha: "1111111111111111111111111111111111111111",
+    });
+    expect(runner.approveDeploy).toHaveBeenCalledWith({
+      pendingId: PENDING_ID,
+      approvedBy: KNOWN_HANDLE,
+    });
+  });
+
+  it("returns skills_disabled when runner/store are unwired", async () => {
+    const transport = makeTransport({});
+    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE);
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "skills_disabled" });
+  });
+
+  it("rejects unknown caller before any store/runner call", async () => {
+    const runner = mock<SkillRunner>();
+    const store = mock<SkillStore>();
+    const transport = makeTransport({ runner, store });
+
+    const result = await transport.skills.approveDeploy(PENDING_ID, UNKNOWN_HANDLE);
+
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    expect(store.getDeployById).not.toHaveBeenCalled();
+    expect(runner.approveDeploy).not.toHaveBeenCalled();
+  });
+
+  it("returns skill_deploy_not_found when getDeployById returns undefined", async () => {
+    const runner = mock<SkillRunner>();
+    const store = mock<SkillStore>();
+    store.getDeployById.mockResolvedValue(undefined);
+    const transport = makeTransport({ runner, store });
+
+    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE);
+
+    expect(result._unsafeUnwrapErr()).toEqual({
+      code: "skill_deploy_not_found",
+      pendingId: PENDING_ID,
+    });
+    expect(runner.approveDeploy).not.toHaveBeenCalled();
+  });
+
+  it("returns skill_deploy_not_pending when status is already resolved", async () => {
+    const runner = mock<SkillRunner>();
+    const store = mock<SkillStore>();
+    store.getDeployById.mockResolvedValue(makeDeployRow({ status: "live" }));
+    const transport = makeTransport({ runner, store });
+
+    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE);
+
+    expect(result._unsafeUnwrapErr()).toEqual({
+      code: "skill_deploy_not_pending",
+      pendingId: PENDING_ID,
+      status: "live",
+    });
+    expect(runner.approveDeploy).not.toHaveBeenCalled();
+  });
+
+  it("maps runner result status=rejected → skill_deploy_register_failed with reason", async () => {
+    // The runner can race past the pre-check (deploy resolved between the
+    // getDeployById read and the approveDeploy call). The transport
+    // forwards the first runner-reported error message verbatim so the
+    // toast text is useful.
+    const runner = mock<SkillRunner>();
+    runner.approveDeploy.mockResolvedValue({
+      name: "echo",
+      riskTier: "approve",
+      status: "rejected",
+      gitSha: "abc",
+      errors: ["non_fast_forward_at_approve_time", "lost the race"],
+    });
+    const store = mock<SkillStore>();
+    store.getDeployById.mockResolvedValue(makeDeployRow());
+    const transport = makeTransport({ runner, store });
+
+    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE);
+
+    expect(result._unsafeUnwrapErr()).toEqual({
+      code: "skill_deploy_register_failed",
+      pendingId: PENDING_ID,
+      reason: "non_fast_forward_at_approve_time",
+    });
+  });
+
+  it("synthesises a reason when runner returned a non-live status with no errors", async () => {
+    // Defence-in-depth: if a runner ever returns `status: "no_op"` or
+    // `"pending_approval"` here (theoretically impossible for an approve
+    // path), the transport must still produce a non-empty toast.
+    const runner = mock<SkillRunner>();
+    runner.approveDeploy.mockResolvedValue({
+      name: "echo",
+      riskTier: "approve",
+      status: "no_op",
+      gitSha: "abc",
+    });
+    const store = mock<SkillStore>();
+    store.getDeployById.mockResolvedValue(makeDeployRow());
+    const transport = makeTransport({ runner, store });
+
+    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE);
+
+    const e = result._unsafeUnwrapErr();
+    expect(e.code).toBe("skill_deploy_register_failed");
+    if (e.code === "skill_deploy_register_failed") {
+      expect(e.reason).toMatch(/no_op/);
+    }
+  });
+});
+
+describe("Transport.skills.denyDeploy", () => {
+  it("happy path: pending → runner.denyDeploy → ok({pendingId})", async () => {
+    const runner = mock<SkillRunner>();
+    runner.denyDeploy.mockResolvedValue(undefined);
+    const store = mock<SkillStore>();
+    store.getDeployById.mockResolvedValue(makeDeployRow());
+    const transport = makeTransport({ runner, store });
+
+    const result = await transport.skills.denyDeploy(PENDING_ID, KNOWN_HANDLE);
+
+    expect(result._unsafeUnwrap()).toEqual({ pendingId: PENDING_ID });
+    expect(runner.denyDeploy).toHaveBeenCalledWith({ pendingId: PENDING_ID });
+  });
+
+  it("forwards optional reason when provided", async () => {
+    const runner = mock<SkillRunner>();
+    runner.denyDeploy.mockResolvedValue(undefined);
+    const store = mock<SkillStore>();
+    store.getDeployById.mockResolvedValue(makeDeployRow());
+    const transport = makeTransport({ runner, store });
+
+    await transport.skills.denyDeploy(PENDING_ID, KNOWN_HANDLE, "looks unsafe");
+
+    expect(runner.denyDeploy).toHaveBeenCalledWith({
+      pendingId: PENDING_ID,
+      reason: "looks unsafe",
+    });
+  });
+
+  it("returns skills_disabled when runner/store are unwired", async () => {
+    const transport = makeTransport({});
+    const result = await transport.skills.denyDeploy(PENDING_ID, KNOWN_HANDLE);
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "skills_disabled" });
+  });
+
+  it("rejects unknown caller before any store/runner call", async () => {
+    const runner = mock<SkillRunner>();
+    const store = mock<SkillStore>();
+    const transport = makeTransport({ runner, store });
+
+    const result = await transport.skills.denyDeploy(PENDING_ID, UNKNOWN_HANDLE);
+
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    expect(store.getDeployById).not.toHaveBeenCalled();
+    expect(runner.denyDeploy).not.toHaveBeenCalled();
+  });
+
+  it("returns skill_deploy_not_found when the deploy row is gone", async () => {
+    const runner = mock<SkillRunner>();
+    const store = mock<SkillStore>();
+    store.getDeployById.mockResolvedValue(undefined);
+    const transport = makeTransport({ runner, store });
+
+    const result = await transport.skills.denyDeploy(PENDING_ID, KNOWN_HANDLE);
+
+    expect(result._unsafeUnwrapErr()).toEqual({
+      code: "skill_deploy_not_found",
+      pendingId: PENDING_ID,
+    });
+    expect(runner.denyDeploy).not.toHaveBeenCalled();
+  });
+
+  it("returns skill_deploy_not_pending on a re-tap of an already-denied row", async () => {
+    // The store's denyPendingDeploy is itself idempotent (it silently
+    // skips already-resolved rows), but this layer wants a precise toast
+    // — a second tap should say "already resolved", not "denied".
+    const runner = mock<SkillRunner>();
+    const store = mock<SkillStore>();
+    store.getDeployById.mockResolvedValue(makeDeployRow({ status: "denied" }));
+    const transport = makeTransport({ runner, store });
+
+    const result = await transport.skills.denyDeploy(PENDING_ID, KNOWN_HANDLE);
+
+    expect(result._unsafeUnwrapErr()).toEqual({
+      code: "skill_deploy_not_pending",
+      pendingId: PENDING_ID,
+      status: "denied",
+    });
+    expect(runner.denyDeploy).not.toHaveBeenCalled();
   });
 });

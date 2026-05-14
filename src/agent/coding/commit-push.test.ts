@@ -249,4 +249,58 @@ describe("runCommitAndPush", () => {
       expect(call.workingDir).toBe("/workspace");
     }
   });
+
+  it("returns kind=failed when `git status` itself errors (worktree corrupt / not a git dir)", async () => {
+    // The very first git command sets the floor — if `status` fails, the
+    // function must short-circuit with `failed` instead of trying to add
+    // + commit against a broken tree.
+    const { container, calls } = fakeContainer({
+      status: { stderr: "fatal: not a git repository\n", exitCode: 128 },
+    });
+
+    const result = await runCommitAndPush({
+      container,
+      worktreeDir: "/workspace",
+      branch: "cogmo/abc",
+      commitMessage: "x",
+      signingKeyPath: "/.cogmo-askpass/signing-key",
+      askpassEnv,
+      author,
+    });
+
+    expect(result.kind).toBe("failed");
+    if (result.kind === "failed") {
+      expect(result.output).toMatch(/not a git repository/);
+    }
+    // Did NOT proceed to add / commit / push.
+    expect(calls.find((c) => c.args.includes("add"))).toBeUndefined();
+    expect(calls.find((c) => c.args.includes("commit"))).toBeUndefined();
+    expect(calls.find((c) => c.args.includes("push"))).toBeUndefined();
+  });
+
+  it("returns kind=failed when `git add` errors (e.g. permission denied)", async () => {
+    // status reports dirty, then add fails. Without this branch the
+    // function would proceed to commit a partially-staged tree.
+    const { container, calls } = fakeContainer({
+      status: { stdout: "M src/foo.ts\n" },
+      add: { stderr: "fatal: pathspec error\n", exitCode: 128 },
+    });
+
+    const result = await runCommitAndPush({
+      container,
+      worktreeDir: "/workspace",
+      branch: "cogmo/abc",
+      commitMessage: "x",
+      signingKeyPath: "/.cogmo-askpass/signing-key",
+      askpassEnv,
+      author,
+    });
+
+    expect(result.kind).toBe("failed");
+    if (result.kind === "failed") {
+      expect(result.output).toMatch(/pathspec/);
+    }
+    expect(calls.find((c) => c.args.includes("commit"))).toBeUndefined();
+    expect(calls.find((c) => c.args.includes("push"))).toBeUndefined();
+  });
 });
