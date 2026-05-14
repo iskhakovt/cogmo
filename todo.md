@@ -115,9 +115,8 @@
 
 ### Phase 2 — memory automation & ingestion
 
-- [ ] `p2` `schedule_task` / `list_tasks` / `remove_task` agent tools (Phase 2) — `croner` validation (via the shipped `validateCron` / `computeNextRun`), per-user cap (start 50), structured `Result<TaskCreated, ValidationError>` so the LLM self-corrects from `tool_result`. Always writes to `scheduled_tasks` (including one-offs — uniform list/remove UX). New `service.scheduling` namespace scoped per conversation. Translates the DB 23514 CHECK violation into a typed error at this layer.
-- [ ] `p2` Wizard recurring-tasks step (Phase 2) — opt-in flow that writes a single `scheduled_tasks` row per recurring action (morning briefing is the canonical example, not a special-cased function). Re-runnable, removable via `/schedules`. Depends on the agent tools.
-- [ ] `p2` `/schedules` channel command (Phase 2) — view enabled + disabled, disable/enable/delete; identity-checked transport entry point; mirror `/skills`. Depends on the table.
+- [ ] `p2` Wizard recurring-tasks step (Phase 2) — opt-in flow that writes a single `scheduled_tasks` row per recurring action (morning briefing is the canonical example, not a special-cased function). Re-runnable, removable via `/schedules`. Calls `SchedulingService.create` directly (same validation path the agent tools use).
+- [ ] `p2` `/schedules` channel command (Phase 2) — view enabled + disabled, disable/enable/delete; identity-checked transport entry point; mirror `/skills`. Calls `SchedulingService.list` and an additional `setEnabled` shape (not yet on the service — add when this slice lands).
 - [ ] `p2` Memory consolidation — daily `reflect()` via static Inngest cron (Phase 2) — genuinely system-wide, not user-defined; stays as a hard-coded cron.
 - [ ] `p2` First ingestion agent: Gmail via MCP (Phase 2) — depends on MCP client Phase D below; polling cadence is itself a `scheduled_tasks` row, not a hard-coded cron.
 - [ ] `p2` First ingestion agent: Google Calendar via MCP (Phase 2) — same shape as Gmail.

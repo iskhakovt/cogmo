@@ -140,14 +140,16 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
       // Cap check + insert in the same tx so two concurrent creates
       // can't both squeak past the limit. Count includes disabled
       // rows so a user can't accumulate a graveyard of disabled
-      // tasks and bypass the cap by toggling.
+      // tasks and bypass the cap by toggling. Uses `countScheduledTasks`
+      // (one SELECT COUNT(*)) rather than `listScheduledTasks` so we
+      // don't pull every row's columns just to read `.length`.
       const result = await deps.runInTx(async (tx) => {
-        const existing = await deps.agentStore.listScheduledTasks(tx, deps.userId);
-        if (existing.length >= taskCap) {
+        const current = await deps.agentStore.countScheduledTasks(tx, deps.userId);
+        if (current >= taskCap) {
           return err({
             kind: "task_cap_exceeded" as const,
             limit: taskCap,
-            current: existing.length,
+            current,
           });
         }
         const row = await deps.agentStore.createScheduledTask(tx, {
