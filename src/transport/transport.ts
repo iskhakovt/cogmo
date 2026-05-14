@@ -1809,10 +1809,14 @@ export function createTransport(deps: {
 
     scheduling: {
       async list(platformUserHandle) {
-        const user = await resolveTapperToUser(platformUserHandle);
-        if (user.isErr()) return err(user.error);
-        const rows = await runInTx((tx) => agentStore.listScheduledTasks(tx, user.value.userId));
-        return ok(rows.map(toScheduledTaskAdminEntry));
+        // Identity resolve + list in one tx (one BEGIN/COMMIT pair,
+        // atomic snapshot).
+        return await runInTx(async (tx) => {
+          const user = await resolveTapperToUser(tx, platformUserHandle);
+          if (user.isErr()) return err(user.error);
+          const rows = await agentStore.listScheduledTasks(tx, user.value.userId);
+          return ok(rows.map(toScheduledTaskAdminEntry));
+        });
       },
 
       async disable(platformUserHandle, id) {
@@ -1827,13 +1831,14 @@ export function createTransport(deps: {
         if (!UUID_RE.test(id)) {
           return err({ code: "schedule_id_malformed" as const, id });
         }
-        const user = await resolveTapperToUser(platformUserHandle);
-        if (user.isErr()) return err(user.error);
-        // Ownership check + delete in one tx so we can't race a
-        // concurrent re-owner. Returns `schedule_not_found` for unknown
-        // OR cross-user ids — same opaque-on-purpose response so a
-        // probing client can't enumerate other users' tasks.
+        // Identity resolve + ownership check + delete in one tx so
+        // the lookup and the write see the same snapshot.
+        // `schedule_not_found` covers unknown ids AND cross-user ids
+        // — same opaque-on-purpose response so a probing client
+        // can't enumerate other users' tasks.
         return await runInTx(async (tx) => {
+          const user = await resolveTapperToUser(tx, platformUserHandle);
+          if (user.isErr()) return err(user.error);
           const row = await agentStore.getScheduledTask(tx, id);
           if (!row || row.userId !== user.value.userId) {
             return err({ code: "schedule_not_found" as const, id });
@@ -2014,15 +2019,16 @@ export function createTransport(deps: {
   /**
    * Variant of `checkSkillsTapper` that returns the resolved userId
    * (the skills variant returns `void` because skills aren't
-   * per-user; scheduling rows are). Same identity-rejection
-   * semantics. Used by `transport.scheduling.*` to scope each call.
+   * per-user; scheduling rows are). Takes an existing `tx` so the
+   * identity check shares a transaction with the main operation —
+   * one BEGIN/COMMIT pair, atomic snapshot. Same identity-rejection
+   * semantics.
    */
   async function resolveTapperToUser(
+    tx: Transaction,
     tapperPlatformHandle: string,
   ): Promise<Result<{ userId: string }, TransportError>> {
-    const tapper = await runInTx((tx) =>
-      transportStore.resolveUser(tx, channelId, tapperPlatformHandle),
-    );
+    const tapper = await transportStore.resolveUser(tx, channelId, tapperPlatformHandle);
     if (!tapper) {
       return err({ code: "identity_rejected" as const });
     }
@@ -2034,6 +2040,11 @@ export function createTransport(deps: {
    * Validates the id format, identity-checks, looks up the row +
    * ownership, applies the requested state, and reports
    * `alreadyAtState: true` when the row was already in that state.
+   *
+   * All DB work happens in ONE transaction so the identity check and
+   * the state update see the same snapshot — closes the race where
+   * the user's identity row could be revoked between resolve and
+   * update.
    *
    * Returns `schedule_not_found` for unknown OR cross-user ids — same
    * opaque-on-purpose response as `delete` so a probing client can't
@@ -2047,9 +2058,9 @@ export function createTransport(deps: {
     if (!UUID_RE.test(id)) {
       return err({ code: "schedule_id_malformed" as const, id });
     }
-    const user = await resolveTapperToUser(platformUserHandle);
-    if (user.isErr()) return err(user.error);
     return await runInTx(async (tx) => {
+      const user = await resolveTapperToUser(tx, platformUserHandle);
+      if (user.isErr()) return err(user.error);
       const row = await agentStore.getScheduledTask(tx, id);
       if (!row || row.userId !== user.value.userId) {
         return err({ code: "schedule_not_found" as const, id });

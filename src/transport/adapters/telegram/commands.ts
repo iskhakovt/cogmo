@@ -1961,21 +1961,40 @@ export async function handleSchedules(
  * `formatTaskList` in `src/agent/scheduling/tools.ts`. Full id
  * included so the user can copy it into a follow-up
  * `/schedules disable|enable|delete <id>` command.
+ *
+ * Caps the rendered list at `MAX_DISPLAY` so the message can't blow
+ * past Telegram's 4096-char per-message limit. Each task line is
+ * ~210 chars worst case (UUID + truncated prompt + ISO timestamp +
+ * formatting); MAX_DISPLAY × 210 + header + footer stays comfortably
+ * under 4096. When the user has more tasks than fit, we surface the
+ * count + nudge them toward `list_tasks` (the agent tool) which has
+ * no length cap.
+ *
+ * Note: `ctx.reply` does NOT auto-rotate — the streaming-text
+ * rotator from PR #239 only applies to the assistant-text path.
  */
+const MAX_SCHEDULE_DISPLAY = 15;
+
 function formatScheduleList(tasks: ReadonlyArray<ScheduledTaskAdminEntry>): string {
   const sorted = [...tasks].sort((a, b) => {
     if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
     return a.nextRunAt.getTime() - b.nextRunAt.getTime();
   });
+  const visible = sorted.slice(0, MAX_SCHEDULE_DISPLAY);
   const header = `Scheduled tasks (${tasks.length}):`;
-  const lines = sorted.map((t, i) => {
+  const lines = visible.map((t, i) => {
     const schedule =
       t.kind === "recurring" ? `cron '${t.cron}' (${t.timezone})` : `one-off (${t.timezone})`;
     const promptPreview = t.prompt.length > 80 ? `${t.prompt.slice(0, 77)}...` : t.prompt;
     const state = t.enabled ? "" : " [disabled]";
     return `${i + 1}. ${t.id}${state}\n   ${schedule} — '${promptPreview}'\n   next: ${t.nextRunAt.toISOString()}`;
   });
-  return [header, ...lines].join("\n");
+  const hiddenCount = tasks.length - visible.length;
+  const footer =
+    hiddenCount > 0
+      ? `\n\n... and ${hiddenCount} more. Ask the agent to list all (uses \`list_tasks\` with no display cap).`
+      : "";
+  return [header, ...lines].join("\n") + footer;
 }
 
 function toReplyOptions(

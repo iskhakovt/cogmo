@@ -3450,6 +3450,63 @@ describe("handleSchedules", () => {
     expect(ctx.reply.mock.calls[0]?.[0]).toContain("not authorized");
   });
 
+  it("truncates the list at 15 entries and surfaces the hidden count + agent nudge", async () => {
+    // Telegram's 4096-char per-message cap would 400 with MESSAGE_TOO_LONG
+    // if we rendered all 200 cap'd tasks (each ~210 chars worst case).
+    // Cap the rendered list at 15 and tell the user the rest is reachable
+    // via the agent's `list_tasks` (no display cap).
+    const total = 50;
+    const tasks = Array.from({ length: total }, (_, i) => ({
+      id: `019e2900-0000-7000-8000-${String(i).padStart(12, "0")}`,
+      kind: "recurring" as const,
+      cron: "0 9 * * *",
+      prompt: "x",
+      timezone: "UTC",
+      // Earlier index → earlier fire so sort is deterministic.
+      nextRunAt: new Date(2026, 5, 1 + i),
+      lastRunAt: null,
+      enabled: true,
+    }));
+    const transport = transportWith({
+      scheduling: { list: vi.fn().mockResolvedValue(ok(tasks)) },
+    });
+    const ctx = mkCtx();
+    await handleSchedules(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+
+    // Header carries the FULL count, not the displayed count.
+    expect(reply).toContain(`Scheduled tasks (${total}):`);
+    // First 15 rendered (numbered 1..15). The 16th-onwards IDs are not in the body.
+    expect(reply).toContain(tasks[14]!.id);
+    expect(reply).not.toContain(tasks[15]!.id);
+    // Footer surfaces the hidden count + steers to the agent tool.
+    expect(reply).toContain(`... and ${total - 15} more`);
+    expect(reply).toContain("list_tasks");
+    // Stays comfortably under Telegram's 4096-char cap.
+    expect(reply.length).toBeLessThan(4096);
+  });
+
+  it("doesn't print the truncation footer when all tasks fit", async () => {
+    const tasks = Array.from({ length: 3 }, (_, i) => ({
+      id: `019e2900-0000-7000-8000-${String(i).padStart(12, "0")}`,
+      kind: "recurring" as const,
+      cron: "0 9 * * *",
+      prompt: "x",
+      timezone: "UTC",
+      nextRunAt: new Date(2026, 5, 1 + i),
+      lastRunAt: null,
+      enabled: true,
+    }));
+    const transport = transportWith({
+      scheduling: { list: vi.fn().mockResolvedValue(ok(tasks)) },
+    });
+    const ctx = mkCtx();
+    await handleSchedules(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    expect(reply).not.toContain("and ");
+    expect(reply).not.toContain("more");
+  });
+
   // --- /schedules disable <id> ---
 
   it("disable: dispatches to transport.scheduling.disable and confirms success", async () => {
