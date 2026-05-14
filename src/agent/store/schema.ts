@@ -619,9 +619,9 @@ export const steeringRules = pgTable("steering_rules", {
  * future third kind doesn't have to rewrite the constraint.
  *
  * `timezone` is an IANA tz string (e.g. `Europe/London`) — validated at the
- * tool boundary via `cron-parser` + Luxon. The schedule fires anchored to
- * that tz, so DST transitions don't drift or skip. `next_run_at` is stored
- * in UTC like every other timestamptz.
+ * tool boundary via `croner` + `Intl.DateTimeFormat`. The schedule fires
+ * anchored to that tz, so DST transitions don't drift. `next_run_at` is
+ * stored in UTC like every other timestamptz.
  *
  * `catchup_missed` flips the post-outage behaviour: `false` (default at the
  * tool layer) fires once with the most recent `next_run_at` regardless of

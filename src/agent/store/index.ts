@@ -990,8 +990,8 @@ export interface AgentStore {
 
   /**
    * Insert a scheduled task. Caller is responsible for cron / timezone
-   * validation (done at the tool layer via `cron-parser` + Luxon) and for
-   * computing `nextRunAt` from the cron expression in the user's tz. The
+   * validation (done at the tool layer via `croner` + `Intl.DateTimeFormat`)
+   * and for computing `nextRunAt` from the cron expression in the user's tz. The
    * DB CHECK pins the `kind ↔ cron` invariant: passing `cron: null` for a
    * `recurring` row (or non-null for `one_off`) raises a 23514 the caller
    * must translate. See design/scheduling.md.
@@ -1035,9 +1035,13 @@ export interface AgentStore {
    * transaction via `advanceScheduledTask` before commit, otherwise the
    * row will re-fire on the next tick.
    *
-   * `now` is passed in (rather than read inside the query) so the ticker
-   * uses Inngest's deterministic step input and the same predicate is
-   * evaluated on every replay.
+   * Replay-safety note: this method does NOT need to be deterministic
+   * across invocations — its return value is captured inside the
+   * ticker's `step.run("lock-and-advance", ...)`, and Inngest replays
+   * the cached step result on retry rather than re-invoking the body.
+   * `now` is just the timestamp the caller snapshots once (outside
+   * `step.run`) and passes in so the SQL predicate is explicit, not a
+   * determinism mechanism.
    */
   lockDueScheduledTasks(
     tx: Transaction,
@@ -1048,7 +1052,7 @@ export interface AgentStore {
    * Advance a row after the ticker has picked it: stamp `last_run_at` to
    * the timestamp that was just fired, set `next_run_at` to the next
    * occurrence (or leave unchanged for one-offs — the row's `enabled` flips
-   * to false instead). Caller computes `nextRunAt` from `cron-parser` for
+   * to false instead). Caller computes `nextRunAt` from `croner` for
    * recurring rows and passes `disable: true` for one-offs so the same
    * row isn't picked again on the next tick.
    */

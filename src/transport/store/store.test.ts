@@ -928,5 +928,54 @@ describe("DrizzleTransportStore", () => {
       // a.userId never used b.profileId — no match should exist.
       expect(result).toBeUndefined();
     });
+
+    it("scopes by profileId for the SAME user — two profiles, two distinct results", async () => {
+      // Same-user-different-profile scoping. The previous test varies
+      // userId; this varies profileId for one user. Catches a hypothetical
+      // regression where the JOIN filtered only on conversations.userId.
+      const userId = (await tx((trx) => agentStore.createUser(trx))).id;
+      profileNameCounter += 1;
+      const profile1 = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `test-p1-${profileNameCounter}`,
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      profileNameCounter += 1;
+      const profile2 = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `test-p2-${profileNameCounter}`,
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      const conv1 = (
+        await tx((trx) =>
+          agentStore.createConversation(trx, { userId, profileId: profile1, isPrivate: true }),
+        )
+      ).id;
+      const conv2 = (
+        await tx((trx) =>
+          agentStore.createConversation(trx, { userId, profileId: profile2, isPrivate: true }),
+        )
+      ).id;
+      const channelId = await seedChannel();
+      const s1 = await seedSession(channelId, conv1, "addr-p1");
+      const s2 = await seedSession(channelId, conv2, "addr-p2");
+
+      const r1 = await tx((trx) => store.findActiveSessionForUserProfile(trx, userId, profile1));
+      const r2 = await tx((trx) => store.findActiveSessionForUserProfile(trx, userId, profile2));
+      expect(r1).toEqual({ sessionId: s1, conversationId: conv1 });
+      expect(r2).toEqual({ sessionId: s2, conversationId: conv2 });
+    });
   });
 });

@@ -74,7 +74,15 @@ export function createScheduledTaskTicker(deps: SchedulingTickerDeps, inngest: I
       id: "scheduled-task-ticker",
       // The ticker is pure dispatch — a transient DB blip shouldn't burn
       // its retry budget; the next minute's tick re-locks any rows we
-      // missed (their `next_run_at` is still in the past).
+      // missed (their `next_run_at` is still in the past). Note that
+      // `retries: 0` at the function level also disables step-level
+      // retries — a `step.run("lock-and-advance")` failure aborts the
+      // whole invocation rather than retrying the step. That's the
+      // intended trade-off: cron is the recovery mechanism, not
+      // mid-invocation backoff. If you bump this to `retries: 1`
+      // expecting step-level resilience, you'd also get function-level
+      // re-invocation, which would re-lock rows whose `next_run_at`
+      // already advanced past `now()` between attempts. Stay at 0.
       retries: 0,
       // Singleton: never run two ticker bodies concurrently. The
       // FOR UPDATE SKIP LOCKED is defense in depth, but limiting at the

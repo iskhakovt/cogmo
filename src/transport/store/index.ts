@@ -204,15 +204,22 @@ export interface TransportStore {
   removeChannel(tx: Transaction, channelId: string): Promise<void>;
 
   /**
-   * Find the most recently active conversation-and-session pair for a
-   * given user + profile. Used by the scheduled-task fire handler to
-   * deliver synthetic inbound messages into the user's currently-open
+   * Find the most recently CREATED active session (and its conversation)
+   * for a given user + profile. Used by the scheduled-task fire handler
+   * to deliver synthetic inbound messages into the user's currently-open
    * chat for that profile.
    *
-   * Returns the most recently created active session whose
-   * `conversation.user_id`/`conversation.profile_id` matches, with its
-   * conversation id. `undefined` when the user has no active sessions
-   * on that profile — fires for offline users no-op.
+   * Ordering is `channel_sessions.created_at DESC` — a 30-second-old
+   * web session wins over a 6-month-old Telegram session. That's the
+   * right heuristic for "where to deliver a fire" because the most
+   * recent session is the one the user just opened. If "most recently
+   * spoken in" is ever needed (e.g. a `last_inbound_ts` denormalisation
+   * on `channel_sessions`), that's a different lookup.
+   *
+   * Returns `{ sessionId, conversationId }` of the winning session, or
+   * `undefined` when the user has no active sessions on that profile
+   * (fires for offline users no-op). Expired or closed sessions are
+   * excluded.
    */
   findActiveSessionForUserProfile(
     tx: Transaction,
