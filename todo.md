@@ -119,7 +119,6 @@
 ### Phase 2 — memory automation & ingestion
 
 - [ ] `p2` Wizard recurring-tasks step (Phase 2) — opt-in flow that writes a single `scheduled_tasks` row per recurring action (morning briefing is the canonical example, not a special-cased function). Re-runnable, removable via `/schedules`. Calls `SchedulingService.create` directly (same validation path the agent tools use).
-- [ ] `p2` `/schedules` channel command (Phase 2) — view enabled + disabled, disable/enable/delete; identity-checked transport entry point; mirror `/skills`. Calls `SchedulingService.list` and an additional `setEnabled` shape (not yet on the service — add when this slice lands).
 - [ ] `p2` Memory consolidation — daily `reflect()` via static Inngest cron (Phase 2) — genuinely system-wide, not user-defined; stays as a hard-coded cron.
 - [ ] `p2` First ingestion agent: Gmail via MCP (Phase 2) — depends on MCP client Phase D below; polling cadence is itself a `scheduled_tasks` row, not a hard-coded cron.
 - [ ] `p2` First ingestion agent: Google Calendar via MCP (Phase 2) — same shape as Gmail.
