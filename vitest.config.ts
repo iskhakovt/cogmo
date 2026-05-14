@@ -1,5 +1,36 @@
 import { defineConfig } from "vitest/config";
 
+/** Defaults to 2 — matches the parallelism of CI's 2-core runners.
+ * Override with `PYODIDE_MAX_FORKS=N` on bigger dev boxes if 2 leaves
+ * perf on the table. */
+const PYODIDE_MAX_FORKS = (() => {
+  const v = Number(process.env.PYODIDE_MAX_FORKS);
+  return Number.isFinite(v) && v >= 1 ? v : 2;
+})();
+
+/** Files that actually load Pyodide (3–6s cold-start per WASM init).
+ * Routed to the `unit-pyodide` project so their parallelism is capped.
+ * Membership rule: file must directly load Pyodide (`loadPyodide`,
+ * `runOnWorker`) or transitively via `SkillRunner.invoke()` calls. Files
+ * that only call `register()` (no Pyodide; tree-sitter classifier
+ * instead) or assert on a pinned version (no WASM load) stay in `unit`. */
+const PYODIDE_HEAVY_UNIT_GLOBS: readonly string[] = [
+  "src/skills/runner.test.ts",
+  "src/skills/runner.register.test.ts",
+  "src/skills/worker-wasm/**/*.test.ts",
+];
+
+/** Shared by both unit projects. `HINDSIGHT_URL` + `INNGEST_BASE_URL` are
+ * required by the runtime schema in `src/env.ts` — any test that touches
+ * code importing the full `env` (e.g. `db/index.ts`, `health.ts`) needs
+ * them populated. Unit tests mock the actual stores so the URLs are never
+ * hit. */
+const UNIT_ENV = {
+  NODE_ENV: "test",
+  HINDSIGHT_URL: "http://localhost:8080",
+  INNGEST_BASE_URL: "http://localhost:8288",
+} as const;
+
 export default defineConfig({
   test: {
     reporters: ["default", "junit"],
@@ -15,23 +46,35 @@ export default defineConfig({
           name: "unit",
           environment: "node",
           include: ["src/**/*.test.ts"],
-          exclude: ["src/**/*.integration.test.ts", "src/**/*.e2e.test.ts"],
+          // Pyodide-heavy files routed to `unit-pyodide` (capped parallelism).
+          exclude: [
+            "src/**/*.integration.test.ts",
+            "src/**/*.e2e.test.ts",
+            ...PYODIDE_HEAVY_UNIT_GLOBS,
+          ],
           // PGlite `pushSchema` runs in `beforeAll` of every store test file
           // and takes 2–7s each under parallel CPU contention. The default
           // 10s hookTimeout flakes once enough store files exist.
           hookTimeout: 30_000,
-          env: {
-            NODE_ENV: "test",
-            // Required by the runtime schema in `src/env.ts`. Modules that
-            // only need the bootstrap tier (`logger`, `seed`) import
-            // `env-bootstrap.ts` and don't trigger validation of these,
-            // but any test that touches code importing the full `env`
-            // (e.g. `db/index.ts`, `health.ts`) needs them populated.
-            // Unit tests mock the actual stores — these placeholders
-            // exist purely to satisfy the schema, the URLs are never hit.
-            HINDSIGHT_URL: "http://localhost:8080",
-            INNGEST_BASE_URL: "http://localhost:8288",
-          },
+          env: UNIT_ENV,
+        },
+      },
+      {
+        test: {
+          // Caps parallelism so Vitest's default `maxForks = os.cpus()`
+          // doesn't oversubscribe disk/CPU during WASM cold-start. `2`
+          // matches CI's effective parallelism; bigger dev boxes can
+          // override via `PYODIDE_MAX_FORKS`.
+          name: "unit-pyodide",
+          environment: "node",
+          include: PYODIDE_HEAVY_UNIT_GLOBS,
+          poolOptions: { forks: { maxForks: PYODIDE_MAX_FORKS } },
+          hookTimeout: 30_000,
+          // 60s covers full Pyodide cold-start + a non-trivial WASM run.
+          // Tighter per-test budgets (e.g. host.test.ts's 15s wall-clock
+          // cap test) still apply via inline `{ timeout }` overrides.
+          testTimeout: 60_000,
+          env: UNIT_ENV,
         },
       },
       {
