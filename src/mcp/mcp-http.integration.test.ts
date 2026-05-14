@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -8,6 +9,8 @@ import { createTestDatabase } from "../test/pglite.js";
 import { HostRunner } from "./client/runner.js";
 import { McpRegistryImpl } from "./registry.js";
 import { DrizzleMcpStore } from "./store/index.js";
+
+const require = createRequire(import.meta.url);
 
 /**
  * HTTP MCP transport integration test. Spawns
