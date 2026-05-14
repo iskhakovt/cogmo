@@ -34,20 +34,13 @@ export interface ToolSpec {
    */
   durable?: boolean;
   /**
-   * Opt-in concurrent execution when the LLM emits multiple tool_use blocks
-   * in one turn. `true` declares that this tool has no externally observable
-   * ordering dependency on sibling tool calls — its handler can run via
-   * `Promise.all` alongside other parallelSafe tools.
+   * Declares the handler has no ordering dependency on sibling tool calls in
+   * the same turn. Consecutive parallelSafe entries in the LLM's tool_use
+   * sequence run via `Promise.all`; unsafe entries run individually between
+   * those groups, preserving emission order.
    *
-   * The agent loop fans out only when *every* tool_use in a turn maps to a
-   * parallelSafe spec. A single unsafe entry forces the whole batch back to
-   * sequential — conservative semantics that preserves the existing ordering
-   * guarantees for writes against shared state (e.g. core_memory).
-   *
-   * Safe choices: pure read-only HTTP (web search/fetch), independent
-   * provider calls (image generation), pure compute. Unsafe choices: writes
-   * against shared state (core memory blocks, the same file path), anything
-   * whose side effects can race with siblings.
+   * Safe: read-only HTTP, independent provider calls, pure compute. Unsafe:
+   * writes against shared state (core memory blocks, same file path).
    */
   parallelSafe?: boolean;
 }
@@ -137,6 +130,7 @@ export function createDefaultTools(
         "Returns the current date, time, day of week, and timezone. " +
         "Use for scheduling, deadlines, or time questions. The system prompt includes the time " +
         "when the conversation started — call this tool for long-running sessions or exact time.",
+      parallelSafe: true,
       schema: z.object({
         timezone: z
           .string()

@@ -1,4 +1,5 @@
 import { SpanStatusCode, trace } from "@opentelemetry/api";
+import * as R from "remeda";
 import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, Message, StreamEvent, TextBlock, ToolUseBlock } from "../llm/types.js";
 import { logger } from "../logger.js";
@@ -173,6 +174,17 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
 }
 
+interface PlannedCall {
+  block: ToolUseBlock;
+  spec: ToolSpec | null;
+}
+
+// Unknown tools short-circuit to an error result with no side effects, so
+// they coalesce with safe runs.
+function isSafeCall(entry: PlannedCall): boolean {
+  return entry.spec === null || entry.spec.parallelSafe === true;
+}
+
 async function executeToolCalls(
   content: ContentBlock[],
   tools: ToolRegistry,
@@ -182,30 +194,34 @@ async function executeToolCalls(
   const toolUseBlocks = content.filter((b): b is ToolUseBlock => b.type === "tool_use");
   if (toolUseBlocks.length === 0) return [];
 
-  // Each entry pairs the tool_use with the resolved spec (or null for
-  // unknown tools, which short-circuit to an error result). We resolve up
-  // front so the parallel-safety decision sees every tool in the batch
-  // without re-scanning the registry mid-flight.
-  const planned = toolUseBlocks.map((block) => ({
+  const planned: PlannedCall[] = toolUseBlocks.map((block) => ({
     block,
     spec: tools.get(block.name) ?? null,
   }));
 
-  // Fan out only when every block in the batch is either an unknown-tool
-  // short-circuit (cheap, no side effects) or a parallelSafe spec. One
-  // unsafe entry forces the whole batch back to sequential — the LLM emits
-  // tool_use blocks in some order but doesn't expect any particular order,
-  // so partial parallelism would create real concurrency between unsafe
-  // writes and sibling reads against the same shared state.
-  const canFanOut = planned.every((p) => p.spec === null || p.spec.parallelSafe === true);
-
-  if (canFanOut && planned.length > 1) {
-    return Promise.all(planned.map(({ block, spec }) => runOne(block, spec, service, stepRun)));
-  }
+  // Coalesce consecutive safe entries; unsafe entries stay as singletons so
+  // [write_file(p), write_file(p)] still runs serially.
+  const groups = R.reduce(
+    planned,
+    (acc, entry) => {
+      const tail = acc.at(-1);
+      // biome-ignore lint/style/noNonNullAssertion: tail non-empty by construction
+      if (isSafeCall(entry) && tail !== undefined && isSafeCall(tail[0]!)) {
+        tail.push(entry);
+      } else {
+        acc.push([entry]);
+      }
+      return acc;
+    },
+    [] as PlannedCall[][],
+  );
 
   const results: ContentBlock[] = [];
-  for (const { block, spec } of planned) {
-    results.push(await runOne(block, spec, service, stepRun));
+  for (const group of groups) {
+    const batch = await Promise.all(
+      group.map(({ block, spec }) => runOne(block, spec, service, stepRun)),
+    );
+    results.push(...batch);
   }
   return results;
 }
