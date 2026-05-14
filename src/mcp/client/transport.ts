@@ -1,4 +1,5 @@
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Transactor } from "../../db/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
@@ -8,9 +9,10 @@ import type { McpServerConfig, McpValueSource } from "../config.js";
  * Construct an SDK `Transport` from a server config + the secrets store
  * (resolves `SecretRef` env / header values to plaintext at construction).
  *
- * Phase A supports stdio only; http/sse throw with a deferred-to-Phase-C
- * message rather than silently misbehaving. The thrown message is what
- * surfaces to the operator via `/mcp add`.
+ * stdio and streamable-http are supported. `sse` (the deprecated split
+ * GET/POST transport) stays deferred — modern remote servers ship the
+ * streamable variant. The thrown message is what surfaces to the operator
+ * via `/mcp add` when somebody configures `transport: "sse"`.
  */
 export async function createTransport(
   config: McpServerConfig,
@@ -27,10 +29,19 @@ export async function createTransport(
         // letting MCP server diagnostics leak into the parent process's stderr.
         stderr: "pipe",
       });
-    case "http":
+    case "http": {
+      const headers = await resolveVarMap(config.headers, secrets, runInTx);
+      // SDK 1.25 types `StreamableHTTPClientTransport.sessionId` as `string |
+      // undefined`, but the `Transport` interface declares it `sessionId?:
+      // string` — incompatible under `exactOptionalPropertyTypes`. Runtime
+      // behaviour is identical; the cast bridges the type gap.
+      return new StreamableHTTPClientTransport(new URL(config.url), {
+        requestInit: { headers },
+      }) as unknown as Transport;
+    }
     case "sse":
       throw new Error(
-        `MCP ${config.transport} transport is deferred to Phase C; only stdio is supported in Phase A`,
+        `MCP sse transport is not supported; use transport: "http" for remote servers (Streamable HTTP)`,
       );
   }
 }

@@ -1,4 +1,5 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { describe, expect, it, vi } from "vitest";
 import { SdkMcpConnection } from "./client.js";
@@ -123,5 +124,60 @@ describe("SdkMcpConnection", () => {
     await conn.close();
     await expect(conn.callTool("x", {}, { timeoutMs: 1000 })).rejects.toThrow(/closed/);
     await expect(conn.listTools()).rejects.toThrow(/closed/);
+  });
+
+  it("calls terminateSession() before close for streamable-http transports", async () => {
+    const client = fakeClient();
+    // Real instance so the `instanceof` check matches — we patch
+    // `terminateSession` and `close` to capture invocation order without
+    // standing up a live HTTP server.
+    const httpTransport = new StreamableHTTPClientTransport(new URL("https://example.test/mcp"));
+    const order: string[] = [];
+    const terminateSession = vi
+      .spyOn(httpTransport, "terminateSession")
+      .mockImplementation(async () => {
+        order.push("terminate");
+      });
+    const transportClose = vi.spyOn(httpTransport, "close").mockImplementation(async () => {
+      order.push("close");
+      httpTransport.onclose?.();
+    });
+    client.close = vi.fn(async () => {
+      await httpTransport.close();
+    }) as unknown as Client["close"];
+
+    const conn = new SdkMcpConnection(
+      client as unknown as Client,
+      httpTransport as unknown as Transport,
+    );
+    await conn.connect();
+    await conn.close();
+
+    expect(terminateSession).toHaveBeenCalledOnce();
+    expect(transportClose).toHaveBeenCalledOnce();
+    expect(order).toEqual(["terminate", "close"]);
+  });
+
+  it("swallows terminateSession errors so close still completes", async () => {
+    const client = fakeClient();
+    const httpTransport = new StreamableHTTPClientTransport(new URL("https://example.test/mcp"));
+    vi.spyOn(httpTransport, "terminateSession").mockRejectedValue(new Error("server gone"));
+    vi.spyOn(httpTransport, "close").mockImplementation(async () => {
+      httpTransport.onclose?.();
+    });
+    client.close = vi.fn(async () => {
+      await httpTransport.close();
+    }) as unknown as Client["close"];
+
+    const conn = new SdkMcpConnection(
+      client as unknown as Client,
+      httpTransport as unknown as Transport,
+    );
+    await conn.connect();
+
+    const cb = vi.fn();
+    conn.onClose(cb);
+    await expect(conn.close()).resolves.toBeUndefined();
+    expect(cb).toHaveBeenCalledTimes(1);
   });
 });

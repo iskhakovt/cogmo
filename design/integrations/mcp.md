@@ -1,6 +1,6 @@
 # MCP Integration
 
-Phase A `[confirmed]`. Phases B / C `[proposed]`; D / E `[research]`. See [Status](#status) for the per-phase marker map.
+Phases A / C `[confirmed]`. Phase B `[proposed]`; D / E `[research]`. See [Status](#status) for the per-phase marker map.
 
 Model Context Protocol client layer. Lets users add third-party MCP servers (GitHub, Gmail, Calendar, Linear, Slack, etc.) declaratively, exposes their tools through the existing `ToolRegistry` contract, scopes them per-profile, survives server crashes, and treats every server as untrusted by default.
 
@@ -12,7 +12,7 @@ Replaces the prior inline `[proposed]` MCP section in [integrations.md](../integ
 |-|-|-|
 | A — core | stdio transport, host runner, schema pinning, profile globs, budget, secrets injection, `/mcp` admin commands | `[confirmed]` |
 | B — security | sysbox runner for `untrusted`, egress allowlist | `[proposed]` |
-| C — remote | HTTP transport, manual-token auth | `[proposed]` |
+| C — remote | Streamable-HTTP transport, manual-token auth via `SecretRef` headers, explicit `terminateSession` on close | `[confirmed]` |
 | D — auth | OAuth 2.1 + DCR + refresh persistence | `[research]` |
 | E — eval | Resources / prompts | `[research]` |
 
@@ -255,9 +255,11 @@ Docker's research found 43% of public MCP servers have command-injection flaws (
 
 ## Auth & secrets
 
-**Phase A — manual tokens.** `env` vars and HTTP headers, with secret references resolved at spawn / request time from the encrypted secrets table. Typed `SecretRef` instead of string interpolation.
+**Phases A / C — manual tokens.** `env` vars (stdio) and HTTP headers (streamable-http) carry secret references resolved at spawn / request time from the encrypted secrets table. Typed `SecretRef` instead of string interpolation. Header values are resolved once at transport construction and passed via `requestInit.headers` — the SDK merges them with per-request `accept`, `content-type`, and `mcp-session-id` automatically. `transport.terminateSession()` runs on close so server-side session state (Linear, Notion, Atlassian all keep state keyed by `Mcp-Session-Id`) is released cleanly; the call is best-effort, errors are logged at debug.
 
 **Phase D — OAuth 2.1.** Spec-mandated PKCE + Dynamic Client Registration ([dev.to/composiodev MCP OAuth 2.1](https://dev.to/composiodev/mcp-oauth-21-a-complete-guide-3g91)). Refresh tokens stored encrypted in `secrets`. Refresh **proactively** before tool dispatch (gemini-cli #23296: refresh failing mid-call is a real footgun).
+
+**Streamable HTTP only.** The legacy split-channel SSE transport (deprecated in spec revision `2025-03-26`) is rejected at the transport factory with a guidance message pointing at `transport: "http"`. Atlassian removes SSE 2026-06-30; modern remote servers all expose Streamable HTTP. Re-evaluate if a target server appears that only offers SSE.
 
 ## Failure handling
 

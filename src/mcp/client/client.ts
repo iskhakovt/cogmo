@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "../../logger.js";
@@ -108,6 +109,19 @@ export class SdkMcpConnection implements McpConnection {
 
   async close(): Promise<void> {
     if (this.#closed) return;
+    // Streamable-HTTP servers (Linear, Notion, Atlassian) keep per-session
+    // state keyed by `Mcp-Session-Id`. Explicit DELETE before tearing down
+    // the transport tells the server to release that state — without it,
+    // sessions linger until server-side expiry. Best-effort: server may
+    // respond 405 (per spec) or already be gone. Stdio / other transports
+    // don't have the method; the instanceof check keeps the abstraction.
+    if (this.#transport instanceof StreamableHTTPClientTransport) {
+      try {
+        await this.#transport.terminateSession();
+      } catch (err) {
+        logger.debug({ err }, "MCP streamable-http terminateSession failed; continuing close");
+      }
+    }
     // Don't pre-set #closed — let `client.close()` propagate to the
     // transport, whose `onclose` handler flips state and notifies listeners.
     // This keeps remote-initiated and explicit close paths symmetric.
