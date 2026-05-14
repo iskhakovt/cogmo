@@ -11,11 +11,9 @@
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-// These ship transitively via @vitest/coverage-v8 — import via deep paths so
-// we don't have to add them to package.json just for the merge script.
-import libCoverage from "../node_modules/.pnpm/istanbul-lib-coverage@3.2.2/node_modules/istanbul-lib-coverage/index.js";
-import libReport from "../node_modules/.pnpm/istanbul-lib-report@3.0.1/node_modules/istanbul-lib-report/index.js";
-import reports from "../node_modules/.pnpm/istanbul-reports@3.2.0/node_modules/istanbul-reports/index.js";
+import libCoverage from "istanbul-lib-coverage";
+import libReport from "istanbul-lib-report";
+import reports from "istanbul-reports";
 
 const root = resolve(import.meta.dirname, "..");
 const unit = JSON.parse(readFileSync(resolve(root, "coverage/unit/coverage-final.json"), "utf8"));

@@ -28,10 +28,14 @@ import type { Duplex } from "node:stream";
 import type Docker from "dockerode";
 
 /**
- * Dockerode's `info()` is typed as `Promise<any>` — we read it through a
- * structural narrow at the one call site, so it stays `unknown` here.
+ * Narrow shape capturing only what `assertRuntimeAvailable` reads from
+ * `docker.info()` — the registered runtimes map. Dockerode's own
+ * `info()` returns `Promise<any>`; declaring our slice here removes the
+ * `info as { Runtimes?: ... }` cast at the call site.
  */
-export type DockerInfo = unknown;
+export interface DockerInfo {
+  Runtimes?: Record<string, unknown>;
+}
 
 /**
  * Narrow shape capturing only what the supervisor reads from

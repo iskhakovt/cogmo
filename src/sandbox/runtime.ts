@@ -18,7 +18,7 @@ export async function assertRuntimeAvailable(
 ): Promise<void> {
   const target = dockerRuntimeName(runtime);
   const info = await docker.info();
-  const runtimes = (info as { Runtimes?: Record<string, unknown> }).Runtimes ?? {};
+  const runtimes = info.Runtimes ?? {};
   if (!(target in runtimes)) {
     const registered = Object.keys(runtimes).join(", ") || "<none>";
     throw new Error(
