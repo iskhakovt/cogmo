@@ -606,14 +606,16 @@ describe("runAgentLoop", () => {
     expect(order).toEqual(["first", "second"]);
   });
 
-  // Unknown tools short-circuit to an error with no side effects, so they
-  // coalesce with adjacent safe entries.
+  // [safe, unknown, safe] with a 2-barrier on the safes. Coalescing requires
+  // treating unknown tools as parallelSafe; if unknown were treated as unsafe
+  // the groups would be [[safe], [unknown], [safe]] — each safe alone — and
+  // the barrier would never release.
   it("coalesces unknown tools with adjacent parallelSafe entries", async () => {
     const provider = mockProvider([
       {
         content: [
-          { type: "tool_use", id: "x1", name: "ghost", input: {} },
           { type: "tool_use", id: "s1", name: "safe", input: {} },
+          { type: "tool_use", id: "x1", name: "ghost", input: {} },
           { type: "tool_use", id: "s2", name: "safe", input: {} },
         ],
         stopReason: "tool_use",
@@ -649,19 +651,19 @@ describe("runAgentLoop", () => {
       provider,
       model: "test",
       systemPrompt: "sys",
-      messages: [{ role: "user", content: "ghost + safes" }],
+      messages: [{ role: "user", content: "safe + ghost + safe" }],
       tools,
       service: stubService(),
     });
 
     expect(result.messages[2]!.content).toEqual([
+      { type: "tool_result", toolUseId: "s1", content: "ok" },
       {
         type: "tool_result",
         toolUseId: "x1",
         content: 'Error: unknown tool "ghost"',
         isError: true,
       },
-      { type: "tool_result", toolUseId: "s1", content: "ok" },
       { type: "tool_result", toolUseId: "s2", content: "ok" },
     ]);
   });
