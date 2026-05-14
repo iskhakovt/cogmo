@@ -241,6 +241,7 @@ export function mockTransportDeep(overrides: DeepPartial<Transport> = {}): Trans
     repos: { ...base.repos, ...(overrides.repos ?? {}) },
     coding: { ...base.coding, ...(overrides.coding ?? {}) },
     skills: { ...base.skills, ...(overrides.skills ?? {}) },
+    scheduling: { ...base.scheduling, ...(overrides.scheduling ?? {}) },
     mcp: { ...base.mcp, ...(overrides.mcp ?? {}) },
   };
 }
@@ -389,6 +390,26 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       list: vi.fn().mockResolvedValue(ok([])),
       disable: vi.fn().mockResolvedValue(ok({ name: "echo" })),
       enable: vi.fn().mockResolvedValue(ok({ name: "echo", alreadyEnabled: false })),
+    },
+    scheduling: {
+      list: vi.fn().mockResolvedValue(ok([])),
+      // Echo the id the caller passed instead of a hardcoded constant.
+      // Matches the real contract (transport returns the id it just
+      // acted on) and prevents silent test passes where a test
+      // inadvertently exercises the default mock with a different id.
+      disable: vi
+        .fn()
+        .mockImplementation((_handle: string, id: string) =>
+          Promise.resolve(ok({ id, alreadyAtState: false })),
+        ),
+      enable: vi
+        .fn()
+        .mockImplementation((_handle: string, id: string) =>
+          Promise.resolve(ok({ id, alreadyAtState: false })),
+        ),
+      delete: vi
+        .fn()
+        .mockImplementation((_handle: string, id: string) => Promise.resolve(ok({ id }))),
     },
     mcp: {
       toolBudget: vi.fn().mockReturnValue(25),
