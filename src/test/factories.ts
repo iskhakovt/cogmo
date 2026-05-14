@@ -241,6 +241,7 @@ export function mockTransportDeep(overrides: DeepPartial<Transport> = {}): Trans
     repos: { ...base.repos, ...(overrides.repos ?? {}) },
     coding: { ...base.coding, ...(overrides.coding ?? {}) },
     skills: { ...base.skills, ...(overrides.skills ?? {}) },
+    scheduling: { ...base.scheduling, ...(overrides.scheduling ?? {}) },
     mcp: { ...base.mcp, ...(overrides.mcp ?? {}) },
   };
 }
@@ -389,6 +390,20 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       list: vi.fn().mockResolvedValue(ok([])),
       disable: vi.fn().mockResolvedValue(ok({ name: "echo" })),
       enable: vi.fn().mockResolvedValue(ok({ name: "echo", alreadyEnabled: false })),
+    },
+    scheduling: {
+      list: vi.fn().mockResolvedValue(ok([])),
+      disable: vi
+        .fn()
+        .mockResolvedValue(
+          ok({ id: "019e2900-0000-7000-8000-000000000001", alreadyAtState: false }),
+        ),
+      enable: vi
+        .fn()
+        .mockResolvedValue(
+          ok({ id: "019e2900-0000-7000-8000-000000000001", alreadyAtState: false }),
+        ),
+      delete: vi.fn().mockResolvedValue(ok({ id: "019e2900-0000-7000-8000-000000000001" })),
     },
     mcp: {
       toolBudget: vi.fn().mockReturnValue(25),

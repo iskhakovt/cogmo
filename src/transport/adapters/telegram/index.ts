@@ -48,6 +48,7 @@ import {
   handleRepo,
   handleResume,
   handleResumeCallback,
+  handleSchedules,
   handleSessions,
   handleSkills,
   handleSkillsApprovalCallback,
@@ -594,6 +595,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("skills", (ctx) => handleSkills(transport, toCmdCtx(ctx)));
   bot.command("disable", (ctx) => handleDisable(transport, toCmdCtx(ctx)));
   bot.command("enable", (ctx) => handleEnable(transport, toCmdCtx(ctx)));
+  bot.command("schedules", (ctx) => handleSchedules(transport, toCmdCtx(ctx)));
 
   // Mid-dialog abort for /profile new|edit and /repo add flows. Evaluate
   // both branches (no `||` short-circuit) so a hypothetical "both dialogs
@@ -903,6 +905,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       { command: "skills", description: "List skills (enabled + disabled)" },
       { command: "disable", description: "Soft-disable a skill by name" },
       { command: "enable", description: "Re-enable a previously-disabled skill" },
+      { command: "schedules", description: "List/disable/enable/delete scheduled tasks" },
       { command: "cancel", description: "Abort the current interactive dialog" },
       { command: "start", description: "Show help" },
     ])
