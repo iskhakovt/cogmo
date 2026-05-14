@@ -1529,7 +1529,7 @@ export async function runWizard(deps: {
   await stepConfigureDaytona(wizardDeps);
 
   // Step 9: Skills repo remote (required for `delegate_coding({repo:"skills"})`;
-  // skippable — operator can re-run `cogmo migrate skills-remote` later)
+  // skippable — operator can re-run `cogmo migrate-skills-remote` later)
   await stepConfigureSkillsRemote(wizardDeps);
 
   // Step 10: Hindsight check

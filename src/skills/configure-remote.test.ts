@@ -252,8 +252,9 @@ describe("configureSkillsRemote", () => {
   });
 
   it("own + publish pushes a populated local to an empty remote", async () => {
-    // This is the migration case the reviewer flagged: operator has local
-    // skills, attaches a fresh empty remote. Push direction, no data loss.
+    // Operator has local skills + fresh empty remote: publish must push
+    // local to remote, not fetch. Asserts the data-loss-free direction
+    // for the populated-local case.
     const skillsPath = join(workDir, "skills.git");
     await bootstrapSkillsRepo({ path: skillsPath });
     const localSha = await seedSkillsBare(skillsPath);
@@ -280,9 +281,10 @@ describe("configureSkillsRemote", () => {
   });
 
   it("own + adopt refuses to overwrite divergent local commits (remote_diverged)", async () => {
-    // The data-loss-safety regression test for the reviewer's "force fetch
-    // overwrites local main" finding. Local has commits; remote has DIFFERENT
-    // commits. Adopt would orphan local. Helper must refuse.
+    // Local has commits; remote has unrelated commits. Adopt would
+    // orphan local. The fast-forward fetch must refuse and leave local
+    // main untouched — the safety property the diverged variant exists
+    // to enforce.
     const skillsPath = join(workDir, "skills.git");
     await bootstrapSkillsRepo({ path: skillsPath });
     const localSha = await seedSkillsBare(skillsPath, "local-only commit");
@@ -425,10 +427,11 @@ describe("configureSkillsRemote", () => {
   });
 
   it("auto-provision picks publish + auto_init:false when local has commits", async () => {
-    // The reviewer's key data-loss concern. Operator has accumulated
-    // skills locally; running auto-provision must NOT overwrite local
-    // with a fresh README — Cogmo asks GitHub for an empty repo and
-    // pushes local to it.
+    // Local already has skills. Auto-provision must NOT request a
+    // README-seeded remote that would overwrite local main — Cogmo asks
+    // GitHub for an empty repo and pushes local to it instead. Asserts
+    // both the `auto_init:false` API call shape and the post-condition
+    // (local SHA survives + lands on the remote).
     const skillsPath = join(workDir, "skills.git");
     await bootstrapSkillsRepo({ path: skillsPath });
     const localSha = await seedSkillsBare(skillsPath, "operator's local skill");

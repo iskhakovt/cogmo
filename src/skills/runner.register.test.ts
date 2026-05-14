@@ -1215,7 +1215,10 @@ effects:
           body: ECHO_BODY,
         });
         await runner.register({ branch: "skill/echo-v1" });
-        const v2 = await pushFeatureBranch({
+        // Advance main past v1. SHA isn't asserted here — what matters
+        // is that the second register sets up the rollback target. The
+        // post-rollback divergence push uses `divergent` below, not v2.
+        await pushFeatureBranch({
           work: repoWithRemote.work,
           branch: "skill/echo-v2",
           manifest: ECHO_MANIFEST.replace(
@@ -1264,7 +1267,6 @@ effects:
         // Sanity: divergent is not v1 — otherwise this test would trivially
         // pass.
         expect(divergent).not.toBe(v1);
-        void v2; // referenced only in the comment above, satisfy noUnusedVariables
       } finally {
         await repoWithRemote.cleanup();
       }

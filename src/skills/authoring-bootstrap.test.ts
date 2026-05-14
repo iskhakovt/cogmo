@@ -126,7 +126,7 @@ async function setupRepos(): Promise<Repos> {
   await execFileP("git", ["init", "--bare", "--initial-branch=main", daytonaRemoteBare]);
 
   // Attach the stand-in remote as origin on the skills bare repo. In
-  // production this is the wizard / `cogmo migrate skills-remote` step;
+  // production this is the wizard / `cogmo migrate-skills-remote` step;
   // `ensureSkillsCodingRepo` reads this origin to fill `coding_repos.remote_url`.
   await execFileP("git", ["-C", skillsBare, "remote", "add", "origin", daytonaRemoteBare]);
 

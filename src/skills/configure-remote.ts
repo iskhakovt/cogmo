@@ -177,14 +177,15 @@ export async function configureSkillsRemote(
     return err({ kind: "local_empty", remoteUrl });
   }
 
-  // Attach or update origin before the transfer so the operator sees a
-  // consistent state if the transfer fails (origin matches what they
-  // asked for; transfer error is recoverable by re-running).
-  const originAction = await attachOrigin(deps.skillsRepoPath, remoteUrl);
-
-  // Fast-forward transfer (no `+` in the refspec). git rejects on
-  // non-fast-forward, which we map to `*_diverged` so operators see a
-  // clear data-safety error instead of a raw git message.
+  // Transfer FIRST (using the URL directly, no need for origin to be
+  // attached). If it fails, the bare repo's `origin` config is untouched
+  // and the next boot's `ensureSkillsCodingRepo` won't sync a stale URL
+  // into the DB row. Industry convention: a tool that fails to publish
+  // / adopt shouldn't leave behind a half-configured remote.
+  //
+  // Fast-forward only (no `+` in the refspec). git rejects on non-FF,
+  // which we map to `*_diverged` so operators see a structured error
+  // instead of a raw git message.
   const transfer = await runTransfer({
     cwd: deps.skillsRepoPath,
     url: remoteUrl,
@@ -192,17 +193,24 @@ export async function configureSkillsRemote(
     pat,
   });
   if (transfer.isErr()) {
-    // origin was already attached above — we don't roll it back. The
-    // operator's next invocation (after they resolve the divergence)
-    // sees `unchanged` for origin and retries the transfer.
+    // Branch on kind so the error variants stay clean — spreading
+    // `transfer.error` and tacking on SHAs would add fields the
+    // `remote_unreachable` variant doesn't declare.
+    if (transfer.error.kind === "remote_unreachable") {
+      return err({ kind: "remote_unreachable", remoteUrl, reason: transfer.error.reason });
+    }
     return err({
-      ...transfer.error,
+      kind: transfer.error.kind,
       remoteUrl,
-      // Best-effort SHA tagging — the probe already knows them.
       localSha: localMainSha ?? "",
       remoteSha: remoteMainSha ?? "",
     });
   }
+
+  // Transfer succeeded — now persist the operator's intent by attaching
+  // (or replacing) origin. From the bare repo's view, origin always
+  // reflects the URL we just successfully transferred to/from.
+  const originAction = await attachOrigin(deps.skillsRepoPath, remoteUrl);
 
   const ensured = await ensureSkillsCodingRepo(
     { runInTx: deps.runInTx, codingStore: deps.codingStore },

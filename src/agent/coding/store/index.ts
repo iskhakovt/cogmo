@@ -139,7 +139,7 @@ export interface CodingStore {
    * one update we accept on the otherwise insert-once `coding_repos` table —
    * narrow surface keeps the "prefer immutable rows" invariant intact for
    * every other column. Used by `configureSkillsRemote` when the operator
-   * picks a new URL via the wizard or the `migrate skills-remote` CLI.
+   * picks a new URL via the wizard or the `migrate-skills-remote` CLI.
    */
   updateRepoRemoteUrl(tx: Transaction, id: string, remoteUrl: string): Promise<void>;
 

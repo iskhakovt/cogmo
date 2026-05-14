@@ -137,7 +137,7 @@ export async function readOriginUrl(repoPath: string): Promise<string | null> {
 export type EnsureSkillsCodingRepoResult =
   | {
       /** No `origin` on the bare repo. Row is not inserted; `delegate_coding({repo:"skills"})`
-       * will fail until the operator runs the wizard or `cogmo migrate skills-remote`. */
+       * will fail until the operator runs the wizard or `cogmo migrate-skills-remote`. */
       kind: "skipped_no_origin";
       localPath: string;
     }
@@ -206,7 +206,7 @@ export async function ensureSkillsCodingRepo(
     log.warn(
       { localPath: args.skillsRepoPath },
       "skills bare repo has no `origin` configured — `delegate_coding({repo:'skills'})` " +
-        "will fail until the wizard or `cogmo migrate skills-remote` runs",
+        "will fail until the wizard or `cogmo migrate-skills-remote` runs",
     );
     return { kind: "skipped_no_origin", localPath: args.skillsRepoPath };
   }

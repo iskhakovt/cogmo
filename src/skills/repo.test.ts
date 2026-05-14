@@ -268,7 +268,7 @@ describe("ensureSkillsCodingRepo", () => {
   it("skips insert when bare repo has no origin and reports skipped_no_origin", async () => {
     // Without origin attached, the bare repo can't participate in the
     // Daytona git-remote transport. We refuse to write a `remote_url=''`
-    // row — the wizard / `cogmo migrate skills-remote` CLI is the path to
+    // row — the wizard / `cogmo migrate-skills-remote` CLI is the path to
     // attach a remote.
     const repoPath = join(workDir, "skills");
     await bootstrapSkillsRepo({ path: repoPath });

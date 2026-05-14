@@ -23,7 +23,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import * as p from "@clack/prompts";
@@ -92,8 +92,8 @@ export async function runMigrateSkillsRemoteCli(
   // Backup before mutate. Only meaningful when a row exists — a missing
   // row is the "fresh install" case with nothing to restore.
   if (existingRow) {
-    const backupPath = makeBackupPath();
-    writeFileSync(backupPath, JSON.stringify(existingRow, null, 2));
+    const backupPath = await makeBackupPath();
+    await writeFile(backupPath, JSON.stringify(existingRow, null, 2));
     p.log.info(`Backed up current row to ${backupPath}`);
   }
 
@@ -255,8 +255,8 @@ function renderConfigureError(error: ConfigureSkillsRemoteError): void {
   }
 }
 
-function makeBackupPath(): string {
-  mkdirSync(BACKUP_DIR, { recursive: true });
+async function makeBackupPath(): Promise<string> {
+  await mkdir(BACKUP_DIR, { recursive: true });
   return join(BACKUP_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
 }
 
