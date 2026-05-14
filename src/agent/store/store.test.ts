@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../../secrets/store/index.js";
+import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "./index.js";
 import { messages } from "./schema.js";
@@ -2281,27 +2282,26 @@ describe("DrizzleAgentStore", () => {
     });
 
     it("returns the singleton row when present", async () => {
-      // Bootstrap path: voice_config has FKs to `secrets`. The wizard would
-      // insert these via `secretsStore.putSecret` then a row via raw SQL —
-      // mirror that here. Same secret id can serve both TTS and STT
-      // (when the operator opts to reuse the OpenAI LLM provider's key).
+      // FK precondition: voice_config.tts_secret_id / stt_secret_id reference
+      // the `secrets` table. Seed one row first; the same id is used for both
+      // columns since the wizard stores a single OpenAI key for voice.
       const { id: secretId } = await tx((trx) =>
         secretsStore.putSecret(trx, {
-          name: "voice_openai_key",
+          name: "openai_voice_key",
           plaintext: "sk-test-voice",
         }),
       );
-      await db.execute(sql`
-        INSERT INTO voice_config (
-          tts_secret_id, stt_secret_id,
-          tts_provider, tts_model, tts_voice, tts_base_url,
-          stt_provider, stt_model, stt_base_url
-        ) VALUES (
-          ${secretId}, ${secretId},
-          'openai', 'gpt-4o-mini-tts', 'alloy', NULL,
-          'openai', 'gpt-4o-mini-transcribe', NULL
-        )
-      `);
+      await tx((trx) =>
+        store.upsertVoiceConfig(trx, {
+          ttsSecretId: secretId,
+          sttSecretId: secretId,
+          ttsProvider: "openai",
+          ttsModel: "gpt-4o-mini-tts",
+          ttsVoice: "alloy",
+          sttProvider: "openai",
+          sttModel: "gpt-4o-mini-transcribe",
+        }),
+      );
 
       const cfg = await tx((trx) => store.getVoiceConfig(trx));
       expect(cfg).toBeDefined();
@@ -2324,7 +2324,7 @@ describe("DrizzleAgentStore", () => {
       // arbitrarily; the constraint blocks the misconfiguration at write time.
       const { id: secretId } = await tx((trx) =>
         secretsStore.putSecret(trx, {
-          name: "voice_openai_key",
+          name: "openai_voice_key",
           plaintext: "sk-test-voice",
         }),
       );
@@ -2342,6 +2342,88 @@ describe("DrizzleAgentStore", () => {
       await db.execute(insertSql);
       // Second insert with default singleton=TRUE collides on the UNIQUE.
       await expect(db.execute(insertSql)).rejects.toThrow();
+    });
+
+    it("upsertVoiceConfig rotates the singleton row in place — same id, new values", async () => {
+      const { id: secretA } = await tx((trx) =>
+        secretsStore.putSecret(trx, { name: "openai_voice_key_a", plaintext: "sk-a" }),
+      );
+      const { id: secretB } = await tx((trx) =>
+        secretsStore.putSecret(trx, { name: "openai_voice_key_b", plaintext: "sk-b" }),
+      );
+
+      const first = await tx((trx) =>
+        store.upsertVoiceConfig(trx, {
+          ttsSecretId: secretA,
+          sttSecretId: secretA,
+          ttsProvider: "openai",
+          ttsModel: "gpt-4o-mini-tts",
+          ttsVoice: "alloy",
+          sttProvider: "openai",
+          sttModel: "gpt-4o-mini-transcribe",
+        }),
+      );
+      const firstCfg = expectDefined(
+        await tx((trx) => store.getVoiceConfig(trx)),
+        "first getVoiceConfig",
+      );
+
+      const second = await tx((trx) =>
+        store.upsertVoiceConfig(trx, {
+          ttsSecretId: secretB,
+          sttSecretId: secretB,
+          ttsProvider: "openai",
+          ttsModel: "gpt-4o-mini-tts",
+          ttsVoice: "nova",
+          ttsBaseUrl: "https://example.invalid/v1",
+          sttProvider: "openai",
+          sttModel: "gpt-4o-mini-transcribe",
+        }),
+      );
+
+      // Same row id — UNIQUE on `singleton` forces ON CONFLICT DO UPDATE
+      // to overwrite rather than insert.
+      expect(second.id).toBe(first.id);
+
+      const secondCfg = expectDefined(
+        await tx((trx) => store.getVoiceConfig(trx)),
+        "second getVoiceConfig",
+      );
+      expect(secondCfg).toMatchObject({
+        id: first.id,
+        ttsSecretId: secretB,
+        sttSecretId: secretB,
+        ttsVoice: "nova",
+        ttsBaseUrl: "https://example.invalid/v1",
+      });
+      // created_at survives the upsert — the row reflects when voice was
+      // first configured, not last rotated. ON CONFLICT DO UPDATE only
+      // writes the columns in its SET clause; created_at isn't there.
+      expect(secondCfg.createdAt).toEqual(firstCfg.createdAt);
+    });
+
+    it("deleteVoiceConfig removes the singleton row", async () => {
+      const { id: secretId } = await tx((trx) =>
+        secretsStore.putSecret(trx, { name: "openai_voice_key", plaintext: "sk-test" }),
+      );
+      await tx((trx) =>
+        store.upsertVoiceConfig(trx, {
+          ttsSecretId: secretId,
+          sttSecretId: secretId,
+          ttsProvider: "openai",
+          ttsModel: "gpt-4o-mini-tts",
+          ttsVoice: "alloy",
+          sttProvider: "openai",
+          sttModel: "gpt-4o-mini-transcribe",
+        }),
+      );
+      expect(await tx((trx) => store.getVoiceConfig(trx))).toBeDefined();
+
+      await tx((trx) => store.deleteVoiceConfig(trx));
+      expect(await tx((trx) => store.getVoiceConfig(trx))).toBeUndefined();
+
+      // Idempotent — deleting again is a no-op, not an error.
+      await tx((trx) => store.deleteVoiceConfig(trx));
     });
   });
 
