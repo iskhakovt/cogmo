@@ -139,10 +139,30 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
   #bot: Bot;
   #attachments: AttachmentStore;
   #activeStreams = new Map<string, TelegramStreamHandle>();
+  #polling: Promise<void> | undefined;
 
   constructor(bot: Bot, attachments: AttachmentStore) {
     this.#bot = bot;
     this.#attachments = attachments;
+  }
+
+  /**
+   * Take ownership of the polling promise returned by grammY's `bot.start()`.
+   * Captured so `stop()` can await it to drain — without this, `bot.stop()`
+   * aborts a pending retry sleep and grammY rejects with "Aborted delay" as
+   * an unhandled rejection, which crashes the test process even though all
+   * tests passed.
+   */
+  attachPolling(polling: Promise<void>): void {
+    this.#polling = polling.catch((err: unknown) => {
+      // Expected: bot.stop() aborts grammY's retry-backoff sleep, which
+      // rejects with "Aborted delay" (from node:timers/promises). Anything
+      // else is a real failure worth logging.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg !== "Aborted delay") {
+        logger.error({ err }, "telegram polling loop failed");
+      }
+    });
   }
 
   async deliver(platformAddress: string, content: RenderedMessage | JsonValue): Promise<void> {
@@ -217,6 +237,10 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
 
   async stop(): Promise<void> {
     this.#bot.stop();
+    // Drain the polling loop so any in-flight retry-backoff abort rejects
+    // before this process exits — otherwise the unhandled rejection lands
+    // on the runtime/test harness instead of being swallowed in attachPolling.
+    if (this.#polling) await this.#polling;
   }
 }
 
@@ -911,9 +935,11 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     ])
     .catch((err) => logger.warn({ err }, "failed to register telegram bot commands"));
 
-  bot.start({
-    onStart: () => logger.info("telegram adapter started"),
-  });
+  adapter.attachPolling(
+    bot.start({
+      onStart: () => logger.info("telegram adapter started"),
+    }),
+  );
 
   // Coding-progress wiring — listen for coding/task/start, find the
   // Telegram session attached to the task's conversation, and subscribe
