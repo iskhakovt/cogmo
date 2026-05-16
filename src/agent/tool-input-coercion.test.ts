@@ -169,4 +169,86 @@ describe("coerceToolInput", () => {
     const { value } = coerceToolInput(input, schema);
     expect(value).toBe(input);
   });
+
+  it("descends into the matching DU branch to recover doubly-stringified inner fields", () => {
+    // The model double-encoded both the outer `schedule` field and its
+    // nested `config` field. After the outer string is recovered we still
+    // sit on the union node (no `properties` of its own) — descent has to
+    // pick the matching branch by discriminator to recover `config`.
+    const aBranch = z.object({
+      kind: z.literal("a"),
+      config: z.object({ flag: z.boolean() }),
+    });
+    const bBranch = z.object({ kind: z.literal("b"), name: z.string() });
+    const schema = jsonSchema(
+      z.object({ schedule: z.discriminatedUnion("kind", [aBranch, bBranch]) }),
+    );
+
+    const { value, coercedPaths } = coerceToolInput(
+      { schedule: '{"kind":"a","config":"{\\"flag\\":true}"}' },
+      schema,
+    );
+
+    expect(value).toEqual({ schedule: { kind: "a", config: { flag: true } } });
+    expect(coercedPaths.sort()).toEqual(["schedule", "schedule.config"]);
+  });
+
+  it("does not descend into a union when no branch's discriminator matches", () => {
+    // The discriminator value isn't one of the legal branches — Zod will
+    // reject this anyway, but the walker must not pick a branch and start
+    // coercing children under the wrong shape.
+    const aBranch = z.object({
+      kind: z.literal("a"),
+      config: z.object({ flag: z.boolean() }),
+    });
+    const bBranch = z.object({ kind: z.literal("b"), name: z.string() });
+    const schema = jsonSchema(
+      z.object({ schedule: z.discriminatedUnion("kind", [aBranch, bBranch]) }),
+    );
+
+    const input = { schedule: { kind: "c", config: '{"flag":true}' } };
+    const { value, coercedPaths } = coerceToolInput(input, schema);
+    expect(value).toEqual(input);
+    expect(coercedPaths).toEqual([]);
+  });
+
+  it("walks values under additionalProperties for z.record(z.string(), z.object(...))", () => {
+    // z.record emits `additionalProperties: { type: "object", ... }` —
+    // entries whose values come back as stringified JSON should still get
+    // recovered.
+    const schema = jsonSchema(
+      z.object({ headers: z.record(z.string(), z.object({ v: z.string() })) }),
+    );
+
+    const { value, coercedPaths } = coerceToolInput(
+      { headers: { auth: '{"v":"bearer"}', trace: { v: "abc" } } },
+      schema,
+    );
+
+    expect(value).toEqual({
+      headers: { auth: { v: "bearer" }, trace: { v: "abc" } },
+    });
+    expect(coercedPaths).toEqual(["headers.auth"]);
+  });
+
+  it("prefers named properties over additionalProperties when both apply", () => {
+    // Hand-rolled schema mixing both — named properties win; only unknown
+    // keys fall through to additionalProperties.
+    const schema: JsonSchema = {
+      type: "object",
+      properties: {
+        outer: {
+          type: "object",
+          properties: { known: { type: "string" } },
+          additionalProperties: { type: "object", properties: { x: { type: "string" } } },
+        },
+      },
+    };
+    const { value, coercedPaths } = coerceToolInput(
+      { outer: { known: "leave-me", extra: '{"x":"hi"}' } },
+      schema,
+    );
+    expect(value).toEqual({ outer: { known: "leave-me", extra: { x: "hi" } } });
+    expect(coercedPaths).toEqual(["outer.extra"]);
+  });
 });

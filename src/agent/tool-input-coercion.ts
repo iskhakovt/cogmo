@@ -51,19 +51,35 @@ function walk(value: unknown, schema: unknown, path: string, out: string[]): unk
     }
   }
 
-  if (isPlainObject(value) && isPlainObject(schema.properties)) {
-    const properties = schema.properties;
-    let rewritten: Record<string, unknown> | undefined;
-    for (const [key, propSchema] of Object.entries(properties)) {
-      if (!(key in value)) continue;
-      const originalChild = value[key];
-      const child = walk(originalChild, propSchema, joinPath(path, key), out);
-      if (child !== originalChild) {
-        if (rewritten === undefined) rewritten = { ...value };
-        rewritten[key] = child;
+  // For a union of objects (discriminated or not), the union node itself has
+  // no `properties` — they live on each branch. Pick the matching branch by
+  // discriminator so descent recovers doubly-stringified fields inside it.
+  const effectiveSchema =
+    isPlainObject(value) && (Array.isArray(schema.anyOf) || Array.isArray(schema.oneOf))
+      ? (selectMatchingBranch(value, schema) ?? schema)
+      : schema;
+
+  if (isPlainObject(value)) {
+    const properties = isPlainObject(effectiveSchema.properties)
+      ? effectiveSchema.properties
+      : undefined;
+    const additional = isPlainObject(effectiveSchema.additionalProperties)
+      ? effectiveSchema.additionalProperties
+      : undefined;
+
+    if (properties !== undefined || additional !== undefined) {
+      let rewritten: Record<string, unknown> | undefined;
+      for (const [key, childValue] of Object.entries(value)) {
+        const childSchema = properties?.[key] ?? additional;
+        if (childSchema === undefined) continue;
+        const result = walk(childValue, childSchema, joinPath(path, key), out);
+        if (result !== childValue) {
+          if (rewritten === undefined) rewritten = { ...value };
+          rewritten[key] = result;
+        }
       }
+      return rewritten ?? value;
     }
-    return rewritten ?? value;
   }
 
   if (Array.isArray(value) && schema.items !== undefined) {
@@ -81,6 +97,52 @@ function walk(value: unknown, schema: unknown, path: string, out: string[]): unk
   }
 
   return value;
+}
+
+/**
+ * Pick the single matching branch from an `anyOf`/`oneOf` of object schemas
+ * by checking that every `const`-valued property in the branch's `properties`
+ * agrees with the corresponding field in the value. This is how discriminated
+ * unions encode their tag (e.g. `kind: { const: "one_off" }`).
+ *
+ * Returns undefined when zero or multiple branches match — descent stays at
+ * the union node and the value passes through. We never guess between
+ * structurally compatible branches that lack a discriminator.
+ */
+function selectMatchingBranch(
+  value: Record<string, unknown>,
+  schema: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  for (const key of ["anyOf", "oneOf"] as const) {
+    const branches = schema[key];
+    if (!Array.isArray(branches)) continue;
+
+    let match: Record<string, unknown> | undefined;
+    for (const branch of branches) {
+      if (!isPlainObject(branch)) continue;
+      if (!branchDiscriminatorMatches(value, branch)) continue;
+      if (match !== undefined) return undefined;
+      match = branch;
+    }
+    if (match !== undefined) return match;
+  }
+  return undefined;
+}
+
+function branchDiscriminatorMatches(
+  value: Record<string, unknown>,
+  branch: Record<string, unknown>,
+): boolean {
+  const props = branch.properties;
+  if (!isPlainObject(props)) return false;
+  let sawConst = false;
+  for (const [propKey, propSchema] of Object.entries(props)) {
+    if (!isPlainObject(propSchema)) continue;
+    if (!("const" in propSchema)) continue;
+    sawConst = true;
+    if (value[propKey] !== propSchema.const) return false;
+  }
+  return sawConst;
 }
 
 function expectedKind(schema: Record<string, unknown>): ExpectedKind {
