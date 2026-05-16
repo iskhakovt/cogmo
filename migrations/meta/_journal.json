@@ -232,6 +232,13 @@
       "when": 1778796475251,
       "tag": "0032_grey_bloodaxe",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1778961986179,
+      "tag": "0033_magenta_tarantula",
+      "breakpoints": true
     }
   ]
 }

@@ -1194,7 +1194,14 @@ export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
   // the voice_config row in a single tx. A crash mid-flight leaves no
   // orphan rows in a state that affects bootstrap (no voice_config row →
   // voice stays disabled).
-  const reusedSecret = tts.apiKey === stt.apiKey;
+  //
+  // Reuse is gated on the same condition `promptSttChoice`'s "use the same
+  // key" shortcut uses (same provider type + same base URL). String-equal
+  // keys across incompatible providers (e.g. ElevenLabs TTS + OpenAI STT
+  // happening to paste the same clipboard contents) get two rows, so each
+  // secret's `description` accurately names its provider.
+  const reusedSecret =
+    tts.apiKey === stt.apiKey && tts.type === stt.type && tts.baseURL === stt.baseURL;
   // Naming preserves backwards compatibility with the historical single-key
   // setup: when both directions share an OpenAI key, keep `openai_voice_key`
   // so existing rows aren't orphaned by a rename.

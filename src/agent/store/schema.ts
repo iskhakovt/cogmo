@@ -592,10 +592,10 @@ export const voiceConfig = pgTable(
     ttsProvider: ttsProviderType("tts_provider").notNull(),
     ttsModel: text("tts_model").notNull(),
     ttsVoice: text("tts_voice").notNull(),
-    ttsBaseUrl: text("tts_base_url"), // NULL = SDK default
+    ttsBaseUrl: text("tts_base_url"), // NULL for openai/elevenlabs (SDK default), NOT NULL for openai_compatible (CHECK enforced)
     sttProvider: sttProviderType("stt_provider").notNull(),
     sttModel: text("stt_model").notNull(),
-    sttBaseUrl: text("stt_base_url"), // NULL = SDK default
+    sttBaseUrl: text("stt_base_url"), // NULL for openai (SDK default), NOT NULL for openai_compatible (CHECK enforced)
     /**
      * Singleton enforcement — `singleton` is always TRUE (the CHECK
      * constraint pins the value); UNIQUE on a single-valued column means
@@ -611,6 +611,21 @@ export const voiceConfig = pgTable(
   (t) => [
     unique("uq_voice_config_singleton").on(t.singleton),
     check("chk_voice_config_singleton", sql`singleton = true`),
+    // Per-value implications: each clause is "if provider = X then base_url
+    // satisfies Y." Mirrors `chk_image_providers_base_url`. A provider value
+    // not mentioned passes by vacuous truth — extend this when adding a new
+    // enum value (e.g. an elevenlabs STT in the future) so hand-edited rows
+    // can't reach the resolver in an invalid shape.
+    check(
+      "chk_voice_config_tts_base_url",
+      sql`(${t.ttsProvider} <> 'openai_compatible' OR ${t.ttsBaseUrl} IS NOT NULL)
+        AND (${t.ttsProvider} = 'openai_compatible' OR ${t.ttsBaseUrl} IS NULL)`,
+    ),
+    check(
+      "chk_voice_config_stt_base_url",
+      sql`(${t.sttProvider} <> 'openai_compatible' OR ${t.sttBaseUrl} IS NOT NULL)
+        AND (${t.sttProvider} = 'openai_compatible' OR ${t.sttBaseUrl} IS NULL)`,
+    ),
   ],
 );
 

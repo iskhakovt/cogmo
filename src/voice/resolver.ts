@@ -16,6 +16,7 @@
  * single-entry cache).
  */
 
+import { createHash } from "node:crypto";
 import type { AgentStore } from "../agent/store/index.js";
 import type { SttProviderTypeValue, TtsProviderTypeValue } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
@@ -78,21 +79,29 @@ export function createDbVoiceResolver(deps: DbVoiceResolverDeps): VoiceProviderR
       return undefined;
     }
 
-    const hash = JSON.stringify({
-      tts: {
-        provider: row.ttsProvider,
-        baseUrl: row.ttsBaseUrl,
-        key: ttsKey,
-        voice: row.ttsVoice,
-        model: row.ttsModel,
-      },
-      stt: {
-        provider: row.sttProvider,
-        baseUrl: row.sttBaseUrl,
-        key: sttKey,
-        model: row.sttModel,
-      },
-    });
+    // SHA-256 the cache key so decrypted secrets never sit on the resolver
+    // heap as plaintext beyond the provider instance that needs them.
+    // Defense-in-depth against accidental log dumps, heapdumps, or future
+    // telemetry hooks reading `cache.hash`.
+    const hash = createHash("sha256")
+      .update(
+        JSON.stringify({
+          tts: {
+            provider: row.ttsProvider,
+            baseUrl: row.ttsBaseUrl,
+            key: ttsKey,
+            voice: row.ttsVoice,
+            model: row.ttsModel,
+          },
+          stt: {
+            provider: row.sttProvider,
+            baseUrl: row.sttBaseUrl,
+            key: sttKey,
+            model: row.sttModel,
+          },
+        }),
+      )
+      .digest("hex");
     if (cache && cache.hash === hash) return cache.bundle;
 
     try {

@@ -180,6 +180,47 @@ describe("stepConfigureVoice", () => {
     });
   });
 
+  it("identical key pasted across incompatible providers — stores two rows, descriptions stay accurate", async () => {
+    // Same string entered for TTS (elevenlabs) and STT (openai) — perhaps
+    // the user's clipboard happened to carry one over. Reuse must NOT
+    // collapse them into a single row named `voice_tts_key` with the
+    // description "elevenlabs API key for voice TTS" reused for STT.
+    const deps = buildDeps();
+    const sharedKey = "same-clipboard-contents-xxxxx";
+    vi.mocked(p.confirm).mockResolvedValueOnce(true); // initial confirm
+    vi.mocked(p.select).mockResolvedValueOnce("elevenlabs"); // tts type
+    vi.mocked(p.password).mockResolvedValueOnce(sharedKey); // tts key
+    vi.mocked(p.text).mockResolvedValueOnce("eleven_turbo_v2_5"); // tts model
+    vi.mocked(p.text).mockResolvedValueOnce("21m00Tcm4TlvDq8ikWAM"); // tts voice
+    vi.mocked(p.select).mockResolvedValueOnce("openai"); // stt type
+    // Different type → no reuse confirm; STT key prompted directly.
+    vi.mocked(p.password).mockResolvedValueOnce(sharedKey); // stt key (string match)
+    vi.mocked(p.text).mockResolvedValueOnce("gpt-4o-mini-transcribe");
+    elevenlabsTtsProbe.mockResolvedValueOnce({
+      audio: Buffer.alloc(0),
+      mediaType: "audio/ogg",
+    });
+
+    await stepConfigureVoice(deps);
+
+    // Two distinct rows — string match alone doesn't trigger reuse anymore.
+    expect(deps.secretsStore.putSecret).toHaveBeenCalledTimes(2);
+    expect(deps.secretsStore.putSecret).toHaveBeenNthCalledWith(1, FAKE_TX, {
+      name: "voice_tts_key",
+      plaintext: sharedKey,
+      description: "elevenlabs API key for voice TTS",
+    });
+    expect(deps.secretsStore.putSecret).toHaveBeenNthCalledWith(2, FAKE_TX, {
+      name: "voice_stt_key",
+      plaintext: sharedKey,
+      description: "openai API key for voice STT",
+    });
+    expect(deps.agentStore.upsertVoiceConfig).toHaveBeenCalledWith(
+      FAKE_TX,
+      expect.objectContaining({ ttsSecretId: "secret-1", sttSecretId: "secret-2" }),
+    );
+  });
+
   it("probe fails + save-anyway — secret stored, voice_config written, markValidated NOT called", async () => {
     const deps = buildDeps();
     vi.mocked(p.confirm).mockResolvedValueOnce(true); // initial confirm
