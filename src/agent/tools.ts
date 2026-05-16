@@ -1,6 +1,8 @@
 import { type ZodType, z } from "zod";
 import type { JsonSchema, ToolDefinition } from "../llm/types.js";
+import { logger } from "../logger.js";
 import type { Service } from "./service.js";
+import { coerceToolInput } from "./tool-input-coercion.js";
 
 /**
  * A tool handler receives validated input and scoped service.
@@ -71,7 +73,14 @@ export function defineTool<T>(opts: {
     description: opts.description,
     inputSchema,
     handler: async (raw, service) => {
-      const parsed = opts.schema.parse(raw);
+      // Some providers occasionally serialize a nested object argument as a
+      // JSON string; unwrap once before Zod so the parse error the LLM sees
+      // reflects a real schema violation, not a serialization quirk.
+      const { value, coercedPaths } = coerceToolInput(raw, inputSchema);
+      if (coercedPaths.length > 0) {
+        logger.debug({ tool: opts.name, paths: coercedPaths }, "coerced stringified tool input");
+      }
+      const parsed = opts.schema.parse(value);
       return opts.handler(parsed, service);
     },
     ...(opts.durable !== undefined && { durable: opts.durable }),
