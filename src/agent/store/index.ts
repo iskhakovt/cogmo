@@ -38,9 +38,11 @@ import {
   pendingMemories,
   profileClasses,
   profiles,
+  type SttProviderTypeValue,
   scheduledTasks,
   steeringRules,
   type ToolSet,
+  type TtsProviderTypeValue,
   users,
   voiceConfig,
 } from "./schema.js";
@@ -354,11 +356,11 @@ export interface AgentStore {
         id: string;
         ttsSecretId: string;
         sttSecretId: string;
-        ttsProvider: string;
+        ttsProvider: TtsProviderTypeValue;
         ttsModel: string;
         ttsVoice: string;
         ttsBaseUrl: string | null;
-        sttProvider: string;
+        sttProvider: SttProviderTypeValue;
         sttModel: string;
         sttBaseUrl: string | null;
         createdAt: Date;
@@ -378,11 +380,11 @@ export interface AgentStore {
     params: {
       ttsSecretId: string;
       sttSecretId: string;
-      ttsProvider: string;
+      ttsProvider: TtsProviderTypeValue;
       ttsModel: string;
       ttsVoice: string;
       ttsBaseUrl?: string | null;
-      sttProvider: string;
+      sttProvider: SttProviderTypeValue;
       sttModel: string;
       sttBaseUrl?: string | null;
     },
@@ -1189,11 +1191,11 @@ export class DrizzleAgentStore implements AgentStore {
     params: {
       ttsSecretId: string;
       sttSecretId: string;
-      ttsProvider: string;
+      ttsProvider: TtsProviderTypeValue;
       ttsModel: string;
       ttsVoice: string;
       ttsBaseUrl?: string | null;
-      sttProvider: string;
+      sttProvider: SttProviderTypeValue;
       sttModel: string;
       sttBaseUrl?: string | null;
     },
