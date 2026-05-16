@@ -25,6 +25,8 @@ import {
   IMAGE_ALLOWED_ASPECT_RATIOS,
   type ImageAspectRatio,
   type ProviderAttrs,
+  type SttProviderTypeValue,
+  type TtsProviderTypeValue,
 } from "../agent/store/schema.js";
 import { type Transactor, transactor } from "../db/transactor.js";
 import { env } from "../env.js";
@@ -50,7 +52,9 @@ import {
 } from "../skills/configure-remote-prompts.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo, readOriginUrl } from "../skills/repo.js";
 import type { TransportStore } from "../transport/store/index.js";
+import { ElevenLabsTtsProvider } from "../voice/elevenlabs.js";
 import { OpenAIVoiceProvider } from "../voice/openai.js";
+import type { TtsProvider } from "../voice/types.js";
 import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
   type DaytonaProbeOpts,
@@ -889,9 +893,13 @@ function parseWizardRatios(raw: string): ReadonlyArray<ImageAspectRatio> | undef
 }
 
 const VOICE_SECRET_NAME = "openai_voice_key";
-const DEFAULT_TTS_MODEL = "gpt-4o-mini-tts";
-const DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe";
-const DEFAULT_TTS_VOICE = "alloy";
+const VOICE_TTS_SECRET_NAME = "voice_tts_key";
+const VOICE_STT_SECRET_NAME = "voice_stt_key";
+const DEFAULT_OPENAI_TTS_MODEL = "gpt-4o-mini-tts";
+const DEFAULT_OPENAI_STT_MODEL = "gpt-4o-mini-transcribe";
+const DEFAULT_OPENAI_TTS_VOICE = "alloy";
+const DEFAULT_ELEVENLABS_TTS_MODEL = "eleven_turbo_v2_5";
+const DEFAULT_ELEVENLABS_TTS_VOICE = "21m00Tcm4TlvDq8ikWAM";
 
 /**
  * Six classic OpenAI TTS voices that work across all `gpt-4o-mini-tts` /
@@ -903,23 +911,222 @@ const DEFAULT_TTS_VOICE = "alloy";
 const OPENAI_TTS_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"] as const;
 
 /**
+ * Lower-bound key length sanity check — real keys for the supported
+ * providers (OpenAI sk-…, OpenRouter sk-or-…, ElevenLabs xi-…/sk_…, Groq
+ * gsk_…) are all well over 20 chars. Catches obviously-typo'd inputs
+ * without false-rejecting any current key format.
+ */
+const MIN_API_KEY_LENGTH = 20;
+
+function validateBaseUrl(v: string | undefined): string | undefined {
+  if (!v) return "Base URL is required";
+  if (!v.startsWith("https://")) return "Base URL must start with https://";
+  if (v.endsWith("/")) return "Base URL must not have a trailing slash";
+  return undefined;
+}
+
+function validateApiKey(v: string | undefined): string | undefined {
+  if (!v) return "API key is required";
+  if (v.length < MIN_API_KEY_LENGTH) return "API key seems too short";
+  return undefined;
+}
+
+interface TtsChoice {
+  type: TtsProviderTypeValue;
+  apiKey: string;
+  baseURL: string | null;
+  model: string;
+  voice: string;
+}
+
+interface SttChoice {
+  type: SttProviderTypeValue;
+  apiKey: string;
+  baseURL: string | null;
+  model: string;
+}
+
+async function promptTtsChoice(): Promise<TtsChoice> {
+  const type = cancelGuard(
+    await p.select<TtsProviderTypeValue>({
+      message: "TTS provider:",
+      options: [
+        { value: "openai", label: "OpenAI", hint: "/v1/audio/speech" },
+        {
+          value: "openai_compatible",
+          label: "OpenAI-compatible (custom base URL)",
+          hint: "Groq, self-hosted relay, …",
+        },
+        { value: "elevenlabs", label: "ElevenLabs", hint: "natural voice character" },
+      ],
+      initialValue: "openai",
+    }),
+  );
+
+  const baseURL =
+    type === "openai_compatible"
+      ? cancelGuard(
+          await p.text({
+            message: "TTS base URL (no trailing slash):",
+            placeholder: "https://api.groq.com/openai/v1",
+            validate: validateBaseUrl,
+          }),
+        )
+      : null;
+
+  const apiKey = cancelGuard(
+    await p.password({
+      message: `Paste your ${type === "elevenlabs" ? "ElevenLabs" : "TTS"} API key:`,
+      validate: validateApiKey,
+    }),
+  );
+
+  if (type === "elevenlabs") {
+    const model = cancelGuard(
+      await p.text({
+        message: "TTS model:",
+        placeholder: DEFAULT_ELEVENLABS_TTS_MODEL,
+        defaultValue: DEFAULT_ELEVENLABS_TTS_MODEL,
+      }),
+    );
+    const voice = cancelGuard(
+      await p.text({
+        message: "Voice id (from your ElevenLabs voice library):",
+        placeholder: DEFAULT_ELEVENLABS_TTS_VOICE,
+        defaultValue: DEFAULT_ELEVENLABS_TTS_VOICE,
+      }),
+    );
+    return { type, apiKey, baseURL, model, voice };
+  }
+
+  const model = cancelGuard(
+    await p.text({
+      message: "TTS model:",
+      placeholder: DEFAULT_OPENAI_TTS_MODEL,
+      defaultValue: DEFAULT_OPENAI_TTS_MODEL,
+    }),
+  );
+  const voice =
+    type === "openai"
+      ? cancelGuard(
+          await p.select({
+            message: "Voice:",
+            options: OPENAI_TTS_VOICES.map((v) => ({ value: v, label: v })),
+            initialValue: DEFAULT_OPENAI_TTS_VOICE,
+          }),
+        )
+      : cancelGuard(
+          await p.text({
+            message: "Voice id (provider-specific):",
+            placeholder: DEFAULT_OPENAI_TTS_VOICE,
+            defaultValue: DEFAULT_OPENAI_TTS_VOICE,
+          }),
+        );
+  return { type, apiKey, baseURL, model, voice };
+}
+
+async function promptSttChoice(tts: TtsChoice): Promise<SttChoice> {
+  const type = cancelGuard(
+    await p.select<SttProviderTypeValue>({
+      message: "STT provider:",
+      options: [
+        { value: "openai", label: "OpenAI", hint: "/v1/audio/transcriptions" },
+        {
+          value: "openai_compatible",
+          label: "OpenAI-compatible (custom base URL)",
+          hint: "Groq, self-hosted relay, …",
+        },
+      ],
+      initialValue: "openai",
+    }),
+  );
+
+  const baseURL =
+    type === "openai_compatible"
+      ? cancelGuard(
+          await p.text({
+            message: "STT base URL (no trailing slash):",
+            placeholder: "https://api.groq.com/openai/v1",
+            validate: validateBaseUrl,
+          }),
+        )
+      : null;
+
+  // Reuse-key shortcut only when both directions hit the SAME provider type
+  // and base URL — anything else (different vendor, different relay, ElevenLabs
+  // TTS) needs its own key and offering reuse would silently 401. The
+  // `tts.type === type` narrows tts.type to the STT-supported subset, so
+  // ElevenLabs TTS already excludes itself here.
+  const canReuse = tts.type === type && tts.baseURL === baseURL;
+  let apiKey = tts.apiKey;
+  if (!canReuse) {
+    apiKey = cancelGuard(
+      await p.password({
+        message: "Paste your STT API key:",
+        validate: validateApiKey,
+      }),
+    );
+  } else {
+    const reuse = await p.confirm({
+      message: "Use the same key for STT? (TTS + STT routed to the same endpoint)",
+      initialValue: true,
+    });
+    if (!cancelGuard(reuse)) {
+      apiKey = cancelGuard(
+        await p.password({
+          message: "Paste your STT API key:",
+          validate: validateApiKey,
+        }),
+      );
+    }
+  }
+
+  const model = cancelGuard(
+    await p.text({
+      message: "STT model:",
+      placeholder: DEFAULT_OPENAI_STT_MODEL,
+      defaultValue: DEFAULT_OPENAI_STT_MODEL,
+    }),
+  );
+
+  return { type, apiKey, baseURL, model };
+}
+
+function buildTtsProbe(choice: TtsChoice): TtsProvider {
+  switch (choice.type) {
+    case "openai":
+      return new OpenAIVoiceProvider({ apiKey: choice.apiKey });
+    case "openai_compatible":
+      return new OpenAIVoiceProvider({
+        apiKey: choice.apiKey,
+        baseURL: choice.baseURL ?? "",
+      });
+    case "elevenlabs":
+      return new ElevenLabsTtsProvider({ apiKey: choice.apiKey });
+  }
+}
+
+/**
  * Configure voice (TTS + STT). Optional — only operators who want
  * Telegram voice replies need this. Re-runnable: existing config offers
  * keep / replace / remove. The "remove" branch deletes the `voice_config`
- * row so bootstrap stops constructing a voice provider on next restart.
+ * row; the bootstrap resolver returns undefined on the next message and
+ * voice degrades to text.
  *
- * Reuses a single OpenAI key for both directions (one `secrets` row, two
- * FK columns pointing at it). No "reuse the LLM provider's key" shortcut
- * — voice traffic hits `/v1/audio/{speech,transcriptions}` which most
- * OpenAI-compatible providers (OpenRouter, Venice, custom proxies) don't
- * serve. See design/voice.md → "Credential entry".
+ * TTS supports OpenAI, OpenAI-compatible (any provider that serves
+ * `/v1/audio/speech`, e.g. self-hosted relays), and ElevenLabs. STT
+ * supports OpenAI and OpenAI-compatible (Groq's `/v1/audio/transcriptions`
+ * is a common pick). Each direction is configured independently — the
+ * historical "one key for both" shortcut is offered only when the provider
+ * type and base URL match. Config takes effect on the next message; no
+ * restart required (resolver is hot-reloaded).
  */
 export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) => deps.agentStore.getVoiceConfig(tx));
 
   if (existing) {
     const action = await p.select({
-      message: `Voice is configured (TTS=${existing.ttsModel}/${existing.ttsVoice}). What would you like to do?`,
+      message: `Voice is configured (TTS=${existing.ttsProvider}/${existing.ttsModel}/${existing.ttsVoice}). What would you like to do?`,
       options: [
         { value: "keep", label: "Keep current configuration" },
         { value: "replace", label: "Reconfigure" },
@@ -930,7 +1137,7 @@ export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
     if (action === "keep") return;
     if (action === "remove") {
       await deps.runInTx((tx) => deps.agentStore.deleteVoiceConfig(tx));
-      p.log.success("Voice configuration removed. Restart the server to release the provider.");
+      p.log.success("Voice configuration removed. Takes effect on the next message.");
       return;
     }
   } else {
@@ -943,71 +1150,38 @@ export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
 
   p.note(
     [
-      "Voice uses OpenAI's /v1/audio/speech (TTS) and",
-      "/v1/audio/transcriptions (STT). Other OpenAI-compatible providers",
-      "(OpenRouter, Venice, etc.) don't serve these endpoints, so voice",
-      "needs its own OpenAI key.",
+      "TTS providers: OpenAI (/v1/audio/speech), OpenAI-compatible relays",
+      "(Groq, self-hosted), or ElevenLabs (natural voice character).",
+      "STT providers: OpenAI or OpenAI-compatible (e.g. Groq Whisper).",
       "",
-      "Get one at https://platform.openai.com/api-keys",
+      "Keys: https://platform.openai.com/api-keys",
+      "      https://elevenlabs.io/app/settings/api-keys",
+      "      https://console.groq.com/keys",
     ].join("\n"),
-    "Where to get an OpenAI voice key",
+    "Voice provider keys",
   );
 
-  const apiKey = cancelGuard(
-    await p.password({
-      message: "Paste your OpenAI API key (used for both TTS and STT):",
-      validate: (v) => {
-        if (!v) return "API key is required";
-        // sk- catches both legacy (sk-…) and project (sk-proj-…) keys.
-        // Length floor is a sanity check — real keys are 51+ chars; 20
-        // rejects obviously-typo'd prefixes without false-positives on
-        // any current OpenAI key format.
-        if (!v.startsWith("sk-")) return "OpenAI keys start with sk-";
-        if (v.length < 20) return "API key seems too short";
-        return undefined;
-      },
-    }),
-  );
+  const tts = await promptTtsChoice();
+  const stt = await promptSttChoice(tts);
 
-  const ttsModel = cancelGuard(
-    await p.text({
-      message: "TTS model:",
-      placeholder: DEFAULT_TTS_MODEL,
-      defaultValue: DEFAULT_TTS_MODEL,
-    }),
-  );
-  const ttsVoice = cancelGuard(
-    await p.select({
-      message: "Voice:",
-      options: OPENAI_TTS_VOICES.map((v) => ({ value: v, label: v })),
-      initialValue: DEFAULT_TTS_VOICE,
-    }),
-  );
-  const sttModel = cancelGuard(
-    await p.text({
-      message: "STT model:",
-      placeholder: DEFAULT_STT_MODEL,
-      defaultValue: DEFAULT_STT_MODEL,
-    }),
-  );
-
-  // Live probe — one short TTS round-trip (~$0.0002 at gpt-4o-mini-tts
-  // pricing). Validates the key, model, and voice in one shot against the
-  // actual /v1/audio/speech endpoint, catching wrong-account / wrong-tier
-  // failures the wizard can't see at paste-time.
+  // Live probe — one short TTS round-trip (~$0.0002 at OpenAI pricing,
+  // <$0.001 at ElevenLabs free tier). Validates the key + model + voice
+  // against the actual endpoint, catching wrong-account / wrong-tier
+  // failures the wizard can't see at paste-time. STT probe stays out —
+  // requires a real audio sample.
   const s = p.spinner();
-  s.start("Validating voice key (1-word TTS probe)...");
+  s.start("Validating TTS provider (1-word probe)...");
   let probeOk = false;
   try {
-    const probe = new OpenAIVoiceProvider({ apiKey });
-    await probe.tts({ text: "hi", voice: ttsVoice, model: ttsModel, format: "ogg" });
-    s.stop("Voice key validated.");
+    const probe = buildTtsProbe(tts);
+    await probe.tts({ text: "hi", voice: tts.voice, model: tts.model, format: "ogg" });
+    s.stop("TTS provider validated.");
     probeOk = true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    s.stop(`Voice probe failed: ${message}`);
+    s.stop(`TTS probe failed: ${message}`);
     p.log.warn(
-      "If the model is tier-locked or the name is wrong, re-run setup and pick a different TTS model.",
+      "If the model is tier-locked or the name is wrong, re-run setup and pick a different TTS model or provider.",
     );
     const saveAnyway = await p.confirm({
       message: "Save the config anyway? Voice replies will error on first use.",
@@ -1016,43 +1190,64 @@ export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
     if (!cancelGuard(saveAnyway)) return;
   }
 
-  // Atomic — store the secret, conditionally mark it validated, and link
-  // the voice_config row in a single tx. A crash mid-flight would
-  // otherwise leave an orphan `openai_voice_key` secret with no
-  // voice_config row referencing it; harmless (bootstrap sees no
-  // voice_config → voice stays disabled), but composing into one tx is
-  // the documented store pattern.
+  // Atomic — store secret(s), conditionally mark them validated, and link
+  // the voice_config row in a single tx. A crash mid-flight leaves no
+  // orphan rows in a state that affects bootstrap (no voice_config row →
+  // voice stays disabled).
+  //
+  // Reuse is gated on the same condition `promptSttChoice`'s "use the same
+  // key" shortcut uses (same provider type + same base URL). String-equal
+  // keys across incompatible providers (e.g. ElevenLabs TTS + OpenAI STT
+  // happening to paste the same clipboard contents) get two rows, so each
+  // secret's `description` accurately names its provider.
+  const reusedSecret =
+    tts.apiKey === stt.apiKey && tts.type === stt.type && tts.baseURL === stt.baseURL;
+  // Naming preserves backwards compatibility with the historical single-key
+  // setup: when both directions share an OpenAI key, keep `openai_voice_key`
+  // so existing rows aren't orphaned by a rename.
+  const ttsSecretName =
+    reusedSecret && tts.type === "openai" && stt.type === "openai"
+      ? VOICE_SECRET_NAME
+      : VOICE_TTS_SECRET_NAME;
+  const sttSecretName = reusedSecret ? ttsSecretName : VOICE_STT_SECRET_NAME;
+
   await deps.runInTx(async (tx) => {
-    const { id: secretId } = await deps.secretsStore.putSecret(tx, {
-      name: VOICE_SECRET_NAME,
-      plaintext: apiKey,
-      description: "OpenAI API key for voice (TTS + STT)",
+    const { id: ttsSecretId } = await deps.secretsStore.putSecret(tx, {
+      name: ttsSecretName,
+      plaintext: tts.apiKey,
+      description: `${tts.type} API key for voice TTS`,
     });
+    let sttSecretId = ttsSecretId;
+    if (!reusedSecret) {
+      const stored = await deps.secretsStore.putSecret(tx, {
+        name: sttSecretName,
+        plaintext: stt.apiKey,
+        description: `${stt.type} API key for voice STT`,
+      });
+      sttSecretId = stored.id;
+    }
     if (probeOk) {
-      await deps.secretsStore.markValidated(tx, VOICE_SECRET_NAME);
+      await deps.secretsStore.markValidated(tx, ttsSecretName);
     }
     await deps.agentStore.upsertVoiceConfig(tx, {
-      ttsSecretId: secretId,
-      sttSecretId: secretId,
-      ttsProvider: "openai",
-      ttsModel,
-      ttsVoice,
-      sttProvider: "openai",
-      sttModel,
+      ttsSecretId,
+      sttSecretId,
+      ttsProvider: tts.type,
+      ttsModel: tts.model,
+      ttsVoice: tts.voice,
+      ttsBaseUrl: tts.baseURL,
+      sttProvider: stt.type,
+      sttModel: stt.model,
+      sttBaseUrl: stt.baseURL,
     });
   });
 
-  // Distinct copy on the save-anyway branch so operators don't confuse a
-  // probe-skipped save with a probe-validated one. `validated_at` on the
-  // secret already encodes the same signal, but the wizard's terminal
-  // line is what the operator actually reads.
+  const summary = `TTS=${tts.type}/${tts.model}/${tts.voice}, STT=${stt.type}/${stt.model}`;
   if (probeOk) {
-    p.log.success(
-      `Voice configured (TTS=${ttsModel}/${ttsVoice}, STT=${sttModel}). Restart the server to pick up changes.`,
-    );
+    p.log.success(`Voice configured (${summary}). Takes effect on the next message.`);
   } else {
     p.log.warn(
-      `Voice config saved UNVALIDATED — probe failed; first voice reply will surface any auth issue (TTS=${ttsModel}/${ttsVoice}, STT=${sttModel}). Restart the server to pick up changes.`,
+      `Voice config saved UNVALIDATED — probe failed; first voice reply will surface any auth issue (${summary}). Takes effect on the next message.`,
     );
   }
 }

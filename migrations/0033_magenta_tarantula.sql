@@ -1,0 +1,4 @@
+ALTER TABLE "voice_config" ADD CONSTRAINT "chk_voice_config_tts_base_url" CHECK (("voice_config"."tts_provider" <> 'openai_compatible' OR "voice_config"."tts_base_url" IS NOT NULL)
+        AND ("voice_config"."tts_provider" = 'openai_compatible' OR "voice_config"."tts_base_url" IS NULL));--> statement-breakpoint
+ALTER TABLE "voice_config" ADD CONSTRAINT "chk_voice_config_stt_base_url" CHECK (("voice_config"."stt_provider" <> 'openai_compatible' OR "voice_config"."stt_base_url" IS NOT NULL)
+        AND ("voice_config"."stt_provider" = 'openai_compatible' OR "voice_config"."stt_base_url" IS NULL));

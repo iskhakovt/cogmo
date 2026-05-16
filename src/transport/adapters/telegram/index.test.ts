@@ -39,7 +39,14 @@ vi.mock("grammy", () => {
       handlers.set(`callbackQuery:${pattern.source}`, handler),
     );
     catch = vi.fn();
-    start = vi.fn(({ onStart }: any = {}) => onStart?.());
+    // Real grammY returns a Promise<void> that resolves when bot.stop() is
+    // called. The adapter awaits it on stop() to drain — without the
+    // Promise return type, `attachPolling` errors with "Cannot read
+    // properties of undefined (reading 'catch')".
+    start = vi.fn(({ onStart }: any = {}) => {
+      onStart?.();
+      return Promise.resolve();
+    });
     stop = vi.fn();
   }
   return { Bot: MockBot, InputFile };

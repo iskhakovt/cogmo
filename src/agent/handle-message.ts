@@ -21,7 +21,7 @@ import { contentToBlocks, type InboundContent } from "../transport/content.js";
 import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import { resolveVoiceMode } from "../voice/mode.js";
-import type { SttProvider, TtsProvider } from "../voice/types.js";
+import type { VoiceProviderResolver } from "../voice/resolver.js";
 import type { CodingService } from "./coding/service.js";
 import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
 import { loadConversationContext } from "./conversation/load-conversation-context.js";
@@ -89,23 +89,15 @@ export interface HandleMessageDeps {
    */
   mcpRegistry?: McpRegistry;
   /**
-   * Speech-to-text provider for transcribing inbound voice blocks. Optional
-   * — absent when no `voice_config` row is present (the wizard hasn't been
-   * run, or voice is intentionally disabled). When undefined, voice blocks
-   * surface as a tool-style placeholder text rather than crashing the turn.
+   * Lazy voice resolver — returns a `VoiceBundle` (TTS + STT providers and
+   * their model/voice ids) when `voice_config` is present and both
+   * providers can be constructed. Called once per turn at the orchestrator
+   * top so a single bundle threads through STT (transcribe-voice step),
+   * voice-mode resolution, and TTS (voice-delivery step). Optional only
+   * because some unit tests bypass voice entirely; production wiring
+   * always populates it. See `src/voice/resolver.ts`.
    */
-  sttProvider?: SttProvider;
-  /**
-   * Text-to-speech provider for outbound voice replies. Optional — absent
-   * when no `voice_config` row is present. Without it, `voice_mode = 'always'`
-   * silently degrades to text-only rather than erroring.
-   */
-  ttsProvider?: TtsProvider;
-  /**
-   * Resolved voice config — pre-loaded from `voice_config` at bootstrap
-   * (voice id + model). Only consumed when ttsProvider is also present.
-   */
-  voiceConfig?: { ttsVoice: string; ttsModel: string };
+  voiceResolver?: VoiceProviderResolver;
   /**
    * IANA timezone used as the default when an agent tool (e.g.
    * `schedule_task`) doesn't supply one. Sourced from `env.USER_TIMEZONE`
@@ -295,6 +287,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // Safe — guarded by length check above
       const maxInboundId = inboundMessages.at(-1)?.id ?? "";
 
+      // Voice bundle resolved once per turn (one indexed singleton read +
+      // two secret lookups; cached by content hash inside the resolver so
+      // steady-state cost is negligible). Re-runs on replay — providers
+      // aren't durable, but step.run still caches transcript / audio
+      // results downstream, so the upstream APIs aren't re-billed. Config
+      // edits between attempts surface on the next non-cached step.
+      const voiceBundle = await deps.voiceResolver?.();
+
       // Voice transcription runs in a durable `step.run` boundary — STT is
       // a billable LLM-adjacent call, so Inngest retries replay from the
       // step cache (exactly-once on second attempt) instead of re-charging
@@ -306,16 +306,20 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const transcripts =
         voiceRefs.length > 0
           ? await step.run("transcribe-voice", async () => {
-              const stt = deps.sttProvider;
+              const stt = voiceBundle?.stt;
               if (!stt) {
                 throw new Error(
-                  "voice block received but no sttProvider configured — insert a `voice_config` row pointing at a valid `secrets` entry",
+                  "voice block received but no STT provider configured — run `cogmo setup` and configure voice, or insert a `voice_config` row pointing at valid `secrets` entries",
                 );
               }
               const out: string[] = [];
               for (const ref of voiceRefs) {
                 const bytes = await attachments.download(ref.path);
-                const result = await stt.stt({ audio: bytes, mediaType: ref.mediaType });
+                const result = await stt.provider.stt({
+                  audio: bytes,
+                  mediaType: ref.mediaType,
+                  model: stt.model,
+                });
                 out.push(result.text);
               }
               return out;
@@ -397,7 +401,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const profileForVoice = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
       const voiceModeForTurn = resolveVoiceMode({
         adapterSupportsVoice: delivery.canDeliverVoice(),
-        voiceConfigPresent: deps.ttsProvider !== undefined && deps.voiceConfig !== undefined,
+        voiceConfigPresent: voiceBundle !== undefined,
         conversationMode: conv.voiceMode,
         profileMode: profileForVoice?.voiceMode ?? "auto",
         // Inspect ONLY the most recent inbound message in the debounced
@@ -871,13 +875,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // just the audio length so step state stays small. Long replies
       // (above the per-channel cap) skip TTS entirely — the cap is a
       // fail-safe; the prompt hint should keep replies short already.
-      if (
-        voiceModeForTurn &&
-        delivery.canDeliverVoice() &&
-        deps.ttsProvider &&
-        deps.voiceConfig &&
-        result.text.length > 0
-      ) {
+      if (voiceModeForTurn && delivery.canDeliverVoice() && voiceBundle && result.text.length > 0) {
+        const ttsBundle = voiceBundle.tts;
         await step.run("voice-delivery", async () => {
           const cap = await deps.runInTx((tx) =>
             transportStore.getVoiceMaxReplyChars(tx, conversationId),
@@ -910,19 +909,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             }
             return { skipped: "over_cap", length: result.text.length };
           }
-          // ttsProvider + voiceConfig narrowed by the outer guard; redo
-          // the check inside the closure since TS doesn't track narrowings
-          // across the `await` boundary into the step.run body.
-          const tts = deps.ttsProvider;
-          const cfg = deps.voiceConfig;
-          if (!tts || !cfg) {
-            // Unreachable — outer guard ensures both are defined.
-            return { skipped: "no_provider" };
-          }
-          const { audio, mediaType } = await tts.tts({
+          const { audio, mediaType } = await ttsBundle.provider.tts({
             text: result.text,
-            voice: cfg.ttsVoice,
-            model: cfg.ttsModel,
+            voice: ttsBundle.voice,
+            model: ttsBundle.model,
             format: "ogg",
           });
           await delivery.deliverVoice({ audio, mediaType });

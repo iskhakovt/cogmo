@@ -73,35 +73,44 @@ Two interfaces (not one combined `VoiceProvider`) so an operator can use OpenAI 
 
 | Class | Provides | Notes |
 |-|-|-|
-| `OpenAIVoiceProvider` | TTS + STT | `gpt-4o-mini-tts` / `gpt-4o-mini-transcribe`; reuses the `openai` SDK already in the project; OGG/Opus directly via `response_format: "opus"` (no ffmpeg needed) |
-| `ElevenLabsTtsProvider` *(deferred)* | TTS only | Pluggable for users who prefer 11labs quality; OGG output via `output_format=opus_48000_192` |
+| `OpenAIVoiceProvider` | TTS + STT | `gpt-4o-mini-tts` / `gpt-4o-mini-transcribe`; reuses the `openai` SDK already in the project; OGG/Opus directly via `response_format: "opus"` (no ffmpeg needed). Used for both `tts_provider = 'openai'` and `'openai_compatible'` (e.g. Groq, self-hosted relays — anything serving `/v1/audio/{speech,transcriptions}`); the only difference is whether `baseURL` is required. |
+| `ElevenLabsTtsProvider` | TTS only | Pluggable for users who prefer 11labs quality; OGG output via `output_format=opus_48000_128`. Uses `fetch` directly — the official SDK is heavy and the API surface is one POST, so a hand-rolled client carries less weight than a runtime dependency. |
 | `DeepgramSttProvider` *(deferred)* | STT only | Optional; Nova-3 for higher accuracy on noisy inputs |
 
-Slice 1 ships `OpenAIVoiceProvider` only — covers both directions with one API key. The interface is what makes the others swappable; the deferred classes can be added later without touching consumers.
+Each provider implementation is interface-only — the per-turn `VoiceProviderResolver` (next subsection) is the only consumer that constructs them, so adding `DeepgramSttProvider` later is a switch arm in `buildStt`, not a rewire.
+
+### Hot reload `[confirmed]`
+
+`voice_config` is read **per turn** by `VoiceProviderResolver` (`src/voice/resolver.ts`) — not once at boot. Each call reads the singleton row + decrypts both secrets (sub-ms each), computes a content hash over `(provider, baseURL, key, voice, model)` for both directions, and returns a cached `VoiceBundle` on hit or rebuilds on miss. Operator changes (swap voice id, change TTS model, switch provider, rotate API key under the same `secret_id`) take effect on the next message with no process restart — the hash differs, the resolver discards the cached bundle, and the next turn picks up the new config.
+
+The bundle threads through three places per turn (STT in transcribe-voice step.run, voice-mode resolution, TTS in voice-delivery step.run) from a single resolver call near the orchestrator top — provider construction is not memoized inside step.run boundaries, so an operator change between Inngest retries is picked up by the second attempt's fresh resolution (step.run still caches the audio Buffer / transcript array, so the upstream APIs aren't re-billed).
 
 ### Configuration `[confirmed]`
 
 **Credentials live in the existing `secrets` table from day 0** — no env-only phase, in line with the [credential-storage decision](decisions.md). A small singleton table holds the active voice config:
 
 ```sql
+CREATE TYPE tts_provider_type AS ENUM ('openai', 'openai_compatible', 'elevenlabs');
+CREATE TYPE stt_provider_type AS ENUM ('openai', 'openai_compatible');
+
 voice_config (
   id              UUID PK,
   tts_secret_id   UUID NOT NULL FK → secrets,
   stt_secret_id   UUID NOT NULL FK → secrets,
-  tts_provider    TEXT NOT NULL,                      -- 'openai' (slice 1)
-  tts_model       TEXT NOT NULL,                      -- 'gpt-4o-mini-tts'
-  tts_voice       TEXT NOT NULL,                      -- 'alloy' / etc.
-  tts_base_url    TEXT,                               -- NULL = SDK default
-  stt_provider    TEXT NOT NULL,
-  stt_model       TEXT NOT NULL,                      -- 'gpt-4o-mini-transcribe'
-  stt_base_url    TEXT,
+  tts_provider    tts_provider_type NOT NULL,
+  tts_model       TEXT NOT NULL,                      -- 'gpt-4o-mini-tts' / 'eleven_turbo_v2_5'
+  tts_voice       TEXT NOT NULL,                      -- 'alloy' / 11labs voice UUID
+  tts_base_url    TEXT,                               -- NULL = SDK default; required for openai_compatible
+  stt_provider    stt_provider_type NOT NULL,
+  stt_model       TEXT NOT NULL,                      -- 'gpt-4o-mini-transcribe' / 'whisper-large-v3'
+  stt_base_url    TEXT,                               -- NULL = SDK default; required for openai_compatible
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 ```
 
 **Singleton enforced (UNIQUE + CHECK)** — exactly zero or one row, pinned at the DB level via a `singleton boolean NOT NULL DEFAULT TRUE` column with `UNIQUE` and `CHECK (singleton = TRUE)`. A second insert violates the unique constraint at write time rather than relying on convention; `getVoiceConfig` also `ORDER BY created_at DESC` as defense-in-depth in case the constraint is somehow bypassed (manual psql, broken migration). The wizard creates the row when the operator opts into voice; reads return null when voice is unconfigured. If a future need for multiple voice configs emerges (per-profile voice character, per-channel TTS provider), promote to `voice_providers` + `voice_models` mirroring `llm_providers` + `model_providers` — but don't pre-build that machinery.
 
-**Credential entry.** The wizard prompts for a fresh OpenAI API key dedicated to voice (stored as the `openai_voice_key` secret). Both `voice_config.tts_secret_id` and `voice_config.stt_secret_id` point at it initially; the FK split keeps a future TTS-on-ElevenLabs swap to a single column update. No "reuse the LLM provider's key" shortcut — voice traffic hits `/v1/audio/{speech,transcriptions}`, which some OpenAI-compatible providers (OpenRouter, custom proxies) don't serve, so making the operator paste the key once is clearer than offering a reuse path that silently fails on a subset of providers.
+**Credential entry.** The wizard configures TTS and STT independently, each with a provider-type select and (for `openai_compatible`) a base-URL prompt. When both directions hit the same provider type and base URL, the wizard offers a "use the same key" shortcut and stores one `secrets` row referenced by both FKs. Otherwise two distinct secrets are stored (`voice_tts_key`, `voice_stt_key`) — the historical `openai_voice_key` name is preserved on the openai+openai reuse path so existing rows aren't orphaned. The FK split was always there for ElevenLabs/Groq mix-and-match; with the resolver it's exercised now.
 
 ### Data model `[confirmed]`
 
