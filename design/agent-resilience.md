@@ -41,7 +41,7 @@ Class C has two handling surfaces. Most callsites are inside the agent loop, whe
 
 A turn classifier runs at two points inside `runStreamingAgentLoop`:
 
-1. **Post-stream**, after content blocks are reconstructed, before the `hasToolUse` gate. Detects: empty content, refusal-only content (text with no tool call when one was required), truncation mid-`tool_use`.
+1. **Post-stream**, after content blocks are reconstructed, before the `hasToolUse` gate. Detects: empty content, truncation mid-`tool_use`, explicit refusal signal from the SDK adapter (see model-refusal subtype below).
 2. **Post-`executeToolCalls`**, before appending results. Detects: schema-validation failure on tool args (Zod failed after `tool-input-coercion` and `jsonrepair`).
 
 Classifier returns a discriminated union:
@@ -77,7 +77,11 @@ The repair runs inside the same Inngest invocation. The outer `retries: 2` remai
 | Stream truncated mid-`tool_use` (`stop_reason: "max_tokens"` with partial JSON) | Replay non-streaming with the same params. Single-shot token budget often completes where the chunked stream did not. If the replay itself hits a Class A failure, normal Class A handling applies (provider chain → Inngest `retries: 2`); the stream-replay budget is consumed regardless of replay outcome. |
 | Model refusal | Immediate degrade — no repair attempt. Degraded-reply text is refusal-specific: *"The model declined that request. Try rephrasing, or switch model with `/model`."* Provider-fallback on refusal is **not** the default per Anthropic's documented guidance — policies are deliberately different across models, and silent re-routing on safety refusal is the wrong shape. If a per-profile fallback chain is configured (future work in [providers.md](providers.md)) it could opt into refusal-triggered fallback before degrade; not in the baseline. |
 
-The model-refusal subtype requires adapter support: `anthropic.ts` must decode `stop_reason: "refusal"`, `openai-compat.ts` must decode `finish_reason: "content_filter"`, and the SDK adapters must surface 400-with-content-policy-error class distinctly from generic 400. Today neither adapter does this (the doc treats it as a precondition).
+**Scope of the refusal subtype (v1):** detection requires an explicit signal from the SDK adapter — `stop_reason: "refusal"` (Anthropic-direct) or `finish_reason: "content_filter"` plus 400-with-content-policy class (OpenAI-direct). `openai-compat.ts` covering OpenAI-compatible providers (OpenRouter, Venice, xAI, generic OpenAI-compat shims) does **not** participate in v1: refusal signals on that surface arrive in too many non-standard shapes (provider-specific 400 bodies, `error.code` inside a 200, empty `choices`, refusal text in a normal `end_turn` reply) for a reliable decoder. LiteLLM does string-pattern matching on error messages and explicitly notes the heuristic is Azure-shaped; that's the prior art and it's brittle. Refusals on OpenAI-compat surfaces degrade through the empty-content path instead: one continuation-prompt budget entry wasted, then degrade. Acceptable cost for v1. Follow-up: per-adapter `decodeRefusal(response): boolean` hook with a permissive regex default for `openai-compat.ts` — wire it when telemetry shows the wasted-budget cost matters.
+
+**Refusal-as-normal-text is not detected.** Older / non-current Anthropic model versions surface refusals as `stop_reason: "end_turn"` with refusal-shaped text. Without a model-side signal, "refusal-shaped text" is heuristic on the content itself — and the false-positive cost (mis-labeling a legitimate text-only reply like "I disagree with that approach because…" as refusal and showing the refusal-degrade message) is worse than the false-negative cost (a refusal slips through as a normal text turn that the user can read and respond to). The post-stream classifier deliberately does NOT detect refusal from text content. Recall on the refusal subtype is best-effort, gated on explicit `stop_reason: "refusal"` or `finish_reason: "content_filter"`.
+
+The refusal subtype requires adapter support: `anthropic.ts` must decode `stop_reason: "refusal"`, `openai-compat.ts` (for OpenAI-direct) must decode `finish_reason: "content_filter"`, and the SDK adapters must surface 400-with-content-policy-error class distinctly from generic 400. Today neither adapter does this (the doc treats it as a precondition).
 
 #### Degraded reply
 
@@ -130,6 +134,8 @@ The trip uses **two** conditions, layered:
 
 The cumulative trigger catches alternating patterns (`A, B, A, B, A` — three `A`s in five iterations, never three in a row) that escape the consecutive rule. AgentPatterns' `LoopGuard` uses a similar shape (per-signature global occurrence count + consecutive counter + flat-step counter); K-of-N is not a canonical industry primitive, but the layered consecutive+cumulative shape is.
 
+**Free upside: bounds runaway tool-arg validation feedback.** Tool-arg validation feedback is unbounded by design ([above](#repair-budgets) — the `is_error: true` channel lets the model self-correct multiple sequential Zod failures). If a model retries identical malformed args across iterations, the fingerprint matches (same `(name, args-hash)` tuple), the side-effect gate doesn't fire (validation rejected before the handler), and Class D catches it earlier than the `DEFAULT_MAX_ITERATIONS = 20` backstop — with proper subtype telemetry instead of a silent iteration-cap trip.
+
 When either trigger fires:
 
 - Loop exits with `{ kind: "degraded", reason: "stuck_loop" }`
@@ -161,12 +167,11 @@ Every repair attempt and every degrade decision emits a structured log line (Pin
 
 The durable Inngest signal is `conversation/degraded` (emitted once per degraded turn from inside the persist step — see "Degraded reply" above). The structured logs are the per-attempt forensic record. The evolution failure-reflector subscribes to the Inngest event and can join the logs by `runId` + `conversationId` for subtype-level analysis.
 
-**Prerequisite: log context plumbing.** The base Pino logger today (`logger.ts:13-18`) carries no per-invocation context, and `runId` (exposed by Inngest as `async ({ event, step, runId })`) is never threaded into child loggers. The join is broken until one of these lands:
+**Prerequisite: log context plumbing.** The base Pino logger today (`logger.ts:13-18`) carries no per-invocation context, and `runId` (exposed by Inngest as `async ({ event, step, runId })`) is never threaded into child loggers. The join is broken until plumbing lands.
 
-1. (Preferred — less invasive.) Each `agent.repair` / `agent.degrade` emission explicitly includes `runId` and `conversationId` as fields: `logger.warn({ runId, conversationId, event: "agent.repair", ... }, "...")`. No logger-context plumbing; the join works on field names.
-2. `handle-message` creates a child logger at function entry — `const turnLogger = logger.child({ runId, conversationId })` — and threads it through service dependencies that emit repair/degrade logs. Slightly cleaner at the callsite but requires adding a logger field to `Service` or passing the child logger explicitly.
+**Baseline: child logger threaded through the loop.** `handle-message` creates `const turnLogger = logger.child({ runId, conversationId })` at function entry and passes it as a new field on `StreamingAgentLoopParams`. The classifier inside `runStreamingAgentLoop` emits through `turnLogger.warn(...)`; subtype/instructions fields are added per-emission, but `runId` and `conversationId` are inherited from the child's bound context. Future telemetry calls inside the loop get the run context for free without per-call ceremony.
 
-Option (1) is the baseline. Option (2) is a follow-up once enough callsites need it to justify the plumbing.
+The per-emission alternative — `logger.warn({ runId, conversationId, ... }, "...")` at every callsite — looked cheaper but isn't: the classifier sits deep inside `runStreamingAgentLoop`, so `runId` has to be threaded through the params anyway. The signature change is the same; the child logger costs one extra field, and every future emission inherits the context.
 
 ## Where the layers compose `[proposed]`
 
