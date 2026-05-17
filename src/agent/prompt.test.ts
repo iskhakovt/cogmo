@@ -22,6 +22,8 @@ function profile(overrides: Partial<Profile> = {}): Profile {
     toolSet: [],
     memoryScope: null,
     profileClass: null,
+    streamChunkChars: 4000,
+    streamEdits: true,
     ...overrides,
   };
 }

@@ -70,6 +70,12 @@ const USAGE = {
     "                                                          → also restrict on speaker dimension\n" +
     "  /profile class <name> <classname>                       → assign profile to a class\n" +
     "  /profile class <name> clear                             → unclass the profile\n" +
+    "  /profile stream <name>                                  → show current streaming prefs\n" +
+    "  /profile stream <name> chunk=500                        → rotate to a new message every ~500 chars (100..4000)\n" +
+    "  /profile stream <name> edits=off                        → append-only (no mid-message edits; typing indicator carries progress)\n" +
+    "  /profile stream <name> chunk=500 edits=off              → both at once\n" +
+    "                                                          (use chunk=N edits=on|off — the = is required;\n" +
+    "                                                          'chunk 500' without = becomes part of the name)\n" +
     `  Compartments: ${CORE_LIST}\n` +
     "  Trust:        first-party, any",
   classes:
@@ -251,6 +257,13 @@ export async function handleProfile(
       const last = rest[rest.length - 1] ?? "";
       const name = rest.slice(0, -1).join(" ");
       return replyProfileClass(transport, ctx, handle, name, last);
+    }
+    case "stream": {
+      // Stream tokens are strictly `<key>=<value>` — no bare keyword like
+      // `clear` (the defaults are static; there's nothing to clear back to).
+      // That lets a profile literally named `clear` be addressed here.
+      const { name, streamTokens } = splitStreamArgs(rest);
+      return replyProfileStream(transport, ctx, handle, name, streamTokens);
     }
     default:
       await ctx.reply(USAGE.profile);
@@ -1188,6 +1201,152 @@ async function replyProfileScope(
       profile.profileClass,
     )}`,
   );
+}
+
+// ── /profile stream ───────────────────────────────────────────────────
+
+/**
+ * Split `rest` into a (multi-token) profile name and the trailing
+ * `<key>=<value>` stream tokens. Walks from the end like `splitScopeArgs`
+ * but the shape predicate is stricter: only `<key>=<value>` counts as a
+ * trailing token. A profile literally named `clear` can be addressed
+ * here (unlike `/profile scope`), since stream has no bare-keyword form.
+ *
+ * Exposed for unit tests; the only caller is the `stream` subcommand
+ * dispatcher in `handleProfile`.
+ */
+export function splitStreamArgs(rest: ReadonlyArray<string>): {
+  name: string;
+  streamTokens: ReadonlyArray<string>;
+} {
+  let splitAt = rest.length;
+  while (splitAt > 0 && /^[a-z]+=/i.test(rest[splitAt - 1] ?? "")) splitAt--;
+  return {
+    name: rest.slice(0, splitAt).join(" "),
+    streamTokens: rest.slice(splitAt),
+  };
+}
+
+/**
+ * Pure parser for the stream spec — the tokens after `<name>` in
+ * `/profile stream <name> …`. Exposed for unit testing.
+ *
+ * Forms:
+ *   []                                        → show current prefs
+ *   ["chunk=500"]                             → set chunk only
+ *   ["edits=off"]                             → set edits only (on|off|true|false)
+ *   ["chunk=500", "edits=off"]                → set both
+ *
+ * Range for chunk mirrors the `chk_profiles_stream_chunk_chars` CHECK:
+ * 100..4000. The DB rejects out-of-range writes; this parser surfaces a
+ * friendlier message before the round trip.
+ */
+export type StreamSpec =
+  | { kind: "show" }
+  | { kind: "set"; changes: { streamChunkChars?: number; streamEdits?: boolean } }
+  | { kind: "error"; message: string };
+
+export function parseStreamSpec(tokens: ReadonlyArray<string>): StreamSpec {
+  const trimmed = tokens.map((t) => t.trim()).filter(Boolean);
+  if (trimmed.length === 0) return { kind: "show" };
+  const changes: { streamChunkChars?: number; streamEdits?: boolean } = {};
+  for (const token of trimmed) {
+    const eq = token.indexOf("=");
+    if (eq <= 0) {
+      return {
+        kind: "error",
+        message: `Bad token "${token}". Expected chunk=<n> or edits=on|off.`,
+      };
+    }
+    const key = token.slice(0, eq).toLowerCase();
+    const raw = token.slice(eq + 1).trim();
+    if (key === "chunk") {
+      if (changes.streamChunkChars !== undefined) {
+        return { kind: "error", message: `Key "chunk" repeated.` };
+      }
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 100 || n > 4000) {
+        return {
+          kind: "error",
+          message: `chunk must be an integer between 100 and 4000 (got "${raw}").`,
+        };
+      }
+      changes.streamChunkChars = n;
+    } else if (key === "edits") {
+      if (changes.streamEdits !== undefined) {
+        return { kind: "error", message: `Key "edits" repeated.` };
+      }
+      const v = raw.toLowerCase();
+      if (v === "on" || v === "true") {
+        changes.streamEdits = true;
+      } else if (v === "off" || v === "false") {
+        changes.streamEdits = false;
+      } else {
+        return {
+          kind: "error",
+          message: `edits must be on|off (got "${raw}").`,
+        };
+      }
+    } else {
+      return {
+        kind: "error",
+        message: `Unknown key "${key}". Expected chunk or edits.`,
+      };
+    }
+  }
+  return { kind: "set", changes };
+}
+
+async function replyProfileStream(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+  name: string,
+  streamTokens: ReadonlyArray<string>,
+): Promise<void> {
+  if (!name) {
+    await ctx.reply(USAGE.profile);
+    return;
+  }
+  const resolved = await resolveProfileByName(transport, handle, name);
+  if (resolved.kind === "error") {
+    await ctx.reply(errorMessage(resolved.error));
+    return;
+  }
+  if (resolved.kind === "none") {
+    await ctx.reply(`No profile named "${name}".`);
+    return;
+  }
+  if (resolved.kind === "ambiguous") {
+    await ctx.reply(ambiguityMessage(name, resolved.matches));
+    return;
+  }
+  const profile = resolved.profile;
+
+  const spec = parseStreamSpec(streamTokens);
+  if (spec.kind === "error") {
+    await ctx.reply(spec.message);
+    return;
+  }
+  if (spec.kind === "show") {
+    await ctx.reply(formatStreamPrefs(profile.name, profile.streamChunkChars, profile.streamEdits));
+    return;
+  }
+  const res = await transport.profiles.update(handle, profile.id, spec.changes);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  await ctx.reply(
+    formatStreamPrefs(res.value.name, res.value.streamChunkChars, res.value.streamEdits),
+  );
+}
+
+function formatStreamPrefs(name: string, chunk: number, edits: boolean): string {
+  const editsLine = edits
+    ? "edits on (mid-message edits + banners)"
+    : "edits off (append-only; typing indicator for progress)";
+  return `Stream prefs for "${name}":\n  chunk: ${chunk} chars\n  ${editsLine}`;
 }
 
 // ── /profile class + /classes ─────────────────────────────────────────

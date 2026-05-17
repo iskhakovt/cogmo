@@ -62,6 +62,13 @@ export interface ProfileInput {
    * `/profile scope` after creation; not part of the create dialog.
    */
   memoryScope?: ProfileMemoryScope | null;
+  /**
+   * Streaming-presentation knobs (Telegram today; future streaming adapters
+   * if they grow). Both have schema defaults — omit to keep them. Set via
+   * `/profile stream` after creation.
+   */
+  streamChunkChars?: number;
+  streamEdits?: boolean;
   // summarizationModel / extractionModel are profile-level fields in the DB but not yet exposed
   // via Transport — /profile edit doesn't cover them. Add back here when the dialog does.
 }

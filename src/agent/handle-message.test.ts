@@ -250,6 +250,7 @@ describe("createHandleMessage", () => {
       maxInboundId: "inbound-1",
       prevCursor: null,
       kind: "reply",
+      streamOpts: { chunkChars: 4000, allowEdits: true },
     });
   });
 

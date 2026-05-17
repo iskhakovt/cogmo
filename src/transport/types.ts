@@ -25,9 +25,27 @@ export interface Adapter {
  */
 export interface StreamingAdapter {
   stop(): Promise<void>;
-  openStream(platformAddress: string, runId: string): Promise<StreamHandle>;
+  openStream(platformAddress: string, runId: string, opts?: StreamOpts): Promise<StreamHandle>;
   /** Same shape as Adapter.sendVoice — optional capability flag. */
   sendVoice?(platformAddress: string, audio: OutboundVoice): Promise<void>;
+}
+
+/**
+ * Per-turn presentation knobs derived from the active profile and passed to
+ * the streaming adapter when the stream opens. Adapters may ignore knobs that
+ * don't apply (a future SSE-style web stream wouldn't honor chunkChars at
+ * all). Today: Telegram honors both.
+ *
+ * `chunkChars` — soft cap on a single message's source length before the
+ *   adapter rotates to a new message. Lower for short-burst UX.
+ * `allowEdits` — when false, the adapter never edits a message mid-stream;
+ *   it only emits whole chunks on boundary/finish, drops tool/status
+ *   banners (they're a streaming-edit affordance), and surfaces progress
+ *   via the platform-native typing indicator.
+ */
+export interface StreamOpts {
+  chunkChars: number;
+  allowEdits: boolean;
 }
 
 /**
