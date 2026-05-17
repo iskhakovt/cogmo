@@ -1,4 +1,6 @@
+import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import type { LlmProvider } from "../llm/provider.js";
 import type {
@@ -8,6 +10,7 @@ import type {
   StopReason,
   StreamEvent,
 } from "../llm/types.js";
+import { logger } from "../logger.js";
 import type { StepRunner } from "./loop.js";
 import { clearOldThinking, runAgentLoop, runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
@@ -1328,5 +1331,109 @@ describe("clearOldThinking", () => {
     // Original thinking content unchanged
     const blocks = original[0]!.content as Array<{ type: string; thinking?: string }>;
     expect(blocks[0]!.thinking).toBe("old");
+  });
+});
+
+// Pre-flight history sanitization runs validateHistory and emits a
+// warn-level repair log when the validator returns repairs. A user message
+// with a tool_result whose toolUseId has no matching prior tool_use is the
+// minimal repro — `validateHistory` flags it as `dropped_stray_tool_result`,
+// which routes through the `agent loop history invariants repaired` warn
+// emission. Both tests below exercise that path: one with an injected
+// `turnLogger`, one without to confirm fallback to the module-level
+// `logger`.
+describe("turnLogger plumbing", () => {
+  function historyWithStrayToolResult(): Message[] {
+    return [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: [{ type: "text", text: "hello" }] },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", toolUseId: "ghost", content: "stray" },
+          { type: "text", text: "real text" },
+        ],
+      },
+    ];
+  }
+
+  it("routes the history-repair warn through turnLogger when provided", async () => {
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "ok" }], stopReason: "end_turn" },
+    ]);
+    const turnLogger = mock<Logger>();
+    const fallbackSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
+
+    try {
+      await runStreamingAgentLoop({
+        provider,
+        model: "test",
+        systemPrompt: "sys",
+        messages: historyWithStrayToolResult(),
+        tools: new ToolRegistry(),
+        service: stubService(),
+        onEvent: async () => {},
+        turnLogger,
+      });
+
+      expect(turnLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ repairCount: expect.any(Number) }),
+        "agent loop history invariants repaired",
+      );
+      // Module-level logger must not see the repair warn — that's the whole
+      // point of the child-logger plumbing.
+      expect(fallbackSpy).not.toHaveBeenCalledWith(
+        expect.anything(),
+        "agent loop history invariants repaired",
+      );
+    } finally {
+      fallbackSpy.mockRestore();
+    }
+  });
+
+  it("falls back to the module-level logger when no turnLogger is provided", async () => {
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "ok" }], stopReason: "end_turn" },
+    ]);
+    const fallbackSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
+
+    try {
+      await runStreamingAgentLoop({
+        provider,
+        model: "test",
+        systemPrompt: "sys",
+        messages: historyWithStrayToolResult(),
+        tools: new ToolRegistry(),
+        service: stubService(),
+        onEvent: async () => {},
+      });
+
+      expect(fallbackSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ repairCount: expect.any(Number) }),
+        "agent loop history invariants repaired",
+      );
+    } finally {
+      fallbackSpy.mockRestore();
+    }
+  });
+
+  it("routes the history-repair warn through turnLogger in runAgentLoop too", async () => {
+    const provider = mockProvider([textResponse("ok")]);
+    const turnLogger = mock<Logger>();
+
+    await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: historyWithStrayToolResult(),
+      tools: new ToolRegistry(),
+      service: stubService(),
+      turnLogger,
+    });
+
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ repairCount: expect.any(Number) }),
+      "agent loop history invariants repaired",
+    );
   });
 });

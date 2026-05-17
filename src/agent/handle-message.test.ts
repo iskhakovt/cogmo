@@ -2,6 +2,7 @@ import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { ProviderConfigError } from "../llm/resolver.js";
+import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
@@ -233,6 +234,35 @@ describe("createHandleMessage", () => {
         data: { conversationId: "conv-1", messageId: "msg-1" },
       }),
     );
+  });
+
+  // Per-invocation child logger threads runId + conversationId through the
+  // agent loop so future Class C/D telemetry inside the loop can be joined
+  // to `conversation/degraded` / `conversation/errored` events by those two
+  // fields without per-emission ceremony. See design/agent-resilience.md →
+  // Telemetry.
+  it("passes a child turnLogger bound to runId + conversationId into the agent loop", async () => {
+    const childLogger = mock<ReturnType<typeof logger.child>>();
+    const childSpy = vi.spyOn(logger, "child").mockReturnValue(childLogger);
+
+    try {
+      const deps = mockDeps();
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(childSpy).toHaveBeenCalledWith({
+        runId: testRunId,
+        conversationId: "conv-1",
+      });
+      expect(deps.runStreamingAgentLoop).toHaveBeenCalledWith(
+        expect.objectContaining({ turnLogger: childLogger }),
+      );
+    } finally {
+      childSpy.mockRestore();
+    }
   });
 
   it("calls deliveryRouter.prepare with full routing context", async () => {

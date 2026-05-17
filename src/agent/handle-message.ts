@@ -205,6 +205,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
     async ({ event, step, runId }) => {
       const { conversationId, triggerInboundId } = event.data;
 
+      // Per-turn child logger — every emission inside the agent loop (and any
+      // future Class C/D telemetry) inherits `runId` + `conversationId` so the
+      // evolution failure-reflector can join structured logs to
+      // `conversation/degraded` / `conversation/errored` events by those two
+      // fields without per-call ceremony. See design/agent-resilience.md →
+      // Telemetry.
+      const turnLogger = logger.child({ runId, conversationId });
+
       // ──── DURABLE: load context + entry guards ────
 
       const conv = await step.run("load-conversation", async () => {
@@ -736,6 +744,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // web_answer). Step id = `tool-<name>-<toolUseId>`, unique per
           // LLM-issued tool call. See design/crash-recovery.md.
           stepRun: (id, fn) => step.run(id, fn),
+          turnLogger,
         });
         await delivery.finish();
       } catch (err) {
