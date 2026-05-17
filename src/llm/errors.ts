@@ -7,6 +7,12 @@
  * classify them. The errors here cover cases where the upstream response
  * arrived structurally intact but its payload is unusable downstream:
  * truncated tool-arg JSON, malformed streamed deltas, etc.
+ *
+ * This file also hosts {@link parseProviderJson} — the shared JSON pre-pass
+ * that adapters use to parse buffered tool-arg payloads, with a `jsonrepair`
+ * fallback and a typed throw on irrecoverable failure. It lives here, beside
+ * the error it raises, rather than in a separate `parse.ts`; greppers looking
+ * for the parse logic should start with this file.
  */
 
 import { jsonrepair } from "jsonrepair";
@@ -43,6 +49,16 @@ export class ProviderProtocolError extends Error {
  * (e.g. "Anthropic streamed tool_use input", "OpenAI-compatible streamed
  * tool_calls arguments") so failures point at the right adapter without
  * the caller having to format the message.
+ *
+ * The thrown {@link ProviderProtocolError} carries the `jsonrepair` failure
+ * as its `.cause` (the final, decisive error) and embeds the initial
+ * `JSON.parse` failure in the human-readable message so both attempts are
+ * visible without chasing `.cause`. There is no in-loop handler today —
+ * PR 5 will install one. Until then the error propagates out of
+ * `runStreamingAgentLoop` and surfaces as an Inngest function failure,
+ * which fails the turn (the same observable outcome as the pre-PR-#256
+ * behavior, just routed through a typed error class instead of a bare
+ * `SyntaxError`).
  */
 export function parseProviderJson(raw: string, toolName: string, context: string): unknown {
   try {
@@ -52,11 +68,11 @@ export function parseProviderJson(raw: string, toolName: string, context: string
       const repaired = jsonrepair(raw);
       return JSON.parse(repaired);
     } catch (repairErr) {
+      const initialMsg = initial instanceof Error ? initial.message : String(initial);
+      const repairMsg = repairErr instanceof Error ? repairErr.message : String(repairErr);
       throw new ProviderProtocolError(
-        `${context} for "${toolName}" failed to parse, including after jsonrepair: ${
-          repairErr instanceof Error ? repairErr.message : String(repairErr)
-        }`,
-        initial,
+        `${context} for "${toolName}" failed to parse — initial: ${initialMsg}; after jsonrepair: ${repairMsg}`,
+        repairErr,
       );
     }
   }

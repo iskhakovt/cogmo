@@ -409,7 +409,7 @@ describe("OpenAICompatibleProvider", () => {
       await expect(response).rejects.toBe(drop);
     });
 
-    it("repairs trailing-comma JSON in tool args via jsonrepair before declaring failure", async () => {
+    it("repairs trailing-comma JSON in tool args via jsonrepair before declaring failure (OpenAI-compat stream)", async () => {
       const provider = createProvider();
       // Reconstructed buffer: `{"query":"weather",}` — valid after
       // jsonrepair drops the trailing comma.
@@ -466,11 +466,12 @@ describe("OpenAICompatibleProvider", () => {
       await expect(response).resolves.toMatchObject({ stopReason: "tool_use" });
     });
 
-    it("throws ProviderProtocolError on tool-arg JSON unrepairable by jsonrepair", async () => {
+    it("throws ProviderProtocolError on tool-arg JSON unrepairable by jsonrepair (OpenAI-compat stream)", async () => {
       const provider = createProvider();
-      // `{{{{}}{}` — interleaved unbalanced braces with no parseable token
-      // structure; jsonrepair throws "Unexpected character" rather than
-      // returning a salvaged shape.
+      // `}}}]]]` — closers-only with no payload. There is nothing for any
+      // future jsonrepair heuristic to wrap, so this stays unrepairable
+      // across library upgrades; a more typo-shaped input could silently
+      // start passing if jsonrepair broadens its recovery surface.
       mockCreate.mockResolvedValueOnce(
         mockStream([
           {
@@ -479,7 +480,7 @@ describe("OpenAICompatibleProvider", () => {
               {
                 delta: {
                   tool_calls: [
-                    { index: 0, id: "call_1", function: { name: "search", arguments: "{{{{}}{}" } },
+                    { index: 0, id: "call_1", function: { name: "search", arguments: "}}}]]]" } },
                   ],
                 },
                 finish_reason: null,

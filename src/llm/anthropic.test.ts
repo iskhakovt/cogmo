@@ -449,7 +449,7 @@ describe("AnthropicProvider", () => {
       expect(callArgs.stream).toBe(true);
     });
 
-    it("repairs trailing-comma JSON in tool args via jsonrepair before declaring failure", async () => {
+    it("repairs trailing-comma JSON in tool args via jsonrepair before declaring failure (Anthropic stream)", async () => {
       const provider = createProvider();
       // Buffered chunks reconstruct to `{"query":"weather",}` — valid after
       // jsonrepair strips the trailing comma, parses as { query: "weather" }.
@@ -497,11 +497,12 @@ describe("AnthropicProvider", () => {
       await expect(response).resolves.toMatchObject({ stopReason: "tool_use" });
     });
 
-    it("throws ProviderProtocolError on tool-arg JSON unrepairable by jsonrepair", async () => {
+    it("throws ProviderProtocolError on tool-arg JSON unrepairable by jsonrepair (Anthropic stream)", async () => {
       const provider = createProvider();
-      // `{{{{}}{}` — interleaved unbalanced braces with no parseable token
-      // structure; jsonrepair throws "Unexpected character" rather than
-      // returning a salvaged shape.
+      // `}}}]]]` — closers-only with no payload. There is nothing for any
+      // future jsonrepair heuristic to wrap, so this stays unrepairable
+      // across library upgrades; a more typo-shaped input could silently
+      // start passing if jsonrepair broadens its recovery surface.
       mockCreate.mockResolvedValueOnce(
         mockStream([
           {
@@ -519,7 +520,7 @@ describe("AnthropicProvider", () => {
           {
             type: "content_block_delta",
             index: 0,
-            delta: { type: "input_json_delta", partial_json: "{{{{}}{}" },
+            delta: { type: "input_json_delta", partial_json: "}}}]]]" },
           },
           { type: "content_block_stop", index: 0 },
           {
