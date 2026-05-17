@@ -30,6 +30,8 @@ function mkProfile(overrides: Partial<Profile> & { id: string; name: string }): 
     toolSet: [],
     memoryScope: null,
     profileClass: null,
+    streamChunkChars: 4000,
+    streamEdits: true,
     ...overrides,
   };
 }

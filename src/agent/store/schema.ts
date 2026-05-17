@@ -415,6 +415,19 @@ export const profiles = pgTable(
      * modality. See design/voice.md.
      */
     voiceMode: voiceMode("voice_mode").notNull().default("auto"),
+    /**
+     * Per-profile streaming presentation knobs honored by `StreamingAdapter`s
+     * (today: Telegram only). `streamChunkChars` is the soft cap on a single
+     * message's source length before the handle rotates to a fresh message —
+     * lower it for a "burst of short messages" UX, leave at the default for
+     * the long-edit UX. `streamEdits` toggles mid-message edits: when
+     * `false`, the handle never edits — it only emits whole chunks on
+     * boundary / finish, drops tool/status banners (they're a streaming-edit
+     * affordance), and falls back to a native typing indicator while the
+     * stream is in flight. Defaults preserve today's behavior.
+     */
+    streamChunkChars: integer("stream_chunk_chars").notNull().default(4000),
+    streamEdits: boolean("stream_edits").notNull().default(true),
     toolSet: jsonbZod("tool_set", ToolSetSchema).notNull(),
     memoryScope: jsonbZod("memory_scope", ProfileMemoryScopeSchema), // null = no restriction
     /**
@@ -430,6 +443,14 @@ export const profiles = pgTable(
   },
   (t) => [
     unique("uq_profiles_user_name").on(t.userId, t.name).nullsNotDistinct(),
+    // Bounds: 100 is the practical floor (anything smaller is sub-bubble noise
+    // and would split mid-word frequently); 4000 leaves headroom under
+    // Telegram's 4096 cap for HTML tag expansion. Defense in depth — the
+    // /profile stream parser validates the same range with a friendly error.
+    check(
+      "chk_profiles_stream_chunk_chars",
+      sql`${t.streamChunkChars} >= 100 AND ${t.streamChunkChars} <= 4000`,
+    ),
     /**
      * Composite FK enforcing that any non-null `(user_id, profile_class)`
      * pair on a profile references an existing row in `profile_classes`.

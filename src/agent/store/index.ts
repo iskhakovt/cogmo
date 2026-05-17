@@ -146,6 +146,17 @@ export interface Profile {
   memoryScope: ProfileMemoryScope | null; // null = no compartment/trust/class restriction
   /** Speaker-isolation label; null = unclassed (Observer emits no class tag). */
   profileClass: string | null;
+  /**
+   * Soft cap on a single outbound message's source-text length before the
+   * streaming adapter rotates to a new message. Lower for short-burst UX.
+   */
+  streamChunkChars: number;
+  /**
+   * When false, the streaming adapter never edits a message mid-stream — it
+   * only emits whole chunks on boundary / finish, drops tool/status banners,
+   * and falls back to a native typing indicator while in flight.
+   */
+  streamEdits: boolean;
 }
 
 export interface ProfileUpdates {
@@ -158,6 +169,8 @@ export interface ProfileUpdates {
   voiceMode?: VoiceMode;
   toolSet?: ToolSet;
   memoryScope?: ProfileMemoryScope | null;
+  streamChunkChars?: number;
+  streamEdits?: boolean;
 }
 
 /** Per-user registry row for `profiles.profile_class`. */
@@ -1348,6 +1361,8 @@ export class DrizzleAgentStore implements AgentStore {
         toolSet: profiles.toolSet,
         memoryScope: profiles.memoryScope,
         profileClass: profiles.profileClass,
+        streamChunkChars: profiles.streamChunkChars,
+        streamEdits: profiles.streamEdits,
       })
       .from(profiles)
       .where(eq(profiles.id, profileId))
@@ -1391,6 +1406,8 @@ export class DrizzleAgentStore implements AgentStore {
           toolSet: profiles.toolSet,
           memoryScope: profiles.memoryScope,
           profileClass: profiles.profileClass,
+          streamChunkChars: profiles.streamChunkChars,
+          streamEdits: profiles.streamEdits,
         }),
       );
       return row as Profile;
@@ -1412,6 +1429,8 @@ export class DrizzleAgentStore implements AgentStore {
         toolSet: profiles.toolSet,
         memoryScope: profiles.memoryScope,
         profileClass: profiles.profileClass,
+        streamChunkChars: profiles.streamChunkChars,
+        streamEdits: profiles.streamEdits,
       })
       .from(profiles)
       .where(or(isNull(profiles.userId), eq(profiles.userId, userId)))
@@ -1454,6 +1473,8 @@ export class DrizzleAgentStore implements AgentStore {
           toolSet: profiles.toolSet,
           memoryScope: profiles.memoryScope,
           profileClass: profiles.profileClass,
+          streamChunkChars: profiles.streamChunkChars,
+          streamEdits: profiles.streamEdits,
         });
       return single(rows) as Profile;
     });

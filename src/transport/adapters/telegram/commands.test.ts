@@ -1,6 +1,7 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { Profile } from "../../../agent/store/index.js";
+import { assertKind } from "../../../test/assertions.js";
 import { type DeepPartial, mockTransportDeep } from "../../../test/factories.js";
 import type { Transport } from "../../transport.js";
 import {
@@ -26,7 +27,9 @@ import {
   handleStatus,
   handleVoice,
   parseScopeSpec,
+  parseStreamSpec,
   splitScopeArgs,
+  splitStreamArgs,
   type TelegramCommandContext,
 } from "./commands.js";
 import { ProfileDialogs } from "./profile-dialog.js";
@@ -235,6 +238,8 @@ describe("handleNew", () => {
       toolSet: [],
       memoryScope: null,
       profileClass: null,
+      streamChunkChars: 4000,
+      streamEdits: true,
     };
   }
 
@@ -393,6 +398,8 @@ describe("handleProfile", () => {
       voiceMode: "auto",
       toolSet: [],
       memoryScope: null,
+      streamChunkChars: 4000,
+      streamEdits: true,
     };
     const transport = transportWith({
       profiles: {
@@ -591,6 +598,8 @@ describe("handleProfile", () => {
         toolSet: [],
         memoryScope: null,
         profileClass: null,
+        streamChunkChars: 4000,
+        streamEdits: true,
       };
     }
 
@@ -702,6 +711,8 @@ describe("handleProfile", () => {
         toolSet: [],
         memoryScope,
         profileClass,
+        streamChunkChars: 4000,
+        streamEdits: true,
       };
     }
 
@@ -1436,6 +1447,108 @@ describe("splitScopeArgs", () => {
   });
 });
 
+describe("splitStreamArgs", () => {
+  it("multi-word name + key=value tokens → joined name, full spec preserved", () => {
+    expect(splitStreamArgs(["my", "profile", "chunk=500", "edits=off"])).toEqual({
+      name: "my profile",
+      streamTokens: ["chunk=500", "edits=off"],
+    });
+  });
+
+  it("stream has no bare-keyword form — a profile named 'clear' is addressable", () => {
+    expect(splitStreamArgs(["clear"])).toEqual({ name: "clear", streamTokens: [] });
+    expect(splitStreamArgs(["clear", "chunk=500"])).toEqual({
+      name: "clear",
+      streamTokens: ["chunk=500"],
+    });
+  });
+
+  it("empty rest → empty name, empty tokens", () => {
+    expect(splitStreamArgs([])).toEqual({ name: "", streamTokens: [] });
+  });
+});
+
+describe("parseStreamSpec", () => {
+  it("empty → show", () => {
+    expect(parseStreamSpec([])).toEqual({ kind: "show" });
+  });
+
+  it("chunk= sets only streamChunkChars", () => {
+    expect(parseStreamSpec(["chunk=500"])).toEqual({
+      kind: "set",
+      changes: { streamChunkChars: 500 },
+    });
+  });
+
+  it("edits=on/off/true/false maps to streamEdits boolean", () => {
+    expect(parseStreamSpec(["edits=on"])).toEqual({
+      kind: "set",
+      changes: { streamEdits: true },
+    });
+    expect(parseStreamSpec(["edits=off"])).toEqual({
+      kind: "set",
+      changes: { streamEdits: false },
+    });
+    expect(parseStreamSpec(["edits=true"])).toEqual({
+      kind: "set",
+      changes: { streamEdits: true },
+    });
+    expect(parseStreamSpec(["edits=false"])).toEqual({
+      kind: "set",
+      changes: { streamEdits: false },
+    });
+  });
+
+  it("both keys at once", () => {
+    expect(parseStreamSpec(["chunk=500", "edits=off"])).toEqual({
+      kind: "set",
+      changes: { streamChunkChars: 500, streamEdits: false },
+    });
+  });
+
+  it("rejects chunk outside [100, 4000] — defense in depth alongside DB CHECK", () => {
+    // Pin the user-facing range copy — drifting silently from the DB
+    // CHECK bounds would make the friendly error misleading.
+    const low = parseStreamSpec(["chunk=50"]);
+    assertKind(low, "error");
+    expect(low.message).toContain("100 and 4000");
+    const high = parseStreamSpec(["chunk=5000"]);
+    assertKind(high, "error");
+    expect(high.message).toContain("100 and 4000");
+  });
+
+  it("rejects non-integer chunk and surfaces the offending value", () => {
+    const r = parseStreamSpec(["chunk=abc"]);
+    assertKind(r, "error");
+    expect(r.message).toContain("abc");
+  });
+
+  it("rejects unknown edits value", () => {
+    const r = parseStreamSpec(["edits=maybe"]);
+    assertKind(r, "error");
+    expect(r.message).toContain("on|off");
+  });
+
+  it("rejects unknown key", () => {
+    const r = parseStreamSpec(["foo=bar"]);
+    assertKind(r, "error");
+    expect(r.message).toContain("chunk");
+    expect(r.message).toContain("edits");
+  });
+
+  it("rejects repeated keys", () => {
+    expect(parseStreamSpec(["chunk=500", "chunk=1000"]).kind).toBe("error");
+    expect(parseStreamSpec(["edits=on", "edits=off"]).kind).toBe("error");
+  });
+
+  it("rejects bare tokens (no '=')", () => {
+    const r = parseStreamSpec(["foo"]);
+    assertKind(r, "error");
+    expect(r.message).toContain("chunk=<n>");
+    expect(r.message).toContain("edits=on|off");
+  });
+});
+
 describe("handleClasses", () => {
   it("rejects /classes add with reserved name 'clear' before calling Transport", async () => {
     const create = vi.fn().mockResolvedValue(ok({} as never));
@@ -1862,6 +1975,8 @@ describe("handleCompartments", () => {
               toolSet: [],
               memoryScope: null,
               profileClass: null,
+              streamChunkChars: 4000,
+              streamEdits: true,
             },
           ]),
         ),
@@ -1893,6 +2008,8 @@ describe("/profile class subcommand", () => {
       toolSet: [],
       memoryScope: null,
       profileClass,
+      streamChunkChars: 4000,
+      streamEdits: true,
     };
   }
 
@@ -3005,6 +3122,8 @@ describe("handleStatus", () => {
           autoRecall: "heuristic",
           memoryScope: null,
           profileClass: null,
+          streamChunkChars: 4000,
+          streamEdits: true,
           voiceMode: "auto",
         },
         voiceMode: null,
@@ -3163,6 +3282,8 @@ describe("handleStatus", () => {
               autoRecall: "heuristic",
               memoryScope: null,
               profileClass: null,
+              streamChunkChars: 4000,
+              streamEdits: true,
               voiceMode: "auto",
             },
             voiceMode: null,

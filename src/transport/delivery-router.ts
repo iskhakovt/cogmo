@@ -13,6 +13,7 @@ import {
   isStreamingAdapter,
   type StreamHandle,
   type StreamingAdapter,
+  type StreamOpts,
 } from "./types.js";
 
 /**
@@ -34,6 +35,12 @@ export interface RoutingContext {
   /** Previous assistant message's lastInboundMessageId (null for first response). */
   prevCursor: string | null;
   kind: "reply" | "broadcast";
+  /**
+   * Profile-derived streaming presentation knobs forwarded to every active
+   * `StreamingAdapter.openStream` call for this turn. Optional only because
+   * the off-path `notifyConversation` surface has no profile in scope.
+   */
+  streamOpts?: StreamOpts;
 }
 
 /**
@@ -182,7 +189,11 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
         if (!entry) continue;
 
         if (isStreamingAdapter(entry.adapter)) {
-          const handle = await entry.adapter.openStream(session.platformAddress, ctx.runId);
+          const handle = await entry.adapter.openStream(
+            session.platformAddress,
+            ctx.runId,
+            ctx.streamOpts,
+          );
           streamHandles.push(handle);
         } else {
           batchTargets.push({
