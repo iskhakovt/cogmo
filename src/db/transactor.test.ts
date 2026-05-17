@@ -118,6 +118,7 @@ describe("transactor", () => {
     ]);
     const tx = transactor(db);
     const caught = await tx(async () => "unused").catch((e) => e);
+    expect(caught).toBeInstanceOf(SerializationFailureError);
     expect((caught as SerializationFailureError).code).toBe("40001");
     expect(calls).toHaveLength(3);
   });
