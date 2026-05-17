@@ -87,13 +87,9 @@ export class AllProvidersFailedError extends Error {
  * `false` for this class so the provider chain propagates it untouched.
  */
 export class RefusalError extends Error {
-  /** Underlying SDK error preserved for forensic logging. */
-  override readonly cause: unknown;
-
   constructor(message: string, cause?: unknown) {
-    super(message);
+    super(message, { cause });
     this.name = "RefusalError";
-    this.cause = cause;
   }
 }
 

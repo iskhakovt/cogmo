@@ -472,7 +472,11 @@ function fromOpenAIMessage(message: OpenAI.ChatCompletionMessage): ContentBlock[
  * Content-policy `code` values seen on `OpenAI.BadRequestError` (and Azure's
  * shim that rides on the same SDK). The body of a 400 carries
  * `error.code: "content_policy_violation"` for OpenAI-direct and
- * `error.code: "responsible_ai_policy_violation"` for Azure OpenAI.
+ * `error.code: "responsible_ai_policy_violation"` for Azure OpenAI. Azure
+ * also documents `error.code: "content_filter"` as the top-level code on a
+ * 400 pre-flight block (Scenario 3 in the Azure content-filter docs); the
+ * matching `finish_reason: "content_filter"` on the success path is handled
+ * separately in `fromOpenAIFinishReason`.
  *
  * Design scope (see design/agent-resilience.md Class C): refusal detection
  * applies to Anthropic-direct + OpenAI-direct. OpenAI-compat shims ride
@@ -482,6 +486,7 @@ function fromOpenAIMessage(message: OpenAI.ChatCompletionMessage): ContentBlock[
 const REFUSAL_ERROR_CODES = new Set<string>([
   "content_policy_violation",
   "responsible_ai_policy_violation",
+  "content_filter",
 ]);
 
 /**

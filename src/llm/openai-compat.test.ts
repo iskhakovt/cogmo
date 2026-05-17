@@ -512,6 +512,28 @@ describe("OpenAICompatibleProvider", () => {
       ).rejects.toBeInstanceOf(RefusalError);
     });
 
+    it("wraps Azure content_filter (top-level error.code) as RefusalError", async () => {
+      // Per the Azure OpenAI content-filter docs (Scenario 3, "Inappropriate
+      // input prompt"), a 400 pre-flight block surfaces with
+      // `error.code: "content_filter"` at the top level — distinct from the
+      // success-path `finish_reason: "content_filter"` on choices.
+      const provider = createProvider();
+      const upstream = Object.assign(new Error("The response was filtered"), {
+        name: "BadRequestError",
+        status: 400,
+        code: "content_filter",
+      });
+      mockCreate.mockRejectedValueOnce(upstream);
+
+      await expect(
+        provider.chat({
+          model: "gpt-5-nano",
+          system: "sys",
+          messages: [{ role: "user", content: "disallowed request" }],
+        }),
+      ).rejects.toBeInstanceOf(RefusalError);
+    });
+
     it("does NOT wrap unrelated 400 errors (e.g. invalid_request_error)", async () => {
       const provider = createProvider();
       const upstream = Object.assign(new Error("Invalid 'messages[0].role'"), {
