@@ -62,6 +62,7 @@ describe("e2e smoke", () => {
         conversationId: conv!.id,
         content: "Hello integration test",
         platformTs: new Date(),
+        source: "user",
       })
       .returning({ id: inboundMessages.id });
 

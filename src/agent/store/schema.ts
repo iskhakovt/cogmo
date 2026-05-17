@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import {
   boolean,
   check,
@@ -476,7 +476,16 @@ export const conversations = pgTable(
     voiceMode: voiceMode("voice_mode"),
     createdAt: ts(),
   },
-  (t) => [index("idx_conversations_profile_id").on(t.profileId)],
+  (t) => [
+    index("idx_conversations_profile_id").on(t.profileId),
+    // Covers `findMostRecentConversationForUserProfile`'s filter on
+    // (user_id, profile_id) restricted to private conversations,
+    // ordered by id DESC. UUIDv7 makes `id DESC` a proxy for
+    // created_at DESC, so the index can serve the order as well.
+    index("idx_conversations_user_profile_private_id")
+      .on(t.userId, t.profileId, desc(t.id))
+      .where(sql`is_private = true`),
+  ],
 );
 
 export const messages = pgTable(

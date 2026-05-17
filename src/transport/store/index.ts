@@ -1,4 +1,5 @@
-import { and, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lte, ne, notExists, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { JsonValue } from "type-fest";
 // Cross-module read: scheduled-task fire routing needs conversations.{user_id, profile_id}
 // joined to channel_sessions. Per CLAUDE.md → Store Pattern, store impls may import
@@ -8,9 +9,12 @@ import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { InboundContent } from "../content.js";
 import {
+  type ChannelSessionReceive,
+  type ChannelSessionStatus,
   channelSessions,
   channels,
   chatDefaultProfiles,
+  type InboundMessageSource,
   inboundMessages,
   userIdentities,
 } from "./schema.js";
@@ -20,8 +24,35 @@ export interface Session {
   channelId: string;
   platformAddress: string;
   conversationId: string;
-  status: string;
-  receive: string;
+  status: ChannelSessionStatus;
+  receive: ChannelSessionReceive;
+}
+
+/**
+ * Discriminated input for `persistInbound`. `user` rows carry their
+ * originating session FK; `scheduled` rows carry the idempotency key.
+ */
+export type PersistInboundParams =
+  | {
+      source: "user";
+      channelSessionId: string;
+      conversationId: string;
+      content: InboundContent;
+      platformTs: Date;
+    }
+  | {
+      source: "scheduled";
+      scheduledFireKey: string;
+      conversationId: string;
+      content: InboundContent;
+      platformTs: Date;
+    };
+
+/** `(channelId, platformAddress, receive)` tuple from `findReachableChannelsForUserProfile`. */
+export interface ReachableChannel {
+  channelId: string;
+  platformAddress: string;
+  receive: ChannelSessionReceive;
 }
 
 export interface TransportStore {
@@ -62,8 +93,8 @@ export interface TransportStore {
       channelId: string;
       platformAddress: string;
       conversationId: string;
-      status: string;
-      receive: string;
+      status: ChannelSessionStatus;
+      receive: ChannelSessionReceive;
     },
   ): Promise<{ id: string }>;
 
@@ -82,28 +113,39 @@ export interface TransportStore {
     platformAddress: string,
     newParams: {
       conversationId: string;
-      status: string;
-      receive: string;
+      status: ChannelSessionStatus;
+      receive: ChannelSessionReceive;
     },
   ): Promise<{ id: string }>;
 
-  /** Persist a raw inbound message. */
-  persistInbound(
+  /**
+   * Persist a raw inbound message. The `source` discriminator selects which
+   * additional fields must be supplied:
+   *   - `'user'` → `channelSessionId` (originating session).
+   *   - `'scheduled'` → `scheduledFireKey` (idempotency key
+   *     `${taskId}:${scheduledFor}`; UNIQUE WHERE NOT NULL).
+   * The DB check constraint enforces this; the type narrows it at the
+   * call site.
+   */
+  persistInbound(tx: Transaction, params: PersistInboundParams): Promise<{ id: string }>;
+
+  /**
+   * Look up a scheduled-source inbound by its idempotency key. Returns
+   * `undefined` when the fire hasn't been dispatched yet. Used by the
+   * fire-handler to short-circuit a retry that lands after the original
+   * tx committed but before Inngest got the step ack.
+   */
+  findInboundByScheduledFireKey(
     tx: Transaction,
-    params: {
-      channelSessionId: string;
-      conversationId: string;
-      content: InboundContent;
-      platformTs: Date;
-    },
-  ): Promise<{ id: string }>;
+    scheduledFireKey: string,
+  ): Promise<{ id: string; conversationId: string } | undefined>;
 
   /** Load unbatched inbound messages after a cursor (null = all). */
   getUnbatchedInbound(
     tx: Transaction,
     conversationId: string,
     afterId: string | null,
-  ): Promise<ReadonlyArray<{ id: string; content: InboundContent }>>;
+  ): Promise<ReadonlyArray<{ id: string; content: InboundContent; source: InboundMessageSource }>>;
 
   /** Get a session by ID. */
   getSession(tx: Transaction, sessionId: string): Promise<Session | undefined>;
@@ -204,28 +246,18 @@ export interface TransportStore {
   removeChannel(tx: Transaction, channelId: string): Promise<void>;
 
   /**
-   * Find the most recently CREATED active session (and its conversation)
-   * for a given user + profile. Used by the scheduled-task fire handler
-   * to deliver synthetic inbound messages into the user's currently-open
-   * chat for that profile.
-   *
-   * Ordering is `channel_sessions.created_at DESC` — a 30-second-old
-   * web session wins over a 6-month-old Telegram session. That's the
-   * right heuristic for "where to deliver a fire" because the most
-   * recent session is the one the user just opened. If "most recently
-   * spoken in" is ever needed (e.g. a `last_inbound_ts` denormalisation
-   * on `channel_sessions`), that's a different lookup.
-   *
-   * Returns `{ sessionId, conversationId }` of the winning session, or
-   * `undefined` when the user has no active sessions on that profile
-   * (fires for offline users no-op). Expired or closed sessions are
-   * excluded.
+   * Every reachable channel for `(userId, profileId)`, distinct on
+   * `(channelId, platformAddress)` with the newest row's `receive` mode.
+   * Closed sessions are included — a `/end`-ed Telegram chat is still
+   * reachable, the rotation just opens a fresh session against the same
+   * `(channelId, platformAddress)`. Sessions with `expires_at` in the past
+   * are excluded (Web UI client gone).
    */
-  findActiveSessionForUserProfile(
+  findReachableChannelsForUserProfile(
     tx: Transaction,
     userId: string,
     profileId: string,
-  ): Promise<{ sessionId: string; conversationId: string } | undefined>;
+  ): Promise<ReadonlyArray<ReachableChannel>>;
 }
 
 export class DrizzleTransportStore implements TransportStore {
@@ -310,8 +342,8 @@ export class DrizzleTransportStore implements TransportStore {
       channelId: string;
       platformAddress: string;
       conversationId: string;
-      status: string;
-      receive: string;
+      status: ChannelSessionStatus;
+      receive: ChannelSessionReceive;
     },
   ): Promise<{ id: string }> {
     return single(
@@ -332,8 +364,8 @@ export class DrizzleTransportStore implements TransportStore {
     platformAddress: string,
     newParams: {
       conversationId: string;
-      status: string;
-      receive: string;
+      status: ChannelSessionStatus;
+      receive: ChannelSessionReceive;
     },
   ): Promise<{ id: string }> {
     // Close ALL active sessions on this (channelId, platformAddress) inside the tx.
@@ -358,31 +390,55 @@ export class DrizzleTransportStore implements TransportStore {
     );
   }
 
-  async persistInbound(
-    tx: Transaction,
-    params: {
-      channelSessionId: string;
-      conversationId: string;
-      content: InboundContent;
-      platformTs: Date;
-    },
-  ): Promise<{ id: string }> {
+  async persistInbound(tx: Transaction, params: PersistInboundParams): Promise<{ id: string }> {
+    const row =
+      params.source === "user"
+        ? {
+            source: "user" as const,
+            channelSessionId: params.channelSessionId,
+            conversationId: params.conversationId,
+            content: params.content,
+            platformTs: params.platformTs,
+          }
+        : {
+            source: "scheduled" as const,
+            scheduledFireKey: params.scheduledFireKey,
+            conversationId: params.conversationId,
+            content: params.content,
+            platformTs: params.platformTs,
+          };
     return single(
-      await tx.insert(inboundMessages).values(params).returning({ id: inboundMessages.id }),
+      await tx.insert(inboundMessages).values(row).returning({ id: inboundMessages.id }),
     );
+  }
+
+  async findInboundByScheduledFireKey(
+    tx: Transaction,
+    scheduledFireKey: string,
+  ): Promise<{ id: string; conversationId: string } | undefined> {
+    const rows = await tx
+      .select({ id: inboundMessages.id, conversationId: inboundMessages.conversationId })
+      .from(inboundMessages)
+      .where(eq(inboundMessages.scheduledFireKey, scheduledFireKey))
+      .limit(1);
+    return rows[0];
   }
 
   async getUnbatchedInbound(
     tx: Transaction,
     conversationId: string,
     afterId: string | null,
-  ): Promise<ReadonlyArray<{ id: string; content: InboundContent }>> {
+  ): Promise<ReadonlyArray<{ id: string; content: InboundContent; source: InboundMessageSource }>> {
     const conditions = [eq(inboundMessages.conversationId, conversationId)];
     if (afterId) {
       conditions.push(gt(inboundMessages.id, afterId));
     }
     return tx
-      .select({ id: inboundMessages.id, content: inboundMessages.content })
+      .select({
+        id: inboundMessages.id,
+        content: inboundMessages.content,
+        source: inboundMessages.source,
+      })
       .from(inboundMessages)
       .where(and(...conditions))
       .orderBy(inboundMessages.id);
@@ -658,20 +714,29 @@ export class DrizzleTransportStore implements TransportStore {
     await tx.delete(channels).where(eq(channels.id, channelId));
   }
 
-  async findActiveSessionForUserProfile(
+  async findReachableChannelsForUserProfile(
     tx: Transaction,
     userId: string,
     profileId: string,
-  ): Promise<{ sessionId: string; conversationId: string } | undefined> {
-    // Joins channel_sessions → conversations to filter by user+profile.
-    // Cross-module JOIN: conversations is owned by agent/store, but per
-    // project convention store implementations may import any schema
-    // (see CLAUDE.md → Store Pattern). Order by session createdAt DESC
-    // so a recently-opened session wins over a long-idle one.
-    const rows = await tx
-      .select({
-        sessionId: channelSessions.id,
-        conversationId: channelSessions.conversationId,
+  ): Promise<ReadonlyArray<ReachableChannel>> {
+    // `status` is intentionally not filtered — closed sessions still
+    // carry a reachable `(channelId, platformAddress)` and the rotation
+    // overwrites them with a fresh active row. The `expires_at` filter
+    // does apply: a Web UI client whose heartbeat stopped is unreachable.
+    //
+    // The notExists clause excludes addresses currently bound to an
+    // active session on a different profile for the same user. Without
+    // it, rotation would `swapSession` over the user's in-flight
+    // conversation on another profile, silently hijacking their context
+    // to the scheduled fire's profile. Self-joining the same tables
+    // requires aliases (`other_cs`, `other_conv`).
+    const otherCs = alias(channelSessions, "other_cs");
+    const otherConv = alias(conversations, "other_conv");
+    return tx
+      .selectDistinctOn([channelSessions.channelId, channelSessions.platformAddress], {
+        channelId: channelSessions.channelId,
+        platformAddress: channelSessions.platformAddress,
+        receive: channelSessions.receive,
       })
       .from(channelSessions)
       .innerJoin(conversations, eq(conversations.id, channelSessions.conversationId))
@@ -679,12 +744,28 @@ export class DrizzleTransportStore implements TransportStore {
         and(
           eq(conversations.userId, userId),
           eq(conversations.profileId, profileId),
-          eq(channelSessions.status, "active"),
           or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
+          notExists(
+            tx
+              .select({ x: sql<number>`1` })
+              .from(otherCs)
+              .innerJoin(otherConv, eq(otherConv.id, otherCs.conversationId))
+              .where(
+                and(
+                  eq(otherCs.channelId, channelSessions.channelId),
+                  eq(otherCs.platformAddress, channelSessions.platformAddress),
+                  eq(otherCs.status, "active"),
+                  eq(otherConv.userId, userId),
+                  ne(otherConv.profileId, profileId),
+                ),
+              ),
+          ),
         ),
       )
-      .orderBy(desc(channelSessions.createdAt))
-      .limit(1);
-    return rows[0];
+      .orderBy(
+        channelSessions.channelId,
+        channelSessions.platformAddress,
+        desc(channelSessions.id),
+      );
   }
 }
