@@ -239,6 +239,13 @@
       "when": 1778961986179,
       "tag": "0033_magenta_tarantula",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1779054915015,
+      "tag": "0034_true_toad",
+      "breakpoints": true
     }
   ]
 }

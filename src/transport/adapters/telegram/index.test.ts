@@ -947,6 +947,99 @@ describe("telegram adapter", () => {
         }
       });
     });
+
+    describe("append-only mode (allowEdits=false)", () => {
+      it("never edits a message mid-stream — sub-chunk pushes accumulate silently", async () => {
+        const adapter = await createStreamingAdapter();
+        const handle = await adapter.openStream("42", "run-1", {
+          chunkChars: 4000,
+          allowEdits: false,
+        });
+
+        await handle.push({ type: "text_delta", text: "hello" });
+        await handle.push({ type: "text_delta", text: " world" });
+
+        // No send and no edit until either chunk boundary or finish.
+        expect(mockBotApi.sendMessage).not.toHaveBeenCalled();
+        expect(mockBotApi.editMessageText).not.toHaveBeenCalled();
+
+        await handle.finish();
+        expect(mockBotApi.sendMessage).toHaveBeenCalledWith(42, "hello world", {
+          parse_mode: "HTML",
+        });
+        expect(mockBotApi.editMessageText).not.toHaveBeenCalled();
+      });
+
+      it("drops tool_start and status banners (no in-message hint to leak)", async () => {
+        const adapter = await createStreamingAdapter();
+        const handle = await adapter.openStream("42", "run-1", {
+          chunkChars: 4000,
+          allowEdits: false,
+        });
+
+        await handle.push({ type: "text_delta", text: "thinking" });
+        await handle.push({
+          type: "tool_start",
+          id: "t1",
+          name: "web_search",
+          input: {},
+        });
+        await handle.push({ type: "status", message: "still here" });
+        await handle.push({ type: "text_delta", text: " done" });
+        await handle.finish();
+
+        // The banner text must not have made it into the final send body.
+        expect(mockBotApi.sendMessage).toHaveBeenCalledWith(42, "thinking done", {
+          parse_mode: "HTML",
+        });
+      });
+
+      it("kicks the typing heartbeat on first push and clears it on finish", async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        try {
+          const adapter = await createStreamingAdapter();
+          const handle = await adapter.openStream("42", "run-1", {
+            chunkChars: 4000,
+            allowEdits: false,
+          });
+
+          await handle.push({ type: "text_delta", text: "x" });
+          // Immediate kick on first push.
+          expect(mockBotApi.sendChatAction).toHaveBeenCalledWith(42, "typing");
+          const initial = mockBotApi.sendChatAction.mock.calls.length;
+
+          // Advance past one refresh interval (3500ms).
+          await vi.advanceTimersByTimeAsync(4000);
+          expect(mockBotApi.sendChatAction.mock.calls.length).toBeGreaterThan(initial);
+
+          const beforeFinish = mockBotApi.sendChatAction.mock.calls.length;
+          await handle.finish();
+          // Another interval after finish — no more typing kicks once cleared.
+          await vi.advanceTimersByTimeAsync(8000);
+          expect(mockBotApi.sendChatAction.mock.calls.length).toBe(beforeFinish);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("rotates messages at the per-profile chunk target, not the default 4000", async () => {
+        const adapter = await createStreamingAdapter();
+        const handle = await adapter.openStream("42", "run-1", {
+          chunkChars: 150,
+          allowEdits: false,
+        });
+
+        // Two paragraphs, each ~120 chars — together they exceed the 150-char
+        // target so the first must rotate before the second lands.
+        const para = "a".repeat(120);
+        await handle.push({ type: "text_delta", text: `${para}\n\n${para}` });
+        await handle.finish();
+
+        // First chunk shipped on overflow, second on finish — two sends, no edits.
+        expect(mockBotApi.sendMessage.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(mockBotApi.editMessageText).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe("generated images (mid-stream)", () => {

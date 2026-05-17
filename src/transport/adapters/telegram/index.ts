@@ -30,7 +30,7 @@ import {
 } from "../../adapter-module.js";
 import { type AttachmentStore, mediaTypeToExt } from "../../attachment-store.js";
 import type { InboundContent } from "../../content.js";
-import type { Adapter, StreamHandle, StreamingAdapter } from "../../types.js";
+import type { Adapter, StreamHandle, StreamingAdapter, StreamOpts } from "../../types.js";
 import {
   handleClasses,
   handleCompartments,
@@ -65,16 +65,22 @@ export const channelType = "telegram";
 
 // Telegram caps a single text message at 4096 chars. Streaming edits that
 // crossed this cap previously raised MESSAGE_TOO_LONG, killing the conversation
-// at the boundary. We rotate to a new message before the source text reaches
-// 4000 chars (leaving headroom for HTML tag expansion); chunks whose HTML
-// render still exceeds the cap fall back to plain text.
+// at the boundary. Per-profile `streamChunkChars` rotates earlier (down to
+// 100); the hard 4096 cap below stays as the HTML fallback threshold. Chunks
+// whose HTML render still exceeds the cap fall back to plain text.
 const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
-const TELEGRAM_CHUNK_TARGET = 4000;
+const TELEGRAM_CHUNK_TARGET_DEFAULT = 4000;
 // Anything smaller than this in the head produces a sliver of a message; we'd
 // rather hard-cut later in the source than emit a sub-half-screen first chunk.
 // Empirical choice — fits a short Telegram message bubble (~3-4 lines of text
-// in the standard mobile UI).
+// in the standard mobile UI). Used as the floor for `findTelegramSplitBoundary`
+// at the default target; at low per-profile targets the boundary-finder picks
+// a proportional floor (target/4) instead.
 const TELEGRAM_MIN_HEAD_CHARS = 500;
+// Refresh interval for the `sendChatAction("typing")` heartbeat used in
+// append-only mode. Telegram's typing action auto-clears after ~5s, so we
+// refresh inside that window. 3500ms leaves a small overlap.
+const TELEGRAM_TYPING_REFRESH_MS = 3500;
 
 /**
  * If `head` ends inside an open fenced code block, close the fence at the
@@ -198,7 +204,11 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
     }
   }
 
-  async openStream(platformAddress: string, runId: string): Promise<StreamHandle> {
+  async openStream(
+    platformAddress: string,
+    runId: string,
+    opts?: StreamOpts,
+  ): Promise<StreamHandle> {
     const existing = this.#activeStreams.get(runId);
     if (existing) return existing;
 
@@ -210,6 +220,7 @@ class TelegramAdapter implements Adapter, StreamingAdapter {
       () => {
         this.#activeStreams.delete(runId);
       },
+      opts,
     );
     this.#activeStreams.set(runId, handle);
     return handle;
@@ -265,6 +276,12 @@ class TelegramStreamHandle implements StreamHandle {
   #sentDocuments = new Set<string>();
   #onDone: () => void;
   #pending: Promise<void> = Promise.resolve();
+  #chunkTarget: number;
+  #allowEdits: boolean;
+  // Append-only mode runs a `sendChatAction("typing")` heartbeat in place of
+  // the visible-banner UX. null when the timer isn't active (edits-allowed
+  // mode, or stream already finished/aborted).
+  #typingTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     bot: Bot,
@@ -272,21 +289,27 @@ class TelegramStreamHandle implements StreamHandle {
     chatId: number,
     runId: string,
     onDone: () => void,
+    opts?: StreamOpts,
   ) {
     this.#bot = bot;
     this.#attachments = attachments;
     this.#chatId = chatId;
     this.#runId = runId;
     this.#onDone = onDone;
+    this.#chunkTarget = opts?.chunkChars ?? TELEGRAM_CHUNK_TARGET_DEFAULT;
+    this.#allowEdits = opts?.allowEdits ?? true;
   }
 
   async push(event: StreamEvent): Promise<void> {
     if (event.type === "text_delta") {
       this.#accumulated += event.text;
     } else if (event.type === "tool_start") {
-      this.#accumulated += `\n🔍 ${event.name}...\n`;
+      // Append-only mode drops in-message banners (they'd land mid-paragraph
+      // at the next chunk boundary, post-hoc and stale). The typing
+      // heartbeat carries progress instead.
+      if (this.#allowEdits) this.#accumulated += `\n🔍 ${event.name}...\n`;
     } else if (event.type === "status") {
-      this.#accumulated += `\n⏳ ${event.message}\n`;
+      if (this.#allowEdits) this.#accumulated += `\n⏳ ${event.message}\n`;
     } else if (event.type === "tool_result" && event.name === "generate_image" && !event.isError) {
       await this.#sendGeneratedImage(event.output);
       return;
@@ -296,10 +319,34 @@ class TelegramStreamHandle implements StreamHandle {
     }
     // other tool_results: skip — LLM will summarize
 
+    if (!this.#allowEdits) {
+      // Kick the typing heartbeat on first push and keep it alive until
+      // finish/abort. `setInterval` is idempotent only because we guard with
+      // null — double-pushing would otherwise stack timers.
+      this.#startTypingHeartbeat();
+    }
+
     // Drain any overflow eagerly, bypassing the throttle — once accumulated
     // crosses the chunk target, further edits to the same message would 400.
     await this.#drainOverflow();
-    await this.#throttledEdit();
+    if (this.#allowEdits) await this.#throttledEdit();
+  }
+
+  #startTypingHeartbeat(): void {
+    if (this.#typingTimer !== null) return;
+    // Fire immediately so the indicator shows up on first push, not after one
+    // refresh interval. Errors are swallowed — typing is a hint, not load-
+    // bearing; a transient API failure shouldn't kill the stream.
+    void this.#bot.api.sendChatAction(this.#chatId, "typing").catch(() => {});
+    this.#typingTimer = setInterval(() => {
+      void this.#bot.api.sendChatAction(this.#chatId, "typing").catch(() => {});
+    }, TELEGRAM_TYPING_REFRESH_MS);
+  }
+
+  #stopTypingHeartbeat(): void {
+    if (this.#typingTimer === null) return;
+    clearInterval(this.#typingTimer);
+    this.#typingTimer = null;
   }
 
   async #sendGeneratedImage(output: string): Promise<void> {
@@ -365,6 +412,7 @@ class TelegramStreamHandle implements StreamHandle {
   }
 
   async finish(): Promise<void> {
+    this.#stopTypingHeartbeat();
     await this.#pending;
     await this.#drainOverflow();
     if (this.#accumulated) {
@@ -375,6 +423,7 @@ class TelegramStreamHandle implements StreamHandle {
   }
 
   async abort(error: string): Promise<void> {
+    this.#stopTypingHeartbeat();
     await this.#pending;
     // Drain any mid-stream overflow first so the error tail lands on the last
     // partial chunk, not floating in its own message.
@@ -385,7 +434,13 @@ class TelegramStreamHandle implements StreamHandle {
     // then emit whatever remains as plain text (no HTML render on errors).
     await this.#drainOverflow();
     if (this.#accumulated) {
-      await this.#edit(this.#accumulated);
+      // Append-only mode never edits a message, so emit the error tail as a
+      // fresh chunk too — `#edit` would silently no-op into nothing.
+      if (this.#allowEdits) {
+        await this.#edit(this.#accumulated);
+      } else {
+        await this.#finalizeChunk(this.#accumulated);
+      }
       this.#accumulated = "";
     }
     this.#onDone();
@@ -424,8 +479,8 @@ class TelegramStreamHandle implements StreamHandle {
    * tail starts a fresh message. Repeats until what remains fits.
    */
   async #drainOverflow(): Promise<void> {
-    while (this.#accumulated.length > TELEGRAM_CHUNK_TARGET) {
-      const splitIdx = findTelegramSplitBoundary(this.#accumulated, TELEGRAM_CHUNK_TARGET);
+    while (this.#accumulated.length > this.#chunkTarget) {
+      const splitIdx = findTelegramSplitBoundary(this.#accumulated, this.#chunkTarget);
       const rawHead = this.#accumulated.slice(0, splitIdx);
       const rawTail = this.#accumulated.slice(splitIdx);
       const { head, tail } = rebalanceCodeFence(rawHead, rawTail);

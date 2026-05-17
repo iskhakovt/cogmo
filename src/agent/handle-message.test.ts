@@ -249,6 +249,7 @@ describe("createHandleMessage", () => {
       isPrivate: true,
       maxInboundId: "inbound-1",
       prevCursor: null,
+      streamOpts: { chunkChars: 4000, allowEdits: true },
     });
   });
 

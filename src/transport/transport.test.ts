@@ -174,6 +174,8 @@ describe("createTransport", () => {
           toolSet: [],
           memoryScope: null,
           profileClass: null,
+          streamChunkChars: 4000,
+          streamEdits: true,
         }),
       });
       const { transport } = setup({ agentStore });
@@ -279,6 +281,8 @@ describe("createTransport", () => {
           toolSet: [],
           memoryScope: null,
           profileClass: null,
+          streamChunkChars: 4000,
+          streamEdits: true,
         }),
       });
       const { transport } = setup({ transportStore, agentStore });
@@ -1468,6 +1472,8 @@ describe("createTransport", () => {
         toolSet: [],
         memoryScope: { compartments: ["work", "dnd"], trust: ["first-party"] },
         profileClass: null,
+        streamChunkChars: 4000,
+        streamEdits: true,
       });
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),

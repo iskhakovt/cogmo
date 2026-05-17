@@ -380,6 +380,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return deps.runInTx((tx) => agentStore.getHistory(tx, conversationId));
       });
 
+      // Load profile up front — its streaming knobs ride into `prepare` so
+      // open streams honor the per-profile chunk target and edit mode, and
+      // the voice resolver below reads the same row.
+      const profileForVoice = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
+
       // Open delivery handles early — needed to resolve voice mode
       // (`canDeliverVoice` reflects which active sessions implement
       // `sendVoice`). Side effect is benign: the streaming adapter just
@@ -391,6 +396,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         isPrivate: conv.isPrivate,
         maxInboundId,
         prevCursor: lastAssistant?.lastInboundMessageId ?? null,
+        ...(profileForVoice && {
+          streamOpts: {
+            chunkChars: profileForVoice.streamChunkChars,
+            allowEdits: profileForVoice.streamEdits,
+          },
+        }),
       });
 
       // Resolve per-turn voice mode BEFORE prompt assembly so the
@@ -398,7 +409,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // gates: adapter capability, TTS provider configured, conversation
       // override (NULL = follow profile default), profile mode, modality of
       // the most recent inbound. See design/voice.md.
-      const profileForVoice = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
       const voiceModeForTurn = resolveVoiceMode({
         adapterSupportsVoice: delivery.canDeliverVoice(),
         voiceConfigPresent: voiceBundle !== undefined,

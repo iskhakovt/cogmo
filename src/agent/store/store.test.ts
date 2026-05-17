@@ -109,6 +109,8 @@ describe("DrizzleAgentStore", () => {
         toolSet: ["memory_recall"],
         memoryScope: null,
         profileClass: null,
+        streamChunkChars: 4000,
+        streamEdits: true,
       });
     });
 

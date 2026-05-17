@@ -164,7 +164,7 @@ describe("createDeliveryRouter", () => {
     });
     await router.prepare(ctx({ runId: "run-abc" }));
 
-    expect(streaming.openStream).toHaveBeenCalledWith("addr-s1", "run-abc");
+    expect(streaming.openStream).toHaveBeenCalledWith("addr-s1", "run-abc", undefined);
   });
 
   it("skips sessions with unknown channel adapter", async () => {
