@@ -189,6 +189,7 @@ describe("MCP pipeline", () => {
         content:
           "Please call the echotest echo tool with the message 'PIPELINE_OK' and reply with the result.",
         platformTs: new Date(),
+        source: "user",
       })
       .returning({ id: inboundMessages.id });
     if (!inbound) throw new Error("inbound insert returned no row");

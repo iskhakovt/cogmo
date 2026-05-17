@@ -5,15 +5,40 @@ import {
   index,
   integer,
   jsonb,
+  pgEnum,
   pgTable,
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 import { conversations, profiles, users } from "../../agent/store/schema.js";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { InboundContentSchema } from "../content.js";
+
+/**
+ * `channel_sessions.status` records reachability — whether we can deliver
+ * to the user on this channel right now. See design/transport/sessions.md.
+ */
+export const channelSessionStatus = pgEnum("channel_session_status", ["active", "closed"]);
+export type ChannelSessionStatus = (typeof channelSessionStatus.enumValues)[number];
+
+/**
+ * `channel_sessions.receive` — which responses this session gets.
+ * `routed` is normal source/lastInbound routing; `all` is Web-UI-style
+ * "watch everything" (private only); `none` is input-only (muted).
+ */
+export const channelSessionReceive = pgEnum("channel_session_receive", ["none", "routed", "all"]);
+export type ChannelSessionReceive = (typeof channelSessionReceive.enumValues)[number];
+
+/**
+ * `inbound_messages.source` — `user` for platform-delivered messages
+ * (originating session FK populated), `scheduled` for synthetic inbounds
+ * with no originating session. A check constraint enforces the link.
+ */
+export const inboundMessageSource = pgEnum("inbound_message_source", ["user", "scheduled"]);
+export type InboundMessageSource = (typeof inboundMessageSource.enumValues)[number];
 
 export const channels = pgTable("channels", {
   id: pk(),
@@ -46,8 +71,8 @@ export const channelSessions = pgTable(
     conversationId: uuid("conversation_id")
       .notNull()
       .references(() => conversations.id),
-    status: text("status").notNull(), // 'active' | 'closed'
-    receive: text("receive").notNull(), // 'none' | 'routed' | 'all'
+    status: channelSessionStatus("status").notNull(),
+    receive: channelSessionReceive("receive").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }), // NULL = never expires
     createdAt: ts(),
   },
@@ -59,18 +84,41 @@ export const channelSessions = pgTable(
   ],
 );
 
-export const inboundMessages = pgTable("inbound_messages", {
-  id: pk(),
-  channelSessionId: uuid("channel_session_id")
-    .notNull()
-    .references(() => channelSessions.id),
-  conversationId: uuid("conversation_id")
-    .notNull()
-    .references(() => conversations.id), // denormalized for query performance
-  content: jsonbZod("content", InboundContentSchema).notNull(),
-  platformTs: timestamp("platform_ts", { withTimezone: true }).notNull(), // when the user sent it
-  createdAt: ts(),
-});
+export const inboundMessages = pgTable(
+  "inbound_messages",
+  {
+    id: pk(),
+    // Nullable: `source='scheduled'` rows have no originating session.
+    // The check constraint below ties nullability to `source`.
+    channelSessionId: uuid("channel_session_id").references(() => channelSessions.id),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id), // denormalized for query performance
+    content: jsonbZod("content", InboundContentSchema).notNull(),
+    platformTs: timestamp("platform_ts", { withTimezone: true }).notNull(), // when the user sent it
+    source: inboundMessageSource("source").notNull(),
+    /**
+     * Idempotency key for scheduled fires: `${taskId}:${scheduledFor}` —
+     * matches the Inngest event-bus dedup key on the ticker's fan-out.
+     * The fire-handler pre-checks this on every dispatch so a retry that
+     * lands after a successful commit (worker died between tx commit and
+     * Inngest ack) reuses the existing row instead of rotating again.
+     * NULL for `source='user'`; the check constraint enforces the link.
+     */
+    scheduledFireKey: text("scheduled_fire_key"),
+    createdAt: ts(),
+  },
+  (t) => [
+    uniqueIndex("uq_inbound_scheduled_fire_key")
+      .on(t.scheduledFireKey)
+      .where(sql`scheduled_fire_key IS NOT NULL`),
+    check(
+      "chk_inbound_source_session",
+      sql`(${t.source} = 'user' AND ${t.channelSessionId} IS NOT NULL AND ${t.scheduledFireKey} IS NULL)
+        OR (${t.source} = 'scheduled' AND ${t.channelSessionId} IS NULL AND ${t.scheduledFireKey} IS NOT NULL)`,
+    ),
+  ],
+);
 
 /**
  * Per-chat default profile. Keyed on `(channel_id, platform_address)` —

@@ -1,6 +1,6 @@
 {
-  "id": "4e698c2b-426e-4e36-94b9-5907fcfe7e05",
-  "prevId": "146b8ceb-2024-44ce-8b86-3854b717d945",
+  "id": "49f43cd3-78ad-4413-afaf-ddbd38c51900",
+  "prevId": "4e698c2b-426e-4e36-94b9-5907fcfe7e05",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1346,6 +1346,20 @@
           "notNull": true,
           "default": "'auto'"
         },
+        "stream_chunk_chars": {
+          "name": "stream_chunk_chars",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 4000
+        },
+        "stream_edits": {
+          "name": "stream_edits",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
         "tool_set": {
           "name": "tool_set",
           "type": "jsonb",
@@ -1402,7 +1416,12 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_profiles_stream_chunk_chars": {
+          "name": "chk_profiles_stream_chunk_chars",
+          "value": "\"profiles\".\"stream_chunk_chars\" >= 100 AND \"profiles\".\"stream_chunk_chars\" <= 4000"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.scheduled_tasks": {

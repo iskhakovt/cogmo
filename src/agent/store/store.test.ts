@@ -1082,6 +1082,63 @@ describe("DrizzleAgentStore", () => {
     });
   });
 
+  describe("findMostRecentConversationForUserProfile", () => {
+    it("returns the latest private conversation with its last-message timestamp", async () => {
+      const { userId, profileId, stamp } = await seedConversation();
+      // Second conversation for the same user+profile, created later
+      // (UUIDv7 = time-ordered) so this is the "most recent" one.
+      const newer = (
+        await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+      ).id;
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId: newer,
+          role: "user",
+          content: "hi",
+          lastInboundMessageId: "019d0000-0000-7000-8000-00000000abcd",
+          ...stamp,
+        }),
+      );
+
+      const result = await tx((trx) =>
+        store.findMostRecentConversationForUserProfile(trx, userId, profileId),
+      );
+      expect(result?.id).toBe(newer);
+      expect(result?.lastMessageAt).toBeInstanceOf(Date);
+    });
+
+    it("returns lastMessageAt: null when the latest conversation has no messages yet", async () => {
+      const { userId, profileId, conversationId } = await seedConversation();
+
+      const result = await tx((trx) =>
+        store.findMostRecentConversationForUserProfile(trx, userId, profileId),
+      );
+      expect(result?.id).toBe(conversationId);
+      expect(result?.lastMessageAt).toBeNull();
+    });
+
+    it("returns undefined when the user has no private conversation on this profile", async () => {
+      const userId = await seedUser();
+      const profileId = await seedProfile();
+
+      const result = await tx((trx) =>
+        store.findMostRecentConversationForUserProfile(trx, userId, profileId),
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it("ignores non-private (group) conversations", async () => {
+      const userId = await seedUser();
+      const profileId = await seedProfile();
+      await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: false }));
+
+      const result = await tx((trx) =>
+        store.findMostRecentConversationForUserProfile(trx, userId, profileId),
+      );
+      expect(result).toBeUndefined();
+    });
+  });
+
   describe("providers", () => {
     async function seedProvider(name = "test-provider") {
       const { id: secretId } = await tx((trx) =>

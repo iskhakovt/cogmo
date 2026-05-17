@@ -17,7 +17,12 @@ The orchestrator emits `response/ready` after persisting the assistant message. 
 
 ## Strategies
 
-Which channel session(s) receive the response. All strategies filter to active sessions only (status = 'active', not expired).
+Which channel session(s) receive the response. `RoutingContext.kind` selects the primary set:
+
+- `"reply"` — source routing: every session that contributed an inbound in this turn's range. Default for user-authored turns.
+- `"broadcast"` — every reachable session on the conversation. Used when the turn was triggered by a scheduled fire — the synthetic inbound has no originating session to source-route against, so delivery falls back to "wherever this conversation is reachable right now."
+
+All strategies filter to active sessions (`status = 'active'`, not expired). Both modes still apply the `receive: 'all'` overlay for private conversations, so Web UI tabs watching the conversation always get the response.
 
 ```typescript
 type RoutingStrategy = "all" | { source?: boolean; lastInbound?: boolean };
@@ -33,7 +38,7 @@ Flags compose — `{ source: true, lastInbound: true }` delivers to the union (d
 
 Default to `{ source: true }`. Hardcoded for v0 — move to a config table when per-org or per-user selection is needed.
 
-**Non-private conversations (`isPrivate: false`) always use `source` routing regardless of config.** Group responses must stay in the group thread that triggered them — routing to `lastInbound` or `all` would leak group context into private chats. Non-private conversations cannot be aliased, resumed, or viewed in the Web UI — they are scoped to their platform thread.
+**Non-private conversations (`isPrivate: false`) always use `source` routing regardless of config.** Group responses must stay in the group thread that triggered them — routing to `lastInbound` or `all` would leak group context into private chats. `kind: 'broadcast'` is rejected on non-private conversations for the same reason. Non-private conversations cannot be aliased, resumed, or viewed in the Web UI — they are scoped to their platform thread.
 
 ### Web UI
 

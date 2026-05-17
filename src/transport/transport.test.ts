@@ -356,6 +356,7 @@ describe("createTransport", () => {
         conversationId: "conv-1",
         content: "hello",
         platformTs: new Date("2026-01-01"),
+        source: "user",
       });
       expect(mockEvent.create).toHaveBeenCalledWith({
         conversationId: "conv-1",

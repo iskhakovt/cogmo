@@ -881,6 +881,7 @@ export function createTransport(deps: {
           conversationId: session.conversationId,
           content,
           platformTs,
+          source: "user",
         });
         return { conversationId: session.conversationId, inboundId: inbound.id };
       });

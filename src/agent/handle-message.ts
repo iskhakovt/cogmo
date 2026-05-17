@@ -287,6 +287,23 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // Safe — guarded by length check above
       const maxInboundId = inboundMessages.at(-1)?.id ?? "";
 
+      // A batch is either all-user or all-scheduled — never mixed. The
+      // debounce stages user inbounds; scheduled fires emit their own
+      // `inbound/arrived` independently after persisting a single
+      // synthetic row, so the two paths can't legitimately interleave
+      // into one turn. A mixed batch would mean a fire landed in a
+      // user-batched turn (or vice versa) and the routing kind below
+      // would silently pick the wrong path — fail fast instead.
+      const scheduledCount = inboundMessages.filter((m) => m.source === "scheduled").length;
+      if (scheduledCount > 0 && scheduledCount !== inboundMessages.length) {
+        throw new Error(
+          `mixed-source inbound batch in conversation ${conversationId}: ${scheduledCount}/${inboundMessages.length} scheduled`,
+        );
+      }
+      // Scheduled inbounds have no originating session for source
+      // routing — broadcast to every reachable session instead.
+      const routingKind: "reply" | "broadcast" = scheduledCount > 0 ? "broadcast" : "reply";
+
       // Voice bundle resolved once per turn (one indexed singleton read +
       // two secret lookups; cached by content hash inside the resolver so
       // steady-state cost is negligible). Re-runs on replay — providers
@@ -396,6 +413,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         isPrivate: conv.isPrivate,
         maxInboundId,
         prevCursor: lastAssistant?.lastInboundMessageId ?? null,
+        kind: routingKind,
         ...(profileForVoice && {
           streamOpts: {
             chunkChars: profileForVoice.streamChunkChars,

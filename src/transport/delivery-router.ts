@@ -18,6 +18,13 @@ import {
 
 /**
  * Routing context for target resolution — passed from the orchestrator.
+ *
+ * `kind` selects how primary target sessions are picked:
+ * `"reply"` uses source routing (sessions that contributed inbounds in
+ * this turn's range); `"broadcast"` falls back to every reachable session
+ * on the conversation, used for scheduled-fire turns where the synthetic
+ * inbound has no originating session. Both modes apply the `receive:"all"`
+ * overlay for private conversations.
  */
 export interface RoutingContext {
   conversationId: string;
@@ -27,6 +34,7 @@ export interface RoutingContext {
   maxInboundId: string;
   /** Previous assistant message's lastInboundMessageId (null for first response). */
   prevCursor: string | null;
+  kind: "reply" | "broadcast";
   /**
    * Profile-derived streaming presentation knobs forwarded to every active
    * `StreamingAdapter.openStream` call for this turn. Optional only because
@@ -116,22 +124,42 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
 
   return {
     async prepare(ctx: RoutingContext): Promise<DeliveryHandle> {
-      // Source routing — find sessions that contributed inbound messages for this turn
-      const sourceSessions = await runInTx((tx) =>
-        transportStore.getSourceSessions(tx, {
-          conversationId: ctx.conversationId,
-          prevCursor: ctx.prevCursor,
-          maxInboundId: ctx.maxInboundId,
-        }),
-      );
+      if (ctx.kind === "broadcast" && !ctx.isPrivate) {
+        // Broadcast routing fans out to every reachable session on the
+        // conversation. On a group thread that would leak proactive
+        // context into unrelated chats. Scheduled fires only target
+        // private conversations; any other broadcast caller is a bug.
+        throw new Error("broadcast routing is not allowed on non-private conversations");
+      }
 
-      // Receive-all sessions — private conversations only
-      const receiveAllSessions = ctx.isPrivate
-        ? await runInTx((tx) => transportStore.getReceiveAllSessions(tx, ctx.conversationId))
-        : [];
+      // Composed read: primary set + receive-all overlay share one tx so
+      // routing always reads through a single connection. Under READ
+      // COMMITTED each statement still sees its own snapshot — true
+      // atomicity would require REPEATABLE READ.
+      //
+      // Concrete race window: a Web UI tab mid-disconnect can appear in
+      // the primary set but be expired by the time the receive-all read
+      // runs (or vice versa). Either case produces a stale target whose
+      // send hits per-target error handling and is logged + dropped
+      // without affecting other deliveries.
+      const { primarySessions, receiveAllSessions } = await runInTx(async (tx) => {
+        const primary =
+          ctx.kind === "broadcast"
+            ? await transportStore.getActiveSessionsForConversation(tx, ctx.conversationId)
+            : await transportStore.getSourceSessions(tx, {
+                conversationId: ctx.conversationId,
+                prevCursor: ctx.prevCursor,
+                maxInboundId: ctx.maxInboundId,
+              });
+        // Receive-all overlay only applies to private conversations.
+        const receiveAll = ctx.isPrivate
+          ? await transportStore.getReceiveAllSessions(tx, ctx.conversationId)
+          : [];
+        return { primarySessions: primary, receiveAllSessions: receiveAll };
+      });
 
       // Merge + dedup by session ID
-      const sessionMap = new Map(sourceSessions.map((s) => [s.id, s]));
+      const sessionMap = new Map(primarySessions.map((s) => [s.id, s]));
       for (const s of receiveAllSessions) {
         sessionMap.set(s.id, s);
       }
