@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
+import { expectDefined } from "../test/assertions.js";
 import { coreMemoryRead } from "./core-memory-tools.js";
 import { listFiles, readFile } from "./file-tools.js";
 import { memoryRecall, memoryReflect, memoryTools } from "./memory-tools.js";
@@ -197,8 +198,8 @@ describe("ToolSpec.sideEffectful", () => {
     ];
 
     for (const { name, spec } of readOnlyTools) {
-      expect(spec, `${name} should be defined`).toBeDefined();
-      expect(spec?.sideEffectful, `${name} must declare sideEffectful: false`).toBe(false);
+      const resolved = expectDefined(spec, name);
+      expect(resolved.sideEffectful, `${name} must declare sideEffectful: false`).toBe(false);
     }
   });
 });

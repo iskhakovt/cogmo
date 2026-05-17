@@ -150,11 +150,17 @@ The side-effect gate requires every `ToolSpec` to declare `sideEffectful: boolea
 
 **Default:** `true` (fail-safe). A read-only tool is the surprising case, not the default; a missing flag should never cause Class D to wrongly trip on a tool that genuinely makes progress. Tools opt in to `sideEffectful: false`:
 
-- `read_file`, `list_files`, `current_time`
-- `web_search`, `fetch_url`, `web_answer`
-- `memory_recall`
+- File reads: `read_file`, `list_files`
+- Web reads: `web_search`, `web_answer`, `fetch_url`
+- Memory reads: `memory_recall`, `memory_reflect`, `core_memory_read`
+- Scheduling reads: `list_tasks`
+- Clock: `get_current_time`
 
-Adding the field is a one-shot migration: extend `ToolSpec` in `src/agent/tools.ts`, default to `true` at the spec level, mark the read-only set above as `false`. Without this migration, the side-effect gate defaults to "always trip" and Class D never fires — so the migration is a precondition for shipping Class D detection, not an optional follow-up.
+`memory_reflect` is read-only despite being billable and `durable: true` — its synthesis writes nothing, and a stuck loop calling it with identical args is exactly what Class D should catch. `core_memory_read` reads agent-owned state (blocks the agent itself writes via `core_memory_update`); identical repeat calls also make no progress and should trip the gate.
+
+**Field shape.** `sideEffectful?: boolean` on `ToolSpec`, with consumers reading `spec.sideEffectful ?? true`. Optional-plus-consumer-default matches the existing `durable?` / `parallelSafe?` convention on the same interface and keeps the migration trivial — third-party / plugin tools added later inherit the fail-safe default without touching their spec.
+
+Adding the field is a one-shot migration: extend `ToolSpec` in `src/agent/tools.ts`, default to `true` at the consumer level, mark the read-only set above as `false`. Without this migration, the side-effect gate defaults to "always trip" and Class D never fires — so the migration is a precondition for shipping Class D detection, not an optional follow-up.
 
 ## Telemetry `[proposed]`
 
