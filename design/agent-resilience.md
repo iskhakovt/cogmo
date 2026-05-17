@@ -29,9 +29,13 @@ A turn ends in one of three states. Each is a durable signal downstream consumer
 
 `errored` is a circuit breaker for invariant violations and persistent infrastructure failure. `degraded` is a soft recovery for "the model wouldn't cooperate." Class C never escalates to `errored` — repeated Class C exhaustion on the same conversation produces repeated `degraded` events, each carrying its subtype tag for telemetry.
 
-## Class C: in-loop repair `[proposed]`
+## Class C: model misbehavior `[proposed]`
 
-### Classifier
+Class C has two handling surfaces. Most callsites are inside the agent loop, where a per-turn repair budget and a degraded-reply off-ramp apply. A few callsites — typed structured-output calls in background jobs, summarization — live outside the loop and use single-call retry-with-feedback instead, with no shared budget. The repair *semantics* (feedback-injection, JSON repair, continuation prompts) are the same; the *budgeting* and *off-ramp* differ. The Pydantic AI split between `tool_retries` (inside the agent loop) and `output_retries` (per-call validation) is the closest external precedent — Instructor's per-call `max_retries` covers the non-loop pattern.
+
+### In-loop repair
+
+#### Classifier
 
 A turn classifier runs at two points inside `runStreamingAgentLoop`:
 
@@ -47,23 +51,22 @@ type TurnOutcome =
   | { kind: "degrade"; reason: string };
 ```
 
-### Repair budget
+#### Repair budget
 
 One repair attempt per turn, shared across all Class C subtypes. The counter is on the turn boundary (one Inngest invocation of `handle-message`), not per iteration of the agent loop. A turn that hits an empty-content failure, repairs, then hits a JSON parse failure on the repaired turn degrades — it does not get a second repair.
 
 The repair runs inside the same Inngest invocation. The outer `retries: 2` remains exclusively for Class A. A Class A retry that succeeds gets a fresh Class C budget because each Inngest invocation is logically a new turn from the user's perspective.
 
-### Per-subtype repair
+#### Per-subtype repair
 
 | Subtype | Repair |
 |-|-|
 | Empty `content` + `end_turn` | Append a user turn with a continuation nudge ("Please complete your response."). Per Anthropic's [stop-reason guidance](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons), naive same-prompt retry does not help — the continuation prompt is the documented recovery. |
 | Truncated / invalid JSON in tool-arg stream | Run `jsonrepair` on the buffered chunks before declaring failure. If repair produces valid JSON, validate against Zod and proceed. If repair fails, escalate to feedback-injection. |
 | Tool-arg validation failure (Zod fails after coercion + repair) | Append an `is_error: true` `tool_result` with the validation message — the same channel handler exceptions already use (`loop.ts:265-270`) — and let the LLM see the error in its next iteration. |
-| `chatTyped` structured-output schema failure | Append the validation error as a user turn, re-request with the same schema. |
-| Stream truncated mid-`tool_use` (`stop_reason: "max_tokens"` with partial JSON) | Replay non-streaming with the same params. Single-shot token budget often completes where the chunked stream did not. |
+| Stream truncated mid-`tool_use` (`stop_reason: "max_tokens"` with partial JSON) | Replay non-streaming with the same params. Single-shot token budget often completes where the chunked stream did not. If the replay itself hits a Class A failure, normal Class A handling applies (provider chain → Inngest `retries: 2`); the C budget is consumed regardless of replay outcome, since the failure was a Class C trigger. |
 
-### Degraded reply
+#### Degraded reply
 
 When the budget exhausts or the classifier returns `degrade`, the orchestrator posts a single user-visible assistant message:
 
@@ -75,9 +78,23 @@ The degraded reply is persisted as a normal assistant message (role `assistant`,
 
 - Successful intermediate iterations (tool_use + tool_result pairs whose handlers ran to completion, including their side effects) **are** persisted. Their tool calls already affected the world — file writes, memory retains, image generations — and the conversation transcript must reflect that.
 - The single iteration whose response triggered the degrade — empty content, malformed JSON, schema-invalid output — is **not** persisted. That assistant message would be useless in history and risks feeding the model its own broken output on the next turn.
+- **Synthetic user turns** injected by the repair flow (continuation prompts, validation-feedback messages) are **not** persisted. They're internal mechanics, not real user input — persisting them would confuse future-turn retrieval and the failure-reflector. This matches the existing ephemeral pattern for `validateHistory`-synthesized tool_results (`history-invariants.ts`) and the `[Previous conversation summary]` turn injected during compaction (`context.ts:234-237`).
 - The degraded reply is persisted as the final assistant message of the turn.
 
 The forensic record of *what the model produced before degrading* lives in the `agent.repair` / `agent.degrade` structured logs (see Telemetry below), not in `messages`. The `messages` table is the conversation transcript; structured logs are the failure audit.
+
+### Outside the agent loop
+
+`chatTyped` callsites in evolution background jobs — `drain-pending-memories.ts:194`, `extract-corrections.ts:79`, `extract-memories.ts:67`, `consolidate-rules.ts:121` — and untyped non-loop calls like the summarization step in `handle-message.ts:702` are still Class C surfaces, but they're not inside the agent loop and have no user to degrade to. They use **single-call retry-with-feedback** semantics:
+
+| Aspect | In-loop | Outside the loop |
+|-|-|-|
+| Budget | Per-turn, shared across subtypes (1) | Per-call, per-callsite (default 1; tunable) |
+| Repair channel | Append continuation / feedback turn to next iteration; replay non-streaming for stream truncation | Wrap the call in a single retry: parse → on `ZodError`, re-request with validation message appended as a user turn |
+| Exhaustion | Degraded reply to user, `conversation/degraded` event | Throw to caller; the Inngest step that owns the callsite uses its own retries + crash-recovery story. No `conversation/degraded` — there's no user-facing conversation in the failure path. |
+| Persistence | Synthetic feedback turn ephemeral (above) | Fully ephemeral — the entire call lives inside one Inngest step, no `messages` rows involved |
+
+The repair logic itself is shared. `chatTyped`'s implementation in `src/llm/chat-typed.ts` (or wherever it lives) grows a `repair: { jsonrepair: true, maxRetries: 1, onZodFailure: "feedback" }` option that both surfaces consume. The in-loop classifier invokes it with the same options; the in-loop budget interacts only with the classifier's outcome, not with `chatTyped`'s internal retry. Background jobs invoke `chatTyped` directly and get the same repair behavior without the loop-level wrapper.
 
 ## Class D: loop pathology `[proposed]`
 
@@ -91,6 +108,8 @@ hash(
 ```
 
 Arguments must be in the hash, not just names: three `read_file` calls against `a.txt`, `b.txt`, `c.txt` is legitimate exploration of read-only state, not a stuck loop. Name-only hashing would false-positive on that sequence.
+
+The inner list is **sorted** so a model that varies the emission order of parallel-safe tool calls between iterations — `[search, fetch]` then `[fetch, search]` with otherwise-identical args — still produces the same fingerprint. The fingerprint asks "did this iteration do the same work as the previous one?" — emission order isn't part of the work, so it shouldn't be part of the hash.
 
 If three consecutive iterations produce the same fingerprint AND none of those iterations' tool calls produced an observable side effect (file write, memory retain, API mutation — tracked by `ToolSpec.sideEffectful: boolean`), the loop trips:
 
@@ -122,9 +141,10 @@ Inngest function `handle-message`             (Class A retries: 2)
 
 Each layer handles one class. None of them double-handles another layer's class:
 
-- SDK adapters retry on HTTP-level transient codes only.
-- `FallbackLlmProvider` tries next provider on Class A; propagates Class B; treats Class C parse failures as **non-retriable** (no `status` field but explicitly tagged `ProviderProtocolError`) so they reach the in-loop classifier instead of burning the provider chain.
-- The in-loop classifier owns all Class C/D handling.
+- SDK adapters retry on HTTP-level transient codes only. **Class C parse failures (malformed JSON in the streamed `input_json_delta` accumulator) are wrapped at the throw site as `ProviderProtocolError`** before propagating. The wrap is essential — without it, the bare `SyntaxError` has no `status` field and `FallbackLlmProvider` would treat it as a transient network failure.
+- `FallbackLlmProvider` tries next provider on Class A; propagates everything else. Its `isRetriableProviderError` predicate stays binary (`true` = try next, `false` = propagate); the trick is an `instanceof ProviderProtocolError` guard placed before the `status == null → true` rule, so Class C escapes the chain without changing the predicate's two-way shape. This is the **only** Class C interaction with the provider layer — once propagated, the in-loop classifier owns the rest.
+- The in-loop classifier owns all Class C/D handling for callsites inside the agent loop.
+- Non-loop Class C callsites (evolution drains, summarization — see "Outside the agent loop" above) use single-call retry inside `chatTyped` / wrapper; they never reach the classifier.
 - Inngest's outer `retries: 2` retries Class A failures that escaped the provider chain (mid-stream socket reset after first event, etc.); cached durable steps replay; the streaming section re-runs.
 
 ## Out of scope / explicit non-goals `[proposed]`
@@ -141,8 +161,8 @@ Each layer handles one class. None of them double-handles another layer's class:
 ## Open questions `[proposed]`
 
 1. **Repair budget granularity.** Per-turn (current design) keeps the budget at the Inngest invocation boundary. Per-conversation would catch "this conversation keeps repairing" without an extra signal but risks letting one bad model burn budget across many turns. Default: per-turn.
-2. **Degraded turn persistence shape.** Today the design persists only the final degraded reply. A `repair_attempts JSONB` column on `messages` (or a sibling table) would let the failure-reflector see what the model originally produced. Defer until the reflector needs the input.
-3. **`conversation/degraded` status separation.** Keeping conversation `active` lets the user immediately retry. Introducing a `'degraded'` status would gate the next inbound on an acknowledgment, which is friction. Default: stay `active`.
+2. **Degraded turn persistence shape.** Today the design persists only the final degraded reply plus the successful intermediate iterations. A `repair_attempts JSONB` column on `messages` (or a sibling table) would let the failure-reflector query historically by SQL. In the interim the `agent.repair` / `agent.degrade` structured logs (see [Telemetry](#telemetry-proposed)) carry the same forensic data — the reflector can join logs to events by `runId` + `conversationId` without an extra column. Defer the column until SQL access is needed.
+3. **`conversation/degraded` status separation.** A separate `'degraded'` enum value wouldn't intrinsically gate anything — gating would come from a status check we'd have to add to `handle-message`'s entry guard (mirroring the existing `if (conv.status === "errored") return skipped` block). The real choice is what that gate should do: (a) auto-flip back to `active` on the next inbound (no behavioral change vs. the current design, just a different bookkeeping shape), or (b) require an explicit reset (friction, but lets the user acknowledge the failure before continuing). No major framework introduces a `degraded` conversation status — OpenAI Threads keep thread-level state binary with run-level status enums; Letta tracks per-step `stop_reason` not conversation-level health; CrewAI / AutoGen rely on event signals only. Default: stay `active` with the event signal, follow the industry pattern.
 4. **Repair telemetry as steering signal.** If specific subtypes recur for specific models, the evolution failure-reflector could propose a steering rule ("prefer Sonnet for `schedule_task`"). Out of scope here; lives in [evolution.md](evolution.md).
 
 ## Related docs `[confirmed]`
