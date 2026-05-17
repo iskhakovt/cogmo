@@ -2,23 +2,18 @@
 
 import { eq } from "drizzle-orm";
 import { connect } from "inngest/connect";
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from "vitest";
-import { conversations, messages, profiles } from "../agent/store/schema.js";
+import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { conversations, messages } from "../agent/store/schema.js";
 import { db } from "../db/index.js";
 import { bootstrap } from "../index.js";
-import { directOutbound } from "../inngest/events.js";
-import { hashToolSchema } from "../mcp/approval.js";
-import { mcpServers, mcpServerTools } from "../mcp/store/schema.js";
-import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
-import { createInlineMcpEchoRunner } from "./mcp-inline-server.js";
+import { channelSessions, inboundMessages } from "../transport/store/schema.js";
 
 /**
  * LLM-driven MCP pipeline integration test. Drives `handle-message`
- * end-to-end with an in-process MCP server reached via
- * `InMemoryTransport`, so the agent loop's MCP integration is exercised
- * against a real registry / pool / dispatcher pipeline without the
- * subprocess + readiness-probe + version-drift overhead of
- * `server-everything`.
+ * end-to-end through the production registry / pool / dispatcher
+ * pipeline and the production `HostRunner` — the test's MCP server runs
+ * in `globalSetup` over Streamable HTTP, so every worker can reach it
+ * regardless of which one Inngest routes the event to.
  *
  * What this test catches that the registry-level tests don't:
  * 1. `resolveTools` output is merged into the agent loop's tool list
@@ -30,114 +25,82 @@ import { createInlineMcpEchoRunner } from "./mcp-inline-server.js";
  *    `tool_result` blocks and the LLM's follow-up text references the
  *    echoed payload.
  *
- * Fixture stability: the inline server's tool description and schema
- * live inside this test file (frozen with the test, not with
+ * Assertion strategy: poll the persisted `messages` table for the final
+ * assistant turn (instead of attaching an Inngest function to capture
+ * `directOutbound`). Reason: `inngest.connect` consolidates function
+ * registrations under one app id ("cogmo"). When this test runs in
+ * parallel with `pipeline.integration.test.ts` — which also calls
+ * `connect` with its own outbound-capture function on the same app id —
+ * one fork's capture function shadows the other, and the event never
+ * reaches this fork's buffer. Polling `messages` reads from the shared
+ * Postgres so the assertion is fork-routing-independent. The outbound
+ * event itself is covered by `pipeline.integration.test.ts`'s
+ * `processes inbound/arrived end-to-end` case.
+ *
+ * Fixture stability: the test's tool schema lives inside
+ * `src/test/mcp-http-echo-server.ts` (frozen with the test, not with
  * `node_modules`). Re-record only when the test author edits the prompt
  * structure, the model, or the test's MCP tool surface.
  */
 
 let inngestBaseUrl: string;
 let connection: Awaited<ReturnType<typeof connect>>;
-let mcpRunnerClose: () => Promise<void>;
 let bootstrapped: Awaited<ReturnType<typeof bootstrap>>;
-
-interface CapturedOutbound {
-  platformAddress: string;
-  content: string;
-}
-const capturedOutbound: CapturedOutbound[] = [];
+let mcpServerId: string | undefined;
 
 const MCP_SERVER_NAME = "echotest";
 
 beforeAll(async () => {
   inngestBaseUrl = inject("inngestBaseUrl");
 
-  // In-process MCP server reached via InMemoryTransport — no subprocess,
-  // no readiness probe. The runner is injected through the bootstrap
-  // override and supersedes the production HostRunner. Held outside the
-  // bootstrap call so afterAll can tear it down independently.
-  const { runner, close } = await createInlineMcpEchoRunner();
-  mcpRunnerClose = close;
-
   const { AnthropicProvider } = await import("../llm/anthropic.js");
   const anthropicKey =
     process.env.RECORD === "1" ? (process.env.ANTHROPIC_API_KEY ?? "test-key") : "test-key";
   const provider = new AnthropicProvider(anthropicKey, inject("llmockBaseUrl"));
 
-  bootstrapped = await bootstrap({
-    providerOverride: provider,
-    mcpRunnerOverride: runner,
-  });
+  bootstrapped = await bootstrap({ providerOverride: provider });
   const { inngest, functions } = bootstrapped;
 
-  const captureOutbound = inngest.createFunction(
-    { id: "test-mcp-capture-outbound", triggers: [directOutbound] },
-    async ({ event }) => {
-      capturedOutbound.push({
-        platformAddress: event.data.platformAddress,
-        content: event.data.content,
-      });
-      return { captured: true };
-    },
-  );
-
-  connection = await connect({
-    apps: [{ client: inngest, functions: [...functions, captureOutbound] }],
-  });
+  // Connect this worker so production functions (handle-message, the
+  // direct-channel adapter, etc.) are reachable from the gateway.
+  // No test capture function — see file-header note on cross-fork
+  // routing — the assertion polls `messages` directly.
+  connection = await connect({ apps: [{ client: inngest, functions }] });
 });
 
 afterAll(async () => {
   if (connection) await connection.close();
-  // Stop the registry before tearing down the inline MCP server so the
-  // client-side pool closes its connections cleanly (matches the pattern
-  // in bootstrap-daytona.integration.test.ts).
-  if (bootstrapped) await bootstrapped.mcpRegistry.stop();
-  if (mcpRunnerClose) await mcpRunnerClose();
-});
-
-beforeEach(async () => {
-  capturedOutbound.length = 0;
+  // Stop the registry before the test orchestrator tears down the shared
+  // MCP HTTP server so the client-side pool closes its connections cleanly
+  // (matches the pattern in bootstrap-daytona.integration.test.ts).
+  if (bootstrapped) {
+    if (mcpServerId) await bootstrapped.mcpRegistry.removeServer(mcpServerId);
+    await bootstrapped.mcpRegistry.stop();
+  }
 });
 
 /**
- * Seed an MCP server row + approved `echo` tool pin so the registry's
- * `resolveTools` surfaces `mcp__echotest__echo` for the active profile
- * (whose `toolSet` is `["*"]` per the default seed, matching every glob).
- * `config.transport` is `"stdio"` so it satisfies `McpServerConfigSchema`;
- * the inline runner ignores the config field entirely and returns the
- * pre-wired in-memory connection on spawn.
+ * Drive the registry's public API end-to-end: register the server,
+ * approve it (which spawns via the production `HostRunner` over
+ * Streamable HTTP, calls `listTools` against the shared echo server,
+ * and pins the schema), then approve the resulting `echo` pin so
+ * `resolveTools` will surface `mcp__echotest__echo` to the agent loop.
+ *
+ * Going through the API instead of raw `db.insert` keeps the echo
+ * server's tool description / schema in one place — drift between the
+ * test's pin and the live tool can't slip past, because the pin comes
+ * from `listTools` against the same server the dispatcher calls.
  */
-async function seedEchoServer(): Promise<void> {
-  const description = "Echo the input string back unchanged. Use this to verify connectivity.";
-  const inputSchema = {
-    type: "object",
-    properties: {
-      message: { type: "string", description: "The message to echo back" },
-    },
-    required: ["message"],
-  };
-
-  await db.delete(mcpServers).where(eq(mcpServers.name, MCP_SERVER_NAME));
-
-  const [server] = await db
-    .insert(mcpServers)
-    .values({
-      name: MCP_SERVER_NAME,
-      config: { transport: "stdio", command: "/bin/true", args: [], env: {} },
-      enabled: true,
-      approvalStatus: "approved",
-    })
-    .returning({ id: mcpServers.id });
-  if (!server) throw new Error("seed: mcp_servers insert returned no row");
-
-  const snapshot = { description, inputSchema };
-  await db.insert(mcpServerTools).values({
-    serverId: server.id,
-    toolName: "echo",
-    schemaHash: hashToolSchema(snapshot),
-    schemaSnapshot: snapshot,
-    approvalStatus: "approved",
+async function seedEchoServer(): Promise<string> {
+  const { mcpRegistry } = bootstrapped;
+  const server = await mcpRegistry.addServer({
+    name: MCP_SERVER_NAME,
+    config: { transport: "http", url: inject("mcpEchoUrl"), headers: {} },
+    enabled: true,
   });
+  await mcpRegistry.approveServer(server.id);
+  await mcpRegistry.approveTool(server.id, "echo");
+  return server.id;
 }
 
 async function sendEvent(name: string, data: Record<string, unknown>) {
@@ -153,32 +116,47 @@ async function sendEvent(name: string, data: Record<string, unknown>) {
   return res.json();
 }
 
-async function waitForOutbound(
-  predicate: (e: CapturedOutbound) => boolean,
-  timeoutMs = 30_000,
-): Promise<CapturedOutbound> {
+interface PersistedMessage {
+  role: string;
+  content: unknown;
+}
+
+async function waitForFinalAssistantMessage(
+  conversationId: string,
+  predicate: (msg: PersistedMessage) => boolean,
+  timeoutMs: number,
+): Promise<PersistedMessage> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const match = capturedOutbound.find(predicate);
-    if (match) return match;
+    const rows = await db
+      .select()
+      .from(messages)
+      .where(eq(messages.conversationId, conversationId));
+    const lastAssistant = [...rows].reverse().find((m) => m.role === "assistant");
+    if (lastAssistant && predicate(lastAssistant)) return lastAssistant;
     await new Promise((r) => setTimeout(r, 500));
   }
-  throw new Error("Timed out waiting for directOutbound");
+  throw new Error("Timed out waiting for final assistant message");
+}
+
+function flattenText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return (content as { type?: string; text?: string }[])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text ?? "")
+    .join("");
 }
 
 describe("MCP pipeline", () => {
   it("LLM invokes an MCP tool end-to-end and the echoed value lands in the reply", async () => {
     const defaultUserId = inject("defaultUserId");
+    const { transportStore, runInTx, profile } = bootstrapped;
 
-    await seedEchoServer();
+    mcpServerId = await seedEchoServer();
 
-    const [profile] = await db.select({ id: profiles.id }).from(profiles).limit(1);
-    const [channel] = await db
-      .select({ id: channels.id })
-      .from(channels)
-      .where(eq(channels.type, "direct"))
-      .limit(1);
-    if (!profile || !channel) throw new Error("seed incomplete");
+    const channel = await runInTx((tx) => transportStore.getChannelByType(tx, "direct"));
+    if (!channel) throw new Error("seed incomplete: no direct channel");
 
     const platformAddress = `mcp-test-${Date.now()}`;
     const [conv] = await db
@@ -221,12 +199,16 @@ describe("MCP pipeline", () => {
     });
 
     const timeoutMs = process.env.RECORD === "1" ? 60_000 : 30_000;
-    const outbound = await waitForOutbound((e) => e.platformAddress === platformAddress, timeoutMs);
+    const finalMsg = await waitForFinalAssistantMessage(
+      conv.id,
+      (m) => /PIPELINE_OK/.test(flattenText(m.content)),
+      timeoutMs,
+    );
 
     // Sanity check that a tool_use / tool_result pair landed in the
     // persisted conversation — proves the MCP dispatch path executed
     // (the registry resolved `mcp__echotest__echo`, the agent loop
-    // dispatched it, the in-memory MCP server replied) rather than the
+    // dispatched it, the in-process MCP server replied) rather than the
     // LLM merely hallucinating the echoed payload back into its reply.
     const allMsgs = await db.select().from(messages).where(eq(messages.conversationId, conv.id));
     const hasToolCall = allMsgs.some(
@@ -240,6 +222,6 @@ describe("MCP pipeline", () => {
     expect(hasToolCall).toBe(true);
     expect(hasToolResult).toBe(true);
 
-    expect(outbound.content).toMatch(/PIPELINE_OK/);
+    expect(flattenText(finalMsg.content)).toMatch(/PIPELINE_OK/);
   });
 });

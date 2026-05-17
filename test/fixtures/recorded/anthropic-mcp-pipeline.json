@@ -1,5 +1,5 @@
 {
-  "_comment": "MCP pipeline integration test fixtures. The 'aa-' prefix forces alphabetic load order ahead of anthropic-image-gen.json, whose turn-1 fixture matches on {turnIndex, hasToolResult} only and would otherwise win against this test's tool_result turn. Our turn-1 fixture's toolName filter scopes us to requests where mcp__echotest__echo is registered, so we never accidentally win against the image-gen test (whose tools list doesn't include it).",
+  "_comment": "MCP pipeline integration test fixtures. Turn-1's userMessage filter pins this fixture to requests whose latest role=user message is this test's prompt — tool_result blocks land as role=tool in the OpenAI shape, so the original user prompt survives as the last role=user message. The toolName filter is a belt-and-braces guard — mcp__echotest__echo only exists in this test's tools list.",
   "fixtures": [
     {
       "match": {
@@ -18,6 +18,7 @@
     },
     {
       "match": {
+        "userMessage": "Please call the echotest echo tool with the message 'PIPELINE_OK' and reply with the result.",
         "turnIndex": 1,
         "hasToolResult": true,
         "toolName": "mcp__echotest__echo"

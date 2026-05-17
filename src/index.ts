@@ -54,7 +54,7 @@ import {
   type LlmProviderResolver,
 } from "./llm/resolver.js";
 import { logger } from "./logger.js";
-import { HostRunner as McpHostRunner, type Runner as McpRunner } from "./mcp/client/runner.js";
+import { HostRunner as McpHostRunner } from "./mcp/client/runner.js";
 import { McpRegistryImpl } from "./mcp/registry.js";
 import { DrizzleMcpStore } from "./mcp/store/index.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
@@ -88,10 +88,6 @@ import type { SttProvider, TtsProvider } from "./voice/types.js";
  * - `sandboxClientOverride` → read by `bootstrapSandbox` (skips env-driven
  *   backend selection so tests can wire `FakeDaytonaSandboxClient`
  *   without hitting Daytona Cloud or a self-hosted compose).
- * - `mcpRunnerOverride` → read by `bootstrapRuntime` (swaps the production
- *   `HostRunner` for a test runner backed by `InMemoryTransport` so the
- *   pipeline-MCP integration test can drive the agent loop against an
- *   in-process MCP server without spawning a subprocess).
  *
  * `bootstrapSkillRunner` takes no options today. Adding a new field?
  * Add it to the relevant stage's signature and update this map so the
@@ -131,14 +127,6 @@ export interface BootstrapOptions {
    * backend identity).
    */
   sandboxClientOverride?: SandboxClient;
-  /**
-   * Inject a custom MCP `Runner` — used by the pipeline-MCP integration
-   * test to back the registry with an `InMemoryTransport` pair against
-   * an in-process MCP server, avoiding subprocess spawn + readiness
-   * probes for an LLM-driven recorded test. Production wiring leaves
-   * this undefined so `new HostRunner()` is used.
-   */
-  mcpRunnerOverride?: McpRunner;
 }
 
 /**
@@ -813,7 +801,7 @@ export async function bootstrapRuntime(
     store: core.mcpStore,
     secrets: core.secretsStore,
     runInTx: core.runInTx,
-    runner: opts.mcpRunnerOverride ?? new McpHostRunner(),
+    runner: new McpHostRunner(),
     callTimeoutMs: env.MCP_CALL_TIMEOUT_MS,
     idleEvictionMs: env.MCP_IDLE_EVICTION_MS,
     evictionIntervalMs: env.MCP_EVICTION_INTERVAL_MS,
