@@ -1,6 +1,6 @@
 {
-  "id": "dedb8ad4-ddf3-41a5-83ed-82c84178df25",
-  "prevId": "3b92f787-4b60-4321-99f6-612027f5ab48",
+  "id": "146b8ceb-2024-44ce-8b86-3854b717d945",
+  "prevId": "dedb8ad4-ddf3-41a5-83ed-82c84178df25",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1767,6 +1767,14 @@
         "chk_voice_config_singleton": {
           "name": "chk_voice_config_singleton",
           "value": "singleton = true"
+        },
+        "chk_voice_config_tts_base_url": {
+          "name": "chk_voice_config_tts_base_url",
+          "value": "(\"voice_config\".\"tts_provider\" <> 'openai_compatible' OR \"voice_config\".\"tts_base_url\" IS NOT NULL)\n        AND (\"voice_config\".\"tts_provider\" = 'openai_compatible' OR \"voice_config\".\"tts_base_url\" IS NULL)"
+        },
+        "chk_voice_config_stt_base_url": {
+          "name": "chk_voice_config_stt_base_url",
+          "value": "(\"voice_config\".\"stt_provider\" <> 'openai_compatible' OR \"voice_config\".\"stt_base_url\" IS NOT NULL)\n        AND (\"voice_config\".\"stt_provider\" = 'openai_compatible' OR \"voice_config\".\"stt_base_url\" IS NULL)"
         }
       },
       "isRLSEnabled": false

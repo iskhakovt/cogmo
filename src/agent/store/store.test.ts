@@ -2429,7 +2429,7 @@ describe("DrizzleAgentStore", () => {
         store.upsertVoiceConfig(trx, {
           ttsSecretId: secretB,
           sttSecretId: secretB,
-          ttsProvider: "openai",
+          ttsProvider: "openai_compatible",
           ttsModel: "gpt-4o-mini-tts",
           ttsVoice: "nova",
           ttsBaseUrl: "https://example.invalid/v1",
@@ -2450,6 +2450,7 @@ describe("DrizzleAgentStore", () => {
         id: first.id,
         ttsSecretId: secretB,
         sttSecretId: secretB,
+        ttsProvider: "openai_compatible",
         ttsVoice: "nova",
         ttsBaseUrl: "https://example.invalid/v1",
       });
@@ -2457,6 +2458,54 @@ describe("DrizzleAgentStore", () => {
       // first configured, not last rotated. ON CONFLICT DO UPDATE only
       // writes the columns in its SET clause; created_at isn't there.
       expect(secondCfg.createdAt).toEqual(firstCfg.createdAt);
+    });
+
+    it("rejects nonsensical (provider, base_url) combos at write time", async () => {
+      // CHECK constraints `chk_voice_config_{tts,stt}_base_url` enforce the
+      // resolver's expectations at the DB level: openai/elevenlabs require
+      // NULL base_url, openai_compatible requires NOT NULL. Hand-edited rows
+      // can't sneak through and produce a silent "voice disabled until
+      // construction succeeds" state at runtime.
+      const { id: secretId } = await tx((trx) =>
+        secretsStore.putSecret(trx, { name: "openai_voice_key", plaintext: "sk-test" }),
+      );
+      // PGlite's thrown Error.message is "Failed query: …"; the actual
+      // postgres notice (with the constraint name) is on `.cause`. Match
+      // there so the regression message names which constraint blocked
+      // each row.
+      const expectCheck = (promise: Promise<unknown>, constraint: string) =>
+        expect(promise).rejects.toMatchObject({ cause: expect.objectContaining({ constraint }) });
+
+      // openai + base_url IS NOT NULL → CHECK violation.
+      await expectCheck(
+        db.execute(sql`
+          INSERT INTO voice_config (
+            tts_secret_id, stt_secret_id,
+            tts_provider, tts_model, tts_voice, tts_base_url,
+            stt_provider, stt_model
+          ) VALUES (
+            ${secretId}, ${secretId},
+            'openai', 'gpt-4o-mini-tts', 'alloy', 'https://example.invalid/v1',
+            'openai', 'gpt-4o-mini-transcribe'
+          )
+        `),
+        "chk_voice_config_tts_base_url",
+      );
+      // openai_compatible + base_url IS NULL → CHECK violation.
+      await expectCheck(
+        db.execute(sql`
+          INSERT INTO voice_config (
+            tts_secret_id, stt_secret_id,
+            tts_provider, tts_model, tts_voice,
+            stt_provider, stt_model
+          ) VALUES (
+            ${secretId}, ${secretId},
+            'openai', 'gpt-4o-mini-tts', 'alloy',
+            'openai_compatible', 'gpt-4o-mini-transcribe'
+          )
+        `),
+        "chk_voice_config_stt_base_url",
+      );
     });
 
     it("deleteVoiceConfig removes the singleton row", async () => {

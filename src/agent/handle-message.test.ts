@@ -15,6 +15,8 @@ import {
   mockStep,
   mockToolRegistry,
   mockTransportStore,
+  mockVoiceBundle,
+  mockVoiceResolver,
 } from "../test/factories.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
@@ -1624,16 +1626,12 @@ describe("createHandleMessage", () => {
   });
 
   describe("voice", () => {
-    function voiceConfigStub() {
-      return { ttsVoice: "alloy", ttsModel: "gpt-4o-mini-tts" };
-    }
-
     it("transcribes inbound voice blocks via stt provider before persisting the user message", async () => {
       const stt = vi.fn().mockResolvedValue({ text: "hello there" });
       const sttProvider = { name: "openai", stt };
       const insertMessage = vi.fn().mockResolvedValue({ id: "msg-1" });
       const deps = mockDeps({
-        sttProvider,
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt: sttProvider })),
         agentStore: mockAgentStore({
           insertMessage,
           getHistory: vi.fn().mockResolvedValue([{ role: "user", content: "hello there" }]),
@@ -1658,7 +1656,11 @@ describe("createHandleMessage", () => {
         runId: testRunId,
       });
 
-      expect(stt).toHaveBeenCalledWith({ audio: expect.any(Buffer), mediaType: "audio/ogg" });
+      expect(stt).toHaveBeenCalledWith({
+        audio: expect.any(Buffer),
+        mediaType: "audio/ogg",
+        model: "gpt-4o-mini-transcribe",
+      });
       // Persisted user message contains the transcript text, not the voice
       // block JSON literal — so subsequent turns load it cleanly.
       expect(insertMessage).toHaveBeenCalledWith(
@@ -1670,7 +1672,7 @@ describe("createHandleMessage", () => {
     it("transcribed text reaches the agent loop as a text block", async () => {
       const sttProvider = { name: "openai", stt: vi.fn().mockResolvedValue({ text: "speak" }) };
       const deps = mockDeps({
-        sttProvider,
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt: sttProvider })),
         agentStore: mockAgentStore({
           getHistory: vi.fn().mockResolvedValue([{ role: "user", content: "speak" }]),
         }),
@@ -1712,8 +1714,7 @@ describe("createHandleMessage", () => {
         hasBatchTargets: vi.fn().mockReturnValue(false),
       });
       const deps = mockDeps({
-        ttsProvider,
-        voiceConfig: voiceConfigStub(),
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts: ttsProvider })),
         agentStore: mockAgentStore({
           getProfile: vi.fn().mockResolvedValue({
             id: "profile-1",
@@ -1764,8 +1765,7 @@ describe("createHandleMessage", () => {
       });
       const notifyConversation = vi.fn().mockRejectedValue(new Error("rate limited"));
       const deps = mockDeps({
-        ttsProvider,
-        voiceConfig: voiceConfigStub(),
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts: ttsProvider })),
         agentStore: mockAgentStore({
           getProfile: vi.fn().mockResolvedValue({
             id: "profile-1",
@@ -1810,8 +1810,7 @@ describe("createHandleMessage", () => {
       });
       const notifyConversation = vi.fn().mockResolvedValue(undefined);
       const deps = mockDeps({
-        ttsProvider,
-        voiceConfig: voiceConfigStub(),
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts: ttsProvider })),
         agentStore: mockAgentStore({
           getProfile: vi.fn().mockResolvedValue({
             id: "profile-1",
@@ -1866,7 +1865,7 @@ describe("createHandleMessage", () => {
       };
       const insertMessage = vi.fn().mockResolvedValue({ id: "msg-1" });
       const deps = mockDeps({
-        sttProvider,
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt: sttProvider })),
         agentStore: mockAgentStore({
           insertMessage,
           getHistory: vi
@@ -1933,9 +1932,7 @@ describe("createHandleMessage", () => {
         hasBatchTargets: vi.fn().mockReturnValue(false),
       });
       const deps = mockDeps({
-        ttsProvider,
-        sttProvider,
-        voiceConfig: voiceConfigStub(),
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts: ttsProvider, stt: sttProvider })),
         // Profile defaults to auto — mirror inbound
         agentStore: mockAgentStore({
           getProfile: vi.fn().mockResolvedValue({
@@ -1979,6 +1976,7 @@ describe("createHandleMessage", () => {
       expect(sttProvider.stt).toHaveBeenCalledWith({
         audio: expect.any(Buffer),
         mediaType: "audio/ogg",
+        model: "gpt-4o-mini-transcribe",
       });
       // TTS happened — the "auto + voice in → voice out" reflex.
       expect(ttsProvider.tts).toHaveBeenCalledWith({
@@ -2008,9 +2006,7 @@ describe("createHandleMessage", () => {
         hasBatchTargets: vi.fn().mockReturnValue(false),
       });
       const deps = mockDeps({
-        ttsProvider,
-        sttProvider,
-        voiceConfig: voiceConfigStub(),
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts: ttsProvider, stt: sttProvider })),
         agentStore: mockAgentStore({
           getProfile: vi.fn().mockResolvedValue({
             id: "profile-1",
@@ -2074,9 +2070,7 @@ describe("createHandleMessage", () => {
         hasBatchTargets: vi.fn().mockReturnValue(false),
       });
       const deps = mockDeps({
-        ttsProvider,
-        sttProvider,
-        voiceConfig: voiceConfigStub(),
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts: ttsProvider, stt: sttProvider })),
         agentStore: mockAgentStore({
           getProfile: vi.fn().mockResolvedValue({
             id: "profile-1",
@@ -2128,8 +2122,7 @@ describe("createHandleMessage", () => {
         hasBatchTargets: vi.fn().mockReturnValue(false),
       });
       const deps = mockDeps({
-        ttsProvider,
-        voiceConfig: voiceConfigStub(),
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts: ttsProvider })),
         // Profile defaults to "auto"; no voice inbound; conversation override null.
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       });
@@ -2149,11 +2142,14 @@ describe("createHandleMessage", () => {
         canDeliverVoice: vi.fn().mockReturnValue(true),
       });
       const deps = mockDeps({
-        ttsProvider: {
-          name: "openai",
-          tts: vi.fn().mockResolvedValue({ audio: Buffer.from([]), mediaType: "audio/ogg" }),
-        },
-        voiceConfig: voiceConfigStub(),
+        voiceResolver: mockVoiceResolver(
+          mockVoiceBundle({
+            tts: {
+              name: "openai",
+              tts: vi.fn().mockResolvedValue({ audio: Buffer.from([]), mediaType: "audio/ogg" }),
+            },
+          }),
+        ),
         agentStore: mockAgentStore({
           getProfile: vi.fn().mockResolvedValue({
             id: "profile-1",

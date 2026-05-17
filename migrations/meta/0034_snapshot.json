@@ -1,6 +1,6 @@
 {
-  "id": "dedb8ad4-ddf3-41a5-83ed-82c84178df25",
-  "prevId": "3b92f787-4b60-4321-99f6-612027f5ab48",
+  "id": "737e3c5f-f45a-49b7-bb8d-b0a00c0298a8",
+  "prevId": "146b8ceb-2024-44ce-8b86-3854b717d945",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1767,6 +1767,14 @@
         "chk_voice_config_singleton": {
           "name": "chk_voice_config_singleton",
           "value": "singleton = true"
+        },
+        "chk_voice_config_tts_base_url": {
+          "name": "chk_voice_config_tts_base_url",
+          "value": "(\"voice_config\".\"tts_provider\" <> 'openai_compatible' OR \"voice_config\".\"tts_base_url\" IS NOT NULL)\n        AND (\"voice_config\".\"tts_provider\" = 'openai_compatible' OR \"voice_config\".\"tts_base_url\" IS NULL)"
+        },
+        "chk_voice_config_stt_base_url": {
+          "name": "chk_voice_config_stt_base_url",
+          "value": "(\"voice_config\".\"stt_provider\" <> 'openai_compatible' OR \"voice_config\".\"stt_base_url\" IS NOT NULL)\n        AND (\"voice_config\".\"stt_provider\" = 'openai_compatible' OR \"voice_config\".\"stt_base_url\" IS NULL)"
         }
       },
       "isRLSEnabled": false
@@ -2932,13 +2940,15 @@
         },
         "status": {
           "name": "status",
-          "type": "text",
+          "type": "channel_session_status",
+          "typeSchema": "public",
           "primaryKey": false,
           "notNull": true
         },
         "receive": {
           "name": "receive",
-          "type": "text",
+          "type": "channel_session_receive",
+          "typeSchema": "public",
           "primaryKey": false,
           "notNull": true
         },
@@ -3164,7 +3174,7 @@
           "name": "channel_session_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "conversation_id": {
           "name": "conversation_id",
@@ -3181,6 +3191,13 @@
         "platform_ts": {
           "name": "platform_ts",
           "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "inbound_message_source",
+          "typeSchema": "public",
           "primaryKey": false,
           "notNull": true
         },
@@ -3216,7 +3233,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "chk_inbound_source_session": {
+          "name": "chk_inbound_source_session",
+          "value": "(\"inbound_messages\".\"source\" = 'user' AND \"inbound_messages\".\"channel_session_id\" IS NOT NULL)\n        OR (\"inbound_messages\".\"source\" = 'scheduled' AND \"inbound_messages\".\"channel_session_id\" IS NULL)"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.user_identities": {
@@ -3448,6 +3470,21 @@
       "name": "skill_tier",
       "schema": "public",
       "values": ["wasm", "container"]
+    },
+    "public.channel_session_receive": {
+      "name": "channel_session_receive",
+      "schema": "public",
+      "values": ["none", "routed", "all"]
+    },
+    "public.channel_session_status": {
+      "name": "channel_session_status",
+      "schema": "public",
+      "values": ["active", "closed"]
+    },
+    "public.inbound_message_source": {
+      "name": "inbound_message_source",
+      "schema": "public",
+      "values": ["user", "scheduled"]
     }
   },
   "schemas": {},

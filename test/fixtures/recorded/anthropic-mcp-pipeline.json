@@ -1,0 +1,31 @@
+{
+  "_comment": "MCP pipeline integration test fixtures. Turn-1's userMessage filter pins this fixture to requests whose latest role=user message is this test's prompt — tool_result blocks land as role=tool in the OpenAI shape, so the original user prompt survives as the last role=user message. The toolName filter is a belt-and-braces guard — mcp__echotest__echo only exists in this test's tools list.",
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Please call the echotest echo tool with the message 'PIPELINE_OK' and reply with the result.",
+        "turnIndex": 0
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "mcp__echotest__echo",
+            "arguments": "{\"message\": \"PIPELINE_OK\"}",
+            "id": "toolu_014C8MpLtC48PUtfK3EUxtJG"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "userMessage": "Please call the echotest echo tool with the message 'PIPELINE_OK' and reply with the result.",
+        "turnIndex": 1,
+        "hasToolResult": true,
+        "toolName": "mcp__echotest__echo"
+      },
+      "response": {
+        "content": "The echo tool returned: PIPELINE_OK"
+      }
+    }
+  ]
+}

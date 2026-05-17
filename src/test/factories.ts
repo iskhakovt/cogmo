@@ -16,6 +16,8 @@ import type { DeliveryHandle, DeliveryRouter } from "../transport/delivery-route
 import type { TransportStore } from "../transport/store/index.js";
 import type { Transport } from "../transport/transport.js";
 import type { Adapter, StreamHandle, StreamingAdapter } from "../transport/types.js";
+import type { VoiceBundle, VoiceProviderResolver } from "../voice/resolver.js";
+import type { SttProvider, TtsProvider } from "../voice/types.js";
 
 export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
   return {
@@ -566,6 +568,42 @@ export function mockAttachmentStore(overrides?: Partial<AttachmentStore>): Attac
     download: vi.fn().mockResolvedValue(Buffer.from([1, 2, 3])),
     ...overrides,
   };
+}
+
+/**
+ * Build a `VoiceBundle` with mock TTS/STT providers. Pass pre-built mocks
+ * via `tts` / `stt` to keep references for assertions, or omit and let the
+ * factory create defaults that return canned values.
+ */
+export function mockVoiceBundle(opts?: {
+  tts?: TtsProvider;
+  stt?: SttProvider;
+  voice?: string;
+  ttsModel?: string;
+  sttModel?: string;
+}): VoiceBundle {
+  return {
+    tts: {
+      provider: opts?.tts ?? {
+        name: "openai",
+        tts: vi.fn().mockResolvedValue({ audio: Buffer.from([]), mediaType: "audio/ogg" }),
+      },
+      voice: opts?.voice ?? "alloy",
+      model: opts?.ttsModel ?? "gpt-4o-mini-tts",
+    },
+    stt: {
+      provider: opts?.stt ?? {
+        name: "openai",
+        stt: vi.fn().mockResolvedValue({ text: "" }),
+      },
+      model: opts?.sttModel ?? "gpt-4o-mini-transcribe",
+    },
+  };
+}
+
+/** Trivial resolver for tests — always returns the supplied bundle (or undefined). */
+export function mockVoiceResolver(bundle?: VoiceBundle): VoiceProviderResolver {
+  return () => Promise.resolve(bundle);
 }
 
 export function mockSecretsStore(overrides?: Partial<SecretsStore>): SecretsStore {
