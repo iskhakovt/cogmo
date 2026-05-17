@@ -599,6 +599,17 @@ export interface AgentStore {
   getLastMessageTime(tx: Transaction, conversationId: string): Promise<Date | undefined>;
 
   /**
+   * Most recent private conversation for `(userId, profileId)` and the
+   * timestamp of its last message (`null` when the conversation has no
+   * messages yet, `undefined` when no such conversation exists).
+   */
+  findMostRecentConversationForUserProfile(
+    tx: Transaction,
+    userId: string,
+    profileId: string,
+  ): Promise<{ id: string; lastMessageAt: Date | null } | undefined>;
+
+  /**
    * Get `{ inputTokens, outputTokens }` from the most recent assistant
    * message, for the fast-path budget estimator. Returns `undefined` if no
    * assistant row exists. The inner `inputTokens` may be `null` (column was
@@ -1761,6 +1772,45 @@ export class DrizzleAgentStore implements AgentStore {
       .orderBy(desc(messages.id))
       .limit(1);
     return rows[0]?.createdAt;
+  }
+
+  async findMostRecentConversationForUserProfile(
+    tx: Transaction,
+    userId: string,
+    profileId: string,
+  ): Promise<{ id: string; lastMessageAt: Date | null } | undefined> {
+    // Two queries instead of a correlated subquery: under PGlite,
+    // Drizzle wraps the FROM in a sub-select for the trailing LIMIT and
+    // the inner reference to `conversations.id` loses correlation.
+    //
+    // Side effect of the split: under READ COMMITTED each statement sees
+    // its own snapshot, so a message landing between the two queries
+    // surfaces as engagement on a conversation we picked before the
+    // message arrived. The bias is toward reuse over rotation when
+    // activity is concurrent — benign for a scheduled fire, and
+    // tightening to REPEATABLE READ isn't worth the lock contention.
+    const convRows = await tx
+      .select({ id: conversations.id })
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.userId, userId),
+          eq(conversations.profileId, profileId),
+          eq(conversations.isPrivate, true),
+        ),
+      )
+      .orderBy(desc(conversations.id))
+      .limit(1);
+    const conv = convRows[0];
+    if (!conv) return undefined;
+
+    const msgRows = await tx
+      .select({ createdAt: messages.createdAt })
+      .from(messages)
+      .where(eq(messages.conversationId, conv.id))
+      .orderBy(desc(messages.id))
+      .limit(1);
+    return { id: conv.id, lastMessageAt: msgRows[0]?.createdAt ?? null };
   }
 
   // --- Conversation admin ---

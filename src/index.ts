@@ -837,11 +837,7 @@ export async function bootstrapRuntime(
     adapters: adapterMap,
     transportStore: core.transportStore,
   });
-  const idleTimer = createIdleTimer({
-    idleTimeoutMs,
-    runInTx: core.runInTx,
-    transportStore: core.transportStore,
-  });
+  const idleTimer = createIdleTimer({ idleTimeoutMs });
   const debounceFunctions = createDebounceFunctions(debounceConfig);
 
   // Voice — lazy per-turn resolver. Reads `voice_config` + decrypts both
@@ -899,13 +895,17 @@ export async function bootstrapRuntime(
     inngest,
   );
 
-  // Scheduled-task fire handler — receives `agent/scheduled-task.fire`
-  // events from the ticker, finds the user's active session for the
-  // task's profile, persists a synthetic inbound, and re-enters the
-  // normal pipeline via `inbound/arrived`. See
-  // `src/agent/scheduling/fire-handler.ts`.
+  // Scheduled-task fire handler — receives `agent/scheduled-task.fire`,
+  // reuses the user's engaged conversation or rotates onto a fresh one,
+  // persists a synthetic inbound, and re-enters the pipeline via
+  // `inbound/arrived`. See `src/agent/scheduling/fire-handler.ts`.
   const scheduledTaskFire = createScheduledTaskFireHandler(
-    { runInTx: core.runInTx, transportStore: core.transportStore },
+    {
+      runInTx: core.runInTx,
+      agentStore: core.agentStore,
+      transportStore: core.transportStore,
+      idleTimeoutMs,
+    },
     inngest,
   );
 

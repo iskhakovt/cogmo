@@ -4,6 +4,7 @@ import { DrizzleAgentStore } from "../../agent/store/index.js";
 import type { Database, Transactor } from "../../db/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleTransportStore } from "./index.js";
+import { inboundMessages as inboundMessagesTable } from "./schema.js";
 
 let db: Database;
 let tx: Transactor;
@@ -253,12 +254,13 @@ describe("DrizzleTransportStore", () => {
           conversationId,
           content: "Hello",
           platformTs: new Date("2026-01-01T12:00:00Z"),
+          source: "user",
         }),
       );
 
       const unbatched = await tx((trx) => store.getUnbatchedInbound(trx, conversationId, null));
       expect(unbatched).toHaveLength(1);
-      expect(unbatched[0]).toEqual({ id, content: "Hello" });
+      expect(unbatched[0]).toEqual({ id, content: "Hello", source: "user" });
     });
 
     it("getUnbatchedInbound respects afterId cursor", async () => {
@@ -273,6 +275,7 @@ describe("DrizzleTransportStore", () => {
           conversationId,
           content: "first",
           platformTs: now,
+          source: "user",
         }),
       );
       // UUIDv7 is time-ordered per millisecond — ensure distinct timestamps
@@ -283,6 +286,7 @@ describe("DrizzleTransportStore", () => {
           conversationId,
           content: "second",
           platformTs: now,
+          source: "user",
         }),
       );
 
@@ -294,6 +298,66 @@ describe("DrizzleTransportStore", () => {
     it("returns empty for no inbound messages", async () => {
       const { conversationId } = await seedConversation();
       expect(await tx((trx) => store.getUnbatchedInbound(trx, conversationId, null))).toEqual([]);
+    });
+
+    it("persists a scheduled inbound and finds it by scheduledFireKey", async () => {
+      const { conversationId } = await seedConversation();
+
+      const { id } = await tx((trx) =>
+        store.persistInbound(trx, {
+          source: "scheduled",
+          scheduledFireKey: "task-1:2026-05-14T09:00:00.000Z",
+          conversationId,
+          content: "morning briefing",
+          platformTs: new Date("2026-05-14T09:00:00.000Z"),
+        }),
+      );
+
+      const found = await tx((trx) =>
+        store.findInboundByScheduledFireKey(trx, "task-1:2026-05-14T09:00:00.000Z"),
+      );
+      expect(found).toEqual({ id, conversationId });
+
+      const missing = await tx((trx) =>
+        store.findInboundByScheduledFireKey(trx, "task-1:2026-05-14T10:00:00.000Z"),
+      );
+      expect(missing).toBeUndefined();
+    });
+
+    it("rejects a second scheduled inbound with the same scheduledFireKey", async () => {
+      // The partial unique index is the DB-level safety net against a
+      // concurrent retry that slips past `findInboundByScheduledFireKey`.
+      const { conversationId } = await seedConversation();
+      const insert = (key: string) =>
+        tx((trx) =>
+          store.persistInbound(trx, {
+            source: "scheduled",
+            scheduledFireKey: key,
+            conversationId,
+            content: "ping",
+            platformTs: new Date(),
+          }),
+        );
+
+      await insert("task-1:2026-05-14T09:00:00.000Z");
+      await expect(insert("task-1:2026-05-14T09:00:00.000Z")).rejects.toThrow();
+    });
+
+    it("rejects a scheduled inbound without a scheduledFireKey at the DB constraint", async () => {
+      // Type narrowing prevents a TS caller from constructing this shape,
+      // but the check constraint must also catch raw inserts (migrations,
+      // adhoc psql, future store changes).
+      const { conversationId } = await seedConversation();
+      await expect(
+        tx(async (trx) => {
+          await trx.insert(inboundMessagesTable).values({
+            source: "scheduled",
+            conversationId,
+            content: "ping",
+            platformTs: new Date(),
+          });
+        }),
+      ).rejects.toThrow();
     });
   });
 
@@ -309,6 +373,7 @@ describe("DrizzleTransportStore", () => {
           conversationId,
           content: "hello",
           platformTs: new Date(),
+          source: "user",
         }),
       );
 
@@ -345,6 +410,7 @@ describe("DrizzleTransportStore", () => {
           conversationId,
           content: "hello",
           platformTs: new Date(),
+          source: "user",
         }),
       );
 
@@ -369,6 +435,7 @@ describe("DrizzleTransportStore", () => {
           conversationId,
           content: "hello",
           platformTs: new Date(),
+          source: "user",
         }),
       );
 
@@ -407,6 +474,7 @@ describe("DrizzleTransportStore", () => {
           conversationId,
           content: "hello",
           platformTs: new Date(),
+          source: "user",
         }),
       );
 
@@ -432,6 +500,7 @@ describe("DrizzleTransportStore", () => {
           conversationId,
           content: "first",
           platformTs: new Date(),
+          source: "user",
         }),
       );
       await new Promise((r) => setTimeout(r, 2));
@@ -441,6 +510,7 @@ describe("DrizzleTransportStore", () => {
           conversationId,
           content: "second",
           platformTs: new Date(),
+          source: "user",
         }),
       );
 
@@ -467,6 +537,7 @@ describe("DrizzleTransportStore", () => {
           conversationId,
           content: "first",
           platformTs: new Date(),
+          source: "user",
         }),
       );
       await new Promise((r) => setTimeout(r, 2));
@@ -476,6 +547,7 @@ describe("DrizzleTransportStore", () => {
           conversationId,
           content: "second",
           platformTs: new Date(),
+          source: "user",
         }),
       );
 
@@ -820,99 +892,89 @@ describe("DrizzleTransportStore", () => {
     });
   });
 
-  describe("findActiveSessionForUserProfile", () => {
-    it("returns the most recent active session for the user+profile pair", async () => {
+  describe("findReachableChannelsForUserProfile", () => {
+    it("returns the user's reachable channel for the profile", async () => {
       const { userId, profileId, conversationId } = await seedConversation();
       const channelId = await seedChannel();
-      const sessionId = await seedSession(channelId, conversationId, "addr-1");
+      await seedSession(channelId, conversationId, "addr-1");
 
       const result = await tx((trx) =>
-        store.findActiveSessionForUserProfile(trx, userId, profileId),
+        store.findReachableChannelsForUserProfile(trx, userId, profileId),
       );
-      expect(result).toEqual({ sessionId, conversationId });
+      expect(result).toEqual([{ channelId, platformAddress: "addr-1", receive: "routed" }]);
     });
 
-    it("picks the most recently-created active session when multiple exist", async () => {
-      const { userId, profileId, conversationId } = await seedConversation();
-      const channelId = await seedChannel();
-      await seedSession(channelId, conversationId, "addr-old");
-      // Sleep 5ms so timestamps are strictly ordered under postgres
-      // resolution. (UUIDv7 ids would tiebreak even at the same ts.)
-      await new Promise((r) => setTimeout(r, 5));
-      const newer = await seedSession(channelId, conversationId, "addr-new");
-
-      const result = await tx((trx) =>
-        store.findActiveSessionForUserProfile(trx, userId, profileId),
-      );
-      expect(result?.sessionId).toBe(newer);
-    });
-
-    it("returns undefined when the user has no active session for the profile", async () => {
+    it("returns an empty array when the user has no prior session for the profile", async () => {
       const { userId, profileId } = await seedConversation();
-      // No session seeded.
 
       const result = await tx((trx) =>
-        store.findActiveSessionForUserProfile(trx, userId, profileId),
+        store.findReachableChannelsForUserProfile(trx, userId, profileId),
       );
-      expect(result).toBeUndefined();
+      expect(result).toEqual([]);
     });
 
-    it("ignores closed sessions", async () => {
+    it("includes closed sessions — reachability is independent of conversation lifecycle", async () => {
+      // A `/end`-ed Telegram chat still has a reachable chat_id; rotation
+      // can swapSession onto a fresh conversation. The query is the source
+      // of `(channelId, platformAddress)` tuples, not a live-session check.
       const { userId, profileId, conversationId } = await seedConversation();
       const channelId = await seedChannel();
       const sessionId = await seedSession(channelId, conversationId);
       await tx((trx) => store.closeSession(trx, sessionId));
 
       const result = await tx((trx) =>
-        store.findActiveSessionForUserProfile(trx, userId, profileId),
+        store.findReachableChannelsForUserProfile(trx, userId, profileId),
       );
-      expect(result).toBeUndefined();
+      expect(result).toHaveLength(1);
+      expect(result[0]?.channelId).toBe(channelId);
     });
 
-    it("ignores expired sessions", async () => {
+    it("excludes expired sessions (Web UI tab closed)", async () => {
       const { userId, profileId, conversationId } = await seedConversation();
       const channelId = await seedChannel();
       const sessionId = await seedSession(channelId, conversationId);
-      // Manually expire in the past — createSession doesn't take expiresAt.
       await db.execute(
         sql`UPDATE channel_sessions SET expires_at = now() - interval '1 hour' WHERE id = ${sessionId}`,
       );
 
       const result = await tx((trx) =>
-        store.findActiveSessionForUserProfile(trx, userId, profileId),
+        store.findReachableChannelsForUserProfile(trx, userId, profileId),
       );
-      expect(result).toBeUndefined();
+      expect(result).toEqual([]);
     });
 
-    it("breaks ties on identical createdAt by session id (UUIDv7 time-ordered)", async () => {
-      // When two sessions are created in the same statement (or within
-      // the same Postgres timestamp resolution), `created_at DESC`
-      // alone is not deterministic. UUIDv7 ids are sub-millisecond
-      // time-ordered, so the id-based ordering of the inner SELECT is
-      // stable. Pin that we get *some* deterministic winner, not a
-      // flaky pick. The exact winner is the chronologically-later id,
-      // which under UUIDv7's monotonic-counter sub-ms scheme is the
-      // second insert.
+    it("dedups on (channelId, platformAddress) — newest session's receive mode wins", async () => {
+      // /new on the same chat rotates sessions: the old row is closed,
+      // a fresh row is opened with the same (channelId, platformAddress).
+      // The query must collapse them and return the newer `receive` mode.
       const { userId, profileId, conversationId } = await seedConversation();
       const channelId = await seedChannel();
-      // Two sessions, identical createdAt likely (same PG `now()` tick).
-      const first = await seedSession(channelId, conversationId, "addr-1");
-      const second = await seedSession(channelId, conversationId, "addr-2");
+      // First session: receive='all' (Web UI style)
+      await tx((trx) =>
+        store.createSession(trx, {
+          channelId,
+          platformAddress: "shared-addr",
+          conversationId,
+          status: "active",
+          receive: "all",
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 5));
+      // Second session on same address: receive='routed'
+      await tx((trx) =>
+        store.createSession(trx, {
+          channelId,
+          platformAddress: "shared-addr",
+          conversationId,
+          status: "active",
+          receive: "routed",
+        }),
+      );
 
       const result = await tx((trx) =>
-        store.findActiveSessionForUserProfile(trx, userId, profileId),
+        store.findReachableChannelsForUserProfile(trx, userId, profileId),
       );
-      // Either is a valid pick under `ORDER BY createdAt DESC` alone —
-      // assert determinism by running the same query twice and seeing
-      // an identical result both times. (Same-tx-snapshot guarantees
-      // this is a real determinism test, not a transient observation.)
-      const again = await tx((trx) =>
-        store.findActiveSessionForUserProfile(trx, userId, profileId),
-      );
-      expect(result?.sessionId).toBeDefined();
-      expect(again?.sessionId).toBe(result?.sessionId);
-      // Sanity: it's one of the two we created.
-      expect([first, second]).toContain(result?.sessionId);
+      expect(result).toEqual([{ channelId, platformAddress: "shared-addr", receive: "routed" }]);
     });
 
     it("scopes by both userId AND profileId — does not leak across users", async () => {
@@ -923,59 +985,145 @@ describe("DrizzleTransportStore", () => {
       await seedSession(channelId, b.conversationId, "addr-b");
 
       const result = await tx((trx) =>
-        store.findActiveSessionForUserProfile(trx, a.userId, b.profileId),
+        store.findReachableChannelsForUserProfile(trx, a.userId, b.profileId),
       );
-      // a.userId never used b.profileId — no match should exist.
-      expect(result).toBeUndefined();
+      expect(result).toEqual([]);
     });
 
-    it("scopes by profileId for the SAME user — two profiles, two distinct results", async () => {
-      // Same-user-different-profile scoping. The previous test varies
-      // userId; this varies profileId for one user. Catches a hypothetical
-      // regression where the JOIN filtered only on conversations.userId.
-      const userId = (await tx((trx) => agentStore.createUser(trx))).id;
-      profileNameCounter += 1;
-      const profile1 = (
-        await tx((trx) =>
-          agentStore.createProfile(trx, {
-            userId: null,
-            name: `test-p1-${profileNameCounter}`,
-            basePrompt: "p",
-            model: "m",
-            toolSet: [],
-          }),
-        )
-      ).id;
-      profileNameCounter += 1;
-      const profile2 = (
-        await tx((trx) =>
-          agentStore.createProfile(trx, {
-            userId: null,
-            name: `test-p2-${profileNameCounter}`,
-            basePrompt: "p",
-            model: "m",
-            toolSet: [],
-          }),
-        )
-      ).id;
-      const conv1 = (
-        await tx((trx) =>
-          agentStore.createConversation(trx, { userId, profileId: profile1, isPrivate: true }),
-        )
-      ).id;
+    it("returns distinct channels (one per (channelId, platformAddress)) across conversations", async () => {
+      // Two conversations on the same profile, each with its own Telegram
+      // session — the user reached the bot from two chats. Both should
+      // surface as separate reachable channels for the rotation.
+      const { userId, profileId, conversationId: conv1 } = await seedConversation();
       const conv2 = (
         await tx((trx) =>
-          agentStore.createConversation(trx, { userId, profileId: profile2, isPrivate: true }),
+          agentStore.createConversation(trx, { userId, profileId, isPrivate: true }),
         )
       ).id;
       const channelId = await seedChannel();
-      const s1 = await seedSession(channelId, conv1, "addr-p1");
-      const s2 = await seedSession(channelId, conv2, "addr-p2");
+      await seedSession(channelId, conv1, "chat-1");
+      await seedSession(channelId, conv2, "chat-2");
 
-      const r1 = await tx((trx) => store.findActiveSessionForUserProfile(trx, userId, profile1));
-      const r2 = await tx((trx) => store.findActiveSessionForUserProfile(trx, userId, profile2));
-      expect(r1).toEqual({ sessionId: s1, conversationId: conv1 });
-      expect(r2).toEqual({ sessionId: s2, conversationId: conv2 });
+      const result = await tx((trx) =>
+        store.findReachableChannelsForUserProfile(trx, userId, profileId),
+      );
+      expect(result).toHaveLength(2);
+      const addrs = result.map((r) => r.platformAddress).sort();
+      expect(addrs).toEqual(["chat-1", "chat-2"]);
+    });
+
+    it("excludes addresses currently bound to an active session on a different profile", async () => {
+      // Cross-profile hijack regression: the user historically chatted on
+      // profile A via chat X, then `/new`-switched the chat to profile B.
+      // Profile A's old session is closed; profile B's session is active.
+      // A scheduled fire on profile A must NOT rotate chat X back onto a
+      // profile-A conversation — that would close the user's active
+      // profile-B session and silently switch their context.
+      const userId = (await tx((trx) => agentStore.createUser(trx))).id;
+      profileNameCounter += 1;
+      const profileA = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `cross-profile-a-${profileNameCounter}`,
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      profileNameCounter += 1;
+      const profileB = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `cross-profile-b-${profileNameCounter}`,
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      const convA = (
+        await tx((trx) =>
+          agentStore.createConversation(trx, { userId, profileId: profileA, isPrivate: true }),
+        )
+      ).id;
+      const convB = (
+        await tx((trx) =>
+          agentStore.createConversation(trx, { userId, profileId: profileB, isPrivate: true }),
+        )
+      ).id;
+      const channelId = await seedChannel();
+      // Step 1: profile-A session on chat X, then closed (simulates /new).
+      const sessionA = await seedSession(channelId, convA, "chat-X");
+      await tx((trx) => store.closeSession(trx, sessionA));
+      // Step 2: profile-B session on chat X is currently active.
+      await seedSession(channelId, convB, "chat-X");
+
+      const reachableForA = await tx((trx) =>
+        store.findReachableChannelsForUserProfile(trx, userId, profileA),
+      );
+      // chat X is excluded: rotating would hijack the active profile-B session.
+      expect(reachableForA).toEqual([]);
+
+      // Profile B can still see chat X as its own reachable channel.
+      const reachableForB = await tx((trx) =>
+        store.findReachableChannelsForUserProfile(trx, userId, profileB),
+      );
+      expect(reachableForB).toHaveLength(1);
+      expect(reachableForB[0]?.platformAddress).toBe("chat-X");
+    });
+
+    it("includes addresses where the other-profile session is itself closed", async () => {
+      // The exclusion is keyed on an ACTIVE other-profile session. A
+      // user who used profile B briefly and then closed it should not
+      // permanently lose chat-X reachability on profile A.
+      const userId = (await tx((trx) => agentStore.createUser(trx))).id;
+      profileNameCounter += 1;
+      const profileA = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `closed-other-a-${profileNameCounter}`,
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      profileNameCounter += 1;
+      const profileB = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `closed-other-b-${profileNameCounter}`,
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      const convA = (
+        await tx((trx) =>
+          agentStore.createConversation(trx, { userId, profileId: profileA, isPrivate: true }),
+        )
+      ).id;
+      const convB = (
+        await tx((trx) =>
+          agentStore.createConversation(trx, { userId, profileId: profileB, isPrivate: true }),
+        )
+      ).id;
+      const channelId = await seedChannel();
+      await seedSession(channelId, convA, "chat-X");
+      const sessionB = await seedSession(channelId, convB, "chat-X");
+      await tx((trx) => store.closeSession(trx, sessionB));
+
+      const reachableForA = await tx((trx) =>
+        store.findReachableChannelsForUserProfile(trx, userId, profileA),
+      );
+      expect(reachableForA).toHaveLength(1);
+      expect(reachableForA[0]?.platformAddress).toBe("chat-X");
     });
   });
 });
