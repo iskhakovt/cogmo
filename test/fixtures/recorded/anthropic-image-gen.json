@@ -17,6 +17,7 @@
     },
     {
       "match": {
+        "userMessage": "draw me a cat in a hat",
         "turnIndex": 1,
         "hasToolResult": true
       },

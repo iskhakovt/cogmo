@@ -9,6 +9,7 @@ import type { StartedTestContainer } from "testcontainers";
 import { Network } from "testcontainers";
 import type { GlobalSetupContext } from "vitest/node";
 import * as c from "../dev/containers.js";
+import { startMcpEchoHttpServer } from "../src/test/mcp-http-echo-server.js";
 import { createMock } from "./llmock-setup.js";
 import { startTelegramMockServer, type TelegramMockServer } from "./telegram-mock.js";
 
@@ -21,6 +22,7 @@ const containers: StartedTestContainer[] = [];
 let network: Awaited<ReturnType<InstanceType<typeof Network>["start"]>> | null = null;
 let mock: LLMock | null = null;
 let telegramMock: TelegramMockServer | null = null;
+let mcpEchoServer: Awaited<ReturnType<typeof startMcpEchoHttpServer>> | null = null;
 let skillsPath: string | null = null;
 
 /**
@@ -118,6 +120,13 @@ export async function setup({ provide }: GlobalSetupContext) {
   telegramMock = await startTelegramMockServer();
   console.log(`telegram-mock at ${telegramMock.url}`);
 
+  // MCP echo server reachable over Streamable HTTP. Shared across workers
+  // so the production `HostRunner` can connect from whichever worker
+  // Inngest routes an `inbound/arrived` event to — no per-worker injection
+  // required.
+  mcpEchoServer = await startMcpEchoHttpServer();
+  console.log(`mcp-echo at ${mcpEchoServer.url}`);
+
   console.log("Running seed...");
   execSync("tsx src/main.ts seed", { stdio: "inherit" });
   console.log("Seed complete.");
@@ -144,6 +153,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   provide("hindsightUrl", hindsightUrl);
   provide("defaultUserId", defaultUserId);
   provide("llmockBaseUrl", mock.url);
+  provide("mcpEchoUrl", mcpEchoServer.url);
 
   console.log(`Integration test environment ready — ${JSON.stringify({ ...urls, hindsightUrl })}`);
 }
@@ -151,6 +161,7 @@ export async function setup({ provide }: GlobalSetupContext) {
 export async function teardown() {
   if (mock) await mock.stop();
   if (telegramMock) await telegramMock.stop();
+  if (mcpEchoServer) await mcpEchoServer.close();
 
   console.log("Stopping test containers...");
   for (const container of containers.reverse()) {
