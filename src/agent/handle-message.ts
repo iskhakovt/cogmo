@@ -399,8 +399,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       // Load profile up front — its streaming knobs ride into `prepare` so
       // open streams honor the per-profile chunk target and edit mode, and
-      // the voice resolver below reads the same row.
-      const profileForVoice = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
+      // voice resolution, auto-recall gating, and the `memoryScope` ACL
+      // filter further down read the same row. One DB roundtrip per turn.
+      // `model` still comes from the turn snapshot, not this read, to
+      // preserve the invariant that one turn = one (profileId, model) stamp
+      // even if profile.model changes mid-turn.
+      const profile = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
 
       // Open delivery handles early — needed to resolve voice mode
       // (`canDeliverVoice` reflects which active sessions implement
@@ -414,10 +418,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         maxInboundId,
         prevCursor: lastAssistant?.lastInboundMessageId ?? null,
         kind: routingKind,
-        ...(profileForVoice && {
+        ...(profile && {
           streamOpts: {
-            chunkChars: profileForVoice.streamChunkChars,
-            allowEdits: profileForVoice.streamEdits,
+            chunkChars: profile.streamChunkChars,
+            allowEdits: profile.streamEdits,
           },
         }),
       });
@@ -431,7 +435,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         adapterSupportsVoice: delivery.canDeliverVoice(),
         voiceConfigPresent: voiceBundle !== undefined,
         conversationMode: conv.voiceMode,
-        profileMode: profileForVoice?.voiceMode ?? "auto",
+        profileMode: profile?.voiceMode ?? "auto",
         // Inspect ONLY the most recent inbound message in the debounced
         // batch — the user's latest intent. If the batch is [voice, text]
         // (user dictated, then typed a follow-up), they're at the keyboard
@@ -464,7 +468,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // skills, and MCP tools entirely.
       const imageTools = deps.imageToolsLoader ? await deps.imageToolsLoader.getTools() : [];
       const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
-      const turnToolSetGlobs = profileForVoice?.toolSet ?? [];
+      const turnToolSetGlobs = profile?.toolSet ?? [];
       const mcpTools = deps.mcpRegistry
         ? await deps.mcpRegistry.resolveTools({ toolGlobs: turnToolSetGlobs })
         : [];
@@ -476,7 +480,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       });
       const toolDefs = turnTools.definitions();
 
-      // Profile passed in from the outer read (`profileForVoice`) so
+      // Profile passed in from the outer read (`profile`) so
       // voice-mode resolution, `composeTurnTools` globs, and the prompt's
       // `# Tools` / base-prompt sections all come from the same row. A
       // concurrent `/settings` mid-turn used to land between the outer
@@ -486,10 +490,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const systemPrompt = await step.run("assemble-prompt", async () => {
         const ctx = await loadConversationContext(
           { runInTx: deps.runInTx, agentStore, transportStore },
-          { conversationId, profile: profileForVoice },
+          { conversationId, profile: profile },
         );
         return promptSource.assemble({
-          profile: profileForVoice,
+          profile: profile,
           rules: ctx.rules,
           voiceMode: voiceModeForTurn,
           toolDefinitions: toolDefs,
@@ -535,14 +539,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           return block;
         }),
       );
-
-      // Reuse the profile loaded earlier for voice-mode resolution — saves
-      // one DB roundtrip per turn. Needed downstream for auto-recall gating,
-      // the `memoryScope` ACL filter, and other per-profile settings. `model`
-      // still comes from the turn snapshot, not this read, to preserve the
-      // invariant that one turn = one (profileId, model) stamp even if
-      // profile.model changes mid-turn.
-      const profile = profileForVoice;
 
       // Load the user's restricted profile-class set so the scoped service
       // can fold in the fail-closed NOT leaf. Keyed on the conversation
