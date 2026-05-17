@@ -489,9 +489,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // voice-mode resolution, `composeTurnTools` globs, and the prompt's
       // `# Tools` / base-prompt sections all come from the same row. A
       // concurrent `/settings` mid-turn used to land between the outer
-      // read and a second `getProfile` inside this step, leaving the
-      // prompt's tool filter and base-prompt sourced from different
-      // snapshots under READ COMMITTED.
+      // read and a second `getProfile` inside this step (separate
+      // durable steps run in separate txs, so the project's REPEATABLE
+      // READ snapshot doesn't span them), leaving the prompt's tool
+      // filter and base-prompt sourced from different snapshots.
       const systemPrompt = await step.run("assemble-prompt", async () => {
         const ctx = await loadConversationContext(
           { runInTx: deps.runInTx, agentStore, transportStore },

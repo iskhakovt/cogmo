@@ -627,9 +627,11 @@ export class DrizzleCodingStore implements CodingStore {
     // `.for('update')` row-locks the matched row so a concurrent
     // callback for the same task blocks here until our transaction
     // commits — without it, two simultaneous Telegram callback
-    // deliveries can both observe `planApprovedAt = null` under
-    // READ COMMITTED and both return `kind: "approved"`, double-firing
-    // the plan-approved event.
+    // deliveries can both observe `planApprovedAt = null` and both
+    // return `kind: "approved"`, double-firing the plan-approved
+    // event. Row-locking is the right tool here regardless of
+    // isolation level — REPEATABLE READ would catch the conflicting
+    // UPDATE via 40001, but blocking is cheaper than retrying.
     const rows = await tx
       .select({
         status: codingTasks.status,

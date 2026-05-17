@@ -91,12 +91,13 @@ export function createCodingService(
       // taps from the same one) could each trigger a task concurrently;
       // splitting count and insert across two transactions opened a
       // window where each saw `active < limit` and both inserted,
-      // exceeding `maxConcurrentTasks`. Single tx narrows that window
-      // sharply (concurrent admissions still serialise on the
-      // underlying lock acquisition pattern under READ COMMITTED — at
-      // single-user scale the residual race is acceptable). If multi-
-      // tenant ever lands, lift to `SELECT ... FOR UPDATE` on the
-      // `coding_repos` row inside the count.
+      // exceeding `maxConcurrentTasks`. REPEATABLE READ (the project
+      // default) doesn't catch this predicate race either — snapshot
+      // isolation doesn't predicate-lock — but at single-user scale
+      // the residual race is acceptable. If multi-tenant lands, prefer
+      // `SELECT ... FOR UPDATE` on the `coding_repos` row inside the
+      // count over SERIALIZABLE — row-locking prevents the race
+      // outright instead of detecting and retrying it.
       const admit = await deps.runInTx(async (tx) => {
         const active = await deps.codingStore.countActiveTasksForRepo(tx, repo.id);
         if (active >= repo.maxConcurrentTasks) {
