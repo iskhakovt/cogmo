@@ -1,8 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { Database, Transaction } from "./transactor.js";
 import { transactor } from "./transactor.js";
-
-const FAKE_TX = { __fakeTx: true } as unknown as Transaction;
 
 /** Postgres SQLSTATE for serialization_failure. Drivers expose it on `err.code`. */
 class SerializationFailureError extends Error {
@@ -14,36 +13,33 @@ class SerializationFailureError extends Error {
 }
 
 /**
- * Build a minimal `Database` stub that records `db.transaction` calls
- * and runs each callback against `FAKE_TX`. We don't go through
- * Drizzle / PGlite here — the unit under test is the retry + isolation
- * wiring around `db.transaction`, not the driver behaviour.
+ * Build a mock `Database` whose `transaction(cb)` records the
+ * isolation level it was called with and runs each callback against
+ * the next attempt-impl from `attemptImpls`. The transactor is the
+ * unit under test, not Drizzle's driver, so we mock at the
+ * `Database` boundary instead of going through PGlite.
  */
-function mockDb(): {
+function mockDb(attemptImpls: Array<(tx: Transaction) => Promise<unknown>>): {
   db: Database;
   calls: { isolationLevel: string | undefined }[];
-  setBehavior: (impls: Array<(tx: Transaction) => Promise<unknown>>) => void;
 } {
+  const db = mock<Database>();
+  const tx = mock<Transaction>();
   const calls: { isolationLevel: string | undefined }[] = [];
-  let impls: Array<(tx: Transaction) => Promise<unknown>> = [];
-  const transaction = vi.fn(
+  const queue = [...attemptImpls];
+  db.transaction.mockImplementation(
+    // The Drizzle overload makes this signature load-bearing for inference,
+    // but at runtime we only care about (cb, opts).
     async (
       cb: (tx: Transaction) => Promise<unknown>,
       opts?: { isolationLevel?: string },
     ): Promise<unknown> => {
       calls.push({ isolationLevel: opts?.isolationLevel });
-      const impl = impls.shift();
-      if (impl) return impl(FAKE_TX);
-      return cb(FAKE_TX);
+      const impl = queue.shift() ?? ((t) => cb(t));
+      return impl(tx);
     },
   );
-  return {
-    db: { transaction } as unknown as Database,
-    calls,
-    setBehavior: (next) => {
-      impls = next;
-    },
-  };
+  return { db, calls };
 }
 
 beforeEach(() => {
@@ -52,7 +48,7 @@ beforeEach(() => {
 
 describe("transactor", () => {
   it("wraps each call with isolationLevel: repeatable read", async () => {
-    const { db, calls } = mockDb();
+    const { db, calls } = mockDb([async () => "ok"]);
     const tx = transactor(db);
     await tx(async () => "ok");
     expect(calls).toEqual([{ isolationLevel: "repeatable read" }]);
@@ -62,8 +58,7 @@ describe("transactor", () => {
     // The whole point of the retry layer: a transient snapshot conflict
     // resolves cleanly on a fresh attempt.
     vi.stubEnv("RETRY_DISABLED", "false");
-    const { db, calls, setBehavior } = mockDb();
-    setBehavior([
+    const { db, calls } = mockDb([
       async () => {
         throw new SerializationFailureError();
       },
@@ -87,11 +82,11 @@ describe("transactor", () => {
       readonly code = "23505" as const;
     }
     const original = new UniqueViolationError("unique violation");
-    const { db, calls } = mockDb();
-    db.transaction = vi.fn(async () => {
-      calls.push({ isolationLevel: "repeatable read" });
-      throw original;
-    }) as unknown as Database["transaction"];
+    const { db, calls } = mockDb([
+      async () => {
+        throw original;
+      },
+    ]);
 
     const tx = transactor(db);
     const caught = await tx(async () => "unused").catch((e) => e);
@@ -104,8 +99,7 @@ describe("transactor", () => {
     // Bounded retries; persistent conflicts surface to the caller
     // (Inngest's outer retry budget catches them).
     vi.stubEnv("RETRY_DISABLED", "false");
-    const { db, calls, setBehavior } = mockDb();
-    setBehavior([
+    const { db, calls } = mockDb([
       async () => {
         throw new SerializationFailureError("attempt 1");
       },
