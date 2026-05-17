@@ -117,6 +117,9 @@ importers:
       jsdom:
         specifier: ^29.1.1
         version: 29.1.1(@noble/hashes@2.2.0)
+      jsonrepair:
+        specifier: ^3.14.0
+        version: 3.14.0
       marked:
         specifier: ^18.0.3
         version: 18.0.3
@@ -3716,6 +3719,10 @@ packages:
 
   json-with-bigint@3.5.8:
     resolution: {integrity: sha512-eq/4KP6K34kwa7TcFdtvnftvHCD9KvHOGGICWwMFc4dOOKF5t4iYqnfLK8otCRCRv06FXOzGGyqE8h8ElMvvdw==}
+
+  jsonrepair@3.14.0:
+    resolution: {integrity: sha512-tWPGKMZf/8UPim+fcW2EfcQ/d/7aKUrP6IECz9G3Tu6Q5dX0orSleqJ9z6sSw7qrQkjF8/Edo4DvsWBZ8H+HNg==}
+    hasBin: true
 
   jszip@3.10.1:
     resolution: {integrity: sha512-xXDvecyTpGLrqFrvkrUSoxxfJI5AH7U8zxxtVclpsUtMCq4JQ290LY8AW5c7Ggnr/Y/oK+bQMbqK2qmtk3pN4g==}
@@ -8975,6 +8982,8 @@ snapshots:
   json-stringify-safe@5.0.1: {}
 
   json-with-bigint@3.5.8: {}
+
+  jsonrepair@3.14.0: {}
 
   jszip@3.10.1:
     dependencies:
