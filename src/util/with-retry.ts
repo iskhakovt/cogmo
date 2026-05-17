@@ -44,6 +44,10 @@ export interface RetryOptions {
    * the caller's error type, unlike `AbortError` which would replace
    * the thrown value with itself. Use this for code-specific retry
    * policy (e.g. retry only Postgres SQLSTATE 40001).
+   *
+   * Called twice per failure (once in `onFailedAttempt` to gate the
+   * warn log, once via p-retry's native `shouldRetry` hook). Keep
+   * the predicate side-effect-free.
    */
   shouldRetry?: (err: unknown) => boolean;
 }
@@ -80,6 +84,11 @@ export function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise
       shouldRetry: ({ error }: { error: Error }) => userShouldRetry(error),
     }),
     onFailedAttempt: ({ error, attemptNumber, retriesLeft }) => {
+      // p-retry fires onFailedAttempt BEFORE consulting shouldRetry, so
+      // we must re-check here to avoid logging "retry attempt N failed"
+      // for errors that won't actually be retried. Same guarantee
+      // p-retry gives for AbortError, lifted to the predicate path.
+      if (userShouldRetry !== undefined && !userShouldRetry(error)) return;
       logger.warn(
         {
           err: { name: error.name, message: error.message },
