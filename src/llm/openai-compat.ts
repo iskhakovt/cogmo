@@ -168,7 +168,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
         usage,
       };
     } catch (err) {
-      const mapped = mapRefusalError(err);
+      const mapped = toRefusalErrorIfMatches(err) ?? err;
       failChatSpan(span, mapped);
       throw mapped;
     } finally {
@@ -212,7 +212,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
             stream_options: { include_usage: true },
           })
           .catch((err: unknown) => {
-            throw mapRefusalError(err);
+            throw toRefusalErrorIfMatches(err) ?? err;
           });
 
         let model = params.model;
@@ -490,19 +490,20 @@ const REFUSAL_ERROR_CODES = new Set<string>([
 ]);
 
 /**
- * Wrap an SDK error in `RefusalError` when its shape matches a 400-class
- * content-policy refusal. Passes any other error through untouched.
+ * Returns a `RefusalError` when the SDK error's shape matches a 400-class
+ * content-policy refusal; returns `undefined` otherwise so callers can
+ * fall through to the original error via `?? err`.
  *
  * Duck-typed on `status` + `code` to avoid binding to the SDK's exact
  * `BadRequestError` class — third-party OpenAI-compat clients sometimes
  * produce structurally-similar errors that don't share the same constructor.
  */
-function mapRefusalError(err: unknown): unknown {
-  if (!(err instanceof Error)) return err;
+function toRefusalErrorIfMatches(err: unknown): RefusalError | undefined {
+  if (!(err instanceof Error)) return undefined;
   const status = (err as unknown as { status?: unknown }).status;
-  if (status !== 400) return err;
+  if (status !== 400) return undefined;
   const code = (err as unknown as { code?: unknown }).code;
-  if (typeof code !== "string" || !REFUSAL_ERROR_CODES.has(code)) return err;
+  if (typeof code !== "string" || !REFUSAL_ERROR_CODES.has(code)) return undefined;
   return new RefusalError(err.message, err);
 }
 
