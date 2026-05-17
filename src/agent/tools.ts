@@ -45,6 +45,21 @@ export interface ToolSpec {
    * writes against shared state (core memory blocks, same file path).
    */
   parallelSafe?: boolean;
+  /**
+   * Declares the handler has no observable side effect on the world — pure
+   * read of state the agent doesn't own (file system, web, memory, clock).
+   *
+   * Consumed by the Class D loop-pathology gate: an iteration whose tool
+   * calls are all `sideEffectful: false` does not count as "progress", so
+   * repeating the same read-only fingerprint trips the stuck-loop detector
+   * (see `design/agent-resilience.md` → Class D).
+   *
+   * The field is **optional**, and `undefined` is treated as `true` by
+   * consumers (`spec.sideEffectful ?? true`) — fail-safe, so a missing flag
+   * never causes Class D to falsely trip on a tool that genuinely makes
+   * progress. Tools opt in to `false` only when the handler is a pure read.
+   */
+  sideEffectful?: boolean;
 }
 
 /**
@@ -64,6 +79,8 @@ export function defineTool<T>(opts: {
   durable?: boolean;
   /** See `ToolSpec.parallelSafe`. */
   parallelSafe?: boolean;
+  /** See `ToolSpec.sideEffectful`. */
+  sideEffectful?: boolean;
 }): ToolSpec {
   // z.toJSONSchema returns Zod's JSONSchema7-flavoured shape; our internal
   // JsonSchema type is a narrower subset that the LLM providers accept.
@@ -85,6 +102,7 @@ export function defineTool<T>(opts: {
     },
     ...(opts.durable !== undefined && { durable: opts.durable }),
     ...(opts.parallelSafe !== undefined && { parallelSafe: opts.parallelSafe }),
+    ...(opts.sideEffectful !== undefined && { sideEffectful: opts.sideEffectful }),
   };
 }
 
@@ -140,6 +158,7 @@ export function createDefaultTools(
         "Use for scheduling, deadlines, or time questions. The system prompt includes the time " +
         "when the conversation started — call this tool for long-running sessions or exact time.",
       parallelSafe: true,
+      sideEffectful: false,
       schema: z.object({
         timezone: z
           .string()

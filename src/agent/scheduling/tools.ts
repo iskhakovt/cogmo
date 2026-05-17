@@ -149,6 +149,7 @@ export const listTasks = defineTool({
     "task ids for `remove_task`, or to answer the user's 'what's scheduled?' " +
     "question. Returns a numbered list with id, schedule, prompt, next fire, " +
     "and enabled state.",
+  sideEffectful: false,
   schema: listTasksSchema,
   handler: async (_input, service) => {
     if (!service.scheduling) {
