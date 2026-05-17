@@ -74,6 +74,7 @@
     "inngest": "^4.4.0",
     "js-tiktoken": "^1.0.21",
     "jsdom": "^29.1.1",
+    "jsonrepair": "^3.14.0",
     "marked": "^18.0.3",
     "micro-key-producer": "^0.8.6",
     "neverthrow": "^8.2.0",

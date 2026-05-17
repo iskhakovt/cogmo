@@ -205,6 +205,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
     async ({ event, step, runId }) => {
       const { conversationId, triggerInboundId } = event.data;
 
+      // Per-turn child logger — every emission inside the agent loop inherits
+      // `runId` + `conversationId` so the evolution failure-reflector can join
+      // logs to `conversation/degraded` events. See design/agent-resilience.md.
+      const turnLogger = logger.child({ runId, conversationId });
+
       // ──── DURABLE: load context + entry guards ────
 
       const conv = await step.run("load-conversation", async () => {
@@ -286,6 +291,23 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const inboundBlocks = inboundMessages.flatMap((m) => contentToBlocks(m.content));
       // Safe — guarded by length check above
       const maxInboundId = inboundMessages.at(-1)?.id ?? "";
+
+      // A batch is either all-user or all-scheduled — never mixed. The
+      // debounce stages user inbounds; scheduled fires emit their own
+      // `inbound/arrived` independently after persisting a single
+      // synthetic row, so the two paths can't legitimately interleave
+      // into one turn. A mixed batch would mean a fire landed in a
+      // user-batched turn (or vice versa) and the routing kind below
+      // would silently pick the wrong path — fail fast instead.
+      const scheduledCount = inboundMessages.filter((m) => m.source === "scheduled").length;
+      if (scheduledCount > 0 && scheduledCount !== inboundMessages.length) {
+        throw new Error(
+          `mixed-source inbound batch in conversation ${conversationId}: ${scheduledCount}/${inboundMessages.length} scheduled`,
+        );
+      }
+      // Scheduled inbounds have no originating session for source
+      // routing — broadcast to every reachable session instead.
+      const routingKind: "reply" | "broadcast" = scheduledCount > 0 ? "broadcast" : "reply";
 
       // Voice bundle resolved once per turn (one indexed singleton read +
       // two secret lookups; cached by content hash inside the resolver so
@@ -380,6 +402,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return deps.runInTx((tx) => agentStore.getHistory(tx, conversationId));
       });
 
+      // Load profile up front — its streaming knobs ride into `prepare` so
+      // open streams honor the per-profile chunk target and edit mode, and
+      // voice resolution, auto-recall gating, and the `memoryScope` ACL
+      // filter further down read the same row. One DB roundtrip per turn.
+      // `model` still comes from the turn snapshot, not this read, to
+      // preserve the invariant that one turn = one (profileId, model) stamp
+      // even if profile.model changes mid-turn.
+      const profile = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
+
       // Open delivery handles early — needed to resolve voice mode
       // (`canDeliverVoice` reflects which active sessions implement
       // `sendVoice`). Side effect is benign: the streaming adapter just
@@ -391,6 +422,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         isPrivate: conv.isPrivate,
         maxInboundId,
         prevCursor: lastAssistant?.lastInboundMessageId ?? null,
+        kind: routingKind,
+        ...(profile && {
+          streamOpts: {
+            chunkChars: profile.streamChunkChars,
+            allowEdits: profile.streamEdits,
+          },
+        }),
       });
 
       // Resolve per-turn voice mode BEFORE prompt assembly so the
@@ -398,12 +436,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // gates: adapter capability, TTS provider configured, conversation
       // override (NULL = follow profile default), profile mode, modality of
       // the most recent inbound. See design/voice.md.
-      const profileForVoice = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
       const voiceModeForTurn = resolveVoiceMode({
         adapterSupportsVoice: delivery.canDeliverVoice(),
         voiceConfigPresent: voiceBundle !== undefined,
         conversationMode: conv.voiceMode,
-        profileMode: profileForVoice?.voiceMode ?? "auto",
+        profileMode: profile?.voiceMode ?? "auto",
         // Inspect ONLY the most recent inbound message in the debounced
         // batch — the user's latest intent. If the batch is [voice, text]
         // (user dictated, then typed a follow-up), they're at the keyboard
@@ -436,7 +473,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // skills, and MCP tools entirely.
       const imageTools = deps.imageToolsLoader ? await deps.imageToolsLoader.getTools() : [];
       const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
-      const turnToolSetGlobs = profileForVoice?.toolSet ?? [];
+      const turnToolSetGlobs = profile?.toolSet ?? [];
       const mcpTools = deps.mcpRegistry
         ? await deps.mcpRegistry.resolveTools({ toolGlobs: turnToolSetGlobs })
         : [];
@@ -448,7 +485,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       });
       const toolDefs = turnTools.definitions();
 
-      // Profile passed in from the outer read (`profileForVoice`) so
+      // Profile passed in from the outer read (`profile`) so
       // voice-mode resolution, `composeTurnTools` globs, and the prompt's
       // `# Tools` / base-prompt sections all come from the same row. A
       // concurrent `/settings` mid-turn used to land between the outer
@@ -458,10 +495,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const systemPrompt = await step.run("assemble-prompt", async () => {
         const ctx = await loadConversationContext(
           { runInTx: deps.runInTx, agentStore, transportStore },
-          { conversationId, profile: profileForVoice },
+          { conversationId, profile: profile },
         );
         return promptSource.assemble({
-          profile: profileForVoice,
+          profile: profile,
           rules: ctx.rules,
           voiceMode: voiceModeForTurn,
           toolDefinitions: toolDefs,
@@ -507,14 +544,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           return block;
         }),
       );
-
-      // Reuse the profile loaded earlier for voice-mode resolution — saves
-      // one DB roundtrip per turn. Needed downstream for auto-recall gating,
-      // the `memoryScope` ACL filter, and other per-profile settings. `model`
-      // still comes from the turn snapshot, not this read, to preserve the
-      // invariant that one turn = one (profileId, model) stamp even if
-      // profile.model changes mid-turn.
-      const profile = profileForVoice;
 
       // Load the user's restricted profile-class set so the scoped service
       // can fold in the fail-closed NOT leaf. Keyed on the conversation
@@ -736,6 +765,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // web_answer). Step id = `tool-<name>-<toolUseId>`, unique per
           // LLM-issued tool call. See design/crash-recovery.md.
           stepRun: (id, fn) => step.run(id, fn),
+          turnLogger,
         });
         await delivery.finish();
       } catch (err) {

@@ -1,4 +1,5 @@
 export { AnthropicProvider } from "./anthropic.js";
+export { ProviderProtocolError } from "./errors.js";
 export type { FallbackAttempt } from "./fallback.js";
 export {
   AllProvidersFailedError,

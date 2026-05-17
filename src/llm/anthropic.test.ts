@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AnthropicProvider } from "./anthropic.js";
+import { ProviderProtocolError } from "./errors.js";
 import type { StreamEvent } from "./types.js";
 
 // Mock the Anthropic SDK — use a class so `new Anthropic()` works
@@ -509,6 +510,101 @@ describe("AnthropicProvider", () => {
 
       const callArgs = mockCreate.mock.calls[0]![0];
       expect(callArgs.stream).toBe(true);
+    });
+
+    it("repairs trailing-comma JSON in tool args via jsonrepair before declaring failure (Anthropic stream)", async () => {
+      const provider = createProvider();
+      // Buffered chunks reconstruct to `{"query":"weather",}` — valid after
+      // jsonrepair strips the trailing comma, parses as { query: "weather" }.
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: {
+              model: "claude-sonnet-4-6",
+              usage: { input_tokens: 10, output_tokens: 0 },
+            },
+          },
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "tool_use", id: "tu_1", name: "web_search" },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "input_json_delta", partial_json: '{"query":"weather",' },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "input_json_delta", partial_json: "}" },
+          },
+          { type: "content_block_stop", index: 0 },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "tool_use" },
+            usage: { output_tokens: 12 },
+          },
+          { type: "message_stop" },
+        ]),
+      );
+
+      const { events, response } = provider.chatStream(defaultParams);
+      const collected: StreamEvent[] = [];
+      for await (const event of events) collected.push(event);
+
+      expect(collected).toEqual([
+        { type: "tool_start", id: "tu_1", name: "web_search", input: { query: "weather" } },
+      ]);
+      await expect(response).resolves.toMatchObject({ stopReason: "tool_use" });
+    });
+
+    it("throws ProviderProtocolError on tool-arg JSON unrepairable by jsonrepair (Anthropic stream)", async () => {
+      const provider = createProvider();
+      // `}}}]]]` — closers-only with no payload. There is nothing for any
+      // future jsonrepair heuristic to wrap, so this stays unrepairable
+      // across library upgrades; a more typo-shaped input could silently
+      // start passing if jsonrepair broadens its recovery surface.
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: {
+              model: "claude-sonnet-4-6",
+              usage: { input_tokens: 10, output_tokens: 0 },
+            },
+          },
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "tool_use", id: "tu_1", name: "web_search" },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "input_json_delta", partial_json: "}}}]]]" },
+          },
+          { type: "content_block_stop", index: 0 },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "tool_use" },
+            usage: { output_tokens: 12 },
+          },
+          { type: "message_stop" },
+        ]),
+      );
+
+      const { events, response } = provider.chatStream(defaultParams);
+      const collect = async (): Promise<StreamEvent[]> => {
+        const out: StreamEvent[] = [];
+        for await (const event of events) out.push(event);
+        return out;
+      };
+
+      await expect(collect()).rejects.toBeInstanceOf(ProviderProtocolError);
+      // Avoid an unhandled rejection from the parallel response promise.
+      await expect(response).rejects.toBeInstanceOf(ProviderProtocolError);
     });
   });
 

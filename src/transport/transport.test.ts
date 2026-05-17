@@ -174,6 +174,8 @@ describe("createTransport", () => {
           toolSet: [],
           memoryScope: null,
           profileClass: null,
+          streamChunkChars: 4000,
+          streamEdits: true,
         }),
       });
       const { transport } = setup({ agentStore });
@@ -279,6 +281,8 @@ describe("createTransport", () => {
           toolSet: [],
           memoryScope: null,
           profileClass: null,
+          streamChunkChars: 4000,
+          streamEdits: true,
         }),
       });
       const { transport } = setup({ transportStore, agentStore });
@@ -352,6 +356,7 @@ describe("createTransport", () => {
         conversationId: "conv-1",
         content: "hello",
         platformTs: new Date("2026-01-01"),
+        source: "user",
       });
       expect(mockEvent.create).toHaveBeenCalledWith({
         conversationId: "conv-1",
@@ -1468,6 +1473,8 @@ describe("createTransport", () => {
         toolSet: [],
         memoryScope: { compartments: ["work", "dnd"], trust: ["first-party"] },
         profileClass: null,
+        streamChunkChars: 4000,
+        streamEdits: true,
       });
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),

@@ -7,10 +7,16 @@ import {
   mockTransportStore,
 } from "../test/factories.js";
 import { type AdapterEntry, createDeliveryRouter, type RoutingContext } from "./delivery-router.js";
+import type { Session } from "./store/index.js";
+import type { ChannelSessionReceive } from "./store/schema.js";
 
 const textDelta: StreamEvent = { type: "text_delta", text: "hello" };
 
-function session(id: string, channelId: string, receive = "routed") {
+function session(
+  id: string,
+  channelId: string,
+  receive: ChannelSessionReceive = "routed",
+): Session {
   return {
     id,
     channelId,
@@ -28,6 +34,7 @@ function ctx(overrides?: Partial<RoutingContext>): RoutingContext {
     isPrivate: true,
     maxInboundId: "inb-1",
     prevCursor: null,
+    kind: "reply",
     ...overrides,
   };
 }
@@ -164,7 +171,7 @@ describe("createDeliveryRouter", () => {
     });
     await router.prepare(ctx({ runId: "run-abc" }));
 
-    expect(streaming.openStream).toHaveBeenCalledWith("addr-s1", "run-abc");
+    expect(streaming.openStream).toHaveBeenCalledWith("addr-s1", "run-abc", undefined);
   });
 
   it("skips sessions with unknown channel adapter", async () => {
@@ -645,6 +652,75 @@ describe("createDeliveryRouter", () => {
       await delivery.deliverVoice(audio);
 
       expect(ok.sendVoice).toHaveBeenCalledWith("addr-s2", audio);
+    });
+  });
+
+  describe("kind: 'broadcast'", () => {
+    it("rejects broadcast routing on non-private conversations", async () => {
+      // Defense-in-depth: broadcasting on a group thread would leak
+      // proactive context into unrelated chats. Today's only broadcast
+      // caller (scheduled fires) only targets private conversations; the
+      // guard catches any future call site that breaks the invariant.
+      const transportStore = mockTransportStore();
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters: new Map(),
+        transportStore,
+      });
+      await expect(router.prepare(ctx({ kind: "broadcast", isPrivate: false }))).rejects.toThrow(
+        /broadcast/i,
+      );
+      expect(transportStore.getActiveSessionsForConversation).not.toHaveBeenCalled();
+      expect(transportStore.getSourceSessions).not.toHaveBeenCalled();
+    });
+
+    it("uses getActiveSessionsForConversation instead of getSourceSessions", async () => {
+      const batch = mockAdapter();
+      const adapters = new Map([["ch-1", { adapter: batch }]]);
+      const transportStore = mockTransportStore({
+        getActiveSessionsForConversation: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+        getSourceSessions: vi.fn().mockResolvedValue([]), // must NOT be consulted
+      });
+
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters,
+        transportStore,
+      });
+      const delivery = await router.prepare(ctx({ kind: "broadcast" }));
+      await delivery.deliverBatch("morning briefing");
+
+      expect(transportStore.getActiveSessionsForConversation).toHaveBeenCalledWith(
+        expect.anything(),
+        "conv-1",
+      );
+      expect(transportStore.getSourceSessions).not.toHaveBeenCalled();
+      expect(batch.deliver).toHaveBeenCalledWith("addr-s1", "morning briefing");
+    });
+
+    it("still merges receive: 'all' overlay for private conversations", async () => {
+      const batch1 = mockAdapter();
+      const batch2 = mockAdapter();
+      const adapters = new Map([
+        ["ch-1", { adapter: batch1 }],
+        ["ch-web", { adapter: batch2 }],
+      ]);
+      const transportStore = mockTransportStore({
+        getActiveSessionsForConversation: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+        getReceiveAllSessions: vi.fn().mockResolvedValue([session("s-web", "ch-web", "all")]),
+        getSourceSessions: vi.fn().mockResolvedValue([]),
+      });
+
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters,
+        transportStore,
+      });
+      const delivery = await router.prepare(ctx({ kind: "broadcast", isPrivate: true }));
+      await delivery.deliverBatch("hello");
+
+      expect(batch1.deliver).toHaveBeenCalledWith("addr-s1", "hello");
+      expect(batch2.deliver).toHaveBeenCalledWith("addr-s-web", "hello");
     });
   });
 

@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { logger } from "../logger.js";
+import { parseProviderJson } from "./errors.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
@@ -115,10 +116,17 @@ export class AnthropicProvider implements LlmProvider {
               const toolBlock = toolBlocks.get(event.index);
               if (toolBlock) {
                 // Malformed tool-use JSON: attribute to the span before the
-                // generator unwinds, matching the catch branch below.
+                // generator unwinds, matching the catch branch below. Wrap
+                // the throw as ProviderProtocolError so FallbackLlmProvider's
+                // status-less network-error heuristic doesn't misclassify a
+                // bare SyntaxError as transient.
                 let input: unknown;
                 try {
-                  input = JSON.parse(toolBlock.jsonChunks.join(""));
+                  input = parseProviderJson(
+                    toolBlock.jsonChunks.join(""),
+                    toolBlock.name,
+                    "Anthropic streamed tool_use input",
+                  );
                 } catch (parseErr) {
                   completed = true;
                   failChatSpan(span, parseErr);

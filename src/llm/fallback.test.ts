@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockProvider } from "../test/factories.js";
+import { ProviderProtocolError } from "./errors.js";
 import {
   AllProvidersFailedError,
   FallbackLlmProvider,
@@ -113,6 +114,11 @@ describe("isRetriableProviderError", () => {
     ["network error without status", networkError(), true],
     ["string throw", "oops", false],
     ["undefined throw", undefined, false],
+    [
+      "ProviderProtocolError (no status, but content-level failure)",
+      new ProviderProtocolError("tool_use args unparseable", new SyntaxError("bad json")),
+      false,
+    ],
     // Refusals are policy decisions — silent re-routing to the next provider
     // is the wrong shape. See design/agent-resilience.md Class C.
     ["RefusalError", new RefusalError("refused"), false],

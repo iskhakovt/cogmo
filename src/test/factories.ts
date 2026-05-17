@@ -54,6 +54,8 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       toolSet: [],
       memoryScope: null,
       profileClass: null,
+      streamChunkChars: 4000,
+      streamEdits: true,
     }),
     getDefaultProfile: vi.fn().mockResolvedValue({ id: "profile-1" }),
     createProfile: vi.fn().mockResolvedValue({
@@ -69,6 +71,8 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       toolSet: [],
       memoryScope: null,
       profileClass: null,
+      streamChunkChars: 4000,
+      streamEdits: true,
     }),
     getActiveRules: vi.fn().mockResolvedValue([]),
     getMessage: vi.fn().mockResolvedValue({ id: "msg-1", role: "assistant", content: "test" }),
@@ -166,10 +170,13 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       toolSet: [],
       memoryScope: null,
       profileClass: null,
+      streamChunkChars: 4000,
+      streamEdits: true,
     }),
     countProfileReferences: vi.fn().mockResolvedValue({ conversations: 0, messages: 0 }),
     deleteProfile: vi.fn().mockResolvedValue(undefined),
     listConversationsForUser: vi.fn().mockResolvedValue([]),
+    findMostRecentConversationForUserProfile: vi.fn().mockResolvedValue(undefined),
     setConversationProfile: vi.fn().mockResolvedValue(undefined),
     setAlias: vi.fn().mockResolvedValue(undefined),
     findConversationByAlias: vi.fn().mockResolvedValue(null),
@@ -196,7 +203,9 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     swapSession: vi.fn().mockResolvedValue({ id: "session-swapped" }),
     getSession: vi.fn().mockResolvedValue(null),
     persistInbound: vi.fn().mockResolvedValue({ id: "inbound-1" }),
-    getUnbatchedInbound: vi.fn().mockResolvedValue([{ id: "inbound-1", content: "hello" }]),
+    getUnbatchedInbound: vi
+      .fn()
+      .mockResolvedValue([{ id: "inbound-1", content: "hello", source: "user" }]),
     getActiveSessionsForConversation: vi.fn().mockResolvedValue([]),
     getActiveChannelTypes: vi.fn().mockResolvedValue([]),
     getVoiceMaxReplyChars: vi.fn().mockResolvedValue(null),
@@ -210,7 +219,8 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     getChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     setChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     clearChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
-    findActiveSessionForUserProfile: vi.fn().mockResolvedValue(undefined),
+    findReachableChannelsForUserProfile: vi.fn().mockResolvedValue([]),
+    findInboundByScheduledFireKey: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }

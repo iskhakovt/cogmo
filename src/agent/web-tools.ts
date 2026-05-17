@@ -89,6 +89,7 @@ function createWebSearch(apiKey: string | undefined): ToolSpec {
       "Search the web for current information. Returns titles, URLs, and snippets. " +
       "Use this when you need to find facts, recent events, or multiple sources to compare.",
     parallelSafe: true,
+    sideEffectful: false,
     schema: z.object({
       query: z.string().describe("Search query"),
       maxResults: z
@@ -154,6 +155,7 @@ function createWebAnswer(apiKey: string | undefined): ToolSpec {
     // wasted retries there are acceptable.
     durable: true,
     parallelSafe: true,
+    sideEffectful: false,
     schema: z.object({
       question: z.string().describe("The question to answer"),
     }),
@@ -215,6 +217,7 @@ function createFetchUrl(tavilyApiKey: string | undefined): ToolSpec {
       "Returns cleaned article text for web pages, or raw text for non-HTML content. " +
       "Use this when you need to read a specific web page.",
     parallelSafe: true,
+    sideEffectful: false,
     schema: z.object({
       url: z.string().url().describe("The URL to fetch (http or https only)"),
     }),

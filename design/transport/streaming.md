@@ -58,7 +58,16 @@ interface Adapter {
 
 interface StreamingAdapter {
   stop(): Promise<void>;
-  openStream(platformAddress: string, runId: string): Promise<StreamHandle>;
+  openStream(
+    platformAddress: string,
+    runId: string,
+    opts?: StreamOpts,
+  ): Promise<StreamHandle>;
+}
+
+interface StreamOpts {
+  chunkChars: number;   // rotate to a new message past this source-text size
+  allowEdits: boolean;  // false = append-only, no mid-message edits
 }
 
 interface StreamHandle {
@@ -70,16 +79,26 @@ interface StreamHandle {
 
 No inheritance between `Adapter` and `StreamingAdapter` — they are separate interfaces for separate delivery paths. The stream router checks which one the adapter implements and uses the right path.
 
+### Per-Profile Presentation Knobs `[confirmed]`
+
+`StreamOpts` is derived from the active profile in the orchestrator and forwarded to `openStream` via `RoutingContext.streamOpts`:
+
+- `chunkChars` — soft cap on a single message's source length before the adapter rotates to a fresh message. Default 4000 (just under Telegram's 4096 char cap, leaving HTML-tag headroom). DB CHECK constrains the column to 100..4000. Lower it for a "burst of short messages" UX where the reply lands as several smaller bubbles instead of one growing edit.
+- `allowEdits` — when false, the adapter never edits a message mid-stream. It emits whole chunks on boundary / finish, drops in-message tool / status banners (they'd land stale and mid-paragraph at the next chunk boundary), and surfaces progress via the platform-native typing indicator. For Telegram: `sendChatAction("typing")` on first push, refreshed every 3.5s (under the 5s auto-clear), cleared on `finish` / `abort`. The error tail in `abort` emits as a fresh chunk too, since `editMessage` is off the table.
+
+Schema: two columns on `profiles` (`stream_chunk_chars INTEGER NOT NULL DEFAULT 4000`, `stream_edits BOOLEAN NOT NULL DEFAULT true`) plus `chk_profiles_stream_chunk_chars` CHECK. Adapters may ignore knobs that don't apply (a future SSE-style web stream would honor neither).
+
 ### Adapter Rendering
 
 Each adapter decides how to render `StreamEvent`s. The interface delivers typed events; the adapter is a renderer.
 
 **Telegram:**
-- `text_delta` → accumulate text, throttled `editMessage` (~every 500ms, respects rate limits)
-- `tool_start` → append status text (e.g. "Searching...")
-- `tool_result` → skip (LLM will summarize)
-- `finish()` → final `editMessage` with formatting
-- `abort(error)` → edit message to show error
+- `text_delta` → accumulate text; if `allowEdits` (default), throttled `editMessage` every ~500ms; rotate to a new message once accumulated source exceeds `chunkChars`
+- `tool_start` / `status` → append status text (e.g. "Searching..."). **Append-only mode (`allowEdits=false`) drops these** — the typing heartbeat carries progress instead
+- `tool_result` → skip (LLM will summarize); image/document results deliver out-of-band via `sendPhoto` / `sendDocument`
+- First push in append-only mode also kicks `sendChatAction("typing")` on a 3.5s refresh loop, cleared on `finish` / `abort`
+- `finish()` → emit any remaining buffer with HTML formatting; in edit mode this is the final `editMessage`, in append-only mode it's a fresh `sendMessage`
+- `abort(error)` → append `⚠️ ${error}` and emit (edit in edit mode, fresh send in append-only mode)
 
 **Web UI (future):**
 - All events pushed as SSE, rendered as rich components (tool cards, streaming text)

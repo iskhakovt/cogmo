@@ -1,6 +1,7 @@
 import { getEncoding, type Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
 import { logger } from "../logger.js";
+import { parseProviderJson } from "./errors.js";
 import { RefusalError } from "./fallback.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
@@ -268,11 +269,18 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
         // Yield accumulated tool calls as complete tool_start events.
         // Malformed argument JSON is attributed to the span before unwinding,
-        // matching the catch branch below.
+        // matching the catch branch below. `parseProviderJson` runs `jsonrepair`
+        // before declaring failure and wraps the throw as ProviderProtocolError
+        // so FallbackLlmProvider's status-less network-error heuristic doesn't
+        // misclassify a bare SyntaxError as transient.
         for (const [, call] of [...toolCalls.entries()].sort(([a], [b]) => a - b)) {
           let input: unknown;
           try {
-            input = JSON.parse(call.argumentChunks.join(""));
+            input = parseProviderJson(
+              call.argumentChunks.join(""),
+              call.name,
+              "OpenAI-compatible streamed tool_calls arguments",
+            );
           } catch (parseErr) {
             completed = true;
             failChatSpan(span, parseErr);

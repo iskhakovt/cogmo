@@ -35,6 +35,7 @@
  */
 
 import { logger } from "../logger.js";
+import { ProviderProtocolError } from "./errors.js";
 import type { LlmProvider } from "./provider.js";
 import type {
   ChatParams,
@@ -98,13 +99,22 @@ export class RefusalError extends Error {
  * (propagate). Pure function — exported for testability.
  *
  * Retriable: no status (network/DNS/TLS/timeout), 408, 425, 429, any 5xx.
- * Permanent: any other numeric HTTP status, or a non-Error throw. Refusals
- * (`RefusalError`) are permanent — silent re-routing across providers on a
- * policy refusal is the wrong shape (see Class C in
- * `design/agent-resilience.md`).
+ * Permanent: any other numeric HTTP status, or a non-Error throw.
+ *
+ * Two non-status error classes are also treated as permanent so they reach
+ * the in-loop classifier instead of burning the provider chain:
+ * - {@link ProviderProtocolError}: upstream response arrived intact but its
+ *   payload is unusable (tool-arg JSON fails to parse even after
+ *   `jsonrepair`). Retrying the next provider has no reason to help.
+ * - {@link RefusalError}: policy refusal (`stop_reason: "refusal"`,
+ *   `finish_reason: "content_filter"`, or a content-policy 400). Silent
+ *   re-routing across providers on a policy refusal is the wrong shape —
+ *   policies are deliberately different. See Class C in
+ *   `design/agent-resilience.md`.
  */
 export function isRetriableProviderError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
+  if (err instanceof ProviderProtocolError) return false;
   if (err instanceof RefusalError) return false;
   const status = extractStatus(err);
   if (status == null) return true; // network / DNS / TLS / timeout
