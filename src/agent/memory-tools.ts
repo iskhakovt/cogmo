@@ -11,6 +11,7 @@ export const memoryRecall = defineTool({
     "Use at the start of conversations and when context would help. " +
     "Prefer this over asking the user something you might already know.",
   parallelSafe: true,
+  sideEffectful: false,
   schema: z.object({
     query: z.string().describe("Semantic search query — describe what you're looking for"),
   }),

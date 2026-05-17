@@ -9,6 +9,7 @@ export const readFile = defineTool({
     "Read a file from the workspace. " +
     "Use to review notes, drafts, or any previously saved content.",
   parallelSafe: true,
+  sideEffectful: false,
   schema: z.object({
     path: z.string().describe("File path (e.g. 'notes/meeting.md')"),
   }),
@@ -43,6 +44,7 @@ export const listFiles = defineTool({
     "List files in the workspace, optionally filtered by path prefix. " +
     "Use to see what files exist before reading or to find a specific file.",
   parallelSafe: true,
+  sideEffectful: false,
   schema: z.object({
     prefix: z
       .string()
