@@ -242,6 +242,10 @@ describe("createHandleMessage", () => {
   // fields without per-emission ceremony. See design/agent-resilience.md →
   // Telemetry.
   it("passes a child turnLogger bound to runId + conversationId into the agent loop", async () => {
+    // Module-level `const log = logger.child(...)` calls elsewhere in `src/`
+    // execute at import time — before this spy is installed — so they don't
+    // route through it. The spy reliably catches only the orchestrator's
+    // per-turn child creation, which is what we want to assert against.
     const childLogger = mock<ReturnType<typeof logger.child>>();
     const childSpy = vi.spyOn(logger, "child").mockReturnValue(childLogger);
 
@@ -253,6 +257,7 @@ describe("createHandleMessage", () => {
         runId: testRunId,
       });
 
+      expect(childSpy).toHaveBeenCalledTimes(1);
       expect(childSpy).toHaveBeenCalledWith({
         runId: testRunId,
         conversationId: "conv-1",

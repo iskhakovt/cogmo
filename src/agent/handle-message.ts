@@ -205,12 +205,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
     async ({ event, step, runId }) => {
       const { conversationId, triggerInboundId } = event.data;
 
-      // Per-turn child logger — every emission inside the agent loop (and any
-      // future Class C/D telemetry) inherits `runId` + `conversationId` so the
-      // evolution failure-reflector can join structured logs to
-      // `conversation/degraded` / `conversation/errored` events by those two
-      // fields without per-call ceremony. See design/agent-resilience.md →
-      // Telemetry.
+      // Per-turn child logger — every emission inside the agent loop inherits
+      // `runId` + `conversationId` so the evolution failure-reflector can join
+      // logs to `conversation/degraded` events. See design/agent-resilience.md.
       const turnLogger = logger.child({ runId, conversationId });
 
       // ──── DURABLE: load context + entry guards ────

@@ -1436,4 +1436,37 @@ describe("turnLogger plumbing", () => {
       "agent loop history invariants repaired",
     );
   });
+
+  // Force the iteration-limit branch: provider always returns a tool_use block
+  // (so the loop never exits via end_turn) and `maxIterations: 1` trips the
+  // ceiling immediately after the first round of tool execution.
+  it("routes the iteration-limit warn through turnLogger", async () => {
+    const provider = mockProvider([toolUseResponse("echo", "t1", {})]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({}),
+        handler: async () => "ok",
+      }),
+    );
+    const turnLogger = mock<Logger>();
+
+    await runAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "loop" }],
+      tools,
+      service: stubService(),
+      maxIterations: 1,
+      turnLogger,
+    });
+
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ maxIterations: 1 }),
+      "agent loop hit iteration limit",
+    );
+  });
 });
