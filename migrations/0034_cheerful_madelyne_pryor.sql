@@ -17,5 +17,8 @@ ALTER TABLE "inbound_messages" ALTER COLUMN "channel_session_id" DROP NOT NULL;-
 ALTER TABLE "inbound_messages" ADD COLUMN "source" "inbound_message_source";--> statement-breakpoint
 UPDATE "inbound_messages" SET "source" = 'user' WHERE "source" IS NULL;--> statement-breakpoint
 ALTER TABLE "inbound_messages" ALTER COLUMN "source" SET NOT NULL;--> statement-breakpoint
-ALTER TABLE "inbound_messages" ADD CONSTRAINT "chk_inbound_source_session" CHECK (("inbound_messages"."source" = 'user' AND "inbound_messages"."channel_session_id" IS NOT NULL)
-        OR ("inbound_messages"."source" = 'scheduled' AND "inbound_messages"."channel_session_id" IS NULL));
+ALTER TABLE "inbound_messages" ADD COLUMN "scheduled_fire_key" text;--> statement-breakpoint
+CREATE INDEX "idx_conversations_user_profile_private_id" ON "conversations" USING btree ("user_id","profile_id","id" desc) WHERE is_private = true;--> statement-breakpoint
+CREATE UNIQUE INDEX "uq_inbound_scheduled_fire_key" ON "inbound_messages" USING btree ("scheduled_fire_key") WHERE scheduled_fire_key IS NOT NULL;--> statement-breakpoint
+ALTER TABLE "inbound_messages" ADD CONSTRAINT "chk_inbound_source_session" CHECK (("inbound_messages"."source" = 'user' AND "inbound_messages"."channel_session_id" IS NOT NULL AND "inbound_messages"."scheduled_fire_key" IS NULL)
+        OR ("inbound_messages"."source" = 'scheduled' AND "inbound_messages"."channel_session_id" IS NULL AND "inbound_messages"."scheduled_fire_key" IS NOT NULL));

@@ -1011,5 +1011,119 @@ describe("DrizzleTransportStore", () => {
       const addrs = result.map((r) => r.platformAddress).sort();
       expect(addrs).toEqual(["chat-1", "chat-2"]);
     });
+
+    it("excludes addresses currently bound to an active session on a different profile", async () => {
+      // Cross-profile hijack regression: the user historically chatted on
+      // profile A via chat X, then `/new`-switched the chat to profile B.
+      // Profile A's old session is closed; profile B's session is active.
+      // A scheduled fire on profile A must NOT rotate chat X back onto a
+      // profile-A conversation — that would close the user's active
+      // profile-B session and silently switch their context.
+      const userId = (await tx((trx) => agentStore.createUser(trx))).id;
+      profileNameCounter += 1;
+      const profileA = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `cross-profile-a-${profileNameCounter}`,
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      profileNameCounter += 1;
+      const profileB = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `cross-profile-b-${profileNameCounter}`,
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      const convA = (
+        await tx((trx) =>
+          agentStore.createConversation(trx, { userId, profileId: profileA, isPrivate: true }),
+        )
+      ).id;
+      const convB = (
+        await tx((trx) =>
+          agentStore.createConversation(trx, { userId, profileId: profileB, isPrivate: true }),
+        )
+      ).id;
+      const channelId = await seedChannel();
+      // Step 1: profile-A session on chat X, then closed (simulates /new).
+      const sessionA = await seedSession(channelId, convA, "chat-X");
+      await tx((trx) => store.closeSession(trx, sessionA));
+      // Step 2: profile-B session on chat X is currently active.
+      await seedSession(channelId, convB, "chat-X");
+
+      const reachableForA = await tx((trx) =>
+        store.findReachableChannelsForUserProfile(trx, userId, profileA),
+      );
+      // chat X is excluded: rotating would hijack the active profile-B session.
+      expect(reachableForA).toEqual([]);
+
+      // Profile B can still see chat X as its own reachable channel.
+      const reachableForB = await tx((trx) =>
+        store.findReachableChannelsForUserProfile(trx, userId, profileB),
+      );
+      expect(reachableForB).toHaveLength(1);
+      expect(reachableForB[0]?.platformAddress).toBe("chat-X");
+    });
+
+    it("includes addresses where the other-profile session is itself closed", async () => {
+      // The exclusion is keyed on an ACTIVE other-profile session. A
+      // user who used profile B briefly and then closed it should not
+      // permanently lose chat-X reachability on profile A.
+      const userId = (await tx((trx) => agentStore.createUser(trx))).id;
+      profileNameCounter += 1;
+      const profileA = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `closed-other-a-${profileNameCounter}`,
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      profileNameCounter += 1;
+      const profileB = (
+        await tx((trx) =>
+          agentStore.createProfile(trx, {
+            userId: null,
+            name: `closed-other-b-${profileNameCounter}`,
+            basePrompt: "p",
+            model: "m",
+            toolSet: [],
+          }),
+        )
+      ).id;
+      const convA = (
+        await tx((trx) =>
+          agentStore.createConversation(trx, { userId, profileId: profileA, isPrivate: true }),
+        )
+      ).id;
+      const convB = (
+        await tx((trx) =>
+          agentStore.createConversation(trx, { userId, profileId: profileB, isPrivate: true }),
+        )
+      ).id;
+      const channelId = await seedChannel();
+      await seedSession(channelId, convA, "chat-X");
+      const sessionB = await seedSession(channelId, convB, "chat-X");
+      await tx((trx) => store.closeSession(trx, sessionB));
+
+      const reachableForA = await tx((trx) =>
+        store.findReachableChannelsForUserProfile(trx, userId, profileA),
+      );
+      expect(reachableForA).toHaveLength(1);
+      expect(reachableForA[0]?.platformAddress).toBe("chat-X");
+    });
   });
 });

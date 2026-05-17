@@ -1,4 +1,5 @@
-import { and, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lte, ne, notExists, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { JsonValue } from "type-fest";
 // Cross-module read: scheduled-task fire routing needs conversations.{user_id, profile_id}
 // joined to channel_sessions. Per CLAUDE.md → Store Pattern, store impls may import
@@ -722,6 +723,15 @@ export class DrizzleTransportStore implements TransportStore {
     // carry a reachable `(channelId, platformAddress)` and the rotation
     // overwrites them with a fresh active row. The `expires_at` filter
     // does apply: a Web UI client whose heartbeat stopped is unreachable.
+    //
+    // The notExists clause excludes addresses currently bound to an
+    // active session on a different profile for the same user. Without
+    // it, rotation would `swapSession` over the user's in-flight
+    // conversation on another profile, silently hijacking their context
+    // to the scheduled fire's profile. Self-joining the same tables
+    // requires aliases (`other_cs`, `other_conv`).
+    const otherCs = alias(channelSessions, "other_cs");
+    const otherConv = alias(conversations, "other_conv");
     return tx
       .selectDistinctOn([channelSessions.channelId, channelSessions.platformAddress], {
         channelId: channelSessions.channelId,
@@ -735,6 +745,21 @@ export class DrizzleTransportStore implements TransportStore {
           eq(conversations.userId, userId),
           eq(conversations.profileId, profileId),
           or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
+          notExists(
+            tx
+              .select({ x: sql<number>`1` })
+              .from(otherCs)
+              .innerJoin(otherConv, eq(otherConv.id, otherCs.conversationId))
+              .where(
+                and(
+                  eq(otherCs.channelId, channelSessions.channelId),
+                  eq(otherCs.platformAddress, channelSessions.platformAddress),
+                  eq(otherCs.status, "active"),
+                  eq(otherConv.userId, userId),
+                  ne(otherConv.profileId, profileId),
+                ),
+              ),
+          ),
         ),
       )
       .orderBy(

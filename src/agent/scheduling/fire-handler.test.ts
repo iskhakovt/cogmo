@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
 import { mockAgentStore, mockTransportStore, spyOnInngestSend } from "../../test/factories.js";
-import { buildSyntheticInboundContent, createScheduledTaskFireHandler } from "./fire-handler.js";
+import { buildSyntheticInboundContent } from "./dispatch-fire.js";
+import { createScheduledTaskFireHandler } from "./fire-handler.js";
 
 let sendSpy: ReturnType<typeof spyOnInngestSend>;
 beforeEach(() => {

@@ -128,9 +128,13 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
       // Composed read: primary set + receive-all overlay share one tx so
       // routing always reads through a single connection. Under READ
       // COMMITTED each statement still sees its own snapshot — true
-      // atomicity would require REPEATABLE READ — but the race window
-      // (a session closing between the two reads) only ever produces a
-      // stale target, which adapter send-error handling already swallows.
+      // atomicity would require REPEATABLE READ.
+      //
+      // Concrete race window: a Web UI tab mid-disconnect can appear in
+      // the primary set but be expired by the time the receive-all read
+      // runs (or vice versa). Either case produces a stale target whose
+      // send hits per-target error handling and is logged + dropped
+      // without affecting other deliveries.
       const { primarySessions, receiveAllSessions } = await runInTx(async (tx) => {
         const primary =
           ctx.kind === "broadcast"

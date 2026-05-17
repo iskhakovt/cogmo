@@ -68,10 +68,20 @@ export async function dispatchScheduledFire(
       args.profileId,
     );
 
-    const targetConversationId =
-      conv?.lastMessageAt != null && Date.now() - conv.lastMessageAt.getTime() < deps.idleTimeoutMs
-        ? conv.id
-        : await rotateAndCreateConversation(tx, deps, args);
+    // Reuse the most-recent conversation when the user is engaged OR
+    // when it has no messages yet (e.g. they `/new`'d on this profile
+    // and haven't typed). Empty conversations are explicitly opened —
+    // landing the fire there matches "I opened a thread, then this
+    // reminder appeared," and avoids stranding the empty row when
+    // rotation would otherwise produce a sibling fresh conversation.
+    const reuse =
+      conv != null &&
+      (conv.lastMessageAt == null ||
+        Date.now() - conv.lastMessageAt.getTime() < deps.idleTimeoutMs);
+
+    const targetConversationId = reuse
+      ? conv.id
+      : await rotateAndCreateConversation(tx, deps, args);
 
     if (targetConversationId == null) {
       return { status: "skipped" as const, reason: "no_reachable_channel" as const };

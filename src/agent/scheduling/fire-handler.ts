@@ -70,5 +70,3 @@ export function createScheduledTaskFireHandler(deps: ScheduledTaskFireDeps, inng
     },
   );
 }
-
-export { buildSyntheticInboundContent } from "./dispatch-fire.js";

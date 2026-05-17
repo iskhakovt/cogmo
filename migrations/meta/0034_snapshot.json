@@ -1,5 +1,5 @@
 {
-  "id": "737e3c5f-f45a-49b7-bb8d-b0a00c0298a8",
+  "id": "4e698c2b-426e-4e36-94b9-5907fcfe7e05",
   "prevId": "146b8ceb-2024-44ce-8b86-3854b717d945",
   "version": "7",
   "dialect": "postgresql",
@@ -481,6 +481,34 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_conversations_user_profile_private_id": {
+          "name": "idx_conversations_user_profile_private_id",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "profile_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "\"id\" desc",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "is_private = true",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -3201,6 +3229,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "scheduled_fire_key": {
+          "name": "scheduled_fire_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -3209,7 +3243,24 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "uq_inbound_scheduled_fire_key": {
+          "name": "uq_inbound_scheduled_fire_key",
+          "columns": [
+            {
+              "expression": "scheduled_fire_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "scheduled_fire_key IS NOT NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "inbound_messages_channel_session_id_channel_sessions_id_fk": {
           "name": "inbound_messages_channel_session_id_channel_sessions_id_fk",
@@ -3236,7 +3287,7 @@
       "checkConstraints": {
         "chk_inbound_source_session": {
           "name": "chk_inbound_source_session",
-          "value": "(\"inbound_messages\".\"source\" = 'user' AND \"inbound_messages\".\"channel_session_id\" IS NOT NULL)\n        OR (\"inbound_messages\".\"source\" = 'scheduled' AND \"inbound_messages\".\"channel_session_id\" IS NULL)"
+          "value": "(\"inbound_messages\".\"source\" = 'user' AND \"inbound_messages\".\"channel_session_id\" IS NOT NULL AND \"inbound_messages\".\"scheduled_fire_key\" IS NULL)\n        OR (\"inbound_messages\".\"source\" = 'scheduled' AND \"inbound_messages\".\"channel_session_id\" IS NULL AND \"inbound_messages\".\"scheduled_fire_key\" IS NOT NULL)"
         }
       },
       "isRLSEnabled": false

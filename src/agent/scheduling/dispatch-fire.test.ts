@@ -98,21 +98,25 @@ describe("dispatchScheduledFire", () => {
     });
   });
 
-  it("treats lastMessageAt === null (no messages yet) as idle and rotates", async () => {
-    // An empty conversation is "most recent" but not engaged — reusing
-    // would dump the fire into a conversation the user never opened.
+  it("reuses an empty conversation (user opened it but never typed)", async () => {
+    // An empty conversation usually means the user `/new`'d on this
+    // profile and hasn't engaged yet. The sessions /new attached are
+    // still pointing at this conv, so the fire lands cleanly and the
+    // user sees "I opened a thread, then a reminder appeared" instead
+    // of a stranded empty conv next to a fresh fire-conv.
     const agentStore = mockAgentStore({
       findMostRecentConversationForUserProfile: vi.fn().mockResolvedValue({
         id: "conv-empty",
         lastMessageAt: null,
       }),
-      createConversation: vi.fn().mockResolvedValue({ id: "conv-fresh" }),
+      // If reuse picks this path correctly, neither runs.
+      createConversation: vi.fn().mockRejectedValue(new Error("must not run on reuse")),
     });
     const transportStore = mockTransportStore({
       findReachableChannelsForUserProfile: vi
         .fn()
-        .mockResolvedValue([{ channelId: "ch-tg", platformAddress: "chat-42", receive: "routed" }]),
-      swapSession: vi.fn().mockResolvedValue({ id: "session-new" }),
+        .mockRejectedValue(new Error("must not run on reuse")),
+      swapSession: vi.fn().mockRejectedValue(new Error("must not run on reuse")),
       persistInbound: vi.fn().mockResolvedValue({ id: "inbound-9" }),
     });
 
@@ -121,9 +125,9 @@ describe("dispatchScheduledFire", () => {
       baseArgs,
     );
 
-    expect(result).toMatchObject({ status: "dispatched", conversationId: "conv-fresh" });
-    expect(agentStore.createConversation).toHaveBeenCalledTimes(1);
-    expect(transportStore.swapSession).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ status: "dispatched", conversationId: "conv-empty" });
+    expect(agentStore.createConversation).not.toHaveBeenCalled();
+    expect(transportStore.swapSession).not.toHaveBeenCalled();
   });
 
   it("preserves the prior receive mode when rotating each channel", async () => {
