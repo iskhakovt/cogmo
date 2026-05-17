@@ -198,22 +198,22 @@ export class OpenAICompatibleProvider implements LlmProvider {
     async function* generateEvents(): AsyncIterable<StreamEvent> {
       let completed = false;
       try {
-        let stream: Awaited<ReturnType<typeof client.chat.completions.create>>;
-        try {
-          stream = await client.chat.completions.create({
+        // Map content-policy 400s to RefusalError at the create-time boundary
+        // before they propagate to FallbackLlmProvider. `.catch()` keeps the
+        // narrow Stream<...> type from the streaming overload — a try/catch
+        // would widen `stream` to the ChatCompletion|Stream union.
+        const stream = await client.chat.completions
+          .create({
             model: params.model,
             max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
             messages: buildMessages(params.system, params.messages, caching),
             ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
             stream: true,
             stream_options: { include_usage: true },
+          })
+          .catch((err: unknown) => {
+            throw mapRefusalError(err);
           });
-        } catch (err) {
-          // Map content-policy 400s to RefusalError before they propagate to
-          // FallbackLlmProvider. Done in a nested try so we don't double-wrap
-          // mid-stream errors from the outer catch below.
-          throw mapRefusalError(err);
-        }
 
         let model = params.model;
         const usage: Usage = { inputTokens: 0, outputTokens: 0 };
