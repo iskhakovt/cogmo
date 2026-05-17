@@ -1,6 +1,7 @@
 import { getEncoding, type Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
 import { logger } from "../logger.js";
+import { RefusalError } from "./fallback.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
@@ -167,8 +168,9 @@ export class OpenAICompatibleProvider implements LlmProvider {
         usage,
       };
     } catch (err) {
-      failChatSpan(span, err);
-      throw err;
+      const mapped = mapRefusalError(err);
+      failChatSpan(span, mapped);
+      throw mapped;
     } finally {
       span.end();
     }
@@ -196,14 +198,22 @@ export class OpenAICompatibleProvider implements LlmProvider {
     async function* generateEvents(): AsyncIterable<StreamEvent> {
       let completed = false;
       try {
-        const stream = await client.chat.completions.create({
-          model: params.model,
-          max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
-          messages: buildMessages(params.system, params.messages, caching),
-          ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
-          stream: true,
-          stream_options: { include_usage: true },
-        });
+        let stream: Awaited<ReturnType<typeof client.chat.completions.create>>;
+        try {
+          stream = await client.chat.completions.create({
+            model: params.model,
+            max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
+            messages: buildMessages(params.system, params.messages, caching),
+            ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
+            stream: true,
+            stream_options: { include_usage: true },
+          });
+        } catch (err) {
+          // Map content-policy 400s to RefusalError before they propagate to
+          // FallbackLlmProvider. Done in a nested try so we don't double-wrap
+          // mid-stream errors from the outer catch below.
+          throw mapRefusalError(err);
+        }
 
         let model = params.model;
         const usage: Usage = { inputTokens: 0, outputTokens: 0 };
@@ -456,6 +466,41 @@ function fromOpenAIMessage(message: OpenAI.ChatCompletionMessage): ContentBlock[
   return blocks;
 }
 
+// --- Error mapping ---
+
+/**
+ * Content-policy `code` values seen on `OpenAI.BadRequestError` (and Azure's
+ * shim that rides on the same SDK). The body of a 400 carries
+ * `error.code: "content_policy_violation"` for OpenAI-direct and
+ * `error.code: "responsible_ai_policy_violation"` for Azure OpenAI.
+ *
+ * Design scope (see design/agent-resilience.md Class C): refusal detection
+ * applies to Anthropic-direct + OpenAI-direct. OpenAI-compat shims ride
+ * along when they happen to emit the same shape — false positives are
+ * acceptable per the design.
+ */
+const REFUSAL_ERROR_CODES = new Set<string>([
+  "content_policy_violation",
+  "responsible_ai_policy_violation",
+]);
+
+/**
+ * Wrap an SDK error in `RefusalError` when its shape matches a 400-class
+ * content-policy refusal. Passes any other error through untouched.
+ *
+ * Duck-typed on `status` + `code` to avoid binding to the SDK's exact
+ * `BadRequestError` class — third-party OpenAI-compat clients sometimes
+ * produce structurally-similar errors that don't share the same constructor.
+ */
+function mapRefusalError(err: unknown): unknown {
+  if (!(err instanceof Error)) return err;
+  const status = (err as unknown as { status?: unknown }).status;
+  if (status !== 400) return err;
+  const code = (err as unknown as { code?: unknown }).code;
+  if (typeof code !== "string" || !REFUSAL_ERROR_CODES.has(code)) return err;
+  return new RefusalError(err.message, err);
+}
+
 function fromOpenAIFinishReason(reason: string | null): StopReason {
   switch (reason) {
     case "stop":
@@ -464,6 +509,17 @@ function fromOpenAIFinishReason(reason: string | null): StopReason {
       return "tool_use";
     case "length":
       return "max_tokens";
+    case "content_filter":
+      // OpenAI's explicit refusal signal on the success path. Surfaces the
+      // Class C "model refusal" subtype (design/agent-resilience.md) for the
+      // in-loop classifier. The design scopes this detection to
+      // OpenAI-direct + Anthropic-direct, but the same adapter serves
+      // OpenAI-compat providers (OpenRouter, Venice, xAI, generic shims) and
+      // there's no clean adapter-time way to tell them apart from the base
+      // URL alone. Compat providers ride along when they happen to emit an
+      // OpenAI-shaped refusal — best-effort, false positives on a compat
+      // shim are acceptable per the design.
+      return "refusal";
     default:
       return "end_turn";
   }

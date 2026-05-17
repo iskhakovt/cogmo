@@ -273,6 +273,69 @@ describe("AnthropicProvider", () => {
     expect(result.stopReason).toBe("max_tokens");
   });
 
+  it("maps refusal stop reason", async () => {
+    // Anthropic surfaces explicit policy refusals on recent models as
+    // `stop_reason: "refusal"`. The Class C subtype in
+    // design/agent-resilience.md depends on this signal reaching the
+    // in-loop classifier, so the mapping must be 1:1 — no default fallthrough
+    // to "end_turn".
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: "I can't help with that.", citations: null }],
+      stop_reason: "refusal",
+      model: "claude-sonnet-4-6",
+      usage: { input_tokens: 20, output_tokens: 8 },
+    });
+
+    const result = await provider.chat({
+      model: "claude-sonnet-4-6",
+      system: "sys",
+      messages: [{ role: "user", content: "do something disallowed" }],
+    });
+
+    expect(result.stopReason).toBe("refusal");
+  });
+
+  it("maps refusal stop reason in stream", async () => {
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce(
+      mockStream([
+        {
+          type: "message_start",
+          message: {
+            model: "claude-sonnet-4-6",
+            usage: { input_tokens: 20, output_tokens: 0 },
+          },
+        },
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "I can't help with that." },
+        },
+        { type: "content_block_stop", index: 0 },
+        {
+          type: "message_delta",
+          delta: { stop_reason: "refusal" },
+          usage: { output_tokens: 8 },
+        },
+        { type: "message_stop" },
+      ]),
+    );
+
+    const { events, response } = provider.chatStream({
+      model: "claude-sonnet-4-6",
+      system: "sys",
+      messages: [{ role: "user", content: "do something disallowed" }],
+    });
+    for await (const _ of events) {
+      /* drain */
+    }
+
+    const meta = await response;
+    expect(meta.stopReason).toBe("refusal");
+  });
+
   describe("chatStream", () => {
     const defaultParams = {
       model: "claude-sonnet-4-6",

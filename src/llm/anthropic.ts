@@ -449,6 +449,11 @@ function fromAnthropicStopReason(reason: string | null): StopReason {
       return "tool_use";
     case "max_tokens":
       return "max_tokens";
+    case "refusal":
+      // Anthropic's explicit refusal signal on recent models. Surfaces the
+      // Class C "model refusal" subtype (design/agent-resilience.md) to the
+      // in-loop classifier.
+      return "refusal";
     default:
       return "end_turn";
   }

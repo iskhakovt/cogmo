@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { isRetriableProviderError, RefusalError } from "./fallback.js";
 import { OpenAICompatibleProvider } from "./openai-compat.js";
 import type { StreamEvent } from "./types.js";
 
@@ -406,6 +407,161 @@ describe("OpenAICompatibleProvider", () => {
       expect(first.value).toEqual({ type: "text_delta", text: "partial" });
       await expect(iter.next()).rejects.toBe(drop);
       await expect(response).rejects.toBe(drop);
+    });
+  });
+
+  // Refusal decoding: see design/agent-resilience.md Class C "model refusal".
+  // Success path: finish_reason "content_filter" → stopReason "refusal".
+  // Error path: 400 BadRequestError with a content-policy code → RefusalError,
+  // which `isRetriableProviderError` reports as non-retriable so the provider
+  // chain propagates it untouched (silent re-routing across providers on a
+  // policy refusal is the wrong shape).
+  describe("refusal decoding", () => {
+    it("maps finish_reason 'content_filter' to stopReason 'refusal' (non-stream)", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [
+          {
+            message: { content: "I cannot help with that.", tool_calls: null },
+            finish_reason: "content_filter",
+          },
+        ],
+        model: "gpt-5-nano",
+        usage: { prompt_tokens: 20, completion_tokens: 8 },
+      });
+
+      const result = await provider.chat({
+        model: "gpt-5-nano",
+        system: "sys",
+        messages: [{ role: "user", content: "disallowed request" }],
+      });
+
+      expect(result.stopReason).toBe("refusal");
+    });
+
+    it("maps finish_reason 'content_filter' to stopReason 'refusal' (stream)", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "gpt-5-nano",
+            choices: [{ delta: { content: "I cannot help" }, finish_reason: null }],
+            usage: null,
+          },
+          {
+            model: "gpt-5-nano",
+            choices: [{ delta: {}, finish_reason: "content_filter" }],
+            usage: { prompt_tokens: 20, completion_tokens: 8 },
+          },
+        ]),
+      );
+
+      const { events, response } = provider.chatStream({
+        model: "gpt-5-nano",
+        system: "sys",
+        messages: [{ role: "user", content: "disallowed request" }],
+      });
+      for await (const _ of events) {
+        /* drain */
+      }
+
+      const meta = await response;
+      expect(meta.stopReason).toBe("refusal");
+    });
+
+    it("wraps a 400 content_policy_violation BadRequestError as RefusalError", async () => {
+      const provider = createProvider();
+      // Mirror OpenAI's BadRequestError shape — `.status` 400, `.code` set by
+      // the SDK from the response body's `error.code`. Duck-typed; the
+      // adapter doesn't bind to the SDK's concrete class.
+      const upstream = Object.assign(
+        new Error("Your request was rejected as a result of our safety system."),
+        {
+          name: "BadRequestError",
+          status: 400,
+          code: "content_policy_violation",
+        },
+      );
+      mockCreate.mockRejectedValueOnce(upstream);
+
+      await expect(
+        provider.chat({
+          model: "gpt-5-nano",
+          system: "sys",
+          messages: [{ role: "user", content: "disallowed request" }],
+        }),
+      ).rejects.toBeInstanceOf(RefusalError);
+    });
+
+    it("wraps Azure responsible_ai_policy_violation as RefusalError", async () => {
+      // Azure OpenAI rides on the same SDK shape but uses its own code.
+      const provider = createProvider();
+      const upstream = Object.assign(new Error("Blocked by content management policy"), {
+        name: "BadRequestError",
+        status: 400,
+        code: "responsible_ai_policy_violation",
+      });
+      mockCreate.mockRejectedValueOnce(upstream);
+
+      await expect(
+        provider.chat({
+          model: "gpt-5-nano",
+          system: "sys",
+          messages: [{ role: "user", content: "disallowed request" }],
+        }),
+      ).rejects.toBeInstanceOf(RefusalError);
+    });
+
+    it("does NOT wrap unrelated 400 errors (e.g. invalid_request_error)", async () => {
+      const provider = createProvider();
+      const upstream = Object.assign(new Error("Invalid 'messages[0].role'"), {
+        name: "BadRequestError",
+        status: 400,
+        code: "invalid_request_error",
+      });
+      mockCreate.mockRejectedValueOnce(upstream);
+
+      // The original error propagates with its 400 status intact — no wrap.
+      const caught = await provider
+        .chat({
+          model: "gpt-5-nano",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+        })
+        .catch((e) => e);
+
+      expect(caught).toBe(upstream);
+      expect(caught).not.toBeInstanceOf(RefusalError);
+    });
+
+    it("wraps a content_policy_violation thrown pre-stream as RefusalError", async () => {
+      const provider = createProvider();
+      const upstream = Object.assign(
+        new Error("Your request was rejected as a result of our safety system."),
+        {
+          name: "BadRequestError",
+          status: 400,
+          code: "content_policy_violation",
+        },
+      );
+      mockCreate.mockRejectedValueOnce(upstream);
+
+      const { events, response } = provider.chatStream({
+        model: "gpt-5-nano",
+        system: "sys",
+        messages: [{ role: "user", content: "disallowed request" }],
+      });
+
+      const iter = events[Symbol.asyncIterator]();
+      await expect(iter.next()).rejects.toBeInstanceOf(RefusalError);
+      await expect(response).rejects.toBeInstanceOf(RefusalError);
+    });
+
+    it("RefusalError is non-retriable", () => {
+      // Contract: FallbackLlmProvider must propagate refusals without trying
+      // the next candidate. The classification predicate stays binary; the
+      // RefusalError instance check rides in front of the status-based rules.
+      expect(isRetriableProviderError(new RefusalError("refused"))).toBe(false);
     });
   });
 

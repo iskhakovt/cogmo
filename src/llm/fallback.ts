@@ -73,14 +73,43 @@ export class AllProvidersFailedError extends Error {
 }
 
 /**
+ * Thrown by an SDK adapter when the upstream provider refuses the request on
+ * content-policy grounds — e.g. OpenAI's `BadRequestError` carrying
+ * `code: "content_policy_violation"` (or Azure's
+ * `responsible_ai_policy_violation`). The success-path equivalent surfaces as
+ * `stopReason: "refusal"` on the response; this error class covers refusals
+ * that arrive as 400-class HTTP errors instead.
+ *
+ * Class C in `design/agent-resilience.md` treats refusal as non-retriable:
+ * fallback to the next provider is the wrong shape (policies differ
+ * deliberately across providers), and re-prompting the same model would
+ * almost certainly hit the same outcome. `isRetriableProviderError` returns
+ * `false` for this class so the provider chain propagates it untouched.
+ */
+export class RefusalError extends Error {
+  /** Underlying SDK error preserved for forensic logging. */
+  override readonly cause: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "RefusalError";
+    this.cause = cause;
+  }
+}
+
+/**
  * Classify an error as retriable (try the next provider) or permanent
  * (propagate). Pure function — exported for testability.
  *
  * Retriable: no status (network/DNS/TLS/timeout), 408, 425, 429, any 5xx.
- * Permanent: any other numeric HTTP status, or a non-Error throw.
+ * Permanent: any other numeric HTTP status, or a non-Error throw. Refusals
+ * (`RefusalError`) are permanent — silent re-routing across providers on a
+ * policy refusal is the wrong shape (see Class C in
+ * `design/agent-resilience.md`).
  */
 export function isRetriableProviderError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
+  if (err instanceof RefusalError) return false;
   const status = extractStatus(err);
   if (status == null) return true; // network / DNS / TLS / timeout
   if (status === 408 || status === 425 || status === 429) return true;
