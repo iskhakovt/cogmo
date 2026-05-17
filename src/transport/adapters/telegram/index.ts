@@ -320,9 +320,12 @@ class TelegramStreamHandle implements StreamHandle {
     // other tool_results: skip — LLM will summarize
 
     if (!this.#allowEdits) {
-      // Kick the typing heartbeat on first push and keep it alive until
-      // finish/abort. `setInterval` is idempotent only because we guard with
-      // null — double-pushing would otherwise stack timers.
+      // Kick the typing heartbeat on the first push that accumulates text or
+      // an in-message banner. Image / document dispatches early-return above
+      // and intentionally skip this: Telegram already renders its native
+      // "sending photo…" indicator while `sendPhoto` / `sendDocument` is in
+      // flight, and once text resumes the next push picks up the heartbeat.
+      // Idempotent via the null guard — double-pushing won't stack timers.
       this.#startTypingHeartbeat();
     }
 
@@ -335,12 +338,22 @@ class TelegramStreamHandle implements StreamHandle {
   #startTypingHeartbeat(): void {
     if (this.#typingTimer !== null) return;
     // Fire immediately so the indicator shows up on first push, not after one
-    // refresh interval. Errors are swallowed — typing is a hint, not load-
-    // bearing; a transient API failure shouldn't kill the stream.
-    void this.#bot.api.sendChatAction(this.#chatId, "typing").catch(() => {});
-    this.#typingTimer = setInterval(() => {
-      void this.#bot.api.sendChatAction(this.#chatId, "typing").catch(() => {});
-    }, TELEGRAM_TYPING_REFRESH_MS);
+    // refresh interval. Errors are logged but don't propagate — typing is a
+    // hint, not load-bearing; a transient API failure shouldn't kill the
+    // stream. `debug` rather than `warn` because a busy Bot API will produce
+    // these in bursts on rate-limit edges and we don't want to spam.
+    const kick = (): Promise<void> =>
+      this.#bot.api
+        .sendChatAction(this.#chatId, "typing")
+        .then(() => {})
+        .catch((err: unknown) => {
+          logger.debug(
+            { err, runId: this.#runId },
+            "telegram: sendChatAction(typing) failed; heartbeat continues",
+          );
+        });
+    void kick();
+    this.#typingTimer = setInterval(() => void kick(), TELEGRAM_TYPING_REFRESH_MS);
   }
 
   #stopTypingHeartbeat(): void {

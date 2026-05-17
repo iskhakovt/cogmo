@@ -74,6 +74,8 @@ const USAGE = {
     "  /profile stream <name> chunk=500                        → rotate to a new message every ~500 chars (100..4000)\n" +
     "  /profile stream <name> edits=off                        → append-only (no mid-message edits; typing indicator carries progress)\n" +
     "  /profile stream <name> chunk=500 edits=off              → both at once\n" +
+    "                                                          (use chunk=N edits=on|off — the = is required;\n" +
+    "                                                          'chunk 500' without = becomes part of the name)\n" +
     `  Compartments: ${CORE_LIST}\n` +
     "  Trust:        first-party, any",
   classes:

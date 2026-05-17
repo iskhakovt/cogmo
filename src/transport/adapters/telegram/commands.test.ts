@@ -1,6 +1,7 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { Profile } from "../../../agent/store/index.js";
+import { assertKind } from "../../../test/assertions.js";
 import { type DeepPartial, mockTransportDeep } from "../../../test/factories.js";
 import type { Transport } from "../../transport.js";
 import {
@@ -1506,25 +1507,33 @@ describe("parseStreamSpec", () => {
   });
 
   it("rejects chunk outside [100, 4000] — defense in depth alongside DB CHECK", () => {
+    // Pin the user-facing range copy — drifting silently from the DB
+    // CHECK bounds would make the friendly error misleading.
     const low = parseStreamSpec(["chunk=50"]);
-    expect(low.kind).toBe("error");
+    assertKind(low, "error");
+    expect(low.message).toContain("100 and 4000");
     const high = parseStreamSpec(["chunk=5000"]);
-    expect(high.kind).toBe("error");
+    assertKind(high, "error");
+    expect(high.message).toContain("100 and 4000");
   });
 
-  it("rejects non-integer chunk", () => {
+  it("rejects non-integer chunk and surfaces the offending value", () => {
     const r = parseStreamSpec(["chunk=abc"]);
-    expect(r.kind).toBe("error");
+    assertKind(r, "error");
+    expect(r.message).toContain("abc");
   });
 
   it("rejects unknown edits value", () => {
     const r = parseStreamSpec(["edits=maybe"]);
-    expect(r.kind).toBe("error");
+    assertKind(r, "error");
+    expect(r.message).toContain("on|off");
   });
 
   it("rejects unknown key", () => {
     const r = parseStreamSpec(["foo=bar"]);
-    expect(r.kind).toBe("error");
+    assertKind(r, "error");
+    expect(r.message).toContain("chunk");
+    expect(r.message).toContain("edits");
   });
 
   it("rejects repeated keys", () => {
@@ -1534,7 +1543,9 @@ describe("parseStreamSpec", () => {
 
   it("rejects bare tokens (no '=')", () => {
     const r = parseStreamSpec(["foo"]);
-    expect(r.kind).toBe("error");
+    assertKind(r, "error");
+    expect(r.message).toContain("chunk=<n>");
+    expect(r.message).toContain("edits=on|off");
   });
 });
 
