@@ -201,12 +201,16 @@ Each layer handles one class. None of them double-handles another layer's class:
 | Failure-rate circuit breaker per conversation ("this model is bad here, suggest `/model`") | Could surface as a steering rule from telemetry; doesn't belong in the loop. |
 | Activity-based tool timeouts | Stuck *tools* — covered separately in [agents.md](agents.md) → Activity-Based Timeouts. This doc covers broken *responses*. |
 
-## Open questions `[proposed]`
+## Deferred follow-ups `[proposed]`
 
-1. **Repair budget granularity.** Per-turn (current design) keeps the budgets at the Inngest invocation boundary. Per-conversation would catch "this conversation keeps repairing" without an extra signal but risks letting one bad model burn budget across many turns. Default: per-turn.
-2. **Degraded turn persistence shape.** Today the design persists only the final degraded reply plus the successful intermediate iterations. A `repair_attempts JSONB` column on `messages` (or a sibling table) would let the failure-reflector query historically by SQL. In the interim the `agent.repair` / `agent.degrade` structured logs (see [Telemetry](#telemetry-proposed)) carry the same forensic data — the reflector can join logs to events by `runId` + `conversationId` without an extra column. Defer the column until SQL access is needed.
-3. **Per-provider Class C rate counter with paging threshold.** Every repair burns an extra LLM call; a provider that suddenly returns 30% Class C costs 30% more with no alert. A per-provider counter (`agent.classC.rate{provider}`) with a threshold ("rate > 10% over 1h → page") would surface a degraded provider before the bill. Wire when there's a metrics sink to attach to.
-4. **Repair telemetry as steering signal.** If specific subtypes recur for specific models, the evolution failure-reflector could propose a steering rule ("prefer Sonnet for `schedule_task`"). Out of scope here; lives in [evolution.md](evolution.md).
+Decisions taken with their follow-up trigger. Not blockers — listed so the rationale is durable and reviewers don't relitigate.
+
+1. **Per-conversation repair budget.** Current design budgets per-turn (one Inngest invocation). Per-conversation would catch "this conversation keeps repairing" without an extra signal but risks one bad model burning budget across many turns. Wire if telemetry shows the same conversation repairing on most turns.
+2. **`repair_attempts` column on `messages`.** Today the design persists only the final degraded reply plus successful intermediate iterations. A JSONB column would let the failure-reflector query historically by SQL. In the interim the `agent.repair` / `agent.degrade` structured logs (see [Telemetry](#telemetry-proposed)) carry the same forensic data — the reflector joins logs to events by `runId` + `conversationId` without an extra column. Wire when SQL access becomes necessary.
+3. **Per-provider Class C rate counter with paging threshold.** A per-provider counter (`agent.classC.rate{provider}`) with a threshold ("rate > 10% over 1h → page") would surface a degraded provider before the bill. Wire when there's a metrics sink to attach to.
+4. **Per-adapter `decodeRefusal` hook for OpenAI-compat.** OpenAI-compat refusals degrade through the empty-content path in v1 (see [Class C](#class-c-model-misbehavior-proposed)). Wire a permissive regex-default hook when telemetry shows the wasted continuation-prompt budget is a real cost driver.
+
+The failure-reflector's downstream consumption — proposing steering rules from repair-subtype telemetry — lives in [evolution.md](evolution.md), not here.
 
 ## Related docs `[confirmed]`
 
