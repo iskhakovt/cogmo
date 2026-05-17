@@ -17,36 +17,24 @@ import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { InboundContentSchema } from "../content.js";
 
 /**
- * `channel_sessions.status` — reachability lifecycle.
- *
- * `active` while the channel can deliver to the user (Telegram chat_id is
- * known and the bot isn't blocked; Web UI tab is alive). `closed` once the
- * user explicitly ended this conversation (`/new`, `/end`, profile change)
- * or `resolveSession` lazy-rotated it after the conversation went idle.
- * Engagement (is the user actively conversing right now?) lives in
- * `messages.created_at`, not here. See design/transport/sessions.md.
+ * `channel_sessions.status` records reachability — whether we can deliver
+ * to the user on this channel right now. See design/transport/sessions.md.
  */
 export const channelSessionStatus = pgEnum("channel_session_status", ["active", "closed"]);
 export type ChannelSessionStatus = (typeof channelSessionStatus.enumValues)[number];
 
 /**
- * `channel_sessions.receive` — what this session receives.
- *
- * `routed` — normal source/lastInbound routing applies. `all` — Web UI
- * style "watch everything for this conversation" (private only). `none` —
- * input-only, no responses delivered (muted).
+ * `channel_sessions.receive` — which responses this session gets.
+ * `routed` is normal source/lastInbound routing; `all` is Web-UI-style
+ * "watch everything" (private only); `none` is input-only (muted).
  */
 export const channelSessionReceive = pgEnum("channel_session_receive", ["none", "routed", "all"]);
 export type ChannelSessionReceive = (typeof channelSessionReceive.enumValues)[number];
 
 /**
- * `inbound_messages.source` — origin of the row.
- *
- * `user` — arrived from a platform message; `channel_session_id` points
- * at the originating session. `scheduled` — synthetic inbound injected by
- * the scheduled-task fire handler; `channel_session_id IS NULL` because
- * the trigger was a clock event, not a platform message. A check
- * constraint enforces the source ↔ session-id nullability link.
+ * `inbound_messages.source` — `user` for platform-delivered messages
+ * (originating session FK populated), `scheduled` for synthetic inbounds
+ * with no originating session. A check constraint enforces the link.
  */
 export const inboundMessageSource = pgEnum("inbound_message_source", ["user", "scheduled"]);
 export type InboundMessageSource = (typeof inboundMessageSource.enumValues)[number];
@@ -99,9 +87,8 @@ export const inboundMessages = pgTable(
   "inbound_messages",
   {
     id: pk(),
-    // Nullable for `source='scheduled'` rows — fire handler injects
-    // synthetic inbounds with no originating session. The check constraint
-    // below makes the link to `source` explicit.
+    // Nullable: `source='scheduled'` rows have no originating session.
+    // The check constraint below ties nullability to `source`.
     channelSessionId: uuid("channel_session_id").references(() => channelSessions.id),
     conversationId: uuid("conversation_id")
       .notNull()

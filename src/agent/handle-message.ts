@@ -295,11 +295,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // Safe — guarded by length check above
       const maxInboundId = inboundMessages.at(-1)?.id ?? "";
 
-      // Scheduled fires inject synthetic inbounds with no originating
-      // session — source routing finds nothing for them. Switch the
-      // delivery router to `broadcast` when any inbound in this turn's
-      // range is scheduled so the response reaches the conversation's
-      // currently-attached channels. See design/transport/sessions.md.
+      // Scheduled inbounds have no originating session for source
+      // routing — broadcast to every reachable session instead.
       const routingKind: "reply" | "broadcast" = inboundMessages.some(
         (m) => m.source === "scheduled",
       )

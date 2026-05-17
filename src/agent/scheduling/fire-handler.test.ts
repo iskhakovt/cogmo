@@ -1,13 +1,7 @@
 /**
- * Fire-handler unit tests. Drives the Inngest function via
- * `@inngest/test`'s InngestTestEngine, mocks the agent + transport stores,
- * and asserts the externally-visible behaviour: which path the dispatcher
- * took (engaged reuse / idle rotate / no-reachable skip), which writes ran,
- * and what event was emitted.
- *
- * Companion to `src/agent/handle-message.replay.test.ts` — same pattern
- * for invoking an Inngest function in isolation. The `_send` stub keeps
- * `step.sendEvent` from trying to reach a real Inngest dev server.
+ * Fire-handler unit tests via `InngestTestEngine`, mocking the stores.
+ * Companion to `src/agent/scheduling/dispatch-fire.test.ts` — that file
+ * pins the use-case logic; this one pins the Inngest wiring around it.
  */
 
 import { InngestTestEngine } from "@inngest/test";
@@ -241,12 +235,10 @@ describe("createScheduledTaskFireHandler", () => {
   });
 
   it("does NOT re-run dispatch when Inngest replays with a cached step result", async () => {
-    // Crash-recovery invariant: a retry that finds `dispatch` already
-    // cached must NOT call the use case again — otherwise the rotation
-    // path would create a second fresh conversation.
+    // A retry that finds `dispatch` cached must NOT re-run the use case
+    // — otherwise the rotation path would create a second conversation.
     const d = deps({
       agent: {
-        // If these get called on replay, the test should fail loudly.
         findMostRecentConversationForUserProfile: vi
           .fn()
           .mockRejectedValue(new Error("must not run")),

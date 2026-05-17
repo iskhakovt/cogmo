@@ -18,19 +18,12 @@ import {
 /**
  * Routing context for target resolution — passed from the orchestrator.
  *
- * `kind` selects how target sessions are picked:
- *   - `"reply"` — source routing: deliver to every session that contributed
- *     an inbound in this turn's range. Default for turns triggered by a
- *     user-authored inbound.
- *   - `"broadcast"` — skip source routing; deliver to every reachable
- *     session on the conversation. Used when the trigger was scheduled —
- *     the synthetic inbound has no originating session to source-route
- *     against, so the response goes to whatever channels are currently
- *     attached to the conversation.
- *
- * Both modes still apply the `receive: "all"` overlay for private
- * conversations, so Web UI tabs watching the conversation always get the
- * response.
+ * `kind` selects how primary target sessions are picked:
+ * `"reply"` uses source routing (sessions that contributed inbounds in
+ * this turn's range); `"broadcast"` falls back to every reachable session
+ * on the conversation, used for scheduled-fire turns where the synthetic
+ * inbound has no originating session. Both modes apply the `receive:"all"`
+ * overlay for private conversations.
  */
 export interface RoutingContext {
   conversationId: string;
@@ -124,10 +117,6 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
 
   return {
     async prepare(ctx: RoutingContext): Promise<DeliveryHandle> {
-      // Pick targets per `kind`. `reply` uses source routing (sessions
-      // that contributed an inbound this turn); `broadcast` falls back
-      // to every reachable session on the conversation, used when the
-      // trigger was a scheduled fire with no originating session.
       const primarySessions =
         ctx.kind === "broadcast"
           ? await runInTx((tx) =>

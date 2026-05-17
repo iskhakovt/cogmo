@@ -1,9 +1,7 @@
 /**
- * Unit tests for the `dispatchScheduledFire` use case — the engaged-reuse
- * vs idle-rotate branching, in isolation from Inngest plumbing. The
- * fire-handler tests exercise the same code path through
- * `InngestTestEngine`; this file pins the use-case contract directly so
- * future refactors of the Inngest handler don't dilute coverage.
+ * Unit tests for `dispatchScheduledFire` — the engaged-reuse vs
+ * idle-rotate decision, pinned directly so it survives any restructuring
+ * of the Inngest handler that wraps it.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -65,10 +63,8 @@ describe("dispatchScheduledFire", () => {
   });
 
   it("treats lastMessageAt === null (no messages yet) as idle and rotates", async () => {
-    // A freshly-created conversation with no messages is technically the
-    // "most recent" but isn't engaged. The dispatcher should rotate, not
-    // reuse — reusing would dump the synthetic inbound into a conversation
-    // the user never actually opened.
+    // An empty conversation is "most recent" but not engaged — reusing
+    // would dump the fire into a conversation the user never opened.
     const agentStore = mockAgentStore({
       findMostRecentConversationForUserProfile: vi.fn().mockResolvedValue({
         id: "conv-empty",
@@ -95,10 +91,8 @@ describe("dispatchScheduledFire", () => {
   });
 
   it("preserves the prior receive mode when rotating each channel", async () => {
-    // The rotation must carry forward the receive mode (`all` for Web UI
-    // tabs, `routed` for Telegram) so the new session behaves identically
-    // to the one it replaces. Mixing modes would silently break Web UI's
-    // "watch everything" semantics for the new conversation.
+    // Carrying forward `receive` keeps Web UI's `'all'` semantics intact
+    // on the new conversation.
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-14T09:00:00.000Z"));
 
@@ -156,8 +150,7 @@ describe("dispatchScheduledFire", () => {
   });
 
   it("skips when prior conversation is idle and no channels are reachable", async () => {
-    // Idle conversation + no reachable channels = no path forward. Don't
-    // create a stranded conversation with no sessions attached.
+    // Don't create a stranded conversation with no sessions attached.
     const agentStore = mockAgentStore({
       findMostRecentConversationForUserProfile: vi.fn().mockResolvedValue({
         id: "conv-stale",

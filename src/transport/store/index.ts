@@ -27,11 +27,7 @@ export interface Session {
   receive: ChannelSessionReceive;
 }
 
-/**
- * A reachable channel for a user+profile: the `(channelId, platformAddress)`
- * tuple plus the prior `receive` mode used on this address (so a rotation
- * can preserve it). Returned by `findReachableChannelsForUserProfile`.
- */
+/** `(channelId, platformAddress, receive)` tuple from `findReachableChannelsForUserProfile`. */
 export interface ReachableChannel {
   channelId: string;
   platformAddress: string;
@@ -101,12 +97,7 @@ export interface TransportStore {
     },
   ): Promise<{ id: string }>;
 
-  /**
-   * Persist a raw inbound message. `channelSessionId` is `null` exactly when
-   * `source = 'scheduled'` — a synthetic inbound from the fire handler with no
-   * originating session. The DB check constraint enforces this; the store
-   * just propagates the values.
-   */
+  /** Persist a raw inbound message. `channelSessionId` is null iff `source='scheduled'`. */
   persistInbound(
     tx: Transaction,
     params: {
@@ -118,12 +109,7 @@ export interface TransportStore {
     },
   ): Promise<{ id: string }>;
 
-  /**
-   * Load unbatched inbound messages after a cursor (null = all). Includes
-   * `source` so the orchestrator can choose `broadcast` routing when the
-   * turn was triggered by a scheduled fire (synthetic inbound, no
-   * originating session to source-route against).
-   */
+  /** Load unbatched inbound messages after a cursor (null = all). */
   getUnbatchedInbound(
     tx: Transaction,
     conversationId: string,
@@ -229,23 +215,12 @@ export interface TransportStore {
   removeChannel(tx: Transaction, channelId: string): Promise<void>;
 
   /**
-   * Every reachable channel for a `(userId, profileId)` — distinct on
-   * `(channelId, platformAddress)`, with the latest known `receive` mode so
-   * a rotating caller can preserve it. Used by the scheduled-task fire
-   * handler to find where the user is reachable when rotating onto a fresh
-   * conversation.
-   *
-   * Reachability rules:
-   * - Channels with `expires_at` in the past are excluded (Web UI tab closed,
-   *   no live client). `expires_at IS NULL` channels (Telegram, Slack DMs)
-   *   are always reachable once a platform address is known.
-   * - Closed sessions are INCLUDED as a source of `(channelId,
-   *   platformAddress)` — a `/end`-ed Telegram chat is still reachable; the
-   *   rotation will open a fresh session pointing at the new conversation.
-   *
-   * Returns an empty array when the user has never had a session on this
-   * profile, or every prior session is on a Web-UI-style adapter whose
-   * client has disconnected.
+   * Every reachable channel for `(userId, profileId)`, distinct on
+   * `(channelId, platformAddress)` with the newest row's `receive` mode.
+   * Closed sessions are included — a `/end`-ed Telegram chat is still
+   * reachable, the rotation just opens a fresh session against the same
+   * `(channelId, platformAddress)`. Sessions with `expires_at` in the past
+   * are excluded (Web UI client gone).
    */
   findReachableChannelsForUserProfile(
     tx: Transaction,
@@ -694,17 +669,10 @@ export class DrizzleTransportStore implements TransportStore {
     userId: string,
     profileId: string,
   ): Promise<ReadonlyArray<ReachableChannel>> {
-    // Cross-module JOIN to conversations — CLAUDE.md → Store Pattern
-    // permits it. DISTINCT ON `(channel_id, platform_address)` keeps the
-    // newest row per address so the rotation caller sees the latest
-    // `receive` mode rather than an ancient setting.
-    //
-    // Status is intentionally NOT filtered: a `/end`-ed Telegram chat is
-    // still reachable (the bot can DM the chat_id), and the rotation
-    // will overwrite the closed row with a fresh active session pointed
-    // at the new conversation. The `expires_at` filter still applies
-    // because that genuinely means "we cannot push to this client"
-    // (Web UI heartbeat stopped).
+    // `status` is intentionally not filtered — closed sessions still
+    // carry a reachable `(channelId, platformAddress)` and the rotation
+    // overwrites them with a fresh active row. The `expires_at` filter
+    // does apply: a Web UI client whose heartbeat stopped is unreachable.
     return tx
       .selectDistinctOn([channelSessions.channelId, channelSessions.platformAddress], {
         channelId: channelSessions.channelId,

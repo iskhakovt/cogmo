@@ -1,23 +1,10 @@
 /**
- * Use case: dispatch a scheduled-task fire onto a conversation.
+ * Dispatch a scheduled-task fire onto a conversation. Engaged conversation
+ * (last message within `idleTimeoutMs`) → reuse. Idle, or no prior
+ * conversation → rotate every reachable channel onto a fresh conversation
+ * (same shape as `/new` + first inbound). No reachable channel → skip.
  *
- * Composes the agent store (most-recent conversation lookup, conversation
- * creation) with the transport store (reachable channels, session swap,
- * synthetic inbound) inside one transaction. Picks one of two paths:
- *
- *   - **Engaged conversation** (last message within `idleTimeoutMs`): the
- *     fire lands on the existing conversation as a synthetic inbound. The
- *     user is mid-conversation; we don't rotate them off it.
- *
- *   - **Idle conversation, or no prior conversation**: rotate. Find every
- *     reachable channel for `(userId, profileId)`, create a fresh
- *     conversation, `swapSession` each reachable address onto it, then
- *     persist the synthetic inbound. Same shape as `/new` + first inbound.
- *
- * If there are no reachable channels (and no engaged conversation),
- * returns `{ status: "skipped", reason: "no_reachable_channel" }`. The
- * scheduled-fires queue (todo: P3) will hand these to a deferred-delivery
- * surface later; for now they no-op.
+ * See design/scheduling.md → Synthetic conversation turn.
  */
 
 import type { Transaction, Transactor } from "../../db/index.js";
@@ -110,12 +97,6 @@ async function rotateAndCreateConversation(
   return newConv.id;
 }
 
-/**
- * Build the user-role content for a synthetic inbound: a one-line header
- * carrying the scheduled-for timestamp, then a blank line, then the
- * original prompt. Exported so tests can lock the format and the
- * `register_task` tool's preview can render the same shape.
- */
 export function buildSyntheticInboundContent(scheduledFor: string, prompt: string): string {
   return `[Scheduled task — fire time was ${scheduledFor}]\n\n${prompt}`;
 }

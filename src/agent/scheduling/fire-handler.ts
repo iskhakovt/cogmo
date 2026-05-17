@@ -1,19 +1,12 @@
 /**
- * Inngest handler for `agent/scheduled-task.fire`. Composes the
- * `dispatchScheduledFire` use case (engaged-reuse-or-rotate-and-create)
- * with the existing inbound pipeline by emitting `inbound/arrived` once
- * the synthetic inbound is persisted — `handle-message` then runs the
- * agent loop and delivers via `DeliveryRouter` as for any inbound.
+ * Inngest handler for `agent/scheduled-task.fire`. Runs the dispatch use
+ * case under one durable step, then re-enters the inbound pipeline by
+ * emitting `inbound/arrived` — `handle-message` takes it from there.
  *
- * Crash recovery: the dispatch step is checkpointed; an Inngest retry
- * after the step succeeded replays the cached `{ conversationId,
- * inboundId }` instead of re-running the use case (which would otherwise
- * double-create a rotated conversation). The `inbound/arrived` send is
- * idempotency-keyed by `fire:<inboundId>` so the event bus dedup's an
- * at-least-once delivery.
- *
- * See design/scheduling.md → Synthetic conversation turn and
- * design/transport/sessions.md.
+ * The dispatch step is cached on success; an Inngest retry projects the
+ * same `inboundId` so the `fire:<inboundId>` idempotency key on the
+ * downstream send dedups at the event bus. Without the cache, a retry
+ * after a successful rotation would double-create the fresh conversation.
  */
 
 import type { Inngest } from "inngest";
@@ -30,9 +23,8 @@ export function createScheduledTaskFireHandler(deps: ScheduledTaskFireDeps, inng
     {
       id: "scheduled-task-fire",
       retries: 2,
-      // Per-task singleton — the ticker re-emit dedups at the event bus,
-      // but in the rare race a second function run might overlap. Keeps
-      // dispatch tx isolation simple at single-user scale.
+      // Per-task singleton — keeps dispatch tx isolation simple if the
+      // ticker's event-bus dedup ever misses and two runs overlap.
       concurrency: { limit: 1, key: "event.data.taskId" },
       triggers: [scheduledTaskFire],
     },
@@ -56,11 +48,6 @@ export function createScheduledTaskFireHandler(deps: ScheduledTaskFireDeps, inng
           conversationId: result.conversationId,
           inboundMessageId: result.inboundId,
         }),
-        // Idempotency key — Inngest dedup'es events with the same `id`,
-        // so an at-least-once double-deliver of this send produces
-        // exactly one `inbound/arrived` downstream. `inbound.id` is
-        // UUIDv7 from the cached dispatch step, so every retry projects
-        // the same value.
         id: `fire:${result.inboundId}`,
       });
 

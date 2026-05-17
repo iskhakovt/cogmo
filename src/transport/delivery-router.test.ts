@@ -656,10 +656,6 @@ describe("createDeliveryRouter", () => {
   });
 
   describe("kind: 'broadcast'", () => {
-    // Scheduled fires inject synthetic inbounds with no originating
-    // session. Source routing returns nothing for them; the orchestrator
-    // passes `kind: 'broadcast'` so prepare() reaches every active
-    // session on the conversation instead.
     it("uses getActiveSessionsForConversation instead of getSourceSessions", async () => {
       const batch = mockAdapter();
       const adapters = new Map([["ch-1", { adapter: batch }]]);
@@ -685,8 +681,6 @@ describe("createDeliveryRouter", () => {
     });
 
     it("still merges receive: 'all' overlay for private conversations", async () => {
-      // A Web UI tab watching the conversation should receive the
-      // scheduled-fire response too, just as for any reply-routed turn.
       const batch1 = mockAdapter();
       const batch2 = mockAdapter();
       const adapters = new Map([

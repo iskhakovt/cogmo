@@ -597,12 +597,9 @@ export interface AgentStore {
   getLastMessageTime(tx: Transaction, conversationId: string): Promise<Date | undefined>;
 
   /**
-   * The most recent private conversation for `(userId, profileId)` plus the
-   * timestamp of its most recent message (`null` when the conversation has
-   * no messages yet). `undefined` when the user has never had a private
-   * conversation on this profile. Used by the scheduled-fire dispatcher to
-   * decide between reusing an engaged conversation and rotating to a fresh
-   * one.
+   * Most recent private conversation for `(userId, profileId)` and the
+   * timestamp of its last message (`null` when the conversation has no
+   * messages yet, `undefined` when no such conversation exists).
    */
   findMostRecentConversationForUserProfile(
     tx: Transaction,
@@ -1780,9 +1777,9 @@ export class DrizzleAgentStore implements AgentStore {
     userId: string,
     profileId: string,
   ): Promise<{ id: string; lastMessageAt: Date | null } | undefined> {
-    // Two queries — the simpler shape avoids a correlated subquery whose
-    // outer table reference gets lost when Drizzle wraps the FROM in a
-    // sub-select for the trailing LIMIT (observed on PGlite).
+    // Two queries instead of a correlated subquery: under PGlite,
+    // Drizzle wraps the FROM in a sub-select for the trailing LIMIT and
+    // the inner reference to `conversations.id` loses correlation.
     const convRows = await tx
       .select({ id: conversations.id })
       .from(conversations)
