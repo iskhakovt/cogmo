@@ -3,7 +3,7 @@ import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { coreMemoryRead } from "./core-memory-tools.js";
 import { listFiles, readFile } from "./file-tools.js";
-import { memoryRecall, memoryTools } from "./memory-tools.js";
+import { memoryRecall, memoryReflect, memoryTools } from "./memory-tools.js";
 import { listTasks } from "./scheduling/tools.js";
 import type { Service } from "./service.js";
 import { createDefaultTools, defineTool, ToolRegistry, type ToolSpec } from "./tools.js";
@@ -187,6 +187,7 @@ describe("ToolSpec.sideEffectful", () => {
       { name: "read_file", spec: readFile },
       { name: "list_files", spec: listFiles },
       { name: "memory_recall", spec: memoryRecall },
+      { name: "memory_reflect", spec: memoryReflect },
       { name: "core_memory_read", spec: coreMemoryRead },
       { name: "list_tasks", spec: listTasks },
       { name: "get_current_time", spec: defaults.get("get_current_time") },

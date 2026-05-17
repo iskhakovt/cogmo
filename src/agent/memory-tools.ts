@@ -51,6 +51,11 @@ export const memoryReflect = defineTool({
   // answer replays, avoiding re-running the whole loop.
   durable: true,
   parallelSafe: true,
+  // Read-only synthesis: no writes to memory or anywhere else. Marked false
+  // so Class D's progress gate (identical fingerprint + sideEffectful: false)
+  // catches identical-args loops — the exact failure mode we want to surface
+  // for an expensive billable tool.
+  sideEffectful: false,
   description:
     "Synthesize an answer from long-term memory via an agentic reasoning loop — " +
     "searches memories, follows entity-graph links, and returns a synthesized answer " +
