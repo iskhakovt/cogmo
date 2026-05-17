@@ -5,6 +5,7 @@ import {
   AllProvidersFailedError,
   FallbackLlmProvider,
   isRetriableProviderError,
+  RefusalError,
 } from "./fallback.js";
 import type { LlmProvider } from "./provider.js";
 import type { ChatParams, ChatStreamResult, LlmResponse, StreamEvent } from "./types.js";
@@ -118,6 +119,9 @@ describe("isRetriableProviderError", () => {
       new ProviderProtocolError("tool_use args unparseable", new SyntaxError("bad json")),
       false,
     ],
+    // Refusals are policy decisions — silent re-routing to the next provider
+    // is the wrong shape. See design/agent-resilience.md Class C.
+    ["RefusalError", new RefusalError("refused"), false],
   ];
 
   it.each(cases)("%s → retriable=%s", (_label, err, expected) => {

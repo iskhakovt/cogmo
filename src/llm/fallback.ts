@@ -74,21 +74,48 @@ export class AllProvidersFailedError extends Error {
 }
 
 /**
+ * Thrown by an SDK adapter when the upstream provider refuses the request on
+ * content-policy grounds — e.g. OpenAI's `BadRequestError` carrying
+ * `code: "content_policy_violation"` (or Azure's
+ * `responsible_ai_policy_violation`). The success-path equivalent surfaces as
+ * `stopReason: "refusal"` on the response; this error class covers refusals
+ * that arrive as 400-class HTTP errors instead.
+ *
+ * Class C in `design/agent-resilience.md` treats refusal as non-retriable:
+ * fallback to the next provider is the wrong shape (policies differ
+ * deliberately across providers), and re-prompting the same model would
+ * almost certainly hit the same outcome. `isRetriableProviderError` returns
+ * `false` for this class so the provider chain propagates it untouched.
+ */
+export class RefusalError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
+    this.name = "RefusalError";
+  }
+}
+
+/**
  * Classify an error as retriable (try the next provider) or permanent
  * (propagate). Pure function — exported for testability.
  *
  * Retriable: no status (network/DNS/TLS/timeout), 408, 425, 429, any 5xx.
  * Permanent: any other numeric HTTP status, or a non-Error throw.
  *
- * {@link ProviderProtocolError} is treated as permanent regardless of the
- * absent `status` field: the upstream response arrived intact but its
- * payload is unusable (tool-arg JSON fails to parse even after `jsonrepair`).
- * Retrying the next provider has no reason to help — the in-loop classifier
- * owns the recovery decision.
+ * Two non-status error classes are also treated as permanent so they reach
+ * the in-loop classifier instead of burning the provider chain:
+ * - {@link ProviderProtocolError}: upstream response arrived intact but its
+ *   payload is unusable (tool-arg JSON fails to parse even after
+ *   `jsonrepair`). Retrying the next provider has no reason to help.
+ * - {@link RefusalError}: policy refusal (`stop_reason: "refusal"`,
+ *   `finish_reason: "content_filter"`, or a content-policy 400). Silent
+ *   re-routing across providers on a policy refusal is the wrong shape —
+ *   policies are deliberately different. See Class C in
+ *   `design/agent-resilience.md`.
  */
 export function isRetriableProviderError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   if (err instanceof ProviderProtocolError) return false;
+  if (err instanceof RefusalError) return false;
   const status = extractStatus(err);
   if (status == null) return true; // network / DNS / TLS / timeout
   if (status === 408 || status === 425 || status === 429) return true;
