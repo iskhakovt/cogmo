@@ -11,6 +11,7 @@ export const memoryRecall = defineTool({
     "Use at the start of conversations and when context would help. " +
     "Prefer this over asking the user something you might already know.",
   parallelSafe: true,
+  sideEffectful: false,
   schema: z.object({
     query: z.string().describe("Semantic search query — describe what you're looking for"),
   }),
@@ -50,6 +51,11 @@ export const memoryReflect = defineTool({
   // answer replays, avoiding re-running the whole loop.
   durable: true,
   parallelSafe: true,
+  // Read-only synthesis: no writes to memory or anywhere else. Marked false
+  // so Class D's progress gate (identical fingerprint + sideEffectful: false)
+  // catches identical-args loops — the exact failure mode we want to surface
+  // for an expensive billable tool.
+  sideEffectful: false,
   description:
     "Synthesize an answer from long-term memory via an agentic reasoning loop — " +
     "searches memories, follows entity-graph links, and returns a synthesized answer " +

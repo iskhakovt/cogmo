@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
-import { memoryTools } from "./memory-tools.js";
+import { expectDefined } from "../test/assertions.js";
+import { coreMemoryRead } from "./core-memory-tools.js";
+import { listFiles, readFile } from "./file-tools.js";
+import { memoryRecall, memoryReflect, memoryTools } from "./memory-tools.js";
+import { listTasks } from "./scheduling/tools.js";
 import type { Service } from "./service.js";
-import { createDefaultTools, defineTool, ToolRegistry } from "./tools.js";
+import { createDefaultTools, defineTool, ToolRegistry, type ToolSpec } from "./tools.js";
+import { createWebTools } from "./web-tools.js";
 
 // These tests don't read from Service — `mock<Service>()` gives a typed
 // proxy where every method is a vi.fn() returning undefined. Drop the
@@ -129,6 +134,73 @@ describe("defineTool", () => {
 
     await spec.handler({}, stubService);
     expect(received).toBe(stubService);
+  });
+});
+
+describe("ToolSpec.sideEffectful", () => {
+  // Type-level: accept true, false, and omit.
+  it("accepts sideEffectful: true, false, and omitted", () => {
+    const explicitFalse = defineTool({
+      name: "explicit_false",
+      description: "",
+      schema: z.object({}),
+      handler: async () => "",
+      sideEffectful: false,
+    });
+    const explicitTrue = defineTool({
+      name: "explicit_true",
+      description: "",
+      schema: z.object({}),
+      handler: async () => "",
+      sideEffectful: true,
+    });
+    const omitted = defineTool({
+      name: "omitted",
+      description: "",
+      schema: z.object({}),
+      handler: async () => "",
+    });
+
+    // `satisfies` keeps the literal types so the assertions below are
+    // exact rather than widened to `boolean | undefined`.
+    expect(explicitFalse.sideEffectful).toBe(false);
+    expect(explicitTrue.sideEffectful).toBe(true);
+    expect(omitted.sideEffectful).toBeUndefined();
+
+    // Type-level proof that the field is optional and accepts both bool literals.
+    const _a = { ...explicitFalse } satisfies ToolSpec;
+    const _b = { ...explicitTrue } satisfies ToolSpec;
+    const _c = { ...omitted } satisfies ToolSpec;
+    expect(_a.name).toBe("explicit_false");
+    expect(_b.name).toBe("explicit_true");
+    expect(_c.name).toBe("omitted");
+  });
+
+  // Registry-level: tools the design enumerates as read-only must opt out.
+  // If a tool drifts away from `sideEffectful: false` (or is renamed) this
+  // test fails — Class D's progress gate (PR 6) would silently regress.
+  it("marks the documented read-only tools as sideEffectful: false", () => {
+    const webTools = createWebTools("tavily-key", "openrouter-key");
+    const webByName = new Map(webTools.map((t) => [t.name, t]));
+    const defaults = createDefaultTools();
+
+    const readOnlyTools: ReadonlyArray<{ name: string; spec: ToolSpec | undefined }> = [
+      { name: "read_file", spec: readFile },
+      { name: "list_files", spec: listFiles },
+      { name: "memory_recall", spec: memoryRecall },
+      { name: "memory_reflect", spec: memoryReflect },
+      { name: "core_memory_read", spec: coreMemoryRead },
+      { name: "list_tasks", spec: listTasks },
+      { name: "get_current_time", spec: defaults.get("get_current_time") },
+      { name: "web_search", spec: webByName.get("web_search") },
+      { name: "web_answer", spec: webByName.get("web_answer") },
+      { name: "fetch_url", spec: webByName.get("fetch_url") },
+    ];
+
+    for (const { name, spec } of readOnlyTools) {
+      const resolved = expectDefined(spec, name);
+      expect(resolved.sideEffectful, `${name} must declare sideEffectful: false`).toBe(false);
+    }
   });
 });
 
