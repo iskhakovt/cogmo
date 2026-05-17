@@ -69,17 +69,28 @@ When the budget exhausts or the classifier returns `degrade`, the orchestrator p
 
 > I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?
 
-The degraded reply is persisted as a normal assistant message (role `assistant`, single `text` block). Conversation status stays `active`. `conversation/degraded` is emitted with the subtype tag and the originating turn metadata.
+The degraded reply is persisted as a normal assistant message (role `assistant`, single `text` block). Conversation status stays `active`. `conversation/degraded` is emitted from inside the orchestrator's durable persist step, so the wrapping `step.run` provides exactly-once delivery (same pattern as `conversation/errored` in `onFailure`) — no explicit idempotency `id` needed.
 
-Degenerate intermediate content from the failed attempt is **not** persisted — only the final degraded reply enters history. This keeps the next turn's history clean and avoids feeding the model its own broken output.
+**Persistence boundary on a degraded turn:**
+
+- Successful intermediate iterations (tool_use + tool_result pairs whose handlers ran to completion, including their side effects) **are** persisted. Their tool calls already affected the world — file writes, memory retains, image generations — and the conversation transcript must reflect that.
+- The single iteration whose response triggered the degrade — empty content, malformed JSON, schema-invalid output — is **not** persisted. That assistant message would be useless in history and risks feeding the model its own broken output on the next turn.
+- The degraded reply is persisted as the final assistant message of the turn.
+
+The forensic record of *what the model produced before degrading* lives in the `agent.repair` / `agent.degrade` structured logs (see Telemetry below), not in `messages`. The `messages` table is the conversation transcript; structured logs are the failure audit.
 
 ## Class D: loop pathology `[proposed]`
 
 Each loop iteration produces a fingerprint:
 
 ```
-hash(sorted tool_use names, last assistant text prefix [256 chars])
+hash(
+  sorted [(tool_use.name, sha256(canonical-json(tool_use.input)))],
+  last assistant text prefix [256 chars],
+)
 ```
+
+Arguments must be in the hash, not just names: three `read_file` calls against `a.txt`, `b.txt`, `c.txt` is legitimate exploration of read-only state, not a stuck loop. Name-only hashing would false-positive on that sequence.
 
 If three consecutive iterations produce the same fingerprint AND none of those iterations' tool calls produced an observable side effect (file write, memory retain, API mutation — tracked by `ToolSpec.sideEffectful: boolean`), the loop trips:
 
@@ -91,14 +102,14 @@ The hard cap `DEFAULT_MAX_ITERATIONS = 20` remains as the backstop. Hitting it a
 
 ## Telemetry `[proposed]`
 
-Every repair attempt and every degrade decision emits a structured log:
+Every repair attempt and every degrade decision emits a structured log line (Pino `logger.warn`, **not** an Inngest event — these do not transit `step.sendEvent` and need no idempotency `id`):
 
 ```typescript
 { event: "agent.repair", subtype, instructions: { kind: "continuation_prompt" | "json_repair" | "feedback_injection" | "disable_stream" } }
 { event: "agent.degrade", reason, subtype? }
 ```
 
-Same shape as `conversation/errored` payloads so the evolution failure-reflector treats `degraded` and `errored` as one stream, bucketed by class and subtype.
+The durable Inngest signal is `conversation/degraded` (emitted once per degraded turn from inside the persist step — see "Degraded reply" above). The structured logs are the per-attempt forensic record. The evolution failure-reflector subscribes to the Inngest event and can join the logs by `runId` + `conversationId` for subtype-level analysis.
 
 ## Where the layers compose `[proposed]`
 
