@@ -5,6 +5,7 @@ export {
   AllProvidersFailedError,
   FallbackLlmProvider,
   isRetriableProviderError,
+  RefusalError,
 } from "./fallback.js";
 export type { LlmProvider } from "./provider.js";
 export {

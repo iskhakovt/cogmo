@@ -107,7 +107,18 @@ export interface ToolDefinition {
 
 // --- Response ---
 
-export type StopReason = "end_turn" | "tool_use" | "max_tokens";
+/**
+ * Why the model stopped generating.
+ *
+ * `refusal` is an explicit policy refusal — Anthropic's `stop_reason: "refusal"`
+ * or OpenAI's `finish_reason: "content_filter"`. Class C in
+ * `design/agent-resilience.md` treats this as a non-recoverable subtype:
+ * the in-loop classifier immediately routes to a refusal-specific degraded
+ * reply rather than retrying. The signal is best-effort and scoped to
+ * Anthropic-direct + OpenAI-direct; OpenAI-compat shims (OpenRouter, Venice,
+ * xAI) ride along when they happen to emit the same shape.
+ */
+export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "refusal";
 
 export interface Usage {
   inputTokens: number;
