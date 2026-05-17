@@ -1,0 +1,7 @@
+`transactor(db)` now wraps every transaction in `db.transaction(cb, { isolationLevel: "repeatable read" })` — snapshot isolation per tx is the project's default. Multi-statement reads inside one `runInTx` block see a consistent committed-at-tx-start view, so composing reads across stores no longer needs per-call snapshot-race reasoning.
+
+A small inline retry (`withRetry` + `shouldRetry: isSerializationFailure`) handles the rare `40001 serialization_failure` raised when a concurrent commit invalidates the snapshot: 3 attempts total with jittered exponential backoff (≈5 ms → 20 ms), worst-case added latency under ~50 ms before bubbling to Inngest's step-level retry budget. Non-40001 errors propagate immediately, type intact — the caller still sees `UniqueViolationError`, `ConstraintViolationError`, etc. unchanged.
+
+Predicate races (two concurrent inserts each observing `count < cap` and both succeeding) are *not* caught by REPEATABLE READ. The three admission-cap sites (`scheduling-service`, `coding/service`, `createCustomCompartment`) now document this honestly: at single-user scale the cap-exceeded-by-1 case is benign; when multi-tenant arrives, the right tool is `pg_advisory_xact_lock(user_id)` or a unique partial index, not SERIALIZABLE — prevention beats retry-on-detection.
+
+`withRetry` gains a `shouldRetry` option (passthrough to p-retry's native hook) so consumers can express "retry only this kind of error" without the `AbortError` type-replacement gotcha.

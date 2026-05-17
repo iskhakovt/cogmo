@@ -546,10 +546,13 @@ export interface AgentStore {
    *     `CustomCompartmentCapExceededError`
    *   - unique `(user_id, name)` → `UniqueViolationError`
    *
-   * Cap is enforced via a count-then-insert in the same transaction. At
-   * single-user scale + UI-only writes, the residual race (concurrent
-   * inserts both seeing count=N-1) is acceptable; tighten with a
-   * REPEATABLE READ outer tx if multi-tenant adds real concurrency.
+   * Cap is enforced via a count-then-insert in the same transaction.
+   * REPEATABLE READ (the project default) doesn't catch this predicate
+   * race — snapshot isolation doesn't predicate-lock. At single-user
+   * scale + UI-only writes the residual race (concurrent inserts both
+   * seeing count=N-1) is acceptable; when multi-tenant lands, prefer
+   * `pg_advisory_xact_lock(user_id)` or a unique partial index over
+   * SERIALIZABLE — predicate races want prevention, not retry.
    */
   createCustomCompartment(
     tx: Transaction,
@@ -1782,13 +1785,6 @@ export class DrizzleAgentStore implements AgentStore {
     // Two queries instead of a correlated subquery: under PGlite,
     // Drizzle wraps the FROM in a sub-select for the trailing LIMIT and
     // the inner reference to `conversations.id` loses correlation.
-    //
-    // Side effect of the split: under READ COMMITTED each statement sees
-    // its own snapshot, so a message landing between the two queries
-    // surfaces as engagement on a conversation we picked before the
-    // message arrived. The bias is toward reuse over rotation when
-    // activity is concurrent — benign for a scheduled fire, and
-    // tightening to REPEATABLE READ isn't worth the lock contention.
     const convRows = await tx
       .select({ id: conversations.id })
       .from(conversations)

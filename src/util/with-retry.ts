@@ -9,7 +9,10 @@
  * Do NOT use this for:
  * - Anthropic / OpenAI SDK calls — both SDKs already retry HTTP errors
  * - Validation retries (e.g. typed.ts) — those are semantic, not transport
- * - Database operations — handled at the connection pool level
+ * - Generic database connection errors — handled at the postgres-js pool
+ *   level (the tx-serialization retry in `src/db/transactor.ts` is a
+ *   targeted exception: it retries only SQLSTATE 40001 from REPEATABLE
+ *   READ snapshot conflicts, not connection-level transience)
  * - Inngest function steps — Inngest retries failed steps itself
  *
  * Use AbortError to mark permanent failures (e.g. HTTP 4xx) that should
@@ -35,6 +38,14 @@ export interface RetryOptions {
   maxRetryTimeMs?: number;
   /** Label included in retry log lines for observability. */
   context?: string;
+  /**
+   * Predicate run on every caught error. Return `false` to skip
+   * remaining attempts and re-throw the error unchanged — preserves
+   * the caller's error type, unlike `AbortError` which would replace
+   * the thrown value with itself. Use this for code-specific retry
+   * policy (e.g. retry only Postgres SQLSTATE 40001).
+   */
+  shouldRetry?: (err: unknown) => boolean;
 }
 
 const DEFAULT_RETRIES = 3;
@@ -54,6 +65,7 @@ export function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise
     return fn();
   }
 
+  const userShouldRetry = opts?.shouldRetry;
   return pRetry(fn, {
     retries: opts?.retries ?? DEFAULT_RETRIES,
     minTimeout: opts?.minTimeoutMs ?? DEFAULT_MIN_TIMEOUT_MS,
@@ -61,6 +73,12 @@ export function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise
     ...(opts?.maxRetryTimeMs != null && { maxRetryTime: opts.maxRetryTimeMs }),
     factor: 2,
     randomize: true,
+    // Native p-retry hook — returning `false` re-throws the original
+    // error unchanged to the caller, preserving its type. Unlike
+    // AbortError, which would replace the thrown value with itself.
+    ...(userShouldRetry !== undefined && {
+      shouldRetry: ({ error }: { error: Error }) => userShouldRetry(error),
+    }),
     onFailedAttempt: ({ error, attemptNumber, retriesLeft }) => {
       logger.warn(
         {

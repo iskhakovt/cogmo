@@ -169,15 +169,15 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
         nextRunAt = parsed.value;
       }
 
-      // Cap check + insert in one tx. Under READ COMMITTED (the
-      // project default per CLAUDE.md), two concurrent creates can
-      // both read `count = cap - 1` and both insert successfully —
-      // the cap is exceeded by one. Accepted at single-user scale,
-      // and named explicitly in CLAUDE.md's Store Pattern docs
-      // ("counting + inserting under an admission cap"). Strict
-      // enforcement would need SERIALIZABLE on the outer tx, an
-      // advisory lock per user, or a unique partial index on
-      // (user_id, row_number); none warranted today.
+      // Cap check + insert in one tx. REPEATABLE READ (the project
+      // default) doesn't catch this predicate race — snapshot isolation
+      // doesn't predicate-lock, so two concurrent creates can each see
+      // `count = cap - 1` and both insert successfully, exceeding the
+      // cap by one. Accepted at single-user scale (cap exceeded by 1 is
+      // benign). When multi-tenant arrives, prefer
+      // `pg_advisory_xact_lock(user_id)` or a unique partial index on
+      // `(user_id, row_number)` over SERIALIZABLE — predicate races
+      // want prevention, not retry-on-detection.
       //
       // Count includes disabled rows so a graveyard can't bypass the
       // cap by toggling. Uses `countScheduledTasks` (SELECT COUNT(*))
