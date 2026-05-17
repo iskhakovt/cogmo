@@ -1,7 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { jsonrepair } from "jsonrepair";
 import { logger } from "../logger.js";
-import { ProviderProtocolError } from "./errors.js";
+import { parseProviderJson } from "./errors.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
@@ -123,7 +122,11 @@ export class AnthropicProvider implements LlmProvider {
                 // bare SyntaxError as transient.
                 let input: unknown;
                 try {
-                  input = parseToolArgs(toolBlock.jsonChunks.join(""), toolBlock.name);
+                  input = parseProviderJson(
+                    toolBlock.jsonChunks.join(""),
+                    toolBlock.name,
+                    "Anthropic streamed tool_use input",
+                  );
                 } catch (parseErr) {
                   completed = true;
                   failChatSpan(span, parseErr);
@@ -444,32 +447,6 @@ function isTextLikeDocumentMediaType(mt: string): boolean {
     mt === "application/yaml" ||
     mt === "application/x-yaml"
   );
-}
-
-/**
- * Parse the buffered `input_json_delta` chunks for a streamed `tool_use`
- * block. Try `JSON.parse` first; on failure, run `jsonrepair` (handles
- * trailing commas, unclosed strings within reason, missing quotes) and
- * parse again. If repair also fails, raise {@link ProviderProtocolError}
- * so the in-loop classifier owns the recovery decision instead of the
- * provider chain misclassifying a bare `SyntaxError`.
- */
-function parseToolArgs(raw: string, toolName: string): unknown {
-  try {
-    return JSON.parse(raw);
-  } catch (initial) {
-    try {
-      const repaired = jsonrepair(raw);
-      return JSON.parse(repaired);
-    } catch (repairErr) {
-      throw new ProviderProtocolError(
-        `Anthropic streamed tool_use input for "${toolName}" failed to parse, including after jsonrepair: ${
-          repairErr instanceof Error ? repairErr.message : String(repairErr)
-        }`,
-        initial,
-      );
-    }
-  }
 }
 
 function fromAnthropicStopReason(reason: string | null): StopReason {

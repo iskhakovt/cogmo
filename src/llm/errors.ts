@@ -9,6 +9,8 @@
  * truncated tool-arg JSON, malformed streamed deltas, etc.
  */
 
+import { jsonrepair } from "jsonrepair";
+
 /**
  * The provider returned a syntactically intact response but its content
  * violates the wire contract — typically a tool-arg JSON stream that fails
@@ -22,12 +24,40 @@
  * attempt repair or degrade.
  */
 export class ProviderProtocolError extends Error {
-  /** Original error from the underlying parse attempt, for diagnostics. */
-  override readonly cause: unknown;
-
   constructor(message: string, cause: unknown) {
-    super(message);
+    super(message, { cause });
     this.name = "ProviderProtocolError";
-    this.cause = cause;
+  }
+}
+
+/**
+ * Parse a JSON payload streamed by a provider (e.g. buffered tool-use
+ * argument chunks). Try `JSON.parse` first; on failure, run `jsonrepair`
+ * (handles trailing commas, unclosed strings within reason, missing
+ * quotes) and parse again. If repair also fails, raise
+ * {@link ProviderProtocolError} so the in-loop classifier owns the
+ * recovery decision instead of the provider chain misclassifying a bare
+ * `SyntaxError`.
+ *
+ * `context` identifies the call site in the resulting error message
+ * (e.g. "Anthropic streamed tool_use input", "OpenAI-compatible streamed
+ * tool_calls arguments") so failures point at the right adapter without
+ * the caller having to format the message.
+ */
+export function parseProviderJson(raw: string, toolName: string, context: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch (initial) {
+    try {
+      const repaired = jsonrepair(raw);
+      return JSON.parse(repaired);
+    } catch (repairErr) {
+      throw new ProviderProtocolError(
+        `${context} for "${toolName}" failed to parse, including after jsonrepair: ${
+          repairErr instanceof Error ? repairErr.message : String(repairErr)
+        }`,
+        initial,
+      );
+    }
   }
 }
