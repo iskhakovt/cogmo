@@ -246,6 +246,13 @@
       "when": 1779047408021,
       "tag": "0034_spotty_karnak",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1779048815143,
+      "tag": "0035_tearful_forge",
+      "breakpoints": true
     }
   ]
 }

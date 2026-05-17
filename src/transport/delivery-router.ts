@@ -117,6 +117,13 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
 
   return {
     async prepare(ctx: RoutingContext): Promise<DeliveryHandle> {
+      if (ctx.kind === "broadcast" && !ctx.isPrivate) {
+        // Broadcast routing fans out to every reachable session on the
+        // conversation. On a group thread that would leak proactive
+        // context into unrelated chats. Scheduled fires only target
+        // private conversations; any other broadcast caller is a bug.
+        throw new Error("broadcast routing is not allowed on non-private conversations");
+      }
       const primarySessions =
         ctx.kind === "broadcast"
           ? await runInTx((tx) =>

@@ -10,6 +10,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 import { conversations, profiles, users } from "../../agent/store/schema.js";
@@ -96,13 +97,25 @@ export const inboundMessages = pgTable(
     content: jsonbZod("content", InboundContentSchema).notNull(),
     platformTs: timestamp("platform_ts", { withTimezone: true }).notNull(), // when the user sent it
     source: inboundMessageSource("source").notNull(),
+    /**
+     * Idempotency key for scheduled fires: `${taskId}:${scheduledFor}` —
+     * matches the Inngest event-bus dedup key on the ticker's fan-out.
+     * The fire-handler pre-checks this on every dispatch so a retry that
+     * lands after a successful commit (worker died between tx commit and
+     * Inngest ack) reuses the existing row instead of rotating again.
+     * NULL for `source='user'`; the check constraint enforces the link.
+     */
+    scheduledFireKey: text("scheduled_fire_key"),
     createdAt: ts(),
   },
   (t) => [
+    uniqueIndex("uq_inbound_scheduled_fire_key")
+      .on(t.scheduledFireKey)
+      .where(sql`scheduled_fire_key IS NOT NULL`),
     check(
       "chk_inbound_source_session",
-      sql`(${t.source} = 'user' AND ${t.channelSessionId} IS NOT NULL)
-        OR (${t.source} = 'scheduled' AND ${t.channelSessionId} IS NULL)`,
+      sql`(${t.source} = 'user' AND ${t.channelSessionId} IS NOT NULL AND ${t.scheduledFireKey} IS NULL)
+        OR (${t.source} = 'scheduled' AND ${t.channelSessionId} IS NULL AND ${t.scheduledFireKey} IS NOT NULL)`,
     ),
   ],
 );

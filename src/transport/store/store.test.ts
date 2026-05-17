@@ -4,6 +4,7 @@ import { DrizzleAgentStore } from "../../agent/store/index.js";
 import type { Database, Transactor } from "../../db/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleTransportStore } from "./index.js";
+import { inboundMessages as inboundMessagesTable } from "./schema.js";
 
 let db: Database;
 let tx: Transactor;
@@ -297,6 +298,66 @@ describe("DrizzleTransportStore", () => {
     it("returns empty for no inbound messages", async () => {
       const { conversationId } = await seedConversation();
       expect(await tx((trx) => store.getUnbatchedInbound(trx, conversationId, null))).toEqual([]);
+    });
+
+    it("persists a scheduled inbound and finds it by scheduledFireKey", async () => {
+      const { conversationId } = await seedConversation();
+
+      const { id } = await tx((trx) =>
+        store.persistInbound(trx, {
+          source: "scheduled",
+          scheduledFireKey: "task-1:2026-05-14T09:00:00.000Z",
+          conversationId,
+          content: "morning briefing",
+          platformTs: new Date("2026-05-14T09:00:00.000Z"),
+        }),
+      );
+
+      const found = await tx((trx) =>
+        store.findInboundByScheduledFireKey(trx, "task-1:2026-05-14T09:00:00.000Z"),
+      );
+      expect(found).toEqual({ id, conversationId });
+
+      const missing = await tx((trx) =>
+        store.findInboundByScheduledFireKey(trx, "task-1:2026-05-14T10:00:00.000Z"),
+      );
+      expect(missing).toBeUndefined();
+    });
+
+    it("rejects a second scheduled inbound with the same scheduledFireKey", async () => {
+      // The partial unique index is the DB-level safety net against a
+      // concurrent retry that slips past `findInboundByScheduledFireKey`.
+      const { conversationId } = await seedConversation();
+      const insert = (key: string) =>
+        tx((trx) =>
+          store.persistInbound(trx, {
+            source: "scheduled",
+            scheduledFireKey: key,
+            conversationId,
+            content: "ping",
+            platformTs: new Date(),
+          }),
+        );
+
+      await insert("task-1:2026-05-14T09:00:00.000Z");
+      await expect(insert("task-1:2026-05-14T09:00:00.000Z")).rejects.toThrow();
+    });
+
+    it("rejects a scheduled inbound without a scheduledFireKey at the DB constraint", async () => {
+      // Type narrowing prevents a TS caller from constructing this shape,
+      // but the check constraint must also catch raw inserts (migrations,
+      // adhoc psql, future store changes).
+      const { conversationId } = await seedConversation();
+      await expect(
+        tx(async (trx) => {
+          await trx.insert(inboundMessagesTable).values({
+            source: "scheduled",
+            conversationId,
+            content: "ping",
+            platformTs: new Date(),
+          });
+        }),
+      ).rejects.toThrow();
     });
   });
 

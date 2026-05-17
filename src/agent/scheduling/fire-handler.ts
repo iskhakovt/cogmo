@@ -31,8 +31,19 @@ export function createScheduledTaskFireHandler(deps: ScheduledTaskFireDeps, inng
     async ({ event, step }) => {
       const { taskId, userId, profileId, scheduledFor, prompt } = event.data;
 
+      // Same shape as the ticker's event-bus dedup key — the dispatcher
+      // uses it to short-circuit a retry that lands after the tx
+      // committed but before Inngest got the step ack.
+      const scheduledFireKey = `${taskId}:${scheduledFor}`;
+
       const result = await step.run("dispatch", () =>
-        dispatchScheduledFire(deps, { userId, profileId, scheduledFor, prompt }),
+        dispatchScheduledFire(deps, {
+          userId,
+          profileId,
+          scheduledFor,
+          prompt,
+          scheduledFireKey,
+        }),
       );
 
       if (result.status === "skipped") {

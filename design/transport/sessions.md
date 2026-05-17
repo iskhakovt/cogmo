@@ -125,16 +125,21 @@ channel_sessions (
 );
 
 inbound_messages (
-  id                 UUID v7 PK,
-  channel_session_id UUID FK → channel_sessions,            -- NULL ⟺ source='scheduled'
-  conversation_id    UUID FK → conversations NOT NULL,
-  content            JSONB NOT NULL,                        -- InboundContentSchema
-  platform_ts        TIMESTAMPTZ NOT NULL,
-  source             inbound_message_source NOT NULL,
-  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CHECK ((source = 'user' AND channel_session_id IS NOT NULL)
-      OR (source = 'scheduled' AND channel_session_id IS NULL))
+  id                  UUID v7 PK,
+  channel_session_id  UUID FK → channel_sessions,            -- NULL ⟺ source='scheduled'
+  conversation_id     UUID FK → conversations NOT NULL,
+  content             JSONB NOT NULL,                        -- InboundContentSchema
+  platform_ts         TIMESTAMPTZ NOT NULL,
+  source              inbound_message_source NOT NULL,
+  scheduled_fire_key  TEXT,                                  -- NOT NULL ⟺ source='scheduled'
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK ((source = 'user' AND channel_session_id IS NOT NULL AND scheduled_fire_key IS NULL)
+      OR (source = 'scheduled' AND channel_session_id IS NULL AND scheduled_fire_key IS NOT NULL))
 );
+-- Partial unique index — scheduled-fire idempotency
+CREATE UNIQUE INDEX uq_inbound_scheduled_fire_key
+  ON inbound_messages (scheduled_fire_key)
+  WHERE scheduled_fire_key IS NOT NULL;
 ```
 
 Indexes:

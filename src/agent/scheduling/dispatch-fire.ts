@@ -4,6 +4,10 @@
  * conversation → rotate every reachable channel onto a fresh conversation
  * (same shape as `/new` + first inbound). No reachable channel → skip.
  *
+ * Idempotent on `scheduledFireKey` (`${taskId}:${scheduledFor}`): a retry
+ * after a successful tx commit short-circuits to the existing inbound
+ * instead of double-creating a rotated conversation.
+ *
  * See design/scheduling.md → Synthetic conversation turn.
  */
 
@@ -16,7 +20,10 @@ export interface DispatchScheduledFireDeps {
   agentStore: Pick<AgentStore, "findMostRecentConversationForUserProfile" | "createConversation">;
   transportStore: Pick<
     TransportStore,
-    "findReachableChannelsForUserProfile" | "swapSession" | "persistInbound"
+    | "findReachableChannelsForUserProfile"
+    | "findInboundByScheduledFireKey"
+    | "swapSession"
+    | "persistInbound"
   >;
   idleTimeoutMs: number;
 }
@@ -26,6 +33,8 @@ export interface DispatchScheduledFireArgs {
   profileId: string;
   scheduledFor: string;
   prompt: string;
+  /** `${taskId}:${scheduledFor}` — same shape as the Inngest event id. */
+  scheduledFireKey: string;
 }
 
 export type DispatchScheduledFireResult =
@@ -37,6 +46,22 @@ export async function dispatchScheduledFire(
   args: DispatchScheduledFireArgs,
 ): Promise<DispatchScheduledFireResult> {
   return deps.runInTx(async (tx) => {
+    // Retry-after-commit guard: if a prior attempt committed and Inngest
+    // didn't get the step ack, the inbound row is already there. Reuse
+    // its ids so the downstream `inbound/arrived` event id (and the
+    // pipeline state below it) stays stable.
+    const existing = await deps.transportStore.findInboundByScheduledFireKey(
+      tx,
+      args.scheduledFireKey,
+    );
+    if (existing) {
+      return {
+        status: "dispatched" as const,
+        conversationId: existing.conversationId,
+        inboundId: existing.id,
+      };
+    }
+
     const conv = await deps.agentStore.findMostRecentConversationForUserProfile(
       tx,
       args.userId,
@@ -53,11 +78,11 @@ export async function dispatchScheduledFire(
     }
 
     const inbound = await deps.transportStore.persistInbound(tx, {
-      channelSessionId: null,
+      source: "scheduled",
+      scheduledFireKey: args.scheduledFireKey,
       conversationId: targetConversationId,
       content: buildSyntheticInboundContent(args.scheduledFor, args.prompt),
       platformTs: new Date(args.scheduledFor),
-      source: "scheduled",
     });
 
     return {

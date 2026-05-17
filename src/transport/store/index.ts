@@ -27,6 +27,26 @@ export interface Session {
   receive: ChannelSessionReceive;
 }
 
+/**
+ * Discriminated input for `persistInbound`. `user` rows carry their
+ * originating session FK; `scheduled` rows carry the idempotency key.
+ */
+export type PersistInboundParams =
+  | {
+      source: "user";
+      channelSessionId: string;
+      conversationId: string;
+      content: InboundContent;
+      platformTs: Date;
+    }
+  | {
+      source: "scheduled";
+      scheduledFireKey: string;
+      conversationId: string;
+      content: InboundContent;
+      platformTs: Date;
+    };
+
 /** `(channelId, platformAddress, receive)` tuple from `findReachableChannelsForUserProfile`. */
 export interface ReachableChannel {
   channelId: string;
@@ -97,17 +117,27 @@ export interface TransportStore {
     },
   ): Promise<{ id: string }>;
 
-  /** Persist a raw inbound message. `channelSessionId` is null iff `source='scheduled'`. */
-  persistInbound(
+  /**
+   * Persist a raw inbound message. The `source` discriminator selects which
+   * additional fields must be supplied:
+   *   - `'user'` → `channelSessionId` (originating session).
+   *   - `'scheduled'` → `scheduledFireKey` (idempotency key
+   *     `${taskId}:${scheduledFor}`; UNIQUE WHERE NOT NULL).
+   * The DB check constraint enforces this; the type narrows it at the
+   * call site.
+   */
+  persistInbound(tx: Transaction, params: PersistInboundParams): Promise<{ id: string }>;
+
+  /**
+   * Look up a scheduled-source inbound by its idempotency key. Returns
+   * `undefined` when the fire hasn't been dispatched yet. Used by the
+   * fire-handler to short-circuit a retry that lands after the original
+   * tx committed but before Inngest got the step ack.
+   */
+  findInboundByScheduledFireKey(
     tx: Transaction,
-    params: {
-      channelSessionId: string | null;
-      conversationId: string;
-      content: InboundContent;
-      platformTs: Date;
-      source: InboundMessageSource;
-    },
-  ): Promise<{ id: string }>;
+    scheduledFireKey: string,
+  ): Promise<{ id: string; conversationId: string } | undefined>;
 
   /** Load unbatched inbound messages after a cursor (null = all). */
   getUnbatchedInbound(
@@ -359,19 +389,38 @@ export class DrizzleTransportStore implements TransportStore {
     );
   }
 
-  async persistInbound(
-    tx: Transaction,
-    params: {
-      channelSessionId: string | null;
-      conversationId: string;
-      content: InboundContent;
-      platformTs: Date;
-      source: InboundMessageSource;
-    },
-  ): Promise<{ id: string }> {
+  async persistInbound(tx: Transaction, params: PersistInboundParams): Promise<{ id: string }> {
+    const row =
+      params.source === "user"
+        ? {
+            source: "user" as const,
+            channelSessionId: params.channelSessionId,
+            conversationId: params.conversationId,
+            content: params.content,
+            platformTs: params.platformTs,
+          }
+        : {
+            source: "scheduled" as const,
+            scheduledFireKey: params.scheduledFireKey,
+            conversationId: params.conversationId,
+            content: params.content,
+            platformTs: params.platformTs,
+          };
     return single(
-      await tx.insert(inboundMessages).values(params).returning({ id: inboundMessages.id }),
+      await tx.insert(inboundMessages).values(row).returning({ id: inboundMessages.id }),
     );
+  }
+
+  async findInboundByScheduledFireKey(
+    tx: Transaction,
+    scheduledFireKey: string,
+  ): Promise<{ id: string; conversationId: string } | undefined> {
+    const rows = await tx
+      .select({ id: inboundMessages.id, conversationId: inboundMessages.conversationId })
+      .from(inboundMessages)
+      .where(eq(inboundMessages.scheduledFireKey, scheduledFireKey))
+      .limit(1);
+    return rows[0];
   }
 
   async getUnbatchedInbound(

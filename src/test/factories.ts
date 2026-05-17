@@ -214,6 +214,7 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     setChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     clearChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     findReachableChannelsForUserProfile: vi.fn().mockResolvedValue([]),
+    findInboundByScheduledFireKey: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }

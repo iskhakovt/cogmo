@@ -4,4 +4,6 @@ Scheduled fires now reach users even after their conversation has been quiet for
 
 The fire handler picks one of two paths: if the user's most recent conversation has activity within the idle window, the fire lands on it as a synthetic inbound. Otherwise it creates a fresh conversation and `swapSession`s every reachable channel onto it — the same shape as `/new` followed by a first message, just triggered by a clock event. Inbound messages now carry a `source` enum (`'user' | 'scheduled'`) with `channel_session_id` nullable for scheduled rows. `RoutingContext.kind` gains a `'broadcast'` mode that `DeliveryRouter.prepare()` uses to deliver to every reachable session on the conversation when the turn was scheduled.
 
+Dispatch is idempotent on `scheduled_fire_key` (`${taskId}:${scheduledFor}`). A retry after a successful tx commit short-circuits to the existing inbound instead of double-creating a rotated conversation — the narrow worker-died-between-commit-and-ack window now produces exactly one conversation per fire instead of cascading into stranded conversations with no sessions attached. A partial unique index on the key is the database-level safety net.
+
 `status` and `receive` move from `text` to `pgEnum` in the same migration.

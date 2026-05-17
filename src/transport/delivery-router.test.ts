@@ -656,6 +656,24 @@ describe("createDeliveryRouter", () => {
   });
 
   describe("kind: 'broadcast'", () => {
+    it("rejects broadcast routing on non-private conversations", async () => {
+      // Defense-in-depth: broadcasting on a group thread would leak
+      // proactive context into unrelated chats. Today's only broadcast
+      // caller (scheduled fires) only targets private conversations; the
+      // guard catches any future call site that breaks the invariant.
+      const transportStore = mockTransportStore();
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters: new Map(),
+        transportStore,
+      });
+      await expect(router.prepare(ctx({ kind: "broadcast", isPrivate: false }))).rejects.toThrow(
+        /broadcast/i,
+      );
+      expect(transportStore.getActiveSessionsForConversation).not.toHaveBeenCalled();
+      expect(transportStore.getSourceSessions).not.toHaveBeenCalled();
+    });
+
     it("uses getActiveSessionsForConversation instead of getSourceSessions", async () => {
       const batch = mockAdapter();
       const adapters = new Map([["ch-1", { adapter: batch }]]);

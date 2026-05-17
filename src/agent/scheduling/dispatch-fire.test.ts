@@ -17,6 +17,7 @@ const baseArgs = {
   profileId: "profile-1",
   scheduledFor: "2026-05-14T09:00:00.000Z",
   prompt: "morning briefing",
+  scheduledFireKey: "task-1:2026-05-14T09:00:00.000Z",
 };
 
 const idleTimeoutMs = 5 * 60_000;
@@ -26,6 +27,41 @@ afterEach(() => {
 });
 
 describe("dispatchScheduledFire", () => {
+  it("short-circuits to the existing inbound when scheduledFireKey is already used", async () => {
+    // Retry-after-commit invariant: if the prior attempt committed and
+    // Inngest didn't get the step ack, the inbound row is in the DB and
+    // a re-run must reuse its ids rather than rotating again.
+    const agentStore = mockAgentStore({
+      // If reuse short-circuits correctly, neither of these runs.
+      findMostRecentConversationForUserProfile: vi
+        .fn()
+        .mockRejectedValue(new Error("must not run on idempotency hit")),
+      createConversation: vi.fn().mockRejectedValue(new Error("must not run on idempotency hit")),
+    });
+    const transportStore = mockTransportStore({
+      findInboundByScheduledFireKey: vi
+        .fn()
+        .mockResolvedValue({ id: "inbound-prior", conversationId: "conv-prior" }),
+      persistInbound: vi.fn().mockRejectedValue(new Error("must not run on idempotency hit")),
+      swapSession: vi.fn().mockRejectedValue(new Error("must not run on idempotency hit")),
+    });
+
+    const result = await dispatchScheduledFire(
+      { runInTx, agentStore, transportStore, idleTimeoutMs },
+      baseArgs,
+    );
+
+    expect(result).toEqual({
+      status: "dispatched",
+      conversationId: "conv-prior",
+      inboundId: "inbound-prior",
+    });
+    expect(transportStore.findInboundByScheduledFireKey).toHaveBeenCalledWith(
+      expect.anything(),
+      baseArgs.scheduledFireKey,
+    );
+  });
+
   it("reuses an engaged conversation without rotating sessions", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-14T09:01:00.000Z"));
@@ -54,11 +90,11 @@ describe("dispatchScheduledFire", () => {
     expect(transportStore.swapSession).not.toHaveBeenCalled();
     expect(agentStore.createConversation).not.toHaveBeenCalled();
     expect(transportStore.persistInbound).toHaveBeenCalledWith(expect.anything(), {
-      channelSessionId: null,
+      source: "scheduled",
+      scheduledFireKey: baseArgs.scheduledFireKey,
       conversationId: "conv-existing",
       content: buildSyntheticInboundContent(baseArgs.scheduledFor, baseArgs.prompt),
       platformTs: new Date(baseArgs.scheduledFor),
-      source: "scheduled",
     });
   });
 
