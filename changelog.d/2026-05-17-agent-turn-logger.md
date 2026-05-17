@@ -1,0 +1,4 @@
+- Add an optional `turnLogger` field to `AgentLoopParams`; `handle-message` builds a `logger.child({ runId, conversationId })` at orchestrator entry and threads it into `runStreamingAgentLoop` / `runAgentLoop`.
+- In-loop emissions migrate to the child logger: history-invariants repair, iteration-limit warn, tool-round debug.
+- Foundation for upcoming Class C/D telemetry — joins structured logs to `conversation/degraded` / `conversation/errored` events by `runId` + `conversationId` without per-emission ceremony.
+- No behavior change: when `turnLogger` is absent the loop falls back to the module-level logger.

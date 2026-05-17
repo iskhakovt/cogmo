@@ -1,4 +1,5 @@
 import { SpanStatusCode, trace } from "@opentelemetry/api";
+import type { Logger } from "pino";
 import * as R from "remeda";
 import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, Message, StreamEvent, TextBlock, ToolUseBlock } from "../llm/types.js";
@@ -41,6 +42,15 @@ export interface AgentLoopParams {
    * with step id `tool-<name>-<toolUseId>` (unique per LLM-issued tool call).
    */
   stepRun?: StepRunner;
+  /**
+   * Per-invocation child logger with `runId` + `conversationId` bound. When
+   * provided, all per-turn log emissions inside the loop route through it so
+   * downstream consumers can join structured logs to `conversation/degraded`
+   * / `conversation/errored` events by `runId` + `conversationId` without
+   * per-emission field stuffing. Optional only because some tests bypass it;
+   * production wiring (`handle-message`) always provides it.
+   */
+  turnLogger?: Logger;
 }
 
 export interface AgentLoopResult {
@@ -70,10 +80,10 @@ const DEFAULT_MAX_ITERATIONS = 20;
  * satisfies the API contract; repairs are logged so we can see whether
  * stale state is still showing up.
  */
-function sanitizeHistory(messages: ReadonlyArray<Message>): Message[] {
+function sanitizeHistory(messages: ReadonlyArray<Message>, log: Logger): Message[] {
   const { messages: repaired, repairs } = validateHistory(messages);
   if (repairs.length > 0) {
-    logger.warn({ repairCount: repairs.length, repairs }, "agent loop history invariants repaired");
+    log.warn({ repairCount: repairs.length, repairs }, "agent loop history invariants repaired");
   }
   return repaired;
 }
@@ -125,7 +135,8 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     stepRun,
     maxIterations = DEFAULT_MAX_ITERATIONS,
   } = params;
-  const messages = clearOldThinking(sanitizeHistory(params.messages));
+  const log = params.turnLogger ?? logger;
+  const messages = clearOldThinking(sanitizeHistory(params.messages, log));
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };
@@ -167,10 +178,10 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     const toolResults = await executeToolCalls(response.content, tools, service, stepRun);
     messages.push({ role: "user", content: toolResults });
 
-    logger.debug({ iteration: iterations, toolCalls: toolResults.length }, "tool round complete");
+    log.debug({ iteration: iterations, toolCalls: toolResults.length }, "tool round complete");
   }
 
-  logger.warn({ maxIterations }, "agent loop hit iteration limit");
+  log.warn({ maxIterations }, "agent loop hit iteration limit");
   return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
 }
 
@@ -337,7 +348,8 @@ export async function runStreamingAgentLoop(
     stepRun,
     maxIterations = DEFAULT_MAX_ITERATIONS,
   } = params;
-  const messages = clearOldThinking(sanitizeHistory(params.messages));
+  const log = params.turnLogger ?? logger;
+  const messages = clearOldThinking(sanitizeHistory(params.messages, log));
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };
@@ -444,12 +456,12 @@ export async function runStreamingAgentLoop(
 
     messages.push({ role: "user", content: toolResults });
 
-    logger.debug(
+    log.debug(
       { iteration: iterations, toolCalls: toolResults.length },
       "streaming tool round complete",
     );
   }
 
-  logger.warn({ maxIterations }, "streaming agent loop hit iteration limit");
+  log.warn({ maxIterations }, "streaming agent loop hit iteration limit");
   return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
 }
