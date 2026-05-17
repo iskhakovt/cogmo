@@ -124,23 +124,28 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
         // private conversations; any other broadcast caller is a bug.
         throw new Error("broadcast routing is not allowed on non-private conversations");
       }
-      const primarySessions =
-        ctx.kind === "broadcast"
-          ? await runInTx((tx) =>
-              transportStore.getActiveSessionsForConversation(tx, ctx.conversationId),
-            )
-          : await runInTx((tx) =>
-              transportStore.getSourceSessions(tx, {
+
+      // Composed read: primary set + receive-all overlay share one tx so
+      // routing always reads through a single connection. Under READ
+      // COMMITTED each statement still sees its own snapshot — true
+      // atomicity would require REPEATABLE READ — but the race window
+      // (a session closing between the two reads) only ever produces a
+      // stale target, which adapter send-error handling already swallows.
+      const { primarySessions, receiveAllSessions } = await runInTx(async (tx) => {
+        const primary =
+          ctx.kind === "broadcast"
+            ? await transportStore.getActiveSessionsForConversation(tx, ctx.conversationId)
+            : await transportStore.getSourceSessions(tx, {
                 conversationId: ctx.conversationId,
                 prevCursor: ctx.prevCursor,
                 maxInboundId: ctx.maxInboundId,
-              }),
-            );
-
-      // Receive-all sessions — private conversations only
-      const receiveAllSessions = ctx.isPrivate
-        ? await runInTx((tx) => transportStore.getReceiveAllSessions(tx, ctx.conversationId))
-        : [];
+              });
+        // Receive-all overlay only applies to private conversations.
+        const receiveAll = ctx.isPrivate
+          ? await transportStore.getReceiveAllSessions(tx, ctx.conversationId)
+          : [];
+        return { primarySessions: primary, receiveAllSessions: receiveAll };
+      });
 
       // Merge + dedup by session ID
       const sessionMap = new Map(primarySessions.map((s) => [s.id, s]));
