@@ -837,11 +837,7 @@ export async function bootstrapRuntime(
     adapters: adapterMap,
     transportStore: core.transportStore,
   });
-  const idleTimer = createIdleTimer({
-    idleTimeoutMs,
-    runInTx: core.runInTx,
-    transportStore: core.transportStore,
-  });
+  const idleTimer = createIdleTimer({ idleTimeoutMs });
   const debounceFunctions = createDebounceFunctions(debounceConfig);
 
   // Voice — bootstrap a single OpenAIVoiceProvider when voice_config is
@@ -961,7 +957,12 @@ export async function bootstrapRuntime(
   // normal pipeline via `inbound/arrived`. See
   // `src/agent/scheduling/fire-handler.ts`.
   const scheduledTaskFire = createScheduledTaskFireHandler(
-    { runInTx: core.runInTx, transportStore: core.transportStore },
+    {
+      runInTx: core.runInTx,
+      agentStore: core.agentStore,
+      transportStore: core.transportStore,
+      idleTimeoutMs,
+    },
     inngest,
   );
 

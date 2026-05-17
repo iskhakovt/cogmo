@@ -305,13 +305,17 @@ DST contract (verified empirically in `src/agent/scheduling/cron.test.ts`):
 
 ### Synthetic conversation turn
 
-When a fire event lands, the orchestrator:
+When a fire event lands, the fire handler dispatches the synthetic inbound, then re-enters the standard inbound pipeline via `inbound/arrived`. The agent loop is the composer for every user-facing surface — scheduled fires use it for the same reason inbounds do.
 
-1. Loads the task's `user_id` + `profile_id`.
-2. Builds a scoped `Service` (memory bank, files, etc.) identical to an inbound-message turn.
-3. Constructs a synthetic user-role message containing the stored prompt and the scheduled-for timestamp (so the model is self-aware about catch-up: "this was meant to fire at 09:00, it's now 10:30").
-4. Runs the agent loop. Output is routed through `DeliveryRouter` to `getReceiveAllSessions(userId)` — whatever channels the user has online for that profile.
-5. Audit-logs `source: 'scheduled_task'`.
+**Dispatch decision: engaged reuse, or fresh-conversation rotate.**
+
+1. Resolve the most recent private conversation for `(userId, profileId)`. If its last message is within `idleTimeoutMs`, the conversation is *engaged* — the user is mid-conversation. Otherwise the conversation is *idle* (or absent entirely).
+2. **Engaged → reuse.** Persist a synthetic `inbound_messages` row on the existing conversation with `source='scheduled'` and `channel_session_id=NULL`. The agent composes the reminder; `DeliveryRouter` delivers to whatever channels are currently attached to the conversation.
+3. **Idle, or no prior conversation → rotate.** Find every reachable channel for `(userId, profileId)` via `findReachableChannelsForUserProfile`. If none, skip with reason `no_reachable_channel`. Otherwise create a fresh conversation, `swapSession` each reachable channel onto it (preserving each channel's prior `receive` mode), and persist the synthetic inbound on the new conversation. Same shape as `/new` + first inbound, just triggered by a clock event instead of a user command.
+
+**Synthetic inbound shape.** `inbound_messages.source` is an enum (`'user' | 'scheduled'`) that records the origin. `channel_session_id` is nullable; a check constraint enforces `source='scheduled' ⇔ channel_session_id IS NULL`. The content carries the stored prompt and the scheduled-for timestamp so the model can render "this was meant for 09:00, it's now 10:30" without an extra system-prompt round-trip.
+
+**Routing for scheduled turns.** `RoutingContext.kind` is `'broadcast'` when any inbound in the turn's range is `source='scheduled'`. `DeliveryRouter.prepare()` skips source routing in this mode and delivers to every reachable session on the conversation — source routing would find nothing for a synthetic inbound with no originating session. The `receive: 'all'` overlay for private conversations still applies, so Web UI tabs watching the conversation receive the response too. `broadcast` is rejected on `isPrivate=false` conversations to prevent leaking proactive context into group threads; scheduled fires only target private conversations.
 
 ### Idempotency, drift, catch-up
 

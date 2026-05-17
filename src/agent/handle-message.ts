@@ -295,6 +295,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // Safe — guarded by length check above
       const maxInboundId = inboundMessages.at(-1)?.id ?? "";
 
+      // Scheduled fires inject synthetic inbounds with no originating
+      // session — source routing finds nothing for them. Switch the
+      // delivery router to `broadcast` when any inbound in this turn's
+      // range is scheduled so the response reaches the conversation's
+      // currently-attached channels. See design/transport/sessions.md.
+      const routingKind: "reply" | "broadcast" = inboundMessages.some(
+        (m) => m.source === "scheduled",
+      )
+        ? "broadcast"
+        : "reply";
+
       // Voice transcription runs in a durable `step.run` boundary — STT is
       // a billable LLM-adjacent call, so Inngest retries replay from the
       // step cache (exactly-once on second attempt) instead of re-charging
@@ -387,6 +398,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         isPrivate: conv.isPrivate,
         maxInboundId,
         prevCursor: lastAssistant?.lastInboundMessageId ?? null,
+        kind: routingKind,
       });
 
       // Resolve per-turn voice mode BEFORE prompt assembly so the

@@ -1,25 +1,22 @@
-import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import { conversationIdle, inboundArrived, responseReady } from "../inngest/events.js";
-import { logger } from "../logger.js";
-import type { TransportStore } from "../transport/store/index.js";
 
 /**
- * Idle timer — detects when a conversation goes quiet.
+ * Idle timer — emits `conversation/idle` after the conversation has been
+ * quiet for `idleTimeoutMs`.
  *
- * Triggered by response/ready (after each agent response).
- * Sleeps for the idle timeout, then closes sessions and emits conversation/idle.
- * Cancelled by inbound/arrived (user sends a new message) — resets the timer.
+ * Triggered by `response/ready` (after each agent response); cancelled by
+ * `inbound/arrived` (user sends a new message) so the sleep resets.
  *
- * The conversation/idle event triggers the Observer for correction
- * extraction (Stage 1) and future memory extraction.
+ * Engagement is a conversation property, not a session property. The timer
+ * never closes sessions — `channel_sessions.status` records reachability,
+ * which is unrelated to whether the user is mid-conversation. Lazy
+ * rotation in `Transport.resolveSession` handles "next inbound after idle
+ * starts a fresh conversation"; this function's only job is to fire the
+ * Observer trigger. See design/transport/sessions.md.
  */
-export function createIdleTimer(deps: {
-  idleTimeoutMs: number;
-  runInTx: Transactor;
-  transportStore: TransportStore;
-}) {
-  const { idleTimeoutMs, runInTx, transportStore } = deps;
+export function createIdleTimer(deps: { idleTimeoutMs: number }) {
+  const { idleTimeoutMs } = deps;
 
   return inngest.createFunction(
     {
@@ -34,24 +31,9 @@ export function createIdleTimer(deps: {
       const minutes = Math.round(idleTimeoutMs / 60_000);
       await step.sleep("idle-wait", `${minutes}m`);
 
-      // Timer fired — conversation is idle
-      const { sessionsClosed } = await step.run("close-sessions", async () => {
-        return runInTx(async (tx) => {
-          const sessions = await transportStore.getActiveSessionsForConversation(
-            tx,
-            conversationId,
-          );
-          for (const session of sessions) {
-            await transportStore.closeSession(tx, session.id);
-          }
-          return { sessionsClosed: sessions.length };
-        });
-      });
-      logger.info({ conversationId, sessionsClosed }, "conversation idle — sessions closed");
-
       await step.sendEvent("emit-idle", conversationIdle.create({ conversationId }));
 
-      return { status: "idle", conversationId, sessionsClosed };
+      return { status: "idle" as const, conversationId };
     },
   );
 }

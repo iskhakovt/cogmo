@@ -597,6 +597,20 @@ export interface AgentStore {
   getLastMessageTime(tx: Transaction, conversationId: string): Promise<Date | undefined>;
 
   /**
+   * The most recent private conversation for `(userId, profileId)` plus the
+   * timestamp of its most recent message (`null` when the conversation has
+   * no messages yet). `undefined` when the user has never had a private
+   * conversation on this profile. Used by the scheduled-fire dispatcher to
+   * decide between reusing an engaged conversation and rotating to a fresh
+   * one.
+   */
+  findMostRecentConversationForUserProfile(
+    tx: Transaction,
+    userId: string,
+    profileId: string,
+  ): Promise<{ id: string; lastMessageAt: Date | null } | undefined>;
+
+  /**
    * Get `{ inputTokens, outputTokens }` from the most recent assistant
    * message, for the fast-path budget estimator. Returns `undefined` if no
    * assistant row exists. The inner `inputTokens` may be `null` (column was
@@ -1759,6 +1773,38 @@ export class DrizzleAgentStore implements AgentStore {
       .orderBy(desc(messages.id))
       .limit(1);
     return rows[0]?.createdAt;
+  }
+
+  async findMostRecentConversationForUserProfile(
+    tx: Transaction,
+    userId: string,
+    profileId: string,
+  ): Promise<{ id: string; lastMessageAt: Date | null } | undefined> {
+    // Two queries — the simpler shape avoids a correlated subquery whose
+    // outer table reference gets lost when Drizzle wraps the FROM in a
+    // sub-select for the trailing LIMIT (observed on PGlite).
+    const convRows = await tx
+      .select({ id: conversations.id })
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.userId, userId),
+          eq(conversations.profileId, profileId),
+          eq(conversations.isPrivate, true),
+        ),
+      )
+      .orderBy(desc(conversations.id))
+      .limit(1);
+    const conv = convRows[0];
+    if (!conv) return undefined;
+
+    const msgRows = await tx
+      .select({ createdAt: messages.createdAt })
+      .from(messages)
+      .where(eq(messages.conversationId, conv.id))
+      .orderBy(desc(messages.id))
+      .limit(1);
+    return { id: conv.id, lastMessageAt: msgRows[0]?.createdAt ?? null };
   }
 
   // --- Conversation admin ---

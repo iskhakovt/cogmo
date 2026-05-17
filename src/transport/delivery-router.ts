@@ -17,6 +17,20 @@ import {
 
 /**
  * Routing context for target resolution — passed from the orchestrator.
+ *
+ * `kind` selects how target sessions are picked:
+ *   - `"reply"` — source routing: deliver to every session that contributed
+ *     an inbound in this turn's range. Default for turns triggered by a
+ *     user-authored inbound.
+ *   - `"broadcast"` — skip source routing; deliver to every reachable
+ *     session on the conversation. Used when the trigger was scheduled —
+ *     the synthetic inbound has no originating session to source-route
+ *     against, so the response goes to whatever channels are currently
+ *     attached to the conversation.
+ *
+ * Both modes still apply the `receive: "all"` overlay for private
+ * conversations, so Web UI tabs watching the conversation always get the
+ * response.
  */
 export interface RoutingContext {
   conversationId: string;
@@ -26,6 +40,7 @@ export interface RoutingContext {
   maxInboundId: string;
   /** Previous assistant message's lastInboundMessageId (null for first response). */
   prevCursor: string | null;
+  kind: "reply" | "broadcast";
 }
 
 /**
@@ -109,14 +124,22 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
 
   return {
     async prepare(ctx: RoutingContext): Promise<DeliveryHandle> {
-      // Source routing — find sessions that contributed inbound messages for this turn
-      const sourceSessions = await runInTx((tx) =>
-        transportStore.getSourceSessions(tx, {
-          conversationId: ctx.conversationId,
-          prevCursor: ctx.prevCursor,
-          maxInboundId: ctx.maxInboundId,
-        }),
-      );
+      // Pick targets per `kind`. `reply` uses source routing (sessions
+      // that contributed an inbound this turn); `broadcast` falls back
+      // to every reachable session on the conversation, used when the
+      // trigger was a scheduled fire with no originating session.
+      const primarySessions =
+        ctx.kind === "broadcast"
+          ? await runInTx((tx) =>
+              transportStore.getActiveSessionsForConversation(tx, ctx.conversationId),
+            )
+          : await runInTx((tx) =>
+              transportStore.getSourceSessions(tx, {
+                conversationId: ctx.conversationId,
+                prevCursor: ctx.prevCursor,
+                maxInboundId: ctx.maxInboundId,
+              }),
+            );
 
       // Receive-all sessions — private conversations only
       const receiveAllSessions = ctx.isPrivate
@@ -124,7 +147,7 @@ export function createDeliveryRouter(deps: DeliveryRouterDeps): DeliveryRouter {
         : [];
 
       // Merge + dedup by session ID
-      const sessionMap = new Map(sourceSessions.map((s) => [s.id, s]));
+      const sessionMap = new Map(primarySessions.map((s) => [s.id, s]));
       for (const s of receiveAllSessions) {
         sessionMap.set(s.id, s);
       }

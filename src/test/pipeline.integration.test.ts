@@ -268,6 +268,7 @@ describe("message pipeline", () => {
         conversationId: conv!.id,
         content: "Hello integration test",
         platformTs: new Date(),
+        source: "user",
       })
       .returning({ id: inboundMessages.id });
 
@@ -324,6 +325,7 @@ describe("message pipeline", () => {
         conversationId: conv!.id,
         content: "draw me a cat in a hat",
         platformTs: new Date(),
+        source: "user",
       })
       .returning({ id: inboundMessages.id });
 
@@ -412,6 +414,7 @@ describe("message pipeline", () => {
         conversationId: conv!.id,
         content: [{ type: "voice", path, mediaType: "audio/ogg" }],
         platformTs: new Date(),
+        source: "user",
       })
       .returning({ id: inboundMessages.id });
 
@@ -478,6 +481,7 @@ describe("message pipeline", () => {
         conversationId: conv!.id,
         content: "Hello integration test",
         platformTs: new Date(),
+        source: "user",
       })
       .returning({ id: inboundMessages.id });
 

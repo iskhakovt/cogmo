@@ -7,10 +7,16 @@ import {
   mockTransportStore,
 } from "../test/factories.js";
 import { type AdapterEntry, createDeliveryRouter, type RoutingContext } from "./delivery-router.js";
+import type { Session } from "./store/index.js";
+import type { ChannelSessionReceive } from "./store/schema.js";
 
 const textDelta: StreamEvent = { type: "text_delta", text: "hello" };
 
-function session(id: string, channelId: string, receive = "routed") {
+function session(
+  id: string,
+  channelId: string,
+  receive: ChannelSessionReceive = "routed",
+): Session {
   return {
     id,
     channelId,
@@ -28,6 +34,7 @@ function ctx(overrides?: Partial<RoutingContext>): RoutingContext {
     isPrivate: true,
     maxInboundId: "inb-1",
     prevCursor: null,
+    kind: "reply",
     ...overrides,
   };
 }
@@ -645,6 +652,63 @@ describe("createDeliveryRouter", () => {
       await delivery.deliverVoice(audio);
 
       expect(ok.sendVoice).toHaveBeenCalledWith("addr-s2", audio);
+    });
+  });
+
+  describe("kind: 'broadcast'", () => {
+    // Scheduled fires inject synthetic inbounds with no originating
+    // session. Source routing returns nothing for them; the orchestrator
+    // passes `kind: 'broadcast'` so prepare() reaches every active
+    // session on the conversation instead.
+    it("uses getActiveSessionsForConversation instead of getSourceSessions", async () => {
+      const batch = mockAdapter();
+      const adapters = new Map([["ch-1", { adapter: batch }]]);
+      const transportStore = mockTransportStore({
+        getActiveSessionsForConversation: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+        getSourceSessions: vi.fn().mockResolvedValue([]), // must NOT be consulted
+      });
+
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters,
+        transportStore,
+      });
+      const delivery = await router.prepare(ctx({ kind: "broadcast" }));
+      await delivery.deliverBatch("morning briefing");
+
+      expect(transportStore.getActiveSessionsForConversation).toHaveBeenCalledWith(
+        expect.anything(),
+        "conv-1",
+      );
+      expect(transportStore.getSourceSessions).not.toHaveBeenCalled();
+      expect(batch.deliver).toHaveBeenCalledWith("addr-s1", "morning briefing");
+    });
+
+    it("still merges receive: 'all' overlay for private conversations", async () => {
+      // A Web UI tab watching the conversation should receive the
+      // scheduled-fire response too, just as for any reply-routed turn.
+      const batch1 = mockAdapter();
+      const batch2 = mockAdapter();
+      const adapters = new Map([
+        ["ch-1", { adapter: batch1 }],
+        ["ch-web", { adapter: batch2 }],
+      ]);
+      const transportStore = mockTransportStore({
+        getActiveSessionsForConversation: vi.fn().mockResolvedValue([session("s1", "ch-1")]),
+        getReceiveAllSessions: vi.fn().mockResolvedValue([session("s-web", "ch-web", "all")]),
+        getSourceSessions: vi.fn().mockResolvedValue([]),
+      });
+
+      const router = createDeliveryRouter({
+        runInTx: (cb) => cb({} as never),
+        adapters,
+        transportStore,
+      });
+      const delivery = await router.prepare(ctx({ kind: "broadcast", isPrivate: true }));
+      await delivery.deliverBatch("hello");
+
+      expect(batch1.deliver).toHaveBeenCalledWith("addr-s1", "hello");
+      expect(batch2.deliver).toHaveBeenCalledWith("addr-s-web", "hello");
     });
   });
 

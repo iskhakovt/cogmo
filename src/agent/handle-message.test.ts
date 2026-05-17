@@ -247,6 +247,7 @@ describe("createHandleMessage", () => {
       isPrivate: true,
       maxInboundId: "inbound-1",
       prevCursor: null,
+      kind: "reply",
     });
   });
 

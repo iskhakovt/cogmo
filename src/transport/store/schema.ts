@@ -5,6 +5,7 @@ import {
   index,
   integer,
   jsonb,
+  pgEnum,
   pgTable,
   text,
   timestamp,
@@ -14,6 +15,41 @@ import {
 import { conversations, profiles, users } from "../../agent/store/schema.js";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { InboundContentSchema } from "../content.js";
+
+/**
+ * `channel_sessions.status` — reachability lifecycle.
+ *
+ * `active` while the channel can deliver to the user (Telegram chat_id is
+ * known and the bot isn't blocked; Web UI tab is alive). `closed` once the
+ * user explicitly ended this conversation (`/new`, `/end`, profile change)
+ * or `resolveSession` lazy-rotated it after the conversation went idle.
+ * Engagement (is the user actively conversing right now?) lives in
+ * `messages.created_at`, not here. See design/transport/sessions.md.
+ */
+export const channelSessionStatus = pgEnum("channel_session_status", ["active", "closed"]);
+export type ChannelSessionStatus = (typeof channelSessionStatus.enumValues)[number];
+
+/**
+ * `channel_sessions.receive` — what this session receives.
+ *
+ * `routed` — normal source/lastInbound routing applies. `all` — Web UI
+ * style "watch everything for this conversation" (private only). `none` —
+ * input-only, no responses delivered (muted).
+ */
+export const channelSessionReceive = pgEnum("channel_session_receive", ["none", "routed", "all"]);
+export type ChannelSessionReceive = (typeof channelSessionReceive.enumValues)[number];
+
+/**
+ * `inbound_messages.source` — origin of the row.
+ *
+ * `user` — arrived from a platform message; `channel_session_id` points
+ * at the originating session. `scheduled` — synthetic inbound injected by
+ * the scheduled-task fire handler; `channel_session_id IS NULL` because
+ * the trigger was a clock event, not a platform message. A check
+ * constraint enforces the source ↔ session-id nullability link.
+ */
+export const inboundMessageSource = pgEnum("inbound_message_source", ["user", "scheduled"]);
+export type InboundMessageSource = (typeof inboundMessageSource.enumValues)[number];
 
 export const channels = pgTable("channels", {
   id: pk(),
@@ -46,8 +82,8 @@ export const channelSessions = pgTable(
     conversationId: uuid("conversation_id")
       .notNull()
       .references(() => conversations.id),
-    status: text("status").notNull(), // 'active' | 'closed'
-    receive: text("receive").notNull(), // 'none' | 'routed' | 'all'
+    status: channelSessionStatus("status").notNull(),
+    receive: channelSessionReceive("receive").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }), // NULL = never expires
     createdAt: ts(),
   },
@@ -59,18 +95,30 @@ export const channelSessions = pgTable(
   ],
 );
 
-export const inboundMessages = pgTable("inbound_messages", {
-  id: pk(),
-  channelSessionId: uuid("channel_session_id")
-    .notNull()
-    .references(() => channelSessions.id),
-  conversationId: uuid("conversation_id")
-    .notNull()
-    .references(() => conversations.id), // denormalized for query performance
-  content: jsonbZod("content", InboundContentSchema).notNull(),
-  platformTs: timestamp("platform_ts", { withTimezone: true }).notNull(), // when the user sent it
-  createdAt: ts(),
-});
+export const inboundMessages = pgTable(
+  "inbound_messages",
+  {
+    id: pk(),
+    // Nullable for `source='scheduled'` rows — fire handler injects
+    // synthetic inbounds with no originating session. The check constraint
+    // below makes the link to `source` explicit.
+    channelSessionId: uuid("channel_session_id").references(() => channelSessions.id),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id), // denormalized for query performance
+    content: jsonbZod("content", InboundContentSchema).notNull(),
+    platformTs: timestamp("platform_ts", { withTimezone: true }).notNull(), // when the user sent it
+    source: inboundMessageSource("source").notNull(),
+    createdAt: ts(),
+  },
+  (t) => [
+    check(
+      "chk_inbound_source_session",
+      sql`(${t.source} = 'user' AND ${t.channelSessionId} IS NOT NULL)
+        OR (${t.source} = 'scheduled' AND ${t.channelSessionId} IS NULL)`,
+    ),
+  ],
+);
 
 /**
  * Per-chat default profile. Keyed on `(channel_id, platform_address)` —

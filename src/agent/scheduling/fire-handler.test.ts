@@ -1,25 +1,22 @@
 /**
  * Fire-handler unit tests. Drives the Inngest function via
- * `@inngest/test`'s InngestTestEngine, mocks the transport store, and
- * asserts the externally-visible behaviour: which store methods were
- * called, with what arguments, and what event was emitted.
+ * `@inngest/test`'s InngestTestEngine, mocks the agent + transport stores,
+ * and asserts the externally-visible behaviour: which path the dispatcher
+ * took (engaged reuse / idle rotate / no-reachable skip), which writes ran,
+ * and what event was emitted.
  *
  * Companion to `src/agent/handle-message.replay.test.ts` — same pattern
- * for invoking an Inngest function in isolation. The `_send` stub
- * keeps `step.sendEvent` from trying to reach a real Inngest dev
- * server (and burning ~2s per test on ECONNREFUSED).
+ * for invoking an Inngest function in isolation. The `_send` stub keeps
+ * `step.sendEvent` from trying to reach a real Inngest dev server.
  */
 
 import { InngestTestEngine } from "@inngest/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
-import { mockTransportStore, spyOnInngestSend } from "../../test/factories.js";
+import { mockAgentStore, mockTransportStore, spyOnInngestSend } from "../../test/factories.js";
 import { buildSyntheticInboundContent, createScheduledTaskFireHandler } from "./fire-handler.js";
 
-// Stub Inngest's private `_send` so `step.sendEvent` inside the function
-// under test doesn't reach a real dev server. See `spyOnInngestSend` for
-// why the cast lives there.
 let sendSpy: ReturnType<typeof spyOnInngestSend>;
 beforeEach(() => {
   sendSpy = spyOnInngestSend(inngest);
@@ -27,10 +24,9 @@ beforeEach(() => {
 });
 afterEach(() => {
   sendSpy.mockRestore();
+  vi.useRealTimers();
 });
 
-// In-process transactor — the fire handler doesn't actually need DB; the
-// mocked store ignores tx. Cast to Transactor at the seam.
 const FAKE_TX = { __mockTx: true } as never;
 const runInTx: Transactor = (cb) => cb(FAKE_TX);
 
@@ -45,140 +41,246 @@ const baseEvent = {
   },
 } as const;
 
+const idleTimeoutMs = 5 * 60_000;
+
+function deps(over: {
+  agent?: Parameters<typeof mockAgentStore>[0];
+  transport?: Parameters<typeof mockTransportStore>[0];
+}) {
+  return {
+    runInTx,
+    agentStore: mockAgentStore(over.agent),
+    transportStore: mockTransportStore(over.transport),
+    idleTimeoutMs,
+  };
+}
+
 describe("createScheduledTaskFireHandler", () => {
-  it("skips with reason='no_active_session' when the user has no active session", async () => {
-    const transportStore = mockTransportStore({
-      findActiveSessionForUserProfile: vi.fn().mockResolvedValue(undefined),
+  it("reuses an engaged conversation (last message inside idle window)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-14T09:01:00.000Z"));
+
+    const d = deps({
+      agent: {
+        findMostRecentConversationForUserProfile: vi.fn().mockResolvedValue({
+          id: "conv-existing",
+          lastMessageAt: new Date("2026-05-14T09:00:30.000Z"), // 30s ago
+        }),
+      },
+      transport: {
+        persistInbound: vi.fn().mockResolvedValue({ id: "inbound-7" }),
+      },
     });
-    const fn = createScheduledTaskFireHandler({ runInTx, transportStore }, inngest);
+    const fn = createScheduledTaskFireHandler(d, inngest);
 
-    const engine = new InngestTestEngine({ function: fn, events: [baseEvent] });
-    const { result } = await engine.execute();
-
-    expect(result).toEqual({ status: "skipped", reason: "no_active_session" });
-    expect(transportStore.persistInbound).not.toHaveBeenCalled();
-  });
-
-  it("persists synthetic inbound + emits inbound/arrived when an active session exists", async () => {
-    const transportStore = mockTransportStore({
-      findActiveSessionForUserProfile: vi.fn().mockResolvedValue({
-        sessionId: "session-1",
-        conversationId: "conv-1",
-      }),
-      persistInbound: vi.fn().mockResolvedValue({ id: "inbound-7" }),
-    });
-    const fn = createScheduledTaskFireHandler({ runInTx, transportStore }, inngest);
-
-    const engine = new InngestTestEngine({ function: fn, events: [baseEvent] });
-    const { result } = await engine.execute();
+    const { result } = await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+    }).execute();
 
     expect(result).toEqual({
       status: "dispatched",
-      conversationId: "conv-1",
+      conversationId: "conv-existing",
       inboundId: "inbound-7",
     });
+    // Reuse path: no rotation
+    expect(d.transportStore.findReachableChannelsForUserProfile).not.toHaveBeenCalled();
+    expect(d.transportStore.swapSession).not.toHaveBeenCalled();
+    expect(d.agentStore.createConversation).not.toHaveBeenCalled();
 
-    expect(transportStore.persistInbound).toHaveBeenCalledTimes(1);
-    expect(transportStore.persistInbound).toHaveBeenCalledWith(expect.anything(), {
-      channelSessionId: "session-1",
-      conversationId: "conv-1",
+    expect(d.transportStore.persistInbound).toHaveBeenCalledWith(expect.anything(), {
+      channelSessionId: null,
+      conversationId: "conv-existing",
       content: buildSyntheticInboundContent(baseEvent.data.scheduledFor, baseEvent.data.prompt),
-      // platformTs uses the scheduled-for timestamp, not now() — pinned
-      // as a Date instance with the right epoch.
       platformTs: new Date(baseEvent.data.scheduledFor),
+      source: "scheduled",
     });
 
-    // Exactly one event emit through Inngest — inbound/arrived for the
-    // resolved conversation. `_send({ fn, payload, ... })` so we pluck
-    // `payload` and assert the event shape AND the idempotency key.
-    // The key is what Inngest dedup'es against on at-least-once retry;
-    // dropping it would let a sendEvent re-deliver produce two
-    // synthetic-inbound runs through handle-message.
-    expect(sendSpy).toHaveBeenCalledTimes(1);
     expect(sendSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         payload: expect.objectContaining({
           name: "inbound/arrived",
-          data: { conversationId: "conv-1", inboundMessageId: "inbound-7" },
+          data: { conversationId: "conv-existing", inboundMessageId: "inbound-7" },
           id: "fire:inbound-7",
         }),
       }),
     );
   });
 
+  it("rotates to a fresh conversation when the prior one is idle", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-14T09:00:00.000Z"));
+
+    const d = deps({
+      agent: {
+        findMostRecentConversationForUserProfile: vi.fn().mockResolvedValue({
+          id: "conv-stale",
+          lastMessageAt: new Date("2026-05-13T22:00:00.000Z"), // ~11 hours ago
+        }),
+        createConversation: vi.fn().mockResolvedValue({ id: "conv-fresh" }),
+      },
+      transport: {
+        findReachableChannelsForUserProfile: vi.fn().mockResolvedValue([
+          { channelId: "ch-tg", platformAddress: "chat-42", receive: "routed" },
+          { channelId: "ch-web", platformAddress: "tab-7", receive: "all" },
+        ]),
+        swapSession: vi.fn().mockResolvedValue({ id: "session-new" }),
+        persistInbound: vi.fn().mockResolvedValue({ id: "inbound-9" }),
+      },
+    });
+    const fn = createScheduledTaskFireHandler(d, inngest);
+
+    const { result } = await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+    }).execute();
+
+    expect(result).toEqual({
+      status: "dispatched",
+      conversationId: "conv-fresh",
+      inboundId: "inbound-9",
+    });
+
+    // Created a new conversation with the task's user+profile
+    expect(d.agentStore.createConversation).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-1",
+      profileId: "profile-1",
+      isPrivate: true,
+    });
+
+    // Rotated every reachable channel onto the new conversation, preserving receive mode
+    expect(d.transportStore.swapSession).toHaveBeenCalledTimes(2);
+    expect(d.transportStore.swapSession).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      "ch-tg",
+      "chat-42",
+      { conversationId: "conv-fresh", status: "active", receive: "routed" },
+    );
+    expect(d.transportStore.swapSession).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      "ch-web",
+      "tab-7",
+      { conversationId: "conv-fresh", status: "active", receive: "all" },
+    );
+
+    // Synthetic inbound on the new conversation, no originating session
+    expect(d.transportStore.persistInbound).toHaveBeenCalledWith(expect.anything(), {
+      channelSessionId: null,
+      conversationId: "conv-fresh",
+      content: buildSyntheticInboundContent(baseEvent.data.scheduledFor, baseEvent.data.prompt),
+      platformTs: new Date(baseEvent.data.scheduledFor),
+      source: "scheduled",
+    });
+  });
+
+  it("rotates when there is no prior conversation at all", async () => {
+    const d = deps({
+      agent: {
+        findMostRecentConversationForUserProfile: vi.fn().mockResolvedValue(undefined),
+        createConversation: vi.fn().mockResolvedValue({ id: "conv-first" }),
+      },
+      transport: {
+        findReachableChannelsForUserProfile: vi
+          .fn()
+          .mockResolvedValue([
+            { channelId: "ch-tg", platformAddress: "chat-42", receive: "routed" },
+          ]),
+        swapSession: vi.fn().mockResolvedValue({ id: "session-new" }),
+        persistInbound: vi.fn().mockResolvedValue({ id: "inbound-1" }),
+      },
+    });
+    const fn = createScheduledTaskFireHandler(d, inngest);
+
+    const { result } = await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+    }).execute();
+
+    expect(result).toMatchObject({ status: "dispatched", conversationId: "conv-first" });
+    expect(d.transportStore.swapSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips with reason 'no_reachable_channel' when nothing can deliver", async () => {
+    const d = deps({
+      agent: {
+        findMostRecentConversationForUserProfile: vi.fn().mockResolvedValue(undefined),
+      },
+      transport: {
+        findReachableChannelsForUserProfile: vi.fn().mockResolvedValue([]),
+      },
+    });
+    const fn = createScheduledTaskFireHandler(d, inngest);
+
+    const { result } = await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+    }).execute();
+
+    expect(result).toEqual({ status: "skipped", reason: "no_reachable_channel" });
+    expect(d.transportStore.persistInbound).not.toHaveBeenCalled();
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
   it("synthetic content carries the scheduled-for timestamp header", () => {
-    // Format lock — the prompt body MUST surface the scheduled-for
-    // timestamp so the model can render "this was meant for X, it's
-    // now Y" without an extra system-prompt round-trip.
     const content = buildSyntheticInboundContent("2026-05-14T09:00:00.000Z", "morning briefing");
     expect(content).toBe(
       "[Scheduled task — fire time was 2026-05-14T09:00:00.000Z]\n\nmorning briefing",
     );
   });
 
-  it("scopes findActiveSessionForUserProfile to the event's userId+profileId", async () => {
-    // Belt-and-braces: the lookup must use the event's identifiers,
-    // not anything cached from the deps. A regression here would route
-    // fires to the wrong user.
-    const find = vi.fn().mockResolvedValue(undefined);
-    const transportStore = mockTransportStore({ findActiveSessionForUserProfile: find });
-    const fn = createScheduledTaskFireHandler({ runInTx, transportStore }, inngest);
-
-    await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
-
-    expect(find).toHaveBeenCalledWith(expect.anything(), "user-1", "profile-1");
-  });
-
   it("pins the function configuration (event trigger, retries, concurrency)", () => {
-    const transportStore = mockTransportStore();
-    const fn = createScheduledTaskFireHandler({ runInTx, transportStore }, inngest);
+    const fn = createScheduledTaskFireHandler(deps({}), inngest);
 
-    // `opts` is the public readonly InngestFunction config.
     expect(fn.opts.id).toBe("scheduled-task-fire");
     expect(fn.opts.retries).toBe(2);
     expect(fn.opts.concurrency).toEqual({ limit: 1, key: "event.data.taskId" });
-    // Triggered by the scheduled-task fire event.
     expect(fn.opts.triggers).toHaveLength(1);
     expect(fn.opts.triggers?.[0]).toMatchObject({ event: "agent/scheduled-task.fire" });
   });
 
-  it("does NOT re-run persist-inbound when Inngest replays with a cached step result", async () => {
-    // Crash-recovery invariant: a retry that finds `persist-inbound`
-    // already cached must NOT call persistInbound again — otherwise
-    // the same fire would inject the synthetic inbound twice.
-    const transportStore = mockTransportStore({
-      findActiveSessionForUserProfile: vi.fn().mockResolvedValue({
-        sessionId: "session-1",
-        conversationId: "conv-1",
-      }),
-      // If this gets called on replay, the test should fail.
-      persistInbound: vi.fn().mockResolvedValue({ id: "should-not-be-used" }),
+  it("does NOT re-run dispatch when Inngest replays with a cached step result", async () => {
+    // Crash-recovery invariant: a retry that finds `dispatch` already
+    // cached must NOT call the use case again — otherwise the rotation
+    // path would create a second fresh conversation.
+    const d = deps({
+      agent: {
+        // If these get called on replay, the test should fail loudly.
+        findMostRecentConversationForUserProfile: vi
+          .fn()
+          .mockRejectedValue(new Error("must not run")),
+        createConversation: vi.fn().mockRejectedValue(new Error("must not run")),
+      },
+      transport: {
+        persistInbound: vi.fn().mockRejectedValue(new Error("must not run")),
+      },
     });
-    const fn = createScheduledTaskFireHandler({ runInTx, transportStore }, inngest);
+    const fn = createScheduledTaskFireHandler(d, inngest);
 
     await new InngestTestEngine({
       function: fn,
       events: [baseEvent],
       steps: [
         {
-          id: "find-active-session",
-          handler: () => ({ sessionId: "session-1", conversationId: "conv-1" }),
+          id: "dispatch",
+          handler: () => ({
+            status: "dispatched",
+            conversationId: "conv-cached",
+            inboundId: "inbound-cached",
+          }),
         },
-        { id: "persist-inbound", handler: () => ({ id: "inbound-cached" }) },
       ],
     }).execute();
 
-    // Neither store method was touched — the cached values flowed through.
-    expect(transportStore.findActiveSessionForUserProfile).not.toHaveBeenCalled();
-    expect(transportStore.persistInbound).not.toHaveBeenCalled();
-    // Trigger event still fired with the cached inbound id, AND the
-    // idempotency key projects from that cached value (so any retry of
-    // the sendEvent step itself dedups against the same key).
+    expect(d.agentStore.findMostRecentConversationForUserProfile).not.toHaveBeenCalled();
+    expect(d.agentStore.createConversation).not.toHaveBeenCalled();
+    expect(d.transportStore.persistInbound).not.toHaveBeenCalled();
     expect(sendSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         payload: expect.objectContaining({
           name: "inbound/arrived",
-          data: { conversationId: "conv-1", inboundMessageId: "inbound-cached" },
+          data: { conversationId: "conv-cached", inboundMessageId: "inbound-cached" },
           id: "fire:inbound-cached",
         }),
       }),

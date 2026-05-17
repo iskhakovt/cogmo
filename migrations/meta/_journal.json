@@ -225,6 +225,13 @@
       "when": 1778756128219,
       "tag": "0031_mighty_dagger",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1779045057546,
+      "tag": "0032_complete_bedlam",
+      "breakpoints": true
     }
   ]
 }

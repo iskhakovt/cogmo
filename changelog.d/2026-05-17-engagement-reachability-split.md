@@ -1,0 +1,7 @@
+Scheduled fires now reach users even after their conversation has been quiet for hours. `channel_sessions.status` was carrying two meanings — reachability (can we deliver?) and engagement (is the user mid-conversation?). The idle timer was closing sessions to fire the Observer trigger, which made every scheduled fire after idle return `no_active_session` and silently drop, even when the Telegram bot could have delivered fine.
+
+`status` is now purely reachability. The idle timer emits `conversation/idle` and stops there; sessions only close on explicit user action (`/new`, `/end`, profile change), lazy rotation on stale inbound, or a scheduled fire rotating onto a fresh conversation.
+
+The fire handler picks one of two paths: if the user's most recent conversation has activity within the idle window, the fire lands on it as a synthetic inbound. Otherwise it creates a fresh conversation and `swapSession`s every reachable channel onto it — the same shape as `/new` followed by a first message, just triggered by a clock event. Inbound messages now carry a `source` enum (`'user' | 'scheduled'`) with `channel_session_id` nullable for scheduled rows. `RoutingContext.kind` gains a `'broadcast'` mode that `DeliveryRouter.prepare()` uses to deliver to every reachable session on the conversation when the turn was scheduled.
+
+`status` and `receive` move from `text` to `pgEnum` in the same migration.
