@@ -1,6 +1,8 @@
 import { getEncoding, type Tiktoken } from "js-tiktoken";
+import { jsonrepair } from "jsonrepair";
 import OpenAI from "openai";
 import { logger } from "../logger.js";
+import { ProviderProtocolError } from "./errors.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
@@ -258,11 +260,14 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
         // Yield accumulated tool calls as complete tool_start events.
         // Malformed argument JSON is attributed to the span before unwinding,
-        // matching the catch branch below.
+        // matching the catch branch below. `parseToolArgs` runs `jsonrepair`
+        // before declaring failure and wraps the throw as ProviderProtocolError
+        // so FallbackLlmProvider's status-less network-error heuristic doesn't
+        // misclassify a bare SyntaxError as transient.
         for (const [, call] of [...toolCalls.entries()].sort(([a], [b]) => a - b)) {
           let input: unknown;
           try {
-            input = JSON.parse(call.argumentChunks.join(""));
+            input = parseToolArgs(call.argumentChunks.join(""), call.name);
           } catch (parseErr) {
             completed = true;
             failChatSpan(span, parseErr);
@@ -454,6 +459,33 @@ function fromOpenAIMessage(message: OpenAI.ChatCompletionMessage): ContentBlock[
   }
 
   return blocks;
+}
+
+/**
+ * Parse the buffered `tool_calls[].function.arguments` deltas for a
+ * streamed tool call. Try `JSON.parse` first; on failure, run `jsonrepair`
+ * (handles trailing commas, unclosed strings within reason, missing
+ * quotes) and parse again. If repair also fails, raise
+ * {@link ProviderProtocolError} so the in-loop classifier owns the
+ * recovery decision instead of the provider chain misclassifying a bare
+ * `SyntaxError`.
+ */
+function parseToolArgs(raw: string, toolName: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch (initial) {
+    try {
+      const repaired = jsonrepair(raw);
+      return JSON.parse(repaired);
+    } catch (repairErr) {
+      throw new ProviderProtocolError(
+        `OpenAI-compatible streamed tool_calls arguments for "${toolName}" failed to parse, including after jsonrepair: ${
+          repairErr instanceof Error ? repairErr.message : String(repairErr)
+        }`,
+        initial,
+      );
+    }
+  }
 }
 
 function fromOpenAIFinishReason(reason: string | null): StopReason {

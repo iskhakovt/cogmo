@@ -35,6 +35,7 @@
  */
 
 import { logger } from "../logger.js";
+import { ProviderProtocolError } from "./errors.js";
 import type { LlmProvider } from "./provider.js";
 import type {
   ChatParams,
@@ -78,9 +79,16 @@ export class AllProvidersFailedError extends Error {
  *
  * Retriable: no status (network/DNS/TLS/timeout), 408, 425, 429, any 5xx.
  * Permanent: any other numeric HTTP status, or a non-Error throw.
+ *
+ * {@link ProviderProtocolError} is treated as permanent regardless of the
+ * absent `status` field: the upstream response arrived intact but its
+ * payload is unusable (tool-arg JSON fails to parse even after `jsonrepair`).
+ * Retrying the next provider has no reason to help — the in-loop classifier
+ * owns the recovery decision.
  */
 export function isRetriableProviderError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
+  if (err instanceof ProviderProtocolError) return false;
   const status = extractStatus(err);
   if (status == null) return true; // network / DNS / TLS / timeout
   if (status === 408 || status === 425 || status === 429) return true;

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { ProviderProtocolError } from "./errors.js";
 import { OpenAICompatibleProvider } from "./openai-compat.js";
 import type { StreamEvent } from "./types.js";
 
@@ -406,6 +407,108 @@ describe("OpenAICompatibleProvider", () => {
       expect(first.value).toEqual({ type: "text_delta", text: "partial" });
       await expect(iter.next()).rejects.toBe(drop);
       await expect(response).rejects.toBe(drop);
+    });
+
+    it("repairs trailing-comma JSON in tool args via jsonrepair before declaring failure", async () => {
+      const provider = createProvider();
+      // Reconstructed buffer: `{"query":"weather",}` — valid after
+      // jsonrepair drops the trailing comma.
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "m",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "call_1",
+                      function: { name: "search", arguments: '{"query":"weather",' },
+                    },
+                  ],
+                },
+                finish_reason: null,
+              },
+            ],
+            usage: null,
+          },
+          {
+            model: "m",
+            choices: [
+              {
+                delta: { tool_calls: [{ index: 0, function: { arguments: "}" } }] },
+                finish_reason: null,
+              },
+            ],
+            usage: null,
+          },
+          {
+            model: "m",
+            choices: [{ delta: {}, finish_reason: "tool_calls" }],
+            usage: { prompt_tokens: 10, completion_tokens: 8 },
+          },
+        ]),
+      );
+
+      const { events, response } = provider.chatStream({
+        model: "m",
+        system: "sys",
+        messages: [{ role: "user", content: "search" }],
+      });
+
+      const collected: StreamEvent[] = [];
+      for await (const event of events) collected.push(event);
+
+      expect(collected).toEqual([
+        { type: "tool_start", id: "call_1", name: "search", input: { query: "weather" } },
+      ]);
+      await expect(response).resolves.toMatchObject({ stopReason: "tool_use" });
+    });
+
+    it("throws ProviderProtocolError on tool-arg JSON unrepairable by jsonrepair", async () => {
+      const provider = createProvider();
+      // `{{{{}}{}` — interleaved unbalanced braces with no parseable token
+      // structure; jsonrepair throws "Unexpected character" rather than
+      // returning a salvaged shape.
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "m",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    { index: 0, id: "call_1", function: { name: "search", arguments: "{{{{}}{}" } },
+                  ],
+                },
+                finish_reason: null,
+              },
+            ],
+            usage: null,
+          },
+          {
+            model: "m",
+            choices: [{ delta: {}, finish_reason: "tool_calls" }],
+            usage: { prompt_tokens: 10, completion_tokens: 8 },
+          },
+        ]),
+      );
+
+      const { events, response } = provider.chatStream({
+        model: "m",
+        system: "sys",
+        messages: [{ role: "user", content: "search" }],
+      });
+
+      const collect = async (): Promise<StreamEvent[]> => {
+        const out: StreamEvent[] = [];
+        for await (const event of events) out.push(event);
+        return out;
+      };
+
+      await expect(collect()).rejects.toBeInstanceOf(ProviderProtocolError);
+      await expect(response).rejects.toBeInstanceOf(ProviderProtocolError);
     });
   });
 
