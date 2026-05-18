@@ -383,9 +383,7 @@ export interface ToolHistorySummary {
 /**
  * Build per-tool history summaries for every tool that appeared in
  * `messages[fromIdx..]`. Single pass over the turn's accumulated
- * message array; consolidates what was three separate per-tool helpers
- * (`countToolInvocations`, `countToolInvocationBatches`,
- * `summarizeToolOutcomes`) into one derivation keyed by tool name.
+ * message array, keyed by tool name.
  *
  * Derives from the message array rather than maintaining a separate
  * counter — Inngest function replay re-executes everything outside
@@ -394,6 +392,18 @@ export interface ToolHistorySummary {
  * the actual current state regardless of replay topology. See
  * `design/agent-resilience.md` → "Implementation note: derive, don't
  * store".
+ *
+ * `priorBatchCount` semantics: count of distinct assistant messages in
+ * the slice carrying a `tool_use` for that tool, **excluding the very
+ * last message in the slice if it is one of them**. Matches the
+ * volume-cluster call-site contract — the trigger calls this helper
+ * after pushing the current iteration's assistant message, so the
+ * "current" batch sits at the tail and gets excluded; the caller does
+ * `batchCount = priorBatchCount + 1` to include it. When the slice's
+ * last message is a user `tool_result` (no current iteration pending)
+ * no exclusion applies and `priorBatchCount` equals the total number
+ * of distinct same-tool batches in the slice. `callCount` and
+ * `outcomes` are unaffected by this exclusion.
  */
 export function summarizeToolHistory(
   messages: ReadonlyArray<Message>,
@@ -496,10 +506,10 @@ function firstLineSummary(content: unknown): string | null {
 /**
  * Common prefix every volume-cluster nudge starts with for a given
  * tool. Shared between {@link formatVolumeClusterContent} (the builder)
- * and {@link summarizeToolOutcomes} (the filter that excludes prior
- * synthetic nudges of this same tool from outcome counts). Kept as one
- * function so the two callsites can't drift apart silently — if the
- * nudge format ever changes its leading clause, both ends update
+ * and {@link summarizeToolHistory}'s synthetic-nudge filter (which
+ * drops a tool's own prior nudges from its outcome counts). Kept as
+ * one function so the two callsites can't drift apart silently — if
+ * the nudge format ever changes its leading clause, both ends update
  * together.
  */
 function volumeClusterNudgePrefix(toolName: string): string {

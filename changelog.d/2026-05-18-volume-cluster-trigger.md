@@ -33,6 +33,11 @@ Per-tool budgets land on `ToolSpec.invocationBudget?` with
 (10). Budgets cap iterations, not individual calls — an admitted batch
 can contain arbitrarily many parallel blocks. Per-call cost ceilings
 belong elsewhere; the trigger's job is loop-pathology detection.
+`defineTool` rejects non-positive-integer budgets at registration time
+so a typo can't ship a tool that's effectively disabled. Both the
+streaming and non-streaming agent-loop variants apply the trigger
+(`runStreamingAgentLoop` and `runAgentLoop` use the same
+`computeVolumeClusterInterceptions` pre-pass).
 
 New `RepairSubtype` variant `"volume_cluster"` and a narrower
 `DegradeSubtype = Exclude<RepairSubtype, "volume_cluster">` keep the

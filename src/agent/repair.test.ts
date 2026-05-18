@@ -328,6 +328,23 @@ describe("summarizeToolHistory", () => {
     expect(summary?.priorBatchCount).toBe(2);
   });
 
+  // When the slice's last message is a user `tool_result` (no current
+  // iteration pending), no exclusion fires and `priorBatchCount` equals
+  // the total distinct same-tool batches. Pins the documented contract
+  // for callers that aren't the volume-cluster trigger.
+  it("priorBatchCount equals total batches when the last message is a user tool_result", () => {
+    const messages: Message[] = [
+      ...pair("a", "img", false, "ok"),
+      ...pair("b", "img", false, "ok"),
+      ...pair("c", "img", false, "ok"),
+    ];
+    const summary = summarizeToolHistory(messages, 0).get("img");
+    expect(summary?.callCount).toBe(3);
+    // Last msg is the user tool_result for "c". No assistant batch is at
+    // that index, so nothing is excluded — all 3 batches count.
+    expect(summary?.priorBatchCount).toBe(3);
+  });
+
   it("priorBatchCount excludes the last assistant message regardless of how many blocks it carries", () => {
     const messages: Message[] = [
       assistantToolUses({ type: "tool_use", id: "p", name: "x", input: {} }),

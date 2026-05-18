@@ -212,8 +212,17 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
       return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations);
     }
 
-    // Execute tool calls and append results
-    const toolResults = await executeToolCalls(response.content, tools, service, stepRun);
+    // Volume-cluster intercept (Class D) — same shape as the streaming
+    // variant. See computeVolumeClusterInterceptions and
+    // design/agent-resilience.md → Volume cluster trigger.
+    const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
+    const toolResults = await executeToolCalls(
+      response.content,
+      tools,
+      service,
+      stepRun,
+      interceptions,
+    );
     messages.push({ role: "user", content: toolResults });
 
     log.debug({ iteration: iterations, toolCalls: toolResults.length }, "tool round complete");
