@@ -132,6 +132,7 @@ interface RunParams {
  */
 export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestratorResult> {
   const { taskId, deps, stepRun, inngest } = params;
+  const taskLog = log.child({ taskId });
   const { runInTx, store, sandbox, secretsStore, askpassBaseDir } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
 
@@ -141,8 +142,8 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
   if (task.status !== "pending_verify") {
-    log.info(
-      { taskId, status: task.status },
+    taskLog.info(
+      { status: task.status },
       "verify: task not in pending_verify — already started or terminated, skipping",
     );
     return { status: "skipped" };
@@ -217,8 +218,8 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       runInTx((tx) => store.transitionTaskStatus(tx, taskId, "pending_verify", "verifying")),
     );
     if (transition.kind !== "transitioned") {
-      log.info(
-        { taskId, transition },
+      taskLog.info(
+        { transition },
         "verify: status transition lost the race (already verifying or terminal)",
       );
       return { status: "skipped" };
@@ -422,13 +423,13 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     if (executeStream) {
       await executeStream
         .complete(true)
-        .catch((err) => log.warn({ err, taskId }, "execute stream complete failed"));
+        .catch((err) => taskLog.warn({ err }, "execute stream complete failed"));
     }
 
     return { status: "pr_open", prUrl: prResult.url, prNumber: prResult.number };
   } catch (err) {
     const reason = (err as Error).message;
-    log.error({ err, taskId }, "coding verify failed");
+    taskLog.error({ err }, "coding verify failed");
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
     ).catch(() => {});
@@ -450,7 +451,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       // askpass dir (slice 4.0d). Idempotent — safe to call even when
       // create-container failed mid-flight.
       await sandbox.deleteByTaskId(taskId).catch((err: unknown) => {
-        log.warn({ err, taskId }, "verify: deleteByTaskId failed");
+        taskLog.warn({ err }, "verify: deleteByTaskId failed");
       });
     } else if (askpassProvisioned) {
       // Container creation never started (or failed before stopTask could
