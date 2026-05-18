@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { ProviderProtocolError } from "./errors.js";
 import type { LlmProvider } from "./provider.js";
 import { chatTyped } from "./typed.js";
 
@@ -67,11 +68,10 @@ describe("chatTyped", () => {
     );
   });
 
-  it("retries on invalid JSON and succeeds", async () => {
-    const provider = mockProvider([
-      { text: "not json at all" },
-      { text: '{"name":"Alice","age":30}' },
-    ]);
+  it("recovers from a trailing-comma response via jsonrepair (no retry consumed)", async () => {
+    // Trailing comma is a canonical jsonrepair target: bare JSON.parse rejects
+    // it, jsonrepair fixes it deterministically without consuming a retry.
+    const provider = mockProvider([{ text: '{"name":"Alice","age":30,}' }]);
 
     const result = await chatTyped({
       provider,
@@ -83,11 +83,11 @@ describe("chatTyped", () => {
     });
 
     expect(result.data).toEqual({ name: "Alice", age: 30 });
-    expect(result.retries).toBe(1);
-    expect(result.usage.inputTokens).toBe(20); // aggregated
+    expect(result.retries).toBe(0);
+    expect(provider.chat).toHaveBeenCalledTimes(1);
   });
 
-  it("retries on Zod validation failure", async () => {
+  it("retries on Zod validation failure with synthetic user turn", async () => {
     const provider = mockProvider([
       { text: '{"name":"Alice"}' }, // missing required 'age'
       { text: '{"name":"Alice","age":30}' },
@@ -105,16 +105,39 @@ describe("chatTyped", () => {
     expect(result.data).toEqual({ name: "Alice", age: 30 });
     expect(result.retries).toBe(1);
 
-    // Second call should include error feedback
-    const secondCall = (provider.chat as ReturnType<typeof vi.fn>).mock.calls[1]![0];
-    expect(secondCall.messages).toHaveLength(3); // original + assistant + feedback
-    expect(secondCall.messages[1].role).toBe("assistant");
-    expect(secondCall.messages[2].role).toBe("user");
-    expect(secondCall.messages[2].content).toContain("didn't match");
+    // Second call: original user + bad assistant + synthetic feedback user turn.
+    const secondCall = vi.mocked(provider.chat).mock.calls[1]?.[0];
+    expect(secondCall?.messages).toHaveLength(3);
+    expect(secondCall?.messages[1]?.role).toBe("assistant");
+    expect(secondCall?.messages[2]?.role).toBe("user");
+    expect(secondCall?.messages[2]?.content).toContain("failed validation");
   });
 
-  it("throws after exceeding max retries", async () => {
-    const provider = mockProvider([{ text: "bad1" }, { text: "bad2" }, { text: "bad3" }]);
+  it("does not persist the synthetic user turn back into the caller's messages array", async () => {
+    // The caller passes a messages array — chatTyped must not mutate it. The
+    // synthetic feedback turn lives only inside the call's local copy and is
+    // never observable outside.
+    const provider = mockProvider([
+      { text: '{"name":"Alice"}' },
+      { text: '{"name":"Alice","age":30}' },
+    ]);
+    const messages = [{ role: "user" as const, content: "Alice is 30" }];
+
+    await chatTyped({
+      provider,
+      model: "test-model",
+      system: "sys",
+      messages,
+      schema: PersonSchema,
+      name: "extract_person",
+    });
+
+    expect(messages).toEqual([{ role: "user", content: "Alice is 30" }]);
+  });
+
+  it("throws ProviderProtocolError when jsonrepair cannot recover the response", async () => {
+    // An empty string is one of the few inputs jsonrepair refuses outright.
+    const provider = mockProvider([{ text: "" }]);
 
     await expect(
       chatTyped({
@@ -124,9 +147,69 @@ describe("chatTyped", () => {
         messages: [{ role: "user", content: "data" }],
         schema: PersonSchema,
         name: "extract_person",
-        maxRetries: 2,
+      }),
+    ).rejects.toBeInstanceOf(ProviderProtocolError);
+  });
+
+  it("propagates Zod error immediately when onZodFailure is 'throw'", async () => {
+    const provider = mockProvider([{ text: '{"name":"Alice"}' }]);
+
+    await expect(
+      chatTyped({
+        provider,
+        model: "test-model",
+        system: "sys",
+        messages: [{ role: "user", content: "data" }],
+        schema: PersonSchema,
+        name: "extract_person",
+        repair: { onZodFailure: "throw" },
+      }),
+    ).rejects.toThrow(/age/i);
+
+    expect(provider.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry on Zod failure when maxRetries is 0", async () => {
+    const provider = mockProvider([
+      { text: '{"name":"Alice"}' },
+      { text: '{"name":"Alice","age":30}' },
+    ]);
+
+    await expect(
+      chatTyped({
+        provider,
+        model: "test-model",
+        system: "sys",
+        messages: [{ role: "user", content: "data" }],
+        schema: PersonSchema,
+        name: "extract_person",
+        repair: { maxRetries: 0 },
       }),
     ).rejects.toThrow();
+
+    expect(provider.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws Zod error after exhausting the feedback-retry budget", async () => {
+    const provider = mockProvider([
+      { text: '{"name":"A"}' },
+      { text: '{"name":"B"}' },
+      { text: '{"name":"C"}' },
+    ]);
+
+    await expect(
+      chatTyped({
+        provider,
+        model: "test-model",
+        system: "sys",
+        messages: [{ role: "user", content: "data" }],
+        schema: PersonSchema,
+        name: "extract_person",
+        repair: { maxRetries: 2 },
+      }),
+    ).rejects.toThrow();
+
+    expect(provider.chat).toHaveBeenCalledTimes(3);
   });
 
   it("passes maxTokens through to provider", async () => {
@@ -143,5 +226,23 @@ describe("chatTyped", () => {
     });
 
     expect(provider.chat).toHaveBeenCalledWith(expect.objectContaining({ maxTokens: 2048 }));
+  });
+
+  it("disables jsonrepair pre-pass when repair.jsonrepair is false", async () => {
+    // With jsonrepair off, the trailing-comma response goes through bare
+    // JSON.parse, which throws, which surfaces as ProviderProtocolError.
+    const provider = mockProvider([{ text: '{"name":"Alice","age":30,}' }]);
+
+    await expect(
+      chatTyped({
+        provider,
+        model: "test-model",
+        system: "sys",
+        messages: [{ role: "user", content: "data" }],
+        schema: PersonSchema,
+        name: "extract_person",
+        repair: { jsonrepair: false },
+      }),
+    ).rejects.toBeInstanceOf(ProviderProtocolError);
   });
 });

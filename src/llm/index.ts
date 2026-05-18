@@ -15,7 +15,7 @@ export {
   type LlmProviderResolver,
   ProviderConfigError,
 } from "./resolver.js";
-export type { TypedChatParams, TypedChatResult } from "./typed.js";
+export type { ChatTypedRepair, TypedChatParams, TypedChatResult } from "./typed.js";
 export { chatTyped } from "./typed.js";
 export type {
   ChatParams,

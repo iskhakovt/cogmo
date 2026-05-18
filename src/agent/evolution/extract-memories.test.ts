@@ -293,4 +293,34 @@ describe("extractMemories", () => {
     const items = call?.[1] ?? [];
     expect(items[0]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
   });
+
+  it("recovers a trailing-comma extraction response via chatTyped repair", async () => {
+    // Regression: extract-memories passes `repair: {}` into chatTyped, so a
+    // trailing comma in the structured-output response is fixed by the
+    // jsonrepair pre-pass instead of crashing the extraction run.
+    const provider = mockProvider({
+      chat: vi.fn().mockResolvedValue({
+        content: [
+          {
+            type: "text",
+            text: '{"memories":[{"fact":"homelab IP is 10.0.10.10","network":"world","compartment":"technical","trust":"first-party",},],}',
+          },
+        ],
+        stopReason: "end_turn",
+        model: "mock",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    });
+    const deps: MemoryExtractionDeps = {
+      provider,
+      model: "test-model",
+      memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
+      customCompartments: [],
+    };
+
+    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+
+    expect(result.extracted).toBe(1);
+    expect(provider.chat).toHaveBeenCalledTimes(1);
+  });
 });
