@@ -1,8 +1,23 @@
 import { ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
+import type { z } from "zod";
 import { inngest } from "../../inngest/client.js";
-import { mockAttachmentStore, mockStep, mockTransport } from "../../test/factories.js";
+import type { directInbound } from "../../inngest/events.js";
+import {
+  invokeInngestFn,
+  type MockStep,
+  mockAttachmentStore,
+  mockStep,
+  mockTransport,
+} from "../../test/factories.js";
 import { setup } from "./direct.js";
+
+type DirectInboundData = z.infer<typeof directInbound.schema>;
+
+interface DirectInboundCtx {
+  event: { data: DirectInboundData };
+  step: MockStep;
+}
 
 const activeSession = {
   id: "session-1",
@@ -50,7 +65,7 @@ describe("direct adapter", () => {
       const { transport, inboundFn } = await setupAdapter();
       const step = mockStep();
 
-      await (inboundFn as any).fn({ event: baseEvent, step });
+      await invokeInngestFn<DirectInboundCtx>(inboundFn, { event: baseEvent, step });
 
       expect(transport.resolveSession).toHaveBeenCalledWith("console-0");
       expect(transport.emit).toHaveBeenCalledWith("session-1", "hello", expect.any(Date));
@@ -62,7 +77,7 @@ describe("direct adapter", () => {
       });
       const step = mockStep();
 
-      await (inboundFn as any).fn({ event: baseEvent, step });
+      await invokeInngestFn<DirectInboundCtx>(inboundFn, { event: baseEvent, step });
 
       expect(transport.createConversation).toHaveBeenCalledWith("console-0", "console-0", {
         isPrivate: true,
@@ -73,7 +88,7 @@ describe("direct adapter", () => {
       const { transport, inboundFn } = await setupAdapter();
       const step = mockStep();
 
-      const result = await (inboundFn as any).fn({
+      const result = await invokeInngestFn<DirectInboundCtx>(inboundFn, {
         event: { data: { ...baseEvent.data, text: "/new" } },
         step,
       });
