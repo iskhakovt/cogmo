@@ -17,11 +17,13 @@ import { logger } from "../logger.js";
 import { agentIterations } from "../metrics.js";
 import { validateHistory } from "./history-invariants.js";
 import {
-  type ClassCSubtype,
+  classifyClassDTrip,
   classifyPostStream,
   classifyStreamError,
+  computeIterationFingerprint,
   freshBudgets,
   type RepairBudgets,
+  type RepairSubtype,
 } from "./repair.js";
 import type { Service } from "./service.js";
 import type { ToolRegistry, ToolSpec } from "./tools.js";
@@ -85,18 +87,20 @@ export interface AgentLoopResult {
   iterations: number;
   /**
    * Class C / D degraded off-ramp. When present, the loop exited because a
-   * repair budget exhausted (or a subtype was immediate-degrade) — the
-   * orchestrator posts a system-generated apology as the final assistant
-   * message rather than `text`. `text` is `""` and `newMessages` carries
-   * only the successfully completed intermediate iterations (the failing
+   * repair budget exhausted, a subtype was immediate-degrade, or a
+   * Class D loop-pathology fingerprint tripped — the orchestrator posts
+   * a system-generated apology as the final assistant message rather
+   * than `text`. `text` is `""` and `newMessages` carries only the
+   * successfully completed intermediate iterations (the failing
    * iteration's content is NOT included; synthetic continuation prompts
    * are NOT included). See design/agent-resilience.md → Degraded reply.
    *
-   * Backstops without a Class C tag (today: the iteration-cap) set
-   * `subtype: null`. PR 6 will add `stuck_loop` / `stuck_loop_cumulative`
-   * variants.
+   * Class D trips set `subtype: "stuck_loop"` (consecutive) or
+   * `"stuck_loop_cumulative"` (alternating-pattern). The iteration-cap
+   * backstop has no classifier verdict and sets `subtype: null`;
+   * `reason: "iteration_cap"` carries the distinguishing label.
    */
-  degraded?: { reason: string; subtype: ClassCSubtype | null };
+  degraded?: { reason: string; subtype: RepairSubtype | null };
 }
 
 const DEFAULT_MAX_ITERATIONS = 20;
@@ -268,6 +272,46 @@ async function executeToolCalls(
   return results;
 }
 
+/**
+ * Did this iteration produce an observable side effect on the world?
+ *
+ * An iteration counts as side-effectful if any tool call:
+ *   - ran to completion (its `tool_result` is not `isError: true`), AND
+ *   - declares `sideEffectful !== false` on its spec (default `true`,
+ *     fail-safe: a missing flag is treated as side-effectful so Class
+ *     D never wrongly trips on a tool that genuinely makes progress).
+ *
+ * Errored tool calls (Zod validation failures, handler throws, unknown
+ * tool) contribute no side effect. This is exactly the "free upside"
+ * the design calls out — runaway identical-malformed-args sequences
+ * trip Class D rather than burning to the iteration cap.
+ *
+ * See design/agent-resilience.md → Class D.
+ */
+function iterationHadSideEffect(
+  toolUses: ReadonlyArray<ToolUseBlock>,
+  toolResults: ReadonlyArray<ContentBlock>,
+  tools: ToolRegistry,
+): boolean {
+  const errorIds = new Set(
+    toolResults
+      .filter(
+        (b): b is Extract<ContentBlock, { type: "tool_result" }> =>
+          b.type === "tool_result" && b.isError === true,
+      )
+      .map((b) => b.toolUseId),
+  );
+  for (const block of toolUses) {
+    if (errorIds.has(block.id)) continue;
+    const spec = tools.get(block.name);
+    // Unknown tool short-circuits to an error result, so it's already
+    // in errorIds — this branch handles known tools only. Default
+    // `sideEffectful` to true (fail-safe) when the flag is unset.
+    if ((spec?.sideEffectful ?? true) === true) return true;
+  }
+  return false;
+}
+
 async function runOne(
   block: ToolUseBlock,
   spec: ToolSpec | null,
@@ -374,7 +418,7 @@ function buildDegradedResult(
   model: string,
   iterations: number,
   reason: string,
-  subtype: ClassCSubtype | null,
+  subtype: RepairSubtype | null,
 ): AgentLoopResult {
   agentIterations.record(iterations, { model });
 
@@ -393,6 +437,29 @@ function buildDegradedResult(
     degraded: { reason, subtype },
   };
 }
+
+/**
+ * Structured log shapes emitted on the agent-resilience path. Downstream
+ * consumers (evolution failure-reflector, metrics) parse against these
+ * variants:
+ *
+ * - `{ event: "agent.repair", subtype, instructions }` — Class C repair
+ *   attempt; `subtype` is a non-null `ClassCSubtype`, `instructions.kind`
+ *   names the repair (`continuation_prompt` | `stream_replay`).
+ * - `{ event: "agent.degrade", reason, subtype }` — Class C degrade;
+ *   `reason` mirrors the subtype label, `subtype` is non-null.
+ * - `{ event: "agent.degrade", reason: "stuck_loop", subtype,
+ *   consecutiveCount, cumulativeCount }` — Class D trip; `subtype` is
+ *   `stuck_loop` or `stuck_loop_cumulative`; counts are for telemetry
+ *   bucketing.
+ * - `{ event: "agent.degrade", reason: "iteration_cap", subtype: null }`
+ *   — backstop trigger; `subtype: null` distinguishes it from
+ *   classifier-driven degrades.
+ *
+ * Every emission uses `turnLogger` (bound `runId` + `conversationId`)
+ * so the failure-reflector can join logs to `conversation/degraded`
+ * events on those fields.
+ */
 
 // --- Streaming variant ---
 
@@ -441,6 +508,17 @@ export async function runStreamingAgentLoop(
   // returning so newMessages reflects the persistable slice.
   const ephemeralIndices: number[] = [];
   const budgets: RepairBudgets = freshBudgets();
+  // Class D loop-pathology state. `consecutiveFingerprint` tracks the most
+  // recent side-effect-free iteration's fingerprint (paired with a
+  // counter); `cumulativeCounts` accumulates the side-effect-free
+  // occurrences across the whole run. An iteration that produces an
+  // observable side effect resets the consecutive counter (the model
+  // made progress) but does NOT contribute to the cumulative count —
+  // the design counts only side-effect-free occurrences toward both
+  // triggers. See design/agent-resilience.md → Class D.
+  let consecutiveFingerprint: string | null = null;
+  let consecutiveCount = 0;
+  const cumulativeCounts = new Map<string, number>();
   let iterations = 0;
   let finalModel = model;
 
@@ -620,6 +698,80 @@ export async function runStreamingAgentLoop(
       { iteration: iterations, toolCalls: toolResults.length },
       "streaming tool round complete",
     );
+
+    // Class D loop-pathology trip. Computed AFTER tool execution so the
+    // side-effect gate observes actual handler outcomes (a Zod-rejected
+    // tool call is `isError: true` and contributes no side effect, which
+    // is exactly the "free upside" the design calls out — runaway
+    // identical-malformed-args sequences trip Class D rather than
+    // burning to the iteration cap). An iteration whose tool calls all
+    // either errored or are `sideEffectful: false` qualifies as
+    // side-effect-free; the fingerprint then counts toward both the
+    // consecutive and cumulative triggers. See
+    // design/agent-resilience.md → Class D.
+    const toolUseBlocks = iterationContent.filter((b): b is ToolUseBlock => b.type === "tool_use");
+    const hadSideEffect = iterationHadSideEffect(toolUseBlocks, toolResults, tools);
+    if (hadSideEffect) {
+      // Progress made — reset the consecutive run and do NOT touch
+      // cumulativeCounts. The design counts only side-effect-free
+      // occurrences in either trigger.
+      consecutiveFingerprint = null;
+      consecutiveCount = 0;
+      continue;
+    }
+
+    const fingerprint = computeIterationFingerprint(toolUseBlocks);
+    if (fingerprint === null) {
+      // Invariant: `hasToolUse` guarded entry into this branch, so
+      // `toolUseBlocks` is non-empty and `computeIterationFingerprint`
+      // cannot return `null` here. Throwing surfaces the bug instead
+      // of silently skipping Class D detection for the iteration.
+      throw new Error(
+        "computeIterationFingerprint returned null for non-empty toolUseBlocks (invariant violated)",
+      );
+    }
+
+    const cumulativeCount = (cumulativeCounts.get(fingerprint) ?? 0) + 1;
+    cumulativeCounts.set(fingerprint, cumulativeCount);
+
+    if (consecutiveFingerprint === fingerprint) {
+      consecutiveCount++;
+    } else {
+      consecutiveFingerprint = fingerprint;
+      consecutiveCount = 1;
+    }
+
+    const trip = classifyClassDTrip(consecutiveCount, cumulativeCount);
+    if (trip !== null) {
+      log.warn(
+        {
+          event: "agent.degrade",
+          reason: "stuck_loop",
+          subtype: trip,
+          consecutiveCount,
+          cumulativeCount,
+        },
+        "agent loop degraded (loop pathology)",
+      );
+      // Trip iteration's tool_use + tool_result pair triggered the degrade
+      // and produced no observable side effect (that's what tripped the
+      // gate); don't persist them. Design rule: the iteration that
+      // triggered a degrade is not persisted (see
+      // design/agent-resilience.md → Persistence boundary on a degraded
+      // turn).
+      messages.pop(); // user (tool_results)
+      messages.pop(); // assistant (tool_use)
+      return buildDegradedResult(
+        messages,
+        initialLength,
+        ephemeralIndices,
+        totalUsage,
+        finalModel,
+        iterations,
+        "stuck_loop",
+        trip,
+      );
+    }
   }
 
   log.warn({ maxIterations }, "streaming agent loop hit iteration limit");
@@ -739,7 +891,7 @@ type StreamReplayResult =
       model: string;
       usage: Usage;
     }
-  | { kind: "degrade"; subtype: ClassCSubtype; reason: string };
+  | { kind: "degrade"; subtype: RepairSubtype; reason: string };
 
 /**
  * Replay the just-failed streaming iteration as a single non-streaming
