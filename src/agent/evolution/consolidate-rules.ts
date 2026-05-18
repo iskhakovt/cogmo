@@ -125,6 +125,7 @@ async function consolidateChannelGroup(
     messages: [{ role: "user", content: "Consolidate the rules above." }],
     schema: ConsolidationSchema,
     name: "rule-consolidation",
+    repair: {},
   });
 
   let mergedGroups = 0;

@@ -209,6 +209,43 @@ describe("drainPendingMemories", () => {
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
     expect(deps.store.deletePendingMemories).not.toHaveBeenCalled();
   });
+
+  it("recovers a trailing-comma classifier response via chatTyped repair (jsonrepair pre-pass)", async () => {
+    // Regression: the classifier callsite passes `repair: {}` into chatTyped,
+    // so jsonrepair runs unconditionally as a pre-pass. A trailing comma in
+    // the structured-output response — a common provider sloppiness — must
+    // not crash the drain, and must not consume a feedback retry budget.
+    const rows = [pending({ id: "pm-1", content: "homelab IP is 10.0.10.10" })];
+    const provider = mockProvider({
+      chat: vi.fn().mockResolvedValue({
+        content: [
+          {
+            type: "text",
+            text: '{"network":"world","compartment":"technical","trust":"first-party",}',
+          },
+        ],
+        stopReason: "end_turn",
+        model: "mock",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    });
+    const deps: DrainPendingDeps = {
+      provider,
+      model: "test-model",
+      runInTx: fakeRunInTx,
+      memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
+      store: {
+        getPendingMemories: vi.fn().mockResolvedValue(rows),
+        deletePendingMemories: vi.fn().mockResolvedValue(undefined),
+      },
+      customCompartments: [],
+    };
+
+    const result = await drainPendingMemories("user-1", deps);
+
+    expect(result.drained).toBe(1);
+    expect(provider.chat).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("drainPendingMemories — customCompartments threading", () => {

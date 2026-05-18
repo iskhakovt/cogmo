@@ -83,6 +83,7 @@ export async function extractCorrections(
     messages: [{ role: "user", content: transcript }],
     schema: CorrectionExtractionSchema,
     name: "correction-extraction",
+    repair: {},
   });
 
   let extracted = 0;

@@ -411,4 +411,52 @@ describe("consolidateRules", () => {
     expect(deps.provider.chat).toHaveBeenCalledTimes(1);
     expect(deps.store.replaceRules).toHaveBeenCalledTimes(1);
   });
+
+  it("recovers a trailing-comma consolidation response via chatTyped repair", async () => {
+    // Regression: consolidate-rules passes `repair: {}` into chatTyped, so a
+    // trailing comma in the structured-output response is fixed by the
+    // jsonrepair pre-pass instead of crashing the consolidation run.
+    const chatMock = vi.fn().mockResolvedValue({
+      content: [
+        {
+          type: "text",
+          text: '{"groups":[{"originalIds":["r1","r2"],"mergedRule":"Be concise and brief","category":"style",},],}',
+        },
+      ],
+      stopReason: "end_turn",
+      model: "mock",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+    const deps: ConsolidationDeps = {
+      provider: mockProvider({ chat: chatMock }),
+      model: "test-model",
+      runInTx: fakeRunInTx,
+      store: {
+        getCorrections: vi.fn().mockResolvedValue([
+          {
+            id: "r1",
+            rule: "Be concise",
+            category: "style",
+            active: true,
+            observationCount: 3,
+            channelType: null,
+          },
+          {
+            id: "r2",
+            rule: "Keep it short",
+            category: "style",
+            active: true,
+            observationCount: 2,
+            channelType: null,
+          },
+        ] satisfies CorrectionRow[]),
+        replaceRules: vi.fn().mockResolvedValue({ id: "new-rule-1" }),
+      },
+    };
+
+    const result = await consolidateRules("profile-1", deps);
+
+    expect(result.mergedGroups).toBe(1);
+    expect(chatMock).toHaveBeenCalledTimes(1);
+  });
 });
