@@ -537,6 +537,33 @@ describe("runCodingTask", () => {
     expect(stopCalls).toEqual([task.id]);
   });
 
+  it("ensureImagePresent throws → status=failed, deleteByTaskId sweep still fires", async () => {
+    // The `step.run("ensure-image-present")` runs one stage earlier
+    // than `create-container`. A boot-warm failure that hasn't been
+    // retried, or a provider outage during the orchestrator's own
+    // retry, surfaces here. The catch path must still call
+    // `deleteByTaskId` unconditionally — covers the case where
+    // ensureImagePresent itself committed provider-side state (Daytona
+    // creates a labelled throwaway sandbox during snapshot build).
+    // sandbox.create() never runs.
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, createCalls, stopCalls } = fakeSandbox();
+    (sandbox.ensureImagePresent as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("daytona snapshot build_failed"),
+    );
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend: backendYielding([]) }),
+      stepRun,
+      inngest: fakeInngestShared,
+    });
+    expect(result.status).toBe("failed");
+    expect(result.failureReason).toMatch(/snapshot build_failed/);
+    expect(createCalls).toHaveLength(0);
+    expect(stopCalls).toEqual([task.id]);
+  });
+
   it("worktree allocation failure → status=failed", async () => {
     // Repo with a non-existent local path so `git worktree add` errors out.
     const badRepo = await tx((trx) =>

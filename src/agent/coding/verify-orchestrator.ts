@@ -458,7 +458,13 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     // The host-side askpass dir holds the PAT + signing key and is
     // independent of the sandbox lifecycle — wipe it whenever
     // provisioning got far enough to create the directory. Idempotent
-    // + tolerant of missing dirs (recursive remove with force:true).
+    // + tolerant of missing dirs (recursive remove with force:true),
+    // which matters here because on Local-Docker the
+    // `sandbox.deleteByTaskId` above already calls `cleanupAskpass`
+    // internally (supervisor's `delete()` owns the bind-mount); the
+    // second call is harmless and removes the per-task dir even on
+    // Daytona (where the sandbox-side copy is wiped server-side but
+    // the host source dir would otherwise leak the PAT).
     if (askpassProvisioned) {
       cleanupAskpass({ baseDir: askpassBaseDir, rootTaskId: taskId });
     }

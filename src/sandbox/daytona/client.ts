@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   Daytona,
   DaytonaNotFoundError,
@@ -59,6 +60,14 @@ const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000;
  * SDK's own internal cadence (`Snapshot.js`).
  */
 const SNAPSHOT_POLL_INTERVAL_MS = 1_000;
+
+/**
+ * After this much wall-clock spent waiting for a single snapshot build,
+ * log a warning every interval so a stuck Daytona-side build doesn't
+ * silently wedge an in-flight `ensureImagePresent` promise. Pure
+ * observability — does NOT terminate the poll.
+ */
+const SLOW_POLL_LOG_INTERVAL_MS = 5 * 60 * 1000;
 
 const CAPABILITIES: SandboxCapabilities = {
   // Code inside the sandbox can spawn child containers, but they're
@@ -304,6 +313,13 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     // `#ensureSnapshotActive` decide (return on ACTIVE, delete +
     // rebuild on anything else). Bounds the loop so a stuck state
     // can't wedge the warm-up forever.
+    //
+    // Observability: long polls log every `SLOW_POLL_LOG_INTERVAL_MS`
+    // so a provider hang surfaces in the host log instead of
+    // disappearing into a silent in-flight promise. No wall-clock cap;
+    // the goal is visibility, not termination.
+    const startedAt = Date.now();
+    let lastSlowLogAt = startedAt;
     while (true) {
       const snap = await this.#daytona.snapshot.get(name);
       if (
@@ -312,6 +328,14 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
         snap.state !== SnapshotState.PULLING
       ) {
         return snap;
+      }
+      const now = Date.now();
+      if (now - lastSlowLogAt >= SLOW_POLL_LOG_INTERVAL_MS) {
+        log.warn(
+          { snapshot: name, state: snap.state, elapsedMs: now - startedAt },
+          "snapshot build still in flight after extended wait",
+        );
+        lastSlowLogAt = now;
       }
       await new Promise((resolve) => setTimeout(resolve, SNAPSHOT_POLL_INTERVAL_MS));
     }
@@ -362,20 +386,53 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
       "cogmo.instance": this.#instanceId,
     };
     const envVars = spec.env && Object.keys(spec.env).length > 0 ? { ...spec.env } : undefined;
-    const sdkSandbox = warmedSnapshot
-      ? await this.#daytona.create({
+    const createFromImage = (): Promise<DaytonaSdkSandbox> =>
+      this.#daytona.create({
+        image: spec.image,
+        labels,
+        autoStopInterval,
+        resources: resourcesFromLimits(spec.resourceLimits),
+        ...(envVars && { envVars }),
+      });
+    let sdkSandbox: DaytonaSdkSandbox;
+    if (warmedSnapshot) {
+      try {
+        sdkSandbox = await this.#daytona.create({
           snapshot: warmedSnapshot,
           labels,
           autoStopInterval,
           ...(envVars && { envVars }),
-        })
-      : await this.#daytona.create({
-          image: spec.image,
-          labels,
-          autoStopInterval,
-          resources: resourcesFromLimits(spec.resourceLimits),
-          ...(envVars && { envVars }),
         });
+      } catch (err) {
+        // The cache holds the snapshot name from the last successful
+        // warm; if the snapshot has since been deleted server-side
+        // (dashboard cleanup, snapshot-GC cron, manual operator
+        // intervention) Daytona returns NotFound. Evict the stale
+        // cache entry, fire a non-blocking re-warm so the next task
+        // hits the fast path, and fall back to the lazy `{ image }`
+        // path for this call. Other error classes (auth, rate-limit,
+        // connection) re-throw — masking them would hide real outages.
+        if (err instanceof DaytonaNotFoundError) {
+          log.warn(
+            { image: spec.image, snapshot: warmedSnapshot },
+            "snapshot reference returned NotFound — evicting cache + falling back to image",
+          );
+          this.#snapshotByImage.delete(spec.image);
+          this.#warmPromises.delete(spec.image);
+          void this.ensureImagePresent(spec.image).catch((rewarmErr: unknown) => {
+            log.warn(
+              { err: rewarmErr, image: spec.image },
+              "background re-warm after NotFound failed — next task will fall back again",
+            );
+          });
+          sdkSandbox = await createFromImage();
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      sdkSandbox = await createFromImage();
+    }
 
     // Post-create provisioning. If any step throws, tear down the freshly
     // created sandbox before rethrowing so we don't leak provider
@@ -601,28 +658,40 @@ function daytonaUnit(n: number): number {
 
 /**
  * Derive a Daytona snapshot name from a container image reference, or
- * `null` if the image isn't snapshot-warmable. Daytona's
- * `snapshot.create` rejects `:latest` and accepts only stable refs;
- * tagless and `:latest` images fall back to the lazy `{ image }` path.
+ * `null` if the image isn't snapshot-warmable. Tagless, `:latest`, and
+ * digest-pinned images fall back to the lazy `{ image }` path.
  *
- * Strategy: take the last `/`-separated segment of the image (drops
- * registry + path prefix), replace the tag separator `:` with `-`, and
- * lowercase. Result is deterministic per image so the same image used
- * across cogmo deploys reuses one snapshot.
+ * Composition: a human-readable slug from the final path segment for
+ * dashboard greppability, plus an 8-hex-char content hash of the full
+ * image string for collision resistance. The hash distinguishes
+ * `a/cogmo-devbase:1.66.0` from `b/cogmo-devbase:1.66.0` — without it
+ * two repos sharing a final segment would silently share one snapshot.
  *
- *   ghcr.io/iskhakovt/cogmo-devbase:1.66.0 → cogmo-cogmo-devbase-1.66.0
- *   python:3.14-slim                       → cogmo-python-3.14-slim
+ *   ghcr.io/iskhakovt/cogmo-devbase:1.66.0 → cogmo-cogmo-devbase-1.66.0-<hash>
+ *   python:3.14-slim                       → cogmo-python-3.14-slim-<hash>
  *   foo:latest                             → null
  *   foo                                    → null
+ *   foo@sha256:abcdef…                     → null  (digest pin)
+ *
+ * Digest pins are out of scope today because cogmo's devbase tags are
+ * version-pinned, not digest-pinned. The naive lastIndexOf(":") split
+ * would treat the digest's own `:` as a tag separator, producing a
+ * malformed name. Cheaper to refuse the format than to special-case it.
  */
 export function snapshotNameFor(image: string): string | null {
+  if (image.includes("@")) return null;
   const lastSlash = image.lastIndexOf("/");
   const slug = lastSlash >= 0 ? image.slice(lastSlash + 1) : image;
   const colon = slug.lastIndexOf(":");
   if (colon < 0) return null;
   const tag = slug.slice(colon + 1);
   if (tag === "" || tag === "latest") return null;
-  return `cogmo-${slug.replace(":", "-").toLowerCase()}`;
+  const slugSanitized = slug.replace(":", "-").toLowerCase();
+  // 8 hex chars = 32 bits. ~1-in-4-billion collision rate is overkill
+  // for single-user scale; cheap defence against same-final-segment
+  // images from different registries.
+  const hash = createHash("sha256").update(image).digest("hex").slice(0, 8);
+  return `cogmo-${slugSanitized}-${hash}`;
 }
 
 function resourcesFromLimits(limits: {
