@@ -319,10 +319,17 @@ function sha256(s: string): string {
  * JSON-compatible by construction (they flow through the
  * `tool_use.input` field, which providers serialize as JSON), so RFC 8785
  * coverage matches what the LLM emits. The library returns `undefined`
- * only for top-level `undefined` / function / symbol input — none of
- * those can appear in a parsed `tool_use.input`, so the empty-string
- * fallback is a defensive belt without a real failure mode.
+ * only for top-level `undefined` / function / symbol input — values that
+ * cannot appear in a parsed `tool_use.input`. Throwing on `undefined`
+ * surfaces such a bug instead of silently collapsing every offending
+ * iteration to `sha256("")` and falsely tripping Class D.
  */
 function canonicalJson(value: unknown): string {
-  return canonicalize(value) ?? "";
+  const encoded = canonicalize(value);
+  if (encoded === undefined) {
+    throw new Error(
+      "canonicalJson: input is not JSON-representable (undefined / function / symbol)",
+    );
+  }
+  return encoded;
 }

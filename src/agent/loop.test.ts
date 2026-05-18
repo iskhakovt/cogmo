@@ -2126,6 +2126,46 @@ describe("loop-pathology fingerprint", () => {
     expect(result.iterations).toBe(4);
   });
 
+  it("mixed-side-effect iteration: one read + one write resets the consecutive counter", async () => {
+    // Each iteration emits a read AND a write. `iterationHadSideEffect`
+    // returns true if ANY tool call in the iteration had a side effect,
+    // so the write makes the iteration count as progress and the
+    // consecutive counter never accumulates — three identical iterations
+    // must NOT trip stuck_loop.
+    function mixedTurn(readId: string, writeId: string): MockStreamTurn {
+      return {
+        events: [
+          { type: "tool_start", id: readId, name: "read_file", input: { path: "x.txt" } },
+          { type: "tool_start", id: writeId, name: "write_file", input: { path: "x.txt" } },
+        ],
+        stopReason: "tool_use",
+      };
+    }
+    const provider = mockStreamProvider([
+      mixedTurn("r1", "w1"),
+      mixedTurn("r2", "w2"),
+      mixedTurn("r3", "w3"),
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(readOnlyTool());
+    tools.register(writeTool());
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded).toBeUndefined();
+    expect(result.text).toBe("done");
+    expect(result.iterations).toBe(4);
+  });
+
   it("cumulative trigger: alternating A, B, A, B, A → stuck_loop_cumulative", async () => {
     // Two interleaved fingerprints; neither reaches three consecutive
     // but `A` accumulates five total side-effect-free occurrences and

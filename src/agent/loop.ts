@@ -295,8 +295,10 @@ function iterationHadSideEffect(
 ): boolean {
   const errorIds = new Set(
     toolResults
-      .filter((b): b is Extract<ContentBlock, { type: "tool_result" }> => b.type === "tool_result")
-      .filter((b) => b.isError === true)
+      .filter(
+        (b): b is Extract<ContentBlock, { type: "tool_result" }> =>
+          b.type === "tool_result" && b.isError === true,
+      )
       .map((b) => b.toolUseId),
   );
   for (const block of toolUses) {
@@ -435,6 +437,29 @@ function buildDegradedResult(
     degraded: { reason, subtype },
   };
 }
+
+/**
+ * Structured log shapes emitted on the agent-resilience path. Downstream
+ * consumers (evolution failure-reflector, metrics) parse against these
+ * variants:
+ *
+ * - `{ event: "agent.repair", subtype, instructions }` — Class C repair
+ *   attempt; `subtype` is a non-null `ClassCSubtype`, `instructions.kind`
+ *   names the repair (`continuation_prompt` | `stream_replay`).
+ * - `{ event: "agent.degrade", reason, subtype }` — Class C degrade;
+ *   `reason` mirrors the subtype label, `subtype` is non-null.
+ * - `{ event: "agent.degrade", reason: "stuck_loop", subtype,
+ *   consecutiveCount, cumulativeCount }` — Class D trip; `subtype` is
+ *   `stuck_loop` or `stuck_loop_cumulative`; counts are for telemetry
+ *   bucketing.
+ * - `{ event: "agent.degrade", reason: "iteration_cap", subtype: null }`
+ *   — backstop trigger; `subtype: null` distinguishes it from
+ *   classifier-driven degrades.
+ *
+ * Every emission uses `turnLogger` (bound `runId` + `conversationId`)
+ * so the failure-reflector can join logs to `conversation/degraded`
+ * events on those fields.
+ */
 
 // --- Streaming variant ---
 
