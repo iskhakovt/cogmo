@@ -1,38 +1,62 @@
 /**
- * In-loop Class C repair classifier and budgets.
+ * In-loop repair classifier and budgets (Class C model misbehavior) +
+ * fingerprint helper for Class D loop-pathology detection.
  *
- * The streaming agent loop consults {@link classifyOutcome} after each
- * iteration's stream drains (or throws). When the classifier returns a
- * `repair` outcome, the loop applies the per-subtype repair (continuation
- * prompt, non-streaming replay) and re-enters; on budget exhaustion or
- * an immediate-degrade subtype, the loop exits with a degraded result and
- * the orchestrator posts the user-facing apology.
+ * The streaming agent loop consults {@link classifyPostStream} /
+ * {@link classifyStreamError} after each iteration's stream drains (or
+ * throws). When the classifier returns a `repair` outcome, the loop
+ * applies the per-subtype repair (continuation prompt, non-streaming
+ * replay) and re-enters; on budget exhaustion or an immediate-degrade
+ * subtype, the loop exits with a degraded result and the orchestrator
+ * posts the user-facing apology.
  *
- * The repair *semantics* live here; the *budget bookkeeping* lives in the
- * loop (`runStreamingAgentLoop`) — one budget set per Inngest invocation.
- * See `design/agent-resilience.md` → Class C.
+ * For Class D, {@link computeIterationFingerprint} produces a stable hash
+ * over an iteration's tool calls (tool name + canonical-JSON args). The
+ * loop maintains consecutive + cumulative counters keyed by this hash and
+ * trips into the same degraded off-ramp when the model keeps issuing the
+ * same side-effect-free tool calls.
+ *
+ * The repair *semantics* live here; the *budget bookkeeping* and the
+ * fingerprint counters live in the loop (`runStreamingAgentLoop`) — one
+ * budget set / counter set per Inngest invocation. See
+ * `design/agent-resilience.md` → Class C / Class D.
  */
 
+import { createHash } from "node:crypto";
 import { ProviderProtocolError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
-import type { ContentBlock, StopReason } from "../llm/types.js";
+import type { ContentBlock, StopReason, ToolUseBlock } from "../llm/types.js";
 
 /**
- * Class C subtypes that the in-loop classifier handles.
+ * Subtypes the in-loop classifier emits on the degraded off-ramp.
+ *
+ *  - `empty_end_turn`, `stream_truncation`, `refusal` — Class C model
+ *    misbehavior subtypes ({@link classifyPostStream},
+ *    {@link classifyStreamError}).
+ *  - `stuck_loop`, `stuck_loop_cumulative` — Class D loop-pathology trips
+ *    fired from the loop body when {@link computeIterationFingerprint}
+ *    repeats without an observable side effect.
  *
  * Tool-arg validation (Zod failures inside a tool handler) is **not** a
- * Class C subtype — it rides on the existing unbounded `is_error: true`
+ * subtype — it rides on the existing unbounded `is_error: true`
  * tool_result channel inside the loop (`loop.ts`). The design doc is
  * explicit that tool-arg feedback is capped only by
  * `DEFAULT_MAX_ITERATIONS`, not by the Class C budget.
  */
-export type ClassCSubtype = "empty_end_turn" | "stream_truncation" | "refusal";
+export type RepairSubtype =
+  | "empty_end_turn"
+  | "stream_truncation"
+  | "refusal"
+  | "stuck_loop"
+  | "stuck_loop_cumulative";
 
 /**
- * Subset of {@link ClassCSubtype} that carries a per-turn repair budget.
+ * Subset of {@link RepairSubtype} that carries a per-turn repair budget.
  * Refusal is excluded — it's immediate-degrade with nothing to decrement.
- * Used to keep the `repair` arm of {@link TurnOutcome} narrow so a
- * `budgets[outcome.subtype]--` decrement is always sound.
+ * Class D subtypes are excluded — they're trip-only (loop-pathology), no
+ * repair attempt to budget against. Used to keep the `repair` arm of
+ * {@link TurnOutcome} narrow so a `budgets[outcome.subtype]--` decrement
+ * is always sound.
  */
 export type BudgetedSubtype = keyof RepairBudgets;
 
@@ -98,7 +122,7 @@ export type RepairInstructions =
 export type TurnOutcome =
   | { kind: "ok" }
   | { kind: "repair"; subtype: BudgetedSubtype; instructions: RepairInstructions }
-  | { kind: "degrade"; reason: string; subtype: ClassCSubtype };
+  | { kind: "degrade"; reason: string; subtype: RepairSubtype };
 
 /**
  * Classify the just-finished turn based on its drained content and
@@ -204,9 +228,112 @@ export function classifyStreamError(
  * degraded off-ramp. Refusal carries a refusal-specific message; every
  * other subtype shares the same apology.
  */
-export function degradedReplyText(subtype: ClassCSubtype | null): string {
+export function degradedReplyText(subtype: RepairSubtype | null): string {
   if (subtype === "refusal") {
     return "The model declined that request. Try rephrasing, or switch model with `/model`.";
   }
   return "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?";
+}
+
+/**
+ * Class D trip thresholds. Two layered triggers per the design:
+ *
+ *  - `consecutive`: three consecutive side-effect-free iterations with
+ *    the same fingerprint. Catches a model emitting the same
+ *    read-only tool call back-to-back.
+ *  - `cumulative`: same fingerprint accumulates five side-effect-free
+ *    occurrences total across the run, regardless of consecutiveness.
+ *    Catches alternating patterns (`A, B, A, B, A`) the consecutive
+ *    rule alone would miss.
+ *
+ * `DEFAULT_MAX_ITERATIONS = 20` in the loop stays as the backstop.
+ * See design/agent-resilience.md → Class D.
+ */
+export const CLASS_D_CONSECUTIVE_LIMIT = 3;
+export const CLASS_D_CUMULATIVE_LIMIT = 5;
+
+/**
+ * Decide which (if any) Class D subtype trips given the current
+ * side-effect-free counters for one fingerprint. Returns `null` when
+ * neither threshold is reached so the caller proceeds with the next
+ * LLM iteration.
+ *
+ * Consecutive is checked first because it's the tighter trigger — three
+ * consecutive matches will also have a cumulative count >= 3, but the
+ * subtype tag distinguishes the failure shape the model exhibited and
+ * the failure-reflector buckets them separately.
+ */
+export function classifyClassDTrip(
+  consecutiveCount: number,
+  cumulativeCount: number,
+): "stuck_loop" | "stuck_loop_cumulative" | null {
+  if (consecutiveCount >= CLASS_D_CONSECUTIVE_LIMIT) return "stuck_loop";
+  if (cumulativeCount >= CLASS_D_CUMULATIVE_LIMIT) return "stuck_loop_cumulative";
+  return null;
+}
+
+/**
+ * Compute the Class D loop-pathology fingerprint for one iteration's
+ * tool calls.
+ *
+ * Hash structure: `sha256` over the sorted list of `(name, sha256(args))`
+ * pairs. The inner list is sorted by `(name, args-hash)` so a model that
+ * varies the emission order of parallel-safe tool calls between
+ * iterations — `[search, fetch]` then `[fetch, search]` with otherwise
+ * identical args — still produces the same fingerprint; the fingerprint
+ * asks "did this iteration do the same work as the previous one?" and
+ * emission order isn't part of the work.
+ *
+ * Args are stringified through {@link canonicalJson} so object key order
+ * (`{a: 1, b: 2}` vs `{b: 2, a: 1}`) doesn't move the hash.
+ *
+ * Assistant text is deliberately **excluded** — text prefixes are
+ * brittle (timestamps, hedging preambles, emoji noise), so two iterations
+ * doing identical redundant tool work but emitted with different openers
+ * would otherwise not match. The side-effect gate in the loop already
+ * protects pure-text replies, so the text component would only add false
+ * negatives.
+ *
+ * Returns `null` when the iteration produced no tool calls — a text-only
+ * iteration exits the loop through the `!hasToolUse` gate and has no
+ * fingerprint to compare against.
+ *
+ * See `design/agent-resilience.md` → Class D.
+ */
+export function computeIterationFingerprint(toolUses: ReadonlyArray<ToolUseBlock>): string | null {
+  if (toolUses.length === 0) return null;
+  const pairs = toolUses.map((b) => `${b.name}:${sha256(canonicalJson(b.input))}`).sort();
+  return sha256(pairs.join("|"));
+}
+
+function sha256(s: string): string {
+  return createHash("sha256").update(s).digest("hex");
+}
+
+/**
+ * Stable canonical-JSON encoding for fingerprint hashing.
+ *
+ * `JSON.stringify` with a key-sort replacer is enough: tool arguments
+ * are JSON-compatible by construction (they flow through the
+ * `tool_use.input` field, which providers serialize as JSON), so the
+ * primitive coverage matches what the LLM emits.
+ *
+ * Sorted object keys at every depth — `{a: 1, b: 2}` and `{b: 2, a: 1}`
+ * hash identically. Arrays preserve order (semantic positions). The
+ * inline recursive sort avoids pulling in a new runtime dependency for
+ * what is structurally a one-screen helper.
+ */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(sortKeys(value));
+}
+
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value === null || typeof value !== "object") return value;
+  const obj = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(obj).sort()) {
+    out[k] = sortKeys(obj[k]);
+  }
+  return out;
 }

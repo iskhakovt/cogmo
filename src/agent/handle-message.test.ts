@@ -2617,6 +2617,76 @@ describe("createHandleMessage", () => {
     );
   });
 
+  it("emits conversation/degraded with subtype: stuck_loop for the Class D consecutive trip", async () => {
+    const deps = mockDeps({
+      runStreamingAgentLoop: vi.fn().mockResolvedValue({
+        text: "",
+        messages: [],
+        newMessages: [],
+        usage: { inputTokens: 10, outputTokens: 5 },
+        model: "mock-model",
+        iterations: 3,
+        degraded: { reason: "stuck_loop", subtype: "stuck_loop" },
+      }),
+    });
+
+    const step = mockStep();
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step,
+      runId: testRunId,
+    });
+
+    expect(step.sendEvent).toHaveBeenCalledWith(
+      "emit-conversation-degraded",
+      expect.objectContaining({
+        name: "conversation/degraded",
+        data: {
+          conversationId: "conv-1",
+          runId: testRunId,
+          triggerInboundId: "inbound-1",
+          subtype: "stuck_loop",
+          reason: "stuck_loop",
+        },
+      }),
+    );
+  });
+
+  it("emits conversation/degraded with subtype: stuck_loop_cumulative for the Class D cumulative trip", async () => {
+    const deps = mockDeps({
+      runStreamingAgentLoop: vi.fn().mockResolvedValue({
+        text: "",
+        messages: [],
+        newMessages: [],
+        usage: { inputTokens: 10, outputTokens: 5 },
+        model: "mock-model",
+        iterations: 9,
+        degraded: { reason: "stuck_loop", subtype: "stuck_loop_cumulative" },
+      }),
+    });
+
+    const step = mockStep();
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step,
+      runId: testRunId,
+    });
+
+    expect(step.sendEvent).toHaveBeenCalledWith(
+      "emit-conversation-degraded",
+      expect.objectContaining({
+        name: "conversation/degraded",
+        data: {
+          conversationId: "conv-1",
+          runId: testRunId,
+          triggerInboundId: "inbound-1",
+          subtype: "stuck_loop_cumulative",
+          reason: "stuck_loop",
+        },
+      }),
+    );
+  });
+
   it("preserves successful intermediate iterations and appends the apology", async () => {
     const handle = mockDeliveryHandle({
       hasBatchTargets: vi.fn().mockReturnValue(false),

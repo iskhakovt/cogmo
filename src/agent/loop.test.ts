@@ -1562,7 +1562,7 @@ function repairStreamProvider(turns: ReadonlyArray<RepairTurn>): {
   return { provider, chatCalls, streamCalls };
 }
 
-describe("class C in-loop repair", () => {
+describe("in-loop model-misbehavior repair", () => {
   it("empty end_turn → continuation prompt → next iteration completes; ephemeral turn not persisted", async () => {
     const { provider, streamCalls } = repairStreamProvider([
       { kind: "stream", events: [], stopReason: "end_turn" },
@@ -1718,7 +1718,7 @@ describe("class C in-loop repair", () => {
     );
   });
 
-  it("Class A error during stream replay propagates untouched (not classified as degrade)", async () => {
+  it("transport-layer error during stream replay propagates untouched (not classified as degrade)", async () => {
     const protocolErr1 = new ProviderProtocolError("first", new Error("boom"));
     const { provider } = repairStreamProvider([{ kind: "throw", error: protocolErr1 }]);
     // Override chat() to also throw a Class A error — the design says
@@ -1851,7 +1851,7 @@ describe("class C in-loop repair", () => {
     });
   });
 
-  it("Anthropic-style refusal stopReason → immediate degrade, no repair attempt", async () => {
+  it("anthropic-style refusal stopReason → immediate degrade, no repair attempt", async () => {
     const { provider, streamCalls } = repairStreamProvider([
       { kind: "stream", events: [], stopReason: "refusal" },
     ]);
@@ -1881,7 +1881,7 @@ describe("class C in-loop repair", () => {
     );
   });
 
-  it("OpenAI-compat RefusalError thrown from stream → degrade with refusal subtype", async () => {
+  it("openai-compat RefusalError thrown from stream → degrade with refusal subtype", async () => {
     // FallbackLlmProvider treats RefusalError as non-retriable (per
     // isRetriableProviderError) and propagates it through `chatStream`
     // — the loop catches it and the classifier routes to degrade.
@@ -2007,7 +2007,7 @@ describe("class C in-loop repair", () => {
     }
   });
 
-  it("does not treat unrelated errors as Class C", async () => {
+  it("does not classify unrelated stream errors as model-misbehavior repairs", async () => {
     // A bare error with no Class C signal must propagate untouched —
     // it's Class A / B and the orchestrator translates it into the
     // appropriate retry decision.
@@ -2025,5 +2025,349 @@ describe("class C in-loop repair", () => {
         onEvent: async () => {},
       }),
     ).rejects.toBe(transientErr);
+  });
+});
+
+// --- Loop pathology fingerprint (Class D) ---
+
+describe("loop-pathology fingerprint", () => {
+  function readOnlyTool() {
+    return defineTool({
+      name: "read_file",
+      description: "read a file",
+      schema: z.object({ path: z.string() }),
+      sideEffectful: false,
+      handler: async (input) => `contents of ${input.path}`,
+    });
+  }
+
+  function writeTool() {
+    return defineTool({
+      name: "write_file",
+      description: "write a file",
+      schema: z.object({ path: z.string() }),
+      sideEffectful: true,
+      handler: async (input) => `wrote ${input.path}`,
+    });
+  }
+
+  function toolUseTurn(toolName: string, id: string, input: unknown): MockStreamTurn {
+    return {
+      events: [{ type: "tool_start", id, name: toolName, input }],
+      stopReason: "tool_use",
+    };
+  }
+
+  it("consecutive trigger: three identical side-effect-free iterations → stuck_loop", async () => {
+    const provider = mockStreamProvider([
+      toolUseTurn("read_file", "t1", { path: "x.txt" }),
+      toolUseTurn("read_file", "t2", { path: "x.txt" }),
+      toolUseTurn("read_file", "t3", { path: "x.txt" }),
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(readOnlyTool());
+    const turnLogger = mock<Logger>();
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+      turnLogger,
+    });
+
+    expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
+    // Exactly three iterations — the trip fires at the end of iteration 3
+    // before another LLM call is made.
+    expect(result.iterations).toBe(3);
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "agent.degrade",
+        reason: "stuck_loop",
+        subtype: "stuck_loop",
+        consecutiveCount: 3,
+      }),
+      expect.any(String),
+    );
+  });
+
+  it("a side-effectful tool call resets the consecutive counter — three identical iterations do NOT trip", async () => {
+    // Run the same iteration 4 times: an iteration with a write tool
+    // produces a side effect; the consecutive counter must reset around
+    // it so even though we see four identical fingerprints, no three
+    // are consecutive among the side-effect-free runs.
+    const provider = mockStreamProvider([
+      toolUseTurn("write_file", "t1", { path: "x.txt" }),
+      toolUseTurn("write_file", "t2", { path: "x.txt" }),
+      toolUseTurn("write_file", "t3", { path: "x.txt" }),
+      // Fourth iteration completes with end_turn so the loop exits
+      // cleanly instead of running out of turns.
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(writeTool());
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    // No trip — the loop completed naturally.
+    expect(result.degraded).toBeUndefined();
+    expect(result.text).toBe("done");
+    expect(result.iterations).toBe(4);
+  });
+
+  it("cumulative trigger: alternating A, B, A, B, A → stuck_loop_cumulative", async () => {
+    // Two interleaved fingerprints; neither reaches three consecutive
+    // but `A` accumulates five total side-effect-free occurrences and
+    // trips the cumulative limit.
+    const provider = mockStreamProvider([
+      toolUseTurn("read_file", "t1", { path: "A" }),
+      toolUseTurn("read_file", "t2", { path: "B" }),
+      toolUseTurn("read_file", "t3", { path: "A" }),
+      toolUseTurn("read_file", "t4", { path: "B" }),
+      toolUseTurn("read_file", "t5", { path: "A" }),
+      toolUseTurn("read_file", "t6", { path: "B" }),
+      toolUseTurn("read_file", "t7", { path: "A" }),
+      toolUseTurn("read_file", "t8", { path: "B" }),
+      toolUseTurn("read_file", "t9", { path: "A" }),
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(readOnlyTool());
+    const turnLogger = mock<Logger>();
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+      turnLogger,
+    });
+
+    expect(result.degraded).toEqual({
+      reason: "stuck_loop",
+      subtype: "stuck_loop_cumulative",
+    });
+    // A appears at iterations 1, 3, 5, 7, 9 — the fifth occurrence trips
+    // the cumulative limit at iteration 9.
+    expect(result.iterations).toBe(9);
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "agent.degrade",
+        reason: "stuck_loop",
+        subtype: "stuck_loop_cumulative",
+        cumulativeCount: 5,
+      }),
+      expect.any(String),
+    );
+  });
+
+  it("varying args (a.txt, b.txt, c.txt) do NOT trip — different fingerprints", async () => {
+    // Three side-effect-free iterations against different paths is
+    // legitimate read-only exploration, not a stuck loop. The
+    // fingerprint must include args; name-only hashing would false-
+    // positive on this sequence.
+    const provider = mockStreamProvider([
+      toolUseTurn("read_file", "t1", { path: "a.txt" }),
+      toolUseTurn("read_file", "t2", { path: "b.txt" }),
+      toolUseTurn("read_file", "t3", { path: "c.txt" }),
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(readOnlyTool());
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "explore" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded).toBeUndefined();
+    expect(result.text).toBe("done");
+    expect(result.iterations).toBe(4);
+  });
+
+  it("identical tool calls with differing assistant text prefixes still match — text excluded from the hash", async () => {
+    // Two iterations emit the same read_file call but with different
+    // hedging preambles before the tool_use. The fingerprint excludes
+    // text, so the same fingerprint accumulates across both iterations.
+    // Add a third identical iteration with NO text to push past the
+    // three-consecutive threshold.
+    const provider = mockStreamProvider([
+      {
+        events: [
+          { type: "text_delta", text: "Let me check… " },
+          { type: "tool_start", id: "t1", name: "read_file", input: { path: "x" } },
+        ],
+        stopReason: "tool_use",
+      },
+      {
+        events: [
+          { type: "text_delta", text: "Hmm, let me re-read. " },
+          { type: "tool_start", id: "t2", name: "read_file", input: { path: "x" } },
+        ],
+        stopReason: "tool_use",
+      },
+      toolUseTurn("read_file", "t3", { path: "x" }),
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(readOnlyTool());
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "check" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
+    expect(result.iterations).toBe(3);
+  });
+
+  it("parallel-tool emission order does not move the fingerprint — sort-stable", async () => {
+    // Two iterations emit the same two tool calls in opposite orders.
+    // The third iteration matches one of them. All three must hash to
+    // the same fingerprint and trip the consecutive threshold.
+    const provider = mockStreamProvider([
+      {
+        events: [
+          { type: "tool_start", id: "t1a", name: "read_file", input: { path: "a" } },
+          { type: "tool_start", id: "t1b", name: "list_files", input: { path: "/" } },
+        ],
+        stopReason: "tool_use",
+      },
+      {
+        events: [
+          { type: "tool_start", id: "t2a", name: "list_files", input: { path: "/" } },
+          { type: "tool_start", id: "t2b", name: "read_file", input: { path: "a" } },
+        ],
+        stopReason: "tool_use",
+      },
+      {
+        events: [
+          { type: "tool_start", id: "t3a", name: "read_file", input: { path: "a" } },
+          { type: "tool_start", id: "t3b", name: "list_files", input: { path: "/" } },
+        ],
+        stopReason: "tool_use",
+      },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(readOnlyTool());
+    tools.register(
+      defineTool({
+        name: "list_files",
+        description: "list",
+        schema: z.object({ path: z.string() }),
+        sideEffectful: false,
+        handler: async (input) => `listing of ${input.path}`,
+      }),
+    );
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
+    expect(result.iterations).toBe(3);
+  });
+
+  it("tool without sideEffectful flag defaults to true (fail-safe) — does NOT trip", async () => {
+    // A tool declared with no `sideEffectful` field defaults to "yes,
+    // side-effectful" at the consumer level. Three identical iterations
+    // with such a tool must NOT trip the consecutive trigger — that's
+    // the fail-safe guarantee third-party tools depend on.
+    const unflaggedTool = defineTool({
+      name: "mystery",
+      description: "no flag",
+      schema: z.object({}),
+      handler: async () => "ok",
+    });
+    expect(unflaggedTool.sideEffectful).toBeUndefined();
+
+    const provider = mockStreamProvider([
+      toolUseTurn("mystery", "t1", {}),
+      toolUseTurn("mystery", "t2", {}),
+      toolUseTurn("mystery", "t3", {}),
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(unflaggedTool);
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded).toBeUndefined();
+    expect(result.iterations).toBe(4);
+  });
+
+  it("errored tool calls (no real side effect) still count toward the fingerprint counter", async () => {
+    // An iteration whose tool handler throws produces an isError
+    // tool_result — no real side effect on the world. The "free upside"
+    // path: identical malformed-args sequences should trip Class D
+    // rather than burning to the iteration cap. The tool is declared
+    // sideEffectful: true (its successful path WOULD affect state) so
+    // this also proves the side-effect gate looks at isError, not the
+    // spec flag in isolation.
+    const erroringTool = defineTool({
+      name: "writer",
+      description: "writes",
+      schema: z.object({ path: z.string() }),
+      sideEffectful: true,
+      handler: async () => {
+        throw new Error("write failed");
+      },
+    });
+    const provider = mockStreamProvider([
+      toolUseTurn("writer", "t1", { path: "x" }),
+      toolUseTurn("writer", "t2", { path: "x" }),
+      toolUseTurn("writer", "t3", { path: "x" }),
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(erroringTool);
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
+    expect(result.iterations).toBe(3);
   });
 });
