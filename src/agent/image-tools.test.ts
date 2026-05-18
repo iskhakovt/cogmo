@@ -7,7 +7,7 @@ import type { ImageProvider } from "../llm/image-providers.js";
 import type { VeniceImageProvider } from "../llm/venice.js";
 import { logger } from "../logger.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
-import { SUSPICIOUS_SIZE_THRESHOLD_BYTES } from "./image-failure.js";
+import { ImageGenerationFailedError, SUSPICIOUS_SIZE_THRESHOLD_BYTES } from "./image-failure.js";
 import {
   createImageTools,
   type GeneratedImagePayload,
@@ -873,6 +873,56 @@ describe("createImageTools", () => {
     });
     const result = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
     expect(result).toMatch(/^Error: auth failed/);
+  });
+
+  it("surfaces a venice-thrown ImageGenerationFailedError through surfaceFailure (symmetry)", async () => {
+    // Venice's adapter throws `ImageGenerationFailedError` from
+    // response-header parsing; the tool handler's `.catch` shim
+    // must convert that into the same `Error: <reason>` + structured
+    // warn log that fal NSFW / size canary / oai content-policy
+    // produce. Without this test we'd have:
+    //  - venice.test.ts proving the throw,
+    //  - image-tools.test.ts proving the catch on fal/oai paths,
+    // but not the venice-throw → tool-handler-catch path on the
+    // same code execution.
+    const { generateFn, provider } = fakeVeniceProvider();
+    generateFn.mockReset();
+    generateFn.mockRejectedValueOnce(
+      new ImageGenerationFailedError({
+        kind: "moderation_blocked",
+        provider: "venice",
+        reason:
+          "Venice rejected the prompt as a content policy violation " +
+          "(x-venice-is-content-violation: true). Try rephrasing.",
+      }),
+    );
+    const veniceModel = falModel({
+      providerId: "provider-3",
+      name: "venice/sd35",
+      modelString: "venice-sd35",
+      provider: provider.row,
+    });
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
+    try {
+      const [tool] = createImageTools({
+        models: [veniceModel],
+        providers: new Map([["provider-3", provider]]),
+        attachments: fakeAttachments(),
+      });
+      const result = await tool!.handler({ prompt: "x", model: "sd35" }, FAKE_SERVICE);
+      expect(result).toMatch(/^Error: Venice rejected the prompt/);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "moderation_blocked",
+          provider: "venice",
+          rowName: "venice/sd35",
+          slug: "sd35",
+        }),
+        "image generation failed",
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("tags openai-compat content-policy 4xx as kind: moderation_blocked", async () => {

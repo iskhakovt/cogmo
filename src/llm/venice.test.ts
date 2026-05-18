@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { ImageGenerationFailedError } from "../agent/image-failure.js";
 import { AbortError } from "../util/with-retry.js";
+import { ImageGenerationFailedError } from "./image-failure.js";
 import { VeniceImageProvider } from "./venice.js";
 
 /**

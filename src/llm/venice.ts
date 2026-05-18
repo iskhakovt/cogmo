@@ -35,8 +35,8 @@
  *     body: { images: ["<base64>", ...], ... }
  */
 
-import { ImageGenerationFailedError } from "../agent/image-failure.js";
 import type { ImageGenerationDefaults } from "../agent/store/schema.js";
+import { ImageGenerationFailedError } from "./image-failure.js";
 
 /** Wire-shape body sent to `POST /image/generate`. */
 interface VeniceRequestBody {

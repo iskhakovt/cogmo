@@ -170,27 +170,6 @@ interface ImageGenerationResult {
  *   site should keep us out of this branch in practice; this is the
  *   belt-and-braces backup.
  */
-/**
- * Single-format point for both failure paths (adapter-thrown via
- * `ImageGenerationFailedError`, post-generation via `detectImageFailure`).
- * Logs the structured failure for operator filtering and returns the
- * LLM-facing `Error: …` string the tool result carries.
- */
-function surfaceFailure(failure: ImageFailure, row: ImageModelWithProvider, slug: string): string {
-  logger.warn(
-    {
-      kind: failure.kind,
-      provider: failure.provider,
-      rowName: row.name,
-      providerId: row.providerId,
-      slug,
-      reason: failure.reason,
-    },
-    "image generation failed",
-  );
-  return `Error: ${failure.reason}`;
-}
-
 async function generateViaAiSdk(args: {
   provider: Extract<ImageProvider, { kind: "fal" | "oai" }>;
   row: ImageModelWithProvider;
@@ -268,11 +247,18 @@ async function generateViaAiSdk(args: {
       const kind: ImageFailure["kind"] = looksLikeModerationBlock(err)
         ? "moderation_blocked"
         : "provider_error";
-      throw new ImageGenerationFailedError({
-        kind,
-        provider: args.provider.kind,
-        reason: err.message,
-      });
+      throw new ImageGenerationFailedError(
+        {
+          kind,
+          provider: args.provider.kind,
+          reason: err.message,
+        },
+        // Chain the SDK error so the original `APICallError` (with its
+        // request URL, response body, status code) survives in stack
+        // traces. Matches the `NonRetriableError(..., { cause: err })`
+        // pattern used in `handle-message.ts` for non-retryable wraps.
+        { cause: err },
+      );
     }
     throw err;
   }
@@ -293,6 +279,27 @@ function looksLikeModerationBlock(err: APICallError): boolean {
   const body = err.responseBody;
   if (typeof body !== "string") return false;
   return body.includes("content_policy_violation") || body.includes("safety system");
+}
+
+/**
+ * Single-format point for both failure paths (adapter-thrown via
+ * `ImageGenerationFailedError`, post-generation via `detectImageFailure`).
+ * Logs the structured failure for operator filtering and returns the
+ * LLM-facing `Error: ...` string the tool result carries.
+ */
+function surfaceFailure(failure: ImageFailure, row: ImageModelWithProvider, slug: string): string {
+  logger.warn(
+    {
+      kind: failure.kind,
+      provider: failure.provider,
+      rowName: row.name,
+      providerId: row.providerId,
+      slug,
+      reason: failure.reason,
+    },
+    "image generation failed",
+  );
+  return `Error: ${failure.reason}`;
 }
 
 /**
