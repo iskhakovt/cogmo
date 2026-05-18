@@ -84,6 +84,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "Hi" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
     });
 
     expect(result.text).toBe("Hello!");
@@ -116,6 +117,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "echo ping" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
     });
 
     expect(result.text).toBe("Got: pong");
@@ -145,6 +147,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "use magic" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
     });
 
     expect(result.iterations).toBe(2);
@@ -183,6 +186,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "fail" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
     });
 
     expect(result.iterations).toBe(2);
@@ -230,6 +234,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "do both" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
     });
 
     expect(result.text).toBe("Both done");
@@ -264,6 +269,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "loop" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       maxIterations: 2,
     });
 
@@ -303,6 +309,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "echo" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
     });
 
     expect(result.iterations).toBe(2);
@@ -346,6 +353,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "echo" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
     });
 
     expect(result.iterations).toBe(2);
@@ -366,6 +374,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "hi" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
     });
 
     const callArgs = vi.mocked(provider.chat).mock.calls[0]![0];
@@ -384,6 +393,7 @@ describe("runAgentLoop", () => {
       messages: original,
       tools,
       service: stubService(),
+      turnLogger: logger,
     });
 
     expect(original).toHaveLength(1);
@@ -415,6 +425,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "spy" }],
       tools,
       service: svc,
+      turnLogger: logger,
     });
 
     expect(receivedService).toBe(svc);
@@ -469,6 +480,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "gen three" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
     });
 
     expect(result.messages[2]!.content).toEqual([
@@ -550,6 +562,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "mixed" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
     });
 
     expect(result.messages[2]!.content).toEqual([
@@ -606,6 +619,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "two writes" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
     });
 
     expect(maxConcurrent).toBe(1);
@@ -660,6 +674,7 @@ describe("runAgentLoop", () => {
       messages: [{ role: "user", content: "safe + ghost + safe" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
     });
 
     expect(result.messages[2]!.content).toEqual([
@@ -725,6 +740,7 @@ describe("runStreamingAgentLoop", () => {
       messages: [{ role: "user", content: "hi" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async (e) => {
         collected.push(e);
       },
@@ -772,6 +788,7 @@ describe("runStreamingAgentLoop", () => {
       messages: [{ role: "user", content: "echo ping" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async (e) => {
         collected.push(e);
       },
@@ -814,6 +831,7 @@ describe("runStreamingAgentLoop", () => {
       messages: [{ role: "user", content: "hi" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async (e) => {
         if (e.type === "text_delta") order.push(e.text);
       },
@@ -836,6 +854,7 @@ describe("runStreamingAgentLoop", () => {
       messages: original,
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
@@ -875,6 +894,7 @@ describe("runStreamingAgentLoop", () => {
       messages: [{ role: "user", content: "loop" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       maxIterations: 2,
       onEvent: async () => {},
     });
@@ -912,6 +932,7 @@ describe("runStreamingAgentLoop", () => {
       messages: [{ role: "user", content: "echo" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
@@ -952,6 +973,7 @@ describe("runStreamingAgentLoop", () => {
       messages: [{ role: "user", content: "echo" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
@@ -1013,6 +1035,7 @@ describe("runStreamingAgentLoop", () => {
           messages: [{ role: "user", content: "hi" }],
           tools: new ToolRegistry(),
           service: stubService(),
+          turnLogger: logger,
           onEvent: async () => {},
         }),
       ).rejects.toBe(failure);
@@ -1046,6 +1069,7 @@ describe("runStreamingAgentLoop", () => {
       messages: [{ role: "user", content: "think" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async (e) => {
         collected.push(e);
       },
@@ -1096,6 +1120,7 @@ describe("tool durability (stepRun)", () => {
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       stepRun,
     });
 
@@ -1130,6 +1155,7 @@ describe("tool durability (stepRun)", () => {
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       // no stepRun
     });
 
@@ -1160,6 +1186,7 @@ describe("tool durability (stepRun)", () => {
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       stepRun,
     });
 
@@ -1202,6 +1229,7 @@ describe("tool durability (stepRun)", () => {
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       stepRun,
     });
 
@@ -1240,6 +1268,7 @@ describe("tool durability (stepRun)", () => {
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
       stepRun,
     });
@@ -1342,9 +1371,9 @@ describe("clearOldThinking", () => {
 // with a tool_result whose toolUseId has no matching prior tool_use is the
 // minimal repro — `validateHistory` flags it as `dropped_stray_tool_result`,
 // which routes through the `agent loop history invariants repaired` warn
-// emission. Both tests below exercise that path: one with an injected
-// `turnLogger`, one without to confirm fallback to the module-level
-// `logger`.
+// emission. Tests below pin that the warn lands on the injected
+// per-invocation `turnLogger` across both loop variants and on the
+// iteration-limit path.
 describe("turnLogger plumbing", () => {
   function historyWithStrayToolResult(): Message[] {
     return [
@@ -1387,32 +1416,6 @@ describe("turnLogger plumbing", () => {
       // point of the child-logger plumbing.
       expect(fallbackSpy).not.toHaveBeenCalledWith(
         expect.anything(),
-        "agent loop history invariants repaired",
-      );
-    } finally {
-      fallbackSpy.mockRestore();
-    }
-  });
-
-  it("falls back to the module-level logger when no turnLogger is provided", async () => {
-    const provider = mockStreamProvider([
-      { events: [{ type: "text_delta", text: "ok" }], stopReason: "end_turn" },
-    ]);
-    const fallbackSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
-
-    try {
-      await runStreamingAgentLoop({
-        provider,
-        model: "test",
-        systemPrompt: "sys",
-        messages: historyWithStrayToolResult(),
-        tools: new ToolRegistry(),
-        service: stubService(),
-        onEvent: async () => {},
-      });
-
-      expect(fallbackSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ repairCount: expect.any(Number) }),
         "agent loop history invariants repaired",
       );
     } finally {
@@ -1737,6 +1740,7 @@ describe("in-loop model-misbehavior repair", () => {
         messages: [{ role: "user", content: "hi" }],
         tools: new ToolRegistry(),
         service: stubService(),
+        turnLogger: logger,
         onEvent: async () => {},
       }),
     ).rejects.toBe(replayErr);
@@ -1842,6 +1846,7 @@ describe("in-loop model-misbehavior repair", () => {
       messages: [{ role: "user", content: "hi" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
@@ -1946,6 +1951,7 @@ describe("in-loop model-misbehavior repair", () => {
       messages: [{ role: "user", content: "hi" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
@@ -1981,6 +1987,7 @@ describe("in-loop model-misbehavior repair", () => {
       messages: [{ role: "user", content: "hi" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
@@ -2022,6 +2029,7 @@ describe("in-loop model-misbehavior repair", () => {
         messages: [{ role: "user", content: "hi" }],
         tools: new ToolRegistry(),
         service: stubService(),
+        turnLogger: logger,
         onEvent: async () => {},
       }),
     ).rejects.toBe(transientErr);
@@ -2117,6 +2125,7 @@ describe("loop-pathology fingerprint", () => {
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
@@ -2158,6 +2167,7 @@ describe("loop-pathology fingerprint", () => {
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
@@ -2235,6 +2245,7 @@ describe("loop-pathology fingerprint", () => {
       messages: [{ role: "user", content: "explore" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
@@ -2276,6 +2287,7 @@ describe("loop-pathology fingerprint", () => {
       messages: [{ role: "user", content: "check" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
@@ -2329,6 +2341,7 @@ describe("loop-pathology fingerprint", () => {
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
@@ -2365,6 +2378,7 @@ describe("loop-pathology fingerprint", () => {
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
@@ -2404,6 +2418,7 @@ describe("loop-pathology fingerprint", () => {
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
@@ -2433,6 +2448,7 @@ describe("loop-pathology fingerprint", () => {
       messages: [{ role: "user", content: "go" }],
       tools,
       service: stubService(),
+      turnLogger: logger,
       onEvent: async () => {},
     });
 
