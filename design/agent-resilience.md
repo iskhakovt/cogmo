@@ -202,7 +202,7 @@ Nudge text branches on outcome mix in the existing history:
 - **Mixed:** "K of N `T` calls produced results. Do not call `T` again — decide from what you have."
 - **All success:** "You have N results from `T`. Do not call `T` again — synthesize and reply."
 
-The counter resets on a successful call of `T`. A model that hits the budget on `web_search`, switches to `fetch_url`, then comes back to `web_search` once new context warrants it is not penalized.
+The counter persists across the whole turn regardless of per-call outcome. Volume is the signal: successful same-tool results dilute attention the same as failed ones (the softmax weight on the original user intent shrinks either way), so the budget is a volume cap, not a failure cap. A model that wants more bandwidth for one tool than its budget allows should ask the user or switch tools — that's the redirect the nudge text enforces. The reset happens at turn boundary (next `runStreamingAgentLoop` invocation), not within a turn.
 
 #### Per-tool budgets on `ToolSpec`
 
