@@ -13,7 +13,12 @@ import {
   type SandboxSession,
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
-import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
+import {
+  makeStepRun,
+  mockAgentStore,
+  mockTransportStore,
+  nullStepSendEvent,
+} from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { createTransport } from "../../transport/transport.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
@@ -22,8 +27,6 @@ import {
   type PlanStreamHandle,
   runCodingExecute,
   runCodingTask,
-  type StepRun,
-  type StepSendEvent,
 } from "./orchestrator.js";
 import { CodingProgressSubscriber } from "./progress-subscriber.js";
 import { createCodingService } from "./service.js";
@@ -32,8 +35,8 @@ import { type CodingStreamEvent, CodingStreamingRegistry } from "./streaming-reg
 
 const execFileP = promisify(execFile);
 
-const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
-const stepSendEvent = (async () => ({ ids: [] })) as any as StepSendEvent;
+const stepRun = makeStepRun();
+const stepSendEvent = nullStepSendEvent();
 const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
 
 let db: Database;

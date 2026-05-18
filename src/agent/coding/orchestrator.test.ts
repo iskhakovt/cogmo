@@ -16,6 +16,7 @@ import {
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectDefined } from "../../test/assertions.js";
+import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
@@ -25,8 +26,6 @@ import {
   NULL_PLAN_STREAM,
   runCodingExecute,
   runCodingTask,
-  type StepRun,
-  type StepSendEvent,
 } from "./orchestrator.js";
 import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
 
@@ -72,18 +71,7 @@ afterAll(async () => {
   await close();
 });
 
-// Shim mirroring `step.run`'s signature. Production has Inngest's real
-// step.run (return type Jsonify<T>); tests run the body inline. Cast at
-// the seam — explicitly justified per CLAUDE.md "intentionally invalid
-// input in tests".
-const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
-// step.sendEvent shim — the in-worker catch path uses this for durable
-// `coding/task/failed` emits. Tests forward to the fake inngest so
-// existing `inngest.send` assertions keep working.
-const stepSendEvent = (async (_: string, payload: unknown) => {
-  await fakeInngestShared.send(payload as never);
-  return { ids: [] };
-}) as any as StepSendEvent;
+const stepRun = makeStepRun();
 
 const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
 
@@ -329,6 +317,7 @@ function makeDeps(
 // emit-task-failed / emit-cli-done / coding/task/permission-requested.
 // Defined here so both describe blocks can share it.
 const fakeInngestShared = { send: vi.fn().mockResolvedValue(undefined) };
+const stepSendEvent = makeStepSendEvent(fakeInngestShared);
 
 describe("runCodingTask", () => {
   it("happy path: plan streamed, session_id persisted, status → awaiting_approval (user trigger)", async () => {
@@ -689,10 +678,9 @@ describe("runCodingTask", () => {
   // leave the row stuck non-terminal — the reconcile subscriber would
   // never see it. Letting the UPDATE throw propagates the failure and
   // hands off to the reconcile.
-  it("catch path: DB update failure after successful emit propagates so reconcile can recover", async () => {
+  it("catch path: DB update throw in catch propagates so reconcile can recover", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
-    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "planning" }));
 
     const { sandbox } = fakeSandbox();
     const throwingBackend: CodingBackend = {
@@ -703,11 +691,20 @@ describe("runCodingTask", () => {
         throw new Error("not used");
       },
     };
+    // First UPDATE call (`set-status-planning` inside the try) succeeds;
+    // the SECOND call (the catch path's status="failed" write) throws.
+    // This isolates the test to the precise contract under exam: that
+    // the catch's UPDATE throw propagates instead of being swallowed.
+    let updateCalls = 0;
     const dbThrowingStore = {
       ...store,
       getTask: store.getTask.bind(store),
       getRepoById: store.getRepoById.bind(store),
-      updateTaskStatus: async () => {
+      updateTaskStatus: async (trx: unknown, params: { id: string; status: string }) => {
+        updateCalls += 1;
+        if (updateCalls === 1) {
+          return store.updateTaskStatus(trx as never, params as never);
+        }
         throw new Error("db blip");
       },
     } as unknown as typeof store;
@@ -727,10 +724,15 @@ describe("runCodingTask", () => {
       }),
     ).rejects.toThrow(/db blip/);
 
-    // Emit fired before the DB update — the bus has the event already.
+    // Two UPDATE attempts — set-status-planning (succeeded) + catch's
+    // set-status-failed (threw).
+    expect(updateCalls).toBe(2);
+    // Emit fired before the catch's UPDATE attempt — the bus has the
+    // event already.
     expect(captured).toHaveLength(1);
-    // Row stays in its prior non-terminal state — reconcile will pick
-    // it up via `failTaskIfNonTerminal`.
+    // Row is in `planning` from the first successful UPDATE — the
+    // catch's status="failed" write was rejected, so the row stays
+    // non-terminal for the reconcile subscriber to pick up.
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("planning");
   });
@@ -1183,5 +1185,55 @@ describe("runCodingExecute", () => {
     }
     expect(createCalls).toHaveLength(0);
     expect(stopCalls).toEqual([]);
+  });
+
+  // Mirror of the runCodingTask catch-path contract — emit-first
+  // ordering pins the reconcile handoff for the execute orchestrator
+  // too.
+  it("catch path: emit fires BEFORE DB update; emit failure propagates leaving the row non-terminal", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+
+    const { sandbox } = fakeSandbox();
+    // `plan` is never invoked on this code path — runCodingExecute
+    // only drives `execute`. An empty async iterable satisfies the
+    // contract.
+    const emptyPlan: AsyncIterable<CodingEvent> = {
+      [Symbol.asyncIterator]: async function* () {},
+    };
+    const throwingBackend: CodingBackend = {
+      plan: () => emptyPlan,
+      execute: async () => {
+        throw new Error("backend exploded");
+      },
+    };
+    const sendCalls: { eventName: string; whenStatus: string | null }[] = [];
+    const stepSendEventThrowing = (async (_: string, payload: unknown) => {
+      const row = await tx((trx) => store.getTask(trx, task.id));
+      sendCalls.push({
+        eventName: (payload as { name: string }).name,
+        whenStatus: row?.status ?? null,
+      });
+      throw new Error("bus down");
+    }) as never;
+
+    await expect(
+      runCodingExecute({
+        taskId: task.id,
+        deps: makeDeps({ sandbox, backend: throwingBackend }),
+        stepRun,
+        stepWaitForEvent: fakeStepWaitForEvent,
+        stepSendEvent: stepSendEventThrowing,
+        inngest: fakeInngest,
+      }),
+    ).rejects.toThrow(/bus down/);
+
+    // Emit attempted while status was still `executing` — the catch
+    // ran the transition before falling through to the emit.
+    expect(sendCalls).toEqual([{ eventName: "coding/task/failed", whenStatus: "executing" }]);
+    // Row stays `executing` (non-terminal) so the reconcile can flip
+    // it via `failTaskIfNonTerminal`.
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("executing");
   });
 });

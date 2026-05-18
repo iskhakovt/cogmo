@@ -1,7 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
+import type { z } from "zod";
+import type { conversationErrored } from "../inngest/events.js";
 import { logger } from "../logger.js";
-import { fakeRunInTx, mockAgentStore, mockStep } from "../test/factories.js";
+import {
+  fakeRunInTx,
+  invokeInngestFn,
+  type MockStep,
+  mockAgentStore,
+  mockStep,
+} from "../test/factories.js";
 import { createRecoverConversation } from "./recover-conversation.js";
+
+type ConversationErroredData = z.infer<typeof conversationErrored.schema>;
+
+interface RecoverConversationCtx {
+  event: { data: ConversationErroredData };
+  step: MockStep;
+}
 
 const baseEvent = {
   data: {
@@ -19,8 +34,11 @@ describe("createRecoverConversation", () => {
     const agentStore = mockAgentStore({
       getConversation: vi.fn().mockResolvedValue(undefined),
     });
-    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore }) as any;
-    const result = await fn.fn({ event: baseEvent, step: mockStep() });
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
+    const result = await invokeInngestFn<RecoverConversationCtx>(fn, {
+      event: baseEvent,
+      step: mockStep(),
+    });
     expect(result).toEqual({ status: "skipped", reason: "conversation_not_found" });
     expect(agentStore.setConversationStatus).not.toHaveBeenCalled();
   });
@@ -35,16 +53,22 @@ describe("createRecoverConversation", () => {
         status: "errored",
       }),
     });
-    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore }) as any;
-    const result = await fn.fn({ event: baseEvent, step: mockStep() });
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
+    const result = await invokeInngestFn<RecoverConversationCtx>(fn, {
+      event: baseEvent,
+      step: mockStep(),
+    });
     expect(result).toEqual({ status: "skipped", reason: "already_errored" });
     expect(agentStore.setConversationStatus).not.toHaveBeenCalled();
   });
 
   it("marks conversation errored on first failure", async () => {
     const agentStore = mockAgentStore();
-    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore }) as any;
-    const result = await fn.fn({ event: baseEvent, step: mockStep() });
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
+    const result = await invokeInngestFn<RecoverConversationCtx>(fn, {
+      event: baseEvent,
+      step: mockStep(),
+    });
     expect(result).toEqual({ status: "marked_errored" });
     expect(agentStore.setConversationStatus).toHaveBeenCalledWith(
       expect.anything(),
@@ -60,8 +84,8 @@ describe("createRecoverConversation", () => {
   it("logs errorClass, causeClass, and errorMessage on the marker write", async () => {
     const warnSpy = vi.spyOn(logger, "warn");
     const agentStore = mockAgentStore();
-    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore }) as any;
-    await fn.fn({ event: baseEvent, step: mockStep() });
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
+    await invokeInngestFn<RecoverConversationCtx>(fn, { event: baseEvent, step: mockStep() });
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         conversationId: "conv-1",

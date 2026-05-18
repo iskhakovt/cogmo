@@ -175,6 +175,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       onFailure: async ({ event, error, step }) => {
         const { conversationId, triggerInboundId } = event.data.event.data;
         const runId = event.data.run_id;
+        const turnLogger = logger.child({ runId, conversationId });
         // `error` is what Inngest saw — typically NonRetriableError, since
         // we rewrap non-retriable provider errors above. The original
         // class (BadRequestError, RateLimitError, etc.) is on `cause`.
@@ -200,8 +201,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               "I hit an error processing your last message and won't keep retrying. Please try again.",
             );
           } catch (notifyErr) {
-            logger.error(
-              { err: notifyErr, conversationId, runId },
+            turnLogger.error(
+              { err: notifyErr },
               "onFailure: notifyConversation failed, conversation/errored already emitted",
             );
           }
@@ -641,10 +642,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         : await service.memory
             .recall(userContentText, { maxTokens: 2000 })
             .catch((err: unknown) => {
-              logger.warn(
-                { err, conversationId },
-                "auto-recall failed, proceeding without recalled context",
-              );
+              turnLogger.warn({ err }, "auto-recall failed, proceeding without recalled context");
               return { memories: [] };
             });
       const recalledContext =
@@ -807,9 +805,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         throw err;
       }
 
-      logger.info(
+      turnLogger.info(
         {
-          conversationId,
           model: result.model,
           iterations: result.iterations,
           usage: result.usage,
@@ -886,7 +883,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
           for (const [i, r] of imageSettled.entries()) {
             if (r.status === "rejected") {
-              logger.error(
+              turnLogger.error(
                 { err: r.reason, path: imageRefs[i]?.path },
                 "outbound image download failed, skipping",
               );
@@ -915,7 +912,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
           for (const [i, r] of docSettled.entries()) {
             if (r.status === "rejected") {
-              logger.error(
+              turnLogger.error(
                 { err: r.reason, path: documentRefs[i]?.path },
                 "outbound document download failed, skipping",
               );
@@ -955,8 +952,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           );
           const effectiveCap = cap ?? 700;
           if (result.text.length > effectiveCap) {
-            logger.info(
-              { conversationId, length: result.text.length, cap: effectiveCap },
+            turnLogger.info(
+              { length: result.text.length, cap: effectiveCap },
               "voice reply skipped — over cap",
             );
             // The streamed text reply already landed; tell the user voice
@@ -974,8 +971,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
                 "(text reply too long for voice — see above)",
               );
             } catch (notifyErr) {
-              logger.warn(
-                { err: notifyErr, conversationId },
+              turnLogger.warn(
+                { err: notifyErr },
                 "voice over-cap notification failed; turn already succeeded",
               );
             }

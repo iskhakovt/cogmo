@@ -680,6 +680,8 @@ Branch logic:
 
 The 7-day permission-prompt wait is not at risk: it's a `step.waitForEvent`, not a `step.run`, so the run is parked durably and only terminates on event arrival or timeout — neither path emits `inngest/function.failed`. A genuine 7-day timeout would expire the wait and the orchestrator's normal path runs `set-status-failed`, so the reconcile sees a terminal row and no-ops.
 
+**Multi-consumer idempotency contract for `coding/task/failed`.** Both paths above can emit the same logical "task failed" signal under different idempotency `id`s — the in-worker catch emits `task-failed-${taskId}`, the reconcile emits `reconcile-${run_id}`. The bus does NOT dedup across different ids, so a DB-blip path lands two events on the bus for the same task. Today's only consumer `cleanup-run-branch` collapses via function-level idempotency on `event.data.taskId` (`createRunBranchCleanupSubscriber` in [`src/agent/coding/cleanup-run-branch.ts`](../src/agent/coding/cleanup-run-branch.ts)), so the double-emit is harmless. **Any future subscriber on `coding/task/failed` must apply the same `taskId`-keyed idempotency** — single-event-id dedup is not safe to assume.
+
 ## Why this design `[confirmed]`
 
 Lines up with documented industry patterns (late 2025 / Q1 2026):
