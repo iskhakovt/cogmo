@@ -721,10 +721,15 @@ export async function runStreamingAgentLoop(
     }
 
     const fingerprint = computeIterationFingerprint(toolUseBlocks);
-    // fingerprint is non-null here because hasToolUse guarded entry into
-    // this branch — every iteration that gets past the !hasToolUse gate
-    // has at least one tool_use block.
-    if (fingerprint === null) continue;
+    if (fingerprint === null) {
+      // Invariant: `hasToolUse` guarded entry into this branch, so
+      // `toolUseBlocks` is non-empty and `computeIterationFingerprint`
+      // cannot return `null` here. Throwing surfaces the bug instead
+      // of silently skipping Class D detection for the iteration.
+      throw new Error(
+        "computeIterationFingerprint returned null for non-empty toolUseBlocks (invariant violated)",
+      );
+    }
 
     const cumulativeCount = (cumulativeCounts.get(fingerprint) ?? 0) + 1;
     cumulativeCounts.set(fingerprint, cumulativeCount);
