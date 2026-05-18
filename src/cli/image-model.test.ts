@@ -176,6 +176,36 @@ describe("runImageModelCli", () => {
     );
   });
 
+  it("writes capabilities.negativePrompt=true when --negative-prompt is passed", async () => {
+    const { io } = makeIo();
+    const createImageModel = vi.fn().mockResolvedValue({ id: "m-np" });
+    const agentStore = {
+      findImageProviderByName: vi.fn().mockResolvedValue(fakeProvider({ type: "venice" })),
+      createImageModel,
+    } as unknown as AgentStore;
+    await runImageModelCli(
+      [
+        "add",
+        "venice/flux-uncensored",
+        "--provider",
+        "venice",
+        "--model-string",
+        "flux-dev-uncensored",
+        "--description",
+        "Venice uncensored",
+        "--negative-prompt",
+      ],
+      { runInTx: tx, agentStore },
+      io,
+    );
+    expect(createImageModel).toHaveBeenCalledWith(
+      FAKE_TX,
+      expect.objectContaining({
+        capabilities: { negativePrompt: true },
+      }),
+    );
+  });
+
   it("rejects --image-input with an unknown value", async () => {
     const { io, err } = makeIo();
     const agentStore = {} as AgentStore;

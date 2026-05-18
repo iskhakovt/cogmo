@@ -1,8 +1,8 @@
 import { drizzle } from "drizzle-orm/postgres-js";
-import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 import { DrizzleAgentStore } from "./agent/store/index.js";
 import { pinoNoticeHandler } from "./db/helpers.js";
+import { migratePerFile } from "./db/migrate-per-file.js";
 import * as schema from "./db/schemas.js";
 import { transactor } from "./db/transactor.js";
 import { logger } from "./logger.js";
@@ -27,7 +27,7 @@ export async function seed(): Promise<void> {
   const db = drizzle({ client, schema });
 
   try {
-    await migrate(db, { migrationsFolder: "./migrations" });
+    await migratePerFile(db, { migrationsFolder: "./migrations" });
     logger.info("migrations applied");
 
     const tx = transactor(db);

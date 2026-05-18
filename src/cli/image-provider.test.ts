@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { AgentStore, ImageProviderRow } from "../agent/store/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { runImageProviderCli } from "./image-provider.js";
@@ -81,7 +82,7 @@ describe("runImageProviderCli", () => {
       io,
     );
     expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/expected fal\|openai_compatible/);
+    expect(err.join("\n")).toMatch(/expected fal\|openai_compatible\|venice/);
   });
 
   it("creates a fal provider (writes secret + provider row)", async () => {
@@ -105,6 +106,118 @@ describe("runImageProviderCli", () => {
       expect.objectContaining({ name: "fal", type: "fal", baseUrl: null, secretId: "sec-fal" }),
     );
     expect(out.join("\n")).toMatch(/Added image provider "fal"/);
+  });
+
+  it("creates a venice provider with safe_mode default", async () => {
+    const { io, out } = makeIo();
+    const putSecret = vi.fn().mockResolvedValue({ id: "sec-venice" });
+    const createImageProvider = vi.fn().mockResolvedValue({ id: "p-venice" });
+    const agentStore = { createImageProvider } as unknown as AgentStore;
+    const secretsStore = { putSecret } as unknown as SecretsStore;
+    const rc = await runImageProviderCli(
+      [
+        "add",
+        "venice",
+        "venice",
+        "sk-venice",
+        "https://api.venice.ai/api/v1",
+        "--safe-mode",
+        "false",
+      ],
+      { runInTx: tx, agentStore, secretsStore },
+      io,
+    );
+    expect(rc).toBe(0);
+    expect(createImageProvider).toHaveBeenCalledWith(
+      FAKE_TX,
+      expect.objectContaining({
+        name: "venice",
+        type: "venice",
+        baseUrl: "https://api.venice.ai/api/v1",
+        attrs: { imageGenerationDefaults: { safe_mode: false } },
+      }),
+    );
+    expect(out.join("\n")).toMatch(/Added image provider "venice"/);
+  });
+
+  it("rejects venice extras for non-venice provider types", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {} as AgentStore;
+    const secretsStore = {} as SecretsStore;
+    const rc = await runImageProviderCli(
+      [
+        "add",
+        "openai_compatible",
+        "openai",
+        "sk-openai",
+        "https://api.openai.com/v1",
+        "--safe-mode",
+        "true",
+      ],
+      { runInTx: tx, agentStore, secretsStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/are venice-only/);
+  });
+
+  it("forwards all four venice extras into imageGenerationDefaults", async () => {
+    // Wizard docs and image-generation.md both claim cfg_scale,
+    // hide_watermark, and style_preset are reachable via `cogmo
+    // image-provider`. This test pins the CLI side of that claim so a
+    // future flag-parser refactor doesn't drop one silently.
+    const { io, out } = makeIo();
+    const agentStore = mock<AgentStore>();
+    agentStore.createImageProvider.mockResolvedValue({ id: "p-2" });
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.putSecret.mockResolvedValue({ id: "s-2" });
+    const rc = await runImageProviderCli(
+      [
+        "add",
+        "venice",
+        "venice-all",
+        "sk-venice",
+        "https://api.venice.ai/api/v1",
+        "--safe-mode",
+        "false",
+        "--cfg-scale",
+        "7.5",
+        "--hide-watermark",
+        "true",
+        "--style-preset",
+        "Photographic",
+      ],
+      { runInTx: tx, agentStore, secretsStore },
+      io,
+    );
+    expect(rc).toBe(0);
+    expect(agentStore.createImageProvider).toHaveBeenCalledWith(
+      FAKE_TX,
+      expect.objectContaining({
+        attrs: {
+          imageGenerationDefaults: {
+            safe_mode: false,
+            cfg_scale: 7.5,
+            hide_watermark: true,
+            style_preset: "Photographic",
+          },
+        },
+      }),
+    );
+    expect(out.join("\n")).toMatch(/Added image provider "venice-all"/);
+  });
+
+  it("rejects --cfg-scale outside 0–20", async () => {
+    const { io, err } = makeIo();
+    const agentStore = mock<AgentStore>();
+    const secretsStore = mock<SecretsStore>();
+    const rc = await runImageProviderCli(
+      ["add", "venice", "venice", "sk-v", "https://api.venice.ai/api/v1", "--cfg-scale", "25"],
+      { runInTx: tx, agentStore, secretsStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--cfg-scale requires a number 0–20/);
   });
 
   it("removes a provider by name", async () => {

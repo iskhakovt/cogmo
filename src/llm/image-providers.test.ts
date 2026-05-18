@@ -177,4 +177,94 @@ describe("buildImageProvider", () => {
       }),
     ).rejects.toThrow(/openai_compatible.*no base_url/);
   });
+
+  it("builds a venice provider with the decrypted key and base URL", async () => {
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecretById.mockResolvedValueOnce("sk-venice");
+
+    const provider = await buildImageProvider(
+      row({
+        name: "venice",
+        type: "venice",
+        baseUrl: "https://api.venice.ai/api/v1",
+      }),
+      { runInTx: TX, secretsStore },
+    );
+
+    expect(provider.kind).toBe("venice");
+    // The adapter is hand-rolled (not an SDK constructor), so the assertion
+    // shape is "the right thing got built" rather than "the SDK was called
+    // with these args." The unit tests in venice.test.ts pin behaviour.
+    expect(provider.row.name).toBe("venice");
+    expect(provider.row.baseUrl).toBe("https://api.venice.ai/api/v1");
+  });
+
+  it("forwards the venice fetch override into the adapter", async () => {
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecretById.mockResolvedValueOnce("sk-venice");
+    // Stub fetch returns a minimal valid Venice response so we can assert
+    // the adapter actually used the injected fetch (not globalThis.fetch).
+    const fakeFetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ images: ["aGVsbG8="] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    ) as unknown as typeof fetch;
+
+    const provider = await buildImageProvider(
+      row({
+        name: "venice",
+        type: "venice",
+        baseUrl: "https://api.venice.ai/api/v1",
+      }),
+      { runInTx: TX, secretsStore, fetchOverrides: { venice: fakeFetch } },
+    );
+    if (provider.kind !== "venice") throw new Error("expected venice provider");
+
+    await provider.provider.generate({ model: "flux", prompt: "hi" });
+    expect(fakeFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("threads attrs.imageGenerationDefaults into the venice adapter", async () => {
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecretById.mockResolvedValueOnce("sk-venice");
+
+    // Stub fetch captures the body so we can confirm safe_mode lands on the
+    // wire. The adapter's own unit tests pin the merge logic; here we just
+    // verify the construction path threads `attrs` through.
+    let capturedBody: Record<string, unknown> = {};
+    const fakeFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      capturedBody = JSON.parse(init?.body as string) as Record<string, unknown>;
+      return new Response(JSON.stringify({ images: ["aGVsbG8="] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const provider = await buildImageProvider(
+      row({
+        name: "venice",
+        type: "venice",
+        baseUrl: "https://api.venice.ai/api/v1",
+        attrs: { imageGenerationDefaults: { safe_mode: false } },
+      }),
+      { runInTx: TX, secretsStore, fetchOverrides: { venice: fakeFetch } },
+    );
+    if (provider.kind !== "venice") throw new Error("expected venice provider");
+    await provider.provider.generate({ model: "flux", prompt: "hi" });
+    expect(capturedBody.safe_mode).toBe(false);
+  });
+
+  it("rejects a venice row whose base_url is somehow null", async () => {
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecretById.mockResolvedValueOnce("sk");
+
+    await expect(
+      buildImageProvider(row({ type: "venice", baseUrl: null }), {
+        runInTx: TX,
+        secretsStore,
+      }),
+    ).rejects.toThrow(/venice.*no base_url/);
+  });
 });

@@ -635,27 +635,34 @@ async function stepConfigureOptionalTools(deps: WizardDeps): Promise<void> {
 }
 
 /**
- * Configure OpenAI-compatible image providers (Venice, OpenAI gpt-image, custom).
- * Fal is handled in `stepConfigureOptionalTools` via the `fal_api_key` prompt —
- * the boot-time `ensureFalImageDefaults` seed wires the canonical 9-model
- * catalog automatically. This step covers the other half: providers that
- * speak `POST /v1/images/generations` and require per-model registration.
+ * Configure non-fal image providers — `openai_compatible` (OpenAI dall-e,
+ * custom inference servers) and `venice` (Venice.ai native API, uncensored,
+ * supports `safe_mode` / `negative_prompt`). Fal is handled in
+ * `stepConfigureOptionalTools` via the `fal_api_key` prompt — the boot-time
+ * `ensureFalImageDefaults` seed wires the canonical 9-model catalog
+ * automatically. This step covers the other half: providers that require
+ * per-model registration.
  */
 async function stepConfigureImageProviders(deps: WizardDeps): Promise<void> {
   const allExisting = await deps.runInTx((tx) => deps.agentStore.listImageProviders(tx));
-  const oaiExisting = allExisting.filter((p) => p.type === "openai_compatible");
+  // Both non-fal provider types share the same wizard flow (name + base
+  // URL + key + per-model loop); the type discriminator picks venice's
+  // extra `safe_mode` default prompt at the end.
+  const nonFalExisting = allExisting.filter(
+    (p) => p.type === "openai_compatible" || p.type === "venice",
+  );
 
-  if (oaiExisting.length === 0) {
+  if (nonFalExisting.length === 0) {
     const add = await p.confirm({
       message:
-        "Configure an OpenAI-compatible image provider? (Venice, OpenAI gpt-image, custom — fal handled separately) (optional)",
+        "Configure an OpenAI-compatible or Venice image provider? (Venice for uncensored, OpenAI gpt-image, custom — fal handled separately) (optional)",
       initialValue: false,
     });
     if (!cancelGuard(add)) return;
   } else {
-    const names = oaiExisting.map((p) => p.name).join(", ");
+    const names = nonFalExisting.map((p) => `${p.name} (${p.type})`).join(", ");
     const action = await p.select({
-      message: `OpenAI-compatible image provider(s) configured: ${names}. What would you like to do?`,
+      message: `Image provider(s) configured: ${names}. What would you like to do?`,
       options: [
         { value: "keep", label: "Keep current configuration" },
         { value: "add", label: "Add another image provider" },
@@ -665,24 +672,40 @@ async function stepConfigureImageProviders(deps: WizardDeps): Promise<void> {
     cancelGuard(action);
     if (action === "keep") return;
     if (action === "add-model") {
-      await stepAddImageModelToExisting(deps, oaiExisting);
+      await stepAddImageModelToExisting(deps, nonFalExisting);
       return;
     }
   }
 
-  await addOaiImageProvider(deps);
+  await addNonFalImageProvider(deps);
 }
 
 const IMAGE_PROVIDER_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 
-async function addOaiImageProvider(deps: WizardDeps): Promise<void> {
+async function addNonFalImageProvider(deps: WizardDeps): Promise<void> {
   p.note(
     [
-      "Venice: https://venice.ai/settings/api → Create API Key",
-      "OpenAI: https://platform.openai.com/api-keys",
-      "Custom: any endpoint that speaks `POST /v1/images/generations`",
+      "venice — Venice.ai native API (uncensored, supports safe_mode + negative_prompt)",
+      "  https://venice.ai/settings/api → Create API Key",
+      "openai_compatible — OpenAI dall-e, custom inference servers (no Venice extras)",
+      "  https://platform.openai.com/api-keys",
+      "  Custom: any endpoint that speaks `POST /v1/images/generations`",
     ].join("\n"),
-    "Where to get an API key",
+    "Provider types",
+  );
+
+  const providerType = cancelGuard(
+    await p.select<"venice" | "openai_compatible">({
+      message: "Provider type?",
+      options: [
+        { value: "venice", label: "venice — Venice.ai native API (uncensored)" },
+        {
+          value: "openai_compatible",
+          label: "openai_compatible — OpenAI dall-e / custom OpenAI-shaped endpoint",
+        },
+      ],
+      initialValue: "venice",
+    }),
   );
 
   const name = cancelGuard(
@@ -697,9 +720,12 @@ async function addOaiImageProvider(deps: WizardDeps): Promise<void> {
     }),
   );
 
+  const defaultBaseUrl =
+    providerType === "venice" ? "https://api.venice.ai/api/v1" : "https://api.openai.com/v1";
   const baseUrl = cancelGuard(
     await p.text({
-      message: "Base URL (e.g. https://api.venice.ai/api/v1):",
+      message: `Base URL (default ${defaultBaseUrl}):`,
+      placeholder: defaultBaseUrl,
       validate: (v = "") => {
         if (!v.startsWith("https://")) return "Must start with https://";
         if (v.endsWith("/")) return "Drop the trailing slash";
@@ -715,6 +741,23 @@ async function addOaiImageProvider(deps: WizardDeps): Promise<void> {
     }),
   );
 
+  // Venice-specific provider-level defaults. `safe_mode` is the only one we
+  // prompt for in the wizard today; the other knobs (`cfg_scale`,
+  // `hide_watermark`, `style_preset`) are available through `cogmo
+  // image-provider` for operators who want finer control without cluttering
+  // the wizard.
+  let safeMode: boolean | undefined;
+  if (providerType === "venice") {
+    const safeModeChoice = cancelGuard(
+      await p.confirm({
+        message: "Venice safe_mode default? (true blurs flagged content; false disables blur)",
+        initialValue: true,
+      }),
+    );
+    safeMode = safeModeChoice;
+  }
+  const attrs = safeMode !== undefined ? { imageGenerationDefaults: { safe_mode: safeMode } } : {};
+
   const secretName = `${name}_api_key`;
   const s = p.spinner();
   s.start("Saving image provider...");
@@ -724,14 +767,14 @@ async function addOaiImageProvider(deps: WizardDeps): Promise<void> {
       const { id: secretId } = await deps.secretsStore.putSecret(tx, {
         name: secretName,
         plaintext: apiKey,
-        description: `openai_compatible image provider key (${name})`,
+        description: `${providerType} image provider key (${name})`,
       });
       const result = await deps.agentStore.createImageProvider(tx, {
         name,
-        type: "openai_compatible",
+        type: providerType,
         baseUrl,
         secretId,
-        attrs: {},
+        attrs,
       });
       return result.id;
     });
@@ -750,7 +793,7 @@ async function addOaiImageProvider(deps: WizardDeps): Promise<void> {
       "Errors (bad key, wrong URL) surface on the first image generation.",
   );
 
-  await promptAddImageModels(deps, name, providerId);
+  await promptAddImageModels(deps, name, providerId, providerType);
 }
 
 async function stepAddImageModelToExisting(
@@ -767,7 +810,13 @@ async function stepAddImageModelToExisting(
   const providerId = cancelGuard(choice);
   const row = existing.find((r) => r.id === providerId);
   if (!row) return; // unreachable — the select only offered known ids
-  await promptAddImageModels(deps, row.name, row.id);
+  // Narrow the runtime `type` string back to the typed enum the inner
+  // prompt loop branches on. Anything outside the non-fal subset is
+  // already filtered upstream — the caller restricts `existing` to those
+  // types before opening the select.
+  const typedKind: "venice" | "openai_compatible" =
+    row.type === "venice" ? "venice" : "openai_compatible";
+  await promptAddImageModels(deps, row.name, row.id, typedKind);
 }
 
 /**
@@ -784,6 +833,7 @@ async function promptAddImageModels(
   deps: WizardDeps,
   providerName: string,
   providerId: string,
+  providerType: "venice" | "openai_compatible",
 ): Promise<void> {
   for (let i = 0; ; i++) {
     const prompt =
@@ -850,12 +900,27 @@ async function promptAddImageModels(
       }),
     );
 
+    // Venice models accept `negative_prompt` natively. Canonical OpenAI
+    // images (`/v1/images/generations`) rejects it with HTTP 400 because
+    // DALL-E / gpt-image-* don't model the concept. But "openai_compatible"
+    // is a broader category — some OpenAI-shaped servers (Together,
+    // Replicate's shim, custom inference) accept extra body fields the
+    // handler can forward via `providerOptions[providerName]`. Default the
+    // toggle accordingly; keep it user-overridable.
+    const negativePrompt = cancelGuard(
+      await p.confirm({
+        message: "Does this model accept a negative prompt (`negativePrompt` tool field)?",
+        initialValue: providerType === "venice",
+      }),
+    );
+
     const capabilities = {
       ...(ratios && { aspectRatios: [...ratios] }),
       ...(seed && { seed: true }),
       ...(imageInputChoice !== "none" && {
         imageInput: imageInputChoice as "required" | "optional",
       }),
+      ...(negativePrompt && { negativePrompt: true }),
     };
 
     try {
