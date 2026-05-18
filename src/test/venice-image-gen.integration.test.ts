@@ -14,14 +14,14 @@
  * **Recording the fixture** (run once locally; commit the result):
  *
  * ```bash
- * RECORD=1 VENICE_INFERENCE_KEY=sk-... \
+ * RECORD=1 VENICE_API_KEY=sk-... \
  *   pnpm test:record src/test/venice-image-gen.integration.test.ts
  * ```
  *
  * Subsequent CI runs replay against `test/fixtures/venice/*.json` — no
  * API key, no cost, no network.
  *
- * Without `VENICE_INFERENCE_KEY` set, the test skips itself in record mode
+ * Without `VENICE_API_KEY` set, the test skips itself in record mode
  * (no key → no value to capture) — but in default replay mode, the fixture
  * suffices on its own.
  */
@@ -42,9 +42,9 @@ import type { AttachmentStore } from "../transport/attachment-store.js";
 import { createVeniceFetch } from "./venice-mock.js";
 
 const PROMPT = "A watercolor painting of a fox curled up in a forest clearing at dusk.";
-const MODEL_STRING = "flux-dev-uncensored";
-const MODEL_NAME = "venice/flux-dev-uncensored";
-const MODEL_SLUG = "flux-dev-uncensored";
+const MODEL_STRING = "venice-sd35";
+const MODEL_NAME = "venice/venice-sd35";
+const MODEL_SLUG = "venice-sd35";
 const PROVIDER_ID = "test-provider-venice";
 
 const FAKE_TX: Transactor = async (cb) => cb({} as never);
@@ -54,13 +54,13 @@ const FIXTURE_PATH = join(process.cwd(), "test/fixtures/venice");
 describe("venice native image gen (recorded)", () => {
   it("generates an image end-to-end via the venice adapter + recorded fixture", async () => {
     const recording = process.env.RECORD === "1";
-    const apiKey = recording ? (process.env.VENICE_INFERENCE_KEY ?? "") : "test-venice-key";
+    const apiKey = recording ? (process.env.VENICE_API_KEY ?? "") : "test-venice-key";
     if (recording && !apiKey) {
       // No live key → nothing to capture. Skip silently rather than failing
       // local `RECORD=1` runs that just wanted to refresh fal/openai
       // fixtures.
       console.warn(
-        "venice-image-gen: VENICE_INFERENCE_KEY not set, skipping record. " +
+        "venice-image-gen: VENICE_API_KEY not set, skipping record. " +
           "Replay-mode runs of this test still pass against the committed fixture.",
       );
       return;
@@ -101,7 +101,7 @@ describe("venice native image gen (recorded)", () => {
       providerId: PROVIDER_ID,
       name: MODEL_NAME,
       modelString: MODEL_STRING,
-      description: "Venice flux-dev-uncensored — supports negativePrompt",
+      description: "Venice SD 3.5 — supports negativePrompt",
       capabilities: { aspectRatios: ["1:1"], negativePrompt: true },
       userSelectable: true,
       provider: providerRow,

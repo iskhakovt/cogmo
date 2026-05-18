@@ -19,7 +19,7 @@
  * Modes:
  * - **replay** (default, CI): unmatched requests return 503 with a
  *   re-record hint (same posture as fal-mock / daytona-mock).
- * - **record** (local, `RECORD=1 VENICE_INFERENCE_KEY=...`): passes through
+ * - **record** (local, `RECORD=1 VENICE_API_KEY=...`): passes through
  *   to real Venice, captures the response (headers + body), writes the
  *   fixture, and returns the response to the caller. Replay-ready
  *   immediately.
@@ -102,7 +102,7 @@ async function handleGenerate(
     } catch {
       return new Response(
         `venice-mock: no fixture for key "${key}" (model=${body.model} prompt="${body.prompt.slice(0, 60)}..."). ` +
-          "Re-record with RECORD=1 VENICE_INFERENCE_KEY=... pnpm test:record.",
+          "Re-record with RECORD=1 VENICE_API_KEY=... pnpm test:record.",
         { status: 503, headers: { "Content-Type": "text/plain" } },
       );
     }

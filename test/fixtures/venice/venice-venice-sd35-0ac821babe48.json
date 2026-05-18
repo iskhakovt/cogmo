@@ -1,0 +1,37 @@
+{
+  "status": 200,
+  "headers": {
+    "Content-Type": "application/json; charset=utf-8",
+    "x-venice-is-blurred": "false",
+    "x-venice-is-content-violation": "false"
+  },
+  "body": {
+    "id": "3sKO6242Jk10EDFgFINR-AFxcDvXgL2v",
+    "images": [
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII="
+    ],
+    "request": {
+      "success": true,
+      "data": {
+        "embed_exif_metadata": false,
+        "format": "png",
+        "height": 1024,
+        "hide_watermark": false,
+        "model": "venice-sd35",
+        "prompt": "A watercolor painting of a fox curled up in a forest clearing at dusk.",
+        "return_binary": false,
+        "safe_mode": true,
+        "seed": -708482614,
+        "steps": 20,
+        "aspect_ratio": "1:1",
+        "width": 1024
+      }
+    },
+    "timing": {
+      "inferenceDuration": 5574,
+      "inferencePreprocessingTime": 5606,
+      "inferenceQueueTime": 1067,
+      "total": 6683
+    }
+  }
+}
