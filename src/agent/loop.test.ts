@@ -14,7 +14,12 @@ import type {
   StreamEvent,
 } from "../llm/types.js";
 import { logger } from "../logger.js";
-import type { AgentLoopParams, StepRunner, StreamingAgentLoopParams } from "./loop.js";
+import type {
+  AgentLoopParams,
+  AgentLoopResult,
+  StepRunner,
+  StreamingAgentLoopParams,
+} from "./loop.js";
 import { clearOldThinking, runAgentLoop, runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
 import { defineTool, ToolRegistry } from "./tools.js";
@@ -72,8 +77,8 @@ function toolUseResponse(toolName: string, toolId: string, input: unknown): LlmR
   };
 }
 
-// Fields these tests almost never vary. Defaulted by `loopParams` /
-// `streamingLoopParams` so each call only states what's behaviourally
+// Fields these tests almost never vary. Defaulted by `testRunAgentLoop` /
+// `testRunStreamingAgentLoop` so each call only states what's behaviourally
 // relevant (provider, tools, messages, plus the variant onEvent / mock
 // turnLogger / etc.). Overriding any of them just means setting it in
 // the override object.
@@ -83,24 +88,24 @@ type LoopOverrides = Omit<AgentLoopParams, LoopDefaultable> &
 type StreamingLoopOverrides = Omit<StreamingAgentLoopParams, LoopDefaultable> &
   Partial<Pick<StreamingAgentLoopParams, LoopDefaultable>>;
 
-function loopParams(overrides: LoopOverrides): AgentLoopParams {
-  return {
+function testRunAgentLoop(overrides: LoopOverrides): Promise<AgentLoopResult> {
+  return runAgentLoop({
     model: "test",
     systemPrompt: "sys",
     service: stubService(),
     turnLogger: logger,
     ...overrides,
-  };
+  });
 }
 
-function streamingLoopParams(overrides: StreamingLoopOverrides): StreamingAgentLoopParams {
-  return {
+function testRunStreamingAgentLoop(overrides: StreamingLoopOverrides): Promise<AgentLoopResult> {
+  return runStreamingAgentLoop({
     model: "test",
     systemPrompt: "sys",
     service: stubService(),
     turnLogger: logger,
     ...overrides,
-  };
+  });
 }
 
 describe("runAgentLoop", () => {
@@ -108,13 +113,11 @@ describe("runAgentLoop", () => {
     const provider = mockProvider([textResponse("Hello!")]);
     const tools = new ToolRegistry();
 
-    const result = await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "Hi" }],
-        tools,
-      }),
-    );
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "Hi" }],
+      tools,
+    });
 
     expect(result.text).toBe("Hello!");
     expect(result.iterations).toBe(1);
@@ -139,13 +142,11 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "echo ping" }],
-        tools,
-      }),
-    );
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "echo ping" }],
+      tools,
+    });
 
     expect(result.text).toBe("Got: pong");
     expect(result.iterations).toBe(2);
@@ -167,13 +168,11 @@ describe("runAgentLoop", () => {
 
     const tools = new ToolRegistry();
 
-    const result = await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "use magic" }],
-        tools,
-      }),
-    );
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "use magic" }],
+      tools,
+    });
 
     expect(result.iterations).toBe(2);
     expect(result.messages[2]!.content).toEqual([
@@ -204,13 +203,11 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "fail" }],
-        tools,
-      }),
-    );
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "fail" }],
+      tools,
+    });
 
     expect(result.iterations).toBe(2);
     expect(result.messages[2]!.content).toEqual([
@@ -250,13 +247,11 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "do both" }],
-        tools,
-      }),
-    );
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "do both" }],
+      tools,
+    });
 
     expect(result.text).toBe("Both done");
     expect(result.messages[2]!.content).toEqual([
@@ -283,14 +278,12 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "loop" }],
-        tools,
-        maxIterations: 2,
-      }),
-    );
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "loop" }],
+      tools,
+      maxIterations: 2,
+    });
 
     expect(result.iterations).toBe(2);
     expect(provider.chat).toHaveBeenCalledTimes(2);
@@ -321,13 +314,11 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "echo" }],
-        tools,
-      }),
-    );
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "echo" }],
+      tools,
+    });
 
     expect(result.iterations).toBe(2);
     // Pair-closing tool_result must follow the tool_use; no orphan tool_use
@@ -363,13 +354,11 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "echo" }],
-        tools,
-      }),
-    );
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "echo" }],
+      tools,
+    });
 
     expect(result.iterations).toBe(2);
     expect(result.newMessages[1]).toEqual({
@@ -382,13 +371,11 @@ describe("runAgentLoop", () => {
     const provider = mockProvider([textResponse("No tools here")]);
     const tools = new ToolRegistry();
 
-    await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "hi" }],
-        tools,
-      }),
-    );
+    await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+    });
 
     const callArgs = vi.mocked(provider.chat).mock.calls[0]![0];
     expect(callArgs.tools).toBeUndefined();
@@ -399,13 +386,11 @@ describe("runAgentLoop", () => {
     const tools = new ToolRegistry();
     const original = [{ role: "user" as const, content: "hi" }];
 
-    await runAgentLoop(
-      loopParams({
-        provider,
-        messages: original,
-        tools,
-      }),
-    );
+    await testRunAgentLoop({
+      provider,
+      messages: original,
+      tools,
+    });
 
     expect(original).toHaveLength(1);
   });
@@ -429,14 +414,12 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "spy" }],
-        tools,
-        service: svc,
-      }),
-    );
+    await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "spy" }],
+      tools,
+      service: svc,
+    });
 
     expect(receivedService).toBe(svc);
   });
@@ -483,13 +466,11 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "gen three" }],
-        tools,
-      }),
-    );
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "gen three" }],
+      tools,
+    });
 
     expect(result.messages[2]!.content).toEqual([
       { type: "tool_result", toolUseId: "t1", content: "out-1" },
@@ -563,13 +544,11 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "mixed" }],
-        tools,
-      }),
-    );
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "mixed" }],
+      tools,
+    });
 
     expect(result.messages[2]!.content).toEqual([
       { type: "tool_result", toolUseId: "s1", content: "out-1" },
@@ -618,13 +597,11 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "two writes" }],
-        tools,
-      }),
-    );
+    await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "two writes" }],
+      tools,
+    });
 
     expect(maxConcurrent).toBe(1);
     expect(order).toEqual(["first", "second"]);
@@ -671,13 +648,11 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "safe + ghost + safe" }],
-        tools,
-      }),
-    );
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "safe + ghost + safe" }],
+      tools,
+    });
 
     expect(result.messages[2]!.content).toEqual([
       { type: "tool_result", toolUseId: "s1", content: "ok" },
@@ -735,16 +710,14 @@ describe("runStreamingAgentLoop", () => {
     const tools = new ToolRegistry();
     const collected: StreamEvent[] = [];
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "hi" }],
-        tools,
-        onEvent: async (e) => {
-          collected.push(e);
-        },
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+    });
 
     expect(result.text).toBe("Hello world");
     expect(result.iterations).toBe(1);
@@ -781,16 +754,14 @@ describe("runStreamingAgentLoop", () => {
 
     const collected: StreamEvent[] = [];
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "echo ping" }],
-        tools,
-        onEvent: async (e) => {
-          collected.push(e);
-        },
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "echo ping" }],
+      tools,
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+    });
 
     expect(result.text).toBe("Got: pong");
     expect(result.iterations).toBe(2);
@@ -822,16 +793,14 @@ describe("runStreamingAgentLoop", () => {
     const tools = new ToolRegistry();
     const order: string[] = [];
 
-    await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "hi" }],
-        tools,
-        onEvent: async (e) => {
-          if (e.type === "text_delta") order.push(e.text);
-        },
-      }),
-    );
+    await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+      onEvent: async (e) => {
+        if (e.type === "text_delta") order.push(e.text);
+      },
+    });
 
     expect(order).toEqual(["A", "B", "C"]);
   });
@@ -843,14 +812,12 @@ describe("runStreamingAgentLoop", () => {
     const tools = new ToolRegistry();
     const original = [{ role: "user" as const, content: "hi" }];
 
-    await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: original,
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    await testRunStreamingAgentLoop({
+      provider,
+      messages: original,
+      tools,
+      onEvent: async () => {},
+    });
 
     expect(original).toHaveLength(1);
   });
@@ -881,15 +848,13 @@ describe("runStreamingAgentLoop", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "loop" }],
-        tools,
-        maxIterations: 2,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "loop" }],
+      tools,
+      maxIterations: 2,
+      onEvent: async () => {},
+    });
 
     expect(result.iterations).toBe(2);
     expect(provider.chatStream).toHaveBeenCalledTimes(2);
@@ -917,14 +882,12 @@ describe("runStreamingAgentLoop", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "echo" }],
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "echo" }],
+      tools,
+      onEvent: async () => {},
+    });
 
     expect(result.iterations).toBe(2);
     expect(result.newMessages[1]).toEqual({
@@ -956,14 +919,12 @@ describe("runStreamingAgentLoop", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "echo" }],
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "echo" }],
+      tools,
+      onEvent: async () => {},
+    });
 
     expect(result.iterations).toBe(2);
     // Assistant tool_use must be paired with the user tool_result before the
@@ -1016,14 +977,12 @@ describe("runStreamingAgentLoop", () => {
     process.on("unhandledRejection", listener);
     try {
       await expect(
-        runStreamingAgentLoop(
-          streamingLoopParams({
-            provider,
-            messages: [{ role: "user", content: "hi" }],
-            tools: new ToolRegistry(),
-            onEvent: async () => {},
-          }),
-        ),
+        testRunStreamingAgentLoop({
+          provider,
+          messages: [{ role: "user", content: "hi" }],
+          tools: new ToolRegistry(),
+          onEvent: async () => {},
+        }),
       ).rejects.toBe(failure);
 
       // Flush microtasks + macrotasks so any pending `unhandledRejection`
@@ -1048,16 +1007,14 @@ describe("runStreamingAgentLoop", () => {
     const tools = new ToolRegistry();
     const collected: StreamEvent[] = [];
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "think" }],
-        tools,
-        onEvent: async (e) => {
-          collected.push(e);
-        },
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "think" }],
+      tools,
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+    });
 
     // thinking_delta NOT forwarded to onEvent
     expect(collected).toEqual([{ type: "text_delta", text: "Answer" }]);
@@ -1097,14 +1054,12 @@ describe("tool durability (stepRun)", () => {
       return fn();
     };
 
-    const result = await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        stepRun,
-      }),
-    );
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      stepRun,
+    });
 
     expect(stepRunCalls).toEqual([{ id: "tool-paid-toolu_01ABC" }]);
     expect(handlerCalls).toBe(1);
@@ -1130,14 +1085,12 @@ describe("tool durability (stepRun)", () => {
       },
     });
 
-    const result = await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        // no stepRun
-      }),
-    );
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      // no stepRun
+    });
 
     expect(handlerCalls).toBe(1);
     expect(result.messages[2]!.content).toEqual([
@@ -1159,14 +1112,12 @@ describe("tool durability (stepRun)", () => {
 
     const stepRun = vi.fn<StepRunner>(async (_id, fn) => fn());
 
-    await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        stepRun,
-      }),
-    );
+    await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      stepRun,
+    });
 
     expect(stepRun).not.toHaveBeenCalled();
   });
@@ -1200,14 +1151,12 @@ describe("tool durability (stepRun)", () => {
       return fn();
     };
 
-    await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        stepRun,
-      }),
-    );
+    await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      stepRun,
+    });
 
     expect(ids).toEqual(["tool-paid-toolu_A", "tool-paid-toolu_B"]);
     expect(new Set(ids).size).toBe(ids.length);
@@ -1237,15 +1186,13 @@ describe("tool durability (stepRun)", () => {
       return fn();
     };
 
-    await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        onEvent: async () => {},
-        stepRun,
-      }),
-    );
+    await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async () => {},
+      stepRun,
+    });
 
     expect(stepRunCalls).toEqual(["tool-paid-toolu_stream"]);
   });
@@ -1371,15 +1318,13 @@ describe("turnLogger plumbing", () => {
     const fallbackSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
 
     try {
-      await runStreamingAgentLoop(
-        streamingLoopParams({
-          provider,
-          messages: historyWithStrayToolResult(),
-          tools: new ToolRegistry(),
-          onEvent: async () => {},
-          turnLogger,
-        }),
-      );
+      await testRunStreamingAgentLoop({
+        provider,
+        messages: historyWithStrayToolResult(),
+        tools: new ToolRegistry(),
+        onEvent: async () => {},
+        turnLogger,
+      });
 
       expect(turnLogger.warn).toHaveBeenCalledWith(
         expect.objectContaining({ repairCount: expect.any(Number) }),
@@ -1400,14 +1345,12 @@ describe("turnLogger plumbing", () => {
     const provider = mockProvider([textResponse("ok")]);
     const turnLogger = mock<Logger>();
 
-    await runAgentLoop(
-      loopParams({
-        provider,
-        messages: historyWithStrayToolResult(),
-        tools: new ToolRegistry(),
-        turnLogger,
-      }),
-    );
+    await testRunAgentLoop({
+      provider,
+      messages: historyWithStrayToolResult(),
+      tools: new ToolRegistry(),
+      turnLogger,
+    });
 
     expect(turnLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ repairCount: expect.any(Number) }),
@@ -1431,15 +1374,13 @@ describe("turnLogger plumbing", () => {
     );
     const turnLogger = mock<Logger>();
 
-    await runAgentLoop(
-      loopParams({
-        provider,
-        messages: [{ role: "user", content: "loop" }],
-        tools,
-        maxIterations: 1,
-        turnLogger,
-      }),
-    );
+    await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "loop" }],
+      tools,
+      maxIterations: 1,
+      turnLogger,
+    });
 
     expect(turnLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ maxIterations: 1 }),
@@ -1549,17 +1490,15 @@ describe("in-loop model-misbehavior repair", () => {
     const turnLogger = mock<Logger>();
     const collected: StreamEvent[] = [];
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "hi" }],
-        tools: new ToolRegistry(),
-        onEvent: async (e) => {
-          collected.push(e);
-        },
-        turnLogger,
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      turnLogger,
+    });
 
     expect(result.text).toBe("ok now");
     expect(result.iterations).toBe(2);
@@ -1597,15 +1536,13 @@ describe("in-loop model-misbehavior repair", () => {
     ]);
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "hi" }],
-        tools: new ToolRegistry(),
-        onEvent: async () => {},
-        turnLogger,
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+      turnLogger,
+    });
 
     expect(result.degraded).toEqual({
       reason: "model returned an empty turn",
@@ -1653,17 +1590,15 @@ describe("in-loop model-misbehavior repair", () => {
     const turnLogger = mock<Logger>();
     const collected: StreamEvent[] = [];
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "hi" }],
-        tools,
-        onEvent: async (e) => {
-          collected.push(e);
-        },
-        turnLogger,
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      turnLogger,
+    });
 
     expect(result.degraded).toBeUndefined();
     expect(result.text).toBe("done");
@@ -1701,14 +1636,12 @@ describe("in-loop model-misbehavior repair", () => {
     (provider.chat as ReturnType<typeof vi.fn>).mockRejectedValue(replayErr);
 
     await expect(
-      runStreamingAgentLoop(
-        streamingLoopParams({
-          provider,
-          messages: [{ role: "user", content: "hi" }],
-          tools: new ToolRegistry(),
-          onEvent: async () => {},
-        }),
-      ),
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async () => {},
+      }),
     ).rejects.toBe(replayErr);
   });
 
@@ -1725,15 +1658,13 @@ describe("in-loop model-misbehavior repair", () => {
     (provider.chat as ReturnType<typeof vi.fn>).mockRejectedValue(replayErr);
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "hi" }],
-        tools: new ToolRegistry(),
-        onEvent: async () => {},
-        turnLogger,
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+      turnLogger,
+    });
 
     expect(result.degraded).toEqual({
       reason: "non-streaming replay still could not parse tool-call arguments",
@@ -1757,15 +1688,13 @@ describe("in-loop model-misbehavior repair", () => {
     (provider.chat as ReturnType<typeof vi.fn>).mockRejectedValue(replayRefusal);
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "hi" }],
-        tools: new ToolRegistry(),
-        onEvent: async () => {},
-        turnLogger,
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+      turnLogger,
+    });
 
     expect(result.degraded).toEqual({
       reason: "model refused the non-streaming replay",
@@ -1803,14 +1732,12 @@ describe("in-loop model-misbehavior repair", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "hi" }],
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+      onEvent: async () => {},
+    });
 
     expect(result.degraded).toEqual({
       reason: "streamed tool-call arguments could not be parsed",
@@ -1824,15 +1751,13 @@ describe("in-loop model-misbehavior repair", () => {
     ]);
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "naughty" }],
-        tools: new ToolRegistry(),
-        onEvent: async () => {},
-        turnLogger,
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "naughty" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+      turnLogger,
+    });
 
     expect(result.degraded).toEqual({
       reason: "model returned a policy refusal",
@@ -1855,15 +1780,13 @@ describe("in-loop model-misbehavior repair", () => {
     const { provider } = repairStreamProvider([{ kind: "throw", error: refusal }]);
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "naughty" }],
-        tools: new ToolRegistry(),
-        onEvent: async () => {},
-        turnLogger,
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "naughty" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+      turnLogger,
+    });
 
     expect(result.degraded).toEqual({
       reason: "model refused the request",
@@ -1904,14 +1827,12 @@ describe("in-loop model-misbehavior repair", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "hi" }],
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+      onEvent: async () => {},
+    });
 
     expect(result.degraded).toBeUndefined();
     expect(result.text).toBe("done");
@@ -1938,14 +1859,12 @@ describe("in-loop model-misbehavior repair", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "hi" }],
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+      onEvent: async () => {},
+    });
 
     expect(result.degraded?.subtype).toBe("empty_end_turn");
     // newMessages should contain the successful tool round (assistant
@@ -1978,14 +1897,12 @@ describe("in-loop model-misbehavior repair", () => {
     const { provider } = repairStreamProvider([{ kind: "throw", error: transientErr }]);
 
     await expect(
-      runStreamingAgentLoop(
-        streamingLoopParams({
-          provider,
-          messages: [{ role: "user", content: "hi" }],
-          tools: new ToolRegistry(),
-          onEvent: async () => {},
-        }),
-      ),
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async () => {},
+      }),
     ).rejects.toBe(transientErr);
   });
 });
@@ -2030,15 +1947,13 @@ describe("loop-pathology fingerprint", () => {
     tools.register(readOnlyTool());
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        onEvent: async () => {},
-        turnLogger,
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async () => {},
+      turnLogger,
+    });
 
     expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
     // Exactly three iterations — the trip fires at the end of iteration 3
@@ -2071,14 +1986,12 @@ describe("loop-pathology fingerprint", () => {
     const tools = new ToolRegistry();
     tools.register(writeTool());
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async () => {},
+    });
 
     // No trip — the loop completed naturally.
     expect(result.degraded).toBeUndefined();
@@ -2111,14 +2024,12 @@ describe("loop-pathology fingerprint", () => {
     tools.register(readOnlyTool());
     tools.register(writeTool());
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async () => {},
+    });
 
     expect(result.degraded).toBeUndefined();
     expect(result.text).toBe("done");
@@ -2144,15 +2055,13 @@ describe("loop-pathology fingerprint", () => {
     tools.register(readOnlyTool());
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        onEvent: async () => {},
-        turnLogger,
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async () => {},
+      turnLogger,
+    });
 
     expect(result.degraded).toEqual({
       reason: "stuck_loop",
@@ -2186,14 +2095,12 @@ describe("loop-pathology fingerprint", () => {
     const tools = new ToolRegistry();
     tools.register(readOnlyTool());
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "explore" }],
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "explore" }],
+      tools,
+      onEvent: async () => {},
+    });
 
     expect(result.degraded).toBeUndefined();
     expect(result.text).toBe("done");
@@ -2226,14 +2133,12 @@ describe("loop-pathology fingerprint", () => {
     const tools = new ToolRegistry();
     tools.register(readOnlyTool());
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "check" }],
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "check" }],
+      tools,
+      onEvent: async () => {},
+    });
 
     expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
     expect(result.iterations).toBe(3);
@@ -2278,14 +2183,12 @@ describe("loop-pathology fingerprint", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async () => {},
+    });
 
     expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
     expect(result.iterations).toBe(3);
@@ -2313,14 +2216,12 @@ describe("loop-pathology fingerprint", () => {
     const tools = new ToolRegistry();
     tools.register(unflaggedTool);
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async () => {},
+    });
 
     expect(result.degraded).toBeUndefined();
     expect(result.iterations).toBe(4);
@@ -2351,14 +2252,12 @@ describe("loop-pathology fingerprint", () => {
     const tools = new ToolRegistry();
     tools.register(erroringTool);
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async () => {},
+    });
 
     expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
     expect(result.iterations).toBe(3);
@@ -2379,14 +2278,12 @@ describe("loop-pathology fingerprint", () => {
     const tools = new ToolRegistry();
     tools.register(readOnlyTool());
 
-    const result = await runStreamingAgentLoop(
-      streamingLoopParams({
-        provider,
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        onEvent: async () => {},
-      }),
-    );
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async () => {},
+    });
 
     expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
     // Iterations 1 and 2: assistant tool_use + user tool_result each.
