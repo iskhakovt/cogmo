@@ -5,6 +5,7 @@ import type { ImageProvider } from "../llm/image-providers.js";
 import { logger } from "../logger.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
+import { detectImageFailure } from "./image-moderation.js";
 import { defineTool, type ToolSpec } from "./tools.js";
 
 /**
@@ -274,7 +275,7 @@ export function createImageTools(deps: {
           ? { text: input.prompt, images: [referenceImageBytes] }
           : input.prompt;
 
-        const { image } = await withRetry(
+        const { image, providerMetadata } = await withRetry(
           async () => {
             try {
               // AI SDK types aspectRatio as `${number}:${number}`. Our Zod
@@ -308,6 +309,19 @@ export function createImageTools(deps: {
           },
           { retries: 2, context: `image.generate.${row.name}` },
         );
+
+        const detection = detectImageFailure({
+          image,
+          providerMetadata,
+          providerKind: provider.kind,
+        });
+        if (!detection.ok) {
+          logger.warn(
+            { provider: row.name, model: row.modelString, reason: detection.reason },
+            "image moderation/failure detected",
+          );
+          return `Error: ${detection.reason}`;
+        }
 
         const buffer = Buffer.from(image.uint8Array);
         const path = await deps.attachments.upload(buffer, image.mediaType, "generated");
