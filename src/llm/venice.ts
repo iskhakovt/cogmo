@@ -167,11 +167,13 @@ export class VeniceImageProvider {
       body: JSON.stringify(body),
     });
 
-    // 4xx → non-retryable. Venice rejects bad keys (401), unknown models
-    // (400), and quota issues (403) on this surface; retrying just burns
-    // budget. Promote to AbortError so withRetry stops immediately, same
-    // shape the AI SDK 4xx classification produces upstream.
-    if (resp.status >= 400 && resp.status < 500) {
+    // 4xx → non-retryable, except 429 (rate limit) which is transient and
+    // benefits from withRetry's exponential backoff. Bad keys (401),
+    // unknown models (400), and quota issues (403) all retry-burn budget.
+    // 429 and 5xx fall through to the default retry path, matching the AI
+    // SDK's `APICallError.isRetryable` classification used on the fal/oai
+    // path and `design/image-generation.md`'s retry-semantics spec.
+    if (resp.status >= 400 && resp.status < 500 && resp.status !== 429) {
       const detail = await resp.text().catch(() => "");
       throw new AbortError(
         `Venice image generation failed: HTTP ${resp.status}${detail ? ` — ${detail.slice(0, 500)}` : ""}`,

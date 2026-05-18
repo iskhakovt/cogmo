@@ -208,6 +208,31 @@ describe("VeniceImageProvider.generate", () => {
     await expect(provider.generate({ model: "m", prompt: "p" })).rejects.toThrow(/HTTP 401/);
   });
 
+  it("throws a plain Error (retryable) on HTTP 429 — rate limit is transient", async () => {
+    // 429 is the only 4xx that benefits from withRetry's exponential
+    // backoff. Promoting it to AbortError (as bad keys, unknown models,
+    // and quota errors are) would fail the call after a rate-limit blip
+    // that would have cleared on the next attempt.
+    const fetchFn = mockFetch(
+      () =>
+        new Response(JSON.stringify({ error: "rate limit exceeded" }), {
+          status: 429,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+
+    const provider = new VeniceImageProvider({
+      apiKey: "sk",
+      baseUrl: "https://api.venice.ai/api/v1",
+      defaults: {},
+      fetch: fetchFn,
+    });
+
+    const result = provider.generate({ model: "m", prompt: "p" });
+    await expect(result).rejects.toThrow(/HTTP 429/);
+    await expect(result).rejects.not.toBeInstanceOf(AbortError);
+  });
+
   it("throws a plain Error on 5xx (retryable upstream)", async () => {
     const fetchFn = mockFetch(() => new Response("upstream is down", { status: 503 }));
 
