@@ -24,7 +24,8 @@ const USAGE = `Usage: cogmo image-model <command> [args]
 Commands:
   add <name> --provider <name> --model-string <id> --description "<text>"
               [--ratios 1:1,16:9,...] [--seed]
-              [--image-input required|optional] [--no-selectable]
+              [--image-input required|optional] [--negative-prompt]
+              [--no-selectable]
 
               Register an image model. \`name\` is the LLM-facing key
               (must be globally unique — convention: <provider>/<slug>).
@@ -36,7 +37,12 @@ Commands:
               \`--image-input\` advertises that this model accepts a
               reference image — \`required\` for edit-only models like
               fal/flux-kontext, \`optional\` for models that accept one but
-              don't require it. Only supported for fal providers today.
+              don't require it. Only supported for fal providers.
+              \`--negative-prompt\` advertises that this model accepts a
+              free-form negative prompt; the field is then forwarded to
+              fal (via providerOptions.fal.negative_prompt) or venice
+              (native body field). openai-compatible models typically
+              don't accept one — leave the flag off.
 
   list [--provider <name>] [--all]
               Show catalog rows. Default lists user-selectable models only;
@@ -138,6 +144,7 @@ async function addModelCmd(
     ...(opts.ratios && { aspectRatios: opts.ratios }),
     ...(opts.seed === true && { seed: true }),
     ...(opts.imageInput && { imageInput: opts.imageInput }),
+    ...(opts.negativePrompt === true && { negativePrompt: true }),
   };
 
   try {
@@ -178,11 +185,12 @@ async function listModels(
     io.out("(no image models)");
     return 0;
   }
-  io.out("name\tprovider\tmodel_string\tratios\tseed\timage_input\tselectable");
+  io.out("name\tprovider\tmodel_string\tratios\tseed\timage_input\tneg_prompt\tselectable");
   for (const row of filtered) {
     const ratios = row.capabilities.aspectRatios?.join(",") ?? "-";
     const seed = row.capabilities.seed === true ? "yes" : "no";
     const imageInput = row.capabilities.imageInput ?? "-";
+    const negativePrompt = row.capabilities.negativePrompt === true ? "yes" : "no";
     io.out(
       [
         row.name,
@@ -191,6 +199,7 @@ async function listModels(
         ratios,
         seed,
         imageInput,
+        negativePrompt,
         row.userSelectable ? "yes" : "no",
       ].join("\t"),
     );
@@ -226,6 +235,7 @@ interface ParsedFlags {
   ratios: NonNullable<ImageModelCapabilities["aspectRatios"]> | undefined;
   seed: boolean | undefined;
   imageInput: NonNullable<ImageModelCapabilities["imageInput"]> | undefined;
+  negativePrompt: boolean | undefined;
   userSelectable: boolean;
   all: boolean;
 }
@@ -238,6 +248,7 @@ function parseFlags(args: readonly string[]): ParsedFlags {
     ratios: undefined,
     seed: undefined,
     imageInput: undefined,
+    negativePrompt: undefined,
     userSelectable: true,
     all: false,
   };
@@ -262,6 +273,9 @@ function parseFlags(args: readonly string[]): ParsedFlags {
         break;
       case "--seed":
         out.seed = true;
+        break;
+      case "--negative-prompt":
+        out.negativePrompt = true;
         break;
       case "--image-input": {
         const value = takeValue(args, i, flag);

@@ -71,12 +71,13 @@ We evaluated the AI SDK for replacing our `LlmProvider` interface (`AnthropicPro
 
 ## Providers `[confirmed]`
 
-Two provider types, both via Vercel AI SDK adapters. The `type` column on `image_providers` is a `pgEnum` — adding a third value is always a code change (new adapter branch in `buildImageProvider`) *and* a migration (`ALTER TYPE ... ADD VALUE`), both shipped together. The enum gives `switch(provider.type)` exhaustive checking with no `assertNever`.
+Three provider types. Two go through Vercel AI SDK adapters; one is hand-rolled. The `type` column on `image_providers` is a `pgEnum` — adding a value is always a code change (new adapter branch in `buildImageProvider`) *and* a migration (`ALTER TYPE ... ADD VALUE`), both shipped together. The enum gives `switch(provider.type)` exhaustive checking with no `assertNever`.
 
 | Type | Package | Used for |
 |-|-|-|
 | `fal` | `@ai-sdk/fal` | fal.ai (seeded by default when `fal_api_key` is configured) |
-| `openai_compatible` | `@ai-sdk/openai-compatible` | Venice.ai, OpenAI's `/images/generations`, any provider exposing an OpenAI-shaped images endpoint |
+| `openai_compatible` | `@ai-sdk/openai-compatible` | OpenAI's `/images/generations`, custom inference servers, anything exposing an OpenAI-shaped images endpoint |
+| `venice` | hand-rolled (`src/llm/venice.ts`) | Venice.ai's native `/api/v1/image/generate` — supports `safe_mode`, `negative_prompt`, response-header censorship signals |
 
 The `openai_compatible` adapter calls `provider.imageModel(modelString)` against `${baseURL}/images/generations`. Pin a version of `@ai-sdk/openai-compatible` that exposes `.imageModel()` — verify on upgrade. If a provider's API diverges from the OpenAI shape (bespoke async polling, non-standard size parameter), write a thin `ImageModelV2` (~100 LoC) instead of mangling it through openai-compatible.
 
@@ -105,11 +106,39 @@ const model = fal.image("fal-ai/flux/dev");
 
 These are escape hatches — not exposed in the tool schema. The LLM shouldn't tune inference hyperparameters; the prompt is the lever.
 
+### Venice.ai (native adapter) `[confirmed]`
+
+Hand-rolled, not via the AI SDK. Venice exposes an OpenAI-compat path (`/v1/images/generations`) **and** a native path (`/api/v1/image/generate`). The OpenAI-compat path strict-rejects Venice's own bespoke knobs (`safe_mode`, `negative_prompt`) with HTTP 400 (`Unrecognized key(s) in object`) — using it would mean dropping Venice's value-add. The native path accepts them and signals censorship via response headers. `VeniceImageProvider` (`src/llm/venice.ts`) wraps it.
+
+**Provider-level defaults** live in `image_providers.attrs.imageGenerationDefaults` — operator policy, not LLM-controlled. The wizard prompts for `safe_mode` (Venice defaults to `true`); the other defaults are reachable via `cogmo image-provider` / direct SQL for finer control.
+
+| Field | Type | Notes |
+|-|-|-|
+| `safe_mode` | boolean | Venice default `true` (blurs flagged content); pass `false` to disable blur. When `false`, an `x-venice-is-blurred: true` response is treated as a failed generation. |
+| `cfg_scale` | number 0..20 | Classifier-free guidance strength. Lower = looser, higher = tighter. |
+| `hide_watermark` | boolean | Strip the Venice watermark (model-dependent). |
+| `style_preset` | string | Venice style preset name (e.g. `"Anime"`). Free-form; the upstream list evolves. |
+
+**Negative prompt** is a per-call field on the `generate_image` tool input gated by `image_models.capabilities.negativePrompt`. Venice forwards it directly as the body's `negative_prompt`; fal forwards via `providerOptions.fal.negative_prompt` at the AI SDK boundary; `openai_compatible` drops it (the SDK has no documented surface). Capability-absent models silently drop the field at the tool handler so the LLM contract stays honest: ask for the field, it's forwarded; capability false, it's a no-op.
+
+**Response-header censorship signals.** Venice emits two boolean headers; the adapter classifies them:
+
+| `x-venice-is-content-violation` | `x-venice-is-blurred` | `safe_mode` (provider default) | Adapter behaviour |
+|-|-|-|-|
+| `true` | any | any | Throw `AbortError("Venice rejected the prompt as a content policy violation. Try rephrasing.")`. Non-retryable. |
+| not `true` | `true` | `true` (or unset → Venice default `true`) | Pass through — operator opted in to blur. |
+| not `true` | `true` | explicitly `false` | Throw `AbortError("Venice returned a blurred image despite safe_mode=false")`. Non-retryable. |
+| not `true` | not `true` | any | Pass through — clean response. |
+
+A sibling change is landing in parallel that generalises moderation detection (fal's `providerMetadata.fal.has_nsfw_concepts`, a file-size canary) — a small follow-up will unify Venice's response-header path and fal's metadata path behind one typed error so the tool wrapper surfaces them identically.
+
+**Output format pinning.** Venice supports `webp` / `jpeg` / `png` — the adapter pins `png` for parity with fal so downstream (Telegram `sendPhoto`, AttachmentStore) doesn't change behaviour by provider. If a future provider-or-model wants a different output, lift the format into the catalog / tool surface; today it's a hand-tuned adapter invariant.
+
 ### Base URL validation
 
-Two layers, for `openai_compatible` providers:
+Two layers, for `openai_compatible` and `venice` providers:
 
-- **DB CHECK** (`chk_image_providers_base_url`) enforces `(type = 'fal' AND base_url IS NULL) OR (type = 'openai_compatible' AND base_url IS NOT NULL)`. Atomic; can't be bypassed by ad-hoc psql or a future store implementer who forgets.
+- **DB CHECK** (`chk_image_providers_base_url`) enforces per-value implications: `openai_compatible ↔ NOT NULL`, `venice ↔ NOT NULL`, `fal ↔ NULL`. Atomic; can't be bypassed by ad-hoc psql or a future store implementer who forgets.
 - **Store guard** (`addImageProvider`) adds URL hygiene the CHECK can't express: must be `https://`, no trailing slash, parseable as a URL. Throws `InvalidProviderConfigError` with a wizard-friendly message.
 
 ## Tool Definition `[confirmed]`
@@ -394,7 +423,7 @@ Combined with `Promise.allSettled`, one slow/failed S3 download doesn't block th
 | What | Where | Notes |
 |-|-|-|
 | Provider credentials | `secrets` table | Encrypted (AES-256-GCM). One row per provider — `fal_api_key`, `venice_api_key`, etc. |
-| Provider routing | `image_providers` table | `(name, type, base_url, secret_id, attrs)`. `type` is `pgEnum image_provider_type`. CHECK constraint pins the `base_url` invariant: `openai_compatible ↔ NOT NULL`, `fal ↔ NULL`. |
+| Provider routing | `image_providers` table | `(name, type, base_url, secret_id, attrs)`. `type` is `pgEnum image_provider_type`. CHECK constraint pins the `base_url` invariant: `openai_compatible ↔ NOT NULL`, `venice ↔ NOT NULL`, `fal ↔ NULL`. `attrs.imageGenerationDefaults` carries provider-level call defaults (`safe_mode`, `cfg_scale`, etc. — see ImageGenerationDefaultsSchema). |
 | Model catalog | `image_models` table | `(name, model_string, description, capabilities, user_selectable, provider_id)`. `name` is the LLM-facing key (`UNIQUE`), `model_string` is the API-facing identifier, `description` is read by the LLM at every turn, `capabilities` validated by `ImageModelCapabilitiesSchema` at the store boundary. |
 | fal defaults | `ensureFalImageDefaults` (`src/setup/seed.ts`) | Idempotent (`ON CONFLICT (name) DO NOTHING`). Wizard calls it after `fal_api_key` is provided; manually re-runnable. User edits to existing rows are preserved on re-run. |
 
@@ -419,7 +448,7 @@ Aspect ratio support varies across providers (Venice's `image_size` presets, rec
 The wizard surfaces two distinct entry points:
 
 - **`stepConfigureOptionalTools`** handles fal — a single `fal_api_key` prompt. The boot-time `ensureFalImageDefaults` seed wires the canonical 9-model catalog automatically, so the wizard doesn't ask the operator to pick fal models one by one.
-- **`stepConfigureImageProviders`** (`src/setup/wizard.ts`) handles `openai_compatible` providers (Venice, OpenAI gpt-image, custom servers). Prompts for name + base URL + API key, then loops "add a model? (name, model_string, description, ratios, seed, image-input)" until the operator declines. Same domain functions back the `cogmo image-provider` / `cogmo image-model` CLI commands — no behaviour drift between wizard and CLI.
+- **`stepConfigureImageProviders`** (`src/setup/wizard.ts`) handles `openai_compatible` and `venice` providers — Venice.ai (native API), OpenAI dall-e, custom inference servers. Asks for the provider type first, then prompts for name + base URL + API key (+ `safe_mode` default when type=venice), then loops "add a model? (name, model_string, description, ratios, seed, image-input, negative-prompt)" until the operator declines. Same domain functions back the `cogmo image-provider` / `cogmo image-model` CLI commands — no behaviour drift between wizard and CLI.
 
 Both surfaces are hot-reload-aware: changes take effect on the next message turn, not on process restart.
 
@@ -431,7 +460,7 @@ Image generation is a tool — profiles control it via `tool_set`. If `generate_
 
 ## Adding more providers
 
-Anything with an OpenAI-shaped `/images/generations` endpoint (Venice.ai, OpenAI, custom inference servers) → wizard flow as `openai_compatible`. Anything bespoke (different async pattern, non-standard size parameter) → new `image_provider_type` enum value + adapter branch in `buildImageProvider`, then the same wizard flow.
+Anything with an OpenAI-shaped `/images/generations` endpoint (OpenAI dall-e, custom inference servers) → wizard flow as `openai_compatible`. Venice.ai → `venice` (its native API ships features the OpenAI-compat path rejects). Anything bespoke (different async pattern, non-standard size parameter) → new `image_provider_type` enum value + adapter branch in `buildImageProvider`, then the same wizard flow.
 
 ## Testing `[confirmed]`
 
@@ -504,7 +533,8 @@ Commit `test/fixtures/fal/*` and `test/fixtures/recorded/*`. Embedding calls (Hi
 |-|-|-|-|
 | `ai` | Vercel AI SDK core (`generateImage`) | ~200KB | Required (runtime dep) |
 | `@ai-sdk/fal` | fal.ai provider adapter | ~few KB | Required (runtime dep) |
-| `@ai-sdk/openai-compatible` | OpenAI-shaped images endpoint adapter (Venice, OpenAI, custom) | ~few KB | Required (runtime dep). Pin a version that exposes `.imageModel()` — verify on upgrade. |
+| `@ai-sdk/openai-compatible` | OpenAI-shaped images endpoint adapter (OpenAI, custom inference servers) | ~few KB | Required (runtime dep). Pin a version that exposes `.imageModel()` — verify on upgrade. |
+| (none — hand-rolled) | Venice.ai native adapter | — | Lives at `src/llm/venice.ts`. No external SDK because Venice's native shape (response-header censorship signals, base64 inline images) doesn't fit a generic adapter. |
 
 The `ai` package also exports `generateText`/`streamText` which we don't use for text LLMs (see rationale above). Tree-shaking eliminates unused code paths at build time.
 

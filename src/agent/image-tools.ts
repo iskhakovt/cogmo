@@ -76,12 +76,14 @@ export function imageModelSlug(name: string): string {
  * and the ratios it accepts (or "fixed size" when `capabilities.aspectRatios`
  * is absent/empty). Models that accept a reference image carry a
  * `[needs reference image]` / `[optional reference image]` hint so the LLM
- * knows when to populate `referenceImage`. The prose ending is constant
- * across deployments.
+ * knows when to populate `referenceImage`. Models that accept a negative
+ * prompt carry a `[supports negativePrompt]` hint. The prose ending is
+ * constant across deployments.
  */
 function buildToolDescription(
   models: ReadonlyArray<ImageModelWithProvider>,
   anyImageInput: boolean,
+  anyNegativePrompt: boolean,
 ): string {
   const lines = models.map((m) => {
     const ratios = m.capabilities.aspectRatios;
@@ -93,7 +95,9 @@ function buildToolDescription(
         : m.capabilities.imageInput === "optional"
           ? " [optional reference image]"
           : "";
-    return `- \`${imageModelSlug(m.name)}\` — ${m.description}${ratioHint}${imageInputHint}`;
+    const negativePromptHint =
+      m.capabilities.negativePrompt === true ? " [supports negativePrompt]" : "";
+    return `- \`${imageModelSlug(m.name)}\` — ${m.description}${ratioHint}${imageInputHint}${negativePromptHint}`;
   });
   const referenceImageNote = anyImageInput
     ? [
@@ -105,16 +109,136 @@ function buildToolDescription(
           "you're editing.",
       ]
     : [];
+  const negativePromptNote = anyNegativePrompt
+    ? [
+        "",
+        "For models marked `[supports negativePrompt]`, pass `negativePrompt` to " +
+          "describe what you don't want in the image (e.g. \"low quality, blurry, " +
+          'extra fingers"). Use sparingly — the positive prompt is the main lever.',
+      ]
+    : [];
   return [
     "Generate an image from a text description. The image is returned to the user.",
     "",
     "Choose the model based on the task:",
     ...lines,
     ...referenceImageNote,
+    ...negativePromptNote,
     "",
     "Write a detailed prompt — describe subject, style, composition, colors, and mood. " +
       "The prompt is the main lever for image quality.",
   ].join("\n");
+}
+
+/**
+ * Output shape both adapters produce — matches the AI SDK's `image` field
+ * on `generateImage` so the upload path stays uniform. The venice adapter
+ * conforms directly; the AI SDK path is unwrapped through `generateViaAiSdk`.
+ */
+interface ImageBytes {
+  uint8Array: Uint8Array;
+  mediaType: string;
+}
+
+/**
+ * Carries the bytes plus the AI SDK's `providerMetadata` so the
+ * moderation hook can read provider-specific failure signals (fal's
+ * per-image NSFW flag). Venice signals censorship via response headers,
+ * handled inside its adapter and surfaced as thrown errors — it returns
+ * `providerMetadata: undefined` here.
+ */
+interface ImageGenerationResult {
+  image: ImageBytes;
+  providerMetadata: Awaited<ReturnType<typeof generateImage>>["providerMetadata"] | undefined;
+}
+
+/**
+ * Run the AI-SDK-backed providers (fal, openai_compatible). Pulled out of
+ * the handler body so the per-provider request assembly stays declarative
+ * and the surrounding control flow reads as a switch over `provider.kind`.
+ *
+ * Negative-prompt forwarding is provider-shaped:
+ * - `fal` accepts it via `providerOptions.fal.negative_prompt` (a
+ *   provider-specific extension layered on top of the SDK's generic
+ *   `providerOptions` knob).
+ * - `oai` (`@ai-sdk/openai-compatible`) has no documented negative-prompt
+ *   surface, so we drop the field here. The capability gate at the call
+ *   site should keep us out of this branch in practice; this is the
+ *   belt-and-braces backup.
+ */
+async function generateViaAiSdk(args: {
+  provider: Extract<ImageProvider, { kind: "fal" | "oai" }>;
+  row: ImageModelWithProvider;
+  prompt: string;
+  referenceImageBytes?: Buffer;
+  aspectRatio?: string;
+  seed?: number;
+  negativePrompt?: string;
+}): Promise<ImageGenerationResult> {
+  // Returns both the bytes and providerMetadata so the moderation hook
+  // upstream can read fal's per-image NSFW signal without re-routing
+  // through a second call.
+  const imageModel =
+    args.provider.kind === "fal"
+      ? args.provider.provider.image(args.row.modelString)
+      : args.provider.provider.imageModel(args.row.modelString);
+
+  // The AI SDK's `prompt` field accepts either `string` (text-only) or
+  // `{ text, images }` (image input). The latter is a fal-provider
+  // extension at runtime — the SDK's public type only declares `string`,
+  // so we type the value precisely here and cast only at the
+  // `generateImage` call site.
+  type GeneratePromptArg = string | { text: string; images: Buffer[] };
+  const promptArg: GeneratePromptArg = args.referenceImageBytes
+    ? { text: args.prompt, images: [args.referenceImageBytes] }
+    : args.prompt;
+
+  try {
+    const { image, providerMetadata } = await generateImage({
+      model: imageModel,
+      // `prompt` accepts the object shape at runtime for fal but the
+      // public `generateImage` signature only declares `string`
+      // (provider-specific extension surfaced via fal's `prompt.images`
+      // — see vercel/ai #11573 thread on ai-sdk-providers/fal docs).
+      prompt: promptArg as unknown as string,
+      ...(args.aspectRatio !== undefined && {
+        // AI SDK types aspectRatio as `${number}:${number}`. Our Zod
+        // enum validated the value against the same shape; the cast
+        // bridges the literal-template typing.
+        aspectRatio: args.aspectRatio as `${number}:${number}`,
+      }),
+      ...(args.seed !== undefined && { seed: args.seed }),
+      // negative_prompt routing differs by provider shape:
+      //   - fal: passes through `providerOptions.fal.negative_prompt`
+      //     which the @ai-sdk/fal adapter folds into the request body.
+      //   - openai_compatible: same passthrough mechanism, keyed by the
+      //     provider's `name` (the value used when `createOpenAICompatible({
+      //     name, ... })` was constructed in `image-providers.ts`).
+      //     Canonical OpenAI rejects with HTTP 400; servers that accept
+      //     extra body fields (Together, Replicate's shim, custom)
+      //     forward the value. The capability flag is the operator's
+      //     declaration of "my chosen server takes this".
+      //   - venice: forwarded via the native adapter, not the AI SDK
+      //     `providerOptions` shape — handled in the venice branch.
+      ...(args.provider.kind === "fal" &&
+        args.negativePrompt !== undefined && {
+          providerOptions: { fal: { negative_prompt: args.negativePrompt } },
+        }),
+      ...(args.provider.kind === "oai" &&
+        args.negativePrompt !== undefined && {
+          providerOptions: { [args.provider.row.name]: { negative_prompt: args.negativePrompt } },
+        }),
+    });
+    return { image, providerMetadata };
+  } catch (err) {
+    // Structured 4xx classification — `isRetryable: false` on 4xx
+    // (except 429) means re-trying the same request burns budget without
+    // helping; promote to AbortError so withRetry stops.
+    if (APICallError.isInstance(err) && err.isRetryable === false) {
+      throw new AbortError(err.message);
+    }
+    throw err;
+  }
 }
 
 /**
@@ -181,11 +305,12 @@ export function createImageTools(deps: {
       : z.never().optional();
 
   const anyImageInput = deps.models.some((m) => m.capabilities.imageInput !== undefined);
+  const anyNegativePrompt = deps.models.some((m) => m.capabilities.negativePrompt === true);
 
   return [
     defineTool({
       name: "generate_image",
-      description: buildToolDescription(deps.models, anyImageInput),
+      description: buildToolDescription(deps.models, anyImageInput, anyNegativePrompt),
       // Durable: each call bills $0.02-$0.04 and uploads to AttachmentStore.
       // On Inngest retry the cached JSON result (path + mediaType) replays,
       // so we neither re-bill the provider nor produce duplicate uploads.
@@ -205,6 +330,15 @@ export function createImageTools(deps: {
           .describe(
             "AttachmentStore path of an image to edit. Only valid for models " +
               "marked `[needs reference image]` or `[optional reference image]`.",
+          ),
+        negativePrompt: z
+          .string()
+          .max(2000)
+          .optional()
+          .describe(
+            "Free-form description of what to avoid in the image. Only forwarded " +
+              "for models marked `[supports negativePrompt]`; silently dropped " +
+              "for models that don't accept one.",
           ),
       }),
       handler: async (input) => {
@@ -254,7 +388,7 @@ export function createImageTools(deps: {
           return `Error: model ${input.model} does not accept a reference image. Drop \`referenceImage\` or pick a model marked \`[needs reference image]\` or \`[optional reference image]\`.`;
         }
         if (input.referenceImage && provider.kind !== "fal") {
-          return `Error: reference images are only supported by fal providers today (got ${provider.kind}). Pick a fal-backed model marked \`[needs reference image]\`.`;
+          return `Error: reference images are only supported by fal providers (got ${provider.kind}). Pick a fal-backed model marked \`[needs reference image]\`.`;
         }
         let referenceImageBytes: Buffer | undefined;
         if (input.referenceImage) {
@@ -265,54 +399,54 @@ export function createImageTools(deps: {
           }
         }
 
-        const imageModel =
-          provider.kind === "fal"
-            ? provider.provider.image(row.modelString)
-            : provider.provider.imageModel(row.modelString);
         const shouldForwardAspect =
           input.aspectRatio !== undefined && supportedRatios.includes(input.aspectRatio);
         const shouldForwardSeed = input.seed !== undefined && row.capabilities.seed === true;
-
-        // The AI SDK's `prompt` field accepts either `string` (text-only) or
-        // `{ text, images }` (image input). The latter is a fal-provider
-        // extension at runtime — the SDK's public type only declares `string`,
-        // so we type the value precisely here and cast only at the
-        // `generateImage` call site.
-        type GeneratePromptArg = string | { text: string; images: Buffer[] };
-        const promptArg: GeneratePromptArg = referenceImageBytes
-          ? { text: input.prompt, images: [referenceImageBytes] }
-          : input.prompt;
+        // Per-call negative prompt is gated by the model's declared
+        // capability — capability-absent models would either silently
+        // ignore it (fal) or strict-reject the call (Venice's OpenAI-compat
+        // path). Dropping at the boundary keeps the LLM-visible contract
+        // honest: ask for the field, it's forwarded; capability false,
+        // it's a no-op.
+        const shouldForwardNegativePrompt =
+          input.negativePrompt !== undefined && row.capabilities.negativePrompt === true;
 
         const { image, providerMetadata } = await withRetry(
-          async () => {
-            try {
-              // AI SDK types aspectRatio as `${number}:${number}`. Our Zod
-              // enum validated the value against the same shape; the cast
-              // bridges the literal-template typing. Explicit
-              // `!== undefined` re-narrows for `exactOptionalPropertyTypes`.
-              return await generateImage({
-                model: imageModel,
-                // `prompt` accepts the object shape at runtime for fal but the
-                // public `generateImage` signature only declares `string`
-                // (provider-specific extension surfaced via fal's
-                // `prompt.images` — see vercel/ai #11573 thread on
-                // ai-sdk-providers/fal docs).
-                prompt: promptArg as unknown as string,
-                ...(shouldForwardAspect &&
-                  input.aspectRatio !== undefined && {
-                    aspectRatio: input.aspectRatio as `${number}:${number}`,
-                  }),
-                ...(shouldForwardSeed && input.seed !== undefined && { seed: input.seed }),
-              });
-            } catch (err) {
-              // Structured 4xx classification — same intent as the previous
-              // fal-only handler. `isRetryable: false` on 4xx (except 429)
-              // means re-trying the same request burns budget without
-              // helping; promote to AbortError so withRetry stops.
-              if (APICallError.isInstance(err) && err.isRetryable === false) {
-                throw new AbortError(err.message);
+          async (): Promise<ImageGenerationResult> => {
+            switch (provider.kind) {
+              case "fal":
+              case "oai":
+                return generateViaAiSdk({
+                  provider,
+                  row,
+                  prompt: input.prompt,
+                  ...(referenceImageBytes !== undefined && { referenceImageBytes }),
+                  ...(shouldForwardAspect &&
+                    input.aspectRatio !== undefined && { aspectRatio: input.aspectRatio }),
+                  ...(shouldForwardSeed && input.seed !== undefined && { seed: input.seed }),
+                  ...(shouldForwardNegativePrompt &&
+                    input.negativePrompt !== undefined && {
+                      negativePrompt: input.negativePrompt,
+                    }),
+                });
+              case "venice": {
+                const bytes = await provider.provider.generate({
+                  model: row.modelString,
+                  prompt: input.prompt,
+                  ...(shouldForwardAspect &&
+                    input.aspectRatio !== undefined && { aspectRatio: input.aspectRatio }),
+                  ...(shouldForwardSeed && input.seed !== undefined && { seed: input.seed }),
+                  ...(shouldForwardNegativePrompt &&
+                    input.negativePrompt !== undefined && {
+                      negativePrompt: input.negativePrompt,
+                    }),
+                });
+                // Venice doesn't expose a providerMetadata surface — its
+                // censorship signals are response headers handled inside the
+                // adapter (throws AbortError). The size canary in
+                // `detectImageFailure` still applies.
+                return { image: bytes, providerMetadata: undefined };
               }
-              throw err;
             }
           },
           { retries: 2, context: `image.generate.${row.name}` },

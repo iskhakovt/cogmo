@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { S3Client } from "@aws-sdk/client-s3";
 import Docker from "dockerode";
-import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { ClaudeCodeBackend } from "./agent/coding/claude.js";
 import { createOrphanRunBranchSweepFunctions } from "./agent/coding/cleanup-orphan-run-branches.js";
 import { createRunBranchCleanupSubscriber } from "./agent/coding/cleanup-run-branch.js";
@@ -45,6 +44,7 @@ import {
   loadHindsightCompat,
 } from "./boot/checks.js";
 import { type Database, db, type Transactor, transactor } from "./db/index.js";
+import { migratePerFile } from "./db/migrate-per-file.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
 import type { LlmProvider } from "./llm/provider.js";
@@ -82,9 +82,10 @@ import { createDbVoiceResolver } from "./voice/resolver.js";
  * Per-stage option ownership — keep in sync when adding fields:
  *
  * - `providerOverride` → read by `bootstrapCore` (LLM provider resolver).
- * - `falFetchOverride`, `voiceFetchOverride` → read by `bootstrapRuntime`
- *   (fal.ai + OpenAI voice provider construction; both clients live next
- *   to the agent loop that consumes them).
+ * - `falFetchOverride`, `veniceFetchOverride`, `voiceFetchOverride` → read by
+ *   `bootstrapRuntime` (fal.ai / Venice.ai image + OpenAI voice provider
+ *   construction; all clients live next to the agent loop that consumes
+ *   them).
  * - `sandboxClientOverride` → read by `bootstrapSandbox` (skips env-driven
  *   backend selection so tests can wire `FakeDaytonaSandboxClient`
  *   without hitting Daytona Cloud or a self-hosted compose).
@@ -107,6 +108,13 @@ export interface BootstrapOptions {
    * SDK uses `globalThis.fetch`.
    */
   falFetchOverride?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  /**
+   * Custom `fetch` for the Venice.ai image provider — used by integration
+   * tests to intercept Venice HTTP traffic (see `src/test/venice-mock.ts`).
+   * Production wiring leaves this undefined so the adapter uses
+   * `globalThis.fetch`. Scoped to the venice provider instance only.
+   */
+  veniceFetchOverride?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   /**
    * Custom `fetch` for the OpenAI voice provider — used by integration tests
    * to intercept `/v1/audio/speech` and `/v1/audio/transcriptions` traffic
@@ -239,7 +247,7 @@ export interface RuntimeDeps {
  * bootstrap is idempotent file writes.)
  */
 export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDeps> {
-  await migrate(db, { migrationsFolder: "./migrations" });
+  await migratePerFile(db, { migrationsFolder: "./migrations" });
   logger.info("database migrations applied");
 
   // Schema PKs default to `uuidv7()`. Verify the function is callable
@@ -751,7 +759,12 @@ export async function bootstrapRuntime(
     agentStore: core.agentStore,
     secretsStore: core.secretsStore,
     attachments: core.attachmentStore,
-    ...(opts.falFetchOverride && { fetchOverrides: { fal: opts.falFetchOverride } }),
+    ...((opts.falFetchOverride || opts.veniceFetchOverride) && {
+      fetchOverrides: {
+        ...(opts.falFetchOverride && { fal: opts.falFetchOverride }),
+        ...(opts.veniceFetchOverride && { venice: opts.veniceFetchOverride }),
+      },
+    }),
   });
   const documentTools = createDocumentTools(core.attachmentStore);
 

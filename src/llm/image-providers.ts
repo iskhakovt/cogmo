@@ -14,23 +14,26 @@ import {
 import type { ImageProviderRow } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { VeniceImageProvider } from "./venice.js";
 
 /** Optional per-provider `fetch` override; keyed by image_providers.type. */
 export interface ImageProviderFetchOverrides {
   fal?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   openai_compatible?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  venice?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }
 
 /**
  * Discriminated union of constructed adapter instances. The `kind` matches
  * the row's `type` so consumers (the `generate_image` tool handler) can
- * pick between `provider.image(modelString)` (fal) and
- * `provider.imageModel(modelString)` (openai-compatible) without further
- * lookups.
+ * pick between `provider.image(modelString)` (fal),
+ * `provider.imageModel(modelString)` (openai-compatible), and
+ * `provider.generate(...)` (venice) without further lookups.
  */
 export type ImageProvider =
   | { kind: "fal"; row: ImageProviderRow; provider: SdkFalProvider }
-  | { kind: "oai"; row: ImageProviderRow; provider: SdkOpenAICompatibleProvider };
+  | { kind: "oai"; row: ImageProviderRow; provider: SdkOpenAICompatibleProvider }
+  | { kind: "venice"; row: ImageProviderRow; provider: VeniceImageProvider };
 
 /**
  * Build a single image provider from its row. Decrypts the secret via
@@ -40,9 +43,10 @@ export type ImageProvider =
  * row.
  *
  * The CHECK on `image_providers.base_url` plus the store-layer guard in
- * `createImageProvider` mean `row.baseUrl` is non-null exactly when
- * `row.type === "openai_compatible"`. The defensive null check inside
- * that case is for the type system — the runtime path is unreachable.
+ * `createImageProvider` mean `row.baseUrl` is non-null when
+ * `row.type` is `openai_compatible` or `venice`. The defensive null
+ * checks inside those cases are for the type system — the runtime path
+ * is unreachable.
  */
 export async function buildImageProvider(
   row: ImageProviderRow,
@@ -83,6 +87,23 @@ export async function buildImageProvider(
           ...(deps.fetchOverrides?.openai_compatible && {
             fetch: deps.fetchOverrides.openai_compatible,
           }),
+        }),
+      };
+    }
+    case "venice": {
+      if (row.baseUrl === null) {
+        // Defensive: the CHECK + store guard make this unreachable; same
+        // posture as the openai_compatible arm above.
+        throw new Error(`image provider "${row.name}" is venice but has no base_url`);
+      }
+      return {
+        kind: "venice",
+        row,
+        provider: new VeniceImageProvider({
+          apiKey,
+          baseUrl: row.baseUrl,
+          defaults: row.attrs.imageGenerationDefaults ?? {},
+          ...(deps.fetchOverrides?.venice && { fetch: deps.fetchOverrides.venice }),
         }),
       };
     }
