@@ -9,6 +9,7 @@ test-results/
 !*.tfvars.example
 .claude/*
 !.claude/commands/
+!.claude/rules/
 !.claude/settings.json
 notes/
 
