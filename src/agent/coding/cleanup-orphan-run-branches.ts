@@ -121,7 +121,7 @@ export async function sweepRepo(
     // Transient race with concurrent repo deletion — not warn-worthy,
     // the cron will skip this fan-out event and pick up survivors next
     // week.
-    repoLog.info({}, "sweep-repo: repo row gone — nothing to do");
+    repoLog.info("sweep-repo: repo row gone — nothing to do");
     return { repoId, deleted: 0, skipped: 0, errors: 0 };
   }
 
