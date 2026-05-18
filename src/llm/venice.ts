@@ -167,6 +167,31 @@ export class VeniceImageProvider {
       body: JSON.stringify(body),
     });
 
+    // Read the censorship signals first so they survive a future Venice
+    // change that ships content-violation as a 4xx. Venice currently
+    // returns content-violation as 200 + header (`x-venice-is-content-violation: true`)
+    // and the header survives whatever status code Venice picks — both
+    // orderings are equivalent today, but probing headers first
+    // guarantees the structured error reaches the LLM rather than the
+    // generic "HTTP 4xx" string.
+    const contentViolation = resp.headers.get("x-venice-is-content-violation") === "true";
+    const blurred = resp.headers.get("x-venice-is-blurred") === "true";
+    const safeModeRequested = this.#defaults.safe_mode !== false;
+
+    if (contentViolation) {
+      throw new AbortError(
+        "Venice rejected the prompt as a content policy violation " +
+          "(x-venice-is-content-violation: true). Try rephrasing.",
+      );
+    }
+    if (blurred && !safeModeRequested) {
+      throw new AbortError(
+        "Venice returned a blurred image despite safe_mode=false " +
+          "(x-venice-is-blurred: true). The provider applied a safety filter " +
+          "that the operator opted out of; treating as a failed generation.",
+      );
+    }
+
     // 4xx → non-retryable, except 429 (rate limit) which is transient and
     // benefits from withRetry's exponential backoff. Bad keys (401),
     // unknown models (400), and quota issues (403) all retry-burn budget.
@@ -181,31 +206,6 @@ export class VeniceImageProvider {
     }
     if (!resp.ok) {
       throw new Error(`Venice image generation failed: HTTP ${resp.status}`);
-    }
-
-    // Censorship signals via response headers. Check after the 4xx guard
-    // above because Venice's docs return content-violation as a 200 — we
-    // only reach this branch on success status, and the headers tell us
-    // whether the 200 carries a real image or a placeholder. If Venice
-    // ever ships content-violation as a 400, the 4xx branch will catch
-    // it first and lose the structured signal — at that point flip the
-    // order so the header probe runs before the status check.
-    const contentViolation = resp.headers.get("x-venice-is-content-violation");
-    if (contentViolation === "true") {
-      throw new AbortError(
-        "Venice rejected the prompt as a content policy violation " +
-          "(x-venice-is-content-violation: true). Try rephrasing.",
-      );
-    }
-
-    const blurred = resp.headers.get("x-venice-is-blurred") === "true";
-    const safeModeRequested = this.#defaults.safe_mode !== false;
-    if (blurred && !safeModeRequested) {
-      throw new AbortError(
-        "Venice returned a blurred image despite safe_mode=false " +
-          "(x-venice-is-blurred: true). The provider applied a safety filter " +
-          "that the operator opted out of; treating as a failed generation.",
-      );
     }
 
     const parsed = (await resp.json()) as VeniceResponseBody;

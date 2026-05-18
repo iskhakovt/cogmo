@@ -460,7 +460,7 @@ describe("createImageTools", () => {
     expect(mockGenerateImage).not.toHaveBeenCalled();
   });
 
-  it("rejects referenceImage for non-fal providers (today)", async () => {
+  it("rejects referenceImage for non-fal providers", async () => {
     const { provider } = fakeOaiProvider();
     const model = falModel({
       providerId: "provider-2",
@@ -482,7 +482,7 @@ describe("createImageTools", () => {
       },
       FAKE_SERVICE,
     );
-    expect(result).toMatch(/only supported by fal providers today/);
+    expect(result).toMatch(/only supported by fal providers/);
     expect(mockGenerateImage).not.toHaveBeenCalled();
   });
 
@@ -624,7 +624,7 @@ describe("createImageTools", () => {
       { prompt: "x", model: "flux-edit", referenceImage: "inbound/photo.png" },
       FAKE_SERVICE,
     );
-    expect(result).toMatch(/only supported by fal providers today/);
+    expect(result).toMatch(/only supported by fal providers/);
   });
 
   it("does NOT forward negativePrompt when the model's capability is absent", async () => {

@@ -37,12 +37,21 @@ Commands:
                           (https://api.venice.ai/api/v1), and FORBIDDEN
                           for fal.
 
-                          Venice extras: pass --safe-mode true|false to
-                          set the provider-level censorship blur default
-                          (Venice defaults to true; pass false to disable
-                          blur — the adapter then treats a returned
-                          x-venice-is-blurred response as a failed
-                          generation).
+                          Venice extras (all venice-only; all optional;
+                          stored in image_providers.attrs.imageGenerationDefaults):
+                            --safe-mode true|false    blur flagged content
+                                                      (Venice default true; pass
+                                                      false to opt out — the
+                                                      adapter then treats a
+                                                      returned x-venice-is-blurred
+                                                      response as a failed
+                                                      generation).
+                            --cfg-scale 0-20          prompt-adherence dial
+                                                      (higher = stricter).
+                            --hide-watermark true|false
+                                                      strip Venice's watermark.
+                            --style-preset <name>     server-side style preset
+                                                      (e.g. "Photographic").
   list                    Show registered image providers (name | type | base url).
   remove <name>           Delete a provider (cascades to its image_models rows).
 `;
@@ -112,12 +121,15 @@ async function addProviderCmd(
   deps: ImageProviderCliDeps,
   io: CliIo,
 ): Promise<number> {
-  // Split positional args from named flags so `--safe-mode true|false` can
-  // appear anywhere after the type/name/api-key triple. Order doesn't matter
-  // for the flag, but the positional triple must come first to preserve the
+  // Split positional args from named flags so venice extras can appear in
+  // any order after the type/name/api-key triple. Order doesn't matter for
+  // the flags, but the positional triple must come first to preserve the
   // existing CLI contract.
   const positional: string[] = [];
   let safeModeFlag: boolean | undefined;
+  let cfgScaleFlag: number | undefined;
+  let hideWatermarkFlag: boolean | undefined;
+  let stylePresetFlag: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--safe-mode") {
@@ -128,6 +140,31 @@ async function addProviderCmd(
       }
       safeModeFlag = value === "true";
       i++;
+    } else if (arg === "--cfg-scale") {
+      const value = args[i + 1];
+      const parsed = value === undefined ? Number.NaN : Number(value);
+      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 20) {
+        io.err(`--cfg-scale requires a number 0–20 (got "${value ?? ""}")`);
+        return 2;
+      }
+      cfgScaleFlag = parsed;
+      i++;
+    } else if (arg === "--hide-watermark") {
+      const value = args[i + 1];
+      if (value !== "true" && value !== "false") {
+        io.err(`--hide-watermark requires "true" or "false" (got "${value ?? ""}")`);
+        return 2;
+      }
+      hideWatermarkFlag = value === "true";
+      i++;
+    } else if (arg === "--style-preset") {
+      const value = args[i + 1];
+      if (value === undefined || value.length === 0) {
+        io.err(`--style-preset requires a non-empty string`);
+        return 2;
+      }
+      stylePresetFlag = value;
+      i++;
     } else if (arg !== undefined) {
       positional.push(arg);
     }
@@ -136,7 +173,9 @@ async function addProviderCmd(
   const [typeArg, name, apiKey, baseUrlArg] = positional;
   if (!typeArg || !name || !apiKey) {
     io.err(
-      "Usage: cogmo image-provider add <type> <name> <api-key> [base-url] [--safe-mode true|false]",
+      "Usage: cogmo image-provider add <type> <name> <api-key> [base-url] " +
+        "[--safe-mode true|false] [--cfg-scale 0-20] [--hide-watermark true|false] " +
+        "[--style-preset <name>]",
     );
     return 2;
   }
@@ -153,17 +192,31 @@ async function addProviderCmd(
     );
     return 2;
   }
-  if (safeModeFlag !== undefined && typeArg !== "venice") {
-    io.err(`--safe-mode is venice-only (got type=${typeArg})`);
+  // All four extras live in `imageGenerationDefaults` and are venice-only
+  // today (the only provider that consumes `safe_mode` / `cfg_scale` /
+  // `hide_watermark` / `style_preset` body fields). Reject up front so
+  // operators don't end up with a fal or openai_compatible row carrying
+  // dead JSONB the runtime won't read.
+  const veniceExtras = {
+    ...(safeModeFlag !== undefined && { safe_mode: safeModeFlag }),
+    ...(cfgScaleFlag !== undefined && { cfg_scale: cfgScaleFlag }),
+    ...(hideWatermarkFlag !== undefined && { hide_watermark: hideWatermarkFlag }),
+    ...(stylePresetFlag !== undefined && { style_preset: stylePresetFlag }),
+  };
+  if (Object.keys(veniceExtras).length > 0 && typeArg !== "venice") {
+    io.err(
+      `--safe-mode / --cfg-scale / --hide-watermark / --style-preset are venice-only ` +
+        `(got type=${typeArg})`,
+    );
     return 2;
   }
   const providerType: ImageProviderTypeValue = typeArg;
   const baseUrl = baseUrlArg ?? null;
   // Empty `imageGenerationDefaults` would round-trip as `{}` in the row,
   // which is harmless but noisy in CRUD output — only include it when the
-  // operator actually opted into a default.
+  // operator actually opted into at least one default.
   const attrs =
-    safeModeFlag !== undefined ? { imageGenerationDefaults: { safe_mode: safeModeFlag } } : {};
+    Object.keys(veniceExtras).length > 0 ? { imageGenerationDefaults: veniceExtras } : {};
 
   // Materialize the API key into a secret named `<provider-name>_api_key` —
   // consistent with the canonical `fal_api_key` slot the wizard uses, just

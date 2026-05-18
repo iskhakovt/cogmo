@@ -50,6 +50,19 @@ interface RecordedResponse {
   body: unknown;
 }
 
+/**
+ * Fixture key — what makes "the same request" the same recording.
+ *
+ * Includes: model, prompt, safe_mode, negative_prompt — fields whose
+ * variation produces a meaningfully different upstream response.
+ *
+ * Excludes: aspect_ratio, seed, width/height. Changing the ratio in a
+ * test does NOT re-trigger record mode and does NOT fail replay — the
+ * recorded image is whatever ratio was captured the day of recording,
+ * and stubbed payloads ignore the ratio anyway. If a future test
+ * widens coverage to assert response dimensions, add the ratio to this
+ * key so divergent recordings get separate files.
+ */
 function fixtureKey(body: VeniceRequestBodyLike): string {
   const hash = createHash("sha256")
     .update(
@@ -108,7 +121,16 @@ async function handleGenerate(
     }
   }
 
-  // record mode: passthrough + capture
+  // record mode: passthrough + capture.
+  //
+  // `globalThis.fetch` deliberately bypasses any per-test fetch override
+  // the harness wired up (e.g. an integration test that scopes a
+  // `createVeniceFetch` to the adapter). Record mode wants to hit the
+  // real Venice API directly — if it went through the test's own
+  // override we'd be capturing the override's response, not Venice's.
+  // A consequence: if the host environment has a transparent HTTP
+  // proxy (corporate CI runner), recordings would capture the proxy's
+  // response. Run `RECORD=1` from a machine on a clean network.
   const realResp = await globalThis.fetch(`${VENICE_HOST}${VENICE_GENERATE_PATH}`, init);
   const responseBody = await realResp.text();
   // Build a headers map filtering down to what consumers care about — we

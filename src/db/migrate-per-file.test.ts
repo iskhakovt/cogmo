@@ -140,4 +140,99 @@ describe("migratePerFile", () => {
     ].join(" | ");
     expect(trail).toMatch(/unsafe use of new value/);
   });
+
+  it("rolls back the failing file's tx but leaves earlier files committed", async () => {
+    // Mid-file failure invariant. The cross-file-atomicity trade-off
+    // documented in `migrate-per-file.ts` says earlier-committed files
+    // stay committed when a later file fails. Materialise that with a
+    // hand-built two-file migration set: file A creates a table; file B
+    // creates a second table THEN issues a statement that violates the
+    // first table's not-null constraint. Expect: file A rows in
+    // __drizzle_migrations (committed), file B absent (rolled back).
+    const tmp = `${process.env.TMPDIR ?? "/tmp"}/migrate-per-file-rollback-${Date.now()}`;
+    const fsMod = await import("node:fs/promises");
+    await fsMod.mkdir(`${tmp}/meta`, { recursive: true });
+    await fsMod.writeFile(
+      `${tmp}/0001_create_a.sql`,
+      `CREATE TABLE "ttable_a" (id int PRIMARY KEY, name text NOT NULL);`,
+    );
+    await fsMod.writeFile(
+      `${tmp}/0002_create_b_then_fail.sql`,
+      // First statement succeeds (creates ttable_b), second statement
+      // violates the NOT NULL on ttable_a — Postgres rejects the whole
+      // file's tx, so ttable_b must roll back too.
+      `CREATE TABLE "ttable_b" (id int PRIMARY KEY);--> statement-breakpoint\n` +
+        `INSERT INTO "ttable_a" (id) VALUES (1);`,
+    );
+    await fsMod.writeFile(
+      `${tmp}/meta/_journal.json`,
+      JSON.stringify({
+        version: "7",
+        dialect: "postgresql",
+        entries: [
+          { idx: 1, version: "7", when: 1_000_000, tag: "0001_create_a", breakpoints: true },
+          {
+            idx: 2,
+            version: "7",
+            when: 2_000_000,
+            tag: "0002_create_b_then_fail",
+            breakpoints: true,
+          },
+        ],
+      }),
+    );
+
+    await expect(migratePerFile(db, { migrationsFolder: tmp })).rejects.toThrow();
+
+    // File A's table exists (its tx committed before file B opened).
+    const aExists = (await db.execute(sql`SELECT to_regclass('ttable_a')::text AS r`)) as {
+      rows: Array<{ r: string | null }>;
+    };
+    expect(aExists.rows[0]?.r).toBe("ttable_a");
+    // File B's table does NOT exist — its tx rolled back when the INSERT
+    // failed. Atomicity inside the file is preserved.
+    const bExists = (await db.execute(sql`SELECT to_regclass('ttable_b')::text AS r`)) as {
+      rows: Array<{ r: string | null }>;
+    };
+    expect(bExists.rows[0]?.r).toBeNull();
+    // Tracking table reflects the partial state: A applied, B not.
+    const applied = (await db.execute(sql`
+      SELECT created_at FROM drizzle.__drizzle_migrations ORDER BY created_at
+    `)) as { rows: Array<{ created_at: string | number | bigint }> };
+    expect(applied.rows.map((r) => Number(r.created_at))).toEqual([1_000_000]);
+
+    await fsMod.rm(tmp, { recursive: true, force: true });
+  });
+
+  it("rejects re-running when an applied file's hash changed", async () => {
+    // Hash-tamper guard. Apply a one-file migration, then edit the
+    // on-disk file's bytes and re-invoke — the runner must refuse to
+    // proceed rather than silently skip (`folderMillis <= lastApplied`
+    // would otherwise pass over the tampered file).
+    const tmp = `${process.env.TMPDIR ?? "/tmp"}/migrate-per-file-hash-${Date.now()}`;
+    const fsMod = await import("node:fs/promises");
+    await fsMod.mkdir(`${tmp}/meta`, { recursive: true });
+    const sqlPath = `${tmp}/0001_create.sql`;
+    await fsMod.writeFile(sqlPath, `CREATE TABLE "hash_target" (id int PRIMARY KEY);`);
+    await fsMod.writeFile(
+      `${tmp}/meta/_journal.json`,
+      JSON.stringify({
+        version: "7",
+        dialect: "postgresql",
+        entries: [{ idx: 1, version: "7", when: 1_000_000, tag: "0001_create", breakpoints: true }],
+      }),
+    );
+
+    await migratePerFile(db, { migrationsFolder: tmp });
+    // Tamper: rewrite the file with different bytes. The journal entry's
+    // `when` stays unchanged so `folderMillis <= lastApplied` is true —
+    // only the hash comparison can catch this.
+    await fsMod.writeFile(sqlPath, `CREATE TABLE "hash_target" (id int PRIMARY KEY, name text);`);
+
+    await expect(migratePerFile(db, { migrationsFolder: tmp })).rejects.toThrow(
+      /applied with a different hash/,
+    );
+
+    await fsMod.rm(tmp, { recursive: true, force: true });
+  });
 });

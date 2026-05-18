@@ -37,7 +37,7 @@ Commands:
               \`--image-input\` advertises that this model accepts a
               reference image — \`required\` for edit-only models like
               fal/flux-kontext, \`optional\` for models that accept one but
-              don't require it. Only supported for fal providers today.
+              don't require it. Only supported for fal providers.
               \`--negative-prompt\` advertises that this model accepts a
               free-form negative prompt; the field is then forwarded to
               fal (via providerOptions.fal.negative_prompt) or venice

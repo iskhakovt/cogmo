@@ -139,7 +139,7 @@ describe("runImageProviderCli", () => {
     expect(out.join("\n")).toMatch(/Added image provider "venice"/);
   });
 
-  it("rejects --safe-mode for non-venice provider types", async () => {
+  it("rejects venice extras for non-venice provider types", async () => {
     const { io, err } = makeIo();
     const agentStore = {} as AgentStore;
     const secretsStore = {} as SecretsStore;
@@ -157,7 +157,66 @@ describe("runImageProviderCli", () => {
       io,
     );
     expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/--safe-mode is venice-only/);
+    expect(err.join("\n")).toMatch(/are venice-only/);
+  });
+
+  it("forwards all four venice extras into imageGenerationDefaults", async () => {
+    // Wizard docs and image-generation.md both claim cfg_scale,
+    // hide_watermark, and style_preset are reachable via `cogmo
+    // image-provider`. This test pins the CLI side of that claim so a
+    // future flag-parser refactor doesn't drop one silently.
+    const { io, out } = makeIo();
+    const putSecret = vi.fn().mockResolvedValue({ id: "s-2" });
+    const createImageProvider = vi.fn().mockResolvedValue({ id: "p-2" });
+    const agentStore = { createImageProvider } as unknown as AgentStore;
+    const secretsStore = { putSecret } as unknown as SecretsStore;
+    const rc = await runImageProviderCli(
+      [
+        "add",
+        "venice",
+        "venice-all",
+        "sk-venice",
+        "https://api.venice.ai/api/v1",
+        "--safe-mode",
+        "false",
+        "--cfg-scale",
+        "7.5",
+        "--hide-watermark",
+        "true",
+        "--style-preset",
+        "Photographic",
+      ],
+      { runInTx: tx, agentStore, secretsStore },
+      io,
+    );
+    expect(rc).toBe(0);
+    expect(createImageProvider).toHaveBeenCalledWith(
+      FAKE_TX,
+      expect.objectContaining({
+        attrs: {
+          imageGenerationDefaults: {
+            safe_mode: false,
+            cfg_scale: 7.5,
+            hide_watermark: true,
+            style_preset: "Photographic",
+          },
+        },
+      }),
+    );
+    expect(out.join("\n")).toMatch(/Added image provider "venice-all"/);
+  });
+
+  it("rejects --cfg-scale outside 0–20", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {} as AgentStore;
+    const secretsStore = {} as SecretsStore;
+    const rc = await runImageProviderCli(
+      ["add", "venice", "venice", "sk-v", "https://api.venice.ai/api/v1", "--cfg-scale", "25"],
+      { runInTx: tx, agentStore, secretsStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--cfg-scale requires a number 0–20/);
   });
 
   it("removes a provider by name", async () => {

@@ -388,7 +388,7 @@ export function createImageTools(deps: {
           return `Error: model ${input.model} does not accept a reference image. Drop \`referenceImage\` or pick a model marked \`[needs reference image]\` or \`[optional reference image]\`.`;
         }
         if (input.referenceImage && provider.kind !== "fal") {
-          return `Error: reference images are only supported by fal providers today (got ${provider.kind}). Pick a fal-backed model marked \`[needs reference image]\`.`;
+          return `Error: reference images are only supported by fal providers (got ${provider.kind}). Pick a fal-backed model marked \`[needs reference image]\`.`;
         }
         let referenceImageBytes: Buffer | undefined;
         if (input.referenceImage) {
