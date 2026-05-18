@@ -253,6 +253,20 @@
       "when": 1779056594145,
       "tag": "0035_third_lightspeed",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1779108952568,
+      "tag": "0036_add_venice_to_image_provider_type",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1779109174962,
+      "tag": "0037_extend_image_providers_base_url_check",
+      "breakpoints": true
     }
   ]
 }

@@ -31,7 +31,7 @@ export type ImageFailureDetection = { ok: true } | { ok: false; reason: string }
  * signals are handled by a sibling work; future PR unifies the two paths).
  * Both kinds still get the size-canary check.
  */
-export type ImageProviderKind = "fal" | "oai";
+export type ImageProviderKind = "fal" | "oai" | "venice";
 
 /**
  * Per-image NSFW flag the fal adapter normalizes from upstream `has_nsfw_concepts[i]`
@@ -78,7 +78,13 @@ const FalProviderMetaSchema = z
  * real case the signals miss.
  */
 export function detectImageFailure(input: {
-  image: GenerateImageResult["image"];
+  /**
+   * Only the byte length is consumed; widen the input type to anything
+   * carrying a `Uint8Array` so non-AI-SDK adapters (e.g. venice's hand-
+   * rolled output) can pass their bytes directly without a synthetic
+   * `base64` field.
+   */
+  image: { uint8Array: Uint8Array };
   providerMetadata: GenerateImageResult["providerMetadata"] | undefined;
   providerKind: ImageProviderKind;
 }): ImageFailureDetection {

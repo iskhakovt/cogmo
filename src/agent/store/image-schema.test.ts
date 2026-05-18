@@ -161,6 +161,37 @@ describe("chk_image_providers_base_url", () => {
       { code: "23514", constraint: "chk_image_providers_base_url" },
     );
   });
+
+  it("accepts venice with non-NULL base_url", async () => {
+    const { id: secretId } = await seedSecret("venice_native_key");
+    await expect(
+      tx((trx) =>
+        trx.insert(imageProviders).values({
+          name: "venice-native",
+          type: "venice",
+          baseUrl: "https://api.venice.ai/api/v1",
+          secretId,
+          attrs: {},
+        }),
+      ),
+    ).resolves.not.toThrow();
+  });
+
+  it("rejects venice with NULL base_url (CHECK violation 23514)", async () => {
+    const { id: secretId } = await seedSecret("venice_native_key");
+    await expectPgError(
+      tx((trx) =>
+        trx.insert(imageProviders).values({
+          name: "venice-native",
+          type: "venice",
+          baseUrl: null,
+          secretId,
+          attrs: {},
+        }),
+      ),
+      { code: "23514", constraint: "chk_image_providers_base_url" },
+    );
+  });
 });
 
 describe("llm_providers.type enum (post-migration)", () => {

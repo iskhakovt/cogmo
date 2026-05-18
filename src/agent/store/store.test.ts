@@ -2956,6 +2956,67 @@ describe("DrizzleAgentStore", () => {
       ).rejects.toBeInstanceOf(InvalidProviderConfigError);
     });
 
+    it("creates a venice provider with base_url + imageGenerationDefaults", async () => {
+      const { id: secretId } = await seedSecret("venice_native_api_key");
+      const { id } = await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "venice-native",
+          type: "venice",
+          baseUrl: "https://api.venice.ai/api/v1",
+          secretId,
+          attrs: { imageGenerationDefaults: { safe_mode: false, cfg_scale: 7.5 } },
+        }),
+      );
+      const row = await tx((trx) => store.getImageProvider(trx, id));
+      expect(row).toMatchObject({
+        name: "venice-native",
+        type: "venice",
+        baseUrl: "https://api.venice.ai/api/v1",
+        attrs: { imageGenerationDefaults: { safe_mode: false, cfg_scale: 7.5 } },
+      });
+    });
+
+    it("round-trips all four imageGenerationDefaults fields through the JSONB Zod codec", async () => {
+      // The JSONB column runs Zod parse on both write and read. Cover all
+      // four optional fields together so a typo in the schema or codec
+      // (`hide_watermark`/`style_preset` arrived later than `safe_mode`/
+      // `cfg_scale` and have less coverage) surfaces here.
+      const { id: secretId } = await seedSecret("venice_all_attrs_api_key");
+      const defaults = {
+        safe_mode: false,
+        cfg_scale: 10.5,
+        hide_watermark: true,
+        style_preset: "Photographic",
+      };
+      const { id } = await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "venice-all",
+          type: "venice",
+          baseUrl: "https://api.venice.ai/api/v1",
+          secretId,
+          attrs: { imageGenerationDefaults: defaults },
+        }),
+      );
+      const row = await tx((trx) => store.getImageProvider(trx, id));
+      expect(row?.attrs.imageGenerationDefaults).toEqual(defaults);
+    });
+
+    it("rejects venice without base_url at the store boundary", async () => {
+      const { id: secretId } = await seedSecret("venice_native_api_key");
+      const { InvalidProviderConfigError } = await import("./errors.js");
+      await expect(
+        tx((trx) =>
+          store.createImageProvider(trx, {
+            name: "venice-native",
+            type: "venice",
+            baseUrl: null,
+            secretId,
+            attrs: {},
+          }),
+        ),
+      ).rejects.toBeInstanceOf(InvalidProviderConfigError);
+    });
+
     it("rejects non-https base_url", async () => {
       const { id: secretId } = await seedSecret("rogue_api_key");
       const { InvalidProviderConfigError } = await import("./errors.js");

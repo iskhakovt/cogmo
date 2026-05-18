@@ -66,3 +66,21 @@ Hindsight server creates and manages its own tables in its own database. Do not 
 | `user_selectable` on `model_providers` | Org policy gate: admins can route internal models (cheap summarization, experimental) via `model_providers` without exposing them in the user `/model` picker. Toggled out-of-band. |
 | Steering rules separate from prompts | Rules change fast (per correction), prompts change slow (globally optimized). Rules can be toggled, prioritized, scoped. |
 | Serialized per conversation | Agents not thread-safe (Letta docs). `concurrency: { limit: 1, key: conversationId }`. |
+
+## Migration Conventions `[confirmed]`
+
+- **Migrations and snapshots are tool-generated.** `pnpm db:generate` produces both the SQL file and the JSON snapshot. Do not hand-edit `migrations/NNNN_*.sql` or `migrations/meta/NNNN_snapshot.json`. The only acceptable hand-edit to `migrations/meta/_journal.json` is renaming a `tag` to match a renamed `.sql` file.
+- **Format the output through biome.** drizzle-kit emits tab-indented JSON; the project formats with 2-space indent. Run `pnpm biome check --write migrations/meta/` after every `db:generate`.
+- **Per-file transactions.** The boot path uses `migratePerFile` (`src/db/migrate-per-file.ts`), one transaction per migration file. Cross-file atomicity is not preserved — a failure in file N leaves files <N committed. Required for the `ALTER TYPE … ADD VALUE` + same-tx-use pattern below.
+- **Splitting a logical schema change across two migration files** (canonical case: `ALTER TYPE … ADD VALUE 'X'` in file N, followed by a CHECK / DEFAULT / column type referencing `'X'` in file N+1 — Postgres rejects same-tx use of a freshly-added enum value): use the **schema.ts rewind dance**, not hand-rolled intermediate snapshots.
+  1. Revert `schema.ts` to the intermediate state (value added but not yet referenced).
+  2. `pnpm db:generate` → produces N + N's snapshot.
+  3. Restore `schema.ts` to the final state.
+  4. `pnpm db:generate` → produces N+1 + N+1's snapshot.
+  5. Rename both auto-generated `NNNN_<marvel-name>.sql` files to descriptive slugs and update the matching `_journal.json` `tag` entries.
+  6. `pnpm biome check --write migrations/meta/`.
+
+  Both snapshots are then tool-generated, biome-clean, and reflect real states the schema.ts editor went through.
+
+- **Already-applied migrations are immutable.** Editing the SQL of a committed migration is a structural error. `migratePerFile` hashes the on-disk file and compares against the recorded hash on every run; a mismatch throws rather than silently re-applying or skipping.
+- **Out-of-order `when` timestamps are rejected.** A new migration whose journal `when` is ≤ the high-water mark of applied migrations is a backdated journal entry; `migratePerFile` throws rather than apply out of order.

@@ -31,9 +31,27 @@ const USAGE = `Usage: cogmo image-provider <command> [args]
 Commands:
   add <type> <name> <api-key> [base-url]
                           Register an image provider. \`type\` is one of:
-                          fal, openai_compatible. base-url is REQUIRED for
-                          openai_compatible (e.g. https://api.venice.ai/api/v1)
-                          and FORBIDDEN for fal.
+                          fal, openai_compatible, venice. base-url is
+                          REQUIRED for openai_compatible (e.g.
+                          https://api.openai.com/v1) and venice
+                          (https://api.venice.ai/api/v1), and FORBIDDEN
+                          for fal.
+
+                          Venice extras (all venice-only; all optional;
+                          stored in image_providers.attrs.imageGenerationDefaults):
+                            --safe-mode true|false    apply a blur
+                                                      (Venice default true; pass
+                                                      false to opt out — the
+                                                      adapter then treats a
+                                                      returned x-venice-is-blurred
+                                                      response as a failed
+                                                      generation).
+                            --cfg-scale 0-20          prompt-adherence dial
+                                                      (higher = stricter).
+                            --hide-watermark true|false
+                                                      strip Venice's watermark.
+                            --style-preset <name>     server-side style preset
+                                                      (e.g. "Photographic").
   list                    Show registered image providers (name | type | base url).
   remove <name>           Delete a provider (cascades to its image_models rows).
 `;
@@ -103,13 +121,66 @@ async function addProviderCmd(
   deps: ImageProviderCliDeps,
   io: CliIo,
 ): Promise<number> {
-  const [typeArg, name, apiKey, baseUrlArg] = args;
+  // Split positional args from named flags so venice extras can appear in
+  // any order after the type/name/api-key triple. Order doesn't matter for
+  // the flags, but the positional triple must come first to preserve the
+  // existing CLI contract.
+  const positional: string[] = [];
+  let safeModeFlag: boolean | undefined;
+  let cfgScaleFlag: number | undefined;
+  let hideWatermarkFlag: boolean | undefined;
+  let stylePresetFlag: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--safe-mode") {
+      const value = args[i + 1];
+      if (value !== "true" && value !== "false") {
+        io.err(`--safe-mode requires "true" or "false" (got "${value ?? ""}")`);
+        return 2;
+      }
+      safeModeFlag = value === "true";
+      i++;
+    } else if (arg === "--cfg-scale") {
+      const value = args[i + 1];
+      const parsed = value === undefined ? Number.NaN : Number(value);
+      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 20) {
+        io.err(`--cfg-scale requires a number 0–20 (got "${value ?? ""}")`);
+        return 2;
+      }
+      cfgScaleFlag = parsed;
+      i++;
+    } else if (arg === "--hide-watermark") {
+      const value = args[i + 1];
+      if (value !== "true" && value !== "false") {
+        io.err(`--hide-watermark requires "true" or "false" (got "${value ?? ""}")`);
+        return 2;
+      }
+      hideWatermarkFlag = value === "true";
+      i++;
+    } else if (arg === "--style-preset") {
+      const value = args[i + 1];
+      if (value === undefined || value.length === 0) {
+        io.err(`--style-preset requires a non-empty string`);
+        return 2;
+      }
+      stylePresetFlag = value;
+      i++;
+    } else if (arg !== undefined) {
+      positional.push(arg);
+    }
+  }
+
+  const [typeArg, name, apiKey, baseUrlArg] = positional;
   if (!typeArg || !name || !apiKey) {
-    io.err("Usage: cogmo image-provider add <type> <name> <api-key> [base-url]");
+    io.err(
+      "Usage: cogmo image-provider add <type> <name> <api-key> [base-url] " +
+        "[--safe-mode true|false] [--cfg-scale 0-20] [--hide-watermark true|false] " +
+        "[--style-preset <name>]",
+    );
     return 2;
   }
-  if (typeArg !== "fal" && typeArg !== "openai_compatible") {
-    io.err(`Invalid type "${typeArg}" — expected fal|openai_compatible`);
+  if (typeArg !== "fal" && typeArg !== "openai_compatible" && typeArg !== "venice") {
+    io.err(`Invalid type "${typeArg}" — expected fal|openai_compatible|venice`);
     return 2;
   }
   if (!PROVIDER_NAME_RE.test(name)) {
@@ -121,8 +192,31 @@ async function addProviderCmd(
     );
     return 2;
   }
+  // All four extras live in `imageGenerationDefaults` and are venice-only
+  // today (the only provider that consumes `safe_mode` / `cfg_scale` /
+  // `hide_watermark` / `style_preset` body fields). Reject up front so
+  // operators don't end up with a fal or openai_compatible row carrying
+  // dead JSONB the runtime won't read.
+  const veniceExtras = {
+    ...(safeModeFlag !== undefined && { safe_mode: safeModeFlag }),
+    ...(cfgScaleFlag !== undefined && { cfg_scale: cfgScaleFlag }),
+    ...(hideWatermarkFlag !== undefined && { hide_watermark: hideWatermarkFlag }),
+    ...(stylePresetFlag !== undefined && { style_preset: stylePresetFlag }),
+  };
+  if (Object.keys(veniceExtras).length > 0 && typeArg !== "venice") {
+    io.err(
+      `--safe-mode / --cfg-scale / --hide-watermark / --style-preset are venice-only ` +
+        `(got type=${typeArg})`,
+    );
+    return 2;
+  }
   const providerType: ImageProviderTypeValue = typeArg;
   const baseUrl = baseUrlArg ?? null;
+  // Empty `imageGenerationDefaults` would round-trip as `{}` in the row,
+  // which is harmless but noisy in CRUD output — only include it when the
+  // operator actually opted into at least one default.
+  const attrs =
+    Object.keys(veniceExtras).length > 0 ? { imageGenerationDefaults: veniceExtras } : {};
 
   // Materialize the API key into a secret named `<provider-name>_api_key` —
   // consistent with the canonical `fal_api_key` slot the wizard uses, just
@@ -141,7 +235,7 @@ async function addProviderCmd(
         type: providerType,
         baseUrl,
         secretId,
-        attrs: {},
+        attrs,
       });
     });
     io.out(`Added image provider "${name}" (id=${providerId}, secret=${secretName}).`);
