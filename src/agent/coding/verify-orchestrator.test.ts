@@ -10,7 +10,7 @@ import { PassThrough, type Readable } from "node:stream";
 import type { Octokit } from "@octokit/rest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import type { StepRun, StepSendEvent } from "../../inngest/index.js";
+import type { StepRun } from "../../inngest/index.js";
 import {
   type ExecOptions,
   type ExecStreamingHandle,
@@ -25,22 +25,12 @@ import {
   serializeGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { type CodingBackend, DrizzleCodingStore } from "./store/index.js";
 import { runCodingVerify, type VerifyOrchestratorDeps } from "./verify-orchestrator.js";
 
 const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
-
-/**
- * step.sendEvent shim — forwards catch-path emits through the test's
- * `inngest.send` so existing event-name assertions see them.
- */
-function makeStepSendEvent(inngest: Pick<import("inngest").Inngest, "send">): StepSendEvent {
-  return (async (_: string, payload: unknown) => {
-    await inngest.send(payload as never);
-    return { ids: [] };
-  }) as any as StepSendEvent;
-}
 
 const VALID_IDENTITY: GitHubIdentity = {
   pat: "ghp_dummy_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
@@ -511,5 +501,57 @@ describe("runCodingVerify", () => {
     });
 
     expect(deps.sandbox.deleteByTaskId).toHaveBeenCalledWith(taskId);
+  });
+
+  // Mirror of the runCodingTask catch-path contract — emit-first
+  // ordering pins the reconcile handoff for the verify orchestrator
+  // too.
+  it("catch path: emit fires BEFORE DB update; emit failure propagates leaving the row non-terminal", async () => {
+    // Inject a failure during verify by handing the orchestrator a
+    // container whose `bash -lc <verifyCmd>` exec throws (mirrors a
+    // sandbox-side failure).
+    const handle = fakeContainerHandle(successScript);
+    const failingExec = vi.fn(async () => {
+      throw new Error("verify exploded");
+    });
+    const failingHandle: SandboxSession<LocalDockerSessionState> = {
+      ...handle,
+      execStreaming: failingExec,
+    };
+    const deps = makeDeps(failingHandle);
+    const sendCalls: { eventName: string; whenStatus: string | null }[] = [];
+    const stepSendEventThrowing = (async (_: string, payload: unknown) => {
+      const row = await tx((trx) => store.getTask(trx, taskId));
+      sendCalls.push({
+        eventName: (payload as { name: string }).name,
+        whenStatus: row?.status ?? null,
+      });
+      throw new Error("bus down");
+    }) as never;
+    const inngest = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Pick<
+      import("inngest").Inngest,
+      "send"
+    >;
+
+    const { taskId } = await seedTask();
+
+    await expect(
+      runCodingVerify({
+        taskId,
+        deps,
+        stepRun,
+        stepSendEvent: stepSendEventThrowing,
+        inngest,
+      }),
+    ).rejects.toThrow(/bus down/);
+
+    // Emit attempted while row was still `verifying` (or its prior
+    // state) — the catch fell through to the emit before touching
+    // the DB.
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0]?.eventName).toBe("coding/task/failed");
+    // Row stays non-terminal for the reconcile subscriber to flip.
+    const reloaded = await tx((trx) => store.getTask(trx, taskId));
+    expect(reloaded?.status).not.toBe("failed");
   });
 });

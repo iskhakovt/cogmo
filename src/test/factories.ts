@@ -7,6 +7,7 @@ import { ok } from "neverthrow";
 import { vi } from "vitest";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
+import type { StepSendEvent } from "../inngest/index.js";
 import type { LlmProvider } from "../llm/provider.js";
 import { constantResolver, type LlmProviderResolver } from "../llm/resolver.js";
 import type { MemoryProvider } from "../memory/provider.js";
@@ -481,6 +482,21 @@ export function mockStep(): MockStep {
     run: vi.fn((_id: string, fn: () => unknown) => fn()),
     sendEvent: vi.fn(),
   };
+}
+
+/**
+ * `step.sendEvent` shim that forwards each emission to `inngest.send`
+ * on the supplied client. Lets orchestrator tests written against
+ * `inngest.send` assertions keep working unchanged when production
+ * code migrates the call to `step.sendEvent`. Three orchestrator
+ * test files used inline copies of this; centralised here per
+ * "generalise where reasonable" (.claude/rules/code-style.md).
+ */
+export function makeStepSendEvent(inngest: Pick<Inngest, "send">): StepSendEvent {
+  return (async (_id: string, payload: unknown) => {
+    await inngest.send(payload as never);
+    return { ids: [] };
+  }) as unknown as StepSendEvent;
 }
 
 /**

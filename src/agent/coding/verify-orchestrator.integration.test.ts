@@ -53,6 +53,7 @@ import {
 import { generateSshKeyPair } from "../../secrets/ssh-keygen.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { FakeDaytonaSandboxClient } from "../../test/daytona-sandbox-fake.js";
+import { makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { type CodingBackend, DrizzleCodingStore } from "./store/index.js";
 import { runCodingVerify, type VerifyOrchestratorDeps } from "./verify-orchestrator.js";
@@ -540,10 +541,7 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
       taskId,
       deps,
       stepRun,
-      stepSendEvent: (async (_: string, payload: unknown) => {
-        await inngestSend(payload as never);
-        return { ids: [] };
-      }) as never,
+      stepSendEvent: makeStepSendEvent({ send: inngestSend }),
       inngest: { send: inngestSend },
     });
 
@@ -601,10 +599,7 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
       taskId,
       deps,
       stepRun,
-      stepSendEvent: (async (_: string, payload: unknown) => {
-        await inngestSend(payload as never);
-        return { ids: [] };
-      }) as never,
+      stepSendEvent: makeStepSendEvent({ send: inngestSend }),
       inngest: { send: inngestSend },
     });
 
@@ -764,10 +759,7 @@ describe("verify orchestrator integration — git-remote transport (fake daytona
       taskId,
       deps,
       stepRun,
-      stepSendEvent: (async (_: string, payload: unknown) => {
-        await inngestSend(payload as never);
-        return { ids: [] };
-      }) as never,
+      stepSendEvent: makeStepSendEvent({ send: inngestSend }),
       inngest: { send: inngestSend },
     });
 
