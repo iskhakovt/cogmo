@@ -1,5 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
+import type { z } from "zod";
+import type { inboundArrived } from "../inngest/events.js";
+import { expectDefined } from "../test/assertions.js";
+import { invokeInngestFn, type MockStep, mockStep } from "../test/factories.js";
 import { createDebounceFunctions } from "./debounce.js";
+
+type InboundArrivedData = z.infer<typeof inboundArrived.schema>;
+
+interface DebounceRouterCtx {
+  event: { data: InboundArrivedData; ts?: number };
+  step: MockStep;
+}
 
 const baseEvent = {
   data: { conversationId: "conv-1", inboundMessageId: "inbound-1" },
@@ -7,10 +18,6 @@ const baseEvent = {
 
 function debounceOpts(fn: any): any {
   return fn?.opts ?? fn?.options;
-}
-
-function mockStep() {
-  return { sendEvent: vi.fn(), run: vi.fn((_, fn) => fn()) };
 }
 
 describe("createDebounceFunctions — path selection", () => {
@@ -128,7 +135,10 @@ describe("native router — handler behavior", () => {
       resumePolicy: "debounce",
     });
     const step = mockStep();
-    await (router as any).fn({ event: baseEvent, step });
+    await invokeInngestFn<DebounceRouterCtx>(expectDefined(router, "router"), {
+      event: baseEvent,
+      step,
+    });
 
     expect(step.sendEvent).toHaveBeenCalledTimes(1);
     expect(step.sendEvent).toHaveBeenCalledWith(
@@ -154,7 +164,10 @@ describe("native router — handler behavior", () => {
       ...baseEvent,
       ts: Date.now() - 2500, // pretend the trigger event was created 2.5s ago
     };
-    await (router as any).fn({ event: eventWithTs, step });
+    await invokeInngestFn<DebounceRouterCtx>(expectDefined(router, "router"), {
+      event: eventWithTs,
+      step,
+    });
 
     expect(recordSpy).toHaveBeenCalledWith(expect.any(Number), { kind: "native" });
     const recordedMs = recordSpy.mock.calls[0]?.[0] as number;
@@ -173,7 +186,10 @@ describe("legacy router — handler behavior", () => {
       resumePolicy: "debounce",
     });
     const step = mockStep();
-    await (router as any).fn({ event: baseEvent, step });
+    await invokeInngestFn<DebounceRouterCtx>(expectDefined(router, "router"), {
+      event: baseEvent,
+      step,
+    });
 
     expect(step.sendEvent).toHaveBeenCalledWith(
       "route",
@@ -195,7 +211,10 @@ describe("legacy router — handler behavior", () => {
       resumePolicy: "debounce",
     });
     const step = mockStep();
-    await (router as any).fn({ event: baseEvent, step });
+    await invokeInngestFn<DebounceRouterCtx>(expectDefined(router, "router"), {
+      event: baseEvent,
+      step,
+    });
 
     expect(step.sendEvent).toHaveBeenCalledWith(
       "route",
@@ -210,7 +229,10 @@ describe("legacy router — handler behavior", () => {
       resumePolicy: "debounce",
     });
     const step = mockStep();
-    await (router as any).fn({ event: baseEvent, step });
+    await invokeInngestFn<DebounceRouterCtx>(expectDefined(router, "router"), {
+      event: baseEvent,
+      step,
+    });
 
     const sendCall = step.sendEvent.mock.calls[0];
     if (!sendCall) throw new Error("expected sendEvent to have been called");
