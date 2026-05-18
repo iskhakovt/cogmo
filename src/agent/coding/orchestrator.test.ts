@@ -343,7 +343,6 @@ describe("runCodingTask", () => {
       deps,
       stepRun,
       stepSendEvent,
-      inngest: fakeInngestShared,
     });
     expect(result.status).toBe("awaiting_approval");
     expect(result.plan).toBe("## Plan\n1. Do X\n");
@@ -406,7 +405,6 @@ describe("runCodingTask", () => {
       deps,
       stepRun,
       stepSendEvent,
-      inngest: fakeInngestShared,
     });
     expect(result.status).toBe("awaiting_approval");
     expect(createCalls[0]?.env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: "sk-test-oauth" });
@@ -426,7 +424,6 @@ describe("runCodingTask", () => {
       deps,
       stepRun,
       stepSendEvent,
-      inngest: fakeInngestShared,
     });
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
@@ -460,7 +457,6 @@ describe("runCodingTask", () => {
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent,
-      inngest: fakeInngestShared,
     });
     expect(result.status).toBe("executing");
     expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("executing");
@@ -481,7 +477,6 @@ describe("runCodingTask", () => {
       deps: makeDeps({ sandbox, backend, openPlanStream: async () => planStream.handle }),
       stepRun,
       stepSendEvent,
-      inngest: fakeInngestShared,
     });
     expect(result.status).toBe("failed");
     expect(result.failureReason).toMatch(/exit code 2/);
@@ -506,7 +501,6 @@ describe("runCodingTask", () => {
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent,
-      inngest: fakeInngestShared,
     });
     expect(result.status).toBe("failed");
     expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("failed");
@@ -525,7 +519,6 @@ describe("runCodingTask", () => {
       deps: makeDeps({ sandbox, backend: backendYielding([]) }),
       stepRun,
       stepSendEvent,
-      inngest: fakeInngestShared,
     });
     expect(result.status).toBe("failed");
     expect(result.failureReason).toMatch(/docker daemon down/);
@@ -565,7 +558,6 @@ describe("runCodingTask", () => {
       deps: makeDeps({ sandbox, backend: backendYielding([]) }),
       stepRun,
       stepSendEvent,
-      inngest: fakeInngestShared,
     });
     expect(result.status).toBe("failed");
     expect((await tx((trx) => store.getTask(trx, badTask.id)))?.status).toBe("failed");
@@ -579,7 +571,6 @@ describe("runCodingTask", () => {
         deps: makeDeps({ sandbox, backend: backendYielding([]) }),
         stepRun,
         stepSendEvent,
-        inngest: fakeInngestShared,
       }),
     ).rejects.toThrow(/task not found/);
   });
@@ -624,7 +615,6 @@ describe("runCodingTask", () => {
         deps: makeDeps({ sandbox, backend: throwingBackend }),
         stepRun,
         stepSendEvent: stepSendEventThrowing,
-        inngest: fakeInngestShared,
       }),
     ).rejects.toThrow(/bus down/);
 
@@ -662,7 +652,40 @@ describe("runCodingTask", () => {
       deps: makeDeps({ sandbox, backend: throwingBackend }),
       stepRun,
       stepSendEvent: capturingStepSendEvent,
-      inngest: fakeInngestShared,
+    });
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      name: "coding/task/failed",
+      id: `task-failed-${task.id}`,
+      data: { taskId: task.id },
+    });
+  });
+
+  // Try-path counterpart of the catch-path test above. The backend
+  // signals failure cleanly (exitCode != 0 / isError), so control flow
+  // stays inside the try and never throws — but the emit must still
+  // carry the same bus-level idempotency id so reconcile-driven re-emits
+  // dedupe against this one if they fire.
+  it("try path: emit payload carries idempotency id when backend reports isError", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-X" },
+      { kind: "complete", exitCode: 2, isError: true },
+    ]);
+    const payloads: unknown[] = [];
+    const capturingStepSendEvent = (async (_: string, payload: unknown) => {
+      payloads.push(payload);
+      return { ids: [] };
+    }) as never;
+
+    await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent: capturingStepSendEvent,
     });
 
     expect(payloads).toHaveLength(1);
@@ -720,7 +743,6 @@ describe("runCodingTask", () => {
         deps: makeDeps({ sandbox, backend: throwingBackend, store: dbThrowingStore }),
         stepRun,
         stepSendEvent: capturingStepSendEvent,
-        inngest: fakeInngestShared,
       }),
     ).rejects.toThrow(/db blip/);
 
@@ -753,7 +775,6 @@ describe("runCodingTask", () => {
         deps: makeDeps({ sandbox, backend: backendYielding([]), store: ghostStore }),
         stepRun,
         stepSendEvent,
-        inngest: fakeInngestShared,
       }),
     ).rejects.toThrow(/repo not found/);
   });
@@ -1014,6 +1035,42 @@ describe("runCodingExecute", () => {
     expect(stopCalls).toEqual([task.id]);
     expect(stream.completed).toEqual([false]);
     expect(stream.failed).toHaveLength(1);
+  });
+
+  // Try-path emit shape — `runCodingExecute`'s `isError` branch must
+  // emit through `stepSendEvent` with the same `task-failed-${taskId}`
+  // idempotency id as the catch path. Reconcile-driven re-emits dedupe
+  // against this one if they ever race.
+  it("try path: isError emit payload carries idempotency id", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox } = fakeSandbox();
+    const stream = recordingExecuteStream();
+    const backend = executeBackendYielding([
+      { kind: "session_started", sessionId: "sess-X" },
+      { kind: "complete", exitCode: 2, isError: true },
+    ]);
+    const payloads: unknown[] = [];
+    const capturingStepSendEvent = (async (_: string, payload: unknown) => {
+      payloads.push(payload);
+      return { ids: [] };
+    }) as never;
+
+    await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
+      stepRun,
+      stepWaitForEvent: fakeStepWaitForEvent,
+      stepSendEvent: capturingStepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      name: "coding/task/failed",
+      id: `task-failed-${task.id}`,
+      data: { taskId: task.id },
+    });
   });
 
   it("idempotent: second event for already-executing task returns skipped without re-running", async () => {

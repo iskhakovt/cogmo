@@ -339,6 +339,49 @@ describe("runCodingVerify", () => {
     expect(calls.find((c) => c[0] === "git")).toBeUndefined();
   });
 
+  // `failAndTeardown` (the verify-orchestrator's shared failure helper)
+  // emits `coding/task/failed` through `stepSendEvent` with the same
+  // `task-failed-${taskId}` idempotency id used by `runCodingTask` /
+  // `runCodingExecute`. Reconcile-driven re-emits dedupe against it.
+  it("try path: failAndTeardown emit carries idempotency id", async () => {
+    const handle = fakeContainerHandle({
+      verify: { stdout: "FAIL\n  Test failed\n", exitCode: 1 },
+      git: {},
+    });
+    const deps = makeDeps(handle);
+    const inngest = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Pick<
+      import("inngest").Inngest,
+      "send"
+    >;
+    const payloads: unknown[] = [];
+    const capturingStepSendEvent = (async (_: string, payload: unknown) => {
+      payloads.push(payload);
+      return { ids: [] };
+    }) as never;
+
+    const { taskId } = await seedTask();
+    await runCodingVerify({
+      taskId,
+      deps,
+      stepRun,
+      stepSendEvent: capturingStepSendEvent,
+      inngest,
+    });
+
+    const failed = payloads.find(
+      (p): p is { name: string; id: string; data: { taskId: string } } =>
+        typeof p === "object" &&
+        p !== null &&
+        (p as { name?: unknown }).name === "coding/task/failed",
+    );
+    expect(failed).toBeDefined();
+    expect(failed).toMatchObject({
+      name: "coding/task/failed",
+      id: `task-failed-${taskId}`,
+      data: { taskId },
+    });
+  });
+
   it("missing identity → status=failed before any container creation", async () => {
     secrets = new FakeSecretsStore(); // no identity set
     const handle = fakeContainerHandle(successScript);

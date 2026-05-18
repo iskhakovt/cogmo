@@ -136,7 +136,6 @@ export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: 
         deps,
         stepRun: step.run,
         stepSendEvent: step.sendEvent,
-        inngest,
       });
     },
   );
@@ -153,12 +152,6 @@ interface RunParams {
    * silently-swallowed `coding/task/failed` event.
    */
   stepSendEvent: StepSendEvent;
-  /**
-   * Inngest client — used to emit `coding/task/failed` so cleanup
-   * subscribers (run-branch deletion, future telemetry) hook in
-   * without polling the row.
-   */
-  inngest: Pick<Inngest, "send">;
 }
 
 /**
