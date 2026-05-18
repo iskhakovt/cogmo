@@ -87,8 +87,12 @@ async function cleanupTestState(): Promise<void> {
   await pgClient.unsafe(`DELETE FROM steering_rules WHERE source IN ('correction', 'evolution')`);
   // Drop audit rows before conversations — FK from evolution_events →
   // conversations is `no action`, so a stale row would block deletion of
-  // its parent conversation. Scope to the test user so concurrent tests
-  // (different users) don't trample each other.
+  // its parent conversation in the cleanup below. Scoped to the seeded
+  // `userId` to match the pattern used by `pending_memories` /
+  // `custom_compartments` /  `profile_classes` below; tests in this file
+  // all share `inject("defaultUserId")` so the scope is effectively
+  // "everything this file has written" rather than a cross-user
+  // isolation claim.
   await pgClient.unsafe(`DELETE FROM evolution_events WHERE user_id = $1`, [userId]);
   await pgClient.unsafe(
     `DELETE FROM conversations

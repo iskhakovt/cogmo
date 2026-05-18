@@ -7,6 +7,7 @@
  */
 
 import { actionToDecision } from "../../../agent/coding/permission-keyboard.js";
+import { MIN_MESSAGES_FOR_EXTRACTION } from "../../../agent/evolution/index.js";
 import {
   CORE_COMPARTMENTS,
   isCoreCompartment,
@@ -2286,7 +2287,7 @@ export async function handleReflect(
     case "skipped": {
       const message =
         outcome.reason === "too_short"
-          ? "Conversation too short to reflect on yet (need at least 4 messages)."
+          ? `Conversation too short to reflect on yet (need at least ${MIN_MESSAGES_FOR_EXTRACTION} messages).`
           : // `conversation_not_found` / `profile_not_found` mean the underlying
             // row vanished mid-call — surfaces as a soft error rather than an
             // exception so the command doesn't crash the bot.
@@ -2318,7 +2319,10 @@ export async function handleReflect(
  * each entry under ~120 chars so a 10-event list fits well under
  * Telegram's 4096-char message cap with room for the header.
  */
-function formatEvolutionDigest(events: ReadonlyArray<EvolutionEventEntry>): string {
+function formatEvolutionDigest(
+  events: ReadonlyArray<EvolutionEventEntry>,
+  now: Date = new Date(),
+): string {
   const header = `Evolution events (${events.length}):`;
   const lines = events.map((e, i) => {
     const c = e.payload.corrections;
@@ -2328,7 +2332,7 @@ function formatEvolutionDigest(events: ReadonlyArray<EvolutionEventEntry>): stri
     const tag = e.triggeredBy === "manual" ? " [manual]" : "";
     return (
       `${i + 1}. ${e.id}${tag}\n` +
-      `   ${e.createdAt.toISOString()} — ${ruleDelta} rule change(s), ${memoryDelta} memory write(s)`
+      `   ${formatRelativeTime(e.createdAt, now)} — ${ruleDelta} rule change(s), ${memoryDelta} memory write(s)`
     );
   });
   return [header, ...lines].join("\n");
@@ -2339,22 +2343,41 @@ function formatEvolutionDigest(events: ReadonlyArray<EvolutionEventEntry>): stri
  * structured-log fields the Observer emits per fire so the operator can
  * cross-reference against process logs when debugging.
  */
-function formatEvolutionDetail(event: EvolutionEventEntry): string {
+function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date()): string {
   const { payload } = event;
+  const skipped =
+    payload.corrections.outOfScopeReinforcementsSkipped +
+    payload.corrections.unknownRuleReinforcementsSkipped;
   const lines: string[] = [
     `Event ${event.id}`,
-    `When: ${event.createdAt.toISOString()}`,
+    // Both forms: relative for at-a-glance scanning, ISO for log-grep parity.
+    `When: ${formatRelativeTime(event.createdAt, now)} (${event.createdAt.toISOString()})`,
     `Triggered by: ${event.triggeredBy}`,
     `Conversation: ${event.conversationId}`,
     `Profile: ${payload.profileId}`,
     `Transcript: ${payload.messageCount} message(s)`,
+  ];
+  if (payload.durationMs !== undefined) {
+    lines.push(`Took: ${formatDurationMs(payload.durationMs)}`);
+  }
+  lines.push(
     "",
     "Corrections:",
     `  extracted:    ${payload.corrections.extracted}`,
     `  reinforced:   ${payload.corrections.reinforced}`,
     `  promoted:     ${payload.corrections.promoted}`,
     `  contradicted: ${payload.corrections.contradictions}`,
-  ];
+  );
+  // Surface the skipped counters only when non-zero — they're zero on
+  // most fires and the silence is the signal. When something WAS
+  // skipped, the operator wants to see it spelled out so they can
+  // reconcile against `extracted + reinforced`. Pre-computed total
+  // gates the whole block so a "0 skipped" line never adds noise.
+  if (skipped > 0) {
+    lines.push(
+      `  skipped:      ${skipped} (${payload.corrections.outOfScopeReinforcementsSkipped} out-of-scope, ${payload.corrections.unknownRuleReinforcementsSkipped} unknown-rule)`,
+    );
+  }
   if (payload.consolidation) {
     lines.push("", "Consolidation:");
     lines.push(`  merged groups: ${payload.consolidation.mergedGroups}`);
@@ -2371,4 +2394,58 @@ function formatEvolutionDetail(event: EvolutionEventEntry): string {
     }
   }
   return lines.join("\n");
+}
+
+/**
+ * Format a past instant as a short human-readable delta from `now`.
+ * Optimised for at-a-glance scanning in chat. Delegates the formatting
+ * to `Intl.RelativeTimeFormat` (built-in, Node ≥18) so the strings
+ * follow locale conventions ("yesterday" / "5 minutes ago"). The Intl
+ * API can't pick the "best" unit itself — caller still chooses
+ * seconds/minutes/hours/days — but everything past unit selection
+ * (pluralisation, "yesterday" vs "1 day ago", negative sign placement)
+ * is handled by the platform.
+ *
+ * Older than a week → fall back to an ISO date stamp. Future
+ * timestamps work too (Intl produces "in 5 minutes" etc.); a future
+ * `createdAt` would be a stamping bug, but the renderer shouldn't
+ * crash on it.
+ *
+ * Exported so unit tests can pin `now` deterministically.
+ */
+const RELATIVE_TIME_FORMAT = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+
+export function formatRelativeTime(when: Date, now: Date): string {
+  // Negative delta = past, positive = future; `RelativeTimeFormat`
+  // matches that sign convention.
+  const deltaSec = (when.getTime() - now.getTime()) / 1000;
+  const absSec = Math.abs(deltaSec);
+  if (absSec < 45) return RELATIVE_TIME_FORMAT.format(0, "second");
+  const min = deltaSec / 60;
+  if (Math.abs(min) < 60) return RELATIVE_TIME_FORMAT.format(Math.round(min), "minute");
+  const hr = min / 60;
+  if (Math.abs(hr) < 24) return RELATIVE_TIME_FORMAT.format(Math.round(hr), "hour");
+  const day = hr / 24;
+  if (Math.abs(day) < 7) return RELATIVE_TIME_FORMAT.format(Math.round(day), "day");
+  // Anything older than a week is calendar-scale; a relative phrase
+  // ("3 weeks ago") loses too much resolution for an audit log. ISO
+  // date stamp keeps grep parity with structured logs.
+  return when.toISOString().slice(0, 10);
+}
+
+/**
+ * Compact ms → human duration. Uses `Intl.DurationFormat` (Node ≥22)
+ * with `style: "narrow"` ("1m 32s") and trims to the largest two
+ * relevant units. Sub-second values stay raw ms because the Intl
+ * variant collapses them to "0 seconds".
+ */
+const DURATION_FORMAT = new Intl.DurationFormat("en", { style: "narrow" });
+
+function formatDurationMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const totalSec = Math.round(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  if (min === 0) return DURATION_FORMAT.format({ seconds: sec });
+  return DURATION_FORMAT.format(sec === 0 ? { minutes: min } : { minutes: min, seconds: sec });
 }

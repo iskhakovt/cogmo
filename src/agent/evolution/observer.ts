@@ -28,7 +28,14 @@ import type { EvolutionTrigger } from "./event-schema.js";
 import { extractCorrections } from "./extract-corrections.js";
 import { extractMemories } from "./extract-memories.js";
 
-const MIN_MESSAGES_FOR_EXTRACTION = 4; // 2 turns minimum
+/**
+ * Minimum transcript length (count of `messages` rows) before the
+ * Observer will spend tokens on extraction. Exported because the
+ * `/reflect` user-facing renderer needs to surface this value verbatim
+ * in its "conversation too short" reply — duplicating the literal would
+ * silently drift if the threshold changed.
+ */
+export const MIN_MESSAGES_FOR_EXTRACTION = 4; // 2 turns minimum
 
 /**
  * Max pending rows drained per Observer run. Caps the `step.run` output
@@ -107,6 +114,11 @@ export async function runObserver(
 ): Promise<ObserverResult> {
   const { agentStore, resolveProvider } = deps;
   const { conversationId } = event.data;
+  // Stamp the wall-clock duration of the fire into the audit row. Captured
+  // outside any step.run so retries don't reset the clock to the retry's
+  // wall time; the recorded value is meaningful as "how long the operator
+  // waited", not "how long the LLM calls took on the successful attempt".
+  const startedAt = Date.now();
 
   const conv = await step.run("load-conversation", async () => {
     return deps.runInTx((tx) => agentStore.getConversation(tx, conversationId));
@@ -276,6 +288,7 @@ export async function runObserver(
           drained: drainResult,
           messageCount: history.length,
           profileId: conv.profileId,
+          durationMs: Date.now() - startedAt,
         },
       }),
     );

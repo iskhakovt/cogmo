@@ -20,7 +20,12 @@ export {
   type MemoryExtractionDeps,
   type MemoryExtractionResult,
 } from "./extract-memories.js";
-export { createObserver, type ObserverDeps, type ObserverResult } from "./observer.js";
+export {
+  createObserver,
+  MIN_MESSAGES_FOR_EXTRACTION,
+  type ObserverDeps,
+  type ObserverResult,
+} from "./observer.js";
 export {
   type TriggerReflectionDeps,
   type TriggerReflectionResult,

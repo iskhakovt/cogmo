@@ -186,6 +186,7 @@ Wraps the Observer's existing `ObserverResult` (the `status: "processed"` varian
 - `drained` — `{drained, byNetwork}` from the pending-memory drain step.
 - `messageCount` — transcript length at fire time (the gating value against `MIN_MESSAGES_FOR_EXTRACTION`).
 - `profileId` — the profile active for the conversation at fire time. Stored so the digest can render "from profile X" without a join.
+- `durationMs` — wall-clock duration of the fire, optional. Stamped at the end of `runObserver` from a `Date.now()` snapshot taken at the top, so it captures "how long the operator waited" rather than "how long the successful retry's LLM calls took." Surfaced in the detail view as `Took: 32s` so a regression in extraction latency is visible per fire without grepping logs.
 
 ### Observer integration
 
@@ -203,6 +204,10 @@ The Telegram command resolves the current conversation, calls `transport.evoluti
 
 `triggerReflection` invokes `runObserver` directly (not via Inngest) with a step harness that just calls the closure — single-user, immediate feedback wins over durability for an explicitly-user-initiated debug action. The autonomous idle path keeps the full Inngest pipeline (concurrency limit per `conversationId`, retry budget, memoisation).
 
+**Concurrency-cap bypass, acknowledged.** The autonomous Inngest function is registered with `concurrency: { limit: 1, key: "event.data.conversationId" }` — at most one in-flight Observer per conversation. `/reflect` sidesteps that registry entirely. If a `/reflect` fires while an idle run is in flight for the same conversation, both succeed independently: two LLM extractions, two audit rows, overlapping transcript windows. At single-user scale (one operator, one tap on `/reflect`) the window for this is human-scale and the cost is two extra audit rows — benign. If/when this gets wider use, the right guard is a `pg_advisory_xact_lock(hashtext('observer:' || conversation_id))` at the top of `runObserver` (cheap, predicate-free, releases on tx commit) rather than reaching for the Inngest cap from the manual path — which would re-introduce async-reply UX and lose the in-chat digest.
+
+**Wall-clock budget.** The handler sends a "Reflecting on this conversation…" pre-message and then awaits the full pipeline (corrections + memories + drain) end-to-end. Practical budget: 10–60 s on Claude/GPT-class models, longer on slower providers. The autonomous idle path falls back to Inngest's per-function timeout if the LLM hangs; the manual path has no such backstop — a wedged provider call blocks the reply until the LLM SDK eventually times out (~minutes). Mitigations not yet implemented but worth considering when the pattern bites: a timer-driven "this may take another minute" follow-up, or a hard `AbortSignal` on the LLM calls capped at e.g. 90 s.
+
 ### Read surface (`/learned`)
 
 - `/learned` — last 10 events for the user, one line per event: `id timestamp from profile-name: N rules, M memories`.
@@ -213,3 +218,7 @@ The Telegram command resolves the current conversation, calls `transport.evoluti
 - **Inline "noted: X" pill** on the next assistant turn — adds chat noise on every fire; the documented anti-pattern is alert fatigue. Revisit after a week of digest-based use.
 - **Undo / per-rule revert** — requires the append-only pattern's reverse-event shape. Cheap once needed; useless without first feeling the pain.
 - **Reasoning trace in detail view** — requires `ExtractionResult` and `MemoryExtractionResult` to surface the per-item `reasoning` field. One-line change to each, but worth landing once the digest UX is in actual use and proves it's the missing piece.
+
+### Forward consideration: deleting a conversation
+
+`evolution_events.conversation_id` is a FK with `ON DELETE no action`. Deliberate — audit rows are append-only, and silently cascading them away on conversation delete defeats the whole point of an audit log. The trade-off: until a delete-conversation command lands, there's no friction. Once one does, it'll need an explicit choice — either refuse the delete while audit rows exist (force the operator to `/learned undo` first, when undo lands), null out `conversation_id` on the audit row (keeps the lineage but loses the back-reference), or move the audit row into a tombstoned shape with the conversation snapshot inlined. Pick at the point of building the delete path; flagged here so it's not a surprise.

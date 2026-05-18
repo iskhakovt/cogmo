@@ -208,11 +208,13 @@ export type ScheduledTaskAdminEntry = ScheduledTaskSummary;
 
 /**
  * One row of `evolution.listEvents` — the adapter-facing projection of an
- * `evolution_events` row. Re-exports the persisted shape; if the durable
- * and the surfaced shapes ever need to diverge (e.g. surfacing reasoning
- * trace fields the store doesn't keep), break the alias then.
+ * `evolution_events` row. `userId` is intentionally omitted: the column
+ * is a denormalisation from `conversations.user_id` for the digest index,
+ * not a value the adapter needs (the caller's identity is already
+ * resolved by the Transport method). Surfacing it through the contract
+ * would leak an internal storage decision.
  */
-export type EvolutionEventEntry = EvolutionEventRow;
+export type EvolutionEventEntry = Omit<EvolutionEventRow, "userId">;
 
 /**
  * Outcome of `evolution.triggerReflection`. Mirrors `ObserverResult` but
@@ -2037,7 +2039,8 @@ export function createTransport(deps: {
         return runInTx(async (tx) => {
           const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
           if (!identity) return err({ code: "identity_rejected" as const });
-          return ok(await agentStore.listEvolutionEvents(tx, identity.userId, opts));
+          const rows = await agentStore.listEvolutionEvents(tx, identity.userId, opts);
+          return ok(rows.map(toEvolutionEventEntry));
         });
       },
       async getEvent(platformUserHandle, id) {
@@ -2045,7 +2048,7 @@ export function createTransport(deps: {
           const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
           if (!identity) return err({ code: "identity_rejected" as const });
           const row = await agentStore.getEvolutionEvent(tx, identity.userId, id);
-          return ok(row ?? null);
+          return ok(row ? toEvolutionEventEntry(row) : null);
         });
       },
       async triggerReflection(platformUserHandle, platformAddress) {
@@ -2231,6 +2234,21 @@ function toScheduledTaskAdminEntry(
     nextRunAt: row.nextRunAt,
     lastRunAt: row.lastRunAt,
     enabled: row.enabled,
+  };
+}
+
+/**
+ * Project an `EvolutionEventRow` onto the adapter-facing entry. Drops
+ * `userId` — it's an internal denormalisation from `conversations.user_id`
+ * that exists for the digest index and has no use at the adapter surface.
+ */
+function toEvolutionEventEntry(row: EvolutionEventRow): EvolutionEventEntry {
+  return {
+    id: row.id,
+    conversationId: row.conversationId,
+    triggeredBy: row.triggeredBy,
+    payload: row.payload,
+    createdAt: row.createdAt,
   };
 }
 
