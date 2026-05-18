@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
 import {
@@ -256,6 +256,27 @@ export interface CodingStore {
    * `coding_repos.max_concurrent_tasks` at admission.
    */
   countActiveTasksForRepo(tx: Transaction, repoId: string): Promise<number>;
+
+  /**
+   * Atomic conditional fail: flip status → `failed` with the supplied
+   * `failureReason` iff the row's current status is non-terminal
+   * (`!= pr_open && != failed && != cancelled`). Single SQL `UPDATE ... WHERE
+   * status NOT IN (...)`, returns whether the row was actually written
+   * (caller can short-circuit the cleanup-event emit when it lost the race
+   * against the in-worker catch path or a concurrent reconcile). Used by the
+   * `coding-task-reconcile` Inngest function (`inngest/function.failed`
+   * subscriber) to recover from worker disconnect / OOM where the in-worker
+   * catch never ran.
+   */
+  failTaskIfNonTerminal(
+    tx: Transaction,
+    id: string,
+    failureReason: string,
+  ): Promise<
+    | { kind: "failed" }
+    | { kind: "already_terminal"; status: CodingTaskStatus }
+    | { kind: "not_found" }
+  >;
 
   /**
    * Atomic conditional status transition: `UPDATE ... SET status=$to
@@ -584,6 +605,37 @@ export class DrizzleCodingStore implements CodingStore {
       .from(codingTasks)
       .where(and(eq(codingTasks.repoId, repoId), ...conditions));
     return rows[0]?.value ?? 0;
+  }
+
+  async failTaskIfNonTerminal(
+    tx: Transaction,
+    id: string,
+    failureReason: string,
+  ): Promise<
+    | { kind: "failed" }
+    | { kind: "already_terminal"; status: CodingTaskStatus }
+    | { kind: "not_found" }
+  > {
+    // Conditional UPDATE: only writes when the current status is
+    // non-terminal. RETURNING is empty if the row is missing OR already
+    // terminal; one follow-up SELECT disambiguates. Idempotent under
+    // duplicate fires (a second reconcile invocation sees `failed` and
+    // returns `already_terminal`).
+    const updated = await tx
+      .update(codingTasks)
+      .set({ status: "failed", failureReason })
+      .where(and(eq(codingTasks.id, id), notInArray(codingTasks.status, [...TERMINAL_STATUSES])))
+      .returning({ id: codingTasks.id });
+    if (updated.length > 0) return { kind: "failed" as const };
+
+    const rows = await tx
+      .select({ status: codingTasks.status })
+      .from(codingTasks)
+      .where(eq(codingTasks.id, id))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return { kind: "not_found" as const };
+    return { kind: "already_terminal" as const, status: row.status };
   }
 
   async transitionTaskStatus(

@@ -183,6 +183,78 @@ describe("DaytonaMock", () => {
       }
     });
 
+    // Wedge knob: when `faults` matches the incoming WS path, the mock
+    // accepts the upgrade and does nothing — no frames, no close. This
+    // is the regression-shape for the Daytona transport-wedge incident
+    // (Daytona [#2513](https://github.com/daytonaio/daytona/issues/2513)
+    // — no async exit notification). The fixture cursor is NOT
+    // advanced, so non-wedged HTTP calls keep their FIFO order.
+    it("ws-hold-open fault: accepts upgrade, no frames, no close (cursor not advanced)", async () => {
+      const fixturePath = join(fixtureDir, "ws-wedge.json");
+      // Fixture has one HTTP call AFTER the WS — this is the
+      // cursor-not-advanced contract under test. If the wedge were
+      // mistakenly consuming a cursor slot, the post-wedge GET below
+      // would find nothing at the cursor and 503.
+      await writeFixture(fixturePath, {
+        scenario: "ws-wedge",
+        recordedAt: "2026-05-11T00:00:00.000Z",
+        calls: [
+          {
+            kind: "http",
+            method: "GET",
+            path: "/post-wedge-probe",
+            request: {},
+            response: {
+              status: 200,
+              headers: { "content-type": "application/json" },
+              bodyJson: { ok: true },
+            },
+          },
+        ],
+      });
+
+      const mock = await DaytonaMock.create({
+        mode: "replay",
+        fixturePath,
+        faults: [{ wsPathPattern: /\/process\/session\/.*\/logs/, kind: "ws-hold-open" }],
+      });
+      try {
+        const ws = new WebSocket(
+          `${mock.url.replace(/^http/, "ws")}/toolbox/sb-1/process/session/s/command/c/logs?follow=true`,
+        );
+        // Wait for the upgrade to land, then verify no frames + no
+        // close within a short window. 250ms is enough to catch a
+        // bug where the wedge accidentally falls through to
+        // `#replayWs` and emits frames immediately via queueMicrotask.
+        await new Promise<void>((resolve, reject) => {
+          ws.on("open", () => resolve());
+          ws.on("error", reject);
+        });
+        let closed = false;
+        const messages: string[] = [];
+        ws.on("message", (data) => messages.push(data.toString()));
+        ws.on("close", () => {
+          closed = true;
+        });
+        await new Promise<void>((resolve) => setTimeout(resolve, 250));
+        expect(messages).toEqual([]);
+        expect(closed).toBe(false);
+
+        // Cursor unchanged: the post-wedge HTTP call still finds its
+        // fixture entry. If the wedge mistakenly consumed cursor 0,
+        // this would 503.
+        const resp = await fetch(`${mock.url}/post-wedge-probe`);
+        expect(resp.status).toBe(200);
+        expect(await resp.json()).toEqual({ ok: true });
+
+        // Tear the WS down from the test side so vitest doesn't leak
+        // the socket between tests.
+        ws.close();
+      } finally {
+        await mock.stop();
+      }
+    });
+
     it("returns 1011 when no WS fixture matches", async () => {
       const fixturePath = join(fixtureDir, "ws-empty.json");
       await writeFixture(fixturePath, {

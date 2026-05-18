@@ -213,7 +213,14 @@ describe("ClaudeCodeBackend.plan", () => {
     expect(cmd).toContain("--input-format");
     expect(cmd).toContain("--permission-mode");
     expect(cmd).toContain("plan");
-    expect(opts).toEqual({ attachStdin: true });
+    // Per-callsite timeout pair pins the wedge-resilience contract —
+    // see design/coding-delegation.md → Per-callsite exec timeouts.
+    // 30-minute total cap + 5-minute idle cap on claude streams.
+    expect(opts).toEqual({
+      attachStdin: true,
+      timeoutMs: 30 * 60 * 1000,
+      idleTimeoutMs: 5 * 60 * 1000,
+    });
   });
 
   it("propagates non-zero exit code with isError=true", async () => {

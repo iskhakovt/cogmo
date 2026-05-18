@@ -1,5 +1,6 @@
 import type { Process } from "@daytonaio/sdk";
 import { describe, expect, it, vi } from "vitest";
+import { ExecTimeoutError } from "../index.js";
 import { DisposedError, startExecStreaming } from "./exec-streaming.js";
 
 /**
@@ -469,5 +470,146 @@ describe("startExecStreaming", () => {
 
     await disposeP;
     expect(proc.deleteSession).toHaveBeenCalledTimes(2);
+  });
+
+  // ── Wall-clock and idle timeouts ──
+  //
+  // The wedge that motivated these (4-day stuck task on run id
+  // `01KRM7A886F293XVTJPVB9CZ91`) was a `getSessionCommandLogs` WS that
+  // held open silently — no `onStdout`, no `onStderr`, no close. Without
+  // a timeout, `await handle.wait()` blocks forever. These tests model
+  // that exact shape (WS opens, never resolves, no chunks emitted) and
+  // assert the cap settles `wait()` with `ExecTimeoutError` + runs
+  // `deleteSession` (the Daytona [#2510] recommended cleanup path).
+  it("timeoutMs: total wall-clock cap fires when WS holds open silently, cleanup runs, wait() rejects with ExecTimeoutError(kind='total')", async () => {
+    let resolveWs: (() => void) | undefined;
+    const proc = fakeProcess({ wsResolve: {} });
+    // Override the WS to a held-open promise — never resolves on its
+    // own, mimicking the wedge. `deleteSession` is what closes it.
+    vi.mocked(proc.getSessionCommandLogs).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveWs = resolve;
+        }),
+    );
+    vi.mocked(proc.deleteSession).mockImplementation(async () => {
+      // Mimic real Daytona — deleteSession tears down the WS, closing
+      // the still-open logs promise. Resolve (rather than reject)
+      // matches what Daytona's SDK does on the success path of a
+      // killed session — and exercises the `.then(timedOut ? reject)`
+      // branch in exec-streaming.ts.
+      resolveWs?.();
+    });
+
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["sleep", "infinity"],
+      opts: { timeoutMs: 50 },
+    });
+    handle.stdout.on("error", () => {});
+    handle.stderr.on("error", () => {});
+
+    const start = Date.now();
+    const err = await handle.wait().catch((e: Error) => e);
+    const elapsed = Date.now() - start;
+
+    expect(err).toBeInstanceOf(ExecTimeoutError);
+    expect((err as ExecTimeoutError).kind).toBe("total");
+    expect((err as ExecTimeoutError).timeoutMs).toBe(50);
+    // Sanity: actually waited at least the timeout (no instant fire),
+    // and didn't block for 30s by accident.
+    expect(elapsed).toBeGreaterThanOrEqual(40);
+    expect(elapsed).toBeLessThan(2_000);
+    // The cleanup runs the same `deleteSession` `dispose()` would —
+    // Daytona [#2510]'s prescribed explicit-cleanup path.
+    expect(proc.deleteSession).toHaveBeenCalled();
+  });
+
+  it("idleTimeoutMs: idle watchdog fires when WS holds open with no chunks for the configured window", async () => {
+    let resolveWs: (() => void) | undefined;
+    const proc = fakeProcess({ wsResolve: {} });
+    vi.mocked(proc.getSessionCommandLogs).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveWs = resolve;
+        }),
+    );
+    vi.mocked(proc.deleteSession).mockImplementation(async () => {
+      resolveWs?.();
+    });
+
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["claude", "-p"],
+      opts: { idleTimeoutMs: 50 },
+    });
+    handle.stdout.on("error", () => {});
+    handle.stderr.on("error", () => {});
+
+    const err = await handle.wait().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(ExecTimeoutError);
+    expect((err as ExecTimeoutError).kind).toBe("idle");
+    expect(proc.deleteSession).toHaveBeenCalled();
+  });
+
+  it("idleTimeoutMs: chunk arrival resets the watchdog — exec completes when WS keeps emitting under the idle window", async () => {
+    let resolveWs: (() => void) | undefined;
+    let onStdoutCb: ((c: string) => void) | undefined;
+    const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
+    vi.mocked(proc.getSessionCommandLogs).mockImplementation(
+      (_sid: string, _cid: string, onStdout: (c: string) => void) => {
+        onStdoutCb = onStdout;
+        return new Promise<void>((resolve) => {
+          resolveWs = resolve;
+        });
+      },
+    );
+
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["yes"],
+      opts: { idleTimeoutMs: 100 },
+    });
+    handle.stdout.on("data", () => {});
+    handle.stderr.on("data", () => {});
+
+    // Drip-feed chunks under the idle interval. After 4 ticks the
+    // total elapsed time exceeds the 100ms idle cap, but no single
+    // gap exceeds it — the watchdog must NOT fire.
+    for (let i = 0; i < 4; i++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 40));
+      onStdoutCb?.("tick\n");
+    }
+    // Now close the WS cleanly, simulating natural exit.
+    resolveWs?.();
+
+    const { exitCode } = await handle.wait();
+    expect(exitCode).toBe(0);
+    // Cleanup still runs on natural-exit.
+    expect(proc.deleteSession).toHaveBeenCalled();
+  });
+
+  it("natural-exit clears timers — a slow exec that finishes under the cap doesn't accidentally fire the timeout after", async () => {
+    // Regression guard: if `clearTimers` weren't called on the
+    // `.then(success)` path, the total/idle timers could fire after
+    // `wait()` already resolved, leaving a stray `deleteSession` call
+    // (and an extra rejection trying to settle a resolved promise).
+    const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: { timeoutMs: 200, idleTimeoutMs: 200 },
+    });
+    handle.stdout.on("data", () => {});
+    handle.stderr.on("data", () => {});
+    const { exitCode } = await handle.wait();
+    expect(exitCode).toBe(0);
+    // Wait longer than the timers — they must NOT fire.
+    await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    expect(proc.deleteSession).toHaveBeenCalledTimes(1);
   });
 });

@@ -11,6 +11,7 @@ import {
   type ExecuteStreamHandle,
   type PlanStreamHandle,
 } from "./agent/coding/orchestrator.js";
+import { createCodingTaskReconcile } from "./agent/coding/reconcile-on-failure.js";
 import { createCodingService } from "./agent/coding/service.js";
 import { DrizzleCodingStore } from "./agent/coding/store/index.js";
 import { CodingStreamingRegistry } from "./agent/coding/streaming-registry.js";
@@ -717,6 +718,15 @@ export async function bootstrapRuntime(
         },
         inngest,
       ),
+    );
+
+    // Subscribes to `inngest/function.failed` and flips any non-terminal
+    // `coding_tasks` row whose function id matches a coding orchestrator
+    // to `failed`. Covers the worker-disconnect class that the in-worker
+    // `try/catch` and per-function `onFailure` both miss — see
+    // design/coding-delegation.md → Worker-death reconciliation.
+    codingFunctions.push(
+      createCodingTaskReconcile({ runInTx: core.runInTx, store: core.codingStore }, inngest),
     );
 
     // Sandbox reaper — runs every minute, kills TTL-expired containers,

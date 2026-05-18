@@ -130,6 +130,20 @@ export interface DaytonaMockReplayOptions {
   mode: "replay";
   /** Path to read the fixture from. */
   fixturePath: string;
+  /**
+   * Per-path fault injection. When an incoming request matches a
+   * configured pattern, the mock injects the configured failure mode
+   * instead of consulting the fixture cursor. Used by wedge-regression
+   * tests to drive a real `@daytonaio/sdk` client + real `ws`
+   * WebSocket into a hung state without a recorded "hang" fixture
+   * (Daytona doesn't emit a recordable hang — it's an upstream
+   * transport failure mode we model directly).
+   *
+   * `ws-hold-open`: accept the WS upgrade, send nothing, never close.
+   * The matching WS path bypasses the fixture cursor entirely, so a
+   * fixture for *other* calls keeps its FIFO order intact.
+   */
+  faults?: ReadonlyArray<{ wsPathPattern: RegExp; kind: "ws-hold-open" }>;
 }
 
 export type DaytonaMockOptions = DaytonaMockRecordOptions | DaytonaMockReplayOptions;
@@ -315,9 +329,26 @@ export class DaytonaMock {
   async #handleWs(ws: WebSocket, path: string, headers: IncomingMessage["headers"]): Promise<void> {
     if (this.#opts.mode === "record") {
       await this.#recordWs(ws, path, headers);
-    } else {
-      this.#replayWs(ws, path);
+      return;
     }
+    // Fault injection: if a configured `ws-hold-open` pattern matches,
+    // accept the upgrade and do nothing. The SDK's `getSessionCommandLogs`
+    // Promise hangs until something on the client side tears the WS
+    // down — which is exactly what production looked like during the
+    // wedge incident. The fixture cursor is NOT advanced, so any
+    // subsequent HTTP call (e.g. the cleanup `DELETE` triggered by
+    // `ExecTimeoutError`) still matches its fixture entry in FIFO
+    // order.
+    const fault = this.#opts.faults?.find((f) => f.wsPathPattern.test(path));
+    if (fault?.kind === "ws-hold-open") {
+      log.debug({ path }, "ws-hold-open fault: accepting upgrade, no frames, no close");
+      // Drop the client-side socket reference so GC doesn't pre-empt
+      // the hold — the WS stays alive until either the client or the
+      // server tears it down. The test driver tears it down via
+      // `mock.stop()`.
+      return;
+    }
+    this.#replayWs(ws, path);
   }
 
   async #recordWs(
