@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ImageGenerationFailedError } from "../agent/image-failure.js";
 import { AbortError } from "../util/with-retry.js";
 import { VeniceImageProvider } from "./venice.js";
 
@@ -131,7 +132,7 @@ describe("VeniceImageProvider.generate", () => {
     });
   });
 
-  it("throws AbortError when x-venice-is-content-violation: true", async () => {
+  it("throws ImageGenerationFailedError (kind=moderation_blocked) on x-venice-is-content-violation", async () => {
     const fetchFn = mockFetch(() =>
       jsonResponse(
         { images: [ONE_PX_PNG_BASE64] },
@@ -146,13 +147,16 @@ describe("VeniceImageProvider.generate", () => {
       fetch: fetchFn,
     });
 
-    await expect(provider.generate({ model: "m", prompt: "p" })).rejects.toBeInstanceOf(AbortError);
-    await expect(provider.generate({ model: "m", prompt: "p" })).rejects.toThrow(
-      /content policy violation/,
-    );
+    const promise = provider.generate({ model: "m", prompt: "p" });
+    await expect(promise).rejects.toBeInstanceOf(ImageGenerationFailedError);
+    // Still an AbortError too (via inheritance) so `withRetry` stops.
+    await expect(promise).rejects.toBeInstanceOf(AbortError);
+    await expect(promise).rejects.toMatchObject({
+      failure: { kind: "moderation_blocked", provider: "venice" },
+    });
   });
 
-  it("throws AbortError on x-venice-is-blurred:true when safe_mode was explicitly false", async () => {
+  it("throws ImageGenerationFailedError (kind=blur_unexpected) on x-venice-is-blurred when safe_mode=false", async () => {
     const fetchFn = mockFetch(() =>
       jsonResponse({ images: [ONE_PX_PNG_BASE64] }, { headers: { "x-venice-is-blurred": "true" } }),
     );
@@ -164,10 +168,11 @@ describe("VeniceImageProvider.generate", () => {
       fetch: fetchFn,
     });
 
-    await expect(provider.generate({ model: "m", prompt: "p" })).rejects.toBeInstanceOf(AbortError);
-    await expect(provider.generate({ model: "m", prompt: "p" })).rejects.toThrow(
-      /blurred image despite safe_mode=false/,
-    );
+    const promise = provider.generate({ model: "m", prompt: "p" });
+    await expect(promise).rejects.toBeInstanceOf(ImageGenerationFailedError);
+    await expect(promise).rejects.toMatchObject({
+      failure: { kind: "blur_unexpected", provider: "venice" },
+    });
   });
 
   it("passes through x-venice-is-blurred:true when safe_mode is default (true)", async () => {
@@ -188,7 +193,7 @@ describe("VeniceImageProvider.generate", () => {
     expect(result.uint8Array.byteLength).toBeGreaterThan(0);
   });
 
-  it("promotes HTTP 4xx to AbortError (non-retryable)", async () => {
+  it("throws ImageGenerationFailedError (kind=provider_error) on HTTP 4xx (non-retryable)", async () => {
     const fetchFn = mockFetch(
       () =>
         new Response(JSON.stringify({ error: "invalid API key" }), {
@@ -204,8 +209,13 @@ describe("VeniceImageProvider.generate", () => {
       fetch: fetchFn,
     });
 
-    await expect(provider.generate({ model: "m", prompt: "p" })).rejects.toBeInstanceOf(AbortError);
-    await expect(provider.generate({ model: "m", prompt: "p" })).rejects.toThrow(/HTTP 401/);
+    const promise = provider.generate({ model: "m", prompt: "p" });
+    await expect(promise).rejects.toBeInstanceOf(ImageGenerationFailedError);
+    await expect(promise).rejects.toBeInstanceOf(AbortError);
+    await expect(promise).rejects.toMatchObject({
+      failure: { kind: "provider_error", provider: "venice" },
+    });
+    await expect(promise).rejects.toThrow(/HTTP 401/);
   });
 
   it("throws a plain Error (retryable) on HTTP 429 — rate limit is transient", async () => {

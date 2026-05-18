@@ -4,8 +4,12 @@ import type { ImageModelWithProvider } from "../agent/store/index.js";
 import type { ImageProvider } from "../llm/image-providers.js";
 import { logger } from "../logger.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
-import { AbortError, withRetry } from "../util/with-retry.js";
-import { detectImageFailure } from "./image-moderation.js";
+import { withRetry } from "../util/with-retry.js";
+import {
+  detectImageFailure,
+  type ImageFailure,
+  ImageGenerationFailedError,
+} from "./image-failure.js";
 import { defineTool, type ToolSpec } from "./tools.js";
 
 /**
@@ -166,6 +170,27 @@ interface ImageGenerationResult {
  *   site should keep us out of this branch in practice; this is the
  *   belt-and-braces backup.
  */
+/**
+ * Single-format point for both failure paths (adapter-thrown via
+ * `ImageGenerationFailedError`, post-generation via `detectImageFailure`).
+ * Logs the structured failure for operator filtering and returns the
+ * LLM-facing `Error: …` string the tool result carries.
+ */
+function surfaceFailure(failure: ImageFailure, row: ImageModelWithProvider, slug: string): string {
+  logger.warn(
+    {
+      kind: failure.kind,
+      provider: failure.provider,
+      rowName: row.name,
+      providerId: row.providerId,
+      slug,
+      reason: failure.reason,
+    },
+    "image generation failed",
+  );
+  return `Error: ${failure.reason}`;
+}
+
 async function generateViaAiSdk(args: {
   provider: Extract<ImageProvider, { kind: "fal" | "oai" }>;
   row: ImageModelWithProvider;
@@ -231,14 +256,43 @@ async function generateViaAiSdk(args: {
     });
     return { image, providerMetadata };
   } catch (err) {
-    // Structured 4xx classification — `isRetryable: false` on 4xx
-    // (except 429) means re-trying the same request burns budget without
-    // helping; promote to AbortError so withRetry stops.
+    // Structured 4xx classification. `isRetryable: false` on 4xx
+    // (except 429) means re-trying burns budget without helping —
+    // surface as `ImageGenerationFailedError` so `withRetry` stops
+    // AND the tool handler gets a typed failure to format uniformly
+    // with the venice / moderation paths. Moderation-shaped 4xx
+    // bodies (gpt-image-1's `content_policy_violation`, OpenAI's
+    // safety-system text) are tagged `kind: "moderation_blocked"`
+    // so the LLM sees the same shape it would from venice or fal.
     if (APICallError.isInstance(err) && err.isRetryable === false) {
-      throw new AbortError(err.message);
+      const kind: ImageFailure["kind"] = looksLikeModerationBlock(err)
+        ? "moderation_blocked"
+        : "provider_error";
+      throw new ImageGenerationFailedError({
+        kind,
+        provider: args.provider.kind,
+        reason: err.message,
+      });
     }
     throw err;
   }
+}
+
+/**
+ * Heuristic match for "the provider rejected this prompt as unsafe."
+ * OpenAI's gpt-image-* family returns HTTP 400 with the substring
+ * `content_policy_violation` in the JSON body; older DALL·E returned
+ * a `"safety system"` phrase. fal and Venice signal moderation through
+ * other channels (fal's `providerMetadata`, Venice's response
+ * headers), not via `APICallError`, so this check only matters on the
+ * openai-compatible path — but the substring set is conservative
+ * enough that it stays safe for any future provider that mirrors
+ * OpenAI's body shape.
+ */
+function looksLikeModerationBlock(err: APICallError): boolean {
+  const body = err.responseBody;
+  if (typeof body !== "string") return false;
+  return body.includes("content_policy_violation") || body.includes("safety system");
 }
 
 /**
@@ -411,7 +465,7 @@ export function createImageTools(deps: {
         const shouldForwardNegativePrompt =
           input.negativePrompt !== undefined && row.capabilities.negativePrompt === true;
 
-        const { image, providerMetadata } = await withRetry(
+        const generateResult = await withRetry(
           async (): Promise<ImageGenerationResult> => {
             switch (provider.kind) {
               case "fal":
@@ -442,15 +496,30 @@ export function createImageTools(deps: {
                     }),
                 });
                 // Venice doesn't expose a providerMetadata surface — its
-                // censorship signals are response headers handled inside the
-                // adapter (throws AbortError). The size canary in
-                // `detectImageFailure` still applies.
+                // censorship signals are response headers handled inside
+                // the adapter (throws `ImageGenerationFailedError`). The
+                // size canary in `detectImageFailure` still applies.
                 return { image: bytes, providerMetadata: undefined };
               }
             }
           },
           { retries: 2, context: `image.generate.${row.name}` },
-        );
+        ).catch((err: unknown): { failure: ImageFailure } => {
+          // Adapter-thrown failures (Venice headers, openai-compat
+          // moderation 4xx) come in as `ImageGenerationFailedError`.
+          // Re-surface as a "failure" Result so the post-generation
+          // path below is the single place that formats LLM-facing
+          // errors and logs them.
+          if (err instanceof ImageGenerationFailedError) {
+            return { failure: err.failure };
+          }
+          throw err;
+        });
+
+        if ("failure" in generateResult) {
+          return surfaceFailure(generateResult.failure, row, input.model);
+        }
+        const { image, providerMetadata } = generateResult;
 
         const detection = moderate({
           image,
@@ -458,16 +527,7 @@ export function createImageTools(deps: {
           providerKind: provider.kind,
         });
         if (!detection.ok) {
-          logger.warn(
-            {
-              rowName: row.name,
-              providerId: row.providerId,
-              slug: input.model,
-              reason: detection.reason,
-            },
-            "image moderation/failure detected",
-          );
-          return `Error: ${detection.reason}`;
+          return surfaceFailure(detection.failure, row, input.model);
         }
 
         const buffer = Buffer.from(image.uint8Array);
