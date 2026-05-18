@@ -57,6 +57,8 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
   const status = await runGit(container, ["status", "--porcelain"], {
     workingDir: worktreeDir,
     env: askpassEnv,
+    timeoutMs: GIT_LOCAL_TOTAL_MS,
+    idleTimeoutMs: GIT_IDLE_MS,
   });
   if (status.exitCode !== 0) {
     return { kind: "failed", output: combine(status) };
@@ -71,6 +73,8 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
     const addResult = await runGit(container, ["add", "-A"], {
       workingDir: worktreeDir,
       env: askpassEnv,
+      timeoutMs: GIT_LOCAL_TOTAL_MS,
+      idleTimeoutMs: GIT_IDLE_MS,
     });
     if (addResult.exitCode !== 0) {
       return { kind: "failed", output: combine(addResult) };
@@ -92,7 +96,12 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
         "-m",
         commitMessage,
       ],
-      { workingDir: worktreeDir, env: askpassEnv },
+      {
+        workingDir: worktreeDir,
+        env: askpassEnv,
+        timeoutMs: GIT_LOCAL_TOTAL_MS,
+        idleTimeoutMs: GIT_IDLE_MS,
+      },
     );
     if (commitResult.exitCode !== 0) {
       // `git commit` exits 1 when there's nothing to commit — but we
@@ -110,6 +119,8 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
   const pushResult = await runGit(container, ["push", REMOTE, branch], {
     workingDir: worktreeDir,
     env: askpassEnv,
+    timeoutMs: GIT_PUSH_TOTAL_MS,
+    idleTimeoutMs: GIT_IDLE_MS,
   });
   const pushOutput = combine(pushResult);
   if (pushResult.exitCode !== 0) {
@@ -132,6 +143,8 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
   const sha = await runGit(container, ["rev-parse", "HEAD"], {
     workingDir: worktreeDir,
     env: askpassEnv,
+    timeoutMs: GIT_LOCAL_TOTAL_MS,
+    idleTimeoutMs: GIT_IDLE_MS,
   });
   const commitSha = sha.exitCode === 0 ? sha.stdout.trim() : "";
   return { kind: "pushed", commitSha, output: pushOutput };
@@ -143,14 +156,30 @@ interface ExecCapture {
   stderr: string;
 }
 
+// Per-call exec timeouts for `git` invocations in commit-and-push. See
+// design/coding-delegation.md → Per-callsite exec timeouts. Local-mutating
+// git ops are fast; `git push` carries a generous total cap because a
+// large delta legitimately takes longer. Idle cap protects against a
+// hung TLS connection mid-upload.
+const GIT_LOCAL_TOTAL_MS = 60_000;
+const GIT_PUSH_TOTAL_MS = 5 * 60 * 1000;
+const GIT_IDLE_MS = 30_000;
+
 async function runGit(
   container: Pick<SandboxSession, "execStreaming">,
   args: ReadonlyArray<string>,
-  opts: { workingDir: string; env: Readonly<Record<string, string>> },
+  opts: {
+    workingDir: string;
+    env: Readonly<Record<string, string>>;
+    timeoutMs: number;
+    idleTimeoutMs: number;
+  },
 ): Promise<ExecCapture> {
   const handle = await container.execStreaming(["git", ...args], {
     workingDir: opts.workingDir,
     env: opts.env,
+    timeoutMs: opts.timeoutMs,
+    idleTimeoutMs: opts.idleTimeoutMs,
   });
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];

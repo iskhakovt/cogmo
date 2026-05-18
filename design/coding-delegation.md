@@ -466,6 +466,19 @@ Same pattern as `handle-message` ([crash-recovery.md](crash-recovery.md)) — du
 
 Streaming sections re-execute on retry. `--resume <sid>` plus idempotent durable steps around them keeps the task convergent — replays don't produce double commits, double pushes, or double PRs. Mirrors the tradeoff we already accepted for `handle-message` message streaming.
 
+### Per-callsite exec timeouts `[confirmed]`
+
+Every `execStreaming()` call inside the orchestrator pair (plan + execute) and the verify orchestrator carries an explicit `timeoutMs` (total wall-clock) and `idleTimeoutMs` (no-byte-flow watchdog), so a wedged transport — Daytona WS half-close, hijacked Docker socket stall — surfaces as a fast `ExecTimeoutError` rejection on `wait()` instead of an indefinite block. Defaults live at the callsite, not on the backend; the backend interface defaults to "no cap" for any caller that omits them. See [sandbox.md → Wall-clock and idle timeouts](sandbox.md#wall-clock-and-idle-timeouts-confirmed) for the cleanup semantics.
+
+| Callsite | `timeoutMs` | `idleTimeoutMs` | Rationale |
+|-|-|-|-|
+| `checkoutFeatureBranchInSandbox` (`git checkout -B`) | 60 s | 30 s | Fast op (~1 s in steady state). Both timeouts tight because there is no legitimate slow path. |
+| `runClaudePlan` / `runClaudeExecute` (plan + execute streams) | 30 min | 5 min | Total cap is the absolute upper bound for one CLI invocation against current models. Idle cap catches WS-wedged-mid-stream while still allowing legitimate gaps between tool calls and thinking blocks. |
+| `runCommitAndPush` (`git add`, `git commit -S`, `git push`) | 60 s for local-mutating commands; 5 min for `git push` (network upload) | 30 s | Push can take longer on a large delta; idle cap protects against a hung TLS connection mid-upload. |
+| `verify` (`bash -lc <verify_command>`) | `coding_repos.verify_timeout_seconds` (default 600 s) | — | Verify keeps its existing `Promise.race(setTimeout)` total cap because the semantics differ: a genuine verify timeout produces `exitCode = TIMEOUT_EXIT_CODE (124)` persisted as the row's `failure_reason`, distinct from the `ExecTimeoutError` class. An idle cap on this callsite is a follow-up; verify is the last exec before sandbox teardown, so a wedged transport is bounded by the outer cleanup. |
+
+A timeout fire is mapped to a task-level failure by the caller — `checkoutFeatureBranchInSandbox` rethrows the `ExecTimeoutError` so the orchestrator's outer `catch` sees it (which writes `failure_reason: "git checkout -B … timed out after 60s"` and emits `coding/task/failed`); `runCommitAndPush` rethrows; the claude runners turn it into a `complete` event with `isError: true` and a `failureReason` describing the cap.
+
 ## Autonomy Gates `[proposed]`
 
 Three gates, mapped onto Cogmo's existing `explicit_permission` rules. Plan gate is `[confirmed]` (slice 2); tool gate is `[confirmed]` (slice 3); merge gate remains `[proposed]`.
@@ -643,6 +656,29 @@ Diffs are not rendered in Telegram. Link to GitHub for review. GitHub Mobile (si
 | Git push rejected (non-ff, protected) | Report error, do not force — user decides how to reconcile |
 | Task container crash | Mark task `failed`; sandbox reaper cleans up orphans; `session_id` preserved so the user can explicitly resume |
 | Cogmo restart mid-task | Sandbox crash recovery reconciles containers on boot. Non-terminal tasks are *not* auto-resumed — they stay in their last status with `session_id` intact, and the next user turn on that task triggers the resume path from [Container Lifecycle](#container-lifecycle-proposed). Avoids silent side-effects after a potentially long outage. |
+| Inngest worker stops responding mid-step | The `coding-task-reconcile` subscriber (see [Worker-death reconciliation](#worker-death-reconciliation-confirmed) below) listens on the system event `inngest/function.failed`, flips any non-terminal `coding_tasks` row whose `function_id` matches a coding orchestrator to `failed`, and emits `coding/task/failed` so the existing cleanup chain (run-branch delete, sandbox reap) fires. |
+
+### Worker-death reconciliation `[confirmed]`
+
+The in-worker `try/catch` inside `runCodingTask` / `runCodingExecute` writes `status='failed'` and emits `coding/task/failed` on every failure path it observes — but Inngest's `connect_worker_stopped_responding` terminal outcome (worker crash, OOM, SIGKILL, or the WS-wedge described in [sandbox.md → Streaming exec](sandbox.md#streaming-exec-proposed)) abandons the run *before* the catch can execute. The cogmo row is left in `planning` / `executing` indefinitely; the orphan-run-branch sweeper deliberately skips non-terminal rows ([cleanup-orphan-run-branches.ts](../src/agent/coding/cleanup-orphan-run-branches.ts) — "Non-terminal tasks are NEVER swept regardless of age — they may be stuck pending approval; the user owns that"), so the run-branch leaks too. This was the observed wedge that motivated the timeout pair above; the worker-death class is broader than the WS hang alone.
+
+A per-function `onFailure` handler is **not** the right hook for this. Inngest's documented contract says `onFailure` fires "after maximum retries" ([handling-failures](https://www.inngest.com/docs/reference/functions/handling-failures)), and the open issue [inngest/inngest#3549](https://github.com/inngest/inngest/issues/3549) reports the symptom — runs stuck after a connect-mode worker disconnect, no clean terminal transition. The reliable hook is the system event [`inngest/function.failed`](https://www.inngest.com/docs/reference/system-events/inngest-function-failed), which fires environment-wide on every terminal-failed run regardless of how the worker exited.
+
+A dedicated Inngest function `coding-task-reconcile` subscribes to that event with a CEL filter pinning it to the coding orchestrators (`coding-task-start`, `coding-task-execute`, `coding-task-verify`). The function body uses **two separate durable steps**, not one:
+
+1. `step.run("reconcile", …)` — pull `function_id` + `event.data.event.data.taskId`, conditional UPDATE: flip non-terminal → `failed` with `failure_reason = "inngest run terminated abnormally (run_id <id>, function_id <fn>): <error.message>"`. Returns a discriminated result; the `reconciled` variant carries `failureReason` so the next step has the payload.
+2. `step.sendEvent("emit-failed", { …codingTaskFailed.create({…}), id: \`reconcile-${run_id}\` })` — durable bus emit with an explicit idempotency `id` so a retry of this step after a transient send blip is deduplicated at the bus.
+
+The split is load-bearing. Putting the emit inside the cached `step.run` is a durability bug: a transient `inngest.send` failure inside the body throws the step, Inngest retries, but the DB UPDATE committed on the first attempt — so the retry's conditional UPDATE returns `already_terminal` and the function returns `skipped`. The event never gets emitted. `cleanup-run-branch` never fires. Discovered in PR #267 review; pinned by the wrapper-level tests in `reconcile-on-failure.test.ts`.
+
+Branch logic:
+- `reconciled` (we wrote the row to `failed`) → run step 2.
+- `already_terminal` (in-worker catch already wrote `failed` and emitted) → no step 2; double-emit would re-fire `cleanup-run-branch`.
+- `not_found` / `missing_task_id` / `not_coding_orchestrator` → no step 2.
+
+`retries: 3` on the reconcile function — DB blips during reconcile shouldn't lose a recovery — and the two-step split keeps retries safe: step 1's conditional UPDATE is idempotent on the DB side; step 2's `id` is idempotent on the bus side. Concurrency keyed on `event.data.run_id` prevents a duplicate event from doing duplicate work.
+
+The 7-day permission-prompt wait is not at risk: it's a `step.waitForEvent`, not a `step.run`, so the run is parked durably and only terminates on event arrival or timeout — neither path emits `inngest/function.failed`. A genuine 7-day timeout would expire the wait and the orchestrator's normal path runs `set-status-failed`, so the reconcile sees a terminal row and no-ops.
 
 ## Why this design `[confirmed]`
 

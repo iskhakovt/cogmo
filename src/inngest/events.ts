@@ -269,6 +269,47 @@ export const codingTaskFailed = eventType("coding/task/failed", {
 });
 
 /**
+ * Inngest system event — fires environment-wide on every terminal-failed
+ * function run. The shape mirrors `FailureEventPayload` from `inngest`
+ * (kept as a parallel Zod declaration here so we can name it as a trigger
+ * without depending on the SDK's `internalEvents` constants at the
+ * trigger callsite).
+ *
+ * Cogmo subscribes to this in the `coding-task-reconcile` function — see
+ * design/coding-delegation.md → Worker-death reconciliation. `onFailure`
+ * is not a reliable substitute on Inngest connect-mode worker death
+ * ([inngest/inngest#3549](https://github.com/inngest/inngest/issues/3549));
+ * this system event fires regardless of how the worker exited.
+ *
+ * Schema is permissive (`passthrough()` for the inner event payload and
+ * the error blob) because the inner shape varies by triggering function;
+ * the reconcile function only needs `function_id`, `run_id`, and
+ * (optionally) `data.event.data.taskId` to identify the coding task.
+ */
+export const inngestFunctionFailed = eventType("inngest/function.failed", {
+  schema: z.object({
+    function_id: z.string(),
+    run_id: z.string(),
+    error: z
+      .object({
+        message: z.string().optional(),
+        name: z.string().optional(),
+      })
+      .passthrough(),
+    event: z
+      .object({
+        name: z.string(),
+        data: z
+          .object({
+            taskId: z.string().optional(),
+          })
+          .passthrough(),
+      })
+      .passthrough(),
+  }),
+});
+
+/**
  * Coding delegation — weekly orphan-run-branch sweep fan-out. The cron
  * lists managed coding repos and emits one event per repo so each repo's
  * cleanup runs in its own retry/observability lane (per Inngest's fan-out

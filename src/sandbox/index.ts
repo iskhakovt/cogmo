@@ -90,6 +90,47 @@ export interface ExecOptions {
   env?: Readonly<Record<string, string>>;
   /** When true, `stdin` is exposed on the returned streaming handle. */
   attachStdin?: boolean;
+  /**
+   * Total wall-clock cap. If `wait()` hasn't settled by `timeoutMs` after the
+   * exec started, the backend runs the same teardown `dispose()` would (close
+   * hijacked socket / `deleteSession`) and rejects `wait()` with
+   * `ExecTimeoutError`. Omitted = no cap. See design/sandbox.md →
+   * Wall-clock and idle timeouts.
+   */
+  timeoutMs?: number;
+  /**
+   * No-byte-flow watchdog. Resets on every stdout/stderr chunk; if it fires
+   * before the next chunk or natural exit, same cleanup + `ExecTimeoutError`
+   * path as `timeoutMs`. Catches "WS holds open but sends nothing" — the
+   * failure mode `timeoutMs` alone misses when the underlying transport
+   * doesn't propagate close on a remote stall. Omitted = no idle cap.
+   */
+  idleTimeoutMs?: number;
+}
+
+/**
+ * Thrown by `wait()` when `ExecOptions.timeoutMs` or
+ * `ExecOptions.idleTimeoutMs` fires. Distinct sentinel from `DisposedError`
+ * so consumers branching on exit outcome can separate "we hit the cap" from
+ * "we explicitly cancelled."
+ *
+ * `kind` carries which cap fired; `timeoutMs` is the configured limit.
+ * Backends are expected to throw this exact shape — Local-Docker and Daytona
+ * import from here rather than defining their own.
+ */
+export class ExecTimeoutError extends Error {
+  readonly kind: "total" | "idle";
+  readonly timeoutMs: number;
+  constructor(kind: "total" | "idle", timeoutMs: number) {
+    super(
+      kind === "total"
+        ? `exec exceeded wall-clock timeout ${timeoutMs}ms`
+        : `exec exceeded idle timeout ${timeoutMs}ms with no stdout/stderr activity`,
+    );
+    this.name = "ExecTimeoutError";
+    this.kind = kind;
+    this.timeoutMs = timeoutMs;
+  }
 }
 
 /**

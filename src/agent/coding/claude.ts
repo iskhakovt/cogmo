@@ -144,6 +144,16 @@ const COMMON_FLAGS: readonly string[] = [
 
 const PLAN_FLAGS: readonly string[] = [...COMMON_FLAGS, "--permission-mode", "plan"];
 
+/**
+ * Per-call exec timeouts for `claude -p`. See design/coding-delegation.md →
+ * Per-callsite exec timeouts. 30-minute total cap is the absolute upper bound
+ * on a single CLI invocation against current models; 5-minute idle cap
+ * catches a WS-wedged-mid-stream while still allowing legitimate gaps
+ * between tool calls and thinking blocks.
+ */
+const CLAUDE_TOTAL_TIMEOUT_MS = 30 * 60 * 1000;
+const CLAUDE_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+
 interface ClaudeCodeBackendOptions {
   /** Override the binary name. Defaults to `claude` (must be on PATH inside the container). */
   binary?: string;
@@ -192,7 +202,11 @@ async function* runClaudePlan(
   flags: readonly string[],
   prompt: string,
 ): AsyncIterable<CodingEvent> {
-  const exec = await container.execStreaming([binary, ...flags], { attachStdin: true });
+  const exec = await container.execStreaming([binary, ...flags], {
+    attachStdin: true,
+    timeoutMs: CLAUDE_TOTAL_TIMEOUT_MS,
+    idleTimeoutMs: CLAUDE_IDLE_TIMEOUT_MS,
+  });
   if (!exec.stdin) throw new Error("ClaudeCodeBackend: stdin not attached");
   writeUserMessage(exec.stdin, prompt);
   exec.stdin.end();
@@ -213,7 +227,11 @@ async function runClaudeExecute(
   flags: readonly string[],
   prompt: string,
 ): Promise<CodingExecuteHandle> {
-  const exec = await container.execStreaming([binary, ...flags], { attachStdin: true });
+  const exec = await container.execStreaming([binary, ...flags], {
+    attachStdin: true,
+    timeoutMs: CLAUDE_TOTAL_TIMEOUT_MS,
+    idleTimeoutMs: CLAUDE_IDLE_TIMEOUT_MS,
+  });
   if (!exec.stdin) throw new Error("ClaudeCodeBackend: stdin not attached");
   writeUserMessage(exec.stdin, prompt);
   // Don't end() — stdin must stay open for permission control_response

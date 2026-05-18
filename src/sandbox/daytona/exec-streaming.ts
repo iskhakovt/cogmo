@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
 import type { Process } from "@daytonaio/sdk";
 import { logger } from "../../logger.js";
-import type { ExecOptions, ExecStreamingHandle } from "../index.js";
+import { type ExecOptions, type ExecStreamingHandle, ExecTimeoutError } from "../index.js";
 
 const log = logger.child({ component: "sandbox.daytona.exec-streaming" });
 
@@ -147,20 +147,72 @@ export async function startExecStreaming(args: {
     throw err;
   }
 
+  // Timeout state — see "Wall-clock and idle timeouts" in
+  // design/sandbox.md. Both timers fire independently; whichever lands
+  // first wins. The natural-exit and explicit-dispose paths both clear
+  // them so they never fire after the exec has already settled.
+  let timedOut: ExecTimeoutError | null = null;
+  let totalTimer: NodeJS.Timeout | null = null;
+  let idleTimer: NodeJS.Timeout | null = null;
+  const clearTimers = (): void => {
+    if (totalTimer) {
+      clearTimeout(totalTimer);
+      totalTimer = null;
+    }
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
+
   // Open the streaming WebSocket. The promise resolves when the WS closes
   // — whether because the command exited cleanly or because we
   // `deleteSession`'d the session out from under it. Errors (transient
   // network drops, server faults) reject; we forward to stdout consumers.
+  //
+  // The chunk callbacks also reset the idle watchdog — any byte from
+  // the remote command counts as activity.
+  const resetIdle = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (opts.idleTimeoutMs !== undefined && !timedOut) {
+      idleTimer = setTimeout(() => {
+        idleTimer = null;
+        if (timedOut) return;
+        timedOut = new ExecTimeoutError("idle", opts.idleTimeoutMs ?? 0);
+        // Force the WS to close by tearing down the session. The
+        // wsPromise chain below will then settle into the timeout
+        // branch and reject `exitPromise`.
+        cleanupSession().catch(() => {});
+      }, opts.idleTimeoutMs);
+    }
+  };
+
   const wsPromise = daytonaProcess.getSessionCommandLogs(
     sessionId,
     commandId,
     (chunk) => {
+      resetIdle();
       stdout.write(chunk);
     },
     (chunk) => {
+      resetIdle();
       stderr.write(chunk);
     },
   );
+
+  // Arm the total wall-clock timer + initial idle timer immediately
+  // after the WS handshake is requested. Idle timer's setup is
+  // factored into `resetIdle()` so chunk arrivals re-arm it without
+  // duplicating logic.
+  if (opts.timeoutMs !== undefined) {
+    totalTimer = setTimeout(() => {
+      totalTimer = null;
+      if (timedOut) return;
+      timedOut = new ExecTimeoutError("total", opts.timeoutMs ?? 0);
+      cleanupSession().catch(() => {});
+    }, opts.timeoutMs);
+  }
+  resetIdle();
 
   // The exit channel: WS close → fetch `getSessionCommand` for the exit
   // code. If WS errored, surface the error (consumers may have already
@@ -171,26 +223,29 @@ export async function startExecStreaming(args: {
   // `DisposedError` after `dispose()` instead of resolving with a
   // sentinel exit code — that forces consumers to handle the dispose
   // path explicitly rather than confusing it with a real exit signal.
+  // Timeouts get their own sentinel `ExecTimeoutError` for the same
+  // reason; consumers branching on outcome can separate "we capped" from
+  // "we cancelled" from "real exit code."
   let disposed = false;
   const exitPromise = new Promise<{ exitCode: number }>((resolve, reject) => {
     wsPromise
       .then(async () => {
+        clearTimers();
         stdout.end();
         stderr.end();
         if (onClose) onClose();
+        await cleanupSession();
+        if (timedOut) {
+          reject(timedOut);
+          return;
+        }
         if (disposed) {
-          await cleanupSession();
           reject(new DisposedError());
           return;
         }
         try {
           const cmd = await daytonaProcess.getSessionCommand(sessionId, commandId);
-          await cleanupSession();
           if (cmd.exitCode === undefined || cmd.exitCode === null) {
-            // Natural WS close + Daytona reports no exit code.
-            // Surface as a real failure rather than coercing to 0 —
-            // "we don't know what happened" must not look like
-            // success to consumers branching on exit status.
             reject(
               new Error(
                 `Daytona session ${sessionId} command ${commandId} exited but reported no exit code`,
@@ -200,15 +255,23 @@ export async function startExecStreaming(args: {
           }
           resolve({ exitCode: cmd.exitCode });
         } catch (err) {
-          await cleanupSession();
           reject(err as Error);
         }
       })
       .catch(async (err: Error) => {
+        clearTimers();
         stdout.end();
         stderr.end();
         if (onClose) onClose();
         await cleanupSession();
+        if (timedOut) {
+          // Preserve the WS error as `cause` so the original transport
+          // failure is recoverable in logs when the timer raced a
+          // real upstream error.
+          timedOut.cause = err;
+          reject(timedOut);
+          return;
+        }
         if (disposed) {
           // Expected — dispose tore down the WS. Reject with the
           // sentinel error type per the interface contract.
@@ -229,6 +292,7 @@ export async function startExecStreaming(args: {
   const dispose = async (): Promise<void> => {
     if (disposed) return;
     disposed = true;
+    clearTimers();
     // `cleanupSession` is the canonical teardown — also called by the
     // natural-exit path above, so this is idempotent. Tearing down the
     // session also closes the WS, which triggers the rejection branch

@@ -148,6 +148,15 @@ type ExecResult = {
  * `stdout` / `stderr`) and `wait()` rejects with `DisposedError` —
  * callers racing dispose against natural exit must check for that.
  *
+ * `ExecOptions.timeoutMs` (total wall-clock) and
+ * `ExecOptions.idleTimeoutMs` (no-byte-flow watchdog) cap `wait()` on
+ * the caller's behalf. On expiry the backend runs the same cleanup
+ * `dispose()` would (close socket / `deleteSession`) and rejects
+ * `wait()` with `ExecTimeoutError`. `ExecTimeoutError` is a distinct
+ * sentinel from `DisposedError` so consumers branching on outcome can
+ * separate "we hit the cap" from "we cancelled." See "Wall-clock and
+ * idle timeouts" below.
+ *
  * Consumers wanting line semantics do their own line splitter
  * (`split2` etc.) on the `Readable`s — backends emit per-chunk, not
  * per-line.
@@ -160,6 +169,21 @@ interface ExecStreamingHandle {
   dispose(): Promise<void>;
 }
 ```
+
+### Wall-clock and idle timeouts `[confirmed]`
+
+Streaming-exec callers pass two independent timeouts on `ExecOptions`:
+
+| Field | Triggers when |
+|-|-|
+| `timeoutMs` | total wall-clock since `execStreaming()` resolved |
+| `idleTimeoutMs` | no stdout/stderr chunk has arrived for `idleTimeoutMs` |
+
+Both default off (no cap). The interface accepts them on every backend; backend implementations clear both timers on natural exit (stream `end`/WS close) and dispose, reset the idle timer on every chunk, and on timer fire run the same teardown `dispose()` would (Local-Docker: `stream.destroy()`; Daytona: `deleteSession`) then reject `wait()` with `ExecTimeoutError`. Idempotent: a timer firing after a natural exit is a no-op.
+
+Why two, not one. The Daytona wedge incident (4-day stuck task, run id `01KRM7A886F293XVTJPVB9CZ91`) was a transient WS hang on `getSessionCommandLogs`: the underlying WebSocket held open silently, the daemon never sent close, and `await handle.wait()` blocked forever. A single total-deadline cap would have caught it, but the cap that fits one workload (e.g. `git checkout` 60s) is wrong for another (`claude -p` streaming for tens of minutes). Splitting into total + idle lets `claude` opt into "stream as long as you want, but never go silent for >N minutes" while keeping `git` calls bounded by their natural wall-clock. This is the same shape e2b ships ([e2b-dev/E2B #1128](https://github.com/e2b-dev/E2B/issues/1128) — streaming calls only honored connect timeout, not read), Modal exposes ([`Sandbox.create(timeout=..., idle_timeout=...)`](https://modal.com/docs/guide/timeouts)), and WebSocket best practice recommends as the "75% rule" — ping at 0.75× the shortest proxy idle. Daytona's own [#2510](https://github.com/daytonaio/daytona/issues/2510) describes the stream-doesn't-close bug; [#2513](https://github.com/daytonaio/daytona/issues/2513) the missing async completion API. Both are upstream limitations the timeout pair routes around.
+
+Per-callsite defaults are owned by the caller, not the backend — see [coding-delegation.md → Per-callsite exec timeouts](coding-delegation.md#per-callsite-exec-timeouts). Backends never inject a default; passing nothing means no cap (preserves the pre-timeout behaviour for skills tier-2 and any future caller that genuinely wants unbounded exec).
 
 ### Discriminated options and state
 
@@ -537,6 +561,7 @@ WS reality the wrapper hides:
 - **Exit code arrives separately.** The WS closes when the command exits; the wrapper then fetches `getSessionCommand(sessionId, commandId)` to read the exit code.
 - **No per-command kill.** `dispose()` calls `deleteSession(sessionId)`, which tears down everything in that session. To keep dispose semantics clean, the wrapper allocates **one Daytona session per `execStreaming()` call**.
 - **No WS heartbeat.** The wrapper relies on the client's per-sandbox `refreshActivity()` ticker (see Authentication & deployment) to keep the sandbox alive across long execs.
+- **WS close is the only completion signal, and it isn't reliable.** Daytona [#2513](https://github.com/daytonaio/daytona/issues/2513) calls this out explicitly — there is no promise-based exit notification today; the WS closing is what tells the wrapper the command finished. Daytona [#2510](https://github.com/daytonaio/daytona/issues/2510) shows the WS sometimes fails to close. Without an upper bound, `wait()` can block forever. The total + idle timeout pair on `ExecOptions` (see [Wall-clock and idle timeouts](#wall-clock-and-idle-timeouts-confirmed) above) is the upper bound. On timer fire the wrapper runs `cleanupSession()` (= `deleteSession`, the same teardown `dispose()` uses — Daytona [#2510](https://github.com/daytonaio/daytona/issues/2510)'s recommended explicit-cleanup path) and rejects `wait()` with `ExecTimeoutError`.
 
 `claude` is wrapped by `stdbuf -oL -eL` inside the sandbox to defeat its block-buffering bug ([anthropics/claude-code#25670](https://github.com/anthropics/claude-code/issues/25670)). `stdbuf` is in coreutils on every reasonable base image. If a future image lacks it, fall back to `script -qfc 'claude …' /dev/null`.
 
