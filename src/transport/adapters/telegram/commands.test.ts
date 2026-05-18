@@ -11,12 +11,14 @@ import {
   handleDisable,
   handleEnable,
   handleEnd,
+  handleLearned,
   handleMcp,
   handleModel,
   handleName,
   handleNew,
   handlePlanCallback,
   handleProfile,
+  handleReflect,
   handleRepair,
   handleResume,
   handleResumeCallback,
@@ -3719,5 +3721,202 @@ describe("handleSchedules", () => {
       await handleSchedules(transport, ctx);
       expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /schedules");
     }
+  });
+});
+
+describe("handleLearned", () => {
+  const EVT_A = "019e2900-0000-7000-8000-0000000000aa";
+  const EVT_B = "019e2900-0000-7000-8000-0000000000bb";
+
+  function makePayload(overrides?: {
+    extracted?: number;
+    reinforced?: number;
+    promoted?: number;
+    memories?: number;
+  }) {
+    return {
+      corrections: {
+        extracted: overrides?.extracted ?? 1,
+        reinforced: overrides?.reinforced ?? 0,
+        contradictions: 0,
+        promoted: overrides?.promoted ?? 0,
+        outOfScopeReinforcementsSkipped: 0,
+        unknownRuleReinforcementsSkipped: 0,
+        consolidationNeeded: false,
+      },
+      consolidation: null,
+      memories: { extracted: overrides?.memories ?? 0, byNetwork: {} },
+      drained: { drained: 0, byNetwork: {} },
+      messageCount: 8,
+      profileId: "11111111-1111-7111-8111-111111111111",
+    };
+  }
+
+  it("renders a digest with id, timestamp, and rule/memory counts", async () => {
+    const transport = transportWith({
+      evolution: {
+        listEvents: vi.fn().mockResolvedValue(
+          ok([
+            {
+              id: EVT_B,
+              conversationId: "c1",
+              userId: "u1",
+              triggeredBy: "manual",
+              payload: makePayload({ extracted: 2, memories: 3 }),
+              createdAt: new Date("2026-06-01T10:00:00Z"),
+            },
+            {
+              id: EVT_A,
+              conversationId: "c1",
+              userId: "u1",
+              triggeredBy: "idle",
+              payload: makePayload({ extracted: 1, memories: 1 }),
+              createdAt: new Date("2026-05-30T08:00:00Z"),
+            },
+          ]),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleLearned(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    expect(reply).toContain("Evolution events (2):");
+    expect(reply).toContain(EVT_B);
+    expect(reply).toContain("[manual]");
+    expect(reply).toContain("2 rule change(s)");
+    expect(reply).toContain("3 memory write(s)");
+  });
+
+  it("nudges the user to /reflect when there are no events", async () => {
+    const transport = transportWith({
+      evolution: { listEvents: vi.fn().mockResolvedValue(ok([])) },
+    });
+    const ctx = mkCtx();
+    await handleLearned(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("/reflect");
+  });
+
+  it("renders detail when given a valid uuid arg", async () => {
+    const transport = transportWith({
+      evolution: {
+        getEvent: vi.fn().mockResolvedValue(
+          ok({
+            id: EVT_A,
+            conversationId: "c1",
+            userId: "u1",
+            triggeredBy: "idle",
+            payload: makePayload({ extracted: 2, reinforced: 1, memories: 4 }),
+            createdAt: new Date("2026-05-30T08:00:00Z"),
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx(EVT_A);
+    await handleLearned(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    expect(reply).toContain(`Event ${EVT_A}`);
+    expect(reply).toContain("Triggered by: idle");
+    expect(reply).toContain("extracted:    2");
+    expect(reply).toContain("reinforced:   1");
+    expect(reply).toContain("Memories: 4 extracted");
+  });
+
+  it("reports a clear miss when the event id is unknown", async () => {
+    const transport = transportWith({
+      evolution: { getEvent: vi.fn().mockResolvedValue(ok(null)) },
+    });
+    const ctx = mkCtx(EVT_A);
+    await handleLearned(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toMatch(/No evolution event/);
+  });
+
+  it("rejects non-uuid arguments with USAGE", async () => {
+    const transport = transportWith();
+    const ctx = mkCtx("not-a-uuid");
+    await handleLearned(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /learned");
+  });
+});
+
+describe("handleReflect", () => {
+  it("renders processed digest with rule, memory, and event-id breadcrumb", async () => {
+    const transport = transportWith({
+      evolution: {
+        triggerReflection: vi.fn().mockResolvedValue(
+          ok({
+            status: "processed",
+            eventId: "019e2900-0000-7000-8000-0000000000cc",
+            ruleChanges: { extracted: 2, reinforced: 1, promoted: 1 },
+            memoryCount: 3,
+            drained: 0,
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleReflect(transport, ctx);
+    // First reply is the "Reflecting…" pre-message; second is the digest.
+    const digest = (ctx.reply.mock.calls[1]?.[0] ?? "") as string;
+    expect(digest).toMatch(/Reflected/);
+    expect(digest).toContain("2 new");
+    expect(digest).toContain("1 reinforced");
+    expect(digest).toContain("3 extracted");
+    expect(digest).toContain("/learned 019e2900");
+  });
+
+  it("reports too-short conversations clearly", async () => {
+    const transport = transportWith({
+      evolution: {
+        triggerReflection: vi
+          .fn()
+          .mockResolvedValue(ok({ status: "skipped", reason: "too_short" })),
+      },
+    });
+    const ctx = mkCtx();
+    await handleReflect(transport, ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/too short/i);
+  });
+
+  it("reports no-session when there's no active conversation", async () => {
+    const transport = transportWith({
+      evolution: {
+        triggerReflection: vi.fn().mockResolvedValue(ok({ status: "no_session" })),
+      },
+    });
+    const ctx = mkCtx();
+    await handleReflect(transport, ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/No active conversation/);
+  });
+
+  it("renders a 'no changes' digest when nothing was extracted", async () => {
+    const transport = transportWith({
+      evolution: {
+        triggerReflection: vi.fn().mockResolvedValue(
+          ok({
+            status: "processed",
+            eventId: "019e2900-0000-7000-8000-0000000000dd",
+            ruleChanges: { extracted: 0, reinforced: 0, promoted: 0 },
+            memoryCount: 0,
+            drained: 0,
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleReflect(transport, ctx);
+    const digest = (ctx.reply.mock.calls[1]?.[0] ?? "") as string;
+    expect(digest).toContain("no rule changes");
+    expect(digest).toContain("no memories");
+  });
+
+  it("surfaces TransportError messages", async () => {
+    const transport = transportWith({
+      evolution: {
+        triggerReflection: vi.fn().mockResolvedValue(err({ code: "evolution_unavailable" })),
+      },
+    });
+    const ctx = mkCtx();
+    await handleReflect(transport, ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/Evolution isn't wired/i);
   });
 });

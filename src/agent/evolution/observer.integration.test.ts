@@ -85,6 +85,11 @@ async function cleanupTestState(): Promise<void> {
   // extractCorrections; manually-seeded rules (source='manual') stay
   // untouched. Wide enough not to leak per-test state into the next.
   await pgClient.unsafe(`DELETE FROM steering_rules WHERE source IN ('correction', 'evolution')`);
+  // Drop audit rows before conversations — FK from evolution_events →
+  // conversations is `no action`, so a stale row would block deletion of
+  // its parent conversation. Scope to the test user so concurrent tests
+  // (different users) don't trample each other.
+  await pgClient.unsafe(`DELETE FROM evolution_events WHERE user_id = $1`, [userId]);
   await pgClient.unsafe(
     `DELETE FROM conversations
      WHERE user_id = $1 AND profile_id IN (
@@ -375,6 +380,53 @@ describe("runObserver — real PG + recording memory mock", () => {
       "trust:first-party",
     ]);
     expect(call?.items[0]?.metadata).toEqual({ source: "conversation" });
+
+    // Audit row: every processed fire writes exactly one row, the result's
+    // `eventId` matches it, and the payload mirrors the in-memory result
+    // (Zod-validated round-trip through JSONB).
+    const events = await fakeRunInTx((tx) => store.listEvolutionEvents(tx, userId));
+    expect(events).toHaveLength(1);
+    const row = events[0];
+    if (!row) throw new Error("expected one evolution_events row");
+    expect(row.id).toBe(result.eventId);
+    expect(row.triggeredBy).toBe("idle");
+    expect(row.conversationId).toBe(conversationId);
+    expect(row.payload.memories.extracted).toBe(1);
+    expect(row.payload.messageCount).toBeGreaterThan(0);
+  });
+
+  it("persists triggered_by='manual' when invoked through triggerReflection", async () => {
+    // Imported here (not at top) so the trigger-reflection test doesn't
+    // pollute other tests' imports — it's the only consumer of this
+    // wrapper in the integration tier.
+    const { triggerReflection } = await import("./trigger-reflection.js");
+    const { conversationId } = await seedConversation({ messageCount: 4 });
+    const stub = buildStubProvider({
+      extractionMemories: [
+        {
+          fact: "user prefers metric units",
+          network: "bank",
+          compartment: "personal",
+          trust: "first-party",
+        },
+      ],
+    });
+    const recorder = buildRecordingMemory();
+    const result = await triggerReflection(conversationId, {
+      runInTx: fakeRunInTx,
+      agentStore: store,
+      transportStore,
+      resolveProvider: () =>
+        Promise.resolve({
+          provider: stub.provider,
+          limits: { contextWindow: null, maxOutputTokens: null },
+        }),
+      memory: recorder.memory,
+    });
+    if (result.status !== "processed") throw new Error(`expected processed, got ${result.status}`);
+    const events = await fakeRunInTx((tx) => store.listEvolutionEvents(tx, userId));
+    expect(events).toHaveLength(1);
+    expect(events[0]?.triggeredBy).toBe("manual");
   });
 
   it("stamps profile_class:<class> on every emitted memory when the profile is classed", async () => {

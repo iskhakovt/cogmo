@@ -17,7 +17,12 @@ import { type ProfileMemoryScope, ProfileMemoryScopeSchema } from "../../../agen
 import { SERVER_NAME_RE } from "../../../mcp/config.js";
 import { truncate } from "../../../util/string.js";
 import { isUuid } from "../../../util/uuid.js";
-import type { ScheduledTaskAdminEntry, Transport, TransportError } from "../../transport.js";
+import type {
+  EvolutionEventEntry,
+  ScheduledTaskAdminEntry,
+  Transport,
+  TransportError,
+} from "../../transport.js";
 import type { ProfileDialogs } from "./profile-dialog.js";
 import type { RepoDialogs } from "./repo-dialog.js";
 import {
@@ -112,6 +117,10 @@ const USAGE = {
     "  /schedules enable <id>       → re-enable a previously disabled task\n" +
     "  /schedules delete <id>       → permanently remove a task (no undo)\n" +
     "  Get task ids from `/schedules` output. Full UUID required.",
+  learned:
+    "Usage: /learned [<id>]\n" +
+    "  /learned         → recent evolution events (newest first)\n" +
+    "  /learned <id>    → full detail for one event (copy id from the list)",
 };
 
 // ---- Public handlers ----
@@ -2018,6 +2027,8 @@ function errorMessage(err: TransportError): string {
       return `No scheduled task with id "${shortenId(err.id)}". Use /schedules to list.`;
     case "schedule_id_malformed":
       return `"${err.id}" doesn't look like a valid task id. Use /schedules to list and copy an id.`;
+    case "evolution_unavailable":
+      return "Evolution isn't wired in this deployment.";
   }
 }
 
@@ -2184,4 +2195,180 @@ function toReplyOptions(
  */
 function looksLikeUuid(s: string): boolean {
   return isUuid(s.toLowerCase());
+}
+
+// ── /learned + /reflect ───────────────────────────────────────────────
+
+/**
+ * `/learned` — list the most recent evolution events for the user.
+ * `/learned <id>` — detail view for one event.
+ *
+ * Surfaces the audit log written by every processed Observer fire (both
+ * autonomous on `conversation/idle` and manual via `/reflect`). The digest
+ * shows enough to spot what changed at a glance; the detail view fans out
+ * each branch (corrections / memories / consolidation / pending drain).
+ *
+ * See `design/evolution.md` → Audit Log & Manual Trigger.
+ */
+export async function handleLearned(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const handle = String(ctx.from.id);
+  const arg = ctx.match?.trim() ?? "";
+
+  if (arg === "") {
+    const res = await transport.evolution.listEvents(handle, { limit: 10 });
+    if (res.isErr()) {
+      await ctx.reply(errorMessage(res.error));
+      return;
+    }
+    if (res.value.length === 0) {
+      await ctx.reply(
+        "No evolution events yet. The Observer runs after a conversation goes idle, " +
+          "or you can run it now with /reflect.",
+      );
+      return;
+    }
+    await ctx.reply(formatEvolutionDigest(res.value));
+    return;
+  }
+
+  // Anything else is treated as an id lookup. Reject obviously-bad shapes
+  // early so the DB hit only happens on plausible UUIDs.
+  if (!looksLikeUuid(arg)) {
+    await ctx.reply(USAGE.learned);
+    return;
+  }
+
+  const res = await transport.evolution.getEvent(handle, arg);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  if (res.value === null) {
+    await ctx.reply(`No evolution event with id "${shortenId(arg)}". Use /learned to list.`);
+    return;
+  }
+  await ctx.reply(formatEvolutionDetail(res.value));
+}
+
+/**
+ * `/reflect` — run the Observer synchronously for the current conversation
+ * and reply with a one-line digest. The autonomous idle-fire path is
+ * untouched; this is the user-initiated debug-shaped trigger that lets the
+ * operator see what extraction would do without waiting for idle.
+ *
+ * Respects the same min-message gate (`MIN_MESSAGES_FOR_EXTRACTION = 4`)
+ * as the autonomous path — too-short conversations reply with a clear
+ * "not enough yet" message rather than silently no-op.
+ */
+export async function handleReflect(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const handle = String(ctx.from.id);
+  const addr = String(ctx.chat.id);
+
+  await ctx.reply("Reflecting on this conversation…");
+
+  const res = await transport.evolution.triggerReflection(handle, addr);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+
+  const outcome = res.value;
+  switch (outcome.status) {
+    case "no_session":
+      await ctx.reply("No active conversation here — send a message first.");
+      return;
+    case "skipped": {
+      const message =
+        outcome.reason === "too_short"
+          ? "Conversation too short to reflect on yet (need at least 4 messages)."
+          : // `conversation_not_found` / `profile_not_found` mean the underlying
+            // row vanished mid-call — surfaces as a soft error rather than an
+            // exception so the command doesn't crash the bot.
+            "Couldn't load the conversation. Try /sessions to confirm it's there.";
+      await ctx.reply(message);
+      return;
+    }
+    case "processed": {
+      const { ruleChanges, memoryCount, drained, eventId } = outcome;
+      const ruleSummary =
+        ruleChanges.extracted + ruleChanges.reinforced + ruleChanges.promoted === 0
+          ? "no rule changes"
+          : `${ruleChanges.extracted} new, ${ruleChanges.reinforced} reinforced, ${ruleChanges.promoted} promoted`;
+      const memorySummary =
+        memoryCount === 0 && drained === 0
+          ? "no memories"
+          : `${memoryCount} extracted, ${drained} drained`;
+      await ctx.reply(
+        `Reflected. Rules: ${ruleSummary}. Memories: ${memorySummary}.\n` +
+          `/learned ${eventId} for the full breakdown.`,
+      );
+      return;
+    }
+  }
+}
+
+/**
+ * Render the `/learned` digest — one line per event, newest first. Keeps
+ * each entry under ~120 chars so a 10-event list fits well under
+ * Telegram's 4096-char message cap with room for the header.
+ */
+function formatEvolutionDigest(events: ReadonlyArray<EvolutionEventEntry>): string {
+  const header = `Evolution events (${events.length}):`;
+  const lines = events.map((e, i) => {
+    const c = e.payload.corrections;
+    const m = e.payload.memories;
+    const ruleDelta = c.extracted + c.reinforced + c.promoted;
+    const memoryDelta = m.extracted;
+    const tag = e.triggeredBy === "manual" ? " [manual]" : "";
+    return (
+      `${i + 1}. ${e.id}${tag}\n` +
+      `   ${e.createdAt.toISOString()} — ${ruleDelta} rule change(s), ${memoryDelta} memory write(s)`
+    );
+  });
+  return [header, ...lines].join("\n");
+}
+
+/**
+ * Render `/learned <id>` — full breakdown of one event. Mirrors the
+ * structured-log fields the Observer emits per fire so the operator can
+ * cross-reference against process logs when debugging.
+ */
+function formatEvolutionDetail(event: EvolutionEventEntry): string {
+  const { payload } = event;
+  const lines: string[] = [
+    `Event ${event.id}`,
+    `When: ${event.createdAt.toISOString()}`,
+    `Triggered by: ${event.triggeredBy}`,
+    `Conversation: ${event.conversationId}`,
+    `Profile: ${payload.profileId}`,
+    `Transcript: ${payload.messageCount} message(s)`,
+    "",
+    "Corrections:",
+    `  extracted:    ${payload.corrections.extracted}`,
+    `  reinforced:   ${payload.corrections.reinforced}`,
+    `  promoted:     ${payload.corrections.promoted}`,
+    `  contradicted: ${payload.corrections.contradictions}`,
+  ];
+  if (payload.consolidation) {
+    lines.push("", "Consolidation:");
+    lines.push(`  merged groups: ${payload.consolidation.mergedGroups}`);
+    lines.push(`  rules removed: ${payload.consolidation.rulesRemoved}`);
+  }
+  lines.push("", `Memories: ${payload.memories.extracted} extracted`);
+  for (const [network, count] of Object.entries(payload.memories.byNetwork)) {
+    lines.push(`  ${network}: ${count}`);
+  }
+  if (payload.drained.drained > 0) {
+    lines.push("", `Pending drained: ${payload.drained.drained}`);
+    for (const [network, count] of Object.entries(payload.drained.byNetwork)) {
+      lines.push(`  ${network}: ${count}`);
+    }
+  }
+  return lines.join("\n");
 }

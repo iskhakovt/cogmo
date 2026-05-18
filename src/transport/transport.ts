@@ -4,6 +4,7 @@ import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import { isCoreCompartment } from "../agent/evolution/memory-extraction-schema.js";
+import type { TriggerReflectionResult } from "../agent/evolution/trigger-reflection.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
 import type { ScheduledTaskSummary } from "../agent/scheduling/scheduling-service.js";
 import {
@@ -20,6 +21,7 @@ import type {
   ConversationStatus,
   ConversationSummary,
   CustomCompartment,
+  EvolutionEventRow,
   Profile,
   ProfileClass,
   VoiceMode,
@@ -204,6 +206,30 @@ export interface SkillListEntry {
  */
 export type ScheduledTaskAdminEntry = ScheduledTaskSummary;
 
+/**
+ * One row of `evolution.listEvents` — the adapter-facing projection of an
+ * `evolution_events` row. Re-exports the persisted shape; if the durable
+ * and the surfaced shapes ever need to diverge (e.g. surfacing reasoning
+ * trace fields the store doesn't keep), break the alias then.
+ */
+export type EvolutionEventEntry = EvolutionEventRow;
+
+/**
+ * Outcome of `evolution.triggerReflection`. Mirrors `ObserverResult` but
+ * stripped of internals the adapter doesn't need (just enough for the
+ * `/reflect` reply text).
+ */
+export type TriggerReflectionOutcome =
+  | { status: "no_session" }
+  | { status: "skipped"; reason: "conversation_not_found" | "profile_not_found" | "too_short" }
+  | {
+      status: "processed";
+      eventId: string;
+      ruleChanges: { extracted: number; reinforced: number; promoted: number };
+      memoryCount: number;
+      drained: number;
+    };
+
 export type TransportError =
   | { code: "session_not_found"; sessionId: string }
   | { code: "identity_rejected" }
@@ -260,7 +286,14 @@ export type TransportError =
    * The supplied id wasn't a UUID. Surfaced before the DB hit so the
    * user gets a clean error rather than a raw PG 22P02.
    */
-  | { code: "schedule_id_malformed"; id: string };
+  | { code: "schedule_id_malformed"; id: string }
+  /**
+   * `evolution.triggerReflection` was called on a deployment that didn't
+   * wire a reflection trigger (test setups, future deployments that
+   * disable evolution). The read methods on the same namespace stay
+   * available — only the trigger surfaces this code.
+   */
+  | { code: "evolution_unavailable" };
 
 /**
  * Transport — the adapter-facing contract for session management and inbound emission.
@@ -678,6 +711,39 @@ export interface Transport {
       toolName: string,
     ): Promise<Result<void, TransportError>>;
   };
+
+  /**
+   * Evolution audit + manual trigger surface. Backs the `/learned` and
+   * `/reflect` Telegram commands. Identity-checked: every method takes a
+   * `platformUserHandle` resolved against `user_identities`; unknown
+   * handles get `identity_rejected`. Returns `evolution_unavailable` when
+   * bootstrap didn't wire a reflection trigger (test setups, future
+   * deployments that disable evolution).
+   *
+   * `listEvents` and `getEvent` work even when the trigger is unwired —
+   * they only read from `agent_store`.
+   */
+  evolution: {
+    listEvents(
+      platformUserHandle: string,
+      opts?: { limit?: number },
+    ): Promise<Result<ReadonlyArray<EvolutionEventEntry>, TransportError>>;
+    /** `ok(null)` when the row doesn't exist or belongs to another user. */
+    getEvent(
+      platformUserHandle: string,
+      id: string,
+    ): Promise<Result<EvolutionEventEntry | null, TransportError>>;
+    /**
+     * Synchronously run the Observer for the caller's current
+     * conversation. Returns the digest the adapter renders into a single
+     * Telegram reply. The autonomous idle path is untouched — this is the
+     * `/reflect` manual trigger only.
+     */
+    triggerReflection(
+      platformUserHandle: string,
+      platformAddress: string,
+    ): Promise<Result<TriggerReflectionOutcome, TransportError>>;
+  };
 }
 
 /**
@@ -727,6 +793,14 @@ export function createTransport(deps: {
    * namespace returns `mcp_disabled`.
    */
   mcpRegistry?: McpRegistry;
+  /**
+   * Synchronous Observer driver for the `/reflect` manual trigger.
+   * Production bootstrap supplies it once the Observer is wired; test
+   * setups that don't exercise `evolution.triggerReflection` may omit, in
+   * which case the method returns `evolution_unavailable` while the
+   * read-side methods on the same namespace stay available.
+   */
+  triggerReflection?: (conversationId: string) => Promise<TriggerReflectionResult>;
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
@@ -744,6 +818,7 @@ export function createTransport(deps: {
     skillRunner,
     skillStore,
     mcpRegistry,
+    triggerReflection,
     inngest,
     inboundArrived,
     attachments,
@@ -1954,6 +2029,66 @@ export function createTransport(deps: {
         const updated = await mcpRegistry.rejectTool(serverId, toolName);
         if (!updated) return err({ code: "mcp_tool_not_found" as const, serverId, toolName });
         return ok(undefined);
+      },
+    },
+
+    evolution: {
+      async listEvents(platformUserHandle, opts) {
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          return ok(await agentStore.listEvolutionEvents(tx, identity.userId, opts));
+        });
+      },
+      async getEvent(platformUserHandle, id) {
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          const row = await agentStore.getEvolutionEvent(tx, identity.userId, id);
+          return ok(row ?? null);
+        });
+      },
+      async triggerReflection(platformUserHandle, platformAddress) {
+        if (!triggerReflection) {
+          return err({ code: "evolution_unavailable" as const });
+        }
+        // Resolve session + identity in one tx — same shape as `/repair` and
+        // `/voice`. `ok({status: "no_session"})` lets the adapter render
+        // "no active conversation" without a separate error code (matches
+        // `getCurrent`'s "you have nothing here" affordance).
+        const conversationId = await runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return { kind: "identity_rejected" as const };
+          const session = await transportStore.resolveSession(tx, channelId, platformAddress);
+          if (!session) return { kind: "no_session" as const };
+          const conv = await agentStore.getConversation(tx, session.conversationId);
+          if (!conv || conv.userId !== identity.userId) {
+            return { kind: "no_session" as const };
+          }
+          return { kind: "ok" as const, conversationId: conv.id };
+        });
+        if (conversationId.kind === "identity_rejected") {
+          return err({ code: "identity_rejected" as const });
+        }
+        if (conversationId.kind === "no_session") {
+          return ok({ status: "no_session" as const });
+        }
+        const result = await triggerReflection(conversationId.conversationId);
+        if (result.status === "skipped") {
+          return ok({ status: "skipped" as const, reason: result.reason });
+        }
+        const memoryCount = result.memories.extracted;
+        return ok({
+          status: "processed" as const,
+          eventId: result.eventId,
+          ruleChanges: {
+            extracted: result.corrections.extracted,
+            reinforced: result.corrections.reinforced,
+            promoted: result.corrections.promoted,
+          },
+          memoryCount,
+          drained: result.drained.drained,
+        });
       },
     },
   };

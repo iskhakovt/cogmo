@@ -20,7 +20,7 @@ import { createCodingVerifyOrchestrator } from "./agent/coding/verify-orchestrat
 import { coreMemoryTools } from "./agent/core-memory-tools.js";
 import { createDebounceFunctions, type DebounceConfig } from "./agent/debounce.js";
 import { createDocumentTools } from "./agent/document-tools.js";
-import { createObserver } from "./agent/evolution/index.js";
+import { createObserver, triggerReflection } from "./agent/evolution/index.js";
 import { fileTools } from "./agent/file-tools.js";
 import { createFileService, FILES_PROMPT_GUIDANCE } from "./agent/files.js";
 import { createHandleMessage } from "./agent/handle-message.js";
@@ -832,6 +832,19 @@ export async function bootstrapRuntime(
   });
   await mcpRegistry.start();
 
+  // Sync Observer driver injected into every Transport so `/reflect` can
+  // run the Observer in-process and reply with the digest in the same turn.
+  // Shares deps with `createObserver` (below) — the autonomous Inngest
+  // path and the manual path execute the same `runObserver` body.
+  const reflectionTrigger = (conversationId: string) =>
+    triggerReflection(conversationId, {
+      runInTx: core.runInTx,
+      agentStore: core.agentStore,
+      transportStore: core.transportStore,
+      resolveProvider: core.resolveProvider,
+      memory: core.memory,
+    });
+
   const {
     functions: channelFunctions,
     adapters,
@@ -847,6 +860,7 @@ export async function bootstrapRuntime(
     skillRunner,
     skillStore: core.skillStore,
     mcpRegistry,
+    triggerReflection: reflectionTrigger,
     inngest,
     inboundArrived,
     attachments: core.attachmentStore,
