@@ -204,7 +204,7 @@ export async function sweepRepo(
     }
 
     const ref = `heads/${runBranchFor(taskId)}`;
-    const taskLog = repoLog.child({ taskId });
+    const taskLog = repoLog.child({ taskId, ref });
     try {
       await stepRun(`delete-${taskId}`, async () => {
         try {
@@ -213,10 +213,10 @@ export async function sweepRepo(
             repo: remote.repo,
             ref,
           });
-          taskLog.info({ ref, repo: repo.name }, "swept orphan run-branch");
+          taskLog.info({ repo: repo.name }, "swept orphan run-branch");
         } catch (err) {
           if (err instanceof RequestError && (err.status === 404 || err.status === 422)) {
-            taskLog.info({ ref, status: err.status }, "run-branch already gone");
+            taskLog.info({ status: err.status }, "run-branch already gone");
             return;
           }
           throw err;
@@ -230,7 +230,7 @@ export async function sweepRepo(
       // week's sweep, and the next weekly tick will pick this one up
       // again. The error count surfaces in the function's return so
       // it shows up in Inngest's run history.
-      taskLog.warn({ err, ref }, "sweep-repo: delete-ref failed after retries — continuing");
+      taskLog.warn({ err }, "sweep-repo: delete-ref failed after retries — continuing");
       errors++;
     }
   }

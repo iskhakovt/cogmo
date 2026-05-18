@@ -1089,7 +1089,7 @@ async function handlePermissionRequest(
   params: HandlePermissionRequestParams,
 ): Promise<PermissionResponse> {
   const { taskId, requestId, tool, input, store, runInTx, stepWaitForEvent, inngest } = params;
-  const taskLog = log.child({ taskId });
+  const taskLog = log.child({ taskId, requestId });
   const call = { tool, input };
   const pattern = canonicalPattern(call);
 
@@ -1097,22 +1097,19 @@ async function handlePermissionRequest(
   const logRows = await runInTx((tx) => store.listToolDecisionsForTask(tx, taskId));
   const replayed = replayDecisionLog(call, logRows);
   if (replayed) {
-    taskLog.info(
-      { requestId, tool, pattern, decision: replayed.decision },
-      "tool gate: decision-log match",
-    );
+    taskLog.info({ tool, pattern, decision: replayed.decision }, "tool gate: decision-log match");
     return replayed.decision === "allow" ? { behavior: "allow" } : { behavior: "deny" };
   }
 
   // 2. Static policy.
   const result = policy.evaluate(call);
   if (result.decision === "allow") {
-    taskLog.info({ requestId, tool, pattern, reason: result.reason }, "tool gate: policy allow");
+    taskLog.info({ tool, pattern, reason: result.reason }, "tool gate: policy allow");
     await persistDecision(store, runInTx, taskId, tool, pattern, "allow", "once");
     return { behavior: "allow" };
   }
   if (result.decision === "deny") {
-    taskLog.info({ requestId, tool, pattern, reason: result.reason }, "tool gate: policy deny");
+    taskLog.info({ tool, pattern, reason: result.reason }, "tool gate: policy deny");
     await persistDecision(store, runInTx, taskId, tool, pattern, "deny", "once");
     return { behavior: "deny", message: result.reason };
   }
@@ -1123,10 +1120,7 @@ async function handlePermissionRequest(
     name: codingTaskPermissionRequested.name,
     data: { taskId, requestId: requestIdShort, tool },
   });
-  taskLog.info(
-    { requestId, requestIdShort, tool, pattern },
-    "tool gate: prompting user via Telegram",
-  );
+  taskLog.info({ requestIdShort, tool, pattern }, "tool gate: prompting user via Telegram");
 
   // step.waitForEvent is durable. The `if:` filter pins the wait to this
   // task + this request id, so a concurrent prompt for a different
@@ -1138,7 +1132,7 @@ async function handlePermissionRequest(
     timeout: "7d",
   });
   if (!decisionEvent) {
-    taskLog.warn({ requestId, tool }, "tool gate: prompt timed out (7d) — denying");
+    taskLog.warn({ tool }, "tool gate: prompt timed out (7d) — denying");
     await persistDecision(store, runInTx, taskId, tool, pattern, "deny", "once");
     return { behavior: "deny", message: "permission prompt timed out" };
   }
@@ -1149,7 +1143,7 @@ async function handlePermissionRequest(
   await persistDecision(store, runInTx, taskId, tool, pattern, data.decision, data.scope);
 
   taskLog.info(
-    { requestId, tool, pattern, decision: data.decision, scope: data.scope },
+    { tool, pattern, decision: data.decision, scope: data.scope },
     "tool gate: user decision applied",
   );
   return data.decision === "allow"
