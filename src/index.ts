@@ -535,6 +535,13 @@ export async function bootstrapSandbox(
       ...(env.DAYTONA_ORGANIZATION_ID && { organizationId: env.DAYTONA_ORGANIZATION_ID }),
     });
     scheduleReconcileCrashedInstances(sandbox, sandboxInstanceId);
+    // Fire-and-forget snapshot prewarm so the first coding-delegation /
+    // skills tier-2 task doesn't pay the multi-minute Daytona
+    // snapshot-build latency in its own request budget. Concurrent
+    // task arrivals share the in-flight promise via
+    // `ensureImagePresent`'s memoisation. Failures evict the cache so
+    // the task path retries on its own.
+    scheduleSandboxImageWarm(sandbox, [env.COGMO_DEVBASE_IMAGE, env.COGMO_SKILLS_IMAGE]);
     logger.info(
       {
         instanceId: sandboxInstanceId,
@@ -545,6 +552,32 @@ export async function bootstrapSandbox(
     return { sandbox, codingSandbox: sandbox, sandboxInstanceId, sandboxDocker: null };
   }
   return NO_SANDBOX;
+}
+
+/**
+ * Fire-and-forget image prewarm. On Daytona this drives
+ * `snapshot.create({ name, image })` so the named snapshot reaches
+ * `ACTIVE` state before the first task references it. On Local-Docker
+ * this is a cheap inspect + pull. Errors are logged but never bubbled —
+ * the call site is boot (we don't want a transient provider hiccup to
+ * fail `cogmo serve` startup), and `ensureImagePresent` is idempotent
+ * + retryable, so the per-task `step.run("ensure-image-present")` will
+ * pick up wherever boot left off.
+ */
+function scheduleSandboxImageWarm(sandbox: SandboxClient, images: ReadonlyArray<string>): void {
+  for (const image of images) {
+    void sandbox.ensureImagePresent(image).then(
+      () => {
+        logger.info({ image }, "sandbox image warm complete");
+      },
+      (err: unknown) => {
+        logger.warn(
+          { err, image },
+          "background sandbox image warm failed — task path will retry on first use",
+        );
+      },
+    );
+  }
 }
 
 /**

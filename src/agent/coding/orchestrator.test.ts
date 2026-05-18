@@ -507,7 +507,15 @@ describe("runCodingTask", () => {
     expect(stopCalls).toEqual([task.id]);
   });
 
-  it("createTaskContainer throws → status=failed, no stopTask (nothing to stop)", async () => {
+  it("createTaskContainer throws → status=failed, deleteByTaskId sweep fires", async () => {
+    // The catch path calls `deleteByTaskId(taskId)` unconditionally — on
+    // managed backends (Daytona) the SDK's `create()` can throw while
+    // provider-side state already exists (e.g. SDK timeout fires while
+    // the snapshot build is still running, leaving a labelled sandbox
+    // alive on the provider). The unconditional sweep reaps it via the
+    // `cogmo.task` label index. On Local-Docker, create commits
+    // atomically, so a thrown create leaves no labelled containers and
+    // the sweep is a no-op — calling it costs one cheap label query.
     const repo = await seedRepo();
     const task = await seedTask(repo);
     const { sandbox, stopCalls } = fakeSandbox();
@@ -523,7 +531,34 @@ describe("runCodingTask", () => {
     expect(result.status).toBe("failed");
     expect(result.failureReason).toMatch(/docker daemon down/);
     expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("failed");
-    expect(stopCalls).toEqual([]);
+    expect(stopCalls).toEqual([task.id]);
+  });
+
+  it("ensureImagePresent throws → status=failed, deleteByTaskId sweep still fires", async () => {
+    // The `step.run("ensure-image-present")` runs one stage earlier
+    // than `create-container`. A boot-warm failure that hasn't been
+    // retried, or a provider outage during the orchestrator's own
+    // retry, surfaces here. The catch path must still call
+    // `deleteByTaskId` unconditionally — covers the case where
+    // ensureImagePresent itself committed provider-side state (Daytona
+    // creates a labelled throwaway sandbox during snapshot build).
+    // sandbox.create() never runs.
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, createCalls, stopCalls } = fakeSandbox();
+    (sandbox.ensureImagePresent as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("daytona snapshot build_failed"),
+    );
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend: backendYielding([]) }),
+      stepRun,
+      stepSendEvent,
+    });
+    expect(result.status).toBe("failed");
+    expect(result.failureReason).toMatch(/snapshot build_failed/);
+    expect(createCalls).toHaveLength(0);
+    expect(stopCalls).toEqual([task.id]);
   });
 
   it("worktree allocation failure → status=failed", async () => {
@@ -1169,9 +1204,9 @@ describe("runCodingExecute", () => {
     // existing container is found, we never recheck the OAuth secret. The
     // env was baked into the container at plan-phase create time and
     // can't be updated retroactively, so a stale or removed secret here
-    // is irrelevant. If we DID check, the throw would bypass
-    // `containerCreated = true` from the resume branch and the catch
-    // block would leak the live container until the idle-TTL reaper.
+    // is irrelevant. If we DID check, the throw would cause the existing
+    // container to be reaped via `deleteByTaskId` and the user would lose
+    // the warm session mid-approval.
     const repo = await seedRepo();
     const { task, dockerId } = await seedExecutableTask(repo);
     const { sandbox, createCalls, stopCalls, setExistingSession } = fakeSandbox();
@@ -1210,12 +1245,16 @@ describe("runCodingExecute", () => {
     expect(fakeSecrets.getSecret).not.toHaveBeenCalled();
   });
 
-  it("create branch + missing OAuth → status=failed, no createCalls, no spurious deleteByTaskId", async () => {
-    // Pins the other half of the leak fix: when no container exists
-    // (reaper got it during long approval), the OAuth check runs INSIDE
-    // the step BEFORE `sandbox.create`, so the throw doesn't flip
-    // `containerCreated`. The catch path must NOT call `deleteByTaskId`
-    // since there's nothing to reap.
+  it("create branch + missing OAuth → status=failed, no createCalls, deleteByTaskId sweep still fires", async () => {
+    // When no container exists (reaper got it during long approval) and
+    // the OAuth check fails inside `create-container`, the catch path
+    // still fires `deleteByTaskId(taskId)` unconditionally. The sweep is
+    // label-indexed and idempotent — if no sandbox was created server-
+    // side, the label query returns empty and the call is a no-op. The
+    // unconditional call covers the managed-backend case where create()
+    // can throw AFTER provider-side state was committed (e.g. Daytona
+    // 60s SDK timeout fires while the snapshot build is still running
+    // server-side, leaving a labelled sandbox alive).
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
     const { sandbox, createCalls, stopCalls } = fakeSandbox();
@@ -1241,7 +1280,7 @@ describe("runCodingExecute", () => {
       expect(result.failureReason).toMatch(/claude_code_oauth_token/);
     }
     expect(createCalls).toHaveLength(0);
-    expect(stopCalls).toEqual([]);
+    expect(stopCalls).toEqual([task.id]);
   });
 
   // Mirror of the runCodingTask catch-path contract — emit-first
