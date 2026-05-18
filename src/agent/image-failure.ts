@@ -1,5 +1,32 @@
+/**
+ * Post-generation image-failure detection — the agent-side half of
+ * the unified failure model. The error vocabulary itself
+ * (`ImageFailure`, `ImageGenerationFailedError`, kinds, provider
+ * discriminant) lives in `src/llm/image-failure.ts` because adapters
+ * in `src/llm/` throw into it; this module imports those types and
+ * consumes them in the post-generation inspector that runs against
+ * AI-SDK `generateImage` results.
+ *
+ * Re-exports the shared types so the tool handler and tests can pull
+ * everything from one place even though the definitions live across
+ * layers.
+ */
+
 import type { GenerateImageResult } from "ai";
 import { z } from "zod";
+import {
+  type ImageFailure,
+  type ImageFailureKind,
+  ImageGenerationFailedError,
+  type ImageProviderKind,
+} from "../llm/image-failure.js";
+
+export {
+  type ImageFailure,
+  type ImageFailureKind,
+  ImageGenerationFailedError,
+  type ImageProviderKind,
+};
 
 /**
  * Generated images whose byte length falls below this threshold are treated
@@ -16,22 +43,12 @@ import { z } from "zod";
 export const SUSPICIOUS_SIZE_THRESHOLD_BYTES = 2048;
 
 /**
- * Result of inspecting a `generateImage` response for known
- * placeholder/censorship signals. `ok: false` carries an LLM-facing
- * `reason` string the tool surfaces verbatim as a text error so the
- * agent can react (rephrase, switch model) instead of silently uploading
- * a useless image.
+ * Result of inspecting a successful `generateImage` response. `ok: false`
+ * carries a structured `failure` the tool surfaces uniformly with the
+ * thrown-path failures, so the LLM sees one shape regardless of which
+ * surface produced the failure.
  */
-export type ImageFailureDetection = { ok: true } | { ok: false; reason: string };
-
-/**
- * Discriminant matching `ImageProvider["kind"]` in `src/llm/image-providers.ts`
- * — `"fal"` reads fal's normalized NSFW slice from `providerMetadata.fal`,
- * `"oai"` has no provider-specific signal today (Venice's response-header
- * signals are handled by a sibling work; future PR unifies the two paths).
- * Both kinds still get the size-canary check.
- */
-export type ImageProviderKind = "fal" | "oai" | "venice";
+export type ImageFailureDetection = { ok: true } | { ok: false; failure: ImageFailure };
 
 /**
  * Per-image NSFW flag the fal adapter normalizes from upstream `has_nsfw_concepts[i]`
@@ -97,10 +114,14 @@ export function detectImageFailure(input: {
         const conceptHint = concepts.length > 0 ? ` (concepts: ${concepts.join(", ")})` : "";
         return {
           ok: false,
-          reason:
-            `image was flagged as nsfw by fal${conceptHint}. ` +
-            "The provider returned a placeholder instead of the requested image — " +
-            "rephrase the prompt to avoid the flagged content, or pick a different model.",
+          failure: {
+            kind: "moderation_blocked",
+            provider: "fal",
+            reason:
+              `image was flagged as nsfw by fal${conceptHint}. ` +
+              "The provider returned a placeholder instead of the requested image — " +
+              "rephrase the prompt to avoid the flagged content, or pick a different model.",
+          },
         };
       }
     }
@@ -110,9 +131,13 @@ export function detectImageFailure(input: {
   if (byteLength < SUSPICIOUS_SIZE_THRESHOLD_BYTES) {
     return {
       ok: false,
-      reason:
-        `generated image is suspiciously small (${byteLength} bytes), likely a placeholder. ` +
-        "The provider may have refused the prompt — try rephrasing or switching models.",
+      failure: {
+        kind: "placeholder_size",
+        provider: input.providerKind,
+        reason:
+          `generated image is suspiciously small (${byteLength} bytes), likely a placeholder. ` +
+          "The provider may have refused the prompt — try rephrasing or switching models.",
+      },
     };
   }
 

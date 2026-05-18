@@ -4,7 +4,7 @@ import {
   detectImageFailure,
   type ImageProviderKind,
   SUSPICIOUS_SIZE_THRESHOLD_BYTES,
-} from "./image-moderation.js";
+} from "./image-failure.js";
 
 type GeneratedImage = GenerateImageResult["image"];
 
@@ -52,9 +52,9 @@ describe("detectImageFailure — fal", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toMatch(/flagged as nsfw by fal/);
+      expect(result.failure.reason).toMatch(/flagged as nsfw by fal/);
       // No concepts available — reason should still be useful.
-      expect(result.reason).not.toMatch(/concepts:/);
+      expect(result.failure.reason).not.toMatch(/concepts:/);
     }
   });
 
@@ -71,7 +71,7 @@ describe("detectImageFailure — fal", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toMatch(/concepts: nudity, violence/);
+      expect(result.failure.reason).toMatch(/concepts: nudity, violence/);
     }
   });
 
@@ -119,8 +119,8 @@ describe("detectImageFailure — size canary (all providers)", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toMatch(new RegExp(`${tinyBytes} bytes`));
-      expect(result.reason).toMatch(/likely a placeholder/);
+      expect(result.failure.reason).toMatch(new RegExp(`${tinyBytes} bytes`));
+      expect(result.failure.reason).toMatch(/likely a placeholder/);
     }
   });
 
@@ -154,8 +154,8 @@ describe("detectImageFailure — size canary (all providers)", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toMatch(/flagged as nsfw/);
-      expect(result.reason).not.toMatch(/suspiciously small/);
+      expect(result.failure.reason).toMatch(/flagged as nsfw/);
+      expect(result.failure.reason).not.toMatch(/suspiciously small/);
     }
   });
 });

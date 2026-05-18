@@ -36,7 +36,7 @@
  */
 
 import type { ImageGenerationDefaults } from "../agent/store/schema.js";
-import { AbortError } from "../util/with-retry.js";
+import { ImageGenerationFailedError } from "./image-failure.js";
 
 /** Wire-shape body sent to `POST /image/generate`. */
 interface VeniceRequestBody {
@@ -179,17 +179,23 @@ export class VeniceImageProvider {
     const safeModeRequested = this.#defaults.safe_mode !== false;
 
     if (contentViolation) {
-      throw new AbortError(
-        "Venice rejected the prompt as a content policy violation " +
+      throw new ImageGenerationFailedError({
+        kind: "moderation_blocked",
+        provider: "venice",
+        reason:
+          "Venice rejected the prompt as a content policy violation " +
           "(x-venice-is-content-violation: true). Try rephrasing.",
-      );
+      });
     }
     if (blurred && !safeModeRequested) {
-      throw new AbortError(
-        "Venice returned a blurred image despite safe_mode=false " +
+      throw new ImageGenerationFailedError({
+        kind: "blur_unexpected",
+        provider: "venice",
+        reason:
+          "Venice returned a blurred image despite safe_mode=false " +
           "(x-venice-is-blurred: true). The provider applied a safety filter " +
           "that the operator opted out of; treating as a failed generation.",
-      );
+      });
     }
 
     // 4xx → non-retryable, except 429 (rate limit) which is transient and
@@ -200,9 +206,11 @@ export class VeniceImageProvider {
     // path and `design/image-generation.md`'s retry-semantics spec.
     if (resp.status >= 400 && resp.status < 500 && resp.status !== 429) {
       const detail = await resp.text().catch(() => "");
-      throw new AbortError(
-        `Venice image generation failed: HTTP ${resp.status}${detail ? ` — ${detail.slice(0, 500)}` : ""}`,
-      );
+      throw new ImageGenerationFailedError({
+        kind: "provider_error",
+        provider: "venice",
+        reason: `Venice image generation failed: HTTP ${resp.status}${detail ? ` — ${detail.slice(0, 500)}` : ""}`,
+      });
     }
     if (!resp.ok) {
       throw new Error(`Venice image generation failed: HTTP ${resp.status}`);

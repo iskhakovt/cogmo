@@ -125,12 +125,12 @@ Hand-rolled, not via the AI SDK. Venice exposes an OpenAI-compat path (`/v1/imag
 
 | `x-venice-is-content-violation` | `x-venice-is-blurred` | `safe_mode` (provider default) | Adapter behaviour |
 |-|-|-|-|
-| `true` | any | any | Throw `AbortError("Venice rejected the prompt as a content policy violation. Try rephrasing.")`. Non-retryable. |
+| `true` | any | any | Throw `ImageGenerationFailedError` (`kind: "moderation_blocked"`). Non-retryable. |
 | not `true` | `true` | `true` (or unset → Venice default `true`) | Pass through — operator opted in to blur. |
-| not `true` | `true` | explicitly `false` | Throw `AbortError("Venice returned a blurred image despite safe_mode=false")`. Non-retryable. |
+| not `true` | `true` | explicitly `false` | Throw `ImageGenerationFailedError` (`kind: "blur_unexpected"`). Non-retryable. |
 | not `true` | not `true` | any | Pass through — clean response. |
 
-A sibling change is landing in parallel that generalises moderation detection (fal's `providerMetadata.fal.has_nsfw_concepts`, a file-size canary) — a small follow-up will unify Venice's response-header path and fal's metadata path behind one typed error so the tool wrapper surfaces them identically.
+`ImageGenerationFailedError` extends `AbortError` so `withRetry` still treats it as fatal; the `failure` field carries the structured `{ kind, reason, provider }` the tool handler surfaces uniformly across all detection paths.
 
 **Output format pinning.** Venice supports `webp` / `jpeg` / `png` — the adapter pins `png` for parity with fal so downstream (Telegram `sendPhoto`, AttachmentStore) doesn't change behaviour by provider. If a future provider-or-model wants a different output, lift the format into the catalog / tool surface; today it's a hand-tuned adapter invariant.
 
@@ -250,18 +250,31 @@ function createImageTools(deps: {
 
 Image providers sometimes return success with a placeholder image — a solid-color, blurred, or otherwise degraded fallback — when the prompt trips a safety filter or the model produces noise. Surfacing that as a normal-looking image is worse than no image: the user receives garbage and the LLM has no signal to react.
 
-Two cheap signals run on every successful `generateImage` response, in `src/agent/image-moderation.ts`:
+All failure surfaces converge on a single `ImageFailure` shape. The error vocabulary (`ImageFailure`, `ImageFailureKind`, `ImageGenerationFailedError`, `ImageProviderKind`) lives in `src/llm/image-failure.ts` alongside the adapters that throw into it; the post-generation `detectImageFailure` inspector + size-canary live in `src/agent/image-failure.ts` and re-export the shared types so the tool handler and tests pull everything from one place.
 
-| Signal | Source | Triggers when |
-|-|-|-|
-| Per-image NSFW flag | `providerMetadata.fal.images[i].nsfw` (fal SDK normalises upstream `has_nsfw_concepts[i]` / `nsfw_content_detected[i]`) | `nsfw === true` for any returned image. Concept names from `providerMetadata.fal.nsfw_concepts` (passed through by the SDK) are included in the LLM-facing message when available. |
-| File-size canary (all providers) | `image.uint8Array.byteLength` | Below `SUSPICIOUS_SIZE_THRESHOLD_BYTES` (2048 today — real PNG/JPEG/WebP photos are 50KB+, placeholder solids compress to a few hundred bytes). Tunable from production data if false positives appear. |
+```ts
+interface ImageFailure {
+  kind: "moderation_blocked" | "blur_unexpected" | "placeholder_size" | "provider_error";
+  reason: string;          // LLM-facing message
+  provider: "fal" | "oai" | "venice";
+}
+```
 
-The tool handler calls `detectImageFailure({ image, providerMetadata, providerKind })` immediately after the `generateImage` call and **before** the `AttachmentStore.upload`. On `ok: false` the handler returns `Error: ${reason}` — the same soft-error pattern used elsewhere in the tool (unknown model, unsupported aspect ratio, reference-image download miss). The LLM sees the error and can rephrase, switch model, or report back to the user. No bytes touch the attachment store; no Telegram delivery is attempted.
+`ImageGenerationFailedError(failure, options?)` accepts `ErrorOptions` so adapter-thrown failures can chain the original SDK error as `cause` — matches the `NonRetriableError({ cause: err })` pattern used elsewhere for non-retryable wraps. The APICallError → ImageGenerationFailedError converter in the tool handler chains the wrapped error so its request URL, response body, and status code survive in stack traces.
 
-A `logger.warn` emits the detection event with `provider`, `model`, and `reason` for operator visibility — failures should be rare enough that every one is worth eyeballing.
+Two surfaces produce it:
 
-The Venice (`openai_compatible`) provider's response-header censorship signals (`x-venice-is-blurred`, `x-venice-is-content-violation`) are owned by a sibling work that lands its own detection alongside the Venice provider type. A follow-up PR unifies both signal paths behind one error type once both have landed.
+1. **Post-generation inspection** (`detectImageFailure`) runs against a successful `generateImage` response. Returns `{ ok: false, failure }` when:
+   - `providerMetadata.fal.images[i].nsfw === true` for any returned image (fal's per-image NSFW flag) → `kind: "moderation_blocked"`. Concept names from `providerMetadata.fal.nsfw_concepts` ride in `reason` when available.
+   - `image.uint8Array.byteLength < SUSPICIOUS_SIZE_THRESHOLD_BYTES` (2048 today — real photos are 50KB+; placeholder solids compress to a few hundred bytes) → `kind: "placeholder_size"`. Tunable from production data if false positives appear.
+
+2. **Adapter-thrown** failures (`ImageGenerationFailedError extends AbortError`) come from protocols whose signals aren't in the SDK result object:
+   - Venice's `x-venice-is-content-violation: true` response header → `kind: "moderation_blocked"`.
+   - Venice's `x-venice-is-blurred: true` when `safe_mode` was explicitly `false` → `kind: "blur_unexpected"`.
+   - Venice's non-retryable 4xx (other than 429) → `kind: "provider_error"`.
+   - openai-compat 4xx whose body matches `content_policy_violation` / `safety system` (gpt-image-1) → `kind: "moderation_blocked"`. Other non-retryable 4xx → `kind: "provider_error"`.
+
+Both paths converge in the tool handler's `surfaceFailure(failure, row, slug)` helper: it emits one `logger.warn` carrying `{ kind, provider, rowName, providerId, slug, reason }` for operator filtering, and returns `Error: ${reason}` to the LLM. The LLM sees one shape regardless of which surface detected the failure, and can rephrase, switch model, or report back to the user. No bytes touch the attachment store on failure; no Telegram delivery is attempted.
 
 **Non-goal: pixel-level analysis.** No runtime image-processing dependency. Decoding bytes to inspect luminance variance or detect a known-stub bitmap is deferred until production traffic shows a real case the cheap signals miss — the heavy decode dep isn't worth carrying for hypothetical coverage.
 
