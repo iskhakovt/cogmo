@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { StreamEvent } from "../llm/types.js";
 import {
+  fakeRunInTx,
   mockAdapter,
   mockStreamHandle,
   mockStreamingAdapter,
@@ -49,7 +50,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -70,7 +71,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -96,7 +97,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -118,7 +119,7 @@ describe("createDeliveryRouter", () => {
     const transportStore = mockTransportStore();
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -145,7 +146,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -165,7 +166,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -181,7 +182,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -196,7 +197,7 @@ describe("createDeliveryRouter", () => {
   it("passes routing params to getSourceSessions", async () => {
     const transportStore = mockTransportStore();
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters: new Map(),
       transportStore,
     });
@@ -224,7 +225,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -249,7 +250,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -273,7 +274,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -294,7 +295,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -317,7 +318,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -336,7 +337,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -357,7 +358,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -369,7 +370,7 @@ describe("createDeliveryRouter", () => {
   it("hasBatchTargets() returns false when there are no sessions at all", async () => {
     const transportStore = mockTransportStore();
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters: new Map(),
       transportStore,
     });
@@ -387,7 +388,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -411,7 +412,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -435,7 +436,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -455,7 +456,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -481,7 +482,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -506,7 +507,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });
@@ -534,7 +535,7 @@ describe("createDeliveryRouter", () => {
       });
 
       const router = createDeliveryRouter({
-        runInTx: (cb) => cb({} as never),
+        runInTx: fakeRunInTx,
         adapters,
         transportStore,
       });
@@ -551,7 +552,7 @@ describe("createDeliveryRouter", () => {
       });
 
       const router = createDeliveryRouter({
-        runInTx: (cb) => cb({} as never),
+        runInTx: fakeRunInTx,
         adapters,
         transportStore,
       });
@@ -576,7 +577,7 @@ describe("createDeliveryRouter", () => {
       });
 
       const router = createDeliveryRouter({
-        runInTx: (cb) => cb({} as never),
+        runInTx: fakeRunInTx,
         adapters,
         transportStore,
       });
@@ -607,7 +608,7 @@ describe("createDeliveryRouter", () => {
       });
 
       const router = createDeliveryRouter({
-        runInTx: (cb) => cb({} as never),
+        runInTx: fakeRunInTx,
         adapters,
         transportStore,
       });
@@ -642,7 +643,7 @@ describe("createDeliveryRouter", () => {
       });
 
       const router = createDeliveryRouter({
-        runInTx: (cb) => cb({} as never),
+        runInTx: fakeRunInTx,
         adapters,
         transportStore,
       });
@@ -663,7 +664,7 @@ describe("createDeliveryRouter", () => {
       // guard catches any future call site that breaks the invariant.
       const transportStore = mockTransportStore();
       const router = createDeliveryRouter({
-        runInTx: (cb) => cb({} as never),
+        runInTx: fakeRunInTx,
         adapters: new Map(),
         transportStore,
       });
@@ -683,7 +684,7 @@ describe("createDeliveryRouter", () => {
       });
 
       const router = createDeliveryRouter({
-        runInTx: (cb) => cb({} as never),
+        runInTx: fakeRunInTx,
         adapters,
         transportStore,
       });
@@ -712,7 +713,7 @@ describe("createDeliveryRouter", () => {
       });
 
       const router = createDeliveryRouter({
-        runInTx: (cb) => cb({} as never),
+        runInTx: fakeRunInTx,
         adapters,
         transportStore,
       });
@@ -742,7 +743,7 @@ describe("createDeliveryRouter", () => {
       });
 
       const router = createDeliveryRouter({
-        runInTx: (cb) => cb({} as never),
+        runInTx: fakeRunInTx,
         adapters,
         transportStore,
       });
@@ -761,7 +762,7 @@ describe("createDeliveryRouter", () => {
       });
 
       const router = createDeliveryRouter({
-        runInTx: (cb) => cb({} as never),
+        runInTx: fakeRunInTx,
         adapters,
         transportStore,
       });
@@ -782,7 +783,7 @@ describe("createDeliveryRouter", () => {
       });
 
       const router = createDeliveryRouter({
-        runInTx: (cb) => cb({} as never),
+        runInTx: fakeRunInTx,
         adapters,
         transportStore,
       });
@@ -804,7 +805,7 @@ describe("createDeliveryRouter", () => {
       });
 
       const router = createDeliveryRouter({
-        runInTx: (cb) => cb({} as never),
+        runInTx: fakeRunInTx,
         adapters,
         transportStore,
       });
@@ -818,7 +819,7 @@ describe("createDeliveryRouter", () => {
         getActiveSessionsForConversation: vi.fn().mockResolvedValue([]),
       });
       const router = createDeliveryRouter({
-        runInTx: (cb) => cb({} as never),
+        runInTx: fakeRunInTx,
         adapters: new Map(),
         transportStore,
       });
@@ -841,7 +842,7 @@ describe("createDeliveryRouter", () => {
     });
 
     const router = createDeliveryRouter({
-      runInTx: (cb) => cb({} as never),
+      runInTx: fakeRunInTx,
       adapters,
       transportStore,
     });

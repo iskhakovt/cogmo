@@ -24,6 +24,7 @@ import { InngestTestEngine } from "@inngest/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { inngest } from "../inngest/client.js";
 import {
+  fakeRunInTx,
   mockAgentStore,
   mockDeliveryHandle,
   mockDeliveryRouter,
@@ -68,7 +69,7 @@ afterEach(() => {
 
 function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
   return {
-    runInTx: (cb) => cb({} as never),
+    runInTx: fakeRunInTx,
     agentStore: mockAgentStore(),
     transportStore: mockTransportStore(),
     resolveProvider: mockResolver(),

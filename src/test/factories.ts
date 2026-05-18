@@ -7,6 +7,8 @@ import { ok } from "neverthrow";
 import { vi } from "vitest";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
+import type { Transactor } from "../db/transactor.js";
+import type { StepRun, StepSendEvent } from "../inngest/index.js";
 import type { LlmProvider } from "../llm/provider.js";
 import { constantResolver, type LlmProviderResolver } from "../llm/resolver.js";
 import type { MemoryProvider } from "../memory/provider.js";
@@ -18,6 +20,24 @@ import type { Transport } from "../transport/transport.js";
 import type { Adapter, StreamHandle, StreamingAdapter } from "../transport/types.js";
 import type { VoiceBundle, VoiceProviderResolver } from "../voice/resolver.js";
 import type { SttProvider, TtsProvider } from "../voice/types.js";
+
+/**
+ * Sentinel transaction token for mock-based tests. Assertions on tx args
+ * should use `expect.anything()` rather than match this value directly —
+ * the sentinel only exists so the store-layer's runtime callback shape is
+ * preserved (every store method takes `tx: Transaction` first; we hand it
+ * an opaque placeholder when there's no real DB behind the test).
+ *
+ * See CLAUDE.md → Store Pattern.
+ */
+export const FAKE_TX = { __mockTx: true } as never;
+
+/**
+ * Shared `Transactor` that invokes its callback with {@link FAKE_TX}.
+ * Equivalent to inline `(cb) => cb({} as never)` but centralised so every
+ * mock-based test imports the same sentinel.
+ */
+export const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
   return {
@@ -481,6 +501,40 @@ export function mockStep(): MockStep {
     run: vi.fn((_id: string, fn: () => unknown) => fn()),
     sendEvent: vi.fn(),
   };
+}
+
+/**
+ * Passthrough `step.run` shim — invokes the body inline and returns
+ * its result. `StepRun`'s real return type is `Jsonify<T>` (after
+ * Inngest's state-serialise round-trip), but unit tests bypass the
+ * round trip, so the cast widens the inferred return back to `T`.
+ * The cast lives here so call sites stay free of `as`.
+ */
+export function makeStepRun(): StepRun {
+  return ((_id: string, fn: () => Promise<unknown>) => fn()) as unknown as StepRun;
+}
+
+/**
+ * `step.sendEvent` shim that forwards each emission to `inngest.send`
+ * on the supplied client. Lets orchestrator tests written against
+ * `inngest.send` assertions keep working unchanged when production
+ * code migrates the call to `step.sendEvent`.
+ */
+export function makeStepSendEvent(inngest: Pick<Inngest, "send">): StepSendEvent {
+  return (async (_id: string, payload: unknown) => {
+    await inngest.send(payload as never);
+    return { ids: [] };
+  }) as unknown as StepSendEvent;
+}
+
+/**
+ * Discard-only `step.sendEvent` — returns `{ ids: [] }` without
+ * forwarding anywhere. Use when a test doesn't assert on emit
+ * payloads (e.g. happy-path tests that just need the orchestrator
+ * to compile).
+ */
+export function nullStepSendEvent(): StepSendEvent {
+  return (async () => ({ ids: [] })) as unknown as StepSendEvent;
 }
 
 /**

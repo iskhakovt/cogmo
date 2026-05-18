@@ -23,3 +23,13 @@ export type StepRun = GetStepTools<typeof inngestClient>["run"];
  * `StepRun`. Used by orchestrators that block on Telegram callbacks.
  */
 export type StepWaitForEvent = GetStepTools<typeof inngestClient>["waitForEvent"];
+
+/**
+ * The exact shape of `step.sendEvent` — used by catch-path emits where
+ * `inngest.send().catch(() => {})` silently loses events on a transient
+ * bus blip. The Inngest SDK retries the underlying HTTP call with
+ * backoff; a terminal failure surfaces as a throw, letting the function
+ * fail and the `coding-task-reconcile` system-event subscriber take
+ * over.
+ */
+export type StepSendEvent = GetStepTools<typeof inngestClient>["sendEvent"];

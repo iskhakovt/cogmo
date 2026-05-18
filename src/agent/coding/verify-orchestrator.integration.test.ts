@@ -36,7 +36,6 @@ import { GenericContainer, type StartedTestContainer, Wait } from "testcontainer
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
-import type { StepRun } from "../../inngest/index.js";
 import {
   type ExecStreamingHandle,
   type LocalDockerSessionState,
@@ -53,13 +52,14 @@ import {
 import { generateSshKeyPair } from "../../secrets/ssh-keygen.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { FakeDaytonaSandboxClient } from "../../test/daytona-sandbox-fake.js";
+import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { type CodingBackend, DrizzleCodingStore } from "./store/index.js";
 import { runCodingVerify, type VerifyOrchestratorDeps } from "./verify-orchestrator.js";
 
 const execFileP = promisify(execFile);
 
-const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
+const stepRun = makeStepRun();
 
 // --- Gitea bootstrap ─────────────────────────────────────────────────
 
@@ -540,6 +540,7 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
       taskId,
       deps,
       stepRun,
+      stepSendEvent: makeStepSendEvent({ send: inngestSend }),
       inngest: { send: inngestSend },
     });
 
@@ -597,6 +598,7 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
       taskId,
       deps,
       stepRun,
+      stepSendEvent: makeStepSendEvent({ send: inngestSend }),
       inngest: { send: inngestSend },
     });
 
@@ -756,6 +758,7 @@ describe("verify orchestrator integration — git-remote transport (fake daytona
       taskId,
       deps,
       stepRun,
+      stepSendEvent: makeStepSendEvent({ send: inngestSend }),
       inngest: { send: inngestSend },
     });
 

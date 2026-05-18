@@ -22,8 +22,8 @@
 import type { Octokit } from "@octokit/rest";
 import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
-import { codingTaskCliDone } from "../../inngest/events.js";
-import type { StepRun } from "../../inngest/index.js";
+import { codingTaskCliDone, codingTaskFailed } from "../../inngest/events.js";
+import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import { cleanupAskpass, provisionAskpass } from "../../sandbox/askpass.js";
 import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
@@ -113,6 +113,7 @@ export function createCodingVerifyOrchestrator(deps: VerifyOrchestratorDeps, inn
         taskId: event.data.taskId,
         deps,
         stepRun: step.run,
+        stepSendEvent: step.sendEvent,
         inngest,
       });
     },
@@ -123,6 +124,12 @@ interface RunParams {
   taskId: string;
   deps: VerifyOrchestratorDeps;
   stepRun: StepRun;
+  /**
+   * Durable bus emit. Used in the in-worker catch path so a transient
+   * send blip surfaces as a function failure (caught by the reconcile
+   * subscriber) rather than a silently-swallowed event.
+   */
+  stepSendEvent: StepSendEvent;
   inngest: Pick<Inngest, "send">;
 }
 
@@ -131,7 +138,8 @@ interface RunParams {
  * and an inline shim in tests.
  */
 export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestratorResult> {
-  const { taskId, deps, stepRun, inngest } = params;
+  const { taskId, deps, stepRun, stepSendEvent, inngest } = params;
+  const taskLog = log.child({ taskId });
   const { runInTx, store, sandbox, secretsStore, askpassBaseDir } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
 
@@ -141,8 +149,8 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
   if (task.status !== "pending_verify") {
-    log.info(
-      { taskId, status: task.status },
+    taskLog.info(
+      { status: task.status },
       "verify: task not in pending_verify — already started or terminated, skipping",
     );
     return { status: "skipped" };
@@ -168,9 +176,10 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
       ),
     );
-    await stepRun("emit-task-failed", () =>
-      inngest.send({ name: "coding/task/failed", data: { taskId, reason } }).then(() => undefined),
-    );
+    await stepSendEvent("emit-task-failed", {
+      ...codingTaskFailed.create({ taskId, reason }),
+      id: `task-failed-${taskId}`,
+    });
     await stepRun("teardown-worktree", () =>
       safeTeardownWorktree({ secretsStore, runInTx, repo, taskId, worktreeAssignment }),
     ).catch(() => undefined);
@@ -216,8 +225,8 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       runInTx((tx) => store.transitionTaskStatus(tx, taskId, "pending_verify", "verifying")),
     );
     if (transition.kind !== "transitioned") {
-      log.info(
-        { taskId, transition },
+      taskLog.info(
+        { transition },
         "verify: status transition lost the race (already verifying or terminal)",
       );
       return { status: "skipped" };
@@ -426,17 +435,24 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     if (executeStream) {
       await executeStream
         .complete(true)
-        .catch((err) => log.warn({ err, taskId }, "execute stream complete failed"));
+        .catch((err) => taskLog.warn({ err }, "execute stream complete failed"));
     }
 
     return { status: "pr_open", prUrl: prResult.url, prNumber: prResult.number };
   } catch (err) {
     const reason = (err as Error).message;
-    log.error({ err, taskId }, "coding verify failed");
+    taskLog.error({ err }, "coding verify failed");
+    // Emit BEFORE the DB status update — see the rationale on the
+    // matching catch in `runCodingTask`.
+    await stepSendEvent("emit-task-failed", {
+      ...codingTaskFailed.create({ taskId, reason }),
+      id: `task-failed-${taskId}`,
+    });
+    // Letting this throw is load-bearing — see the matching catch in
+    // `runCodingTask`.
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-    ).catch(() => {});
-    await inngest.send({ name: "coding/task/failed", data: { taskId, reason } }).catch(() => {});
+    );
     await safeTeardownWorktree({
       secretsStore,
       runInTx,
@@ -453,7 +469,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     // and reaps managed-backend state (Daytona) that survived a thrown
     // create. No-op when no labelled sandbox exists.
     await sandbox.deleteByTaskId(taskId).catch((err: unknown) => {
-      log.warn({ err, taskId }, "verify: deleteByTaskId failed");
+      taskLog.warn({ err }, "verify: deleteByTaskId failed");
     });
     // The host-side askpass dir holds the PAT + signing key and is
     // independent of the sandbox lifecycle — wipe it whenever

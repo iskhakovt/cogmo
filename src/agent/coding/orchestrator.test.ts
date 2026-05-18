@@ -16,6 +16,7 @@ import {
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectDefined } from "../../test/assertions.js";
+import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
@@ -25,7 +26,6 @@ import {
   NULL_PLAN_STREAM,
   runCodingExecute,
   runCodingTask,
-  type StepRun,
 } from "./orchestrator.js";
 import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
 
@@ -71,11 +71,7 @@ afterAll(async () => {
   await close();
 });
 
-// Shim mirroring `step.run`'s signature. Production has Inngest's real
-// step.run (return type Jsonify<T>); tests run the body inline. Cast at
-// the seam — explicitly justified per CLAUDE.md "intentionally invalid
-// input in tests".
-const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
+const stepRun = makeStepRun();
 
 const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
 
@@ -321,6 +317,7 @@ function makeDeps(
 // emit-task-failed / emit-cli-done / coding/task/permission-requested.
 // Defined here so both describe blocks can share it.
 const fakeInngestShared = { send: vi.fn().mockResolvedValue(undefined) };
+const stepSendEvent = makeStepSendEvent(fakeInngestShared);
 
 describe("runCodingTask", () => {
   it("happy path: plan streamed, session_id persisted, status → awaiting_approval (user trigger)", async () => {
@@ -345,7 +342,7 @@ describe("runCodingTask", () => {
       taskId: task.id,
       deps,
       stepRun,
-      inngest: fakeInngestShared,
+      stepSendEvent,
     });
     expect(result.status).toBe("awaiting_approval");
     expect(result.plan).toBe("## Plan\n1. Do X\n");
@@ -407,7 +404,7 @@ describe("runCodingTask", () => {
       taskId: task.id,
       deps,
       stepRun,
-      inngest: fakeInngestShared,
+      stepSendEvent,
     });
     expect(result.status).toBe("awaiting_approval");
     expect(createCalls[0]?.env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: "sk-test-oauth" });
@@ -426,7 +423,7 @@ describe("runCodingTask", () => {
       taskId: task.id,
       deps,
       stepRun,
-      inngest: fakeInngestShared,
+      stepSendEvent,
     });
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
@@ -459,7 +456,7 @@ describe("runCodingTask", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
-      inngest: fakeInngestShared,
+      stepSendEvent,
     });
     expect(result.status).toBe("executing");
     expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("executing");
@@ -479,7 +476,7 @@ describe("runCodingTask", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend, openPlanStream: async () => planStream.handle }),
       stepRun,
-      inngest: fakeInngestShared,
+      stepSendEvent,
     });
     expect(result.status).toBe("failed");
     expect(result.failureReason).toMatch(/exit code 2/);
@@ -503,7 +500,7 @@ describe("runCodingTask", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
-      inngest: fakeInngestShared,
+      stepSendEvent,
     });
     expect(result.status).toBe("failed");
     expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("failed");
@@ -529,7 +526,7 @@ describe("runCodingTask", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend: backendYielding([]) }),
       stepRun,
-      inngest: fakeInngestShared,
+      stepSendEvent,
     });
     expect(result.status).toBe("failed");
     expect(result.failureReason).toMatch(/docker daemon down/);
@@ -556,7 +553,7 @@ describe("runCodingTask", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend: backendYielding([]) }),
       stepRun,
-      inngest: fakeInngestShared,
+      stepSendEvent,
     });
     expect(result.status).toBe("failed");
     expect(result.failureReason).toMatch(/snapshot build_failed/);
@@ -595,7 +592,7 @@ describe("runCodingTask", () => {
       taskId: badTask.id,
       deps: makeDeps({ sandbox, backend: backendYielding([]) }),
       stepRun,
-      inngest: fakeInngestShared,
+      stepSendEvent,
     });
     expect(result.status).toBe("failed");
     expect((await tx((trx) => store.getTask(trx, badTask.id)))?.status).toBe("failed");
@@ -608,9 +605,193 @@ describe("runCodingTask", () => {
         taskId: "019d0000-0000-7000-8000-0000000000ff",
         deps: makeDeps({ sandbox, backend: backendYielding([]) }),
         stepRun,
-        inngest: fakeInngestShared,
+        stepSendEvent,
       }),
     ).rejects.toThrow(/task not found/);
+  });
+
+  // Catch-path durability — the in-worker catch emits via
+  // `step.sendEvent` BEFORE writing `status='failed'`. If the emit
+  // were swallowed silently AFTER the DB UPDATE (the old shape), a
+  // transient send blip would leave the row terminal with no event
+  // on the bus — `cleanup-run-branch` would never fire and the
+  // `coding-task-reconcile` subscriber would see `already_terminal`
+  // and skip. Letting the emit throw lets the function fail, which
+  // fires `inngest/function.failed` and lets the reconcile pick up a
+  // still-non-terminal row.
+  it("catch path: emit fires BEFORE DB update; emit failure propagates leaving the row non-terminal", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "planning" }));
+
+    const { sandbox } = fakeSandbox();
+    // Backend that throws — drives the function into the catch.
+    const throwingBackend: CodingBackend = {
+      plan: () => {
+        throw new Error("backend exploded");
+      },
+      execute: async () => {
+        throw new Error("not used");
+      },
+    };
+    const sendCalls: { eventName: string; whenStatus: string | null }[] = [];
+    const stepSendEventThrowing = (async (_: string, payload: unknown) => {
+      const row = await tx((trx) => store.getTask(trx, task.id));
+      sendCalls.push({
+        eventName: (payload as { name: string }).name,
+        whenStatus: row?.status ?? null,
+      });
+      throw new Error("bus down");
+    }) as never;
+
+    await expect(
+      runCodingTask({
+        taskId: task.id,
+        deps: makeDeps({ sandbox, backend: throwingBackend }),
+        stepRun,
+        stepSendEvent: stepSendEventThrowing,
+      }),
+    ).rejects.toThrow(/bus down/);
+
+    // Emit was attempted exactly once, with status STILL non-terminal —
+    // pins the "emit before DB UPDATE" ordering.
+    expect(sendCalls).toEqual([{ eventName: "coding/task/failed", whenStatus: "planning" }]);
+    // Row stays non-terminal because the catch threw before the DB
+    // update — the reconcile subscriber can now flip + re-emit.
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("planning");
+  });
+
+  it("catch path: emit payload carries idempotency id 'task-failed-' + taskId for bus-level dedup", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "planning" }));
+
+    const { sandbox } = fakeSandbox();
+    const throwingBackend: CodingBackend = {
+      plan: () => {
+        throw new Error("backend exploded");
+      },
+      execute: async () => {
+        throw new Error("not used");
+      },
+    };
+    const payloads: unknown[] = [];
+    const capturingStepSendEvent = (async (_: string, payload: unknown) => {
+      payloads.push(payload);
+      return { ids: [] };
+    }) as never;
+
+    await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend: throwingBackend }),
+      stepRun,
+      stepSendEvent: capturingStepSendEvent,
+    });
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      name: "coding/task/failed",
+      id: `task-failed-${task.id}`,
+      data: { taskId: task.id },
+    });
+  });
+
+  // Try-path counterpart of the catch-path test above. The backend
+  // signals failure cleanly (exitCode != 0 / isError), so control flow
+  // stays inside the try and never throws — but the emit must still
+  // carry the same bus-level idempotency id so reconcile-driven re-emits
+  // dedupe against this one if they fire.
+  it("try path: emit payload carries idempotency id when backend reports isError", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-X" },
+      { kind: "complete", exitCode: 2, isError: true },
+    ]);
+    const payloads: unknown[] = [];
+    const capturingStepSendEvent = (async (_: string, payload: unknown) => {
+      payloads.push(payload);
+      return { ids: [] };
+    }) as never;
+
+    await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent: capturingStepSendEvent,
+    });
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      name: "coding/task/failed",
+      id: `task-failed-${task.id}`,
+      data: { taskId: task.id },
+    });
+  });
+
+  // If the DB UPDATE in the catch swallowed its error, a transient DB
+  // blip after a successful emit would suppress `function.failed` and
+  // leave the row stuck non-terminal — the reconcile subscriber would
+  // never see it. Letting the UPDATE throw propagates the failure and
+  // hands off to the reconcile.
+  it("catch path: DB update throw in catch propagates so reconcile can recover", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+
+    const { sandbox } = fakeSandbox();
+    const throwingBackend: CodingBackend = {
+      plan: () => {
+        throw new Error("backend exploded");
+      },
+      execute: async () => {
+        throw new Error("not used");
+      },
+    };
+    // First UPDATE call (`set-status-planning` inside the try) succeeds;
+    // the SECOND call (the catch path's status="failed" write) throws.
+    // This isolates the test to the precise contract under exam: that
+    // the catch's UPDATE throw propagates instead of being swallowed.
+    let updateCalls = 0;
+    const dbThrowingStore = {
+      ...store,
+      getTask: store.getTask.bind(store),
+      getRepoById: store.getRepoById.bind(store),
+      updateTaskStatus: async (trx: unknown, params: { id: string; status: string }) => {
+        updateCalls += 1;
+        if (updateCalls === 1) {
+          return store.updateTaskStatus(trx as never, params as never);
+        }
+        throw new Error("db blip");
+      },
+    } as unknown as typeof store;
+    const captured: unknown[] = [];
+    const capturingStepSendEvent = (async (_: string, payload: unknown) => {
+      captured.push(payload);
+      return { ids: [] };
+    }) as never;
+
+    await expect(
+      runCodingTask({
+        taskId: task.id,
+        deps: makeDeps({ sandbox, backend: throwingBackend, store: dbThrowingStore }),
+        stepRun,
+        stepSendEvent: capturingStepSendEvent,
+      }),
+    ).rejects.toThrow(/db blip/);
+
+    // Two UPDATE attempts — set-status-planning (succeeded) + catch's
+    // set-status-failed (threw).
+    expect(updateCalls).toBe(2);
+    // Emit fired before the catch's UPDATE attempt — the bus has the
+    // event already.
+    expect(captured).toHaveLength(1);
+    // Row is in `planning` from the first successful UPDATE — the
+    // catch's status="failed" write was rejected, so the row stays
+    // non-terminal for the reconcile subscriber to pick up.
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("planning");
   });
 
   it("missing repo throws", async () => {
@@ -628,7 +809,7 @@ describe("runCodingTask", () => {
         taskId: task.id,
         deps: makeDeps({ sandbox, backend: backendYielding([]), store: ghostStore }),
         stepRun,
-        inngest: fakeInngestShared,
+        stepSendEvent,
       }),
     ).rejects.toThrow(/repo not found/);
   });
@@ -789,6 +970,7 @@ describe("runCodingExecute", () => {
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
       stepWaitForEvent: fakeStepWaitForEvent,
+      stepSendEvent,
       inngest: fakeInngest,
     });
 
@@ -833,6 +1015,7 @@ describe("runCodingExecute", () => {
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
       stepWaitForEvent: fakeStepWaitForEvent,
+      stepSendEvent,
       inngest: fakeInngest,
     });
 
@@ -877,6 +1060,7 @@ describe("runCodingExecute", () => {
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
       stepWaitForEvent: fakeStepWaitForEvent,
+      stepSendEvent,
       inngest: fakeInngest,
     });
 
@@ -886,6 +1070,42 @@ describe("runCodingExecute", () => {
     expect(stopCalls).toEqual([task.id]);
     expect(stream.completed).toEqual([false]);
     expect(stream.failed).toHaveLength(1);
+  });
+
+  // Try-path emit shape — `runCodingExecute`'s `isError` branch must
+  // emit through `stepSendEvent` with the same `task-failed-${taskId}`
+  // idempotency id as the catch path. Reconcile-driven re-emits dedupe
+  // against this one if they ever race.
+  it("try path: isError emit payload carries idempotency id", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    const { sandbox } = fakeSandbox();
+    const stream = recordingExecuteStream();
+    const backend = executeBackendYielding([
+      { kind: "session_started", sessionId: "sess-X" },
+      { kind: "complete", exitCode: 2, isError: true },
+    ]);
+    const payloads: unknown[] = [];
+    const capturingStepSendEvent = (async (_: string, payload: unknown) => {
+      payloads.push(payload);
+      return { ids: [] };
+    }) as never;
+
+    await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
+      stepRun,
+      stepWaitForEvent: fakeStepWaitForEvent,
+      stepSendEvent: capturingStepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      name: "coding/task/failed",
+      id: `task-failed-${task.id}`,
+      data: { taskId: task.id },
+    });
   });
 
   it("idempotent: second event for already-executing task returns skipped without re-running", async () => {
@@ -902,6 +1122,7 @@ describe("runCodingExecute", () => {
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepWaitForEvent: fakeStepWaitForEvent,
+      stepSendEvent,
       inngest: fakeInngest,
     });
 
@@ -933,6 +1154,7 @@ describe("runCodingExecute", () => {
         }),
         stepRun,
         stepWaitForEvent: fakeStepWaitForEvent,
+        stepSendEvent,
         inngest: fakeInngest,
       }),
     ).rejects.toThrow(/plan_approved_at/);
@@ -957,6 +1179,7 @@ describe("runCodingExecute", () => {
         deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
         stepRun,
         stepWaitForEvent: fakeStepWaitForEvent,
+        stepSendEvent,
         inngest: fakeInngest,
       }),
     ).rejects.toThrow(/no session_id/);
@@ -970,6 +1193,7 @@ describe("runCodingExecute", () => {
         deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
         stepRun,
         stepWaitForEvent: fakeStepWaitForEvent,
+        stepSendEvent,
         inngest: fakeInngest,
       }),
     ).rejects.toThrow(/coding task not found/);
@@ -1010,6 +1234,7 @@ describe("runCodingExecute", () => {
       }),
       stepRun,
       stepWaitForEvent: fakeStepWaitForEvent,
+      stepSendEvent,
       inngest: fakeInngest,
     });
 
@@ -1046,6 +1271,7 @@ describe("runCodingExecute", () => {
       }),
       stepRun,
       stepWaitForEvent: fakeStepWaitForEvent,
+      stepSendEvent,
       inngest: fakeInngest,
     });
 
@@ -1055,5 +1281,55 @@ describe("runCodingExecute", () => {
     }
     expect(createCalls).toHaveLength(0);
     expect(stopCalls).toEqual([task.id]);
+  });
+
+  // Mirror of the runCodingTask catch-path contract — emit-first
+  // ordering pins the reconcile handoff for the execute orchestrator
+  // too.
+  it("catch path: emit fires BEFORE DB update; emit failure propagates leaving the row non-terminal", async () => {
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+
+    const { sandbox } = fakeSandbox();
+    // `plan` is never invoked on this code path — runCodingExecute
+    // only drives `execute`. An empty async iterable satisfies the
+    // contract.
+    const emptyPlan: AsyncIterable<CodingEvent> = {
+      [Symbol.asyncIterator]: async function* () {},
+    };
+    const throwingBackend: CodingBackend = {
+      plan: () => emptyPlan,
+      execute: async () => {
+        throw new Error("backend exploded");
+      },
+    };
+    const sendCalls: { eventName: string; whenStatus: string | null }[] = [];
+    const stepSendEventThrowing = (async (_: string, payload: unknown) => {
+      const row = await tx((trx) => store.getTask(trx, task.id));
+      sendCalls.push({
+        eventName: (payload as { name: string }).name,
+        whenStatus: row?.status ?? null,
+      });
+      throw new Error("bus down");
+    }) as never;
+
+    await expect(
+      runCodingExecute({
+        taskId: task.id,
+        deps: makeDeps({ sandbox, backend: throwingBackend }),
+        stepRun,
+        stepWaitForEvent: fakeStepWaitForEvent,
+        stepSendEvent: stepSendEventThrowing,
+        inngest: fakeInngest,
+      }),
+    ).rejects.toThrow(/bus down/);
+
+    // Emit attempted while status was still `executing` — the catch
+    // ran the transition before falling through to the emit.
+    expect(sendCalls).toEqual([{ eventName: "coding/task/failed", whenStatus: "executing" }]);
+    // Row stays `executing` (non-terminal) so the reconcile can flip
+    // it via `failTaskIfNonTerminal`.
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("executing");
   });
 });

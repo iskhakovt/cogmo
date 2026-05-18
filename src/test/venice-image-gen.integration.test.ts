@@ -35,10 +35,10 @@ import {
 } from "../agent/image-tools.js";
 import type { Service } from "../agent/service.js";
 import type { ImageModelWithProvider, ImageProviderRow } from "../agent/store/index.js";
-import type { Transactor } from "../db/index.js";
 import { buildImageProvider } from "../llm/image-providers.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
+import { fakeRunInTx } from "./factories.js";
 import { createVeniceFetch } from "./venice-mock.js";
 
 const PROMPT = "A watercolor painting of a fox curled up in a forest clearing at dusk.";
@@ -46,8 +46,6 @@ const MODEL_STRING = "venice-sd35";
 const MODEL_NAME = "venice/venice-sd35";
 const MODEL_SLUG = "venice-sd35";
 const PROVIDER_ID = "test-provider-venice";
-
-const FAKE_TX: Transactor = async (cb) => cb({} as never);
 
 const FIXTURE_PATH = join(process.cwd(), "test/fixtures/venice");
 
@@ -90,7 +88,7 @@ describe("venice native image gen (recorded)", () => {
     } as unknown as SecretsStore;
 
     const provider = await buildImageProvider(providerRow, {
-      runInTx: FAKE_TX,
+      runInTx: fakeRunInTx,
       secretsStore,
       fetchOverrides: { venice: veniceFetch },
     });

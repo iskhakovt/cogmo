@@ -112,6 +112,7 @@ export async function sweepRepo(
   stepRun: StepRun,
 ): Promise<{ repoId: string; deleted: number; skipped: number; errors: number }> {
   const now = (deps.now ?? (() => new Date()))();
+  const repoLog = log.child({ repoId });
 
   const repo = await stepRun("load-repo", () =>
     deps.runInTx((tx) => deps.store.getRepoById(tx, repoId)),
@@ -120,13 +121,13 @@ export async function sweepRepo(
     // Transient race with concurrent repo deletion — not warn-worthy,
     // the cron will skip this fan-out event and pick up survivors next
     // week.
-    log.info({ repoId }, "sweep-repo: repo row gone — nothing to do");
+    repoLog.info("sweep-repo: repo row gone — nothing to do");
     return { repoId, deleted: 0, skipped: 0, errors: 0 };
   }
 
   const remote = parseRemoteUrl(repo.remoteUrl);
   if (!remote) {
-    log.warn({ repoId, remoteUrl: repo.remoteUrl }, "sweep-repo: cannot parse remote");
+    repoLog.warn({ remoteUrl: repo.remoteUrl }, "sweep-repo: cannot parse remote");
     return { repoId, deleted: 0, skipped: 0, errors: 0 };
   }
 
@@ -203,6 +204,7 @@ export async function sweepRepo(
     }
 
     const ref = `heads/${runBranchFor(taskId)}`;
+    const taskLog = repoLog.child({ taskId, ref });
     try {
       await stepRun(`delete-${taskId}`, async () => {
         try {
@@ -211,10 +213,10 @@ export async function sweepRepo(
             repo: remote.repo,
             ref,
           });
-          log.info({ taskId, ref, repo: repo.name }, "swept orphan run-branch");
+          taskLog.info({ repo: repo.name }, "swept orphan run-branch");
         } catch (err) {
           if (err instanceof RequestError && (err.status === 404 || err.status === 422)) {
-            log.info({ taskId, ref, status: err.status }, "run-branch already gone");
+            taskLog.info({ status: err.status }, "run-branch already gone");
             return;
           }
           throw err;
@@ -228,11 +230,11 @@ export async function sweepRepo(
       // week's sweep, and the next weekly tick will pick this one up
       // again. The error count surfaces in the function's return so
       // it shows up in Inngest's run history.
-      log.warn({ err, taskId, ref }, "sweep-repo: delete-ref failed after retries — continuing");
+      taskLog.warn({ err }, "sweep-repo: delete-ref failed after retries — continuing");
       errors++;
     }
   }
 
-  log.info({ repoId, refs: taskIds.length, deleted, skipped, errors }, "sweep-repo done");
+  repoLog.info({ refs: taskIds.length, deleted, skipped, errors }, "sweep-repo done");
   return { repoId, deleted, skipped, errors };
 }

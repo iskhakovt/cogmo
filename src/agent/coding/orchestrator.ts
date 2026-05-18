@@ -2,12 +2,13 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
 import {
+  codingTaskFailed,
   codingTaskPermissionDecision,
   codingTaskPermissionRequested,
   codingTaskPlanApproved,
   codingTaskStart,
 } from "../../inngest/events.js";
-import type { StepRun, StepWaitForEvent } from "../../inngest/index.js";
+import type { StepRun, StepSendEvent, StepWaitForEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import {
   isLocalDockerSessionState,
@@ -29,7 +30,7 @@ import { allocateWorktree } from "./worktree.js";
 
 const log = logger.child({ component: "coding.orchestrator" });
 
-export type { StepRun } from "../../inngest/index.js";
+export type { StepRun, StepSendEvent } from "../../inngest/index.js";
 
 /**
  * Streaming surface the orchestrator writes to during the non-durable plan
@@ -130,7 +131,12 @@ export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: 
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
     async ({ event, step }) => {
-      return runCodingTask({ taskId: event.data.taskId, deps, stepRun: step.run, inngest });
+      return runCodingTask({
+        taskId: event.data.taskId,
+        deps,
+        stepRun: step.run,
+        stepSendEvent: step.sendEvent,
+      });
     },
   );
 }
@@ -140,11 +146,12 @@ interface RunParams {
   deps: CodingOrchestratorDeps;
   stepRun: StepRun;
   /**
-   * Inngest client — used to emit `coding/task/failed` so cleanup
-   * subscribers (run-branch deletion, future telemetry) hook in
-   * without polling the row.
+   * Durable bus emit. Used in the in-worker catch path so a transient
+   * send blip surfaces as a function failure (caught by the
+   * `coding-task-reconcile` system-event subscriber) rather than a
+   * silently-swallowed `coding/task/failed` event.
    */
-  inngest: Pick<Inngest, "send">;
+  stepSendEvent: StepSendEvent;
 }
 
 /**
@@ -159,7 +166,8 @@ interface RunParams {
  * retry.
  */
 export async function runCodingTask(params: RunParams): Promise<CodingOrchestratorResult> {
-  const { taskId, deps, stepRun, inngest } = params;
+  const { taskId, deps, stepRun, stepSendEvent } = params;
+  const taskLog = log.child({ taskId });
   const {
     runInTx,
     store,
@@ -399,11 +407,10 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
           store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
         ),
       );
-      await stepRun("emit-task-failed", () =>
-        inngest
-          .send({ name: "coding/task/failed", data: { taskId, reason } })
-          .then(() => undefined),
-      );
+      await stepSendEvent("emit-task-failed", {
+        ...codingTaskFailed.create({ taskId, reason }),
+        id: `task-failed-${taskId}`,
+      });
       const a = assignment;
       if (a) {
         await stepRun("teardown-worktree", () =>
@@ -421,7 +428,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       // doesn't escape into the outer catch and write a second failed
       // status that masks the original reason.
       await planStream.fail(reason).catch((streamErr: unknown) => {
-        log.warn({ err: streamErr, taskId }, "plan stream fail notification failed");
+        taskLog.warn({ err: streamErr }, "plan stream fail notification failed");
       });
       return { status: "failed", failureReason: reason };
     }
@@ -441,24 +448,35 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // Same wrap as the failure-path notification above — once status is
     // committed, a subscriber error must not regress the task to failed.
     await planStream.finalize(result.plan ?? "").catch((streamErr: unknown) => {
-      log.warn(
-        { err: streamErr, taskId },
+      taskLog.warn(
+        { err: streamErr },
         `plan stream finalize notification failed (task already ${nextStatus})`,
       );
     });
     return { status: nextStatus, plan: result.plan ?? "" };
   } catch (err) {
     const reason = (err as Error).message;
-    log.error({ err, taskId }, "coding task failed");
-    // Catch-path writes deliberately bypass `stepRun`. The function runs
-    // with retries=0 (the plan-mode `claude` session is non-resumable
-    // from mid-stream — see the createFunction comment), so wrapping in
-    // `stepRun` here would just add observability noise without any
-    // exactly-once benefit. Revisit if retries ever become non-zero.
+    taskLog.error({ err }, "coding task failed");
+    // Emit BEFORE the DB status update. If `step.sendEvent` ultimately
+    // fails (SDK exhausts its retry budget on a real bus outage), the
+    // catch throws, the function fails, and `inngest/function.failed`
+    // fires. The `coding-task-reconcile` subscriber sees a still-non-
+    // terminal row and re-emits via its own idempotency id. The DB
+    // status update reaching this catch first would leave the row
+    // terminal and the reconcile would see `already_terminal` and skip.
+    // Idempotency `id` dedups against an unlikely repeat fire for the
+    // same task.
+    await stepSendEvent("emit-task-failed", {
+      ...codingTaskFailed.create({ taskId, reason }),
+      id: `task-failed-${taskId}`,
+    });
+    // Letting this throw is load-bearing: a DB blip after a successful
+    // emit would otherwise return normally to Inngest, suppress
+    // `function.failed`, and leave the row non-terminal forever
+    // (reconcile only fires on function failure).
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-    ).catch(() => {});
-    await inngest.send({ name: "coding/task/failed", data: { taskId, reason } }).catch(() => {});
+    );
     if (assignment) {
       await safeTeardownWorktree({
         runInTx,
@@ -566,6 +584,7 @@ export function createCodingExecuteOrchestrator(deps: CodingOrchestratorDeps, in
         deps,
         stepRun: step.run,
         stepWaitForEvent: step.waitForEvent,
+        stepSendEvent: step.sendEvent,
         inngest,
       });
     },
@@ -650,6 +669,13 @@ interface ExecuteRunParams {
    */
   stepWaitForEvent: StepWaitForEvent;
   /**
+   * Durable bus emit. Used in the in-worker catch path so a transient
+   * send blip surfaces as a function failure (caught by the reconcile
+   * subscriber) rather than a silently-swallowed
+   * `coding/task/failed` event.
+   */
+  stepSendEvent: StepSendEvent;
+  /**
    * Inngest client — used to emit `coding/task/permission-requested` for
    * observability + Telegram delivery, and any future events the gate
    * fires.
@@ -670,7 +696,8 @@ interface ExecuteRunParams {
  * - `worktree_assignment` must be present (the plan phase allocated it).
  */
 export async function runCodingExecute(params: ExecuteRunParams): Promise<CodingExecuteResult> {
-  const { taskId, deps, stepRun, stepWaitForEvent, inngest } = params;
+  const { taskId, deps, stepRun, stepWaitForEvent, stepSendEvent, inngest } = params;
+  const taskLog = log.child({ taskId });
   const { runInTx, store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
 
@@ -683,8 +710,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     throw new Error(`coding task ${taskId} has no plan_approved_at — execute fired prematurely`);
   }
   if (task.status !== "awaiting_approval") {
-    log.info(
-      { taskId, status: task.status },
+    taskLog.info(
+      { status: task.status },
       "execute: task not in awaiting_approval — already started or terminated, skipping",
     );
     return { status: "skipped" };
@@ -711,8 +738,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       runInTx((tx) => store.transitionTaskStatus(tx, taskId, "awaiting_approval", "executing")),
     );
     if (transition.kind !== "transitioned") {
-      log.info(
-        { taskId, transition },
+      taskLog.info(
+        { transition },
         "execute: status transition lost the race (already cancelled or transitioned)",
       );
       return { status: "skipped" };
@@ -861,11 +888,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
           store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
         ),
       );
-      await stepRun("emit-task-failed", () =>
-        inngest
-          .send({ name: "coding/task/failed", data: { taskId, reason } })
-          .then(() => undefined),
-      );
+      await stepSendEvent("emit-task-failed", {
+        ...codingTaskFailed.create({ taskId, reason }),
+        id: `task-failed-${taskId}`,
+      });
       await stepRun("teardown-worktree", () =>
         safeTeardownWorktree({
           runInTx,
@@ -883,10 +909,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       // doesn't bubble into the outer catch, which would write a second
       // (less informative) failed-status overwriting the original reason.
       await executeStream.complete(false).catch((streamErr: unknown) => {
-        log.warn({ err: streamErr, taskId }, "execute stream complete(false) notification failed");
+        taskLog.warn({ err: streamErr }, "execute stream complete(false) notification failed");
       });
       await executeStream.fail(reason).catch((streamErr: unknown) => {
-        log.warn({ err: streamErr, taskId }, "execute stream fail notification failed");
+        taskLog.warn({ err: streamErr }, "execute stream fail notification failed");
       });
       return { status: "failed", failureReason: reason };
     }
@@ -933,19 +959,26 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     // see the final progress message edit, which is recoverable on next
     // interaction.
     await executeStream.complete(true, completionTokens).catch((streamErr: unknown) => {
-      log.warn(
-        { err: streamErr, taskId },
+      taskLog.warn(
+        { err: streamErr },
         "execute stream complete notification failed (task already pending_verify)",
       );
     });
     return { status: "pending_verify" };
   } catch (err) {
     const reason = (err as Error).message;
-    log.error({ err, taskId }, "coding execute failed");
+    taskLog.error({ err }, "coding execute failed");
+    // Emit BEFORE the DB status update — see the rationale on the
+    // matching catch in `runCodingTask`.
+    await stepSendEvent("emit-task-failed", {
+      ...codingTaskFailed.create({ taskId, reason }),
+      id: `task-failed-${taskId}`,
+    });
+    // Letting this throw is load-bearing — see the matching catch in
+    // `runCodingTask`.
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-    ).catch(() => {});
-    await inngest.send({ name: "coding/task/failed", data: { taskId, reason } }).catch(() => {});
+    );
     await safeTeardownWorktree({
       runInTx,
       ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
@@ -1094,6 +1127,7 @@ async function handlePermissionRequest(
   params: HandlePermissionRequestParams,
 ): Promise<PermissionResponse> {
   const { taskId, requestId, tool, input, store, runInTx, stepWaitForEvent, inngest } = params;
+  const taskLog = log.child({ taskId, requestId });
   const call = { tool, input };
   const pattern = canonicalPattern(call);
 
@@ -1101,25 +1135,19 @@ async function handlePermissionRequest(
   const logRows = await runInTx((tx) => store.listToolDecisionsForTask(tx, taskId));
   const replayed = replayDecisionLog(call, logRows);
   if (replayed) {
-    log.info(
-      { taskId, requestId, tool, pattern, decision: replayed.decision },
-      "tool gate: decision-log match",
-    );
+    taskLog.info({ tool, pattern, decision: replayed.decision }, "tool gate: decision-log match");
     return replayed.decision === "allow" ? { behavior: "allow" } : { behavior: "deny" };
   }
 
   // 2. Static policy.
   const result = policy.evaluate(call);
   if (result.decision === "allow") {
-    log.info(
-      { taskId, requestId, tool, pattern, reason: result.reason },
-      "tool gate: policy allow",
-    );
+    taskLog.info({ tool, pattern, reason: result.reason }, "tool gate: policy allow");
     await persistDecision(store, runInTx, taskId, tool, pattern, "allow", "once");
     return { behavior: "allow" };
   }
   if (result.decision === "deny") {
-    log.info({ taskId, requestId, tool, pattern, reason: result.reason }, "tool gate: policy deny");
+    taskLog.info({ tool, pattern, reason: result.reason }, "tool gate: policy deny");
     await persistDecision(store, runInTx, taskId, tool, pattern, "deny", "once");
     return { behavior: "deny", message: result.reason };
   }
@@ -1130,10 +1158,7 @@ async function handlePermissionRequest(
     name: codingTaskPermissionRequested.name,
     data: { taskId, requestId: requestIdShort, tool },
   });
-  log.info(
-    { taskId, requestId, requestIdShort, tool, pattern },
-    "tool gate: prompting user via Telegram",
-  );
+  taskLog.info({ requestIdShort, tool, pattern }, "tool gate: prompting user via Telegram");
 
   // step.waitForEvent is durable. The `if:` filter pins the wait to this
   // task + this request id, so a concurrent prompt for a different
@@ -1145,7 +1170,7 @@ async function handlePermissionRequest(
     timeout: "7d",
   });
   if (!decisionEvent) {
-    log.warn({ taskId, requestId, tool }, "tool gate: prompt timed out (7d) — denying");
+    taskLog.warn({ tool }, "tool gate: prompt timed out (7d) — denying");
     await persistDecision(store, runInTx, taskId, tool, pattern, "deny", "once");
     return { behavior: "deny", message: "permission prompt timed out" };
   }
@@ -1155,8 +1180,8 @@ async function handlePermissionRequest(
   // requests in this task auto-apply; `once` is audit-only.
   await persistDecision(store, runInTx, taskId, tool, pattern, data.decision, data.scope);
 
-  log.info(
-    { taskId, requestId, tool, pattern, decision: data.decision, scope: data.scope },
+  taskLog.info(
+    { tool, pattern, decision: data.decision, scope: data.scope },
     "tool gate: user decision applied",
   );
   return data.decision === "allow"
