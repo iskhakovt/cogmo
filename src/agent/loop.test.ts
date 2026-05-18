@@ -1504,15 +1504,12 @@ function repairStreamProvider(turns: ReadonlyArray<RepairTurn>): {
     if (!turn) throw new Error(`repairStreamProvider: ran out of turns (cursor=${cursor})`);
     if (turn.kind === "throw") {
       const err = turn.error;
-      const events: AsyncIterable<StreamEvent> = {
-        [Symbol.asyncIterator]() {
-          return {
-            next(): Promise<IteratorResult<StreamEvent>> {
-              return Promise.reject(err);
-            },
-          };
-        },
-      };
+      // Generator throws on first `next()` instead of yielding — symmetric
+      // with the success branch's `async function*` form below.
+      // biome-ignore lint/correctness/useYield: intentional throw-only generator
+      const events = (async function* (): AsyncGenerator<StreamEvent> {
+        throw err;
+      })();
       return { events, response: Promise.reject(err) };
     }
     return {

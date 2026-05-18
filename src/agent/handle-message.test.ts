@@ -1,12 +1,17 @@
 import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import type { z } from "zod";
+import type { inboundReady } from "../inngest/events.js";
 import { ProviderConfigError } from "../llm/resolver.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
 import {
+  invokeInngestFn,
+  invokeInngestOnFailure,
+  type MockStep,
   mockAgentStore,
   mockDeliveryHandle,
   mockDeliveryRouter,
@@ -23,6 +28,32 @@ import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
 import { ToolRegistry } from "./tools.js";
+
+type InboundReadyData = z.infer<typeof inboundReady.schema>;
+
+interface HandleMessageCtx {
+  event: { data: InboundReadyData };
+  step: MockStep;
+  runId: string;
+}
+
+// Shape Inngest passes to `onFailure`: `data` wraps the original event
+// alongside `run_id`. `step` here is a partial — onFailure only calls
+// `run` + `sendEvent`, so we keep the minimal surface our handler
+// touches rather than reach for the full Inngest step type.
+interface HandleMessageFailureCtx {
+  event: {
+    data: {
+      run_id: string;
+      event: { data: InboundReadyData };
+    };
+  };
+  error: Error;
+  step: {
+    run: ReturnType<typeof vi.fn>;
+    sendEvent: ReturnType<typeof vi.fn>;
+  };
+}
 
 function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
   return {
@@ -59,7 +90,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
   };
 }
 
-const testEvent = {
+const testEvent: { data: InboundReadyData } = {
   data: { conversationId: "conv-1", triggerInboundId: "inbound-1" },
 };
 
@@ -68,7 +99,7 @@ const testRunId = "run-123";
 describe("createHandleMessage", () => {
   it("loads unbatched inbound messages via transportStore", async () => {
     const deps = mockDeps();
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -83,7 +114,7 @@ describe("createHandleMessage", () => {
 
   it("calls promptSource.assemble with the loaded conversation context", async () => {
     const deps = mockDeps();
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -103,7 +134,7 @@ describe("createHandleMessage", () => {
 
   it("uses model from profile", async () => {
     const deps = mockDeps();
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -116,7 +147,7 @@ describe("createHandleMessage", () => {
 
   it("creates service with memory recall and retain", async () => {
     const deps = mockDeps();
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -165,7 +196,7 @@ describe("createHandleMessage", () => {
     const deps = mockDeps({
       agentStore: mockAgentStore({ getProfile }),
     });
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -188,7 +219,7 @@ describe("createHandleMessage", () => {
 
   it("inserts user and assistant messages via agentStore", async () => {
     const deps = mockDeps();
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -221,7 +252,7 @@ describe("createHandleMessage", () => {
   it("emits response/ready with conversationId and messageId", async () => {
     const deps = mockDeps();
     const step = mockStep();
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step,
       runId: testRunId,
@@ -251,7 +282,7 @@ describe("createHandleMessage", () => {
 
     try {
       const deps = mockDeps();
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -272,7 +303,7 @@ describe("createHandleMessage", () => {
 
   it("calls deliveryRouter.prepare with full routing context", async () => {
     const deps = mockDeps();
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -306,7 +337,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -321,7 +352,7 @@ describe("createHandleMessage", () => {
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -338,7 +369,7 @@ describe("createHandleMessage", () => {
     });
 
     await expect(
-      (createHandleMessage(deps) as any).fn({
+      invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -362,7 +393,7 @@ describe("createHandleMessage", () => {
 
     let caught: unknown;
     try {
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -388,9 +419,7 @@ describe("createHandleMessage", () => {
     const deps = mockDeps({
       deliveryRouter: mockDeliveryRouter({ notifyConversation }),
     });
-    const fn = createHandleMessage(deps) as any;
-    const onFailure = fn.opts.onFailure;
-    expect(onFailure).toBeDefined();
+    const fn = createHandleMessage(deps);
 
     const sendEvent = vi.fn().mockResolvedValue(undefined);
     const stepRun = vi
@@ -423,7 +452,11 @@ describe("createHandleMessage", () => {
       callOrder.push("notifyConversation");
     });
 
-    await onFailure({ event: failureEvent, error, step: stepCtx });
+    await invokeInngestOnFailure<HandleMessageFailureCtx>(fn, {
+      event: failureEvent,
+      error,
+      step: stepCtx,
+    });
 
     expect(callOrder).toEqual(["sendEvent", "notifyConversation"]);
 
@@ -453,8 +486,7 @@ describe("createHandleMessage", () => {
   // know there's nothing to unwrap.
   it("onFailure emits causeClass: null when error has no cause", async () => {
     const deps = mockDeps();
-    const fn = createHandleMessage(deps) as any;
-    const onFailure = fn.opts.onFailure;
+    const fn = createHandleMessage(deps);
     const sendEvent = vi.fn().mockResolvedValue(undefined);
     const stepRun = vi
       .fn()
@@ -468,7 +500,11 @@ describe("createHandleMessage", () => {
     };
     const error = new Error("internal");
 
-    await onFailure({ event: failureEvent, error, step: stepCtx });
+    await invokeInngestOnFailure<HandleMessageFailureCtx>(fn, {
+      event: failureEvent,
+      error,
+      step: stepCtx,
+    });
 
     expect(sendEvent).toHaveBeenCalledTimes(1);
     expect(sendEvent.mock.calls[0]![1]).toMatchObject({
@@ -488,8 +524,7 @@ describe("createHandleMessage", () => {
     const deps = mockDeps({
       deliveryRouter: mockDeliveryRouter({ notifyConversation }),
     });
-    const fn = createHandleMessage(deps) as any;
-    const onFailure = fn.opts.onFailure;
+    const fn = createHandleMessage(deps);
 
     const sendEvent = vi.fn().mockResolvedValue(undefined);
     const stepRun = vi
@@ -505,7 +540,13 @@ describe("createHandleMessage", () => {
     const error = new Error("boom");
 
     // Must NOT throw, even though notifyConversation rejects.
-    await expect(onFailure({ event: failureEvent, error, step: stepCtx })).resolves.toBeUndefined();
+    await expect(
+      invokeInngestOnFailure<HandleMessageFailureCtx>(fn, {
+        event: failureEvent,
+        error,
+        step: stepCtx,
+      }),
+    ).resolves.toBeUndefined();
 
     // Durable signal still emitted — the whole point.
     expect(sendEvent).toHaveBeenCalledTimes(1);
@@ -524,7 +565,7 @@ describe("createHandleMessage", () => {
 
     let caught: unknown;
     try {
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -545,7 +586,7 @@ describe("createHandleMessage", () => {
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -562,7 +603,7 @@ describe("createHandleMessage", () => {
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -604,7 +645,7 @@ describe("createHandleMessage", () => {
       },
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -614,8 +655,11 @@ describe("createHandleMessage", () => {
 
     // The last user message handed to the agent loop must contain the resolved
     // DocumentBlock with base64-encoded bytes and the original filename.
-    const callArgs = (deps.runStreamingAgentLoop as any).mock.calls[0][0];
-    const lastMsg = callArgs.messages.at(-1);
+    const callArgs = expectDefined(
+      vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+      "runStreamingAgentLoop call",
+    )[0];
+    const lastMsg = expectDefined(callArgs.messages.at(-1), "last message");
     expect(lastMsg.role).toBe("user");
     expect(lastMsg.content).toContainEqual({
       type: "document",
@@ -651,15 +695,19 @@ describe("createHandleMessage", () => {
       },
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
     });
 
-    const callArgs = (deps.runStreamingAgentLoop as any).mock.calls[0][0];
-    const lastMsg = callArgs.messages.at(-1);
-    const docBlock = (lastMsg.content as any[]).find((b) => b.type === "document");
+    const callArgs = expectDefined(
+      vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+      "runStreamingAgentLoop call",
+    )[0];
+    const lastMsg = expectDefined(callArgs.messages.at(-1), "last message");
+    if (!Array.isArray(lastMsg.content)) throw new Error("expected ContentBlock[]");
+    const docBlock = lastMsg.content.find((b) => b.type === "document");
     expect(docBlock).not.toHaveProperty("name");
   });
 
@@ -711,7 +759,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -779,7 +827,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -810,7 +858,7 @@ describe("createHandleMessage", () => {
         }),
       }),
     });
-    const result = await (createHandleMessage(deps) as any).fn({
+    const result = await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -829,7 +877,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    const result = await (createHandleMessage(deps) as any).fn({
+    const result = await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: { data: { conversationId: "conv-1", triggerInboundId: "inbound-3" } },
       step: mockStep(),
       runId: testRunId,
@@ -848,7 +896,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    const result = await (createHandleMessage(deps) as any).fn({
+    const result = await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: { data: { conversationId: "conv-1", triggerInboundId: null } },
       step: mockStep(),
       runId: testRunId,
@@ -864,7 +912,7 @@ describe("createHandleMessage", () => {
       debounceConfig: { idleTimeoutMs: 3000, maxWaitMs: 30000, resumePolicy: "flush" as const },
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step,
       runId: testRunId,
@@ -886,7 +934,7 @@ describe("createHandleMessage", () => {
       debounceConfig: { idleTimeoutMs: 3000, maxWaitMs: 30000, resumePolicy: "debounce" as const },
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step,
       runId: testRunId,
@@ -906,7 +954,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -926,7 +974,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -937,7 +985,7 @@ describe("createHandleMessage", () => {
 
   it("persists inputTokens and outputTokens on assistant message", async () => {
     const deps = mockDeps();
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -966,7 +1014,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -1016,7 +1064,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -1062,7 +1110,7 @@ describe("createHandleMessage", () => {
       },
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -1119,14 +1167,17 @@ describe("createHandleMessage", () => {
       },
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
     });
 
     // The merged ToolRegistry passed into runStreamingAgentLoop must contain both.
-    const passedTools = (deps.runStreamingAgentLoop as any).mock.calls[0][0].tools;
+    const passedTools = expectDefined(
+      vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+      "runStreamingAgentLoop call",
+    )[0].tools;
     expect(passedTools.get("memory_recall")).toBeDefined();
     expect(passedTools.get("mcp__github__create_pr")).toBeDefined();
   });
@@ -1156,13 +1207,16 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
     });
 
-    const passedTools = (deps.runStreamingAgentLoop as any).mock.calls[0][0].tools;
+    const passedTools = expectDefined(
+      vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+      "runStreamingAgentLoop call",
+    )[0].tools;
     expect(passedTools.snapshot()).toHaveLength(0);
   });
 
@@ -1219,7 +1273,7 @@ describe("createHandleMessage", () => {
         imageToolsLoader,
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -1247,7 +1301,7 @@ describe("createHandleMessage", () => {
         skillRunner,
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -1274,7 +1328,7 @@ describe("createHandleMessage", () => {
         mcpRegistry,
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -1300,7 +1354,7 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -1338,7 +1392,7 @@ describe("createHandleMessage", () => {
         mcpRegistry,
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -1381,7 +1435,7 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -1393,7 +1447,10 @@ describe("createHandleMessage", () => {
       // pinned the provider to whatever was configured for the default
       // profile.
       expect(resolveProvider).toHaveBeenCalledWith("x-ai/grok-4.20");
-      const loopArgs = (deps.runStreamingAgentLoop as any).mock.calls[0][0];
+      const loopArgs = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "runStreamingAgentLoop call",
+      )[0];
       expect(loopArgs.provider).toBe(turnProvider);
       expect(loopArgs.model).toBe("x-ai/grok-4.20");
     });
@@ -1435,7 +1492,7 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -1502,7 +1559,7 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -1569,7 +1626,7 @@ describe("createHandleMessage", () => {
       });
 
       // Turn must complete without ever resolving the summarization model.
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -1601,13 +1658,11 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      const caught = await (createHandleMessage(deps) as any)
-        .fn({
-          event: testEvent,
-          step: mockStep(),
-          runId: testRunId,
-        })
-        .catch((e: unknown) => e);
+      const caught = await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      }).catch((e: unknown) => e);
 
       // Plain Error → Inngest sees a regular rejection and runs its retry
       // path. Must NOT be wrapped in NonRetriableError, otherwise a real
@@ -1646,13 +1701,11 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      const caught = await (createHandleMessage(deps) as any)
-        .fn({
-          event: testEvent,
-          step: mockStep(),
-          runId: testRunId,
-        })
-        .catch((e: unknown) => e);
+      const caught = await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      }).catch((e: unknown) => e);
 
       expect(caught).toBeInstanceOf(NonRetriableError);
       expect((caught as NonRetriableError).cause).toBeInstanceOf(ProviderConfigError);
@@ -1686,7 +1739,7 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -1726,13 +1779,16 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
       });
 
-      const callArgs = (deps.runStreamingAgentLoop as any).mock.calls[0][0];
+      const callArgs = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "runStreamingAgentLoop call",
+      )[0];
       // History was rewritten with the resolved trailing user message
       // because `hasAttachments` is false for voice — but the transcript
       // already lives in the persisted text via getHistory's mock.
@@ -1771,7 +1827,7 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -1827,7 +1883,7 @@ describe("createHandleMessage", () => {
 
       // Turn must complete without rethrowing the notify failure.
       await expect(
-        (createHandleMessage(deps) as any).fn({
+        invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
           event: testEvent,
           step: mockStep(),
           runId: testRunId,
@@ -1871,7 +1927,7 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -1927,7 +1983,7 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -2002,7 +2058,7 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -2076,7 +2132,7 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -2138,7 +2194,7 @@ describe("createHandleMessage", () => {
         }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -2163,7 +2219,7 @@ describe("createHandleMessage", () => {
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -2203,7 +2259,7 @@ describe("createHandleMessage", () => {
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       });
 
-      await (createHandleMessage(deps) as any).fn({
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
         step: mockStep(),
         runId: testRunId,
@@ -2238,15 +2294,15 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
     });
 
     expect(memory.recall).toHaveBeenCalled();
-    const recallCall = (memory.recall as any).mock.calls[0];
-    const opts = recallCall[2];
+    const recallCall = expectDefined(vi.mocked(memory.recall).mock.calls[0], "recall call");
+    const opts = expectDefined(recallCall[2], "recall opts");
     expect(opts).toMatchObject({
       tagGroups: [
         {
@@ -2284,7 +2340,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -2349,7 +2405,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -2412,7 +2468,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -2446,7 +2502,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -2503,7 +2559,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -2536,7 +2592,7 @@ describe("createHandleMessage", () => {
     });
 
     const step = mockStep();
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step,
       runId: testRunId,
@@ -2591,7 +2647,7 @@ describe("createHandleMessage", () => {
       }),
     });
 
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
@@ -2632,7 +2688,7 @@ describe("createHandleMessage", () => {
     });
 
     const step = mockStep();
-    await (createHandleMessage(deps) as any).fn({
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step,
       runId: testRunId,
