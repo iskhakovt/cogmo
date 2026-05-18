@@ -14,7 +14,12 @@ import type {
   StreamEvent,
 } from "../llm/types.js";
 import { logger } from "../logger.js";
-import type { StepRunner } from "./loop.js";
+import type {
+  AgentLoopParams,
+  AgentLoopResult,
+  StepRunner,
+  StreamingAgentLoopParams,
+} from "./loop.js";
 import { clearOldThinking, runAgentLoop, runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
 import { defineTool, ToolRegistry } from "./tools.js";
@@ -72,18 +77,46 @@ function toolUseResponse(toolName: string, toolId: string, input: unknown): LlmR
   };
 }
 
+// Fields these tests almost never vary. Defaulted by `testRunAgentLoop` /
+// `testRunStreamingAgentLoop` so each call only states what's behaviourally
+// relevant (provider, tools, messages, plus the variant onEvent / mock
+// turnLogger / etc.). Overriding any of them just means setting it in
+// the override object.
+type LoopDefaultable = "model" | "systemPrompt" | "service" | "turnLogger";
+type LoopOverrides = Omit<AgentLoopParams, LoopDefaultable> &
+  Partial<Pick<AgentLoopParams, LoopDefaultable>>;
+type StreamingLoopOverrides = Omit<StreamingAgentLoopParams, LoopDefaultable> &
+  Partial<Pick<StreamingAgentLoopParams, LoopDefaultable>>;
+
+function testRunAgentLoop(overrides: LoopOverrides): Promise<AgentLoopResult> {
+  return runAgentLoop({
+    model: "test",
+    systemPrompt: "sys",
+    service: stubService(),
+    turnLogger: logger,
+    ...overrides,
+  });
+}
+
+function testRunStreamingAgentLoop(overrides: StreamingLoopOverrides): Promise<AgentLoopResult> {
+  return runStreamingAgentLoop({
+    model: "test",
+    systemPrompt: "sys",
+    service: stubService(),
+    turnLogger: logger,
+    ...overrides,
+  });
+}
+
 describe("runAgentLoop", () => {
   it("returns text on single-turn end_turn", async () => {
     const provider = mockProvider([textResponse("Hello!")]);
     const tools = new ToolRegistry();
 
-    const result = await runAgentLoop({
+    const result = await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "Be helpful",
       messages: [{ role: "user", content: "Hi" }],
       tools,
-      service: stubService(),
     });
 
     expect(result.text).toBe("Hello!");
@@ -109,13 +142,10 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop({
+    const result = await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "echo ping" }],
       tools,
-      service: stubService(),
     });
 
     expect(result.text).toBe("Got: pong");
@@ -138,13 +168,10 @@ describe("runAgentLoop", () => {
 
     const tools = new ToolRegistry();
 
-    const result = await runAgentLoop({
+    const result = await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "use magic" }],
       tools,
-      service: stubService(),
     });
 
     expect(result.iterations).toBe(2);
@@ -176,13 +203,10 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop({
+    const result = await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "fail" }],
       tools,
-      service: stubService(),
     });
 
     expect(result.iterations).toBe(2);
@@ -223,13 +247,10 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop({
+    const result = await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "do both" }],
       tools,
-      service: stubService(),
     });
 
     expect(result.text).toBe("Both done");
@@ -257,13 +278,10 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop({
+    const result = await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "loop" }],
       tools,
-      service: stubService(),
       maxIterations: 2,
     });
 
@@ -296,13 +314,10 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop({
+    const result = await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "echo" }],
       tools,
-      service: stubService(),
     });
 
     expect(result.iterations).toBe(2);
@@ -339,13 +354,10 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop({
+    const result = await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "echo" }],
       tools,
-      service: stubService(),
     });
 
     expect(result.iterations).toBe(2);
@@ -359,13 +371,10 @@ describe("runAgentLoop", () => {
     const provider = mockProvider([textResponse("No tools here")]);
     const tools = new ToolRegistry();
 
-    await runAgentLoop({
+    await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "hi" }],
       tools,
-      service: stubService(),
     });
 
     const callArgs = vi.mocked(provider.chat).mock.calls[0]![0];
@@ -377,13 +386,10 @@ describe("runAgentLoop", () => {
     const tools = new ToolRegistry();
     const original = [{ role: "user" as const, content: "hi" }];
 
-    await runAgentLoop({
+    await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: original,
       tools,
-      service: stubService(),
     });
 
     expect(original).toHaveLength(1);
@@ -408,10 +414,8 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    await runAgentLoop({
+    await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "spy" }],
       tools,
       service: svc,
@@ -462,13 +466,10 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop({
+    const result = await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "gen three" }],
       tools,
-      service: stubService(),
     });
 
     expect(result.messages[2]!.content).toEqual([
@@ -543,13 +544,10 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop({
+    const result = await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "mixed" }],
       tools,
-      service: stubService(),
     });
 
     expect(result.messages[2]!.content).toEqual([
@@ -599,13 +597,10 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    await runAgentLoop({
+    await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "two writes" }],
       tools,
-      service: stubService(),
     });
 
     expect(maxConcurrent).toBe(1);
@@ -653,13 +648,10 @@ describe("runAgentLoop", () => {
       }),
     );
 
-    const result = await runAgentLoop({
+    const result = await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "safe + ghost + safe" }],
       tools,
-      service: stubService(),
     });
 
     expect(result.messages[2]!.content).toEqual([
@@ -718,13 +710,10 @@ describe("runStreamingAgentLoop", () => {
     const tools = new ToolRegistry();
     const collected: StreamEvent[] = [];
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "hi" }],
       tools,
-      service: stubService(),
       onEvent: async (e) => {
         collected.push(e);
       },
@@ -765,13 +754,10 @@ describe("runStreamingAgentLoop", () => {
 
     const collected: StreamEvent[] = [];
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "echo ping" }],
       tools,
-      service: stubService(),
       onEvent: async (e) => {
         collected.push(e);
       },
@@ -807,13 +793,10 @@ describe("runStreamingAgentLoop", () => {
     const tools = new ToolRegistry();
     const order: string[] = [];
 
-    await runStreamingAgentLoop({
+    await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "hi" }],
       tools,
-      service: stubService(),
       onEvent: async (e) => {
         if (e.type === "text_delta") order.push(e.text);
       },
@@ -829,13 +812,10 @@ describe("runStreamingAgentLoop", () => {
     const tools = new ToolRegistry();
     const original = [{ role: "user" as const, content: "hi" }];
 
-    await runStreamingAgentLoop({
+    await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: original,
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 
@@ -868,13 +848,10 @@ describe("runStreamingAgentLoop", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "loop" }],
       tools,
-      service: stubService(),
       maxIterations: 2,
       onEvent: async () => {},
     });
@@ -905,13 +882,10 @@ describe("runStreamingAgentLoop", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "echo" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 
@@ -945,13 +919,10 @@ describe("runStreamingAgentLoop", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "echo" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 
@@ -1006,13 +977,10 @@ describe("runStreamingAgentLoop", () => {
     process.on("unhandledRejection", listener);
     try {
       await expect(
-        runStreamingAgentLoop({
+        testRunStreamingAgentLoop({
           provider,
-          model: "test",
-          systemPrompt: "sys",
           messages: [{ role: "user", content: "hi" }],
           tools: new ToolRegistry(),
-          service: stubService(),
           onEvent: async () => {},
         }),
       ).rejects.toBe(failure);
@@ -1039,13 +1007,10 @@ describe("runStreamingAgentLoop", () => {
     const tools = new ToolRegistry();
     const collected: StreamEvent[] = [];
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "think" }],
       tools,
-      service: stubService(),
       onEvent: async (e) => {
         collected.push(e);
       },
@@ -1089,13 +1054,10 @@ describe("tool durability (stepRun)", () => {
       return fn();
     };
 
-    const result = await runAgentLoop({
+    const result = await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
-      service: stubService(),
       stepRun,
     });
 
@@ -1123,13 +1085,10 @@ describe("tool durability (stepRun)", () => {
       },
     });
 
-    const result = await runAgentLoop({
+    const result = await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
-      service: stubService(),
       // no stepRun
     });
 
@@ -1153,13 +1112,10 @@ describe("tool durability (stepRun)", () => {
 
     const stepRun = vi.fn<StepRunner>(async (_id, fn) => fn());
 
-    await runAgentLoop({
+    await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
-      service: stubService(),
       stepRun,
     });
 
@@ -1195,13 +1151,10 @@ describe("tool durability (stepRun)", () => {
       return fn();
     };
 
-    await runAgentLoop({
+    await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
-      service: stubService(),
       stepRun,
     });
 
@@ -1233,13 +1186,10 @@ describe("tool durability (stepRun)", () => {
       return fn();
     };
 
-    await runStreamingAgentLoop({
+    await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
       stepRun,
     });
@@ -1342,9 +1292,9 @@ describe("clearOldThinking", () => {
 // with a tool_result whose toolUseId has no matching prior tool_use is the
 // minimal repro — `validateHistory` flags it as `dropped_stray_tool_result`,
 // which routes through the `agent loop history invariants repaired` warn
-// emission. Both tests below exercise that path: one with an injected
-// `turnLogger`, one without to confirm fallback to the module-level
-// `logger`.
+// emission. Tests below pin that the warn lands on the injected
+// per-invocation `turnLogger` across both loop variants and on the
+// iteration-limit path.
 describe("turnLogger plumbing", () => {
   function historyWithStrayToolResult(): Message[] {
     return [
@@ -1368,13 +1318,10 @@ describe("turnLogger plumbing", () => {
     const fallbackSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
 
     try {
-      await runStreamingAgentLoop({
+      await testRunStreamingAgentLoop({
         provider,
-        model: "test",
-        systemPrompt: "sys",
         messages: historyWithStrayToolResult(),
         tools: new ToolRegistry(),
-        service: stubService(),
         onEvent: async () => {},
         turnLogger,
       });
@@ -1394,43 +1341,14 @@ describe("turnLogger plumbing", () => {
     }
   });
 
-  it("falls back to the module-level logger when no turnLogger is provided", async () => {
-    const provider = mockStreamProvider([
-      { events: [{ type: "text_delta", text: "ok" }], stopReason: "end_turn" },
-    ]);
-    const fallbackSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
-
-    try {
-      await runStreamingAgentLoop({
-        provider,
-        model: "test",
-        systemPrompt: "sys",
-        messages: historyWithStrayToolResult(),
-        tools: new ToolRegistry(),
-        service: stubService(),
-        onEvent: async () => {},
-      });
-
-      expect(fallbackSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ repairCount: expect.any(Number) }),
-        "agent loop history invariants repaired",
-      );
-    } finally {
-      fallbackSpy.mockRestore();
-    }
-  });
-
   it("routes the history-repair warn through turnLogger in runAgentLoop too", async () => {
     const provider = mockProvider([textResponse("ok")]);
     const turnLogger = mock<Logger>();
 
-    await runAgentLoop({
+    await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: historyWithStrayToolResult(),
       tools: new ToolRegistry(),
-      service: stubService(),
       turnLogger,
     });
 
@@ -1456,13 +1374,10 @@ describe("turnLogger plumbing", () => {
     );
     const turnLogger = mock<Logger>();
 
-    await runAgentLoop({
+    await testRunAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "loop" }],
       tools,
-      service: stubService(),
       maxIterations: 1,
       turnLogger,
     });
@@ -1575,13 +1490,10 @@ describe("in-loop model-misbehavior repair", () => {
     const turnLogger = mock<Logger>();
     const collected: StreamEvent[] = [];
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "hi" }],
       tools: new ToolRegistry(),
-      service: stubService(),
       onEvent: async (e) => {
         collected.push(e);
       },
@@ -1624,13 +1536,10 @@ describe("in-loop model-misbehavior repair", () => {
     ]);
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "hi" }],
       tools: new ToolRegistry(),
-      service: stubService(),
       onEvent: async () => {},
       turnLogger,
     });
@@ -1681,13 +1590,10 @@ describe("in-loop model-misbehavior repair", () => {
     const turnLogger = mock<Logger>();
     const collected: StreamEvent[] = [];
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "hi" }],
       tools,
-      service: stubService(),
       onEvent: async (e) => {
         collected.push(e);
       },
@@ -1730,13 +1636,10 @@ describe("in-loop model-misbehavior repair", () => {
     (provider.chat as ReturnType<typeof vi.fn>).mockRejectedValue(replayErr);
 
     await expect(
-      runStreamingAgentLoop({
+      testRunStreamingAgentLoop({
         provider,
-        model: "test",
-        systemPrompt: "sys",
         messages: [{ role: "user", content: "hi" }],
         tools: new ToolRegistry(),
-        service: stubService(),
         onEvent: async () => {},
       }),
     ).rejects.toBe(replayErr);
@@ -1755,13 +1658,10 @@ describe("in-loop model-misbehavior repair", () => {
     (provider.chat as ReturnType<typeof vi.fn>).mockRejectedValue(replayErr);
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "hi" }],
       tools: new ToolRegistry(),
-      service: stubService(),
       onEvent: async () => {},
       turnLogger,
     });
@@ -1788,13 +1688,10 @@ describe("in-loop model-misbehavior repair", () => {
     (provider.chat as ReturnType<typeof vi.fn>).mockRejectedValue(replayRefusal);
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "hi" }],
       tools: new ToolRegistry(),
-      service: stubService(),
       onEvent: async () => {},
       turnLogger,
     });
@@ -1835,13 +1732,10 @@ describe("in-loop model-misbehavior repair", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "hi" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 
@@ -1857,13 +1751,10 @@ describe("in-loop model-misbehavior repair", () => {
     ]);
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "naughty" }],
       tools: new ToolRegistry(),
-      service: stubService(),
       onEvent: async () => {},
       turnLogger,
     });
@@ -1889,13 +1780,10 @@ describe("in-loop model-misbehavior repair", () => {
     const { provider } = repairStreamProvider([{ kind: "throw", error: refusal }]);
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "naughty" }],
       tools: new ToolRegistry(),
-      service: stubService(),
       onEvent: async () => {},
       turnLogger,
     });
@@ -1939,13 +1827,10 @@ describe("in-loop model-misbehavior repair", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "hi" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 
@@ -1974,13 +1859,10 @@ describe("in-loop model-misbehavior repair", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "hi" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 
@@ -2015,13 +1897,10 @@ describe("in-loop model-misbehavior repair", () => {
     const { provider } = repairStreamProvider([{ kind: "throw", error: transientErr }]);
 
     await expect(
-      runStreamingAgentLoop({
+      testRunStreamingAgentLoop({
         provider,
-        model: "test",
-        systemPrompt: "sys",
         messages: [{ role: "user", content: "hi" }],
         tools: new ToolRegistry(),
-        service: stubService(),
         onEvent: async () => {},
       }),
     ).rejects.toBe(transientErr);
@@ -2068,13 +1947,10 @@ describe("loop-pathology fingerprint", () => {
     tools.register(readOnlyTool());
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
       turnLogger,
     });
@@ -2110,13 +1986,10 @@ describe("loop-pathology fingerprint", () => {
     const tools = new ToolRegistry();
     tools.register(writeTool());
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 
@@ -2151,13 +2024,10 @@ describe("loop-pathology fingerprint", () => {
     tools.register(readOnlyTool());
     tools.register(writeTool());
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 
@@ -2185,13 +2055,10 @@ describe("loop-pathology fingerprint", () => {
     tools.register(readOnlyTool());
     const turnLogger = mock<Logger>();
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
       turnLogger,
     });
@@ -2228,13 +2095,10 @@ describe("loop-pathology fingerprint", () => {
     const tools = new ToolRegistry();
     tools.register(readOnlyTool());
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "explore" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 
@@ -2269,13 +2133,10 @@ describe("loop-pathology fingerprint", () => {
     const tools = new ToolRegistry();
     tools.register(readOnlyTool());
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "check" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 
@@ -2322,13 +2183,10 @@ describe("loop-pathology fingerprint", () => {
       }),
     );
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 
@@ -2358,13 +2216,10 @@ describe("loop-pathology fingerprint", () => {
     const tools = new ToolRegistry();
     tools.register(unflaggedTool);
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 
@@ -2397,13 +2252,10 @@ describe("loop-pathology fingerprint", () => {
     const tools = new ToolRegistry();
     tools.register(erroringTool);
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 
@@ -2426,13 +2278,10 @@ describe("loop-pathology fingerprint", () => {
     const tools = new ToolRegistry();
     tools.register(readOnlyTool());
 
-    const result = await runStreamingAgentLoop({
+    const result = await testRunStreamingAgentLoop({
       provider,
-      model: "test",
-      systemPrompt: "sys",
       messages: [{ role: "user", content: "go" }],
       tools,
-      service: stubService(),
       onEvent: async () => {},
     });
 

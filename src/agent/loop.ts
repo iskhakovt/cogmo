@@ -13,7 +13,6 @@ import type {
   ToolUseBlock,
   Usage,
 } from "../llm/types.js";
-import { logger } from "../logger.js";
 import { agentIterations } from "../metrics.js";
 import { validateHistory } from "./history-invariants.js";
 import {
@@ -62,14 +61,13 @@ export interface AgentLoopParams {
    */
   stepRun?: StepRunner;
   /**
-   * Per-invocation child logger with `runId` + `conversationId` bound. When
-   * provided, all per-turn log emissions inside the loop route through it so
-   * downstream consumers can join structured logs to `conversation/degraded`
-   * / `conversation/errored` events by `runId` + `conversationId` without
-   * per-emission field stuffing. Optional only because some tests bypass it;
-   * production wiring (`handle-message`) always provides it.
+   * Per-invocation child logger with `runId` + `conversationId` bound. All
+   * per-turn log emissions inside the loop route through it so downstream
+   * consumers can join structured logs to `conversation/degraded` /
+   * `conversation/errored` events by `runId` + `conversationId` without
+   * per-emission field stuffing.
    */
-  turnLogger?: Logger;
+  turnLogger: Logger;
 }
 
 export interface AgentLoopResult {
@@ -169,8 +167,8 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     service,
     stepRun,
     maxIterations = DEFAULT_MAX_ITERATIONS,
+    turnLogger: log,
   } = params;
-  const log = params.turnLogger ?? logger;
   const messages = clearOldThinking(sanitizeHistory(params.messages, log));
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
@@ -494,8 +492,8 @@ export async function runStreamingAgentLoop(
     onEvent,
     stepRun,
     maxIterations = DEFAULT_MAX_ITERATIONS,
+    turnLogger: log,
   } = params;
-  const log = params.turnLogger ?? logger;
   const messages = clearOldThinking(sanitizeHistory(params.messages, log));
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
