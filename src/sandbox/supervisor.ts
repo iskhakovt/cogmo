@@ -15,7 +15,7 @@ import type {
   SandboxSession,
   SessionSpec,
 } from "./index.js";
-import { LocalDockerSessionStateSchema } from "./index.js";
+import { ExecTimeoutError, LocalDockerSessionStateSchema } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import { assertRuntimeAvailable, dockerRuntimeName, type SandboxRuntime } from "./runtime.js";
 import type { SandboxStore } from "./store/index.js";
@@ -570,17 +570,75 @@ async function execStreaming(
     stdin: opts.attachStdin === true,
   });
 
+  // Per-call timeout state — same shape as the Daytona backend. The
+  // total timer caps wall-clock from now; the idle timer resets on
+  // every demuxed chunk (we tap stdout/stderr below). Whichever fires
+  // first stores its sentinel in `timedOut` and forces the hijacked
+  // socket closed via `DisposedError` — the stream's `'error'` handler
+  // then sees `timedOut` set and rejects `exitPromise` with the
+  // timeout error rather than the underlying `DisposedError`. See
+  // design/sandbox.md → Wall-clock and idle timeouts.
+  let timedOut: ExecTimeoutError | null = null;
+  let totalTimer: NodeJS.Timeout | null = null;
+  let idleTimer: NodeJS.Timeout | null = null;
+  const clearTimers = (): void => {
+    if (totalTimer) {
+      clearTimeout(totalTimer);
+      totalTimer = null;
+    }
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
+  const fireTimeout = (kind: "total" | "idle", limit: number): void => {
+    if (timedOut) return;
+    timedOut = new ExecTimeoutError(kind, limit);
+    // Closing the hijacked stream is the same teardown `dispose()` runs.
+    // The stream's `'error'` handler picks up `timedOut` and rejects
+    // with the timeout sentinel.
+    stream.destroy(new DisposedError());
+  };
+  const resetIdle = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (opts.idleTimeoutMs !== undefined && !timedOut) {
+      idleTimer = setTimeout(() => {
+        idleTimer = null;
+        fireTimeout("idle", opts.idleTimeoutMs ?? 0);
+      }, opts.idleTimeoutMs);
+    }
+  };
+
   const stdout = new PassThrough();
   const stderr = new PassThrough();
+  // Tap chunks before demux so the watchdog counts both channels.
+  // PassThroughs sink the bytes; the listener is observation-only.
+  stdout.on("data", resetIdle);
+  stderr.on("data", resetIdle);
   docker.modem.demuxStream(stream, stdout, stderr);
+
+  if (opts.timeoutMs !== undefined) {
+    totalTimer = setTimeout(() => {
+      totalTimer = null;
+      fireTimeout("total", opts.timeoutMs ?? 0);
+    }, opts.timeoutMs);
+  }
+  resetIdle();
 
   // Capture the exit eagerly — listeners attached after `'end'` already
   // fired wouldn't trigger, which deadlocks any caller that reads stdout
   // before calling wait().
   const exitPromise = new Promise<{ exitCode: number }>((resolve, reject) => {
     stream.on("end", async () => {
+      clearTimers();
       stdout.end();
       stderr.end();
+      if (timedOut) {
+        // Timer-fire raced the natural exit — the cap is the
+        // operative outcome from the caller's perspective.
+        reject(timedOut);
+        return;
+      }
       try {
         const info = await exec.inspect();
         resolve({ exitCode: info.ExitCode ?? 0 });
@@ -589,6 +647,15 @@ async function execStreaming(
       }
     });
     stream.on("error", (err: Error) => {
+      clearTimers();
+      if (timedOut) {
+        // Timer fired and we tore down the socket; surface the
+        // timeout, not the resulting `DisposedError`.
+        stdout.end();
+        stderr.end();
+        reject(timedOut);
+        return;
+      }
       if (err instanceof DisposedError) {
         // Intentional teardown via `dispose()` — close downstream
         // streams peacefully so consumers see EOF, not an error. The
@@ -614,6 +681,7 @@ async function execStreaming(
   const dispose = async (): Promise<void> => {
     if (disposed) return;
     disposed = true;
+    clearTimers();
     // Closing the hijacked stream causes the daemon to reap the exec
     // process. Docker's exec API doesn't expose a direct kill, but
     // socket close is the documented teardown path. Pass an error so

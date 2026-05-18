@@ -642,6 +642,61 @@ describe("LocalDockerSandboxClient — execStreaming.dispose()", () => {
 
     expect(winner).toBe("done");
   });
+
+  // Per-callsite timeoutMs cap: the hijacked socket might hold half-open
+  // (kernel keepalive lag, daemon stall) even when the in-container
+  // process has stopped writing. The Daytona-wedge equivalent for the
+  // Local-Docker backend is the same risk in a different transport. The
+  // total cap rejects `wait()` with `ExecTimeoutError("total")` and
+  // tears the stream down via the same path `dispose()` uses.
+  it("timeoutMs: total cap on a held-open stream rejects wait() with ExecTimeoutError(kind='total')", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { PassThrough } = await import("node:stream");
+    const hijack = new PassThrough();
+    const execObj = {
+      start: vi.fn(async () => hijack),
+      inspect: vi.fn(async () => ({ ExitCode: 137 })),
+    };
+    const containerObj = {
+      exec: vi.fn(async () => execObj),
+      inspect: vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} })),
+      kill: vi.fn(),
+      remove: vi.fn(),
+    };
+    const docker = {
+      info: vi.fn(async () => ({ Runtimes: { runc: { path: "runc" } } })),
+      createContainer: vi.fn(async () => ({
+        id: "docker-timeout",
+        start: vi.fn(),
+        remove: vi.fn(),
+        inspect: vi.fn(async () => ({ State: { Status: "running" }, HostConfig: {} })),
+      })),
+      getContainer: vi.fn(() => containerObj),
+      listContainers: vi.fn(async () => []),
+      modem: { demuxStream: vi.fn() },
+    } as unknown as DockerFacade;
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+    });
+    const session = await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-00000000d151",
+      image: "alpine",
+      resourceLimits: RESOURCE_LIMITS,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const handle = await session.execStreaming(["sleep", "infinity"], {
+      timeoutMs: 50,
+    });
+
+    const { ExecTimeoutError } = await import("./index.js");
+    const err = await handle.wait().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(ExecTimeoutError);
+    expect((err as InstanceType<typeof ExecTimeoutError>).kind).toBe("total");
+  });
 });
 
 /**

@@ -140,7 +140,15 @@ describe("checkoutFeatureBranchInSandbox", () => {
     await checkoutFeatureBranchInSandbox(session, "cogmo/abc12345");
     expect(execCalls).toHaveLength(1);
     expect(execCalls[0]?.cmd).toEqual(["git", "checkout", "-B", "cogmo/abc12345"]);
-    expect(execCalls[0]?.opts).toEqual({ workingDir: "/workspace" });
+    // Per-callsite timeout pair pins the wedge-resilience contract —
+    // see design/coding-delegation.md → Per-callsite exec timeouts.
+    // `git checkout -B` is a fast op; both caps tight because there is
+    // no legitimate slow path.
+    expect(execCalls[0]?.opts).toEqual({
+      workingDir: "/workspace",
+      timeoutMs: 60_000,
+      idleTimeoutMs: 30_000,
+    });
   });
 
   it("throws on non-zero exit code (stops the orchestrator before runCommitAndPush)", async () => {

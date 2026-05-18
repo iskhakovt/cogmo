@@ -1015,6 +1015,96 @@ describe("DrizzleCodingStore", () => {
       expect(result.kind).toBe("not_found");
     });
 
+    // failTaskIfNonTerminal is the reconcile-on-failure store entry
+    // point: a conditional UPDATE that only writes when status is
+    // non-terminal. The branches need direct SQL coverage — the
+    // unit-level reconcile test stubs the store, so this is where the
+    // "conditional UPDATE matches the right rows" contract is pinned.
+    it("failTaskIfNonTerminal: flips a planning row to failed and stamps failure_reason", async () => {
+      const repoId = await seedRepo();
+      const task = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "planning" }));
+
+      const result = await tx((trx) =>
+        store.failTaskIfNonTerminal(trx, task.id, "inngest run terminated abnormally"),
+      );
+      expect(result.kind).toBe("failed");
+
+      const reloaded = await tx((trx) => store.getTask(trx, task.id));
+      expect(reloaded?.status).toBe("failed");
+      expect(reloaded?.failureReason).toBe("inngest run terminated abnormally");
+    });
+
+    it("failTaskIfNonTerminal: returns already_terminal without rewriting an already-failed row (preserves original failure_reason)", async () => {
+      const repoId = await seedRepo();
+      const task = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      // Simulate the in-worker catch path winning the race.
+      await tx((trx) =>
+        store.updateTaskStatus(trx, {
+          id: task.id,
+          status: "failed",
+          failureReason: "claude exit code 2",
+        }),
+      );
+
+      const result = await tx((trx) =>
+        store.failTaskIfNonTerminal(trx, task.id, "reconcile-injected reason"),
+      );
+      expect(result.kind).toBe("already_terminal");
+      if (result.kind !== "already_terminal") return;
+      expect(result.status).toBe("failed");
+
+      const reloaded = await tx((trx) => store.getTask(trx, task.id));
+      // The original (worker-supplied) failure_reason wins — reconcile
+      // must not stomp on a more accurate message.
+      expect(reloaded?.failureReason).toBe("claude exit code 2");
+    });
+
+    it.each<{ terminal: "pr_open" | "failed" | "cancelled" }>([
+      { terminal: "pr_open" },
+      { terminal: "failed" },
+      { terminal: "cancelled" },
+    ])("failTaskIfNonTerminal: returns already_terminal for status=$terminal (no write)", async ({
+      terminal,
+    }) => {
+      const repoId = await seedRepo(`fail-noop-${terminal}`);
+      const task = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: terminal }));
+      const result = await tx((trx) => store.failTaskIfNonTerminal(trx, task.id, "ignored"));
+      expect(result.kind).toBe("already_terminal");
+    });
+
+    it("failTaskIfNonTerminal: not_found for unknown id", async () => {
+      const result = await tx((trx) =>
+        store.failTaskIfNonTerminal(trx, "019d0000-0000-7000-8000-000000000099", "x"),
+      );
+      expect(result.kind).toBe("not_found");
+    });
+
     it("cancel on terminal task returns already_terminal without rewriting", async () => {
       const repoId = await seedRepo();
       const task = await tx((trx) =>
