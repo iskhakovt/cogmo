@@ -60,6 +60,55 @@ The fast-path optimization (persisting `inputTokens` on assistant messages) avoi
 
 Three strategies, applied in order from gentlest to most aggressive. Each has a trigger threshold expressed as a fraction of the budget.
 
+### Strategy 0: Same-Tool Supersession `[trigger: count-based] [proposed]`
+
+The three strategies below are **budget-pressure-triggered** — they fire when the conversation approaches the context limit. They do not fire when a single turn calls the same tool many times at low overall budget utilization: eight `generate_image` results at 30% of the budget evade Strategy 1 entirely.
+
+Volume-driven attention dilution is independent of budget utilization. Every same-tool `tool_result` block in the window dilutes the softmax weight on the original user intent, and the lost-in-the-middle effect compounds as same-tool results stack. The fix is **count-based**, not budget-based: when a new same-tool result lands and the count of that tool's prior results exceeds K, rewrite the prior results in place.
+
+This strategy is intentionally narrower than Strategy 1:
+
+| | Strategy 0 | Strategy 1 |
+|-|-|-|
+| Trigger | New same-tool `tool_result` brings count > K | Total context > 60% budget |
+| Scope | One tool's cluster | All old `tool_result` blocks |
+| Action | Compact prior same-tool results into one summary block | Replace tool_result content with placeholder |
+| Frequency | Per-turn, fires often on tool-heavy turns | Per-turn, fires only as context fills |
+
+#### Rewrite at supersession points only
+
+The cardinal rule is **deterministic supersession**, not continuous editing. Mutating tool_results on every turn invalidates Anthropic's prompt cache on every call — roughly 10× the input cost and ~3× the latency. Strategy 0 mutates only when a new tool_result of the same name lands; the cut point is the **new tool call's position**, not arbitrary. Older same-tool results past that boundary become eligible for compaction in a single rewrite pass; once compacted, they stay compacted across subsequent turns.
+
+#### What stays verbatim
+
+- The **most recent K results per tool** (default K=2) — the model leans hardest on these.
+- The **first result** in each tool's series — lost-in-the-middle says the start matters; the inflection point of "the model decided to start querying X" carries planning signal worth preserving.
+- All **non-same-tool blocks** between same-tool blocks — assistant text and other tool calls are not subject to this strategy.
+
+Prior same-tool results between the first and the last K get compacted into a single block of the form:
+
+```
+[Earlier this turn: 4 prior `web_search` results — first at iteration 2 ("react testing libraries"), then "vitest jest comparison", "react testing library setup", "jest deprecation"; combined ~3.2KB. Latest 2 verbatim below.]
+```
+
+The summary preserves: count, tool name, original arg-shape per call (so the model's reasoning trace stays coherent), approximate aggregate size. It does **not** carry the result content — that's what the verbatim recent K is for.
+
+#### Pair-aware
+
+`tool_result` blocks must pair with `tool_use` blocks on the preceding assistant message (the existing pairing invariant; see "Pair-Aware Compaction" below). Strategy 0 rewrites the `tool_result` content into the summary block but leaves the `tool_use` blocks intact. The conversation transcript still records *what* the model called and with *what args*; only the *result content* is compacted. This matches Strategy 1's invariant.
+
+#### Failure mode and rollback
+
+If summary generation needs an LLM call (it shouldn't — the summary is template-based and cheap), Strategy 0 falls through to "leave the cluster alone, let Strategy 1 handle it on the next budget check." Strategy 0 is best-effort optimization; it never blocks a turn.
+
+#### Where it runs
+
+In the same load-time compaction pipeline as Strategies 1–3, applied **before** Strategy 1. Strategy 0 reduces same-tool clutter; Strategy 1 then operates on a cleaner array if budget pressure additionally calls for it.
+
+#### Confidence
+
+Marked `[proposed]` because the K thresholds (per-tool retain count, summary template detail level) are intuitions. Real data — turns where attention dilution caused user-visible degradation — should validate or tune these before promoting. The structural shape (supersession-triggered, in-place rewrite, prior-results-only) is the design constraint; the constants are tunable.
+
 ### Strategy 1: Clear Tool Results `[trigger: 60%]`
 
 Replace old `tool_result` content with a placeholder (`[Cleared — call tool again if needed]`). Keep the `tool_use` block intact so the model knows what was called and with what arguments.
@@ -118,6 +167,8 @@ Anthropic requires every `tool_result` block (on a user message) to have a match
 ## Pipeline Execution
 
 ```
+messages = compactSameToolClusters(messages, retainPerTool=2)   # Strategy 0 (count-based, always runs)
+
 count = countTokens(system, messages, tools)
 
 if count > budget * 0.60:
@@ -134,7 +185,9 @@ if count > budget * 0.95:
     messages = truncate(messages)
 ```
 
-Token counting calls are minimized: one initial count, then re-count only after a strategy fires and the next threshold needs checking. Tool result clearing doesn't need a re-count (reduction is calculated from cleared content); summarization does (output size varies).
+Strategy 0 is a count-based deterministic transform — no token-count threshold, no LLM call — so it runs unconditionally at the top. It always reduces or leaves token count unchanged, so subsequent threshold checks remain correct.
+
+Token counting calls are minimized: one initial count after Strategy 0, then re-count only after a strategy fires and the next threshold needs checking. Tool result clearing doesn't need a re-count (reduction is calculated from cleared content); summarization does (output size varies).
 
 ## Fast Path: Usage Tracking
 
