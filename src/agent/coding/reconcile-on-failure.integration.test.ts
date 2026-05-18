@@ -73,23 +73,21 @@ beforeAll(async () => {
     },
   );
 
-  // Decoy functions that share function-ids with the real coding
-  // orchestrators (under this test app, so the full function_id is
-  // `cogmo-reconcile-itest-coding-task-start` — suffix-matches the
-  // reconcile's id matcher). Each listens on `TRIGGER_EVENT` and
-  // throws immediately; with `retries: 0` Inngest emits
-  // `inngest/function.failed` on the first attempt.
-  const makeDecoy = (id: "coding-task-start" | "coding-task-execute") =>
+  // Each decoy listens on its OWN trigger event so a test fires
+  // exactly one of them — sharing a trigger would let both decoys
+  // throw in parallel and the reconcile would pick up whichever's
+  // `inngest/function.failed` event landed first.
+  const makeDecoy = (id: "coding-task-start" | "coding-task-execute", triggerEvent: string) =>
     testInngest.createFunction(
-      { id, retries: 0, triggers: [{ event: TRIGGER_EVENT }] },
+      { id, retries: 0, triggers: [{ event: triggerEvent }] },
       async ({ event }) => {
         throw new Error(
           `decoy ${id} failure for taskId=${(event.data as { taskId?: string }).taskId ?? "?"}`,
         );
       },
     );
-  const decoyStart = makeDecoy("coding-task-start");
-  const decoyExecute = makeDecoy("coding-task-execute");
+  const decoyStart = makeDecoy("coding-task-start", TRIGGER_START);
+  const decoyExecute = makeDecoy("coding-task-execute", TRIGGER_EXECUTE);
 
   // A "non-coding" decoy too — its function_id will be
   // `cogmo-reconcile-itest-non-coding-decoy`, which the reconcile's
@@ -176,18 +174,14 @@ async function sendInngestEvent(name: string, data: Record<string, unknown>): Pr
 }
 
 /**
- * Fire-event-for-trigger trigger for the failing decoy functions below.
- * Each decoy listens on this with a `taskId` payload, then immediately
- * throws — Inngest exhausts retries (0) and emits `inngest/function.failed`
- * environment-wide, which the reconcile function (registered under the
- * same app, with the bare `coding-task-*` ids) picks up.
- *
- * We can't directly POST `inngest/function.failed` because Inngest's
- * event API rejects reserved internal names ("event name is reserved for
- * internal use"). The only way to make the real system event fire is to
- * make a real function fail.
+ * Inngest rejects external POST of `inngest/function.failed` ("event
+ * name is reserved for internal use"), so each test fires its own
+ * trigger event that drives one specific decoy to throw. Inngest then
+ * emits the real system event environment-wide on that decoy's
+ * terminal failure, which the reconcile picks up.
  */
-const TRIGGER_EVENT = "test/reconcile/trigger";
+const TRIGGER_START = "test/reconcile/trigger-start";
+const TRIGGER_EXECUTE = "test/reconcile/trigger-execute";
 
 async function waitForTaskStatus(
   taskId: string,
@@ -229,7 +223,7 @@ describe("coding-task-reconcile — Inngest integration", () => {
     // `cogmo-reconcile-itest-coding-task-start` (the test app id +
     // function id). The real reconcile function's suffix-matcher
     // accepts that shape, picks up the event, and flips our row.
-    await sendInngestEvent(TRIGGER_EVENT, { taskId });
+    await sendInngestEvent(TRIGGER_START, { taskId });
 
     const reloaded = await waitForTaskStatus(taskId, "failed");
     expect(reloaded.status).toBe("failed");
@@ -266,7 +260,9 @@ describe("coding-task-reconcile — Inngest integration", () => {
     );
 
     const eventsBefore = capturedFailedEvents.filter((e) => e.taskId === taskId).length;
-    await sendInngestEvent(TRIGGER_EVENT, { taskId });
+    // Use the `coding-task-execute` decoy here to exercise both
+    // function ids end-to-end across the suite.
+    await sendInngestEvent(TRIGGER_EXECUTE, { taskId });
 
     // Give the reconcile a few seconds to fire. Polling for a negative
     // is awkward — we wait a fixed window then assert the row didn't

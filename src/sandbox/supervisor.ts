@@ -611,11 +611,9 @@ async function execStreaming(
 
   const stdout = new PassThrough();
   const stderr = new PassThrough();
-  // Hook the watchdog on the upstream hijacked stream — that's where
-  // bytes arrive. Multiple `data` listeners on one Readable coexist
-  // (docker-modem's demuxStream attaches its own to demux), and the
-  // PassThroughs stay paused until the caller attaches a consumer,
-  // so buffered chunks aren't lost to a late `for await`.
+  // Watchdog registers on the upstream stream BEFORE demuxStream so
+  // both data listeners are attached before the first chunk fires.
+  // PassThroughs stay paused until the caller's consumer attaches.
   stream.on("data", resetIdle);
   docker.modem.demuxStream(stream, stdout, stderr);
 

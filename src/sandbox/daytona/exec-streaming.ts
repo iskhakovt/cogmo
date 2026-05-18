@@ -234,28 +234,18 @@ export async function startExecStreaming(args: {
         stdout.end();
         stderr.end();
         if (onClose) onClose();
+        await cleanupSession();
         if (timedOut) {
-          // Timeout fired and our `deleteSession` tore down the WS,
-          // landing us here. The cap is the user-visible outcome —
-          // don't pretend the command exited normally even if Daytona
-          // happens to report an exit code on the killed session.
-          await cleanupSession();
           reject(timedOut);
           return;
         }
         if (disposed) {
-          await cleanupSession();
           reject(new DisposedError());
           return;
         }
         try {
           const cmd = await daytonaProcess.getSessionCommand(sessionId, commandId);
-          await cleanupSession();
           if (cmd.exitCode === undefined || cmd.exitCode === null) {
-            // Natural WS close + Daytona reports no exit code.
-            // Surface as a real failure rather than coercing to 0 —
-            // "we don't know what happened" must not look like
-            // success to consumers branching on exit status.
             reject(
               new Error(
                 `Daytona session ${sessionId} command ${commandId} exited but reported no exit code`,
@@ -265,7 +255,6 @@ export async function startExecStreaming(args: {
           }
           resolve({ exitCode: cmd.exitCode });
         } catch (err) {
-          await cleanupSession();
           reject(err as Error);
         }
       })
@@ -276,10 +265,10 @@ export async function startExecStreaming(args: {
         if (onClose) onClose();
         await cleanupSession();
         if (timedOut) {
-          // Timeout-triggered cleanup raced a real WS error — the
-          // timeout is still the operative outcome from the caller's
-          // perspective. The underlying WS error is dropped (the
-          // command was going to be killed anyway).
+          // Preserve the WS error as `cause` so the original transport
+          // failure is recoverable in logs when the timer raced a
+          // real upstream error.
+          timedOut.cause = err;
           reject(timedOut);
           return;
         }
