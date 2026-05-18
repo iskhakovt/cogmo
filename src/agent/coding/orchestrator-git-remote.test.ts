@@ -280,7 +280,6 @@ describe("runCodingTask — git-remote transport", () => {
       }),
       stepRun,
       stepSendEvent,
-      inngest: fakeInngest,
     });
 
     expect(result.status).toBe("awaiting_approval");
@@ -351,7 +350,6 @@ describe("runCodingTask — git-remote transport", () => {
       }),
       stepRun,
       stepSendEvent,
-      inngest: fakeInngest,
     });
 
     expect(result.status).toBe("failed");
@@ -395,7 +393,6 @@ describe("runCodingTask — git-remote transport", () => {
       }),
       stepRun,
       stepSendEvent,
-      inngest: fakeInngest,
     });
 
     expect(result.status).toBe("awaiting_approval");

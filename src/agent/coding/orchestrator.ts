@@ -136,7 +136,6 @@ export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: 
         deps,
         stepRun: step.run,
         stepSendEvent: step.sendEvent,
-        inngest,
       });
     },
   );
@@ -153,12 +152,6 @@ interface RunParams {
    * silently-swallowed `coding/task/failed` event.
    */
   stepSendEvent: StepSendEvent;
-  /**
-   * Inngest client — used to emit `coding/task/failed` so cleanup
-   * subscribers (run-branch deletion, future telemetry) hook in
-   * without polling the row.
-   */
-  inngest: Pick<Inngest, "send">;
 }
 
 /**
@@ -173,7 +166,7 @@ interface RunParams {
  * retry.
  */
 export async function runCodingTask(params: RunParams): Promise<CodingOrchestratorResult> {
-  const { taskId, deps, stepRun, stepSendEvent, inngest } = params;
+  const { taskId, deps, stepRun, stepSendEvent } = params;
   const taskLog = log.child({ taskId });
   const {
     runInTx,
@@ -411,11 +404,10 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
           store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
         ),
       );
-      await stepRun("emit-task-failed", () =>
-        inngest
-          .send({ name: "coding/task/failed", data: { taskId, reason } })
-          .then(() => undefined),
-      );
+      await stepSendEvent("emit-task-failed", {
+        ...codingTaskFailed.create({ taskId, reason }),
+        id: `task-failed-${taskId}`,
+      });
       const a = assignment;
       if (a) {
         await stepRun("teardown-worktree", () =>
@@ -886,11 +878,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
           store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
         ),
       );
-      await stepRun("emit-task-failed", () =>
-        inngest
-          .send({ name: "coding/task/failed", data: { taskId, reason } })
-          .then(() => undefined),
-      );
+      await stepSendEvent("emit-task-failed", {
+        ...codingTaskFailed.create({ taskId, reason }),
+        id: `task-failed-${taskId}`,
+      });
       await stepRun("teardown-worktree", () =>
         safeTeardownWorktree({
           runInTx,
