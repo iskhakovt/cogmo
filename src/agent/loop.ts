@@ -22,13 +22,11 @@ import {
   classifyStreamError,
   classifyVolumeCluster,
   computeIterationFingerprint,
-  countToolInvocationBatches,
-  countToolInvocations,
   type DegradeSubtype,
   formatVolumeClusterContent,
   freshBudgets,
   type RepairBudgets,
-  summarizeToolOutcomes,
+  summarizeToolHistory,
 } from "./repair.js";
 import type { Service } from "./service.js";
 import { DEFAULT_INVOCATION_BUDGET, type ToolRegistry, type ToolSpec } from "./tools.js";
@@ -271,10 +269,11 @@ function computeVolumeClusterInterceptions(
     R.groupBy((b) => b.name),
   );
 
-  // Prior batches = distinct prior iterations that emitted any
-  // tool_use for T. The just-pushed assistant message (this iteration)
-  // is excluded by slicing off the last entry before counting.
-  const priorMessages = messages.slice(0, messages.length - 1);
+  // One pass over the turn's messages builds the call/batch/outcome
+  // counts for every tool in the slice. The per-tool loop below is an
+  // O(1) lookup against this map rather than re-scanning the array
+  // per tool.
+  const history = summarizeToolHistory(messages, initialLength);
 
   // for...of here is side-effectful (mutates `interceptions`, emits
   // `log.warn`), the documented carve-out from the functional-only rule.
@@ -286,21 +285,20 @@ function computeVolumeClusterInterceptions(
     // result is already explanatory.
     if (!spec) continue;
 
-    const budget = spec.invocationBudget ?? DEFAULT_INVOCATION_BUDGET;
-    const priorBatches = countToolInvocationBatches(toolName, priorMessages, initialLength);
-    // Including this iteration's batch.
-    const batchCount = priorBatches + 1;
+    const summary = history.get(toolName);
+    // Every tool with blocks in this iteration must have a summary —
+    // summarizeToolHistory scans the same message array that contains
+    // them. Defensive guard so a TS-narrowed map access doesn't need
+    // a non-null assertion.
+    if (summary === undefined) continue;
 
+    const budget = spec.invocationBudget ?? DEFAULT_INVOCATION_BUDGET;
+    // Including this iteration's batch.
+    const batchCount = summary.priorBatchCount + 1;
     const verdict = classifyVolumeCluster(batchCount, budget);
     if (verdict === null) continue;
 
-    // Total call count (blocks, not batches) — what the nudge text
-    // tells the model. The model emitted these blocks; the model
-    // thinks in call counts.
-    const callCount = countToolInvocations(toolName, messages, initialLength);
-    const outcomes = summarizeToolOutcomes(toolName, messages, initialLength);
-    const content = formatVolumeClusterContent(toolName, callCount, outcomes);
-
+    const content = formatVolumeClusterContent(toolName, summary.callCount, summary.outcomes);
     for (const block of batchBlocks) {
       interceptions.set(block.id, {
         type: "tool_result",
@@ -315,10 +313,13 @@ function computeVolumeClusterInterceptions(
         subtype: "volume_cluster",
         tool: toolName,
         batchCount,
-        callCount,
+        callCount: summary.callCount,
         blocksInBatch: batchBlocks.length,
         budget,
-        outcomeMix: { successes: outcomes.successes, failures: outcomes.failures },
+        outcomeMix: {
+          successes: summary.outcomes.successes,
+          failures: summary.outcomes.failures,
+        },
       },
       "agent loop class D volume-cluster intercept",
     );

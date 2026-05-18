@@ -10,13 +10,12 @@ import {
   classifyStreamError,
   classifyVolumeCluster,
   computeIterationFingerprint,
-  countToolInvocations,
   degradedReplyText,
   formatVolumeClusterContent,
   freshBudgets,
   INITIAL_BUDGETS,
   type RepairBudgets,
-  summarizeToolOutcomes,
+  summarizeToolHistory,
 } from "./repair.js";
 
 describe("classifyPostStream", () => {
@@ -237,66 +236,14 @@ describe("classifyClassDTrip", () => {
   });
 });
 
-describe("countToolInvocations", () => {
+describe("summarizeToolHistory", () => {
   function assistantToolUses(...blocks: ToolUseBlock[]): Message {
     return { role: "assistant", content: blocks };
   }
 
-  it("returns 0 when no assistant messages have tool_use blocks for the name", () => {
-    const messages: Message[] = [
-      { role: "user", content: "hi" },
-      { role: "assistant", content: [{ type: "text", text: "ok" }] },
-    ];
-    expect(countToolInvocations("read_file", messages, 0)).toBe(0);
-  });
-
-  it("counts tool_use blocks across multiple assistant messages from fromIdx", () => {
-    const messages: Message[] = [
-      { role: "user", content: "ignored before fromIdx" },
-      assistantToolUses({ type: "tool_use", id: "t1", name: "read_file", input: { path: "a" } }),
-      { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "ok" }] },
-      assistantToolUses({ type: "tool_use", id: "t2", name: "read_file", input: { path: "b" } }),
-      assistantToolUses({ type: "tool_use", id: "t3", name: "web_search", input: { q: "x" } }),
-      assistantToolUses({ type: "tool_use", id: "t4", name: "read_file", input: { path: "c" } }),
-    ];
-    expect(countToolInvocations("read_file", messages, 0)).toBe(3);
-    expect(countToolInvocations("web_search", messages, 0)).toBe(1);
-  });
-
-  it("ignores messages before fromIdx (turn-boundary scope)", () => {
-    const messages: Message[] = [
-      assistantToolUses({ type: "tool_use", id: "old1", name: "read_file", input: { path: "x" } }),
-      assistantToolUses({ type: "tool_use", id: "old2", name: "read_file", input: { path: "y" } }),
-      assistantToolUses({ type: "tool_use", id: "new1", name: "read_file", input: { path: "z" } }),
-    ];
-    expect(countToolInvocations("read_file", messages, 2)).toBe(1);
-  });
-
-  it("counts multiple tool_use blocks within a single assistant message", () => {
-    const messages: Message[] = [
-      assistantToolUses(
-        { type: "tool_use", id: "a", name: "read_file", input: { path: "1" } },
-        { type: "tool_use", id: "b", name: "read_file", input: { path: "2" } },
-        { type: "tool_use", id: "c", name: "read_file", input: { path: "3" } },
-      ),
-    ];
-    expect(countToolInvocations("read_file", messages, 0)).toBe(3);
-  });
-
-  it("ignores string-content messages and non-assistant messages", () => {
-    const messages: Message[] = [
-      { role: "user", content: "tool_use is a tool_use" },
-      { role: "assistant", content: "string-typed content with the word tool_use" },
-      assistantToolUses({ type: "tool_use", id: "real", name: "read_file", input: {} }),
-    ];
-    expect(countToolInvocations("read_file", messages, 0)).toBe(1);
-  });
-});
-
-describe("summarizeToolOutcomes", () => {
   function pair(id: string, name: string, isError: boolean, content: string): Message[] {
     return [
-      { role: "assistant", content: [{ type: "tool_use", id, name, input: {} }] },
+      assistantToolUses({ type: "tool_use", id, name, input: {} }),
       {
         role: "user",
         content: [
@@ -308,60 +255,144 @@ describe("summarizeToolOutcomes", () => {
     ];
   }
 
-  it("returns zero counts when nothing matches the tool name", () => {
-    const messages: Message[] = pair("t1", "other_tool", false, "ok");
-    const mix = summarizeToolOutcomes("read_file", messages, 0);
-    expect(mix).toEqual({ successes: 0, failures: 0, failureReasons: [] });
+  it("returns an empty map when no tool_use blocks appear in the slice", () => {
+    const messages: Message[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: [{ type: "text", text: "ok" }] },
+    ];
+    expect(summarizeToolHistory(messages, 0).size).toBe(0);
   });
 
-  it("counts successes and failures by inspecting tool_result.isError", () => {
+  // callCount = total tool_use blocks for the tool in the slice.
+  it("counts tool_use blocks across multiple assistant messages from fromIdx", () => {
+    const messages: Message[] = [
+      { role: "user", content: "ignored before fromIdx" },
+      assistantToolUses({ type: "tool_use", id: "t1", name: "read_file", input: { path: "a" } }),
+      { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "ok" }] },
+      assistantToolUses({ type: "tool_use", id: "t2", name: "read_file", input: { path: "b" } }),
+      assistantToolUses({ type: "tool_use", id: "t3", name: "web_search", input: { q: "x" } }),
+      assistantToolUses({ type: "tool_use", id: "t4", name: "read_file", input: { path: "c" } }),
+    ];
+    const history = summarizeToolHistory(messages, 0);
+    expect(history.get("read_file")?.callCount).toBe(3);
+    expect(history.get("web_search")?.callCount).toBe(1);
+  });
+
+  it("ignores messages before fromIdx (turn-boundary scope)", () => {
+    const messages: Message[] = [
+      assistantToolUses({ type: "tool_use", id: "old1", name: "read_file", input: { path: "x" } }),
+      assistantToolUses({ type: "tool_use", id: "old2", name: "read_file", input: { path: "y" } }),
+      assistantToolUses({ type: "tool_use", id: "new1", name: "read_file", input: { path: "z" } }),
+    ];
+    expect(summarizeToolHistory(messages, 2).get("read_file")?.callCount).toBe(1);
+  });
+
+  it("counts multiple tool_use blocks within a single assistant message", () => {
+    const messages: Message[] = [
+      assistantToolUses(
+        { type: "tool_use", id: "a", name: "read_file", input: { path: "1" } },
+        { type: "tool_use", id: "b", name: "read_file", input: { path: "2" } },
+        { type: "tool_use", id: "c", name: "read_file", input: { path: "3" } },
+      ),
+    ];
+    expect(summarizeToolHistory(messages, 0).get("read_file")?.callCount).toBe(3);
+  });
+
+  it("ignores string-content messages and non-assistant messages for tool_use counting", () => {
+    const messages: Message[] = [
+      { role: "user", content: "tool_use is a tool_use" },
+      { role: "assistant", content: "string-typed content with the word tool_use" },
+      assistantToolUses({ type: "tool_use", id: "real", name: "read_file", input: {} }),
+    ];
+    expect(summarizeToolHistory(messages, 0).get("read_file")?.callCount).toBe(1);
+  });
+
+  // priorBatchCount = distinct prior iterations (excludes the last
+  // assistant message in the slice — the "current" iteration).
+  it("priorBatchCount counts distinct prior iterations, not blocks", () => {
+    const messages: Message[] = [
+      // Two prior iterations, the first with 3 parallel blocks.
+      assistantToolUses(
+        { type: "tool_use", id: "a1", name: "read_file", input: {} },
+        { type: "tool_use", id: "a2", name: "read_file", input: {} },
+        { type: "tool_use", id: "a3", name: "read_file", input: {} },
+      ),
+      assistantToolUses({ type: "tool_use", id: "b1", name: "read_file", input: {} }),
+      // The current (last) iteration.
+      assistantToolUses({ type: "tool_use", id: "c1", name: "read_file", input: {} }),
+    ];
+    const summary = summarizeToolHistory(messages, 0).get("read_file");
+    expect(summary?.callCount).toBe(5);
+    // 2 prior iterations contributed to the batch counter — the last one
+    // is the current iteration and is excluded.
+    expect(summary?.priorBatchCount).toBe(2);
+  });
+
+  it("priorBatchCount excludes the last assistant message regardless of how many blocks it carries", () => {
+    const messages: Message[] = [
+      assistantToolUses({ type: "tool_use", id: "p", name: "x", input: {} }),
+      assistantToolUses(
+        { type: "tool_use", id: "c1", name: "x", input: {} },
+        { type: "tool_use", id: "c2", name: "x", input: {} },
+        { type: "tool_use", id: "c3", name: "x", input: {} },
+      ),
+    ];
+    const summary = summarizeToolHistory(messages, 0).get("x");
+    expect(summary?.callCount).toBe(4);
+    expect(summary?.priorBatchCount).toBe(1);
+  });
+
+  // outcomes — pairing tool_results by toolUseId, classifying by isError.
+  it("outcomes count successes and failures by inspecting tool_result.isError", () => {
     const messages: Message[] = [
       ...pair("t1", "read_file", false, "data1"),
       ...pair("t2", "read_file", true, "Error: ENOENT no such file"),
       ...pair("t3", "read_file", false, "data2"),
       ...pair("t4", "read_file", true, "Error: permission denied"),
     ];
-    const mix = summarizeToolOutcomes("read_file", messages, 0);
-    expect(mix.successes).toBe(2);
-    expect(mix.failures).toBe(2);
-    expect(mix.failureReasons).toEqual(["Error: ENOENT no such file", "Error: permission denied"]);
+    const summary = summarizeToolHistory(messages, 0).get("read_file");
+    expect(summary?.outcomes.successes).toBe(2);
+    expect(summary?.outcomes.failures).toBe(2);
+    expect(summary?.outcomes.failureReasons).toEqual([
+      "Error: ENOENT no such file",
+      "Error: permission denied",
+    ]);
   });
 
-  it("dedupes identical failure reasons", () => {
+  it("outcomes dedupe identical failure reasons", () => {
     const messages: Message[] = [
       ...pair("t1", "generate_image", true, "image was flagged as nsfw"),
       ...pair("t2", "generate_image", true, "image was flagged as nsfw"),
       ...pair("t3", "generate_image", true, "image was flagged as nsfw"),
     ];
-    const mix = summarizeToolOutcomes("generate_image", messages, 0);
-    expect(mix.failureReasons).toEqual(["image was flagged as nsfw"]);
-    expect(mix.failures).toBe(3);
+    const summary = summarizeToolHistory(messages, 0).get("generate_image");
+    expect(summary?.outcomes.failureReasons).toEqual(["image was flagged as nsfw"]);
+    expect(summary?.outcomes.failures).toBe(3);
   });
 
-  it("only counts tool_results whose toolUseId pairs to a same-name tool_use", () => {
-    // A `web_search` tool_result must not show up in the read_file mix.
+  it("outcomes only count tool_results whose toolUseId pairs to a same-name tool_use", () => {
+    // The web_search failure must not contaminate the read_file outcomes.
     const messages: Message[] = [
       ...pair("a", "read_file", false, "ok"),
       ...pair("b", "web_search", true, "rate limited"),
     ];
-    const mix = summarizeToolOutcomes("read_file", messages, 0);
-    expect(mix.successes).toBe(1);
-    expect(mix.failures).toBe(0);
+    const read = summarizeToolHistory(messages, 0).get("read_file");
+    expect(read?.outcomes.successes).toBe(1);
+    expect(read?.outcomes.failures).toBe(0);
   });
 
-  it("excludes this tool's own prior volume-cluster nudges from failure counts and reasons", () => {
+  it("outcomes exclude this tool's own prior volume-cluster nudges (recursive-impurity invariant)", () => {
     // Pin the recursive-impurity fix: if the model ignored a previous
-    // nudge and emitted another batch, computeVolumeClusterInterceptions
-    // would call summarizeToolOutcomes against a history that already
-    // contains the synthetic intercept. Without the prefix filter, that
-    // synthetic would be counted as a failure and its first line quoted
-    // back as a "reason" in the next nudge — recursive nonsense.
+    // nudge and emitted another batch, summarizeToolHistory runs against
+    // a history that already contains the synthetic intercept. Without
+    // the prefix filter, that synthetic would be counted as a failure
+    // and its first line quoted back as a "reason" in the next nudge.
     const messages: Message[] = [
       ...pair("t1", "img", true, "Error: nsfw flagged"),
       ...pair("t2", "img", true, "Error: nsfw flagged"),
-      // Synthetic from a prior intercept — matches the all-success
-      // branch of formatVolumeClusterContent ("You have called `img` 3
-      // times this turn — 2 succeeded. Do NOT call `img` again...").
+      // Synthetic from a prior intercept — matches the all-success branch
+      // of formatVolumeClusterContent ("You have called `img` 3 times
+      // this turn — 2 succeeded. Do NOT call `img` again...").
       ...pair(
         "t3",
         "img",
@@ -372,17 +403,30 @@ describe("summarizeToolOutcomes", () => {
       ),
       ...pair("t4", "img", true, "Error: too long"),
     ];
-    const mix = summarizeToolOutcomes("img", messages, 0);
+    const summary = summarizeToolHistory(messages, 0).get("img");
     // 3 real failures (t1, t2, t4); the synthetic t3 is excluded.
-    expect(mix.failures).toBe(3);
-    expect(mix.successes).toBe(0);
-    // failureReasons holds the real reasons, deduped — the nudge text
-    // is NOT in there.
-    expect(mix.failureReasons).toEqual(["Error: nsfw flagged", "Error: too long"]);
+    expect(summary?.outcomes.failures).toBe(3);
+    expect(summary?.outcomes.successes).toBe(0);
+    expect(summary?.outcomes.failureReasons).toEqual(["Error: nsfw flagged", "Error: too long"]);
     // Negative assertion: no reason starts with the prefix.
-    for (const reason of mix.failureReasons) {
+    for (const reason of summary?.outcomes.failureReasons ?? []) {
       expect(reason.startsWith("You have called `img`")).toBe(false);
     }
+  });
+
+  it("returns separate entries per tool name in one pass", () => {
+    // The whole point of the consolidated helper: a single scan
+    // produces every tool's summary, not one-scan-per-tool.
+    const messages: Message[] = [
+      ...pair("r1", "read_file", false, "data"),
+      ...pair("w1", "web_search", true, "timeout"),
+      ...pair("r2", "read_file", true, "Error"),
+    ];
+    const history = summarizeToolHistory(messages, 0);
+    expect(history.get("read_file")?.callCount).toBe(2);
+    expect(history.get("read_file")?.outcomes.failures).toBe(1);
+    expect(history.get("web_search")?.callCount).toBe(1);
+    expect(history.get("web_search")?.outcomes.failures).toBe(1);
   });
 });
 

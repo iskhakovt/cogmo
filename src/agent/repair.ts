@@ -346,124 +346,129 @@ function canonicalJson(value: unknown): string {
 }
 
 /**
- * Tally of prior same-tool outcomes within one turn, used to shape the
- * volume-cluster nudge. Counts are over `tool_result` blocks already
- * present in the iteration's accumulated message array — i.e. handlers
- * that ran to completion or errored. `tool_use` blocks without a matching
- * `tool_result` (the model-in-flight case) are ignored.
- */
-export interface ToolOutcomeMix {
-  successes: number;
-  failures: number;
-  /** First-line summaries of failure tool_result content, deduped. */
-  failureReasons: string[];
-}
-
-/**
- * Count how many times the model has emitted a `tool_use` block targeting
- * `toolName` within the slice `messages[fromIdx..]` (the current turn's
- * accumulated array). Counts assistant-message `tool_use` blocks; ignores
- * `tool_result`s. Used for the count carried in the nudge text — the
- * model thinks in "calls," not "batches," so the nudge tells it how many
- * blocks it has emitted.
+ * Per-tool history within one turn — the counts and outcome tally the
+ * volume-cluster trigger needs to decide an iteration's intercept
+ * verdict and shape its nudge text. Built in one pass over the turn's
+ * accumulated message array by {@link summarizeToolHistory}, keyed by
+ * tool name.
  *
- * Derives from the message array rather than a separate counter — Inngest
- * function replay re-executes everything outside `step.run` from the top,
- * so a closure-held counter would silently reset mid-turn. Scanning the
- * already-built message array reflects the actual current state regardless
- * of replay topology. See `design/agent-resilience.md` →
- * "Implementation note: derive, don't store".
+ * - `callCount`: every `tool_use` block the model emitted for this tool
+ *   this turn. The nudge text shows this number because the model
+ *   thinks in calls, not batches.
+ * - `priorBatchCount`: distinct prior iterations (assistant messages
+ *   before the last one in `messages[fromIdx..]`) that emitted any
+ *   `tool_use` for this tool. The unit the budget compares against.
+ *   Per-iteration counting distinguishes "model re-deciding to call T"
+ *   (multiple iterations — the stuck-loop signature) from "model
+ *   decided to parallel-call T N times in one shot" (one iteration,
+ *   N blocks).
+ * - `outcomes`: tool_results paired by id back to same-name tool_use
+ *   blocks. This tool's own prior volume-cluster nudges are excluded
+ *   from the count and reasons so the helper stays pure under
+ *   recursion — a model that ignores a nudge and emits another batch
+ *   doesn't see the prior nudge text quoted as a "failure reason" in
+ *   the next nudge.
  */
-export function countToolInvocations(
-  toolName: string,
-  messages: ReadonlyArray<Message>,
-  fromIdx: number,
-): number {
-  return messages
-    .slice(fromIdx)
-    .flatMap((msg) => (msg.role === "assistant" && Array.isArray(msg.content) ? msg.content : []))
-    .filter((b) => b.type === "tool_use" && b.name === toolName).length;
-}
-
-/**
- * Count distinct *iterations* (assistant messages) within
- * `messages[fromIdx..]` that emitted at least one `tool_use` block for
- * `toolName`. This is the **batch** count — the unit the volume-cluster
- * budget operates on.
- *
- * Per-iteration counting (not per-block) is the design choice that
- * distinguishes "model is stuck re-deciding to call T" (multiple
- * iterations) from "model decided to parallel-call T N times in one
- * shot" (one iteration, N blocks). A user requesting "generate 10
- * images" usually produces either (a) one iteration with 10 parallel
- * blocks → one batch, admitted, or (b) ten sequential iterations →
- * ten batches, intercepted at the budget. The cluster trigger targets
- * the across-iteration decision loop, not the within-iteration
- * parallelism.
- *
- * See `design/agent-resilience.md` → Volume cluster trigger.
- */
-export function countToolInvocationBatches(
-  toolName: string,
-  messages: ReadonlyArray<Message>,
-  fromIdx: number,
-): number {
-  return messages
-    .slice(fromIdx)
-    .filter(
-      (msg) =>
-        msg.role === "assistant" &&
-        Array.isArray(msg.content) &&
-        msg.content.some((b) => b.type === "tool_use" && b.name === toolName),
-    ).length;
-}
-
-/**
- * Summarize prior tool_results for `toolName` in the turn slice
- * `messages[fromIdx..]`. Walks all user-message tool_result blocks and
- * pairs them back to the matching tool_use by id to filter by tool name.
- * Each failure's first non-empty line (capped at 120 chars) is captured
- * as a deduped reason for the nudge text.
- */
-export function summarizeToolOutcomes(
-  toolName: string,
-  messages: ReadonlyArray<Message>,
-  fromIdx: number,
-): ToolOutcomeMix {
-  const slice = messages.slice(fromIdx);
-
-  const idsForTool = new Set(
-    slice
-      .flatMap((msg) => (msg.role === "assistant" && Array.isArray(msg.content) ? msg.content : []))
-      .filter((b): b is ToolUseBlock => b.type === "tool_use" && b.name === toolName)
-      .map((b) => b.id),
-  );
-
-  const matchingResults = slice
-    .flatMap((msg) => (msg.role === "user" && Array.isArray(msg.content) ? msg.content : []))
-    .filter(
-      (b): b is Extract<ContentBlock, { type: "tool_result" }> =>
-        b.type === "tool_result" && idsForTool.has(b.toolUseId),
-    )
-    // Exclude this tool's own prior volume-cluster nudges. The cluster
-    // trigger lands a synthetic `isError: true` tool_result whose content
-    // begins with `volumeClusterNudgePrefix(toolName)`; without this
-    // filter, a model that ignores one nudge and emits another batch
-    // would see the prior nudge quoted as a "failure reason" in the next
-    // nudge (recursive impurity). The fingerprint still degrades that
-    // scenario quickly, but the interim nudge would be confusing.
-    .filter((b) => !isVolumeClusterNudge(toolName, b.content));
-
-  const failures = matchingResults.filter((r) => r.isError === true);
-  const failureReasons = R.unique(
-    failures.map((r) => firstLineSummary(r.content)).filter((s): s is string => s !== null),
-  );
-
-  return {
-    successes: matchingResults.length - failures.length,
-    failures: failures.length,
-    failureReasons,
+export interface ToolHistorySummary {
+  callCount: number;
+  priorBatchCount: number;
+  outcomes: {
+    successes: number;
+    failures: number;
+    /** First-line summaries of failure tool_result content, deduped. */
+    failureReasons: string[];
   };
+}
+
+/**
+ * Build per-tool history summaries for every tool that appeared in
+ * `messages[fromIdx..]`. Single pass over the turn's accumulated
+ * message array; consolidates what was three separate per-tool helpers
+ * (`countToolInvocations`, `countToolInvocationBatches`,
+ * `summarizeToolOutcomes`) into one derivation keyed by tool name.
+ *
+ * Derives from the message array rather than maintaining a separate
+ * counter — Inngest function replay re-executes everything outside
+ * `step.run` from the top, so a closure-held counter would silently
+ * reset mid-turn. Scanning the already-built message array reflects
+ * the actual current state regardless of replay topology. See
+ * `design/agent-resilience.md` → "Implementation note: derive, don't
+ * store".
+ */
+export function summarizeToolHistory(
+  messages: ReadonlyArray<Message>,
+  fromIdx: number,
+): Map<string, ToolHistorySummary> {
+  const slice = messages.slice(fromIdx);
+  const lastIdx = slice.length - 1;
+
+  // Every tool_use block, tagged with its assistant-message index so
+  // priorBatchCount can count distinct prior iterations.
+  const toolUses = R.pipe(
+    slice,
+    R.flatMap((msg, idx) =>
+      msg.role === "assistant" && Array.isArray(msg.content)
+        ? msg.content
+            .filter((b): b is ToolUseBlock => b.type === "tool_use")
+            .map((b) => ({ name: b.name, id: b.id, msgIdx: idx }))
+        : [],
+    ),
+  );
+
+  const usesByTool = R.groupBy(toolUses, (u) => u.name);
+  const idToName = new Map(toolUses.map((u) => [u.id, u.name] as const));
+
+  // Tool_results paired back to their tool name via the tool_use id
+  // index. Excludes this tool's own prior volume-cluster nudges (see
+  // `isVolumeClusterNudge`) so the helper stays pure under recursion.
+  const resultsByTool = R.pipe(
+    slice,
+    R.flatMap((msg) =>
+      msg.role === "user" && Array.isArray(msg.content)
+        ? msg.content.filter(
+            (b): b is Extract<ContentBlock, { type: "tool_result" }> => b.type === "tool_result",
+          )
+        : [],
+    ),
+    R.flatMap((r) => {
+      const name = idToName.get(r.toolUseId);
+      if (name === undefined) return [];
+      if (isVolumeClusterNudge(name, r.content)) return [];
+      return [{ name, result: r }];
+    }),
+    R.groupBy((x) => x.name),
+  );
+
+  const names = new Set([...Object.keys(usesByTool), ...Object.keys(resultsByTool)]);
+
+  return new Map(
+    R.pipe(
+      [...names],
+      R.map((name) => {
+        const uses = usesByTool[name] ?? [];
+        const results = (resultsByTool[name] ?? []).map((x) => x.result);
+        const failures = results.filter((r) => r.isError === true);
+        const priorMsgIdxs = new Set(uses.map((u) => u.msgIdx).filter((idx) => idx !== lastIdx));
+
+        return [
+          name,
+          {
+            callCount: uses.length,
+            priorBatchCount: priorMsgIdxs.size,
+            outcomes: {
+              successes: results.length - failures.length,
+              failures: failures.length,
+              failureReasons: R.unique(
+                failures
+                  .map((r) => firstLineSummary(r.content))
+                  .filter((s): s is string => s !== null),
+              ),
+            },
+          },
+        ] as const;
+      }),
+    ),
+  );
 }
 
 function firstLineSummary(content: unknown): string | null {
@@ -514,7 +519,7 @@ function isVolumeClusterNudge(toolName: string, content: unknown): boolean {
 export function formatVolumeClusterContent(
   toolName: string,
   count: number,
-  outcomes: ToolOutcomeMix,
+  outcomes: ToolHistorySummary["outcomes"],
 ): string {
   const { successes, failures, failureReasons } = outcomes;
   const reasonText = failureReasons.length > 0 ? ` Reasons: ${failureReasons.join("; ")}.` : "";
