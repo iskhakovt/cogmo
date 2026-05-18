@@ -5,6 +5,7 @@ import type { ImageProvider } from "../llm/image-providers.js";
 import { logger } from "../logger.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
+import { detectImageFailure } from "./image-moderation.js";
 import { defineTool, type ToolSpec } from "./tools.js";
 
 /**
@@ -130,8 +131,16 @@ export function createImageTools(deps: {
   models: ReadonlyArray<ImageModelWithProvider>;
   providers: ReadonlyMap<string, ImageProvider>;
   attachments: AttachmentStore;
+  /**
+   * Override the post-generation moderation/failure detector. Defaults to
+   * the real `detectImageFailure`. Tests that exercise the happy path with
+   * tiny stub fixtures pass `() => ({ ok: true })` so the size canary
+   * doesn't trip on bytes that would never appear in production.
+   */
+  detectImageFailure?: typeof detectImageFailure;
 }): ToolSpec[] {
   if (deps.models.length === 0) return [];
+  const moderate = deps.detectImageFailure ?? detectImageFailure;
 
   // Build a slash-free identifier per model for the LLM-facing enum (see
   // `imageModelSlug` for why). The map from slug back to the canonical row
@@ -274,7 +283,7 @@ export function createImageTools(deps: {
           ? { text: input.prompt, images: [referenceImageBytes] }
           : input.prompt;
 
-        const { image } = await withRetry(
+        const { image, providerMetadata } = await withRetry(
           async () => {
             try {
               // AI SDK types aspectRatio as `${number}:${number}`. Our Zod
@@ -308,6 +317,24 @@ export function createImageTools(deps: {
           },
           { retries: 2, context: `image.generate.${row.name}` },
         );
+
+        const detection = moderate({
+          image,
+          providerMetadata,
+          providerKind: provider.kind,
+        });
+        if (!detection.ok) {
+          logger.warn(
+            {
+              rowName: row.name,
+              providerId: row.providerId,
+              slug: input.model,
+              reason: detection.reason,
+            },
+            "image moderation/failure detected",
+          );
+          return `Error: ${detection.reason}`;
+        }
 
         const buffer = Buffer.from(image.uint8Array);
         const path = await deps.attachments.upload(buffer, image.mediaType, "generated");

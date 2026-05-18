@@ -217,6 +217,25 @@ function createImageTools(deps: {
 
 **Storage prefix.** Generated images use the `"generated"` prefix via `attachments.upload(buffer, mediaType, "generated")`. The `AttachmentStore.upload()` signature accepts an optional `prefix` param (default `"inbound"` for backward compatibility).
 
+### Failure detection `[confirmed]`
+
+Image providers sometimes return success with a placeholder image — a solid-color, blurred, or otherwise degraded fallback — when the prompt trips a safety filter or the model produces noise. Surfacing that as a normal-looking image is worse than no image: the user receives garbage and the LLM has no signal to react.
+
+Two cheap signals run on every successful `generateImage` response, in `src/agent/image-moderation.ts`:
+
+| Signal | Source | Triggers when |
+|-|-|-|
+| Per-image NSFW flag | `providerMetadata.fal.images[i].nsfw` (fal SDK normalises upstream `has_nsfw_concepts[i]` / `nsfw_content_detected[i]`) | `nsfw === true` for any returned image. Concept names from `providerMetadata.fal.nsfw_concepts` (passed through by the SDK) are included in the LLM-facing message when available. |
+| File-size canary (all providers) | `image.uint8Array.byteLength` | Below `SUSPICIOUS_SIZE_THRESHOLD_BYTES` (2048 today — real PNG/JPEG/WebP photos are 50KB+, placeholder solids compress to a few hundred bytes). Tunable from production data if false positives appear. |
+
+The tool handler calls `detectImageFailure({ image, providerMetadata, providerKind })` immediately after the `generateImage` call and **before** the `AttachmentStore.upload`. On `ok: false` the handler returns `Error: ${reason}` — the same soft-error pattern used elsewhere in the tool (unknown model, unsupported aspect ratio, reference-image download miss). The LLM sees the error and can rephrase, switch model, or report back to the user. No bytes touch the attachment store; no Telegram delivery is attempted.
+
+A `logger.warn` emits the detection event with `provider`, `model`, and `reason` for operator visibility — failures should be rare enough that every one is worth eyeballing.
+
+The Venice (`openai_compatible`) provider's response-header censorship signals (`x-venice-is-blurred`, `x-venice-is-content-violation`) are owned by a sibling work that lands its own detection alongside the Venice provider type. A follow-up PR unifies both signal paths behind one error type once both have landed.
+
+**Non-goal: pixel-level analysis.** No runtime image-processing dependency. Decoding bytes to inspect luminance variance or detect a known-stub bitmap is deferred until production traffic shows a real case the cheap signals miss — the heavy decode dep isn't worth carrying for hypothetical coverage.
+
 **Graceful absence.** If `image_models` has zero `user_selectable` rows, the tool is not registered at all — no "configured but unavailable" middle state. Same intent as the prior `FAL_API_KEY`-missing branch, but cleaner now that the tool's presence is data-driven.
 
 ## Outbound Image Delivery `[proposed]`
