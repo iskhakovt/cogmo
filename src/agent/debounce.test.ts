@@ -5,7 +5,12 @@ const baseEvent = {
   data: { conversationId: "conv-1", inboundMessageId: "inbound-1" },
 };
 
-function debounceOpts(fn: any): any {
+interface DebounceInternalOpts {
+  debounce?: { period?: string; timeout?: string; key?: string };
+}
+function debounceOpts(
+  fn: { opts?: DebounceInternalOpts; options?: DebounceInternalOpts } | undefined,
+): DebounceInternalOpts | undefined {
   return fn?.opts ?? fn?.options;
 }
 

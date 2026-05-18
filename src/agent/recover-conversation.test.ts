@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { logger } from "../logger.js";
-import { mockAgentStore, mockStep } from "../test/factories.js";
+import { fakeRunInTx, mockAgentStore, mockStep } from "../test/factories.js";
 import { createRecoverConversation } from "./recover-conversation.js";
 
 const baseEvent = {
@@ -19,7 +19,7 @@ describe("createRecoverConversation", () => {
     const agentStore = mockAgentStore({
       getConversation: vi.fn().mockResolvedValue(undefined),
     });
-    const fn = createRecoverConversation({ runInTx: (cb) => cb({} as never), agentStore }) as any;
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore }) as any;
     const result = await fn.fn({ event: baseEvent, step: mockStep() });
     expect(result).toEqual({ status: "skipped", reason: "conversation_not_found" });
     expect(agentStore.setConversationStatus).not.toHaveBeenCalled();
@@ -35,7 +35,7 @@ describe("createRecoverConversation", () => {
         status: "errored",
       }),
     });
-    const fn = createRecoverConversation({ runInTx: (cb) => cb({} as never), agentStore }) as any;
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore }) as any;
     const result = await fn.fn({ event: baseEvent, step: mockStep() });
     expect(result).toEqual({ status: "skipped", reason: "already_errored" });
     expect(agentStore.setConversationStatus).not.toHaveBeenCalled();
@@ -43,7 +43,7 @@ describe("createRecoverConversation", () => {
 
   it("marks conversation errored on first failure", async () => {
     const agentStore = mockAgentStore();
-    const fn = createRecoverConversation({ runInTx: (cb) => cb({} as never), agentStore }) as any;
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore }) as any;
     const result = await fn.fn({ event: baseEvent, step: mockStep() });
     expect(result).toEqual({ status: "marked_errored" });
     expect(agentStore.setConversationStatus).toHaveBeenCalledWith(
@@ -60,7 +60,7 @@ describe("createRecoverConversation", () => {
   it("logs errorClass, causeClass, and errorMessage on the marker write", async () => {
     const warnSpy = vi.spyOn(logger, "warn");
     const agentStore = mockAgentStore();
-    const fn = createRecoverConversation({ runInTx: (cb) => cb({} as never), agentStore }) as any;
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore }) as any;
     await fn.fn({ event: baseEvent, step: mockStep() });
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({

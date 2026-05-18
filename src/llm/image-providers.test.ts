@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { ImageProviderRow } from "../agent/store/index.js";
-import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { fakeRunInTx } from "../test/factories.js";
 import { buildImageProvider } from "./image-providers.js";
 
 /**
@@ -35,8 +35,6 @@ function fakeOaiSdk() {
   return { imageModel: vi.fn() } as unknown as object;
 }
 
-const TX: Transactor = async (cb) => cb({} as never);
-
 function row(overrides: Partial<ImageProviderRow>): ImageProviderRow {
   return {
     id: "provider-1",
@@ -57,7 +55,7 @@ describe("buildImageProvider", () => {
     secretsStore.getSecretById.mockResolvedValueOnce("sk-fal-real");
 
     const provider = await buildImageProvider(row({ type: "fal" }), {
-      runInTx: TX,
+      runInTx: fakeRunInTx,
       secretsStore,
     });
 
@@ -73,7 +71,7 @@ describe("buildImageProvider", () => {
     const fakeFetch = vi.fn() as unknown as typeof fetch;
 
     await buildImageProvider(row({ type: "fal" }), {
-      runInTx: TX,
+      runInTx: fakeRunInTx,
       secretsStore,
       fetchOverrides: { fal: fakeFetch },
     });
@@ -96,7 +94,7 @@ describe("buildImageProvider", () => {
         type: "openai_compatible",
         baseUrl: "https://api.venice.ai/api/v1",
       }),
-      { runInTx: TX, secretsStore },
+      { runInTx: fakeRunInTx, secretsStore },
     );
 
     expect(provider.kind).toBe("oai");
@@ -120,7 +118,7 @@ describe("buildImageProvider", () => {
         baseUrl: "https://api.venice.ai/api/v1",
         attrs: { headers: { "X-Cogmo-Source": "test" } },
       }),
-      { runInTx: TX, secretsStore },
+      { runInTx: fakeRunInTx, secretsStore },
     );
 
     expect(mockCreateOpenAICompatible).toHaveBeenCalledWith(
@@ -143,7 +141,7 @@ describe("buildImageProvider", () => {
         baseUrl: "https://api.venice.ai/api/v1",
       }),
       {
-        runInTx: TX,
+        runInTx: fakeRunInTx,
         secretsStore,
         fetchOverrides: { openai_compatible: fakeFetch },
       },
@@ -159,7 +157,7 @@ describe("buildImageProvider", () => {
     secretsStore.getSecretById.mockResolvedValueOnce(undefined);
 
     await expect(
-      buildImageProvider(row({ type: "fal" }), { runInTx: TX, secretsStore }),
+      buildImageProvider(row({ type: "fal" }), { runInTx: fakeRunInTx, secretsStore }),
     ).rejects.toThrow(/missing secret_id/);
   });
 
@@ -172,7 +170,7 @@ describe("buildImageProvider", () => {
 
     await expect(
       buildImageProvider(row({ type: "openai_compatible", baseUrl: null }), {
-        runInTx: TX,
+        runInTx: fakeRunInTx,
         secretsStore,
       }),
     ).rejects.toThrow(/openai_compatible.*no base_url/);
@@ -188,7 +186,7 @@ describe("buildImageProvider", () => {
         type: "venice",
         baseUrl: "https://api.venice.ai/api/v1",
       }),
-      { runInTx: TX, secretsStore },
+      { runInTx: fakeRunInTx, secretsStore },
     );
 
     expect(provider.kind).toBe("venice");
@@ -218,7 +216,7 @@ describe("buildImageProvider", () => {
         type: "venice",
         baseUrl: "https://api.venice.ai/api/v1",
       }),
-      { runInTx: TX, secretsStore, fetchOverrides: { venice: fakeFetch } },
+      { runInTx: fakeRunInTx, secretsStore, fetchOverrides: { venice: fakeFetch } },
     );
     if (provider.kind !== "venice") throw new Error("expected venice provider");
 
@@ -249,7 +247,7 @@ describe("buildImageProvider", () => {
         baseUrl: "https://api.venice.ai/api/v1",
         attrs: { imageGenerationDefaults: { safe_mode: false } },
       }),
-      { runInTx: TX, secretsStore, fetchOverrides: { venice: fakeFetch } },
+      { runInTx: fakeRunInTx, secretsStore, fetchOverrides: { venice: fakeFetch } },
     );
     if (provider.kind !== "venice") throw new Error("expected venice provider");
     await provider.provider.generate({ model: "flux", prompt: "hi" });
@@ -262,7 +260,7 @@ describe("buildImageProvider", () => {
 
     await expect(
       buildImageProvider(row({ type: "venice", baseUrl: null }), {
-        runInTx: TX,
+        runInTx: fakeRunInTx,
         secretsStore,
       }),
     ).rejects.toThrow(/venice.*no base_url/);

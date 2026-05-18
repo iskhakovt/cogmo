@@ -7,6 +7,7 @@ import { ok } from "neverthrow";
 import { vi } from "vitest";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
+import type { Transactor } from "../db/transactor.js";
 import type { LlmProvider } from "../llm/provider.js";
 import { constantResolver, type LlmProviderResolver } from "../llm/resolver.js";
 import type { MemoryProvider } from "../memory/provider.js";
@@ -18,6 +19,24 @@ import type { Transport } from "../transport/transport.js";
 import type { Adapter, StreamHandle, StreamingAdapter } from "../transport/types.js";
 import type { VoiceBundle, VoiceProviderResolver } from "../voice/resolver.js";
 import type { SttProvider, TtsProvider } from "../voice/types.js";
+
+/**
+ * Sentinel transaction token for mock-based tests. Assertions on tx args
+ * should use `expect.anything()` rather than match this value directly —
+ * the sentinel only exists so the store-layer's runtime callback shape is
+ * preserved (every store method takes `tx: Transaction` first; we hand it
+ * an opaque placeholder when there's no real DB behind the test).
+ *
+ * See CLAUDE.md → Store Pattern.
+ */
+export const FAKE_TX = { __mockTx: true } as never;
+
+/**
+ * Shared `Transactor` that invokes its callback with {@link FAKE_TX}.
+ * Equivalent to inline `(cb) => cb({} as never)` but centralised so every
+ * mock-based test imports the same sentinel.
+ */
+export const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
 export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
   return {

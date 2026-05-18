@@ -9,6 +9,7 @@ import type { McpRegistry } from "../mcp/registry.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
 import {
+  fakeRunInTx,
   invokeInngestFn,
   invokeInngestOnFailure,
   type MockStep,
@@ -57,7 +58,7 @@ interface HandleMessageFailureCtx {
 
 function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
   return {
-    runInTx: (cb) => cb({} as never),
+    runInTx: fakeRunInTx,
     agentStore: mockAgentStore(),
     transportStore: mockTransportStore(),
     resolveProvider: mockResolver(),

@@ -4,7 +4,7 @@ import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
 import type { StepRun } from "../../inngest/index.js";
-import { spyOnInngestSend } from "../../test/factories.js";
+import { fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { AgentStore } from "../store/index.js";
 import { DrizzleAgentStore } from "../store/index.js";
@@ -313,7 +313,7 @@ describe("createScheduledTaskTicker (Inngest wiring)", () => {
 
   it("pins the function configuration (cron, retries, concurrency)", () => {
     const fn = createScheduledTaskTicker(
-      { runInTx: (cb) => cb({} as never), store: mock<AgentStore>() },
+      { runInTx: fakeRunInTx, store: mock<AgentStore>() },
       inngest,
     );
     // `opts` is a public readonly field on InngestFunction.
