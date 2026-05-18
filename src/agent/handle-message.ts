@@ -1,7 +1,12 @@
 import { NonRetriableError } from "inngest";
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
-import { conversationErrored, inboundReady, responseReady } from "../inngest/events.js";
+import {
+  conversationDegraded,
+  conversationErrored,
+  inboundReady,
+  responseReady,
+} from "../inngest/events.js";
 import { isRetriableProviderError } from "../llm/fallback.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
 import {
@@ -31,6 +36,7 @@ import type { ImageToolsLoader } from "./image-tools-loader.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
 import { shouldSkipRecall } from "./recall-gate.js";
+import { degradedReplyText } from "./repair.js";
 import { createSchedulingService } from "./scheduling/scheduling-service.js";
 import type { Service } from "./service.js";
 import { createService } from "./service.js";
@@ -768,6 +774,23 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           stepRun: (id, fn) => step.run(id, fn),
           turnLogger,
         });
+        // Class C / D degraded off-ramp. The loop exited because a repair
+        // budget exhausted (or an immediate-degrade subtype tripped); the
+        // user-facing apology is appended here so the streamed reply
+        // closes with a coherent message rather than silence. See
+        // design/agent-resilience.md → Degraded reply.
+        if (result.degraded) {
+          const apology = degradedReplyText(result.degraded.subtype);
+          await delivery.push({ type: "text_delta", text: apology });
+          result = {
+            ...result,
+            text: apology,
+            newMessages: [
+              ...result.newMessages,
+              { role: "assistant", content: [{ type: "text", text: apology }] },
+            ],
+          };
+        }
         await delivery.finish();
       } catch (err) {
         await delivery.abort(err instanceof Error ? err.message : "Unknown error");
@@ -795,9 +818,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       );
 
       // ──── DURABLE: persist all new messages (tool turns + final assistant) ────
+      //
+      // For a degraded turn we also emit `conversation/degraded` from inside
+      // this step. Wrapping the emission in the same `step.run` as the
+      // persist gives exactly-once delivery (same pattern as
+      // `conversation/errored` in `onFailure`) — no explicit idempotency
+      // `id` needed. See design/agent-resilience.md → Telemetry.
 
       const assistantMsg = await step.run("persist-new-messages", async () => {
-        return deps.runInTx((tx) =>
+        const inserted = await deps.runInTx((tx) =>
           agentStore.insertMessages(tx, {
             conversationId,
             messages: result.newMessages,
@@ -808,6 +837,18 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             lastMessageOutputTokens: result.usage.outputTokens,
           }),
         );
+        if (result.degraded) {
+          await inngest.send(
+            conversationDegraded.create({
+              conversationId,
+              runId,
+              triggerInboundId,
+              subtype: result.degraded.subtype,
+              reason: result.degraded.reason,
+            }),
+          );
+        }
+        return inserted;
       });
 
       // ──── DURABLE: batch delivery ────

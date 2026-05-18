@@ -1,6 +1,7 @@
 import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { inngest } from "../inngest/client.js";
 import { ProviderConfigError } from "../llm/resolver.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
@@ -18,6 +19,7 @@ import {
   mockTransportStore,
   mockVoiceBundle,
   mockVoiceResolver,
+  spyOnInngestSend,
 } from "../test/factories.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
@@ -2421,5 +2423,260 @@ describe("createHandleMessage", () => {
     expect(memory.recall).toHaveBeenCalledWith("user-1", expect.any(String), {
       maxTokens: 2000,
     });
+  });
+
+  // --- Class C / D degraded off-ramp ---
+  //
+  // When the agent loop returns `{ degraded: { reason, subtype } }`, the
+  // orchestrator pushes a user-facing apology onto the stream, persists it
+  // as the final assistant message, emits `conversation/degraded`, and
+  // proceeds with the normal post-turn flow. Conversation stays `active`.
+  // See design/agent-resilience.md → Degraded reply.
+
+  it("appends the default degraded apology to the stream and persists it", async () => {
+    const sendSpy = spyOnInngestSend(inngest);
+    sendSpy.mockResolvedValue({ ids: [] });
+    try {
+      const handle = mockDeliveryHandle();
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        runStreamingAgentLoop: vi.fn().mockResolvedValue({
+          text: "",
+          messages: [],
+          newMessages: [],
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: "mock-model",
+          iterations: 2,
+          degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // The user-facing apology was pushed onto the streaming delivery.
+      const textPushes = vi
+        .mocked(handle.push)
+        .mock.calls.flat()
+        .filter((e) => (e as { type: string }).type === "text_delta");
+      expect(textPushes).toHaveLength(1);
+      expect(textPushes[0]).toEqual({
+        type: "text_delta",
+        text: "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?",
+      });
+
+      // Stream still finished (no abort).
+      expect(handle.finish).toHaveBeenCalled();
+      expect(handle.abort).not.toHaveBeenCalled();
+
+      // Persistence included the synthetic apology assistant message —
+      // newMessages was empty when the loop returned, so the orchestrator
+      // appended it.
+      expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "text",
+                  text: "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?",
+                },
+              ],
+            },
+          ],
+        }),
+      );
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it("uses the refusal-specific apology when subtype is refusal", async () => {
+    const sendSpy = spyOnInngestSend(inngest);
+    sendSpy.mockResolvedValue({ ids: [] });
+    try {
+      const handle = mockDeliveryHandle();
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        runStreamingAgentLoop: vi.fn().mockResolvedValue({
+          text: "",
+          messages: [],
+          newMessages: [],
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: "mock-model",
+          iterations: 1,
+          degraded: { reason: "model refused the request", subtype: "refusal" },
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      const textPushes = vi
+        .mocked(handle.push)
+        .mock.calls.flat()
+        .filter((e) => (e as { type: string }).type === "text_delta");
+      expect(textPushes[0]).toEqual({
+        type: "text_delta",
+        text: "The model declined that request. Try rephrasing, or switch model with `/model`.",
+      });
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it("emits conversation/degraded with subtype, reason, runId, conversationId, triggerInboundId", async () => {
+    const sendSpy = spyOnInngestSend(inngest);
+    sendSpy.mockResolvedValue({ ids: [] });
+    try {
+      const deps = mockDeps({
+        runStreamingAgentLoop: vi.fn().mockResolvedValue({
+          text: "",
+          messages: [],
+          newMessages: [],
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: "mock-model",
+          iterations: 2,
+          degraded: {
+            reason: "streamed tool-call arguments could not be parsed",
+            subtype: "stream_truncation",
+          },
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // `inngest.send` was called with the degraded event. The persist
+      // step wraps the send — exactly-once delivery is provided by the
+      // wrapping `step.run`, no explicit idempotency `id` needed.
+      // `_send` (the internal method `spyOnInngestSend` hooks) receives
+      // `{ payload: { name, data, ... } }` per the SDK's private API.
+      expect(sendSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            name: "conversation/degraded",
+            data: {
+              conversationId: "conv-1",
+              runId: testRunId,
+              triggerInboundId: "inbound-1",
+              subtype: "stream_truncation",
+              reason: "streamed tool-call arguments could not be parsed",
+            },
+          }),
+        }),
+      );
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it("preserves successful intermediate iterations and appends the apology", async () => {
+    const sendSpy = spyOnInngestSend(inngest);
+    sendSpy.mockResolvedValue({ ids: [] });
+    try {
+      const handle = mockDeliveryHandle({
+        hasBatchTargets: vi.fn().mockReturnValue(false),
+      });
+      const successfulToolRound = [
+        {
+          role: "assistant" as const,
+          content: [{ type: "tool_use" as const, id: "t1", name: "echo", input: {} }],
+        },
+        {
+          role: "user" as const,
+          content: [{ type: "tool_result" as const, toolUseId: "t1", content: "ok" }],
+        },
+      ];
+      const deps = mockDeps({
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        runStreamingAgentLoop: vi.fn().mockResolvedValue({
+          text: "",
+          messages: [],
+          // The successful tool round IS persisted; the apology is appended.
+          // The failing iteration's assistant content is already excluded
+          // upstream by the loop.
+          newMessages: successfulToolRound,
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: "mock-model",
+          iterations: 3,
+          degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
+        }),
+      });
+
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
+      const persistCall = vi.mocked(deps.agentStore.insertMessages).mock.calls[0];
+      const persistArgs = expectDefined(persistCall, "persist call")[1] as {
+        messages: ReadonlyArray<unknown>;
+      };
+      expect(persistArgs.messages).toHaveLength(3);
+      // Successful tool_use + tool_result preserved.
+      expect(persistArgs.messages[0]).toEqual(successfulToolRound[0]);
+      expect(persistArgs.messages[1]).toEqual(successfulToolRound[1]);
+      // Final assistant is the apology.
+      expect(persistArgs.messages[2]).toEqual({
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?",
+          },
+        ],
+      });
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it("still emits response/ready on the degraded path so downstream consumers run", async () => {
+    const sendSpy = spyOnInngestSend(inngest);
+    sendSpy.mockResolvedValue({ ids: [] });
+    try {
+      const deps = mockDeps({
+        runStreamingAgentLoop: vi.fn().mockResolvedValue({
+          text: "",
+          messages: [],
+          newMessages: [],
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: "mock-model",
+          iterations: 1,
+          degraded: { reason: "model refused the request", subtype: "refusal" },
+        }),
+      });
+
+      const step = mockStep();
+      await (createHandleMessage(deps) as any).fn({
+        event: testEvent,
+        step,
+        runId: testRunId,
+      });
+
+      // response/ready still fires — degraded is an event, not a status,
+      // and downstream consumers (Observer extraction, metrics) still want
+      // to see the turn closed out.
+      expect(step.sendEvent).toHaveBeenCalledWith(
+        "send-response",
+        expect.objectContaining({ name: "response/ready" }),
+      );
+    } finally {
+      sendSpy.mockRestore();
+    }
   });
 });

@@ -2,9 +2,12 @@ import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
+import { ProviderProtocolError } from "../llm/errors.js";
+import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type {
   ChatStreamResult,
+  ContentBlock,
   LlmResponse,
   Message,
   StopReason,
@@ -1468,5 +1471,495 @@ describe("turnLogger plumbing", () => {
       expect.objectContaining({ maxIterations: 1 }),
       "agent loop hit iteration limit",
     );
+  });
+});
+
+// --- Class C in-loop repair ---
+//
+// Each iteration's stream produces (events, response) — repair-test
+// scenarios need both the stream content and the post-stream `stopReason`
+// the classifier reads, plus the option to make a stream throw before
+// completion. `repairStreamProvider` exposes that surface as a small
+// builder so tests stay declarative.
+
+type RepairTurn =
+  | { kind: "stream"; events: StreamEvent[]; stopReason: StopReason }
+  | { kind: "throw"; error: unknown };
+
+function repairStreamProvider(turns: ReadonlyArray<RepairTurn>): {
+  provider: LlmProvider;
+  chatCalls: Array<Parameters<LlmProvider["chat"]>[0]>;
+  streamCalls: Array<Parameters<LlmProvider["chatStream"]>[0]>;
+} {
+  const chatCalls: Array<Parameters<LlmProvider["chat"]>[0]> = [];
+  const streamCalls: Array<Parameters<LlmProvider["chatStream"]>[0]> = [];
+  let cursor = 0;
+  const chatStream = vi.fn((params: Parameters<LlmProvider["chatStream"]>[0]) => {
+    // Snapshot messages at call time — the loop holds a single mutable
+    // array reference and mutates it across iterations; without the
+    // structuredClone, assertions on streamCalls[i].messages see the
+    // FINAL state, not the per-iteration state.
+    streamCalls.push({ ...params, messages: structuredClone(params.messages) });
+    const turn = turns[cursor++];
+    if (!turn) throw new Error(`repairStreamProvider: ran out of turns (cursor=${cursor})`);
+    if (turn.kind === "throw") {
+      const err = turn.error;
+      const events: AsyncIterable<StreamEvent> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next(): Promise<IteratorResult<StreamEvent>> {
+              return Promise.reject(err);
+            },
+          };
+        },
+      };
+      return { events, response: Promise.reject(err) };
+    }
+    return {
+      events: (async function* () {
+        for (const e of turn.events) yield e;
+      })(),
+      response: Promise.resolve({
+        stopReason: turn.stopReason,
+        model: "mock-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    } satisfies ChatStreamResult;
+  });
+  const chat = vi.fn(async (params: Parameters<LlmProvider["chat"]>[0]) => {
+    chatCalls.push(params);
+    // Walk the same cursor so a `kind: "stream"` entry placed AFTER a
+    // throw acts as the stream-replay's non-streaming response.
+    const turn = turns[cursor++];
+    if (!turn)
+      throw new Error(`repairStreamProvider: ran out of turns for chat() (cursor=${cursor})`);
+    if (turn.kind !== "stream") {
+      throw new Error("repairStreamProvider: chat() called but next turn is not a stream entry");
+    }
+    const content: ContentBlock[] = [];
+    let currentText = "";
+    for (const e of turn.events) {
+      if (e.type === "text_delta") currentText += e.text;
+      else if (e.type === "tool_start") {
+        if (currentText) {
+          content.push({ type: "text", text: currentText });
+          currentText = "";
+        }
+        content.push({ type: "tool_use", id: e.id, name: e.name, input: e.input });
+      }
+    }
+    if (currentText) content.push({ type: "text", text: currentText });
+    return {
+      content,
+      stopReason: turn.stopReason,
+      model: "mock-model",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    };
+  });
+  const provider: LlmProvider = {
+    name: "repair-mock",
+    chat,
+    chatStream,
+    countTokens: vi.fn(),
+  };
+  return { provider, chatCalls, streamCalls };
+}
+
+describe("class C in-loop repair", () => {
+  it("empty end_turn → continuation prompt → next iteration completes; ephemeral turn not persisted", async () => {
+    const { provider, streamCalls } = repairStreamProvider([
+      { kind: "stream", events: [], stopReason: "end_turn" },
+      {
+        kind: "stream",
+        events: [{ type: "text_delta", text: "ok now" }],
+        stopReason: "end_turn",
+      },
+    ]);
+    const turnLogger = mock<Logger>();
+    const collected: StreamEvent[] = [];
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      service: stubService(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      turnLogger,
+    });
+
+    expect(result.text).toBe("ok now");
+    expect(result.iterations).toBe(2);
+    expect(result.degraded).toBeUndefined();
+    // Two LLM stream calls.
+    expect(streamCalls).toHaveLength(2);
+    // Synthetic continuation prompt fed back to the model (visible in the
+    // second iteration's history input).
+    const secondCallMessages = streamCalls[1]?.messages ?? [];
+    const lastUser = secondCallMessages.at(-1);
+    expect(lastUser?.role).toBe("user");
+    expect(lastUser?.content).toBe("Please complete your response.");
+    // The synthetic user turn is NOT in newMessages — only the
+    // successful assistant reply from iteration 2.
+    expect(result.newMessages).toHaveLength(1);
+    expect(result.newMessages[0]).toEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "ok now" }],
+    });
+    // Repair telemetry.
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "agent.repair",
+        subtype: "empty_end_turn",
+        instructions: { kind: "continuation_prompt" },
+      }),
+      expect.any(String),
+    );
+  });
+
+  it("empty end_turn twice → degrade with empty_end_turn subtype", async () => {
+    const { provider } = repairStreamProvider([
+      { kind: "stream", events: [], stopReason: "end_turn" },
+      { kind: "stream", events: [], stopReason: "end_turn" },
+    ]);
+    const turnLogger = mock<Logger>();
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      service: stubService(),
+      onEvent: async () => {},
+      turnLogger,
+    });
+
+    expect(result.degraded).toEqual({
+      reason: "model returned an empty turn",
+      subtype: "empty_end_turn",
+    });
+    expect(result.iterations).toBe(2);
+    // The failing iteration's empty assistant content is NOT in newMessages.
+    expect(result.newMessages).toHaveLength(0);
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "agent.degrade",
+        subtype: "empty_end_turn",
+      }),
+      expect.any(String),
+    );
+  });
+
+  it("stream truncation (ProviderProtocolError) → non-streaming replay → success", async () => {
+    const protocolErr = new ProviderProtocolError(
+      "tool args failed to parse",
+      new SyntaxError("unexpected token"),
+    );
+    const { provider, chatCalls, streamCalls } = repairStreamProvider([
+      { kind: "throw", error: protocolErr },
+      {
+        kind: "stream",
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: { text: "hi" } }],
+        stopReason: "tool_use",
+      },
+      {
+        kind: "stream",
+        events: [{ type: "text_delta", text: "done" }],
+        stopReason: "end_turn",
+      },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => `pong from ${input.text}`,
+      }),
+    );
+    const turnLogger = mock<Logger>();
+    const collected: StreamEvent[] = [];
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+      service: stubService(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      turnLogger,
+    });
+
+    expect(result.degraded).toBeUndefined();
+    expect(result.text).toBe("done");
+    // Iteration count: the failed-stream + non-streaming-replay is ONE
+    // iteration (replay supplies the content the stream couldn't), then
+    // the follow-up iteration that produces the final text. Two total.
+    expect(result.iterations).toBe(2);
+    // chat() was called once for the replay; chatStream() called for
+    // the initial throw + the final-text iteration.
+    expect(chatCalls).toHaveLength(1);
+    expect(streamCalls).toHaveLength(2);
+    // The recovered tool_start was forwarded onto the stream so
+    // streaming delivery sees the tool_use that the failed stream never
+    // emitted.
+    expect(collected.some((e) => e.type === "tool_start" && e.id === "t1")).toBe(true);
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "agent.repair",
+        subtype: "stream_truncation",
+        instructions: { kind: "stream_replay" },
+      }),
+      expect.any(String),
+    );
+  });
+
+  it("stream truncation, replay also throws → degrade with stream_truncation subtype", async () => {
+    const protocolErr1 = new ProviderProtocolError("first", new Error("boom"));
+    const { provider } = repairStreamProvider([{ kind: "throw", error: protocolErr1 }]);
+    // Override chat() to also throw a Class A error — the design says
+    // Class A handling resumes if the replay itself fails. The error
+    // must propagate to the caller (NOT be caught and turned into
+    // degrade — that's Class A's job).
+    const replayErr = Object.assign(new Error("upstream 502"), { status: 502 });
+    (provider.chat as ReturnType<typeof vi.fn>).mockReset();
+    (provider.chat as ReturnType<typeof vi.fn>).mockRejectedValue(replayErr);
+
+    await expect(
+      runStreamingAgentLoop({
+        provider,
+        model: "test",
+        systemPrompt: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        service: stubService(),
+        onEvent: async () => {},
+      }),
+    ).rejects.toBe(replayErr);
+  });
+
+  it("two consecutive ProviderProtocolErrors → degrade after budget exhausted", async () => {
+    const err1 = new ProviderProtocolError("first", new Error("boom"));
+    const err2 = new ProviderProtocolError("second", new Error("boom"));
+    const { provider } = repairStreamProvider([
+      { kind: "throw", error: err1 },
+      // The first error consumes the budget and triggers a non-streaming
+      // replay via chat(). Make chat() succeed cleanly, then have the
+      // SECOND streaming iteration throw a fresh ProviderProtocolError —
+      // budget exhausted, degrade.
+      {
+        kind: "stream",
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: {} }],
+        stopReason: "tool_use",
+      },
+      { kind: "throw", error: err2 },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({}),
+        handler: async () => "ok",
+      }),
+    );
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded).toEqual({
+      reason: "streamed tool-call arguments could not be parsed",
+      subtype: "stream_truncation",
+    });
+  });
+
+  it("Anthropic-style refusal stopReason → immediate degrade, no repair attempt", async () => {
+    const { provider, streamCalls } = repairStreamProvider([
+      { kind: "stream", events: [], stopReason: "refusal" },
+    ]);
+    const turnLogger = mock<Logger>();
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "naughty" }],
+      tools: new ToolRegistry(),
+      service: stubService(),
+      onEvent: async () => {},
+      turnLogger,
+    });
+
+    expect(result.degraded).toEqual({
+      reason: "model returned a policy refusal",
+      subtype: "refusal",
+    });
+    // Exactly one LLM call — refusal does not consume continuation budget.
+    expect(streamCalls).toHaveLength(1);
+    expect(result.iterations).toBe(1);
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.degrade", subtype: "refusal" }),
+      expect.any(String),
+    );
+  });
+
+  it("OpenAI-compat RefusalError thrown from stream → degrade with refusal subtype", async () => {
+    // FallbackLlmProvider treats RefusalError as non-retriable (per
+    // isRetriableProviderError) and propagates it through `chatStream`
+    // — the loop catches it and the classifier routes to degrade.
+    const refusal = new RefusalError("policy violation");
+    const { provider } = repairStreamProvider([{ kind: "throw", error: refusal }]);
+    const turnLogger = mock<Logger>();
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "naughty" }],
+      tools: new ToolRegistry(),
+      service: stubService(),
+      onEvent: async () => {},
+      turnLogger,
+    });
+
+    expect(result.degraded).toEqual({
+      reason: "model refused the request",
+      subtype: "refusal",
+    });
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.degrade", subtype: "refusal" }),
+      expect.any(String),
+    );
+  });
+
+  it("budgets are independent: empty_end_turn fires then stream_truncation fires, both repair", async () => {
+    const protocolErr = new ProviderProtocolError("oops", new Error("boom"));
+    const { provider } = repairStreamProvider([
+      // iteration 1: empty end_turn → repair via continuation prompt
+      { kind: "stream", events: [], stopReason: "end_turn" },
+      // iteration 2: stream throws → repair via non-streaming replay
+      { kind: "throw", error: protocolErr },
+      // chat() replay for iteration 2: tool_use, then iteration 3 completes
+      {
+        kind: "stream",
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: {} }],
+        stopReason: "tool_use",
+      },
+      {
+        kind: "stream",
+        events: [{ type: "text_delta", text: "done" }],
+        stopReason: "end_turn",
+      },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({}),
+        handler: async () => "ok",
+      }),
+    );
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded).toBeUndefined();
+    expect(result.text).toBe("done");
+  });
+
+  it("persistence boundary: successful tool round persists; failing iteration + synthetic prompt do not", async () => {
+    // iteration 1: tool_use; iteration 2: empty end_turn (fails); iteration 3: empty end_turn (degrade)
+    const { provider } = repairStreamProvider([
+      {
+        kind: "stream",
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: { text: "x" } }],
+        stopReason: "tool_use",
+      },
+      { kind: "stream", events: [], stopReason: "end_turn" },
+      { kind: "stream", events: [], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => `pong from ${input.text}`,
+      }),
+    );
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "hi" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded?.subtype).toBe("empty_end_turn");
+    // newMessages should contain the successful tool round (assistant
+    // tool_use + user tool_result) but NOT the empty assistant from
+    // iteration 2, NOT the synthetic continuation prompt, and NOT the
+    // empty assistant from iteration 3.
+    expect(result.newMessages).toHaveLength(2);
+    expect(result.newMessages[0]).toEqual({
+      role: "assistant",
+      content: [{ type: "tool_use", id: "t1", name: "echo", input: { text: "x" } }],
+    });
+    expect(result.newMessages[1]).toEqual({
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "t1", content: "pong from x" }],
+    });
+    // No "Please complete your response." synthetic prompt should
+    // appear among the persistable messages.
+    for (const m of result.newMessages) {
+      if (typeof m.content === "string") {
+        expect(m.content).not.toMatch(/please complete/i);
+      }
+    }
+  });
+
+  it("does not treat unrelated errors as Class C", async () => {
+    // A bare error with no Class C signal must propagate untouched —
+    // it's Class A / B and the orchestrator translates it into the
+    // appropriate retry decision.
+    const transientErr = Object.assign(new Error("upstream 502"), { status: 502 });
+    const { provider } = repairStreamProvider([{ kind: "throw", error: transientErr }]);
+
+    await expect(
+      runStreamingAgentLoop({
+        provider,
+        model: "test",
+        systemPrompt: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        service: stubService(),
+        onEvent: async () => {},
+      }),
+    ).rejects.toBe(transientErr);
   });
 });
