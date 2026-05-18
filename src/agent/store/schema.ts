@@ -179,6 +179,22 @@ export type ProfileMemoryScope = z.infer<typeof ProfileMemoryScopeSchema>;
  * - `hide_watermark`: strip the Venice watermark when supported.
  * - `style_preset`: Venice style preset name (e.g. `"3D Model"`,
  *   `"Anime"`). Free-form because the upstream list evolves.
+ *
+ * **Forward shape decision.** The current schema is flat — every field
+ * sits at the top level. That's correct for one provider with a clean
+ * keyspace. When a second provider's defaults land (Replicate, OpenAI
+ * gpt-image-*, Together image, etc.), two options open up:
+ *   (a) Stay flat. Works if the new fields don't collide with venice's.
+ *       Risk: a future provider's `cfg_scale` with different semantics
+ *       or range — same name, different meaning — would corrupt rows
+ *       silently on swap or be unenforceable at the schema layer.
+ *   (b) Namespace: `{ venice?: {...}, replicate?: {...} }`. Buys
+ *       isolation at the cost of one extra level of indirection in
+ *       every adapter that reads its slice. Adapters become "look up
+ *       my namespace" rather than "spread my fields."
+ * Pick (b) the moment any name collision is plausible or a second
+ * provider adds three or more knobs. Pick (a) if the second provider
+ * adds one or two with names obviously distinct from venice's.
  */
 export const ImageGenerationDefaultsSchema = z.object({
   safe_mode: z.boolean().optional(),

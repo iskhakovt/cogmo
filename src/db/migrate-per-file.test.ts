@@ -204,6 +204,54 @@ describe("migratePerFile", () => {
     await fsMod.rm(tmp, { recursive: true, force: true });
   });
 
+  it("rejects a backdated migration whose `when` is below the high-water mark", async () => {
+    // Out-of-order invariant. The runner has already applied a later
+    // migration, and now sees an unapplied file with a smaller `when` —
+    // stock Drizzle would have applied it out of order. We refuse:
+    // silently skipping leaves an operator believing the file ran when
+    // it didn't.
+    const tmp = `${process.env.TMPDIR ?? "/tmp"}/migrate-per-file-backdated-${Date.now()}`;
+    const fsMod = await import("node:fs/promises");
+    await fsMod.mkdir(`${tmp}/meta`, { recursive: true });
+    // First pass: apply one migration with when=5_000_000.
+    await fsMod.writeFile(
+      `${tmp}/0001_later.sql`,
+      `CREATE TABLE "later_target" (id int PRIMARY KEY);`,
+    );
+    await fsMod.writeFile(
+      `${tmp}/meta/_journal.json`,
+      JSON.stringify({
+        version: "7",
+        dialect: "postgresql",
+        entries: [{ idx: 1, version: "7", when: 5_000_000, tag: "0001_later", breakpoints: true }],
+      }),
+    );
+    await migratePerFile(db, { migrationsFolder: tmp });
+
+    // Second pass: drop in a backdated file with when=2_000_000.
+    await fsMod.writeFile(
+      `${tmp}/0000_earlier.sql`,
+      `CREATE TABLE "earlier_target" (id int PRIMARY KEY);`,
+    );
+    await fsMod.writeFile(
+      `${tmp}/meta/_journal.json`,
+      JSON.stringify({
+        version: "7",
+        dialect: "postgresql",
+        entries: [
+          { idx: 0, version: "7", when: 2_000_000, tag: "0000_earlier", breakpoints: true },
+          { idx: 1, version: "7", when: 5_000_000, tag: "0001_later", breakpoints: true },
+        ],
+      }),
+    );
+
+    await expect(migratePerFile(db, { migrationsFolder: tmp })).rejects.toThrow(
+      /journal was likely backdated/,
+    );
+
+    await fsMod.rm(tmp, { recursive: true, force: true });
+  });
+
   it("rejects re-running when an applied file's hash changed", async () => {
     // Hash-tamper guard. Apply a one-file migration, then edit the
     // on-disk file's bytes and re-invoke — the runner must refuse to

@@ -1,6 +1,7 @@
 import type { FalProvider } from "@ai-sdk/fal";
 import type { OpenAICompatibleProvider } from "@ai-sdk/openai-compatible";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { ImageModelWithProvider } from "../agent/store/index.js";
 import type { ImageProvider } from "../llm/image-providers.js";
 import type { VeniceImageProvider } from "../llm/venice.js";
@@ -127,14 +128,21 @@ function fakeVeniceProvider(): {
   generateFn: ReturnType<typeof vi.fn>;
   provider: ImageProvider;
 } {
+  // `VeniceImageProvider` is a project-owned class — `mock<T>()` gives a
+  // typed `MockProxy<T>` with every method as a `vi.fn()`, no
+  // `as unknown as` cast needed. The fal/oai stubs above use the cast
+  // form because those types are SDK-owned with wider surfaces; here we
+  // own the type. See the project memory `feedback-no-as-casts-in-tests`.
+  //
   // Use a healthy-sized buffer so the moderation size canary doesn't
   // fire on venice tests that aren't exercising the moderation path.
   // Tests that DO exercise it set their own smaller payload + inject
   // the real detector explicitly.
-  const generateFn = vi.fn(async () => ({
+  const veniceMock = mock<VeniceImageProvider>();
+  veniceMock.generate.mockResolvedValue({
     uint8Array: new Uint8Array(HEALTHY_IMAGE_BYTES),
     mediaType: "image/png" as const,
-  }));
+  });
   const provider: ImageProvider = {
     kind: "venice",
     row: {
@@ -145,12 +153,9 @@ function fakeVeniceProvider(): {
       secretId: "sec-3",
       attrs: {},
     },
-    // Minimal stub conforming to the surface the tool handler calls
-    // (`generate`). The adapter's full constructor takes apiKey/baseUrl/etc.
-    // and is exercised in venice.test.ts.
-    provider: { generate: generateFn } as unknown as VeniceImageProvider,
+    provider: veniceMock,
   };
-  return { generateFn, provider };
+  return { generateFn: veniceMock.generate, provider };
 }
 
 function fakeAttachments(): AttachmentStore {

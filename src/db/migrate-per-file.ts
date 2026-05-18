@@ -96,7 +96,21 @@ export async function migratePerFile(
       }
       continue;
     }
-    if (migration.folderMillis <= lastApplied) continue;
+    // Not in the applied map. If its `folderMillis` is still ≤ the
+    // high-water mark, the journal has been backdated — a file was
+    // added with a `when` timestamp that pre-dates already-applied
+    // migrations but the file itself was never applied. Stock Drizzle
+    // would have applied this out of order; we refuse rather than
+    // silently skip, because skipping leaves a file that an operator
+    // believed would run but never did.
+    if (migration.folderMillis <= lastApplied) {
+      throw new Error(
+        `migration ${migration.folderMillis} is unapplied but its journal "when" is ` +
+          `≤ the most recent applied migration (${lastApplied}). The journal was likely ` +
+          `backdated after later migrations had already shipped. Fix the journal entry's ` +
+          `"when" to be > ${lastApplied}, or delete the file if it shouldn't apply.`,
+      );
+    }
     await db.transaction(async (tx) => {
       for (const stmt of migration.sql) {
         const trimmed = stmt.trim();

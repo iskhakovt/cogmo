@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { AgentStore, ImageProviderRow } from "../agent/store/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { runImageProviderCli } from "./image-provider.js";
@@ -166,10 +167,10 @@ describe("runImageProviderCli", () => {
     // image-provider`. This test pins the CLI side of that claim so a
     // future flag-parser refactor doesn't drop one silently.
     const { io, out } = makeIo();
-    const putSecret = vi.fn().mockResolvedValue({ id: "s-2" });
-    const createImageProvider = vi.fn().mockResolvedValue({ id: "p-2" });
-    const agentStore = { createImageProvider } as unknown as AgentStore;
-    const secretsStore = { putSecret } as unknown as SecretsStore;
+    const agentStore = mock<AgentStore>();
+    agentStore.createImageProvider.mockResolvedValue({ id: "p-2" });
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.putSecret.mockResolvedValue({ id: "s-2" });
     const rc = await runImageProviderCli(
       [
         "add",
@@ -190,7 +191,7 @@ describe("runImageProviderCli", () => {
       io,
     );
     expect(rc).toBe(0);
-    expect(createImageProvider).toHaveBeenCalledWith(
+    expect(agentStore.createImageProvider).toHaveBeenCalledWith(
       FAKE_TX,
       expect.objectContaining({
         attrs: {
@@ -208,8 +209,8 @@ describe("runImageProviderCli", () => {
 
   it("rejects --cfg-scale outside 0–20", async () => {
     const { io, err } = makeIo();
-    const agentStore = {} as AgentStore;
-    const secretsStore = {} as SecretsStore;
+    const agentStore = mock<AgentStore>();
+    const secretsStore = mock<SecretsStore>();
     const rc = await runImageProviderCli(
       ["add", "venice", "venice", "sk-v", "https://api.venice.ai/api/v1", "--cfg-scale", "25"],
       { runInTx: tx, agentStore, secretsStore },
