@@ -3364,4 +3364,149 @@ describe("DrizzleAgentStore", () => {
       expect(after.map((m) => m.name)).toEqual(["fal/keep"]);
     });
   });
+
+  describe("evolution events", () => {
+    function samplePayload() {
+      return {
+        corrections: {
+          extracted: 1,
+          reinforced: 2,
+          contradictions: 0,
+          promoted: 1,
+          outOfScopeReinforcementsSkipped: 0,
+          unknownRuleReinforcementsSkipped: 0,
+          consolidationNeeded: false,
+        },
+        consolidation: null,
+        memories: { extracted: 3, byNetwork: { world: 1, bank: 2 } },
+        drained: { drained: 0, byNetwork: {} },
+        messageCount: 12,
+        profileId: "11111111-1111-7111-8111-111111111111",
+      };
+    }
+
+    it("records and lists events newest-first per user", async () => {
+      const { userId, conversationId } = await seedConversation();
+
+      const first = await tx((trx) =>
+        store.recordEvolutionEvent(trx, {
+          conversationId,
+          userId,
+          triggeredBy: "idle",
+          payload: samplePayload(),
+        }),
+      );
+      const second = await tx((trx) =>
+        store.recordEvolutionEvent(trx, {
+          conversationId,
+          userId,
+          triggeredBy: "manual",
+          payload: samplePayload(),
+        }),
+      );
+
+      const events = await tx((trx) => store.listEvolutionEvents(trx, userId));
+      expect(events.map((e) => e.id)).toEqual([second.id, first.id]);
+      expect(events[0]?.triggeredBy).toBe("manual");
+      expect(events[0]?.payload.memories.extracted).toBe(3);
+    });
+
+    it("listEvolutionEvents respects limit", async () => {
+      const { userId, conversationId } = await seedConversation();
+      for (let i = 0; i < 5; i++) {
+        await tx((trx) =>
+          store.recordEvolutionEvent(trx, {
+            conversationId,
+            userId,
+            triggeredBy: "idle",
+            payload: samplePayload(),
+          }),
+        );
+      }
+      const events = await tx((trx) => store.listEvolutionEvents(trx, userId, { limit: 2 }));
+      expect(events).toHaveLength(2);
+    });
+
+    it("listEvolutionEvents scopes to the requesting user", async () => {
+      const a = await seedConversation();
+      const otherUserId = await seedUser();
+      const otherConv = (
+        await tx((trx) =>
+          store.createConversation(trx, {
+            userId: otherUserId,
+            profileId: a.profileId,
+            isPrivate: true,
+          }),
+        )
+      ).id;
+      await tx((trx) =>
+        store.recordEvolutionEvent(trx, {
+          conversationId: a.conversationId,
+          userId: a.userId,
+          triggeredBy: "idle",
+          payload: samplePayload(),
+        }),
+      );
+      await tx((trx) =>
+        store.recordEvolutionEvent(trx, {
+          conversationId: otherConv,
+          userId: otherUserId,
+          triggeredBy: "idle",
+          payload: samplePayload(),
+        }),
+      );
+      const aEvents = await tx((trx) => store.listEvolutionEvents(trx, a.userId));
+      expect(aEvents).toHaveLength(1);
+      expect(aEvents[0]?.userId).toBe(a.userId);
+    });
+
+    it("getEvolutionEvent returns the row when it belongs to the user", async () => {
+      const { userId, conversationId } = await seedConversation();
+      const { id } = await tx((trx) =>
+        store.recordEvolutionEvent(trx, {
+          conversationId,
+          userId,
+          triggeredBy: "idle",
+          payload: samplePayload(),
+        }),
+      );
+      const row = await tx((trx) => store.getEvolutionEvent(trx, userId, id));
+      expect(row?.id).toBe(id);
+      expect(row?.payload.messageCount).toBe(12);
+    });
+
+    it("getEvolutionEvent returns undefined for a row owned by another user", async () => {
+      const a = await seedConversation();
+      const otherUserId = await seedUser();
+      const { id } = await tx((trx) =>
+        store.recordEvolutionEvent(trx, {
+          conversationId: a.conversationId,
+          userId: a.userId,
+          triggeredBy: "idle",
+          payload: samplePayload(),
+        }),
+      );
+      // Probing as the other user must not leak existence.
+      const row = await tx((trx) => store.getEvolutionEvent(trx, otherUserId, id));
+      expect(row).toBeUndefined();
+    });
+
+    it("rejects writes whose payload doesn't match the schema", async () => {
+      const { userId, conversationId } = await seedConversation();
+      const bad = {
+        // missing required fields
+        memories: { extracted: 1, byNetwork: {} },
+      } as never;
+      await expect(
+        tx((trx) =>
+          store.recordEvolutionEvent(trx, {
+            conversationId,
+            userId,
+            triggeredBy: "idle",
+            payload: bad,
+          }),
+        ),
+      ).rejects.toThrow();
+    });
+  });
 });

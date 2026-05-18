@@ -267,6 +267,13 @@
       "when": 1779109174962,
       "tag": "0037_extend_image_providers_base_url_check",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1779130254678,
+      "tag": "0038_evolution_events",
+      "breakpoints": true
     }
   ]
 }
