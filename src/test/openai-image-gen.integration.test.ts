@@ -36,10 +36,10 @@ import {
 } from "../agent/image-tools.js";
 import type { Service } from "../agent/service.js";
 import type { ImageModelWithProvider, ImageProviderRow } from "../agent/store/index.js";
-import type { Transactor } from "../db/index.js";
 import { buildImageProvider } from "../llm/image-providers.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
+import { fakeRunInTx } from "./factories.js";
 
 /**
  * Keep this prompt stable across re-records — llmock matches fixtures by
@@ -65,8 +65,6 @@ const MODEL_NAME = "openai/dall-e-3";
 // rule itself; this constant pins the contract at the integration boundary.
 const MODEL_SLUG = "dall-e-3";
 const PROVIDER_ID = "test-provider-openai-images";
-
-const FAKE_TX: Transactor = async (cb) => cb({} as never);
 
 describe("openai-compatible image gen — OpenAI dall-e-3 (recorded)", () => {
   it("generates an image end-to-end through buildImageProvider → llmock fixture", async () => {
@@ -96,7 +94,7 @@ describe("openai-compatible image gen — OpenAI dall-e-3 (recorded)", () => {
     } as unknown as SecretsStore;
 
     const provider = await buildImageProvider(providerRow, {
-      runInTx: FAKE_TX,
+      runInTx: fakeRunInTx,
       secretsStore,
     });
     expect(provider.kind).toBe("oai");
