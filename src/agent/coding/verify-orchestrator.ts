@@ -442,9 +442,11 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       ...codingTaskFailed.create({ taskId, reason }),
       id: `task-failed-${taskId}`,
     });
+    // Letting this throw is load-bearing — see the matching catch in
+    // `runCodingTask`.
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-    ).catch(() => {});
+    );
     await safeTeardownWorktree({
       secretsStore,
       runInTx,

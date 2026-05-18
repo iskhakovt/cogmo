@@ -684,6 +684,57 @@ describe("runCodingTask", () => {
     });
   });
 
+  // If the DB UPDATE in the catch swallowed its error, a transient DB
+  // blip after a successful emit would suppress `function.failed` and
+  // leave the row stuck non-terminal — the reconcile subscriber would
+  // never see it. Letting the UPDATE throw propagates the failure and
+  // hands off to the reconcile.
+  it("catch path: DB update failure after successful emit propagates so reconcile can recover", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "planning" }));
+
+    const { sandbox } = fakeSandbox();
+    const throwingBackend: CodingBackend = {
+      plan: () => {
+        throw new Error("backend exploded");
+      },
+      execute: async () => {
+        throw new Error("not used");
+      },
+    };
+    const dbThrowingStore = {
+      ...store,
+      getTask: store.getTask.bind(store),
+      getRepoById: store.getRepoById.bind(store),
+      updateTaskStatus: async () => {
+        throw new Error("db blip");
+      },
+    } as unknown as typeof store;
+    const captured: unknown[] = [];
+    const capturingStepSendEvent = (async (_: string, payload: unknown) => {
+      captured.push(payload);
+      return { ids: [] };
+    }) as never;
+
+    await expect(
+      runCodingTask({
+        taskId: task.id,
+        deps: makeDeps({ sandbox, backend: throwingBackend, store: dbThrowingStore }),
+        stepRun,
+        stepSendEvent: capturingStepSendEvent,
+        inngest: fakeInngestShared,
+      }),
+    ).rejects.toThrow(/db blip/);
+
+    // Emit fired before the DB update — the bus has the event already.
+    expect(captured).toHaveLength(1);
+    // Row stays in its prior non-terminal state — reconcile will pick
+    // it up via `failTaskIfNonTerminal`.
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("planning");
+  });
+
   it("missing repo throws", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);

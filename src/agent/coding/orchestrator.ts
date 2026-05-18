@@ -474,9 +474,13 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       ...codingTaskFailed.create({ taskId, reason }),
       id: `task-failed-${taskId}`,
     });
+    // Letting this throw is load-bearing: a DB blip after a successful
+    // emit would otherwise return normally to Inngest, suppress
+    // `function.failed`, and leave the row non-terminal forever
+    // (reconcile only fires on function failure).
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-    ).catch(() => {});
+    );
     if (assignment) {
       await safeTeardownWorktree({
         runInTx,
@@ -967,9 +971,11 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       ...codingTaskFailed.create({ taskId, reason }),
       id: `task-failed-${taskId}`,
     });
+    // Letting this throw is load-bearing — see the matching catch in
+    // `runCodingTask`.
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-    ).catch(() => {});
+    );
     await safeTeardownWorktree({
       runInTx,
       ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
