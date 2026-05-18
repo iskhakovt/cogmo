@@ -24,6 +24,7 @@
 
 import { createHash } from "node:crypto";
 import canonicalize from "canonicalize";
+import * as R from "remeda";
 import { ProviderProtocolError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { ContentBlock, Message, StopReason, ToolUseBlock } from "../llm/types.js";
@@ -362,7 +363,9 @@ export interface ToolOutcomeMix {
  * Count how many times the model has emitted a `tool_use` block targeting
  * `toolName` within the slice `messages[fromIdx..]` (the current turn's
  * accumulated array). Counts assistant-message `tool_use` blocks; ignores
- * `tool_result`s.
+ * `tool_result`s. Used for the count carried in the nudge text — the
+ * model thinks in "calls," not "batches," so the nudge tells it how many
+ * blocks it has emitted.
  *
  * Derives from the message array rather than a separate counter — Inngest
  * function replay re-executes everything outside `step.run` from the top,
@@ -376,16 +379,43 @@ export function countToolInvocations(
   messages: ReadonlyArray<Message>,
   fromIdx: number,
 ): number {
-  let count = 0;
-  for (let i = fromIdx; i < messages.length; i++) {
-    const msg = messages[i];
-    if (msg?.role !== "assistant") continue;
-    if (typeof msg.content === "string") continue;
-    for (const block of msg.content) {
-      if (block.type === "tool_use" && block.name === toolName) count++;
-    }
-  }
-  return count;
+  return messages
+    .slice(fromIdx)
+    .flatMap((msg) => (msg.role === "assistant" && Array.isArray(msg.content) ? msg.content : []))
+    .filter((b) => b.type === "tool_use" && b.name === toolName).length;
+}
+
+/**
+ * Count distinct *iterations* (assistant messages) within
+ * `messages[fromIdx..]` that emitted at least one `tool_use` block for
+ * `toolName`. This is the **batch** count — the unit the volume-cluster
+ * budget operates on.
+ *
+ * Per-iteration counting (not per-block) is the design choice that
+ * distinguishes "model is stuck re-deciding to call T" (multiple
+ * iterations) from "model decided to parallel-call T N times in one
+ * shot" (one iteration, N blocks). A user requesting "generate 10
+ * images" usually produces either (a) one iteration with 10 parallel
+ * blocks → one batch, admitted, or (b) ten sequential iterations →
+ * ten batches, intercepted at the budget. The cluster trigger targets
+ * the across-iteration decision loop, not the within-iteration
+ * parallelism.
+ *
+ * See `design/agent-resilience.md` → Volume cluster trigger.
+ */
+export function countToolInvocationBatches(
+  toolName: string,
+  messages: ReadonlyArray<Message>,
+  fromIdx: number,
+): number {
+  return messages
+    .slice(fromIdx)
+    .filter(
+      (msg) =>
+        msg.role === "assistant" &&
+        Array.isArray(msg.content) &&
+        msg.content.some((b) => b.type === "tool_use" && b.name === toolName),
+    ).length;
 }
 
 /**
@@ -400,38 +430,32 @@ export function summarizeToolOutcomes(
   messages: ReadonlyArray<Message>,
   fromIdx: number,
 ): ToolOutcomeMix {
-  const idsForTool = new Set<string>();
-  for (let i = fromIdx; i < messages.length; i++) {
-    const msg = messages[i];
-    if (msg?.role !== "assistant" || typeof msg.content === "string") continue;
-    for (const block of msg.content) {
-      if (block.type === "tool_use" && block.name === toolName) idsForTool.add(block.id);
-    }
-  }
+  const slice = messages.slice(fromIdx);
 
-  let successes = 0;
-  let failures = 0;
-  const reasons: string[] = [];
-  const seenReasons = new Set<string>();
-  for (let i = fromIdx; i < messages.length; i++) {
-    const msg = messages[i];
-    if (msg?.role !== "user" || typeof msg.content === "string") continue;
-    for (const block of msg.content) {
-      if (block.type !== "tool_result") continue;
-      if (!idsForTool.has(block.toolUseId)) continue;
-      if (block.isError === true) {
-        failures++;
-        const reason = firstLineSummary(block.content);
-        if (reason && !seenReasons.has(reason)) {
-          seenReasons.add(reason);
-          reasons.push(reason);
-        }
-      } else {
-        successes++;
-      }
-    }
-  }
-  return { successes, failures, failureReasons: reasons };
+  const idsForTool = new Set(
+    slice
+      .flatMap((msg) => (msg.role === "assistant" && Array.isArray(msg.content) ? msg.content : []))
+      .filter((b): b is ToolUseBlock => b.type === "tool_use" && b.name === toolName)
+      .map((b) => b.id),
+  );
+
+  const matchingResults = slice
+    .flatMap((msg) => (msg.role === "user" && Array.isArray(msg.content) ? msg.content : []))
+    .filter(
+      (b): b is Extract<ContentBlock, { type: "tool_result" }> =>
+        b.type === "tool_result" && idsForTool.has(b.toolUseId),
+    );
+
+  const failures = matchingResults.filter((r) => r.isError === true);
+  const failureReasons = R.unique(
+    failures.map((r) => firstLineSummary(r.content)).filter((s): s is string => s !== null),
+  );
+
+  return {
+    successes: matchingResults.length - failures.length,
+    failures: failures.length,
+    failureReasons,
+  };
 }
 
 function firstLineSummary(content: unknown): string | null {

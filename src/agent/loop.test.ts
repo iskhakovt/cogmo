@@ -2485,12 +2485,11 @@ describe("volume-cluster trigger", () => {
     };
   }
 
-  it("budget=2 admits the first 2 calls, intercepts the 3rd with synthetic tool_result", async () => {
-    // Three iterations all call the same budgeted tool with varying args.
-    // The first two execute; the third is intercepted before the handler
-    // runs. The synthetic tool_result is the loop's response — but the
-    // model has no further turn to consume it because the mock provider
-    // only has three turns scripted; the loop falls through naturally.
+  it("budget=2 admits the first 2 iterations, intercepts the 3rd batch with synthetic tool_result", async () => {
+    // Three sequential iterations each call the same budgeted tool —
+    // three batches. The first two execute; the third batch intercepts
+    // before the handler runs. budget counts iterations (batches), not
+    // individual calls.
     const provider = mockStreamProvider([
       toolUseTurn("img", "t1", { q: "a" }),
       toolUseTurn("img", "t2", { q: "b" }),
@@ -2534,13 +2533,16 @@ describe("volume-cluster trigger", () => {
     expect(byId.get("t3")?.isError).toBe(true);
     // Synthetic carries the intercepted tool_use's id (Anthropic pairing).
     expect(byId.get("t3")?.toolUseId).toBe("t3");
-    // Telemetry on the intercept.
+    // Telemetry on the intercept — batchCount: 3 (third iteration),
+    // callCount: 3 (three tool_use blocks total across the turn).
     expect(turnLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         event: "agent.repair",
         subtype: "volume_cluster",
         tool: "img",
-        count: 3,
+        batchCount: 3,
+        callCount: 3,
+        blocksInBatch: 1,
         budget: 2,
       }),
       expect.any(String),
@@ -2730,15 +2732,72 @@ describe("volume-cluster trigger", () => {
     expect((new1 as { isError?: boolean }).isError).toBeUndefined();
   });
 
-  it("multiple tool_uses in one iteration share the in-iteration counter", async () => {
-    // Single iteration emits 3 parallel-safe img tool_uses. budget=2:
-    // first two run, third is intercepted by the in-iteration counter.
+  it("single iteration with N parallel calls is one batch — all admit regardless of N vs budget", async () => {
+    // User-requested batch: "generate 10 images" in one shot. budget=2.
+    // The model emits 10 parallel-safe img tool_uses in one iteration.
+    // Per-batch counter: this is 1 batch (the model made one decision
+    // to call img with 10 args). All 10 execute. The cluster trigger
+    // targets the across-iteration decision loop, not within-iteration
+    // parallelism.
+    const parallelBlocks = Array.from({ length: 10 }, (_, i) => ({
+      type: "tool_start" as const,
+      id: `p${i + 1}`,
+      name: "img",
+      input: { q: `image ${i + 1}` },
+    }));
     const provider = mockStreamProvider([
+      { events: parallelBlocks, stopReason: "tool_use" },
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(budgetedTool("img", 2));
+    const turnLogger = mock<Logger>();
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "generate 10 images" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+      turnLogger,
+    });
+
+    expect(result.degraded).toBeUndefined();
+    const toolResults = result.newMessages
+      .filter((m) => m.role === "user")
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((b) => b.type === "tool_result");
+    expect(toolResults).toHaveLength(10);
+    // All 10 ran — none have isError set.
+    const errors = toolResults.filter(
+      (r) => "isError" in r && (r as { isError?: boolean }).isError === true,
+    );
+    expect(errors).toHaveLength(0);
+    // No volume_cluster telemetry — the batch was admitted.
+    const volumeWarnings = turnLogger.warn.mock.calls.filter(
+      (call) =>
+        typeof call[0] === "object" &&
+        call[0] !== null &&
+        "subtype" in call[0] &&
+        (call[0] as { subtype?: string }).subtype === "volume_cluster",
+    );
+    expect(volumeWarnings).toHaveLength(0);
+  });
+
+  it("parallel batch intercept: all blocks of the over-budget batch get the synthetic tool_result", async () => {
+    // Two prior iterations consumed the budget (=2). A third iteration
+    // emits 3 parallel calls — the WHOLE batch intercepts (all 3),
+    // and the model receives three synthetic isError tool_results.
+    const provider = mockStreamProvider([
+      toolUseTurn("img", "t1", { q: "a" }),
+      toolUseTurn("img", "t2", { q: "b" }),
       {
         events: [
-          { type: "tool_start", id: "p1", name: "img", input: { q: "a" } },
-          { type: "tool_start", id: "p2", name: "img", input: { q: "b" } },
-          { type: "tool_start", id: "p3", name: "img", input: { q: "c" } },
+          { type: "tool_start", id: "p1", name: "img", input: { q: "c" } },
+          { type: "tool_start", id: "p2", name: "img", input: { q: "d" } },
+          { type: "tool_start", id: "p3", name: "img", input: { q: "e" } },
         ],
         stopReason: "tool_use",
       },
@@ -2746,6 +2805,7 @@ describe("volume-cluster trigger", () => {
     ]);
     const tools = new ToolRegistry();
     tools.register(budgetedTool("img", 2));
+    const turnLogger = mock<Logger>();
 
     const result = await runStreamingAgentLoop({
       provider,
@@ -2755,16 +2815,37 @@ describe("volume-cluster trigger", () => {
       tools,
       service: stubService(),
       onEvent: async () => {},
+      turnLogger,
     });
 
+    expect(result.degraded).toBeUndefined();
     const toolResults = result.newMessages
       .filter((m) => m.role === "user")
       .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
       .filter((b) => b.type === "tool_result");
     const byId = new Map(toolResults.map((r) => [(r as { toolUseId: string }).toolUseId, r]));
-    expect((byId.get("p1") as { isError?: boolean }).isError).toBeUndefined();
-    expect((byId.get("p2") as { isError?: boolean }).isError).toBeUndefined();
+    expect((byId.get("t1") as { isError?: boolean }).isError).toBeUndefined();
+    expect((byId.get("t2") as { isError?: boolean }).isError).toBeUndefined();
+    // All three parallel blocks in the over-budget batch intercept.
+    expect(byId.get("p1")).toMatchObject({ isError: true });
+    expect(byId.get("p2")).toMatchObject({ isError: true });
     expect(byId.get("p3")).toMatchObject({ isError: true });
+    // One telemetry emission for the whole batch (not three).
+    const volumeWarnings = turnLogger.warn.mock.calls.filter(
+      (call) =>
+        typeof call[0] === "object" &&
+        call[0] !== null &&
+        "subtype" in call[0] &&
+        (call[0] as { subtype?: string }).subtype === "volume_cluster",
+    );
+    expect(volumeWarnings).toHaveLength(1);
+    expect(volumeWarnings[0]?.[0]).toMatchObject({
+      tool: "img",
+      batchCount: 3,
+      callCount: 5,
+      blocksInBatch: 3,
+      budget: 2,
+    });
   });
 
   it("composes with the fingerprint: cluster intercept → repeat-args → stuck_loop degrade", async () => {

@@ -196,9 +196,13 @@ The mechanism is intentionally outcome-agnostic. A failure-only counter under-fi
 
 #### Mechanism
 
-A per-tool counter increments on each `tool_use` emission, scoped to one `runStreamingAgentLoop` invocation. When the counter for tool `T` reaches `T.invocationBudget`, the next `tool_use` block targeting `T` is intercepted: the handler does not run, and the loop synthesizes an `is_error: true` `tool_result` that names the cluster and forbids further calls to `T` this turn.
+A per-tool **batch** counter increments once per *iteration* that emits any `tool_use` block targeting tool `T`, scoped to one `runStreamingAgentLoop` invocation. When the prior-batch count for `T` reaches `T.invocationBudget`, the next iteration's same-tool batch is intercepted **as a whole**: every `tool_use` block targeting `T` in that iteration is replaced with an `is_error: true` `tool_result` (paired by id), the handlers never run, and the loop synthesizes one telemetry emission for the batch.
 
-**Implementation note: derive, don't store.** The counter must be recomputed by scanning the iteration's accumulated message array on each check, not maintained as a closure variable. Inngest function replay on retry replays cached `step.run` outputs in order but re-executes everything outside `step.run` from the top — a counter held in a closure resets to zero on every retry, silently letting the budget reset mid-turn. Deriving from the message array reflects the actual current state regardless of replay, and the scan is O(N) over a single-turn message array (cheap at the iteration count cap).
+**Per-iteration, not per-block.** The cluster trigger targets the model's *decision pattern* across iterations, not the parallelism within one decision. An iteration emitting 10 parallel `tool_use` blocks for `T` is one batch — the model made a single decision to call `T` with 10 arguments. A user requesting "generate 10 images" usually produces either one iteration with 10 parallel blocks (one batch, admitted) or ten sequential iterations (ten batches, intercepted starting at the budget). The failure mode the trigger catches — "model didn't see this result and decide it was enough, then decided to call again anyway" — is per-iteration behavior. Counting per-block would conflate that failure with legitimate user-explicit batches and parallel-safe tool fan-out, producing false positives like "I can only generate 2 of your 10 requested images."
+
+A by-product: an admitted batch can contain arbitrarily many parallel calls. The trigger isn't a cost control; per-call cost ceilings belong to per-tool rate limits / cost caps elsewhere. The trigger's job is loop-pathology detection.
+
+**Implementation note: derive, don't store.** The batch counter must be recomputed by scanning the iteration's accumulated message array on each check, not maintained as a closure variable. Inngest function replay on retry replays cached `step.run` outputs in order but re-executes everything outside `step.run` from the top — a counter held in a closure resets to zero on every retry, silently letting the budget reset mid-turn. Deriving from the message array reflects the actual current state regardless of replay, and the scan is O(N) over a single-turn message array (cheap at the iteration count cap).
 
 Nudge text branches on outcome mix in the existing history:
 
@@ -206,30 +210,32 @@ Nudge text branches on outcome mix in the existing history:
 - **Mixed:** "K of N `T` calls produced results. Do not call `T` again — decide from what you have."
 - **All success:** "You have N results from `T`. Do not call `T` again — synthesize and reply."
 
-The counter persists across the whole turn regardless of per-call outcome. Volume is the signal: successful same-tool results dilute attention the same as failed ones (the softmax weight on the original user intent shrinks either way), so the budget is a volume cap, not a failure cap. A model that wants more bandwidth for one tool than its budget allows should ask the user or switch tools — that's the redirect the nudge text enforces. The reset happens at turn boundary (next `runStreamingAgentLoop` invocation), not within a turn.
+The batch counter persists across the whole turn regardless of per-call outcome. Volume is the signal: successful same-tool results dilute attention the same as failed ones (the softmax weight on the original user intent shrinks either way), so the budget is a volume cap, not a failure cap. A model that wants more bandwidth for one tool than its budget allows should ask the user or switch tools — that's the redirect the nudge text enforces. The reset happens at turn boundary (next `runStreamingAgentLoop` invocation), not within a turn.
 
 #### Per-tool budgets on `ToolSpec`
 
 `ToolSpec` grows an optional `invocationBudget?: number`. Consumers read `spec.invocationBudget ?? DEFAULT_INVOCATION_BUDGET` (default `5`), matching the existing optional-plus-consumer-default convention for `durable?`, `parallelSafe?`, `sideEffectful?`.
 
+Budgets cap **iterations**, not individual calls. A budget of `B` admits the first `B` iterations in which the model emits any tool_use for `T`; the `(B+1)`th iteration's whole same-tool batch intercepts.
+
 | Tool class | Budget | Why |
 |-|-|-|
-| Image generation | 2 | Each call is multi-second + paid; legitimate multi-attempt is rare. |
-| `web_search`, `fetch_url` | 5 | Genuine multi-source research is normal up to ~5. |
-| `read_file`, `list_files` | 10 | Codebase exploration legitimately touches many files. |
-| `memory_recall` | 3 | Repeated recall on one turn usually means the model isn't finding what it wants — nudge to degrade. |
+| Image generation | 2 | 2 iterations of image-gen attempts before the trigger fires. Each iteration can be one call or a parallel batch — the across-iteration count is what catches the retry-loop failure mode. |
+| `web_search`, `fetch_url` | 5 | 5 iterations — genuine multi-source research distributed across iterations is normal up to ~5. |
+| `read_file`, `list_files` | 10 | 10 iterations. Codebase exploration usually batches multiple reads per iteration, so this is a generous across-iteration cap. |
+| `memory_recall` | 3 | Repeated recall iterations on one turn usually means the model isn't finding what it wants — nudge to switch tactics earlier. |
 | Default | 5 | Conservative fail-safe; tune from telemetry. |
 
-The field is keyed on `tool` not on `(tool, args)` — ten `read_file`s against ten paths is normal exploration, but ten different prompts to `generate_image` is the failure mode this catches. Distinguishing those by args at the budget layer would re-create the fingerprint's blind spot.
+The field is keyed on `tool` not on `(tool, args)` — ten `read_file` iterations against ten different paths is normal exploration (10 batches against budget 10), but ten different prompts to `generate_image` across ten iterations is the failure mode this catches. Distinguishing by args at the budget layer would re-create the fingerprint's blind spot.
 
 #### Composition with the fingerprint trigger
 
 Both triggers run concurrently. They catch disjoint patterns:
 
-- **Fingerprint** trips on `(name, args)` repetition: same tool, same args, 3 consecutive or 5 cumulative.
-- **Volume cluster** trips on `name` repetition regardless of args: same tool, varying args, ≥ budget.
+- **Fingerprint** trips on `(name, args)` repetition: same tool, same args, 3 consecutive or 5 cumulative iterations.
+- **Volume cluster** trips on across-iteration `name` repetition regardless of args: same tool emitted in `> budget` distinct iterations.
 
-A loop that varies args to evade the fingerprint hits the volume trigger. A loop that doesn't vary hits the fingerprint first. Neither fires when the model uses different tools (legitimate multi-step work) or the same read-only tool against different inputs (legitimate exploration, within budget).
+A loop that varies args to evade the fingerprint hits the volume trigger. A loop that doesn't vary hits the fingerprint first. Neither fires when the model uses different tools (legitimate multi-step work) or the same read-only tool across many iterations within budget (legitimate exploration). A single iteration with many parallel same-tool blocks is one batch — neither trigger interprets it as a stuck signal.
 
 #### Trip semantics — redirect, not terminate
 
@@ -244,8 +250,10 @@ If the model ignores the nudge and emits another `tool_use` for `T`, the args ar
 #### Telemetry
 
 ```typescript
-{ event: "agent.repair", subtype: "volume_cluster", tool: T, count, outcome_mix }
+{ event: "agent.repair", subtype: "volume_cluster", tool: T, batchCount, callCount, blocksInBatch, budget, outcomeMix }
 ```
+
+`batchCount` is the across-iteration counter the budget compared against; `callCount` is the total `tool_use` block count this turn (what the nudge text shows the model); `blocksInBatch` distinguishes a one-block iteration that intercepts (`blocksInBatch: 1`) from a parallel batch that intercepts as a unit (`blocksInBatch: N`). One emission per intercepted batch — not per blocked block.
 
 No separate degrade event — the cluster trigger is a repair. The follow-on degrade (if the model ignores the nudge) is the existing `stuck_loop` event.
 

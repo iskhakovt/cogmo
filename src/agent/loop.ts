@@ -22,6 +22,8 @@ import {
   classifyStreamError,
   classifyVolumeCluster,
   computeIterationFingerprint,
+  countToolInvocationBatches,
+  countToolInvocations,
   type DegradeSubtype,
   formatVolumeClusterContent,
   freshBudgets,
@@ -234,17 +236,20 @@ interface PlannedCall {
  * that should NOT be dispatched to their handler. Returns an empty map
  * when nothing trips the per-tool `invocationBudget`.
  *
- * Counter semantics: count for tool T = (prior tool_use blocks for T in
- * `messages[initialLength..]`) + (in-iteration tool_use blocks for T
- * already processed in this scan, including the current one). A budget
- * of `B` admits the first `B` calls; the `(B+1)`th onward intercept.
+ * Counter semantics — **per iteration, not per block**. Budget `B` for
+ * tool `T` admits the first `B` *iterations* in which the model emits
+ * any `tool_use` for `T`; the `(B+1)`th iteration intercepts the entire
+ * same-tool batch within it. An iteration emitting 10 parallel
+ * `tool_use` blocks for `T` is one batch — all 10 run when the iteration
+ * is admitted; all 10 intercept when it isn't. This distinguishes the
+ * model "re-deciding to call T" (multiple iterations — the stuck-loop
+ * signature) from "deciding once to parallel-call T N times" (one
+ * iteration — a user-requested batch).
  *
  * Counter is derived from the message array (not stored) so Inngest
  * function replay doesn't reset it. The just-pushed assistant message
- * at the tail of `messages` is included in the count — `messages` is
- * walked top-to-bottom and the in-iteration counter advances per block
- * we visit, so a single same-tool block in this iteration is counted
- * exactly once.
+ * at the tail of `messages` is the current iteration; the prior-batch
+ * scan caps at one short of it.
  *
  * See `design/agent-resilience.md` → Volume cluster trigger.
  */
@@ -257,55 +262,61 @@ function computeVolumeClusterInterceptions(
 ): Map<string, ContentBlock> {
   const interceptions = new Map<string, ContentBlock>();
 
-  // Prior count = same-tool emissions across this turn but BEFORE the
-  // just-pushed assistant message. The current iteration's blocks are
-  // counted via the in-iter accumulator below as we walk them in order.
-  const priorCounts = new Map<string, number>();
-  // messages.length - 1 is the just-pushed assistant message (current
-  // iteration); cap the prior scan one short of it.
-  const lastAssistantIdx = messages.length - 1;
-  for (let i = initialLength; i < lastAssistantIdx; i++) {
-    const msg = messages[i];
-    if (msg?.role !== "assistant" || typeof msg.content === "string") continue;
-    for (const block of msg.content) {
-      if (block.type === "tool_use") {
-        priorCounts.set(block.name, (priorCounts.get(block.name) ?? 0) + 1);
-      }
-    }
-  }
+  // Group this iteration's tool_use blocks by tool name — each name
+  // gets exactly one batch decision regardless of how many blocks it
+  // emitted in this iteration.
+  const blocksByName = R.pipe(
+    iterationContent,
+    R.filter((b): b is ToolUseBlock => b.type === "tool_use"),
+    R.groupBy((b) => b.name),
+  );
 
-  const inIterCounts = new Map<string, number>();
-  for (const block of iterationContent) {
-    if (block.type !== "tool_use") continue;
-    const spec = tools.get(block.name);
+  // Prior batches = distinct prior iterations that emitted any
+  // tool_use for T. The just-pushed assistant message (this iteration)
+  // is excluded by slicing off the last entry before counting.
+  const priorMessages = messages.slice(0, messages.length - 1);
+
+  // for...of here is side-effectful (mutates `interceptions`, emits
+  // `log.warn`), the documented carve-out from the functional-only rule.
+  for (const [toolName, batchBlocks] of Object.entries(blocksByName)) {
+    if (batchBlocks === undefined) continue;
+    const spec = tools.get(toolName);
     // Unknown tool falls through to runOne's existing unknown-tool
-    // error path. Don't budget it — the count would be unreliable
-    // (no spec, no budget) and the error result is already explanatory.
+    // error path. Don't budget it — no spec, no budget, and the error
+    // result is already explanatory.
     if (!spec) continue;
 
     const budget = spec.invocationBudget ?? DEFAULT_INVOCATION_BUDGET;
-    const prior = priorCounts.get(block.name) ?? 0;
-    const inIter = inIterCounts.get(block.name) ?? 0;
-    const count = prior + inIter + 1;
-    inIterCounts.set(block.name, inIter + 1);
+    const priorBatches = countToolInvocationBatches(toolName, priorMessages, initialLength);
+    // Including this iteration's batch.
+    const batchCount = priorBatches + 1;
 
-    const verdict = classifyVolumeCluster(count, budget);
+    const verdict = classifyVolumeCluster(batchCount, budget);
     if (verdict === null) continue;
 
-    const outcomes = summarizeToolOutcomes(block.name, messages, initialLength);
-    const content = formatVolumeClusterContent(block.name, verdict.count, outcomes);
-    interceptions.set(block.id, {
-      type: "tool_result",
-      toolUseId: block.id,
-      content,
-      isError: true,
-    });
+    // Total call count (blocks, not batches) — what the nudge text
+    // tells the model. The model emitted these blocks; the model
+    // thinks in call counts.
+    const callCount = countToolInvocations(toolName, messages, initialLength);
+    const outcomes = summarizeToolOutcomes(toolName, messages, initialLength);
+    const content = formatVolumeClusterContent(toolName, callCount, outcomes);
+
+    for (const block of batchBlocks) {
+      interceptions.set(block.id, {
+        type: "tool_result",
+        toolUseId: block.id,
+        content,
+        isError: true,
+      });
+    }
     log.warn(
       {
         event: "agent.repair",
         subtype: "volume_cluster",
-        tool: block.name,
-        count: verdict.count,
+        tool: toolName,
+        batchCount,
+        callCount,
+        blocksInBatch: batchBlocks.length,
         budget,
         outcomeMix: { successes: outcomes.successes, failures: outcomes.failures },
       },
