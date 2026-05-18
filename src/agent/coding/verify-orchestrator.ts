@@ -22,8 +22,8 @@
 import type { Octokit } from "@octokit/rest";
 import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
-import { codingTaskCliDone } from "../../inngest/events.js";
-import type { StepRun } from "../../inngest/index.js";
+import { codingTaskCliDone, codingTaskFailed } from "../../inngest/events.js";
+import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import { cleanupAskpass, provisionAskpass } from "../../sandbox/askpass.js";
 import type { SandboxClient, SandboxSession } from "../../sandbox/index.js";
@@ -113,6 +113,7 @@ export function createCodingVerifyOrchestrator(deps: VerifyOrchestratorDeps, inn
         taskId: event.data.taskId,
         deps,
         stepRun: step.run,
+        stepSendEvent: step.sendEvent,
         inngest,
       });
     },
@@ -123,6 +124,12 @@ interface RunParams {
   taskId: string;
   deps: VerifyOrchestratorDeps;
   stepRun: StepRun;
+  /**
+   * Durable bus emit. Used in the in-worker catch path so a transient
+   * send blip surfaces as a function failure (caught by the reconcile
+   * subscriber) rather than a silently-swallowed event.
+   */
+  stepSendEvent: StepSendEvent;
   inngest: Pick<Inngest, "send">;
 }
 
@@ -131,7 +138,7 @@ interface RunParams {
  * and an inline shim in tests.
  */
 export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestratorResult> {
-  const { taskId, deps, stepRun, inngest } = params;
+  const { taskId, deps, stepRun, stepSendEvent, inngest } = params;
   const taskLog = log.child({ taskId });
   const { runInTx, store, sandbox, secretsStore, askpassBaseDir } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
@@ -430,10 +437,17 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   } catch (err) {
     const reason = (err as Error).message;
     taskLog.error({ err }, "coding verify failed");
+    // Emit BEFORE the DB status update — see the rationale on the
+    // matching catch in `runCodingTask`.
+    await stepSendEvent("emit-task-failed", {
+      ...codingTaskFailed.create({ taskId, reason }),
+      id: `task-failed-${taskId}`,
+    });
+    // Letting this throw is load-bearing — see the matching catch in
+    // `runCodingTask`.
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-    ).catch(() => {});
-    await inngest.send({ name: "coding/task/failed", data: { taskId, reason } }).catch(() => {});
+    );
     await safeTeardownWorktree({
       secretsStore,
       runInTx,
