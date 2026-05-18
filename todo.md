@@ -45,7 +45,6 @@
 - [ ] `p3` LLM-suggested conversation auto-naming — generate alias from first turn or on demand. User can accept/edit/reject. Aliases remain user-controlled; this is a suggestion path, not auto-apply.
 - [ ] `p3` Profile-switch tool-removal regression test — when `/profile switch` removes a tool whose `tool_use` blocks live in conversation history, verify the next turn still loads cleanly (Anthropic API accepts historical tool blocks even if not in current `tools`, but a regression test pins the contract).
 - [ ] `p3` Decide turnLogger fallback shape on `StreamingAgentLoopParams` — make required (compile-time miss-wiring check; ~10 test-site updates) vs. keep optional + add `logger.debug({event: "missing-turn-logger"})` warn. Reviewer flagged on PR #257 round 2. Wire when a real miss-wiring incident or compile-time-safety push justifies the test churn.
-- [ ] `p3` Migrate remaining `(fn as any).fn(...)` Inngest test patterns to `invokeInngestFn` / `invokeInngestOnFailure` from `src/test/factories.ts` (added in PR #263 round 2). Files: `src/agent/recover-conversation.test.ts`, `src/transport/adapters/direct.test.ts`, `src/agent/scheduling/*.test.ts`. They already typecheck against the new `MockStep`; migration is mechanical call-shape swap. Pick up whenever someone is in those files for an unrelated change.
 
 ### Skills, voice & transport
 
