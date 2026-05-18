@@ -1,10 +1,10 @@
-# Agent Resilience `[proposed]`
+# Agent Resilience `[confirmed]`
 
 How the agent loop handles **LLM provider misbehavior** — empty assistant turns, malformed tool arguments, truncated structured output, refusals where a tool call was required.
 
 Distinct from [crash-recovery.md](crash-recovery.md), which covers Inngest durability (process death, step replay, exactly-once side effects). That doc answers *we lost the worker*; this one answers *the model returned something we can't use*.
 
-## Failure taxonomy `[proposed]`
+## Failure taxonomy `[confirmed]`
 
 Every provider failure falls into one of four classes. The class determines the response.
 
@@ -17,7 +17,7 @@ Every provider failure falls into one of four classes. The class determines the 
 
 Class A and B are provider-layer concerns and live in `FallbackLlmProvider` + `resolveOrFail`. This doc covers C and D.
 
-## Off-ramps `[proposed]`
+## Off-ramps `[confirmed]`
 
 A turn ends in one of three states. Each is a durable signal downstream consumers (evolution failure-reflector, telemetry) can subscribe to.
 
@@ -31,7 +31,7 @@ A turn ends in one of three states. Each is a durable signal downstream consumer
 
 **`degraded` is an event, not a status.** The conversation row's `status` enum stays `'active' | 'errored'`; the semantic distinction "the last turn was degraded" lives in the `conversation/degraded` event stream, not in a third enum value. No major agent framework introduces a `degraded` conversation status (OpenAI Threads keep thread-level state binary with run-level status enums; Letta tracks per-step `stop_reason`; CrewAI / AutoGen rely on event signals only). A separate `'degraded'` enum value wouldn't intrinsically gate anything — any gating behavior would come from a check we'd have to add to `handle-message`'s entry guard — so it would be net new complexity without buying anything the event signal doesn't already deliver.
 
-## Class C: model misbehavior `[proposed]`
+## Class C: model misbehavior `[confirmed]`
 
 Class C has two handling surfaces. Most callsites are inside the agent loop, where a per-turn repair budget and a degraded-reply off-ramp apply. A few callsites — typed structured-output calls in background jobs, summarization — live outside the loop and use single-call retry-with-feedback instead, with no shared budget. The repair *semantics* (feedback-injection, JSON repair, continuation prompts) are the same; the *budgeting* and *off-ramp* differ. The Pydantic AI split between `tool_retries` (inside the agent loop) and `output_retries` (per-call validation) is the closest external precedent — Instructor's per-call `max_retries` covers the non-loop pattern.
 
@@ -113,7 +113,7 @@ The forensic record of *what the model produced before degrading* lives in the `
 
 The repair logic itself is shared. `chatTyped`'s implementation in `src/llm/chat-typed.ts` (or wherever it lives) grows a `repair: { jsonrepair: true, maxRetries: 1, onZodFailure: "feedback" }` option that both surfaces consume. The in-loop classifier invokes it with the same options; the in-loop budget interacts only with the classifier's outcome, not with `chatTyped`'s internal retry. Background jobs invoke `chatTyped` directly and get the same repair behavior without the loop-level wrapper.
 
-## Class D: loop pathology `[proposed]`
+## Class D: loop pathology `[confirmed]`
 
 Each loop iteration produces a fingerprint over **tool calls only**:
 
@@ -162,7 +162,7 @@ The side-effect gate requires every `ToolSpec` to declare `sideEffectful: boolea
 
 Adding the field is a one-shot migration: extend `ToolSpec` in `src/agent/tools.ts`, default to `true` at the consumer level, mark the read-only set above as `false`. Without this migration, the side-effect gate defaults to "always trip" and Class D never fires — so the migration is a precondition for shipping Class D detection, not an optional follow-up.
 
-## Telemetry `[proposed]`
+## Telemetry `[confirmed]`
 
 Every repair attempt and every degrade decision emits a structured log line (Pino `logger.warn`, **not** an Inngest event — these do not transit `step.sendEvent` and need no idempotency `id`):
 
@@ -179,7 +179,7 @@ The durable Inngest signal is `conversation/degraded` (emitted once per degraded
 
 The per-emission alternative — `logger.warn({ runId, conversationId, ... }, "...")` at every callsite — looked cheaper but isn't: the classifier sits deep inside `runStreamingAgentLoop`, so `runId` has to be threaded through the params anyway. The signature change is the same; the child logger costs one extra field, and every future emission inherits the context.
 
-## Where the layers compose `[proposed]`
+## Where the layers compose `[confirmed]`
 
 ```
 Inngest function `handle-message`             (Class A retries: 2)
@@ -196,7 +196,7 @@ Each layer handles one class. None of them double-handles another layer's class:
 - Non-loop Class C callsites (evolution drains, summarization — see "Outside the agent loop" above) use single-call retry inside `chatTyped` / wrapper; they never reach the classifier.
 - Inngest's outer `retries: 2` retries Class A failures that escaped the provider chain (mid-stream socket reset after first event, etc.); cached durable steps replay; the streaming section re-runs.
 
-## Out of scope / explicit non-goals `[proposed]`
+## Out of scope / explicit non-goals `[confirmed]`
 
 | Idea | Why excluded |
 |-|-|

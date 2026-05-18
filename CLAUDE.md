@@ -2,21 +2,7 @@
 
 Personal agent runtime — modular system with persistent memory and self-evolution.
 
-## Glossary
-
-| Term | Meaning |
-|-|-|
-| **Tool** | An LLM-callable function. Defined by name, description, and JSON Schema input. The LLM decides when to call it via `tool_use`. Implementation can be simple (return current time) or heavy (run a nested agent loop). See `ToolSpec` in `src/agent/tools.ts`. |
-| **Agent** | An autonomous loop with its own system prompt, tool set, and model. Heavier than a simple tool — makes multiple LLM calls. Exposed to the orchestrator as a Tool (agents-as-tools pattern). The orchestrator doesn't distinguish agents from simple tools — both are `ToolSpec` entries. |
-| **Service** | Scoped runtime dependencies injected into tool handlers by the orchestrator. The ACL boundary — tools access memory, http, etc. through this interface, never via direct service references. Scoped per conversation turn (userId, profile rules baked in). See `Service` in `src/agent/service.ts`. |
-| **Channel** | A platform connection (Telegram, Direct, Slack). DB row with credentials and identity mode. Each channel type has an `AdapterModule` in `src/transport/adapters/`. |
-| **Channel Session** | Maps a platform address to an active conversation (a Telegram DM, a Direct event address, a Web UI tab). Invisible to the agent — only the transport layer manages sessions. |
-| **Conversation** | A dialogue thread with shared LLM context. No explicit lifecycle — just goes idle. |
-| **Profile** | A named agent configuration: base prompt, model, enabled tools. Conversations use a profile. |
-| **Orchestrator** | The `handle-message` Inngest function. Thin controller — resolves session, constructs scoped service, calls the agent loop, emits response events. Zero business logic. |
-| **Control Command** | A channel command that doesn't go through the orchestrator (`/new`, `/profile`, `/settings`). Intercepted by the channel adapter, executed via domain services directly. Instant response, no LLM call. Distinct from regular messages which flow through the full pipeline. |
-| **Steering Rules** | Dynamic behavioral rules stored as DB rows, injected into system prompts at invocation time. Can be global or scoped to a profile. Managed by evolution stages. |
-| **Observer** | Post-conversation extraction. Runs after a conversation goes idle, extracts facts into Hindsight memory. |
+Glossary of core terms (Tool, Agent, Service, Channel, Conversation, Profile, Orchestrator, Steering Rules, Observer, etc.): see [design/overview.md](design/overview.md) → Glossary.
 
 ## Design Doc Confidence Markers
 
@@ -36,7 +22,7 @@ Read `design/` for the full picture. Key docs:
 
 | Doc | Contents |
 |-|-|
-| [overview.md](design/overview.md) | Vision, constraints |
+| [overview.md](design/overview.md) | Vision, constraints, glossary |
 | [architecture.md](design/architecture.md) | Topology, data flow, component map |
 | [memory.md](design/memory.md) | Hindsight, 4 networks, Observer extraction, retrieval |
 | [evolution.md](design/evolution.md) | 6-stage self-evolution ladder, safety patterns |
@@ -52,6 +38,7 @@ Read `design/` for the full picture. Key docs:
 | [sandbox.md](design/sandbox.md) | Container sandbox — sysbox-default runtime, Docker API proxy, lineage tracking, reaper |
 | [skills.md](design/skills.md) | Skill execution — Python, two-tier runtime (Pyodide WASM + sysbox), warm pool, git-backed library |
 | [coding-delegation.md](design/coding-delegation.md) | Claude Code / Codex CLI subprocess delegation, worktree + draft-PR flow, autonomy gates |
+| [agent-resilience.md](design/agent-resilience.md) | Failure taxonomy, in-loop repair, degraded reply, stuck-loop detection |
 | [setup.md](design/setup.md) | Guided setup wizard UX contract — interactive flow, re-runnable behavior, non-interactive mode |
 | [infrastructure.md](design/infrastructure.md) | Runtime requirements, Docker Compose, secrets (encrypted DB, master key, HKDF, `_FILE` convention), deployment |
 | [data-model.md](design/data-model.md) | Table index — points to schemas in domain docs, deferred tables, design decisions |
@@ -107,26 +94,7 @@ Other tracking docs:
 
 **Infrastructure modules (`db/`, `inngest/`, `llm/`, `memory/`) contain only core setup and abstractions.** Business logic that uses them lives in domain modules (`agent/`, `transport/`). Example: the Inngest event definitions live in `src/inngest/events.ts`, but the `handle-message` orchestrator function that uses them lives in `src/agent/`. Respond functions live in `src/transport/`, not `src/inngest/functions/`.
 
-### Store Pattern
-
-Each domain module owns its DB access in a `store/` subdirectory:
-
-- **`<module>/store/schema.ts`** — Drizzle table definitions owned by this module
-- **`<module>/store/index.ts`** — Store interface + implementation. All DB reads/writes go through this.
-- **`src/db/schemas.ts`** — Barrel file re-exporting all module schemas (for drizzle-kit migrations only)
-
-| Store | Tables |
-|-|-|
-| `agent/store/` | conversations, messages, steering_rules, profiles, core_memory_blocks |
-| `transport/store/` | channels, channel_sessions, inbound_messages, user_identities |
-
-**Interface boundary, not table boundary.** A store implementation can import schemas from any module — JOINs and cross-table transactions are fine. Consumers depend on the store interface and mock it in tests. The schema defines ownership (who creates/migrates the table); the interface defines access (who can read/write what).
-
-**Stores are stateless query objects; methods take `tx` first.** Every Drizzle store implementation has no constructor (or only the encryption key, for `DrizzleSecretsStore`) — `new DrizzleAgentStore()`. Each method takes `tx: Transaction` (exported from `src/db/index.ts`) as its first parameter and operates on `tx` directly with no internal `runInTx` wrapper. Callers own the unit-of-work boundary: pass a `Transactor` (`<T>(cb: (tx: Transaction) => Promise<T>) => Promise<T>`) into deps and wrap each call (or set of calls) in `runInTx(async (tx) => store.method(tx, args))`. Composing reads across stores — the original motivation — becomes natural: open one tx, call into multiple stores. Tests get `tx` from `createTestDatabase()`'s `{ db, tx, close }` return; unit tests use `await tx((trx) => store.method(trx, args))`. Mock-based tests use a sentinel-tx token: `const FAKE_TX = { __mockTx: true } as never; const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);` — assertions on call args use `expect.anything()` for the tx position.
-
-**Use cases live in domain folders, named after the action.** When a workflow composes multiple store calls inside one tx (the common case as soon as anything non-trivial talks to two stores), put it in a kebab-case file under the relevant domain folder — `src/agent/conversation/load-conversation-context.ts`, `src/agent/profile/set-profile-voice-mode.ts`, etc. Single async function per file: `async function loadConversationContext(deps, args) { ... }`. `deps` carries the `Transactor` plus the store interfaces the use case touches; `args` carries per-call inputs. Tests pass a fake `deps`. No `Service` class to wrap them in — the file IS the use case. The existing `Service` interface in `src/agent/service.ts` is unrelated: that's the per-conversation tool execution context (memory, files, coreMemory ACL boundary), not an application-service layer.
-
-**Default isolation is REPEATABLE READ.** `transactor(db)` wraps every call in `db.transaction(cb, { isolationLevel: "repeatable read" })` and retries a `40001 serialization_failure` once before surfacing it to Inngest's outer retry budget. Snapshot isolation per tx — every statement in a `runInTx` block sees the same committed-at-tx-start view. Compose reads across stores freely; no per-statement-snapshot reasoning required. Predicate races (two concurrent inserts both observing `count < cap` and both succeeding) are *not* caught by REPEATABLE READ — snapshot isolation doesn't predicate-lock. For those, the right tool is an advisory lock (`pg_advisory_xact_lock(user_id)`) or a unique partial index, not SERIALIZABLE: predicate races want prevention, not retry-on-detection. At single-user scale, the residual race on admission caps is benign and the cap-exceeded-by-1 case is documented at the relevant call sites. SERIALIZABLE is reserved for future hard-invariant paths (none today).
+Per-domain store layout and the unit-of-work boundary: @.claude/rules/store-pattern.md
 
 ## Commits & PRs
 
@@ -134,91 +102,16 @@ Each domain module owns its DB access in a `store/` subdirectory:
 - **No force pushes** — always create new commits to address review feedback. Force pushes erase review context, break comment threading, and make it impossible to see what changed between rounds. Amending is only acceptable before the first push of a branch.
 - **Merge over rebase** — use `git merge` to incorporate upstream changes, not `git rebase`. Merge preserves the original commit graph, keeps review comments attached to their commits, and avoids the force push that rebase requires.
 - **PR bodies and commit messages: pass markdown via `--body-file`, never via shell heredoc.** Backticks (`\``) and triple-backtick fences inside a heredoc-built `--body "$(cat <<'EOF' ... EOF)"` get mangled — `gh` (or the shell) escapes them to literal `\\\`` sequences that GitHub renders as a backslash next to a backtick. Same risk for any embedded `$`, `!`, or shell-special character. Write the body to a tempfile with the `Write` tool and pass `gh pr create --body-file /tmp/pr-body.md` (or `git commit -F /tmp/msg.md`); no shell interpolation, no escape surprises. Verify after with `gh pr view <n> --json body -q .body | head` — if you see `\\\``, the file went through a heredoc.
+- **PR bodies: no per-file breakdowns or LOC counts.** Don't restate the diff. A list of changed files with `+N / -M` annotations duplicates what GitHub already renders and wastes the reviewer's attention. State *what* changed and *why*; let the file tree do its job. **Exception:** when a single logical change is intentionally distributed as small adjustments across many files (a rename refactor, a mechanical migration touching dozens of callsites, a cross-cutting flag rollout), a brief grouping helps the reviewer scan — call it out only then.
+- **Before opening a PR, audit test coverage on the changed surface.** New behavioral branches with no test, error paths that silently degrade with no regression test, contracts only exercised indirectly through happy-path tests — find them and either add coverage or flag the gap explicitly in the PR body. Reviewers should not be the ones discovering "the failure path isn't tested." When you add a try/catch that swallows errors into a degraded return, that catch deserves a test before the PR opens.
 
 ## Code Style
 
-- **Comments describe the current state, not migration history.** Don't write "Tighter than the previous `[0-9a-f-]{36}` regex which would accept...", "Replaced the unconditional UPDATE here", "Don't say 'Done' because we used to...". Future readers don't have the prior code in front of them — they want to know what this code IS and why, not what it ISN'T or what it replaced. The diff and commit message own the migration story; the comment owns the present-tense rationale. If a comment only makes sense by contrast with a prior version, delete it.
-- **Idiomatic TypeScript** — use classes, interfaces, enums where they make the domain clear. Prefer `interface` over `type` for object shapes (extendable). Use generics for reusable components.
-- **`function` declarations for named exports** — use `function foo()` not `const foo = () => {}`. Better stack traces, hoisted, readable. Arrow functions for callbacks and inline lambdas only.
-- **Naming** — lowercase-hyphenated filenames (`steering-rules.ts`), `.test.ts` suffix for tests. PascalCase for classes/types/interfaces, camelCase for functions/variables.
-- **Imports** — ESM with `.js` extensions (`import { foo } from "./bar.js"`). Named imports over default exports. Biome organises imports automatically. **No circular imports** — tsx/esbuild's `keepNames` helper breaks on circular ESM imports (`__name is not a function`). If A imports B and B imports A, restructure so one side accepts the dependency as a parameter instead.
-- **Return types** — annotate exported functions that return domain types (`Transport`, `Service`, `AgentLoopResult`, etc.). Skip annotation when the return type is a complex library generic (Inngest functions, Drizzle columns) — inference is better there. Biome's `useExplicitType` nursery rule is too broad to enforce this; rely on review discipline.
-- **Error handling** — `Result<T, E>` (neverthrow) at service boundaries and anywhere failure is expected. Exceptions only for programmer errors (bugs). Never `catch` and silently swallow.
-- **No mutable state across boundaries** — functions may mutate local arrays/objects internally for performance, but must return defensive copies (spread or `structuredClone`). Never return a reference to internal mutable state — this is rep exposure. Use `Readonly<T>` / `ReadonlyArray<T>` in return types where practical.
-- **Prefer libraries over bespoke code** — check if a well-maintained library solves the problem before writing a custom implementation. See `design/tooling.md` for the approved stack.
-- **Use the stack** — Remeda for collection processing, neverthrow for Result types, ts-pattern for pattern matching, Zod for validation, Drizzle for queries. Don't reinvent what these provide.
-- **Manual `sql\`\`` is for fragments Drizzle's typed API can't express** — Postgres function calls (`uuidv7()`, `now()`), partial-index predicates declared inside `pgTable`, and DDL fragments inside migrations. For query bodies (WHERE, JOIN, subquery, set ops), use the typed operators: `eq`, `and`, `or`, `inArray`, `desc`, `exists`, `notExists`, `alias` (from `drizzle-orm/pg-core` for self-joins), `selectDistinctOn`, etc. If you reach for `sql\`SELECT ... FROM\`` or `sql\`NOT EXISTS (...)\``, stop and check whether the typed API expresses it — it almost always does, with smaller surface for SQL injection and tighter type inference. Tests get a carve-out for adversarial setup (e.g. `db.execute(sql\`UPDATE ... SET expires_at = now() - interval '1 hour'\``) where the goal is to bypass the store and create a state the typed API would refuse.
-- **Functional collection processing** — use `R.map`, `R.filter`, `R.pipe`, `R.reduce`, `R.groupBy`, etc. over `for` loops for data transforms. `for` loops are acceptable only when the body is side-effectful (sequential `await`, I/O) or is a stateful scan with early exit that would be less readable as a functional chain. If you reach for a `for` loop, first check whether `R.map`/`R.flatMap`/`R.reduce` can express it. Prefer Drizzle's `.values([...])` batch insert over looping inserts.
-- **Inject dependencies, don't hard-import them** — services and stateful dependencies (db, LLM provider, agent loop) should be passed in as parameters — interface, class, or function. Hard-importing a concrete implementation creates coupling that requires `vi.mock()` to test. A function parameter counts as injection — `bar(chat: () => Promise<Response>)` is as good as `bar(provider: LlmProvider)`. Pure helpers, utilities, constants, type definitions, and schema objects (e.g. `eq()` from drizzle, `logger`, Zod schemas) are fine to import directly.
-- **Strict encapsulation** — all class fields and methods must be `#private` unless declared on the interface the class implements. Use ES2022 `#` (runtime-enforced), not TypeScript `private` (erased at compile time). This prevents accidental exposure of implementation details and ensures the interface IS the public API.
-- **Async class initialization** — use `private constructor` + `static async create()` factory. Never do async work in constructors. The factory ensures the instance is fully initialized before it's returned. Thin standalone factory functions can alias the static method (e.g., `const startFoo: StartAdapter = Foo.create`).
-- **Avoid `as` type assertions** — `as` silences the type checker and hides bugs. Prefer: type guards (`if (x.type === "foo")`), Zod parsing, refactoring so the source produces the correct type, or Postgres enums (Drizzle `pgEnum` → TypeScript union, no cast needed). Acceptable uses: `as const` for literal narrowing; `as unknown as X` in tests for intentionally invalid input; Drizzle result casts when the select shape exactly matches the return type and inference falls short. If you write `as`, justify why the alternative is worse. **`as unknown` in production code requires an inline comment naming the specific library type gap it's working around** (e.g. "OpenAI SDK type doesn't include tool_calls on this message variant", "dockerode hijacked stream is structurally Writable but typed as Duplex"). No comment = the cast is hiding something instead of documenting it. **Before commenting on a cast as a library type gap, try removing it** — a cast that compiles cleanly after deletion was cruft (SDK fixed the type, upstream import changed, or a TS-strict-flag mismatch resolved itself). `tsc` is cheaper than a paragraph of justification; only reach for the comment after deletion has actually failed.
-- **Generalise where reasonable** — extract interfaces and shared types when two or more consumers exist. Don't over-abstract for hypothetical future use.
-- **No dead code** — if nothing consumes a method, delete it or make it private. No code "just in case".
+@.claude/rules/code-style.md
 
 ## Testing
 
-### Principles
-
-- **One module per test file** — each `.test.ts` tests exactly one source module. Mock everything outside that module.
-- **Design for testability** — accept interfaces, not concrete classes. Pass dependencies (db, provider) as parameters, not imports. If something is hard to test, the design is wrong — fix the design, not the test.
-- **Test contracts, not internals** — test the interface a consumer depends on. If changing an implementation detail breaks a test, the test is too coupled. If a contract changes and no test breaks, there's a gap.
-- **Boundary behavior matters** — defensive copies, error propagation, unknown/missing inputs, edge cases at module boundaries. This is where real bugs live.
-- **Test helpers for readability** — factory functions (`mockProvider()`, `textResponse()`) keep tests scannable. Prefer building test data declaratively over inline object literals repeated across tests.
-- **Mock interfaces with `mock<T>()` from `vitest-mock-extended`, not `as any`.** For any stub of a project-owned interface (`MemoryProvider`, `SecretsStore`, `SkillStore`, `Service`, etc.), use `mock<T>()` — it returns a typed `MockProxy<T>` with every method as a `vi.fn()`, no casts needed. Override individual methods with `.mockResolvedValue(...)` / `.mockImplementation(...)`. **Do not write** `{ partial fields } as any` to satisfy a typed dep. *Three known caveats:* (1) **Absent optional sub-namespaces don't work via assignment.** `mock<Service>()` returns a Proxy that auto-mocks on every access, including optional fields like `coding`/`skills`. `svc.coding = undefined` is blocked by `exactOptionalPropertyTypes`, and `delete svc.coding` doesn't stick — the Proxy re-mocks on the next read, so a test that exercises the "service is unavailable" path still sees `service.coding.delegate is not a function`. Hand-build the stub instead, mocking the always-present sub-namespaces and using conditional spread for the optional ones: `{ memory: mock<Service["memory"]>(), files: mock<Service["files"]>(), coreMemory: mock<Service["coreMemory"]>(), ...(coding !== undefined && { coding }) }`. See `src/agent/coding/tool.test.ts` and `src/skills/skills-tool.test.ts`. (2) Stateful test fixtures with custom call-tracking (e.g. the dockerode stubs in `src/sandbox/supervisor.test.ts` / `reaper.test.ts`) and partial third-party types where only one method is exercised (`{ send } as any` for Inngest) stay as targeted partial casts — `mock<T>()` doesn't help when the value of the test IS the stateful tracking. (3) `mock<Service>()` similarly auto-mocks every nullable field, including ones a test wants to read as `null` for default behavior — assign explicitly when the contract under test depends on `null` vs. defined.
-- **Narrow without `!` or `as`.** Use the helpers in `src/test/assertions.ts` instead of writing `events[4] as Extract<CodingEvent, { kind: "plan_ready" }>` or `arr[0]!`. `expectDefined<T>(value, label)` returns the narrowed `T` and throws if null/undefined — for `arr[i]`, `map.get(k)`, `.find(...)`, `mock.calls[0]`. `assertKind<U,K>(value, kind)` uses an `asserts value is …` annotation to narrow a discriminated-union variant in place: `const planReady = events[4]; assertKind(planReady, "plan_ready"); expect(planReady.plan)…` works without a cast at the call site. Cast-free narrowing keeps the type checker honest — a wrong `kind` literal is a compile error rather than a silent runtime miscoercion.
-- **Deep-merge `Transport` overrides via `mockTransportDeep`.** `mockTransport({ conversations: { list: vi.fn()… } })` requires the *full* `Transport["conversations"]` shape and breaks every time a new method is added to the namespace. `mockTransportDeep({ conversations: { list: vi.fn()… } })` from `src/test/factories.ts` deep-merges the override into each sub-namespace (`conversations`, `profiles`, `coding`, `skills`, `repos`, `models`, `mcp`) and keeps `mockTransport()`'s defaults for the rest. Use it whenever a test only cares about one method on a namespace.
-- **Coverage patterns** — `design/testing.md` → "Coverage Patterns" lists concrete recipes (JSONB raw-SQL bypass, discriminated-union parse tests, audit invariants, error-path matrix, resource-cleanup invariants, concurrency invariants, CLI exit-code matrix). Apply to new test code.
-- **Integration tests pass in isolation, ship in parallel.** Vitest's integration tier runs files in parallel forks by default — that's the deployment model, not an implementation detail. Before declaring an integration test stable, run it alongside its noisiest peers (`pnpm test:integration --run a.test.ts b.test.ts`), not just `--run my.test.ts`. Tests that bootstrap shared infrastructure (Inngest connect, sockets, port bindings, advisory locks, Postgres rows that other tests query) collide under parallel forks in ways single-file runs hide. CI passing isn't proof either — slower runners can give timing windows that don't exist locally; when local fails and CI passes, suspect CI luck first and reproduce on the prior committed state (`git stash` + rerun) before blaming local environment. If a test relies on per-fork state but participates in a shared event/RPC bus, that's a design bug — fix the design (e.g. move the resource to `globalSetup` and `provide()` its URL), don't paper over with retries or sequential pragmas.
-- **Framework:** Vitest. See `design/testing.md` for full details.
-
-### Three-Tier Structure
-
-| Tier | Infra | App | LLM | What it proves |
-|-|-|-|-|-|
-| **unit** `.test.ts` | PGlite (in-process) | mocked / direct | mocked | Module logic, store queries, contracts |
-| **integration** `.integration.test.ts` | Docker (PG, Redis, Inngest, Hindsight) + llmock | in-process | llmock fixtures | Pipeline orchestration, memory round-trip, event routing |
-| **e2e** `.e2e.test.ts` | Docker (full stack) + llmock | subprocess | llmock fixtures | Binary boots, migrations apply, full stack smoke |
-
-Commands: `pnpm test` (unit), `pnpm test:integration`, `pnpm test:e2e`, `pnpm test:all`.
-
-### Store Tests with PGlite
-
-Store implementations (`DrizzleAgentStore`, `DrizzleTransportStore`) are tested against real SQL via PGlite — an in-memory WASM PostgreSQL (PG17). No Docker needed.
-
-- **Schema:** Applied via `pushSchema()` from `drizzle-kit/api` — no migration files in tests.
-- **UUIDs:** `pg_uuidv7` PGlite extension + `uuidv7()` SQL alias (the extension exposes `uuid_generate_v7()`).
-- **Type:** `Database` is `PgDatabase<PgQueryResultHKT, schema>` — driver-agnostic. Works with postgres-js, PGlite, or any Drizzle PG driver. No `as any` casts needed.
-- **Cleanup:** Truncate all tables via `db.execute(sql\`...\`)` between tests. One PGlite instance per test file.
-- **Helper:** `src/test/pglite.ts` — `createTestDatabase()` and `truncateAll()`.
-
-### Record/replay mocks (LLM + fal + voice + xAI + Daytona)
-
-Integration tests run against frozen wire fixtures captured from real upstreams. CI replays for free; recordings happen locally once per drift. Five mocks share the same `RECORD=1` env flag:
-
-| Mock | Location | What it captures |
-|-|-|-|
-| llmock (`@copilotkit/aimock`) | `test/llmock-setup.ts` | Anthropic `/v1/messages` + OpenAI `/v1/chat/completions` + `/v1/embeddings` (for Hindsight) |
-| fal-mock | `src/test/fal-mock.ts` | fal.ai image generation, scoped `fetch` wrapper |
-| openai-voice-mock | `src/test/openai-voice-mock.ts` | OpenAI `/v1/audio/{speech,transcriptions}` for TTS/STT |
-| xAI llmock | `src/test/xai-grok.integration.test.ts` | One-off llmock proxying `openai → openrouter.ai/api` |
-| daytona-mock | `src/test/daytona-mock.ts` | `@daytonaio/sdk` REST + WebSocket (toolbox proxy, `getSessionCommandLogs`) |
-
-**To re-record:** `pnpm test:record` (or `:e2e`) sets `RECORD=1` and runs the integration tier. Each mock guards on its own upstream API key — only adapters with keys present in `.env` actually record. CI never sets `RECORD=1`; unmatched requests fail with `503` (or `1011` for WS) carrying a "re-record" hint.
-
-**When to re-record:** prompt structure changes, new tools in the system prompt, auto-recall on/off, model swap, SDK version bump for daytona/fal/etc. The failing test's error surface points at the fixture file that needs refreshing.
-
-**Sandbox-id and other stable identifiers in URLs:** fixture matching is `(method, path)` FIFO. Random per-test UUIDs that appear in URLs (`sessionId`, etc.) must be pinned to fixed strings in the test, otherwise the recorded path won't match the replay path. Body-only identifiers (labels, request payloads) can stay random — body comparison is intentionally loose.
-
-### Integration Test Env Injection
-
-`process.env` mutations in Vitest `globalSetup` propagate to test workers (worker env = `{ ...process.env, ...config.env }`). Dynamic values (container URLs, `COGMO_MASTER_KEY`) are set via `process.env` in globalSetup. Static values (`NODE_ENV`) go in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
-
-### Telegram Testing
-
-- **Unit:** grammY transformers + `handleUpdate()` for testing adapter logic without network. Current tests use `vi.mock("grammy")` — future enhancement to use grammY's built-in test primitives.
-- **Integration:** Not tested — integration tier uses Direct adapter.
-- **E2e (future):** Telegram Test DC + tgintegration (TypeScript/mtcute). Real user account on Telegram's test servers.
+@.claude/rules/testing.md
 
 ## Working with Tools
 
@@ -252,18 +145,4 @@ After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 
 ## Architecture Rules
 
-- No frameworks — raw SDK only.
-- **All DB operations use transactions.** Stores enforce this at the type level — every store method takes `tx: Transaction` as its first parameter (see `src/db/index.ts`). Callers wrap calls in `runInTx(async (tx) => store.method(tx, args))` from a `Transactor` they hold. Bootstrap probes that hit the DB once before stores are wired (e.g. `checkUuidv7`) take `Database` directly and stay outside this rule.
-- **Every table gets a UUIDv7 primary key (`id`, DB-generated) and `created_at TIMESTAMPTZ DEFAULT now()`.** No exceptions.
-- **Columns are NOT NULL unless explicitly nullable.** Drizzle defaults to nullable — always add `.notNull()`. Nullable columns must be justified (e.g., `expires_at` = never expires, `steering_rules.profile_id` = null means applies to all profiles, `steering_rules.channel_type` = null means applies to all channels).
-- **Avoid default values** in DB columns and function parameters unless strongly justified (`id`, `created_at` are justified). Explicit values at the call site prevent hidden assumptions.
-- **Use `pgEnum` for any column whose values we control.** Don't use `text` + CHECK constraint for closed value sets — Drizzle's `pgEnum` produces a real Postgres `CREATE TYPE`, gives the TS column a literal-union type without `as` casts, and rejects unknown values at write time. Reserve `text` for values from external systems (channel types from third-party adapters, model names from upstream providers) where the set isn't ours to define. Reference: `auto_recall_mode`, `conversation_status`, `pending_memory_source` in `src/agent/store/schema.ts`.
-- **No table design is final.** Schemas in `design/` docs are design intent, not frozen specs — they evolve as real usage reveals issues. When changing a table, update both the Drizzle schema (`<module>/store/schema.ts`) and the design doc that owns it simultaneously.
-- **Prefer immutable rows.** Insert once, avoid updates where practical. When updates are necessary (e.g. status transitions), that's fine — just design tables so most rows are append-only.
-- **Every JSONB column has a Zod schema validated at the store boundary** (on both read and write). JSONB without a schema is rep exposure — any shape drift is caught where the bytes enter or leave the DB, not deep inside consumer code. Declare columns with the `jsonbZod(name, Schema)` helper from `src/db/helpers.ts` — a Drizzle `customType` wrapper that runs `Schema.parse()` in `toDriver` and `fromDriver`, so validation is built into the column instead of repeated at every call site, and Drizzle infers the row type as `z.infer<typeof Schema>` (no `JsonValue` casts). Name the schema in the design doc next to the column (e.g. `resource_usage JSONB, -- ResourceUsageSchema`). Reference: `messages.content` declared via `jsonbZod("content", MessageContentSchema)` in `src/agent/store/schema.ts`. Exception: opaque payloads that Cogmo never inspects (e.g. `channels.credentials`, which is encrypted ciphertext the adapter hands back to the channel SDK). Keep those as plain `jsonb()` and mark them OPAQUE in the schema comment.
-- **Group atomic multi-field state in a JSONB blob, not separate columns.** When two or more fields are conceptually inseparable (set together, used together, never independently meaningful), prefer one nullable JSONB column with a Zod schema enforcing the all-or-none invariant over multiple nullable columns. Consumers do one null check; the schema makes "half-set" states unrepresentable at the store boundary. Reference: `coding_tasks.worktree_assignment` carries `{ branch, worktreePath }` — null until the orchestrator's allocate-worktree step runs, both fields populated together once it does. Single-field state stays as its natural type (text, timestamp, FK) — a JSONB blob with one field is just text-with-overhead. The trade-off is ad-hoc DB queries (`SELECT col->>'field'` instead of `SELECT field`) and indexability — accept that cost when atomicity matters more than DB-level access ergonomics, which is most of the time for lifecycle state.
-- Memory writes are always additive. Dedup runs async via `reflect()`.
-- Sub-agents never see API keys. Orchestrator makes all external calls.
-- Every LLM call uses typed contracts (Zod schema in, Zod schema out) with retry + feedback injection.
-- Self-evolution changes are gated: steering rule corrections auto-apply (graduation model), code/skill changes require human approval.
-- Secrets never in env files or git. Use host secret management in production.
+@.claude/rules/architecture-rules.md
