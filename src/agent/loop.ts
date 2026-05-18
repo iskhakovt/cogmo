@@ -167,8 +167,8 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     service,
     stepRun,
     maxIterations = DEFAULT_MAX_ITERATIONS,
+    turnLogger: log,
   } = params;
-  const log = params.turnLogger;
   const messages = clearOldThinking(sanitizeHistory(params.messages, log));
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
@@ -492,8 +492,8 @@ export async function runStreamingAgentLoop(
     onEvent,
     stepRun,
     maxIterations = DEFAULT_MAX_ITERATIONS,
+    turnLogger: log,
   } = params;
-  const log = params.turnLogger;
   const messages = clearOldThinking(sanitizeHistory(params.messages, log));
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
