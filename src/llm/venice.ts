@@ -183,9 +183,13 @@ export class VeniceImageProvider {
       throw new Error(`Venice image generation failed: HTTP ${resp.status}`);
     }
 
-    // Censorship signals via response headers. Check before parsing the
-    // body — a content-violation response can still carry a placeholder
-    // image we don't want to deliver.
+    // Censorship signals via response headers. Check after the 4xx guard
+    // above because Venice's docs return content-violation as a 200 — we
+    // only reach this branch on success status, and the headers tell us
+    // whether the 200 carries a real image or a placeholder. If Venice
+    // ever ships content-violation as a 400, the 4xx branch will catch
+    // it first and lose the structured signal — at that point flip the
+    // order so the header probe runs before the status check.
     const contentViolation = resp.headers.get("x-venice-is-content-violation");
     if (contentViolation === "true") {
       throw new AbortError(
@@ -209,9 +213,12 @@ export class VeniceImageProvider {
     if (typeof first !== "string" || first.length === 0) {
       throw new Error("Venice response carried no image data");
     }
+    // Buffer extends Uint8Array, so the `uint8Array` field contract is
+    // satisfied directly — wrapping in `new Uint8Array(buffer, ...)` just
+    // adds a view layer the caller would copy through anyway.
     const bytes = Buffer.from(first, "base64");
     return {
-      uint8Array: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+      uint8Array: bytes,
       mediaType: MEDIA_TYPE_BY_FORMAT[this.#format],
     };
   }

@@ -900,10 +900,13 @@ async function promptAddImageModels(
       }),
     );
 
-    // Venice models all accept `negative_prompt` natively; openai-compatible
-    // models typically don't. Default the prompt accordingly so the operator
-    // gets the right answer by hitting Enter, while keeping the toggle
-    // available if a custom OpenAI-shaped endpoint does support it.
+    // Venice models accept `negative_prompt` natively. Canonical OpenAI
+    // images (`/v1/images/generations`) rejects it with HTTP 400 because
+    // DALL-E / gpt-image-* don't model the concept. But "openai_compatible"
+    // is a broader category — some OpenAI-shaped servers (Together,
+    // Replicate's shim, custom inference) accept extra body fields the
+    // handler can forward via `providerOptions[providerName]`. Default the
+    // toggle accordingly; keep it user-overridable.
     const negativePrompt = cancelGuard(
       await p.confirm({
         message: "Does this model accept a negative prompt (`negativePrompt` tool field)?",

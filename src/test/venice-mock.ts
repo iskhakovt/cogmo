@@ -114,17 +114,14 @@ async function handleGenerate(
   // Build a headers map filtering down to what consumers care about — we
   // explicitly preserve the censorship headers, content-type, and the
   // status. Don't capture cookies, set-cookie, ratelimit-reset, etc.
+  const blurredHeader = realResp.headers.get("x-venice-is-blurred");
+  const violationHeader = realResp.headers.get("x-venice-is-content-violation");
   const captured: RecordedResponse = {
     status: realResp.status,
     headers: {
       "Content-Type": realResp.headers.get("Content-Type") ?? "application/json",
-      ...(realResp.headers.get("x-venice-is-blurred") !== null && {
-        "x-venice-is-blurred": realResp.headers.get("x-venice-is-blurred") ?? "",
-      }),
-      ...(realResp.headers.get("x-venice-is-content-violation") !== null && {
-        "x-venice-is-content-violation":
-          realResp.headers.get("x-venice-is-content-violation") ?? "",
-      }),
+      ...(blurredHeader !== null && { "x-venice-is-blurred": blurredHeader }),
+      ...(violationHeader !== null && { "x-venice-is-content-violation": violationHeader }),
     },
     body: tryParseJson(responseBody),
   };

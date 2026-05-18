@@ -192,9 +192,25 @@ async function generateViaAiSdk(args: {
         aspectRatio: args.aspectRatio as `${number}:${number}`,
       }),
       ...(args.seed !== undefined && { seed: args.seed }),
+      // negative_prompt routing differs by provider shape:
+      //   - fal: passes through `providerOptions.fal.negative_prompt`
+      //     which the @ai-sdk/fal adapter folds into the request body.
+      //   - openai_compatible: same passthrough mechanism, keyed by the
+      //     provider's `name` (the value used when `createOpenAICompatible({
+      //     name, ... })` was constructed in `image-providers.ts`).
+      //     Canonical OpenAI rejects with HTTP 400; servers that accept
+      //     extra body fields (Together, Replicate's shim, custom)
+      //     forward the value. The capability flag is the operator's
+      //     declaration of "my chosen server takes this".
+      //   - venice: forwarded via the native adapter, not the AI SDK
+      //     `providerOptions` shape — handled in the venice branch.
       ...(args.provider.kind === "fal" &&
         args.negativePrompt !== undefined && {
           providerOptions: { fal: { negative_prompt: args.negativePrompt } },
+        }),
+      ...(args.provider.kind === "oai" &&
+        args.negativePrompt !== undefined && {
+          providerOptions: { [args.provider.row.name]: { negative_prompt: args.negativePrompt } },
         }),
     });
     return image;

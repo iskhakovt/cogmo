@@ -641,6 +641,46 @@ describe("createImageTools", () => {
     expect(generateFn.mock.calls[0]?.[0]).not.toHaveProperty("negativePrompt");
   });
 
+  it("forwards negativePrompt to openai_compatible via providerOptions[providerName].negative_prompt", async () => {
+    // Canonical OpenAI rejects with HTTP 400, but openai-shaped servers
+    // (Together, Replicate's shim, custom inference) accept the field —
+    // the capability flag is the operator's declaration of "my server
+    // takes this." The handler forwards via the @ai-sdk/openai-compatible
+    // passthrough keyed by provider name, matching how the SDK was
+    // constructed in `image-providers.ts`.
+    mockGenerateImage.mockResolvedValueOnce({
+      image: { uint8Array: new Uint8Array(8192), mediaType: "image/png" },
+    });
+    const { provider } = fakeOaiProvider();
+    const oaiModel: ImageModelWithProvider = {
+      id: "model-oai-1",
+      providerId: "provider-2",
+      name: "venice-oai/sd35",
+      modelString: "venice-sd35",
+      description: "openai-compat with negativePrompt",
+      capabilities: { negativePrompt: true },
+      userSelectable: true,
+      provider: provider.row,
+    };
+    const [tool] = createImageTools({
+      models: [oaiModel],
+      providers: new Map([["provider-2", provider]]),
+      attachments: fakeAttachments(),
+    });
+    await tool!.handler(
+      {
+        prompt: "x",
+        model: "sd35",
+        negativePrompt: "low quality",
+      },
+      FAKE_SERVICE,
+    );
+    const callArg = mockGenerateImage.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(callArg.providerOptions).toMatchObject({
+      "venice-oai": { negative_prompt: "low quality" },
+    });
+  });
+
   it("forwards negativePrompt to fal via providerOptions.fal.negative_prompt", async () => {
     mockGenerateImage.mockResolvedValueOnce({
       image: { uint8Array: new Uint8Array([1]), mediaType: "image/png" },

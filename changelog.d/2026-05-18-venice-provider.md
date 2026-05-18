@@ -2,7 +2,7 @@ Added a third `image_provider_type` enum value, `venice`, backed by a hand-rolle
 
 Provider-level defaults (`safe_mode`, `cfg_scale`, `hide_watermark`, `style_preset`) live in `image_providers.attrs.imageGenerationDefaults` under a provider-neutral key so future adapters can layer their own defaults without a migration. The wizard / `cogmo image-provider` CLI prompts for `safe_mode` (Venice default `true`); when set to `false` the adapter throws on an `x-venice-is-blurred: true` response — opting out of blur and still getting one is a failed generation.
 
-`image_models.capabilities.negativePrompt` opts a model into the per-call `negativePrompt` tool field. Venice forwards it as the native body's `negative_prompt`; fal routes it through `providerOptions.fal.negative_prompt`; `openai_compatible` drops it. Capability-absent models silently drop the field at the handler so the LLM contract stays honest.
+`image_models.capabilities.negativePrompt` opts a model into the per-call `negativePrompt` tool field. Venice forwards it as the native body's `negative_prompt`; fal routes it through `providerOptions.fal.negative_prompt`; `openai_compatible` routes it through `providerOptions[providerName].negative_prompt` (canonical OpenAI rejects it, but openai-shaped servers like Together / Replicate's shim accept extra body fields). Capability-absent models silently drop the field at the handler so the LLM contract stays honest.
 
 A sibling PR is landing in parallel that generalises moderation detection for fal (`providerMetadata.fal.has_nsfw_concepts`, file-size canary). This PR throws clean `AbortError`s from the Venice path so a small follow-up can unify both behind one typed error without coordination logic on either side.
 
