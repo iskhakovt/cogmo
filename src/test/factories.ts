@@ -464,11 +464,54 @@ export function mockToolRegistry(): ToolRegistry {
   } as unknown as ToolRegistry;
 }
 
-export function mockStep() {
+/**
+ * Minimum surface our orchestrator functions touch on `step`. Real Inngest
+ * `step.run` is generic over `TFn`'s return type, but tests only need the
+ * passthrough behavior (run the body inline). Typing this as a structural
+ * subset of `BaseContext["step"]` keeps the call sites cast-free without
+ * binding to Inngest's deep handler-generics machinery.
+ */
+export interface MockStep {
+  run: ReturnType<typeof vi.fn>;
+  sendEvent: ReturnType<typeof vi.fn>;
+}
+
+export function mockStep(): MockStep {
   return {
     run: vi.fn((_id: string, fn: () => unknown) => fn()),
     sendEvent: vi.fn(),
   };
+}
+
+/**
+ * Invoke the handler body of an Inngest function for unit testing.
+ *
+ * `inngest.createFunction(...)` returns an `InngestFunction` whose handler
+ * is a `private readonly fn` field — the SDK exposes no public hook for
+ * driving a handler in isolation. The single cast lives here so test call
+ * sites stay free of `as any`; callers pick the context shape they need
+ * via the `TCtx` generic.
+ *
+ * Pair with `invokeInngestOnFailure` for the `opts.onFailure` handler;
+ * `opts` is public on `InngestFunction` so that one doesn't need a cast,
+ * but the helper centralises the calling pattern symmetrically.
+ */
+export async function invokeInngestFn<TCtx>(inngestFn: object, ctx: TCtx): Promise<unknown> {
+  const handle = inngestFn as { fn: (ctx: TCtx) => Promise<unknown> };
+  return handle.fn(ctx);
+}
+
+/**
+ * Invoke an Inngest function's `onFailure` handler directly. Mirrors the
+ * shape Inngest itself passes — `{ event, error, step }` — but lets the
+ * test author pick the context type so the assertion that follows can
+ * narrow `event.data` to the real failure payload shape.
+ */
+export async function invokeInngestOnFailure<TCtx>(inngestFn: object, ctx: TCtx): Promise<unknown> {
+  const handle = inngestFn as { opts: { onFailure?: (ctx: TCtx) => unknown } };
+  const onFailure = handle.opts.onFailure;
+  if (!onFailure) throw new Error("invokeInngestOnFailure: no onFailure handler defined");
+  return onFailure(ctx);
 }
 
 export function mockProvider(overrides?: Partial<LlmProvider>): LlmProvider {

@@ -616,4 +616,40 @@ describe("extractCorrections", () => {
     // chatTyped should not have been called
     expect(deps.provider.chat).not.toHaveBeenCalled();
   });
+
+  it("recovers a trailing-comma extraction response via chatTyped repair", async () => {
+    // Regression: extract-corrections passes `repair: {}` into chatTyped, so
+    // the jsonrepair pre-pass fixes a trailing comma in the structured-output
+    // response without a feedback retry. Without repair this would crash the
+    // extraction run.
+    const provider = mockProvider({
+      chat: vi.fn().mockResolvedValue({
+        content: [
+          {
+            type: "text",
+            text: '{"corrections":[{"rule":"Use fetch_url for weather lookups","category":"domain","reasoning":"User correction","matchedExistingRuleId":null,"action":"new","channelType":null,},],}',
+          },
+        ],
+        stopReason: "end_turn",
+        model: "mock",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    });
+    const deps: ExtractionDeps = {
+      provider,
+      model: "test-model",
+      runInTx: fakeRunInTx,
+      store: {
+        getCorrections: vi.fn().mockResolvedValue([]),
+        upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
+        countActiveRules: vi.fn().mockResolvedValue(5),
+      },
+      activeChannelTypes: [],
+    };
+
+    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+
+    expect(result.extracted).toBe(1);
+    expect(provider.chat).toHaveBeenCalledTimes(1);
+  });
 });

@@ -132,6 +132,10 @@ describe("openai-compatible image gen — OpenAI dall-e-3 (recorded)", () => {
       models: [modelEntry],
       providers: new Map([[PROVIDER_ID, provider]]),
       attachments,
+      // Stub fixtures decode to ~67 bytes — well under the production
+      // size canary. Bypass the detector so the integration test
+      // exercises the recorded wire shape, not the moderation path.
+      detectImageFailure: () => ({ ok: true }),
     });
     expect(tool).toBeDefined();
 

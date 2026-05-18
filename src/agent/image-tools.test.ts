@@ -4,8 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ImageModelWithProvider } from "../agent/store/index.js";
 import type { ImageProvider } from "../llm/image-providers.js";
 import type { VeniceImageProvider } from "../llm/venice.js";
+import { logger } from "../logger.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { AbortError } from "../util/with-retry.js";
+import { SUSPICIOUS_SIZE_THRESHOLD_BYTES } from "./image-moderation.js";
 import {
   createImageTools,
   type GeneratedImagePayload,
@@ -13,6 +15,21 @@ import {
   parseGeneratedImagePayload,
 } from "./image-tools.js";
 import type { Service } from "./service.js";
+
+/**
+ * Byte count comfortably above the image-moderation size canary so the
+ * default mocked `generateImage` result represents a real photo, not a
+ * placeholder. Individual tests opt into the canary's failure path by
+ * passing their own small Uint8Array.
+ */
+const HEALTHY_IMAGE_BYTES = SUSPICIOUS_SIZE_THRESHOLD_BYTES * 50;
+
+function healthyImage(mediaType = "image/png"): {
+  uint8Array: Uint8Array;
+  mediaType: string;
+} {
+  return { uint8Array: new Uint8Array(HEALTHY_IMAGE_BYTES), mediaType };
+}
 
 // Passthrough withRetry — tests exercise the handler's error classification
 // without paying real backoff delays. Retry behaviour itself is covered in
@@ -110,8 +127,12 @@ function fakeVeniceProvider(): {
   generateFn: ReturnType<typeof vi.fn>;
   provider: ImageProvider;
 } {
+  // Use a healthy-sized buffer so the moderation size canary doesn't
+  // fire on venice tests that aren't exercising the moderation path.
+  // Tests that DO exercise it set their own smaller payload + inject
+  // the real detector explicitly.
   const generateFn = vi.fn(async () => ({
-    uint8Array: new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
+    uint8Array: new Uint8Array(HEALTHY_IMAGE_BYTES),
     mediaType: "image/png" as const,
   }));
   const provider: ImageProvider = {
@@ -255,9 +276,7 @@ describe("createImageTools", () => {
   });
 
   it("delegates to provider.image() for fal models", async () => {
-    mockGenerateImage.mockResolvedValueOnce({
-      image: { uint8Array: new Uint8Array([1, 2, 3]), mediaType: "image/png" },
-    });
+    mockGenerateImage.mockResolvedValueOnce({ image: healthyImage() });
     const { imageFn, provider } = fakeFalProvider();
     const attachments = fakeAttachments();
     const [tool] = createImageTools({
@@ -279,9 +298,7 @@ describe("createImageTools", () => {
   });
 
   it("delegates to provider.imageModel() for openai_compatible models", async () => {
-    mockGenerateImage.mockResolvedValueOnce({
-      image: { uint8Array: new Uint8Array([4, 5, 6]), mediaType: "image/png" },
-    });
+    mockGenerateImage.mockResolvedValueOnce({ image: healthyImage() });
     const { imageModelFn, provider } = fakeOaiProvider();
     const model = falModel({
       providerId: "provider-2",
@@ -361,9 +378,7 @@ describe("createImageTools", () => {
   });
 
   it("silently drops `seed` for models that don't honor it", async () => {
-    mockGenerateImage.mockResolvedValueOnce({
-      image: { uint8Array: new Uint8Array([7, 8]), mediaType: "image/png" },
-    });
+    mockGenerateImage.mockResolvedValueOnce({ image: healthyImage() });
     const [tool] = createImageTools({
       models: [
         falModel({
@@ -388,9 +403,7 @@ describe("createImageTools", () => {
   });
 
   it("forwards `seed` for models with capabilities.seed=true", async () => {
-    mockGenerateImage.mockResolvedValueOnce({
-      image: { uint8Array: new Uint8Array([9]), mediaType: "image/png" },
-    });
+    mockGenerateImage.mockResolvedValueOnce({ image: healthyImage() });
     const [tool] = createImageTools({
       models: [falModel()], // seed: true
       providers: new Map([["provider-1", fakeFalProvider().provider]]),
@@ -474,9 +487,7 @@ describe("createImageTools", () => {
   });
 
   it("forwards reference image bytes via the `prompt` object shape on fal", async () => {
-    mockGenerateImage.mockResolvedValueOnce({
-      image: { uint8Array: new Uint8Array([1]), mediaType: "image/png" },
-    });
+    mockGenerateImage.mockResolvedValueOnce({ image: healthyImage() });
     const refBytes = Buffer.from([0xff, 0xd8, 0xff]); // first JPEG bytes
     const attachments = fakeAttachments();
     attachments.download = vi.fn().mockResolvedValue(refBytes);
@@ -725,6 +736,119 @@ describe("createImageTools", () => {
     });
     expect(tool!.description).toMatch(/\[supports negativePrompt\]/);
     expect(tool!.description).toMatch(/negativePrompt/);
+  });
+
+  it("returns a text error when fal flags the result as nsfw (no upload)", async () => {
+    mockGenerateImage.mockResolvedValueOnce({
+      image: healthyImage(),
+      providerMetadata: {
+        fal: {
+          images: [{ nsfw: true }],
+          nsfw_concepts: ["nudity"],
+        },
+      },
+    });
+    const { provider } = fakeFalProvider();
+    const attachments = fakeAttachments();
+    const [tool] = createImageTools({
+      models: [falModel()],
+      providers: new Map([["provider-1", provider]]),
+      attachments,
+    });
+    const result = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+    expect(result).toMatch(/Error: image was flagged as nsfw by fal/);
+    expect(result).toMatch(/concepts: nudity/);
+    expect(attachments.upload).not.toHaveBeenCalled();
+  });
+
+  it("returns a text error when the generated bytes are below the size canary (no upload)", async () => {
+    mockGenerateImage.mockResolvedValueOnce({
+      // Below SUSPICIOUS_SIZE_THRESHOLD_BYTES — solid-color placeholders
+      // compress to a few hundred bytes; this stub mimics that.
+      image: { uint8Array: new Uint8Array(500), mediaType: "image/png" },
+    });
+    const attachments = fakeAttachments();
+    const [tool] = createImageTools({
+      models: [falModel()],
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
+      attachments,
+    });
+    const result = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+    expect(result).toMatch(/Error: generated image is suspiciously small/);
+    expect(result).toMatch(/500 bytes/);
+    expect(attachments.upload).not.toHaveBeenCalled();
+  });
+
+  it("logs the failure with operator-filterable fields (rowName, providerId, slug, reason)", async () => {
+    // The warn-log shape is the operator's primary observability surface
+    // when moderation fires. Pin every field so a future refactor that
+    // re-labels them (e.g. accidentally putting the model name under
+    // `provider`) breaks here instead of silently mis-tagging logs.
+    mockGenerateImage.mockResolvedValueOnce({
+      image: healthyImage(),
+      providerMetadata: { fal: { images: [{ nsfw: true }], nsfw_concepts: ["nudity"] } },
+    });
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
+    try {
+      const [tool] = createImageTools({
+        models: [falModel()],
+        providers: new Map([["provider-1", fakeFalProvider().provider]]),
+        attachments: fakeAttachments(),
+      });
+      await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        {
+          rowName: "fal/flux-dev",
+          providerId: "provider-1",
+          slug: "flux-dev",
+          reason: expect.stringMatching(/flagged as nsfw by fal/),
+        },
+        "image moderation/failure detected",
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("honours the injected detectImageFailure override (test-stub bypass path)", async () => {
+    // Same too-small payload as the canary test above. With an injected
+    // detector that always passes, the tool must upload and return the
+    // JSON payload — proving the DI seam plumbs through to the handler.
+    mockGenerateImage.mockResolvedValueOnce({
+      image: { uint8Array: new Uint8Array(500), mediaType: "image/png" },
+    });
+    const attachments = fakeAttachments();
+    const detector = vi.fn().mockReturnValue({ ok: true });
+    const [tool] = createImageTools({
+      models: [falModel()],
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
+      attachments,
+      detectImageFailure: detector,
+    });
+    const result = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+    expect(detector).toHaveBeenCalledTimes(1);
+    expect(result).not.toMatch(/^Error:/);
+    expect(attachments.upload).toHaveBeenCalledTimes(1);
+  });
+
+  it("uploads and returns the payload when the result is clean", async () => {
+    mockGenerateImage.mockResolvedValueOnce({
+      image: healthyImage(),
+      providerMetadata: { fal: { images: [{ nsfw: false }] } },
+    });
+    const attachments = fakeAttachments();
+    const [tool] = createImageTools({
+      models: [falModel()],
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
+      attachments,
+    });
+    const result = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+    expect(attachments.upload).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(result)).toMatchObject({
+      path: "inbound/test.png",
+      mediaType: "image/png",
+    });
   });
 
   it("promotes non-retryable APICallErrors to AbortError", async () => {

@@ -5,6 +5,7 @@ import type { ImageProvider } from "../llm/image-providers.js";
 import { logger } from "../logger.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
+import { detectImageFailure } from "./image-moderation.js";
 import { defineTool, type ToolSpec } from "./tools.js";
 
 /**
@@ -130,13 +131,25 @@ function buildToolDescription(
 }
 
 /**
- * Output shape both adapters return — matches the AI SDK's `image` field on
- * `generateImage` so the upload path stays uniform. The venice adapter
- * conforms directly; the AI SDK path is unwrapped through this helper.
+ * Output shape both adapters produce — matches the AI SDK's `image` field
+ * on `generateImage` so the upload path stays uniform. The venice adapter
+ * conforms directly; the AI SDK path is unwrapped through `generateViaAiSdk`.
  */
-interface ImageGenerationResult {
+interface ImageBytes {
   uint8Array: Uint8Array;
   mediaType: string;
+}
+
+/**
+ * Carries the bytes plus the AI SDK's `providerMetadata` so the
+ * moderation hook can read provider-specific failure signals (fal's
+ * per-image NSFW flag). Venice signals censorship via response headers,
+ * handled inside its adapter and surfaced as thrown errors — it returns
+ * `providerMetadata: undefined` here.
+ */
+interface ImageGenerationResult {
+  image: ImageBytes;
+  providerMetadata: Awaited<ReturnType<typeof generateImage>>["providerMetadata"] | undefined;
 }
 
 /**
@@ -162,6 +175,9 @@ async function generateViaAiSdk(args: {
   seed?: number;
   negativePrompt?: string;
 }): Promise<ImageGenerationResult> {
+  // Returns both the bytes and providerMetadata so the moderation hook
+  // upstream can read fal's per-image NSFW signal without re-routing
+  // through a second call.
   const imageModel =
     args.provider.kind === "fal"
       ? args.provider.provider.image(args.row.modelString)
@@ -178,7 +194,7 @@ async function generateViaAiSdk(args: {
     : args.prompt;
 
   try {
-    const { image } = await generateImage({
+    const { image, providerMetadata } = await generateImage({
       model: imageModel,
       // `prompt` accepts the object shape at runtime for fal but the
       // public `generateImage` signature only declares `string`
@@ -213,7 +229,7 @@ async function generateViaAiSdk(args: {
           providerOptions: { [args.provider.row.name]: { negative_prompt: args.negativePrompt } },
         }),
     });
-    return image;
+    return { image, providerMetadata };
   } catch (err) {
     // Structured 4xx classification — `isRetryable: false` on 4xx
     // (except 429) means re-trying the same request burns budget without
@@ -239,8 +255,16 @@ export function createImageTools(deps: {
   models: ReadonlyArray<ImageModelWithProvider>;
   providers: ReadonlyMap<string, ImageProvider>;
   attachments: AttachmentStore;
+  /**
+   * Override the post-generation moderation/failure detector. Defaults to
+   * the real `detectImageFailure`. Tests that exercise the happy path with
+   * tiny stub fixtures pass `() => ({ ok: true })` so the size canary
+   * doesn't trip on bytes that would never appear in production.
+   */
+  detectImageFailure?: typeof detectImageFailure;
 }): ToolSpec[] {
   if (deps.models.length === 0) return [];
+  const moderate = deps.detectImageFailure ?? detectImageFailure;
 
   // Build a slash-free identifier per model for the LLM-facing enum (see
   // `imageModelSlug` for why). The map from slug back to the canonical row
@@ -387,8 +411,8 @@ export function createImageTools(deps: {
         const shouldForwardNegativePrompt =
           input.negativePrompt !== undefined && row.capabilities.negativePrompt === true;
 
-        const result = await withRetry(
-          async () => {
+        const { image, providerMetadata } = await withRetry(
+          async (): Promise<ImageGenerationResult> => {
             switch (provider.kind) {
               case "fal":
               case "oai":
@@ -405,8 +429,8 @@ export function createImageTools(deps: {
                       negativePrompt: input.negativePrompt,
                     }),
                 });
-              case "venice":
-                return provider.provider.generate({
+              case "venice": {
+                const bytes = await provider.provider.generate({
                   model: row.modelString,
                   prompt: input.prompt,
                   ...(shouldForwardAspect &&
@@ -417,16 +441,40 @@ export function createImageTools(deps: {
                       negativePrompt: input.negativePrompt,
                     }),
                 });
+                // Venice doesn't expose a providerMetadata surface — its
+                // censorship signals are response headers handled inside the
+                // adapter (throws AbortError). The size canary in
+                // `detectImageFailure` still applies.
+                return { image: bytes, providerMetadata: undefined };
+              }
             }
           },
           { retries: 2, context: `image.generate.${row.name}` },
         );
 
-        const buffer = Buffer.from(result.uint8Array);
-        const path = await deps.attachments.upload(buffer, result.mediaType, "generated");
+        const detection = moderate({
+          image,
+          providerMetadata,
+          providerKind: provider.kind,
+        });
+        if (!detection.ok) {
+          logger.warn(
+            {
+              rowName: row.name,
+              providerId: row.providerId,
+              slug: input.model,
+              reason: detection.reason,
+            },
+            "image moderation/failure detected",
+          );
+          return `Error: ${detection.reason}`;
+        }
+
+        const buffer = Buffer.from(image.uint8Array);
+        const path = await deps.attachments.upload(buffer, image.mediaType, "generated");
         return JSON.stringify({
           path,
-          mediaType: result.mediaType,
+          mediaType: image.mediaType,
           model: row.name,
         });
       },

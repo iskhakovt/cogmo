@@ -71,6 +71,7 @@ export async function extractMemories(
       messages: [{ role: "user", content: transcript }],
       schema,
       name: "memory-extraction",
+      repair: {},
     }));
   } catch (err) {
     logger.warn({ err, bankId }, "memory extraction failed — skipping");

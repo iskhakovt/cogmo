@@ -124,6 +124,12 @@ describe("venice native image gen (recorded)", () => {
       models: [modelEntry],
       providers: new Map([[PROVIDER_ID, provider]]),
       attachments,
+      // Recorded fixture stubs the image bytes down to a 1×1 PNG (~67
+      // bytes) — well under the moderation size canary. Bypass the
+      // detector so the integration test exercises the recorded wire
+      // shape, not the moderation path. Same posture as
+      // `openai-image-gen.integration.test.ts`.
+      detectImageFailure: () => ({ ok: true }),
     });
     expect(tool).toBeDefined();
 

@@ -48,6 +48,44 @@ export const conversationIdle = eventType("conversation/idle", {
  * steering-rule auto-correction. PR1 only emits the event — no consumers
  * yet, intentionally.
  */
+/**
+ * Fired by `handle-message` when a turn exits via the degraded off-ramp:
+ * either the in-loop Class C repair budget for a subtype exhausted, or
+ * Class D loop-pathology / iteration-cap fingerprint tripped. Unlike
+ * `conversation/errored`, the conversation stays `active` — the user got a
+ * system-generated apology and can retry. See design/agent-resilience.md →
+ * Off-ramps + Degraded reply.
+ *
+ * Emitted via `step.sendEvent` right after the durable persist step that
+ * writes the degraded assistant message — same pattern as
+ * `conversation/errored` in `onFailure`. Inngest's bus-level dedup on the
+ * named step provides exactly-once delivery; no explicit idempotency `id`
+ * needed.
+ *
+ * `subtype` carries the classifier verdict when the loop exited through a
+ * Class C / D tagged off-ramp (`empty_end_turn`, `stream_truncation`,
+ * `refusal`, `stuck_loop`, `stuck_loop_cumulative`). It is `null` when the
+ * loop exited via the iteration-cap backstop — that path has no classifier
+ * subtype; `reason: "iteration_cap"` carries the distinguishing label.
+ */
+export const conversationDegraded = eventType("conversation/degraded", {
+  schema: z.object({
+    conversationId: z.string(),
+    runId: z.string(),
+    triggerInboundId: z.string().nullable(),
+    subtype: z
+      .enum([
+        "empty_end_turn",
+        "stream_truncation",
+        "refusal",
+        "stuck_loop",
+        "stuck_loop_cumulative",
+      ])
+      .nullable(),
+    reason: z.string(),
+  }),
+});
+
 export const conversationErrored = eventType("conversation/errored", {
   schema: z.object({
     conversationId: z.string(),

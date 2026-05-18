@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ProviderProtocolError } from "../../llm/errors.js";
 import type { Message } from "../../llm/types.js";
 import { mockProvider } from "../../test/factories.js";
 import { extractMemories, type MemoryExtractionDeps } from "./extract-memories.js";
@@ -161,6 +162,33 @@ describe("extractMemories", () => {
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
   });
 
+  it("degrades to a no-op when chatTyped throws ProviderProtocolError", async () => {
+    // When the structured-output parse fails irrecoverably (jsonrepair also
+    // chokes), chatTyped surfaces a ProviderProtocolError. extract-memories
+    // must catch it the same way as any other failure — degrade to zeros,
+    // skip retainBatch, no rethrow.
+    const deps = mockExtractionDeps(
+      { memories: [] },
+      {
+        provider: mockProvider({
+          chat: vi
+            .fn()
+            .mockRejectedValue(
+              new ProviderProtocolError(
+                'structured output for "memory-extraction" failed JSON.parse: empty input',
+                new SyntaxError("Unexpected end of JSON input"),
+              ),
+            ),
+        }),
+      },
+    );
+
+    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+
+    expect(result).toEqual({ extracted: 0, byNetwork: {} });
+    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
+  });
+
   it("appends profile_class tag when profileClass is non-null", async () => {
     const deps = mockExtractionDeps({
       memories: [
@@ -292,5 +320,35 @@ describe("extractMemories", () => {
     const call = vi.mocked(deps.memory.retainBatch).mock.calls[0];
     const items = call?.[1] ?? [];
     expect(items[0]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
+  });
+
+  it("recovers a trailing-comma extraction response via chatTyped repair", async () => {
+    // Regression: extract-memories passes `repair: {}` into chatTyped, so a
+    // trailing comma in the structured-output response is fixed by the
+    // jsonrepair pre-pass instead of crashing the extraction run.
+    const provider = mockProvider({
+      chat: vi.fn().mockResolvedValue({
+        content: [
+          {
+            type: "text",
+            text: '{"memories":[{"fact":"homelab IP is 10.0.10.10","network":"world","compartment":"technical","trust":"first-party",},],}',
+          },
+        ],
+        stopReason: "end_turn",
+        model: "mock",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    });
+    const deps: MemoryExtractionDeps = {
+      provider,
+      model: "test-model",
+      memory: { retainBatch: vi.fn().mockResolvedValue(undefined) },
+      customCompartments: [],
+    };
+
+    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+
+    expect(result.extracted).toBe(1);
+    expect(provider.chat).toHaveBeenCalledTimes(1);
   });
 });
