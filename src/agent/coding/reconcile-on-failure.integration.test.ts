@@ -45,7 +45,10 @@ let testInngest: Inngest;
 // the bus default of a server-minted UUID) would pass the data-shape
 // assertions and only surface in production as duplicate emits on
 // retry.
-const capturedFailedEvents: Array<{ id: string; taskId: string; reason: string }> = [];
+// `id` stays `string | undefined` so a missing-id regression fails
+// the explicit `toBeDefined` assertion below with a clear diagnostic
+// rather than a misleading regex mismatch on an empty string.
+const capturedFailedEvents: Array<{ id: string | undefined; taskId: string; reason: string }> = [];
 const seededRepoIds: string[] = [];
 const seededTaskIds: string[] = [];
 
@@ -65,7 +68,7 @@ beforeAll(async () => {
     async ({ event }) => {
       // `event.id` is the bus-level idempotency key — captured so the
       // assertion below can pin `reconcile-${run_id}`.
-      capturedFailedEvents.push({ id: event.id ?? "", ...event.data });
+      capturedFailedEvents.push({ id: event.id, ...event.data });
       return { captured: true };
     },
   );
@@ -207,7 +210,7 @@ async function waitForTaskStatus(
 async function waitForFailedEvent(
   taskId: string,
   timeoutMs = 30_000,
-): Promise<{ id: string; taskId: string; reason: string }> {
+): Promise<{ id: string | undefined; taskId: string; reason: string }> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const match = capturedFailedEvents.find((e) => e.taskId === taskId);
@@ -236,12 +239,11 @@ describe("coding-task-reconcile — Inngest integration", () => {
 
     const failedEvent = await waitForFailedEvent(taskId);
     expect(failedEvent.reason).toMatch(/decoy coding-task-start failure/);
-    // Idempotency `id` from `step.sendEvent({..., id: \`reconcile-${run_id}\`})` —
-    // pin the prefix so a regression that drops the explicit id (and
-    // falls back to a server-minted UUID) fails here. Without the id,
-    // a retry of the emit step after a transient send failure would
-    // double-fire `cleanup-run-branch`. The run_id is opaque (Inngest
-    // mints it per run), so we match on the prefix only.
+    // Pin the bus-level idempotency `id` so a retry of the emit step
+    // dedups instead of double-firing `cleanup-run-branch`. The
+    // run_id portion is opaque (minted per run by Inngest) so the
+    // assertion matches the `reconcile-` prefix only.
+    expect(failedEvent.id).toBeDefined();
     expect(failedEvent.id).toMatch(/^reconcile-/);
   });
 
