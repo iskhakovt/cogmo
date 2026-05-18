@@ -19,7 +19,6 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
-import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import type {
   ExecStreamingHandle,
   GitRemoteWorktreeSpec,
@@ -30,6 +29,7 @@ import type {
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { GitHubIdentity } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { makeStepRun, nullStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { CLAUDE_CODE_OAUTH_TOKEN_SECRET } from "./auth.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
@@ -122,8 +122,8 @@ afterAll(async () => {
   await close();
 });
 
-const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as unknown as StepRun;
-const stepSendEvent = (async () => ({ ids: [] })) as unknown as StepSendEvent;
+const stepRun = makeStepRun();
+const stepSendEvent = nullStepSendEvent();
 const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
 const fakeInngest = { send: vi.fn().mockResolvedValue(undefined) };
 

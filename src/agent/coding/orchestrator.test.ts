@@ -16,7 +16,7 @@ import {
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectDefined } from "../../test/assertions.js";
-import { makeStepSendEvent } from "../../test/factories.js";
+import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
@@ -26,7 +26,6 @@ import {
   NULL_PLAN_STREAM,
   runCodingExecute,
   runCodingTask,
-  type StepRun,
 } from "./orchestrator.js";
 import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
 
@@ -72,11 +71,7 @@ afterAll(async () => {
   await close();
 });
 
-// Shim mirroring `step.run`'s signature. Production has Inngest's real
-// step.run (return type Jsonify<T>); tests run the body inline. Cast at
-// the seam — explicitly justified per CLAUDE.md "intentionally invalid
-// input in tests".
-const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
+const stepRun = makeStepRun();
 
 const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
 

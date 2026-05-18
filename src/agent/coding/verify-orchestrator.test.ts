@@ -10,7 +10,6 @@ import { PassThrough, type Readable } from "node:stream";
 import type { Octokit } from "@octokit/rest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import type { StepRun } from "../../inngest/index.js";
 import {
   type ExecOptions,
   type ExecStreamingHandle,
@@ -25,12 +24,12 @@ import {
   serializeGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
-import { makeStepSendEvent } from "../../test/factories.js";
+import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { type CodingBackend, DrizzleCodingStore } from "./store/index.js";
 import { runCodingVerify, type VerifyOrchestratorDeps } from "./verify-orchestrator.js";
 
-const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
+const stepRun = makeStepRun();
 
 const VALID_IDENTITY: GitHubIdentity = {
   pat: "ghp_dummy_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
