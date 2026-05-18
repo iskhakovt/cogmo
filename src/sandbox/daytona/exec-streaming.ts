@@ -359,10 +359,12 @@ class SessionCommandInputWritable extends Writable {
 }
 
 function buildShellCommand(cmd: readonly string[], opts: ExecOptions): string {
-  // Wrap the argv as an exec'd subprocess so bash flags don't apply, but
-  // do honour cwd / env via the same shell. Daytona's session is bash by
-  // default; cwd defaults to user home. Inject env via `env` CLI rather
-  // than session-level config so it scopes to this command.
+  // Run the argv as a normal child of bash: cwd via `cd`, env via the `env`
+  // CLI scoped to this command. The target binary MUST run as a child
+  // (not via bash's `exec` builtin) — Daytona's session-command lifecycle
+  // detects completion via the session shell's exit, and `exec` replaces
+  // the shell so that exit never fires. Daytona [#2513] is the upstream
+  // gap; running as a child gives the shell a clean exit to report.
   const envPrefix =
     opts.env && Object.keys(opts.env).length > 0
       ? `env ${Object.entries(opts.env)
@@ -371,7 +373,7 @@ function buildShellCommand(cmd: readonly string[], opts: ExecOptions): string {
       : "";
   const cdPrefix = opts.workingDir ? `cd ${shellEscape(opts.workingDir)} && ` : "";
   const argv = cmd.map(shellEscape).join(" ");
-  return `${cdPrefix}${envPrefix}exec ${argv}`;
+  return `${cdPrefix}${envPrefix}${argv}`;
 }
 
 /**

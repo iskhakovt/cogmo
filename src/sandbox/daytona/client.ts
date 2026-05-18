@@ -1,4 +1,9 @@
-import { Daytona, type Sandbox as DaytonaSdkSandbox, SandboxState } from "@daytonaio/sdk";
+import {
+  Daytona,
+  DaytonaNotFoundError,
+  type Sandbox as DaytonaSdkSandbox,
+  SandboxState,
+} from "@daytonaio/sdk";
 import { logger } from "../../logger.js";
 import {
   type DaytonaSessionState,
@@ -11,6 +16,25 @@ import {
 import { uploadAskpassToSandbox } from "./askpass-upload.js";
 import { daytonaHealthProbe } from "./probe.js";
 import { DaytonaSandboxSession } from "./session.js";
+
+/**
+ * Snapshot lifecycle states. The literal set comes from `@daytona/api-client`'s
+ * `SnapshotState` enum, which `@daytonaio/sdk` exposes only via the `Snapshot`
+ * type but doesn't re-export as a runtime value. Hardcoded here so we don't
+ * have to depend on `@daytona/api-client` (transitive) directly. If the SDK
+ * grows a state, the state-machine in `#ensureSnapshotActive` defaults to
+ * delete-and-rebuild for unknown states.
+ */
+const SnapshotState = {
+  BUILDING: "building",
+  PENDING: "pending",
+  PULLING: "pulling",
+  ACTIVE: "active",
+  INACTIVE: "inactive",
+  ERROR: "error",
+  BUILD_FAILED: "build_failed",
+  REMOVING: "removing",
+} as const;
 
 /**
  * Where the cloned worktree lives inside the sandbox. Matches the
@@ -28,6 +52,13 @@ const LABEL_ROLE = "cogmo.role";
 
 /** Refresh the sandbox's auto-stop activity timer this often, while a session is live. */
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Poll cadence for `snapshot.get(...).state` while waiting for an
+ * in-flight snapshot build to land on a terminal state. Matches the
+ * SDK's own internal cadence (`Snapshot.js`).
+ */
+const SNAPSHOT_POLL_INTERVAL_MS = 1_000;
 
 const CAPABILITIES: SandboxCapabilities = {
   // Code inside the sandbox can spawn child containers, but they're
@@ -91,6 +122,23 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
    * also gets cleared on `delete` / `deleteByTaskId` / `shutdown`.
    */
   #keepalives = new Map<string, NodeJS.Timeout>();
+  /**
+   * Per-image in-flight snapshot-warm promises. First call for a given
+   * image kicks off `ensureSnapshot(...)`; concurrent calls await the
+   * same promise. Resolved promises are kept so steady-state calls are
+   * one Map lookup. Rejected promises are evicted in the `.catch` so the
+   * next call retries fresh instead of inheriting the failure.
+   */
+  #warmPromises = new Map<string, Promise<void>>();
+  /**
+   * Per-image snapshot name once warmed successfully. `create()` checks
+   * this map: a hit means it can dispatch `daytona.create({ snapshot })`
+   * (fast path, sub-second on Daytona's runner cache); a miss means
+   * `ensureImagePresent` hasn't been called or skipped warming for an
+   * unversioned tag, so we fall back to `daytona.create({ image })`
+   * which lazy-builds the snapshot on the provider side.
+   */
+  #snapshotByImage = new Map<string, string>();
 
   private constructor(opts: CreateOptions) {
     const config: ConstructorParameters<typeof Daytona>[0] = {
@@ -118,12 +166,145 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     return { orphansReaped: 0 };
   }
 
-  async ensureImagePresent(_image: string): Promise<void> {
-    // Daytona's builder pulls the image (and synthesises a snapshot) on
-    // first `create()`; subsequent creates reuse the snapshot. There's
-    // no separate "is this image reachable" probe in the SDK, and
-    // forcing a probe via a throwaway sandbox would actually pay the
-    // build cost. No-op: the first real `create()` carries the latency.
+  async ensureImagePresent(image: string): Promise<void> {
+    // Pre-bake a named snapshot via `daytona.snapshot.create({ name, image })`
+    // so subsequent `daytona.create({ snapshot: name })` calls hit Daytona's
+    // runner cache and provision in ~1s instead of paying the multi-minute
+    // image-pull-and-snapshot-build cost on first task. Daytona's own
+    // `daytona.create({ image })` path lazy-builds the snapshot and the
+    // SDK's hardcoded 60s `waitUntilStarted` cap fires before any
+    // realistic image build completes; using the snapshot reference
+    // splits the long-pole work into a dedicated `snapshot.create`
+    // call that blocks until ACTIVE.
+    //
+    // Idempotent + memoised: concurrent callers share one warm cycle.
+    // A failed warm clears the cache (`.catch` below) so the next caller
+    // retries fresh instead of inheriting the failure.
+    const name = snapshotNameFor(image);
+    if (!name) {
+      // Unversioned tag (`:latest`, no tag) — Daytona's `snapshot.create`
+      // rejects these with "Images with tag ':latest' are not allowed",
+      // so we let `create()` fall back to the lazy `{ image }` path. The
+      // miss is documented; the path still works, just slow on first call.
+      return;
+    }
+    let promise = this.#warmPromises.get(image);
+    if (!promise) {
+      promise = this.#ensureSnapshotActive(image, name).then(
+        () => {
+          this.#snapshotByImage.set(image, name);
+        },
+        (err: unknown) => {
+          // Evict on rejection so the next call retries fresh.
+          this.#warmPromises.delete(image);
+          throw err;
+        },
+      );
+      this.#warmPromises.set(image, promise);
+    }
+    await promise;
+  }
+
+  /**
+   * Drive a snapshot to the `ACTIVE` state. Walks the state machine
+   * exposed by Daytona's snapshot API:
+   *
+   *   - `ACTIVE` — return immediately.
+   *   - `BUILDING` / `PENDING` / `PULLING` — server-side build is
+   *     in-flight (e.g. another cogmo instance kicked it off, or a
+   *     previous boot of this instance). Poll until terminal.
+   *   - `ERROR` / `BUILD_FAILED` — prior attempt failed. Delete the
+   *     stale snapshot so the create below isn't blocked by a name
+   *     conflict, then rebuild.
+   *   - `INACTIVE` / `REMOVING` — best effort: delete + recreate.
+   *   - Not found (DaytonaNotFoundError) — first warm, fall through to
+   *     `snapshot.create` directly.
+   *
+   * `snapshot.create()` itself blocks until terminal (per
+   * `@daytonaio/sdk` `Snapshot.js`'s internal poll), so once we kick off
+   * a build the wait happens inside the SDK call.
+   */
+  async #ensureSnapshotActive(image: string, name: string): Promise<void> {
+    log.info({ image, snapshot: name }, "ensuring Daytona snapshot is active");
+    try {
+      const existing = await this.#daytona.snapshot.get(name);
+      if (existing.state === SnapshotState.ACTIVE) {
+        log.debug({ image, snapshot: name }, "snapshot already active");
+        return;
+      }
+      if (
+        existing.state === SnapshotState.BUILDING ||
+        existing.state === SnapshotState.PENDING ||
+        existing.state === SnapshotState.PULLING
+      ) {
+        log.info(
+          { image, snapshot: name, state: existing.state },
+          "snapshot build in flight — polling for terminal state",
+        );
+        const settled = await this.#pollSnapshotUntilTerminal(name);
+        if (settled.state === SnapshotState.ACTIVE) return;
+        // Build-in-flight resolved to a failure — drop the stale row and
+        // fall through to create below for a fresh attempt.
+        await this.#daytona.snapshot.delete(settled).catch((err: unknown) => {
+          log.warn(
+            { err, image, snapshot: name, state: settled.state },
+            "failed to delete snapshot in failure state — create may 409 on name conflict",
+          );
+        });
+      } else {
+        // INACTIVE / ERROR / BUILD_FAILED / REMOVING. Daytona has no
+        // documented `reactivate` flow we can rely on here; delete and
+        // rebuild is the safe path. Idempotent: `.catch` swallows
+        // already-deleted / racing-with-another-instance.
+        log.info(
+          { image, snapshot: name, state: existing.state },
+          "snapshot present but not active — deleting before rebuild",
+        );
+        await this.#daytona.snapshot.delete(existing).catch((err: unknown) => {
+          log.warn(
+            { err, image, snapshot: name, state: existing.state },
+            "snapshot delete before rebuild failed — create may 409",
+          );
+        });
+      }
+    } catch (err) {
+      if (!(err instanceof DaytonaNotFoundError)) throw err;
+      // 404 — snapshot doesn't exist yet, proceed to create.
+      log.info({ image, snapshot: name }, "snapshot not found — building");
+    }
+    // Build. SDK's `snapshot.create()` polls internally until terminal
+    // and throws on `ERROR` / `BUILD_FAILED`. Resources are omitted —
+    // Daytona's platform default is reasonable for cogmo's workloads
+    // (coding-delegation: 2 cpu / 2 GiB; skills tier-2: smaller, but
+    // over-provisioning by a factor of 2 is acceptable at single-user
+    // scale). `CreateSandboxFromSnapshotParams` has no `resources` field
+    // anyway — resources bake at snapshot creation time, so picking one
+    // shape per image keeps the operational story simple.
+    await this.#daytona.snapshot.create({ name, image });
+    log.info({ image, snapshot: name }, "snapshot active");
+  }
+
+  async #pollSnapshotUntilTerminal(
+    name: string,
+  ): Promise<Awaited<ReturnType<Daytona["snapshot"]["get"]>>> {
+    // No outer wall-clock cap. Daytona's snapshot build can legitimately
+    // take many minutes for fresh images; the in-flight `Promise` returned
+    // by `ensureImagePresent` is the natural backpressure mechanism —
+    // boot fires-and-forgets, the orchestrator's `create-container` step
+    // awaits the same promise. If a build genuinely never terminates
+    // (provider outage), Daytona's auto-stop reaper would eventually
+    // clean it up server-side and our next call would 404 and rebuild.
+    while (true) {
+      const snap = await this.#daytona.snapshot.get(name);
+      if (
+        snap.state === SnapshotState.ACTIVE ||
+        snap.state === SnapshotState.ERROR ||
+        snap.state === SnapshotState.BUILD_FAILED
+      ) {
+        return snap;
+      }
+      await new Promise((resolve) => setTimeout(resolve, SNAPSHOT_POLL_INTERVAL_MS));
+    }
   }
 
   async create(spec: SessionSpec): Promise<SandboxSession<DaytonaSessionState>> {
@@ -148,23 +329,43 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     }
 
     const autoStopInterval = computeAutoStopInterval(spec.expiresAt);
+    const warmedSnapshot = this.#snapshotByImage.get(spec.image);
     log.info(
-      { taskId: spec.taskId, image: spec.image, autoStopInterval },
+      {
+        taskId: spec.taskId,
+        image: spec.image,
+        snapshot: warmedSnapshot ?? null,
+        autoStopInterval,
+      },
       "creating Daytona sandbox",
     );
-    const sdkSandbox = await this.#daytona.create({
-      image: spec.image,
-      labels: {
-        [LABEL_TASK]: spec.taskId,
-        [LABEL_ROLE]: "root",
-        "cogmo.instance": this.#instanceId,
-      },
-      autoStopInterval,
-      resources: resourcesFromLimits(spec.resourceLimits),
-      // Empty / absent env must NOT clobber the image's defaults; only
-      // spread `envVars` when populated.
-      ...(spec.env && Object.keys(spec.env).length > 0 && { envVars: { ...spec.env } }),
-    });
+    // Prefer the warm snapshot path when `ensureImagePresent` has primed
+    // it — Daytona's `daytona.create({ snapshot })` resolves in ~1s
+    // against a cached runner versus 60s+ of waitUntilStarted that the
+    // `{ image }` path pays on a fresh image. Resources baked into the
+    // snapshot at warm time supersede `spec.resourceLimits` for the
+    // snapshot path (`CreateSandboxFromSnapshotParams` has no resources
+    // field); the `{ image }` fallback still honours them.
+    const labels: Record<string, string> = {
+      [LABEL_TASK]: spec.taskId,
+      [LABEL_ROLE]: "root",
+      "cogmo.instance": this.#instanceId,
+    };
+    const envVars = spec.env && Object.keys(spec.env).length > 0 ? { ...spec.env } : undefined;
+    const sdkSandbox = warmedSnapshot
+      ? await this.#daytona.create({
+          snapshot: warmedSnapshot,
+          labels,
+          autoStopInterval,
+          ...(envVars && { envVars }),
+        })
+      : await this.#daytona.create({
+          image: spec.image,
+          labels,
+          autoStopInterval,
+          resources: resourcesFromLimits(spec.resourceLimits),
+          ...(envVars && { envVars }),
+        });
 
     // Post-create provisioning. If any step throws, tear down the freshly
     // created sandbox before rethrowing so we don't leak provider
@@ -386,6 +587,32 @@ const GIB = 1024 * 1024 * 1024;
 // Daytona's per-resource minimum.
 function daytonaUnit(n: number): number {
   return Math.max(1, Math.ceil(n));
+}
+
+/**
+ * Derive a Daytona snapshot name from a container image reference, or
+ * `null` if the image isn't snapshot-warmable. Daytona's
+ * `snapshot.create` rejects `:latest` and accepts only stable refs;
+ * tagless and `:latest` images fall back to the lazy `{ image }` path.
+ *
+ * Strategy: take the last `/`-separated segment of the image (drops
+ * registry + path prefix), replace the tag separator `:` with `-`, and
+ * lowercase. Result is deterministic per image so the same image used
+ * across cogmo deploys reuses one snapshot.
+ *
+ *   ghcr.io/iskhakovt/cogmo-devbase:1.66.0 → cogmo-cogmo-devbase-1.66.0
+ *   python:3.14-slim                       → cogmo-python-3.14-slim
+ *   foo:latest                             → null
+ *   foo                                    → null
+ */
+export function snapshotNameFor(image: string): string | null {
+  const lastSlash = image.lastIndexOf("/");
+  const slug = lastSlash >= 0 ? image.slice(lastSlash + 1) : image;
+  const colon = slug.lastIndexOf(":");
+  if (colon < 0) return null;
+  const tag = slug.slice(colon + 1);
+  if (tag === "" || tag === "latest") return null;
+  return `cogmo-${slug.replace(":", "-").toLowerCase()}`;
 }
 
 function resourcesFromLimits(limits: {

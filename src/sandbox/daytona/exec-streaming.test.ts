@@ -145,7 +145,7 @@ describe("startExecStreaming", () => {
 
   it("emits no env prefix when env is an empty record", async () => {
     // Defends a subtle inversion: an `env: {}` opt arriving from a
-    // non-env-aware caller must NOT synthesize a bare `env exec ...`
+    // non-env-aware caller must NOT synthesize a bare `env <argv>...`
     // (which on most coreutils strips the inherited env, breaking
     // PATH-dependent commands). Builder gates the prefix on
     // `Object.keys(opts.env).length > 0` — this regression test
@@ -159,9 +159,33 @@ describe("startExecStreaming", () => {
     }).then((h) => h.wait());
     const exec = vi.mocked(proc.executeSessionCommand);
     const command = exec.mock.calls[0]?.[1].command;
-    // The whole command should be `exec 'pwd'` — no leading `env `,
-    // no leading `cd ` (workingDir omitted).
-    expect(command).toBe("exec 'pwd'");
+    // The whole command should be `'pwd'` — no leading `env `, no
+    // leading `cd ` (workingDir omitted), and crucially no `exec` —
+    // bash's `exec` builtin replaces the shell, and Daytona's session
+    // completion detection waits for the shell to exit. Running as a
+    // child of bash gives the shell something to exit from.
+    expect(command).toBe("'pwd'");
+  });
+
+  it("never emits bash's exec builtin (would prevent Daytona session completion)", async () => {
+    // Daytona [#2513]: session-command completion fires on the shell
+    // exit. `exec <argv>` replaces the shell with the target binary,
+    // so when the binary completes the session never reports
+    // completion and the WS log-stream stays open until something
+    // external tears it down (idleTimeoutMs, deleteSession). Regression
+    // pin: the emitted command must invoke the target as a child of
+    // bash, never via the `exec` builtin.
+    const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
+    await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["git", "checkout", "-B", "feature"],
+      opts: { workingDir: "/workspace" },
+    }).then((h) => h.wait());
+    const exec = vi.mocked(proc.executeSessionCommand);
+    const command = exec.mock.calls[0]?.[1].command;
+    expect(command).not.toMatch(/\bexec\b/);
+    expect(command).toBe("cd '/workspace' && 'git' 'checkout' '-B' 'feature'");
   });
 
   it("dispose() calls deleteSession and rejects wait() with DisposedError", async () => {

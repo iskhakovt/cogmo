@@ -177,7 +177,6 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
-  let containerCreated = false;
   // Worktree assignment may be null on a fresh task — derived from the
   // (DB-generated) task id by the allocate-worktree step below. Local
   // mutable so the rest of the function reads it without re-loading the row.
@@ -307,19 +306,24 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       gitRemoteIdentityPat = identity.pat;
     }
 
-    // Three checkpoints for container lifecycle so any failure between
-    // sandbox.create() succeeding and the post-create wiring completing
-    // still triggers cleanup via the outer catch:
-    //
-    //   1. `create-container` returns sessionState — once this checkpoints,
-    //      the container exists on Docker / Daytona side and is labelled
-    //      with the task id.
-    //   2. `containerCreated = true` — set OUTSIDE the step body so it
-    //      survives Inngest replay (step bodies are skipped on resume,
-    //      only checkpointed return values are loaded).
-    //   3. `persist-container-id` + `checkout-feature-branch` — wiring
-    //      that runs after the flag is set. If either throws, the catch
-    //      sees `containerCreated=true` and reaps via deleteByTaskId.
+    // Cleanup on failure goes through `sandbox.deleteByTaskId(taskId)`
+    // unconditionally in the outer catch — it's contract-bound to be
+    // idempotent (label-indexed lookup, empty set is a no-op). Calling
+    // it even when `sandbox.create()` threw covers managed backends
+    // (Daytona) where provider-side state can outlive a thrown create:
+    // the sandbox row reaches `building_snapshot`/`started` server-side
+    // and carries the `cogmo.task` label, so the label-index sweep
+    // reaps it. Local-Docker's create commits atomically — a thrown
+    // create leaves no rows for the sweep to find, also a no-op.
+    const containerImage = repo.devcontainer?.image ?? devbaseImage;
+    // Snapshot prewarm acts as the delegate-gate: on Daytona, this
+    // resolves once the named snapshot is ACTIVE. Boot fires the same
+    // call non-blocking, so a steady-state task hits a resolved promise;
+    // a task arriving before the warm completes shares the in-flight
+    // promise. Local-Docker `ensureImagePresent` is the cheap pull check.
+    await stepRun("ensure-image-present", async () => {
+      await sandbox.ensureImagePresent(containerImage);
+    });
     const sessionState = await stepRun("create-container", async () => {
       const session = await sandbox.create({
         taskId,
@@ -336,7 +340,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
           homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
         }),
-        image: repo.devcontainer?.image ?? devbaseImage,
+        image: containerImage,
         resourceLimits: defaultResourceLimits,
         expiresAt: new Date(Date.now() + taskTtlMs),
         allowPrivilegedRunc: task.allowPrivilegedRunc,
@@ -344,7 +348,6 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       });
       return session.state;
     });
-    containerCreated = true;
 
     if (isLocalDockerSessionState(sessionState)) {
       // `containers` is the local-docker FK target; managed backends
@@ -465,9 +468,10 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         worktreeAssignment: assignment,
       }).catch(() => {});
     }
-    if (containerCreated) {
-      await sandbox.deleteByTaskId(taskId).catch(() => {});
-    }
+    // Unconditional — see "Cleanup on failure" comment above the
+    // `create-container` step. Idempotent at the label-index layer:
+    // a sandbox that never made it server-side is a no-op sweep.
+    await sandbox.deleteByTaskId(taskId).catch(() => {});
     // Notify the plan stream if it was opened. Best-effort — we're already
     // in the catch path, don't let a delivery failure mask the original error.
     await planStream?.fail(reason).catch(() => {});
@@ -694,7 +698,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
 
   const sessionId = task.sessionId;
   const worktreeAssignment = task.worktreeAssignment;
-  let containerCreated = false;
   let executeStream: ExecuteStreamHandle | null = null;
 
   try {
@@ -717,7 +720,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
 
     const secretsStore = deps.secretsStore;
 
-    // Get-or-create the task container in three checkpoints:
+    // Get-or-create the task container in two checkpoints:
     //
     //   1. `try-resume` — non-null state means a prior sandbox is alive
     //      (the reaper hasn't gotten to it; or the plan-phase container
@@ -728,10 +731,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     //      hit doesn't pay the DB+decrypt cost, and so the PAT never
     //      becomes a step return value (Inngest persists step returns
     //      and we don't want credentials in its state store).
-    //   3. `containerCreated = true` — set OUTSIDE the steps so it
-    //      survives Inngest replay. Once any of (1)/(2) checkpointed,
-    //      a container labelled with this task id exists and the
-    //      catch path's `deleteByTaskId` call reaps it.
+    //
+    // Cleanup on failure goes through `sandbox.deleteByTaskId(taskId)`
+    // unconditionally in the outer catch — idempotent at the label-index
+    // layer, reaps managed-backend state that survived a thrown create.
     const resumedState = await stepRun("try-resume", async () => {
       const existing = await sandbox.tryResumeByTaskId(taskId);
       return existing?.state ?? null;
@@ -744,6 +747,12 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       isFreshCreate = false;
     } else {
       isFreshCreate = true;
+      // Delegate-gate: await the boot-time snapshot warm (Daytona) or
+      // image pull check (Local-Docker) before paying the create cost.
+      const containerImage = repo.devcontainer?.image ?? devbaseImage;
+      await stepRun("ensure-image-present", async () => {
+        await sandbox.ensureImagePresent(containerImage);
+      });
       sessionState = await stepRun("create-container", async () => {
         let sandboxEnv: Record<string, string> | undefined;
         if (secretsStore) {
@@ -779,7 +788,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
           ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
             homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
           }),
-          image: repo.devcontainer?.image ?? devbaseImage,
+          image: containerImage,
           resourceLimits: defaultResourceLimits,
           expiresAt: new Date(Date.now() + taskTtlMs),
           allowPrivilegedRunc: task.allowPrivilegedRunc,
@@ -806,7 +815,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         ),
       );
     }
-    containerCreated = true;
 
     // Post-create wiring — only on the fresh-create branch. A resume
     // hit means a prior attempt already ran these (or they're not
@@ -945,18 +953,17 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       taskId,
       worktreeAssignment,
     }).catch(() => {});
-    if (containerCreated) {
-      await sandbox.deleteByTaskId(taskId).catch(() => {});
-      // Stamp deleted_at so wall_clock = deleted_at - created_at is
-      // computable for tasks that crash mid-execute. The store
-      // method's WHERE gate makes this a no-op when no sandbox block
-      // was ever persisted (e.g. crash before `persist-sandbox-created`
-      // checkpointed) or when deleted_at is already set, so calling
-      // unconditionally is safe.
-      await runInTx((tx) =>
-        store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString()),
-      ).catch(() => {});
-    }
+    // Unconditional sandbox reap — see the "Cleanup on failure" comment
+    // above the try-resume / create-container block. Idempotent.
+    await sandbox.deleteByTaskId(taskId).catch(() => {});
+    // Stamp deleted_at so wall_clock = deleted_at - created_at is
+    // computable for tasks that crash mid-execute. The store method's
+    // WHERE gate makes this a no-op when no sandbox block was ever
+    // persisted (e.g. crash before `persist-sandbox-created`
+    // checkpointed) or when deleted_at is already set.
+    await runInTx((tx) =>
+      store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString()),
+    ).catch(() => {});
     await executeStream?.fail(reason).catch(() => {});
     return { status: "failed", failureReason: reason };
   }

@@ -9,7 +9,22 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { expectDefined } from "../../test/assertions.js";
 import type { SessionSpec } from "../index.js";
-import { DaytonaSandboxClient } from "./client.js";
+import { DaytonaSandboxClient, snapshotNameFor } from "./client.js";
+
+/**
+ * Snapshot state literals match the SDK's `SnapshotState` enum (which
+ * isn't re-exported as a runtime value). Hand-pinned here to keep the
+ * test off the transitive `@daytona/api-client` dep, matching the
+ * approach in `client.ts`.
+ */
+const SnapshotState = {
+  BUILDING: "building",
+  ACTIVE: "active",
+  BUILD_FAILED: "build_failed",
+} as const;
+// Test-side stub shape for Daytona's Snapshot — the client reads only
+// `name` and `state`, so a structural lookalike is enough.
+type DaytonaSnapshot = { name: string; state: string };
 
 // Mock the SDK at the module boundary so tests don't need a network roundtrip.
 // The Daytona class's internal behaviour isn't under test here — what matters
@@ -19,6 +34,9 @@ const daytonaCalls = {
   list: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
   get: vi.fn<(...args: unknown[]) => Promise<DaytonaSdkSandbox>>(),
   create: vi.fn<(...args: unknown[]) => Promise<DaytonaSdkSandbox>>(),
+  snapshotGet: vi.fn<(name: string) => Promise<DaytonaSnapshot>>(),
+  snapshotCreate: vi.fn<(...args: unknown[]) => Promise<DaytonaSnapshot>>(),
+  snapshotDelete: vi.fn<(snap: DaytonaSnapshot) => Promise<void>>(),
 };
 vi.mock("@daytonaio/sdk", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@daytonaio/sdk")>();
@@ -29,6 +47,11 @@ vi.mock("@daytonaio/sdk", async (importOriginal) => {
     list = daytonaCalls.list;
     get = daytonaCalls.get;
     create = daytonaCalls.create;
+    snapshot = {
+      get: daytonaCalls.snapshotGet,
+      create: daytonaCalls.snapshotCreate,
+      delete: daytonaCalls.snapshotDelete,
+    };
   }
   return { ...actual, Daytona: MockDaytona };
 });
@@ -84,10 +107,17 @@ beforeEach(() => {
   daytonaCalls.list.mockReset();
   daytonaCalls.get.mockReset();
   daytonaCalls.create.mockReset();
+  daytonaCalls.snapshotGet.mockReset();
+  daytonaCalls.snapshotCreate.mockReset();
+  daytonaCalls.snapshotDelete.mockReset();
 });
 afterEach(() => {
   vi.clearAllTimers();
 });
+
+function fakeSnapshot(opts: { name: string; state: string }): DaytonaSnapshot {
+  return { name: opts.name, state: opts.state };
+}
 
 const BASE_SPEC: SessionSpec = {
   taskId: "019d0000-0000-7000-8000-000000000aaa",
@@ -870,16 +900,162 @@ describe("DaytonaSandboxClient", () => {
     });
   });
 
-  describe("ensureImagePresent + reconcileCrashedInstances", () => {
-    it("ensureImagePresent is a no-op (Daytona builds on first create)", async () => {
+  describe("ensureImagePresent (snapshot prewarm) + reconcileCrashedInstances", () => {
+    it("skips warming for :latest tag (Daytona rejects it via snapshot.create)", async () => {
       const client = await makeClient();
-      await expect(client.ensureImagePresent("anything:latest")).resolves.toBeUndefined();
+      await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:latest");
+      expect(daytonaCalls.snapshotGet).not.toHaveBeenCalled();
+      expect(daytonaCalls.snapshotCreate).not.toHaveBeenCalled();
+    });
+
+    it("skips warming for untagged image (no version to pin)", async () => {
+      const client = await makeClient();
+      await client.ensureImagePresent("python");
+      expect(daytonaCalls.snapshotGet).not.toHaveBeenCalled();
+      expect(daytonaCalls.snapshotCreate).not.toHaveBeenCalled();
+    });
+
+    it("snapshot already ACTIVE → no create call", async () => {
+      daytonaCalls.snapshotGet.mockResolvedValue(
+        fakeSnapshot({ name: "cogmo-cogmo-devbase-1.66.0", state: SnapshotState.ACTIVE }),
+      );
+      const client = await makeClient();
+      await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+      expect(daytonaCalls.snapshotGet).toHaveBeenCalledWith("cogmo-cogmo-devbase-1.66.0");
+      expect(daytonaCalls.snapshotCreate).not.toHaveBeenCalled();
+    });
+
+    it("snapshot missing (404) → snapshot.create fires with derived name + image", async () => {
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: "cogmo-cogmo-devbase-1.66.0", state: SnapshotState.ACTIVE }),
+      );
+      const client = await makeClient();
+      await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+      expect(daytonaCalls.snapshotCreate).toHaveBeenCalledWith({
+        name: "cogmo-cogmo-devbase-1.66.0",
+        image: "ghcr.io/iskhakovt/cogmo-devbase:1.66.0",
+      });
+    });
+
+    it("snapshot in failure state (BUILD_FAILED) → delete + recreate", async () => {
+      const stale = fakeSnapshot({
+        name: "cogmo-cogmo-devbase-1.66.0",
+        state: SnapshotState.BUILD_FAILED,
+      });
+      daytonaCalls.snapshotGet.mockResolvedValue(stale);
+      daytonaCalls.snapshotDelete.mockResolvedValue();
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: "cogmo-cogmo-devbase-1.66.0", state: SnapshotState.ACTIVE }),
+      );
+      const client = await makeClient();
+      await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+      expect(daytonaCalls.snapshotDelete).toHaveBeenCalledWith(stale);
+      expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it("concurrent callers share one warm cycle", async () => {
+      let resolveCreate: (value: DaytonaSnapshot) => void = () => {};
+      const createGate = new Promise<DaytonaSnapshot>((resolve) => {
+        resolveCreate = resolve;
+      });
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockReturnValue(createGate);
+
+      const client = await makeClient();
+      const a = client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+      const b = client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+      resolveCreate(
+        fakeSnapshot({ name: "cogmo-cogmo-devbase-1.66.0", state: SnapshotState.ACTIVE }),
+      );
+      await Promise.all([a, b]);
+      // First call kicks off the cycle; the second observes the same
+      // in-flight promise via the per-image memoisation, so only one
+      // create call fires for both awaits.
+      expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it("failed warm is evicted from cache — next call retries", async () => {
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate
+        .mockRejectedValueOnce(new Error("provider 5xx"))
+        .mockResolvedValueOnce(
+          fakeSnapshot({ name: "cogmo-cogmo-devbase-1.66.0", state: SnapshotState.ACTIVE }),
+        );
+      const client = await makeClient();
+      await expect(
+        client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0"),
+      ).rejects.toThrow(/provider 5xx/);
+      // Second call must observe a fresh start, NOT a cached rejected
+      // promise. Without the eviction, this would re-throw the prior
+      // failure without retrying.
+      await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+      expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(2);
+    });
+
+    it("after ensureImagePresent succeeds, create() uses snapshot reference", async () => {
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: "cogmo-python-3.14-slim", state: SnapshotState.ACTIVE }),
+      );
+      daytonaCalls.create.mockResolvedValue(
+        fakeSandbox({ id: "sb-snap", state: SandboxState.STARTED }),
+      );
+      const client = await makeClient();
+      await client.ensureImagePresent("python:3.14-slim");
+      await client.create(BASE_SPEC);
+      const call = daytonaCalls.create.mock.calls[0]?.[0] as {
+        snapshot?: string;
+        image?: string;
+        resources?: unknown;
+      };
+      expect(call.snapshot).toBe("cogmo-python-3.14-slim");
+      expect(call.image).toBeUndefined();
+      // Resources are baked into the snapshot — `CreateSandboxFromSnapshotParams`
+      // has no `resources` field. Don't pass one or the SDK type would reject.
+      expect(call.resources).toBeUndefined();
+    });
+
+    it("without ensureImagePresent, create() falls back to image + resources", async () => {
+      daytonaCalls.create.mockResolvedValue(
+        fakeSandbox({ id: "sb-img", state: SandboxState.STARTED }),
+      );
+      const client = await makeClient();
+      await client.create(BASE_SPEC);
+      const call = daytonaCalls.create.mock.calls[0]?.[0] as {
+        snapshot?: string;
+        image?: string;
+        resources?: { cpu: number };
+      };
+      expect(call.image).toBe(BASE_SPEC.image);
+      expect(call.snapshot).toBeUndefined();
+      expect(call.resources?.cpu).toBe(1);
     });
 
     it("reconcileCrashedInstances reports zero (provider auto-cleanup)", async () => {
       const client = await makeClient();
       const result = await client.reconcileCrashedInstances("instance-1");
       expect(result).toEqual({ orphansReaped: 0 });
+    });
+  });
+
+  describe("snapshotNameFor", () => {
+    it("strips registry prefix and replaces tag colon", () => {
+      expect(snapshotNameFor("ghcr.io/iskhakovt/cogmo-devbase:1.66.0")).toBe(
+        "cogmo-cogmo-devbase-1.66.0",
+      );
+    });
+    it("lowercases the slug", () => {
+      expect(snapshotNameFor("MyOrg/Foo:V2.0")).toBe("cogmo-foo-v2.0");
+    });
+    it("returns null for :latest (Daytona rejects)", () => {
+      expect(snapshotNameFor("foo:latest")).toBeNull();
+    });
+    it("returns null for untagged image (no version to pin)", () => {
+      expect(snapshotNameFor("python")).toBeNull();
+    });
+    it("returns null for empty tag", () => {
+      expect(snapshotNameFor("python:")).toBeNull();
     });
   });
 
