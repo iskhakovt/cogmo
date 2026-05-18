@@ -100,6 +100,32 @@ The degraded reply is persisted as a normal assistant message (role `assistant`,
 
 The forensic record of *what the model produced before degrading* lives in the `agent.repair` / `agent.degrade` structured logs (see Telemetry below), not in `messages`. The `messages` table is the conversation transcript; structured logs are the failure audit.
 
+#### Tools-free synthesis on degrade `[proposed]`
+
+The fixed text above is the conservative baseline — no LLM call, deterministic, no failure modes. But it tells the user nothing about *what* the model was trying to do or *why* it stopped. A user who asked for an image and got "I had trouble generating a clean response" can't tell whether to rephrase, switch model, give up, or wait.
+
+The proposed extension: when a degrade fires (Class C exhaustion, Class D fingerprint, volume cluster, iteration cap), do **one** final LLM call **without tools** before posting the degraded reply. The model has the full failure history in context; the call asks it to summarize in user-facing terms what happened and what to try next. The result becomes the degraded reply text, persisted as the final assistant message of the turn.
+
+Synthesis call shape:
+
+- **Tools disabled at the API level** (`tools: []`), not via prompt — belt-and-braces against a model that "helpfully" tries to call a tool from a stale system instruction.
+- **Single attempt, no Class C repair on this call.** If it fails for any reason, fall back to the fixed string above and emit `agent.degrade.synthesis` with `ok: false`. Don't degrade-the-degrade — the user has waited long enough.
+- **Wall-clock cap of 5s** — tighter than the normal request budget. The user is already waiting on a failed turn.
+- **`temperature: 0`** — predictability matters more than variety on a failure reply.
+- **System prompt names the stop reason and asks for 1–3 sentences** covering: what was attempted, what went wrong, one concrete next step (rephrase, switch model, try later, etc.). No verbose apology.
+
+Provider for the synthesis call is the same one the failing turn was using — the conversation is already paying for that model's quirks; switching providers on the apology message is a non-sequitur. (A future "this provider is misbehaving" circuit breaker could change this; out of scope here.)
+
+Telemetry:
+
+```typescript
+{ event: "agent.degrade.synthesis", reason, subtype?, tokens_in, tokens_out, ok: boolean }
+```
+
+Single event name, `ok: boolean` for outcome — no separate `synthesis_failed` event. Downstream queries count failures as `event == "agent.degrade.synthesis" AND ok == false`. The underlying `agent.degrade` log fires regardless of synthesis outcome (the turn is degrading either way); the synthesis event is the per-attempt forensic record.
+
+**Provider-outage falls through cleanly.** When the synthesis call hits a Class A failure on a dead provider, it returns `ok: false` and the fixed string is posted. A spike in `synthesis ok: false` correlated with provider-outage telemetry is *not* a synthesis-logic bug — the synthesis path inherits the failing turn's provider, so any upstream unavailability propagates here. Investigate the upstream symptom in that case, not the synthesis code.
+
 ### Outside the agent loop
 
 `chatTyped` callsites in evolution background jobs — `drain-pending-memories.ts:194`, `extract-corrections.ts:79`, `extract-memories.ts:67`, `consolidate-rules.ts:121` — and untyped non-loop calls like the summarization step in `handle-message.ts:702` are still Class C surfaces, but they're not inside the agent loop and have no user to degrade to. They use **single-call retry-with-feedback** semantics:
@@ -161,6 +187,71 @@ The side-effect gate requires every `ToolSpec` to declare `sideEffectful: boolea
 **Field shape.** `sideEffectful?: boolean` on `ToolSpec`, with consumers reading `spec.sideEffectful ?? true`. Optional-plus-consumer-default matches the existing `durable?` / `parallelSafe?` convention on the same interface and keeps the migration trivial — third-party / plugin tools added later inherit the fail-safe default without touching their spec.
 
 Adding the field is a one-shot migration: extend `ToolSpec` in `src/agent/tools.ts`, default to `true` at the consumer level, mark the read-only set above as `false`. Without this migration, the side-effect gate defaults to "always trip" and Class D never fires — so the migration is a precondition for shipping Class D detection, not an optional follow-up.
+
+### Volume cluster trigger `[proposed]`
+
+The fingerprint above catches the loop doing the *same work* repeatedly — `(name, args)` matches twice. It does not catch the loop doing *similar work at high volume* — six `generate_image` calls with different prompts, eight `web_search`es with varying queries. Each call is unique by fingerprint, so the existing trigger ignores it. The LLM's softmax attention budget does not make the same distinction: every additional same-tool result block dilutes attention on the original user intent, and the lost-in-the-middle effect compounds as same-tool results stack. Class D today catches the *repetition* corner case of loop pathology; the volume-cluster trigger closes the *accumulation* case.
+
+The mechanism is intentionally outcome-agnostic. A failure-only counter under-fires: ten successful `web_search`es returning slightly different but redundant results dilute attention as much as ten failures, and the existing class-C/D plumbing already handles the all-failure case via fingerprint-on-identical-retry. The gap is "the loop made progress per-call but not per-turn" — a signal only volume captures.
+
+#### Mechanism
+
+A per-tool counter increments on each `tool_use` emission, scoped to one `runStreamingAgentLoop` invocation. When the counter for tool `T` reaches `T.invocationBudget`, the next `tool_use` block targeting `T` is intercepted: the handler does not run, and the loop synthesizes an `is_error: true` `tool_result` that names the cluster and forbids further calls to `T` this turn.
+
+**Implementation note: derive, don't store.** The counter must be recomputed by scanning the iteration's accumulated message array on each check, not maintained as a closure variable. Inngest function replay on retry replays cached `step.run` outputs in order but re-executes everything outside `step.run` from the top — a counter held in a closure resets to zero on every retry, silently letting the budget reset mid-turn. Deriving from the message array reflects the actual current state regardless of replay, and the scan is O(N) over a single-turn message array (cheap at the iteration count cap).
+
+Nudge text branches on outcome mix in the existing history:
+
+- **All failures:** "Every attempt to call `T` this turn failed (reasons: …). Do not call `T` again — change strategy."
+- **Mixed:** "K of N `T` calls produced results. Do not call `T` again — decide from what you have."
+- **All success:** "You have N results from `T`. Do not call `T` again — synthesize and reply."
+
+The counter persists across the whole turn regardless of per-call outcome. Volume is the signal: successful same-tool results dilute attention the same as failed ones (the softmax weight on the original user intent shrinks either way), so the budget is a volume cap, not a failure cap. A model that wants more bandwidth for one tool than its budget allows should ask the user or switch tools — that's the redirect the nudge text enforces. The reset happens at turn boundary (next `runStreamingAgentLoop` invocation), not within a turn.
+
+#### Per-tool budgets on `ToolSpec`
+
+`ToolSpec` grows an optional `invocationBudget?: number`. Consumers read `spec.invocationBudget ?? DEFAULT_INVOCATION_BUDGET` (default `5`), matching the existing optional-plus-consumer-default convention for `durable?`, `parallelSafe?`, `sideEffectful?`.
+
+| Tool class | Budget | Why |
+|-|-|-|
+| Image generation | 2 | Each call is multi-second + paid; legitimate multi-attempt is rare. |
+| `web_search`, `fetch_url` | 5 | Genuine multi-source research is normal up to ~5. |
+| `read_file`, `list_files` | 10 | Codebase exploration legitimately touches many files. |
+| `memory_recall` | 3 | Repeated recall on one turn usually means the model isn't finding what it wants — nudge to degrade. |
+| Default | 5 | Conservative fail-safe; tune from telemetry. |
+
+The field is keyed on `tool` not on `(tool, args)` — ten `read_file`s against ten paths is normal exploration, but ten different prompts to `generate_image` is the failure mode this catches. Distinguishing those by args at the budget layer would re-create the fingerprint's blind spot.
+
+#### Composition with the fingerprint trigger
+
+Both triggers run concurrently. They catch disjoint patterns:
+
+- **Fingerprint** trips on `(name, args)` repetition: same tool, same args, 3 consecutive or 5 cumulative.
+- **Volume cluster** trips on `name` repetition regardless of args: same tool, varying args, ≥ budget.
+
+A loop that varies args to evade the fingerprint hits the volume trigger. A loop that doesn't vary hits the fingerprint first. Neither fires when the model uses different tools (legitimate multi-step work) or the same read-only tool against different inputs (legitimate exploration, within budget).
+
+#### Trip semantics — redirect, not terminate
+
+The cluster trigger is a **repair**, not a degrade. When it fires:
+
+- The intercepted `tool_use` is **not** executed. No handler runs, no side effect, no provider cost.
+- The synthetic `tool_result` is appended to the iteration's results, **carrying the intercepted `tool_use`'s `id`** to satisfy Anthropic's tool_use ↔ tool_result pairing requirement. The `tool_use` block exists in the assistant message regardless of handler execution; a matching `tool_result` must exist on the next user message or the API rejects the conversation. Intercept happens *after* the block lands in the assistant message and *before* the handler runs.
+- The loop continues — the model receives the nudge and emits its next response.
+
+If the model ignores the nudge and emits another `tool_use` for `T`, the args are likely identical to a prior call (the model has no new information). The existing fingerprint catches that as the consecutive trigger and degrades on `stuck_loop`. Volume cluster → fingerprint → degrade is the staircase; the volume trigger redirects, the fingerprint terminates.
+
+#### Telemetry
+
+```typescript
+{ event: "agent.repair", subtype: "volume_cluster", tool: T, count, outcome_mix }
+```
+
+No separate degrade event — the cluster trigger is a repair. The follow-on degrade (if the model ignores the nudge) is the existing `stuck_loop` event.
+
+#### Prerequisite
+
+`ToolSpec.invocationBudget?` ships before the trigger code does, same way `sideEffectful` had to ship before the side-effect gate. Default-at-consumer (`?? DEFAULT_INVOCATION_BUDGET`) keeps the migration to a single PR — no per-tool retrofitting required for the trigger to light up; tool-specific overrides land incrementally as telemetry justifies them.
 
 ## Telemetry `[confirmed]`
 
