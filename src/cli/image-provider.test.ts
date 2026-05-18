@@ -81,7 +81,7 @@ describe("runImageProviderCli", () => {
       io,
     );
     expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/expected fal\|openai_compatible/);
+    expect(err.join("\n")).toMatch(/expected fal\|openai_compatible\|venice/);
   });
 
   it("creates a fal provider (writes secret + provider row)", async () => {
@@ -105,6 +105,59 @@ describe("runImageProviderCli", () => {
       expect.objectContaining({ name: "fal", type: "fal", baseUrl: null, secretId: "sec-fal" }),
     );
     expect(out.join("\n")).toMatch(/Added image provider "fal"/);
+  });
+
+  it("creates a venice provider with safe_mode default", async () => {
+    const { io, out } = makeIo();
+    const putSecret = vi.fn().mockResolvedValue({ id: "sec-venice" });
+    const createImageProvider = vi.fn().mockResolvedValue({ id: "p-venice" });
+    const agentStore = { createImageProvider } as unknown as AgentStore;
+    const secretsStore = { putSecret } as unknown as SecretsStore;
+    const rc = await runImageProviderCli(
+      [
+        "add",
+        "venice",
+        "venice",
+        "sk-venice",
+        "https://api.venice.ai/api/v1",
+        "--safe-mode",
+        "false",
+      ],
+      { runInTx: tx, agentStore, secretsStore },
+      io,
+    );
+    expect(rc).toBe(0);
+    expect(createImageProvider).toHaveBeenCalledWith(
+      FAKE_TX,
+      expect.objectContaining({
+        name: "venice",
+        type: "venice",
+        baseUrl: "https://api.venice.ai/api/v1",
+        attrs: { imageGenerationDefaults: { safe_mode: false } },
+      }),
+    );
+    expect(out.join("\n")).toMatch(/Added image provider "venice"/);
+  });
+
+  it("rejects --safe-mode for non-venice provider types", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {} as AgentStore;
+    const secretsStore = {} as SecretsStore;
+    const rc = await runImageProviderCli(
+      [
+        "add",
+        "openai_compatible",
+        "openai",
+        "sk-openai",
+        "https://api.openai.com/v1",
+        "--safe-mode",
+        "true",
+      ],
+      { runInTx: tx, agentStore, secretsStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--safe-mode is venice-only/);
   });
 
   it("removes a provider by name", async () => {

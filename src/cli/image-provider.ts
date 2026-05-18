@@ -31,9 +31,18 @@ const USAGE = `Usage: cogmo image-provider <command> [args]
 Commands:
   add <type> <name> <api-key> [base-url]
                           Register an image provider. \`type\` is one of:
-                          fal, openai_compatible. base-url is REQUIRED for
-                          openai_compatible (e.g. https://api.venice.ai/api/v1)
-                          and FORBIDDEN for fal.
+                          fal, openai_compatible, venice. base-url is
+                          REQUIRED for openai_compatible (e.g.
+                          https://api.openai.com/v1) and venice
+                          (https://api.venice.ai/api/v1), and FORBIDDEN
+                          for fal.
+
+                          Venice extras: pass --safe-mode true|false to
+                          set the provider-level censorship blur default
+                          (Venice defaults to true; pass false to disable
+                          blur — the adapter then treats a returned
+                          x-venice-is-blurred response as a failed
+                          generation).
   list                    Show registered image providers (name | type | base url).
   remove <name>           Delete a provider (cascades to its image_models rows).
 `;
@@ -103,13 +112,36 @@ async function addProviderCmd(
   deps: ImageProviderCliDeps,
   io: CliIo,
 ): Promise<number> {
-  const [typeArg, name, apiKey, baseUrlArg] = args;
+  // Split positional args from named flags so `--safe-mode true|false` can
+  // appear anywhere after the type/name/api-key triple. Order doesn't matter
+  // for the flag, but the positional triple must come first to preserve the
+  // existing CLI contract.
+  const positional: string[] = [];
+  let safeModeFlag: boolean | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--safe-mode") {
+      const value = args[i + 1];
+      if (value !== "true" && value !== "false") {
+        io.err(`--safe-mode requires "true" or "false" (got "${value ?? ""}")`);
+        return 2;
+      }
+      safeModeFlag = value === "true";
+      i++;
+    } else if (arg !== undefined) {
+      positional.push(arg);
+    }
+  }
+
+  const [typeArg, name, apiKey, baseUrlArg] = positional;
   if (!typeArg || !name || !apiKey) {
-    io.err("Usage: cogmo image-provider add <type> <name> <api-key> [base-url]");
+    io.err(
+      "Usage: cogmo image-provider add <type> <name> <api-key> [base-url] [--safe-mode true|false]",
+    );
     return 2;
   }
-  if (typeArg !== "fal" && typeArg !== "openai_compatible") {
-    io.err(`Invalid type "${typeArg}" — expected fal|openai_compatible`);
+  if (typeArg !== "fal" && typeArg !== "openai_compatible" && typeArg !== "venice") {
+    io.err(`Invalid type "${typeArg}" — expected fal|openai_compatible|venice`);
     return 2;
   }
   if (!PROVIDER_NAME_RE.test(name)) {
@@ -121,8 +153,17 @@ async function addProviderCmd(
     );
     return 2;
   }
+  if (safeModeFlag !== undefined && typeArg !== "venice") {
+    io.err(`--safe-mode is venice-only (got type=${typeArg})`);
+    return 2;
+  }
   const providerType: ImageProviderTypeValue = typeArg;
   const baseUrl = baseUrlArg ?? null;
+  // Empty `imageGenerationDefaults` would round-trip as `{}` in the row,
+  // which is harmless but noisy in CRUD output — only include it when the
+  // operator actually opted into a default.
+  const attrs =
+    safeModeFlag !== undefined ? { imageGenerationDefaults: { safe_mode: safeModeFlag } } : {};
 
   // Materialize the API key into a secret named `<provider-name>_api_key` —
   // consistent with the canonical `fal_api_key` slot the wizard uses, just
@@ -141,7 +182,7 @@ async function addProviderCmd(
         type: providerType,
         baseUrl,
         secretId,
-        attrs: {},
+        attrs,
       });
     });
     io.out(`Added image provider "${name}" (id=${providerId}, secret=${secretName}).`);

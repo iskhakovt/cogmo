@@ -3,6 +3,7 @@ import type { OpenAICompatibleProvider } from "@ai-sdk/openai-compatible";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ImageModelWithProvider } from "../agent/store/index.js";
 import type { ImageProvider } from "../llm/image-providers.js";
+import type { VeniceImageProvider } from "../llm/venice.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { AbortError } from "../util/with-retry.js";
 import {
@@ -94,7 +95,7 @@ function fakeOaiProvider(): {
     kind: "oai",
     row: {
       id: "provider-2",
-      name: "venice",
+      name: "venice-oai",
       type: "openai_compatible",
       baseUrl: "https://api.venice.ai/api/v1",
       secretId: "sec-2",
@@ -103,6 +104,32 @@ function fakeOaiProvider(): {
     provider: { imageModel: imageModelFn } as unknown as OpenAICompatibleProvider,
   };
   return { imageModelFn, provider };
+}
+
+function fakeVeniceProvider(): {
+  generateFn: ReturnType<typeof vi.fn>;
+  provider: ImageProvider;
+} {
+  const generateFn = vi.fn(async () => ({
+    uint8Array: new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
+    mediaType: "image/png" as const,
+  }));
+  const provider: ImageProvider = {
+    kind: "venice",
+    row: {
+      id: "provider-3",
+      name: "venice",
+      type: "venice",
+      baseUrl: "https://api.venice.ai/api/v1",
+      secretId: "sec-3",
+      attrs: {},
+    },
+    // Minimal stub conforming to the surface the tool handler calls
+    // (`generate`). The adapter's full constructor takes apiKey/baseUrl/etc.
+    // and is exercised in venice.test.ts.
+    provider: { generate: generateFn } as unknown as VeniceImageProvider,
+  };
+  return { generateFn, provider };
 }
 
 function fakeAttachments(): AttachmentStore {
@@ -522,6 +549,142 @@ describe("createImageTools", () => {
     });
     expect(tool!.description).toMatch(/\[needs reference image\]/);
     expect(tool!.description).toMatch(/referenceImage/);
+  });
+
+  it("delegates to provider.generate() for venice models", async () => {
+    const { generateFn, provider } = fakeVeniceProvider();
+    const attachments = fakeAttachments();
+    const model = falModel({
+      providerId: "provider-3",
+      name: "venice/flux-dev-uncensored",
+      modelString: "flux-dev-uncensored",
+      capabilities: { aspectRatios: ["1:1", "16:9"], seed: true, negativePrompt: true },
+      provider: provider.row,
+    });
+    const [tool] = createImageTools({
+      models: [model],
+      providers: new Map([["provider-3", provider]]),
+      attachments,
+    });
+
+    const result = await tool!.handler(
+      {
+        prompt: "a painted dragon",
+        model: "flux-dev-uncensored",
+        aspectRatio: "16:9",
+        seed: 42,
+        negativePrompt: "low quality, blurry",
+      },
+      FAKE_SERVICE,
+    );
+
+    expect(generateFn).toHaveBeenCalledTimes(1);
+    expect(generateFn.mock.calls[0]?.[0]).toMatchObject({
+      model: "flux-dev-uncensored",
+      prompt: "a painted dragon",
+      aspectRatio: "16:9",
+      seed: 42,
+      negativePrompt: "low quality, blurry",
+    });
+    expect(attachments.upload).toHaveBeenCalled();
+    const parsed = JSON.parse(result) as GeneratedImagePayload;
+    expect(parsed).toMatchObject({
+      path: "inbound/test.png",
+      mediaType: "image/png",
+      model: "venice/flux-dev-uncensored",
+    });
+  });
+
+  it("rejects referenceImage for venice (non-fal) providers", async () => {
+    const { provider } = fakeVeniceProvider();
+    const model = falModel({
+      providerId: "provider-3",
+      name: "venice/flux-edit",
+      modelString: "flux-edit",
+      capabilities: { imageInput: "optional" },
+      provider: provider.row,
+    });
+    const [tool] = createImageTools({
+      models: [model],
+      providers: new Map([["provider-3", provider]]),
+      attachments: fakeAttachments(),
+    });
+    const result = await tool!.handler(
+      { prompt: "x", model: "flux-edit", referenceImage: "inbound/photo.png" },
+      FAKE_SERVICE,
+    );
+    expect(result).toMatch(/only supported by fal providers today/);
+  });
+
+  it("does NOT forward negativePrompt when the model's capability is absent", async () => {
+    const { generateFn, provider } = fakeVeniceProvider();
+    const model = falModel({
+      providerId: "provider-3",
+      name: "venice/text-only",
+      modelString: "text-only",
+      capabilities: { aspectRatios: ["1:1"] }, // negativePrompt absent
+      provider: provider.row,
+    });
+    const [tool] = createImageTools({
+      models: [model],
+      providers: new Map([["provider-3", provider]]),
+      attachments: fakeAttachments(),
+    });
+    await tool!.handler(
+      {
+        prompt: "x",
+        model: "text-only",
+        negativePrompt: "blurry",
+      },
+      FAKE_SERVICE,
+    );
+    expect(generateFn.mock.calls[0]?.[0]).not.toHaveProperty("negativePrompt");
+  });
+
+  it("forwards negativePrompt to fal via providerOptions.fal.negative_prompt", async () => {
+    mockGenerateImage.mockResolvedValueOnce({
+      image: { uint8Array: new Uint8Array([1]), mediaType: "image/png" },
+    });
+    const [tool] = createImageTools({
+      models: [
+        falModel({
+          capabilities: { aspectRatios: ["1:1", "16:9"], seed: true, negativePrompt: true },
+        }),
+      ],
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
+      attachments: fakeAttachments(),
+    });
+    await tool!.handler(
+      {
+        prompt: "x",
+        model: "flux-dev",
+        negativePrompt: "extra fingers",
+      },
+      FAKE_SERVICE,
+    );
+    const callArg = mockGenerateImage.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(callArg.providerOptions).toMatchObject({
+      fal: { negative_prompt: "extra fingers" },
+    });
+  });
+
+  it("advertises [supports negativePrompt] in the tool description for capable models", () => {
+    const { provider } = fakeVeniceProvider();
+    const [tool] = createImageTools({
+      models: [
+        falModel({
+          providerId: "provider-3",
+          name: "venice/flux-uncensored",
+          modelString: "flux-dev-uncensored",
+          capabilities: { aspectRatios: ["1:1"], negativePrompt: true },
+          provider: provider.row,
+        }),
+      ],
+      providers: new Map([["provider-3", provider]]),
+      attachments: fakeAttachments(),
+    });
+    expect(tool!.description).toMatch(/\[supports negativePrompt\]/);
+    expect(tool!.description).toMatch(/negativePrompt/);
   });
 
   it("promotes non-retryable APICallErrors to AbortError", async () => {

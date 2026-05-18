@@ -82,9 +82,10 @@ import { createDbVoiceResolver } from "./voice/resolver.js";
  * Per-stage option ownership — keep in sync when adding fields:
  *
  * - `providerOverride` → read by `bootstrapCore` (LLM provider resolver).
- * - `falFetchOverride`, `voiceFetchOverride` → read by `bootstrapRuntime`
- *   (fal.ai + OpenAI voice provider construction; both clients live next
- *   to the agent loop that consumes them).
+ * - `falFetchOverride`, `veniceFetchOverride`, `voiceFetchOverride` → read by
+ *   `bootstrapRuntime` (fal.ai / Venice.ai image + OpenAI voice provider
+ *   construction; all clients live next to the agent loop that consumes
+ *   them).
  * - `sandboxClientOverride` → read by `bootstrapSandbox` (skips env-driven
  *   backend selection so tests can wire `FakeDaytonaSandboxClient`
  *   without hitting Daytona Cloud or a self-hosted compose).
@@ -107,6 +108,13 @@ export interface BootstrapOptions {
    * SDK uses `globalThis.fetch`.
    */
   falFetchOverride?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  /**
+   * Custom `fetch` for the Venice.ai image provider — used by integration
+   * tests to intercept Venice HTTP traffic (see `src/test/venice-mock.ts`).
+   * Production wiring leaves this undefined so the adapter uses
+   * `globalThis.fetch`. Scoped to the venice provider instance only.
+   */
+  veniceFetchOverride?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   /**
    * Custom `fetch` for the OpenAI voice provider — used by integration tests
    * to intercept `/v1/audio/speech` and `/v1/audio/transcriptions` traffic
@@ -751,7 +759,12 @@ export async function bootstrapRuntime(
     agentStore: core.agentStore,
     secretsStore: core.secretsStore,
     attachments: core.attachmentStore,
-    ...(opts.falFetchOverride && { fetchOverrides: { fal: opts.falFetchOverride } }),
+    ...((opts.falFetchOverride || opts.veniceFetchOverride) && {
+      fetchOverrides: {
+        ...(opts.falFetchOverride && { fal: opts.falFetchOverride }),
+        ...(opts.veniceFetchOverride && { venice: opts.veniceFetchOverride }),
+      },
+    }),
   });
   const documentTools = createDocumentTools(core.attachmentStore);
 

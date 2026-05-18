@@ -61,10 +61,17 @@ export type LlmProviderTypeValue = (typeof llmProviderType.enumValues)[number];
 /**
  * Image provider adapter discriminator. `fal` uses `@ai-sdk/fal` (no base
  * URL), `openai_compatible` uses `@ai-sdk/openai-compatible` against
- * `${base_url}/images/generations`. See `design/image-generation.md` →
+ * `${base_url}/images/generations`, `venice` uses a hand-rolled adapter
+ * against Venice.ai's native `/image/generate` endpoint (Venice's
+ * OpenAI-compat path strict-rejects its own bespoke knobs like
+ * `safe_mode` / `negative_prompt`). See `design/image-generation.md` →
  * Providers.
  */
-export const imageProviderType = pgEnum("image_provider_type", ["fal", "openai_compatible"]);
+export const imageProviderType = pgEnum("image_provider_type", [
+  "fal",
+  "openai_compatible",
+  "venice",
+]);
 export type ImageProviderTypeValue = (typeof imageProviderType.enumValues)[number];
 
 /**
@@ -156,12 +163,41 @@ export const ProfileMemoryScopeSchema = z.object({
 export type ProfileMemoryScope = z.infer<typeof ProfileMemoryScopeSchema>;
 
 /**
+ * Provider-level image-generation defaults. Adapter-specific knobs the
+ * operator pins for every call (the LLM never sees or chooses these).
+ * Today shaped by Venice's native API but the field name is provider-neutral
+ * so future providers can layer their own defaults under the same key without
+ * another migration.
+ *
+ * - `safe_mode`: Venice defaults to `true` (blurs flagged content); set
+ *   `false` to disable blur. When `safe_mode` is false the adapter throws on
+ *   `x-venice-is-blurred: true` — an unwanted blur is a failed generation,
+ *   not a delivery target.
+ * - `cfg_scale`: classifier-free guidance strength (Venice). Lower = looser
+ *   adherence to the prompt; higher = tighter. Venice's documented range is
+ *   0–20.
+ * - `hide_watermark`: strip the Venice watermark when supported.
+ * - `style_preset`: Venice style preset name (e.g. `"3D Model"`,
+ *   `"Anime"`). Free-form because the upstream list evolves.
+ */
+export const ImageGenerationDefaultsSchema = z.object({
+  safe_mode: z.boolean().optional(),
+  cfg_scale: z.number().min(0).max(20).optional(),
+  hide_watermark: z.boolean().optional(),
+  style_preset: z.string().optional(),
+});
+export type ImageGenerationDefaults = z.infer<typeof ImageGenerationDefaultsSchema>;
+
+/**
  * `image_providers.attrs` — adapter-specific knobs. `headers` sets extra
  * default headers on the OpenAI-compatible SDK client (e.g. for tenant
- * routing or usage attribution). Fal has no documented use today.
+ * routing or usage attribution). `imageGenerationDefaults` carries the
+ * provider-level call defaults the operator wants pinned (see
+ * `ImageGenerationDefaultsSchema`). Fal has no documented use today.
  */
 export const ImageProviderAttrsSchema = z.object({
   headers: z.record(z.string(), z.string()).optional(),
+  imageGenerationDefaults: ImageGenerationDefaultsSchema.optional(),
 });
 export type ImageProviderAttrs = z.infer<typeof ImageProviderAttrsSchema>;
 
@@ -188,9 +224,16 @@ export type ImageProviderAttrs = z.infer<typeof ImageProviderAttrsSchema>;
  *   Today only honored by `kind: "fal"` providers (via the AI SDK's
  *   `prompt: { text, images }` shape); openai-compatible providers reject
  *   image input at the handler boundary until a validated path lands.
+ * `negativePrompt` — declares whether the model accepts a free-form
+ *   negative prompt ("don't draw X"). True opts in to the per-call
+ *   `negativePrompt` field in the tool input; absent or false → the field
+ *   is dropped before the provider call, preventing accidental forwarding
+ *   to providers that strict-reject the parameter. Today honored by fal
+ *   (via `providerOptions.fal.negative_prompt`) and venice (native body
+ *   field); openai-compatible models typically don't accept it.
  *
- * Forward-extensible: add `negativePrompt`, `maxPromptLength`,
- * `outputMediaType`, etc. without a migration as new providers land.
+ * Forward-extensible: add `maxPromptLength`, `outputMediaType`, etc.
+ * without a migration as new providers land.
  */
 /**
  * Canonical aspect-ratio vocabulary. Shared between the schema (for the
@@ -212,6 +255,7 @@ export const ImageModelCapabilitiesSchema = z.object({
   aspectRatios: z.array(z.enum(IMAGE_ALLOWED_ASPECT_RATIOS)).optional(),
   seed: z.boolean().optional(),
   imageInput: z.enum(["required", "optional"]).optional(),
+  negativePrompt: z.boolean().optional(),
 });
 export type ImageModelCapabilities = z.infer<typeof ImageModelCapabilitiesSchema>;
 
@@ -291,7 +335,7 @@ export const imageProviders = pgTable(
     id: pk(),
     name: text("name").notNull().unique(),
     type: imageProviderType("type").notNull(),
-    baseUrl: text("base_url"), // NULL for fal, NOT NULL for openai_compatible (CHECK enforced)
+    baseUrl: text("base_url"), // NULL for fal, NOT NULL for openai_compatible / venice (CHECK enforced)
     secretId: uuid("secret_id")
       .notNull()
       .references(() => secrets.id),
@@ -305,7 +349,9 @@ export const imageProviders = pgTable(
       // satisfies Y." A type not mentioned here passes both clauses by
       // vacuous truth — see the docstring for why this matters when
       // extending the enum.
-      sql`(${t.type} <> 'openai_compatible' OR ${t.baseUrl} IS NOT NULL) AND (${t.type} <> 'fal' OR ${t.baseUrl} IS NULL)`,
+      sql`(${t.type} <> 'openai_compatible' OR ${t.baseUrl} IS NOT NULL)
+        AND (${t.type} <> 'venice' OR ${t.baseUrl} IS NOT NULL)
+        AND (${t.type} <> 'fal' OR ${t.baseUrl} IS NULL)`,
     ),
   ],
 );

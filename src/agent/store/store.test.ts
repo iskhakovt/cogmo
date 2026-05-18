@@ -2956,6 +2956,42 @@ describe("DrizzleAgentStore", () => {
       ).rejects.toBeInstanceOf(InvalidProviderConfigError);
     });
 
+    it("creates a venice provider with base_url + imageGenerationDefaults", async () => {
+      const { id: secretId } = await seedSecret("venice_native_api_key");
+      const { id } = await tx((trx) =>
+        store.createImageProvider(trx, {
+          name: "venice-native",
+          type: "venice",
+          baseUrl: "https://api.venice.ai/api/v1",
+          secretId,
+          attrs: { imageGenerationDefaults: { safe_mode: false, cfg_scale: 7.5 } },
+        }),
+      );
+      const row = await tx((trx) => store.getImageProvider(trx, id));
+      expect(row).toMatchObject({
+        name: "venice-native",
+        type: "venice",
+        baseUrl: "https://api.venice.ai/api/v1",
+        attrs: { imageGenerationDefaults: { safe_mode: false, cfg_scale: 7.5 } },
+      });
+    });
+
+    it("rejects venice without base_url at the store boundary", async () => {
+      const { id: secretId } = await seedSecret("venice_native_api_key");
+      const { InvalidProviderConfigError } = await import("./errors.js");
+      await expect(
+        tx((trx) =>
+          store.createImageProvider(trx, {
+            name: "venice-native",
+            type: "venice",
+            baseUrl: null,
+            secretId,
+            attrs: {},
+          }),
+        ),
+      ).rejects.toBeInstanceOf(InvalidProviderConfigError);
+    });
+
     it("rejects non-https base_url", async () => {
       const { id: secretId } = await seedSecret("rogue_api_key");
       const { InvalidProviderConfigError } = await import("./errors.js");

@@ -266,9 +266,9 @@ function previewFromContent(content: unknown): string {
  * Validate `(type, base_url)` for an image provider. Throws
  * `InvalidProviderConfigError` with a wizard-friendly reason for the
  * cases the DB CHECK can't express. The DB CHECK still enforces the
- * coarser `openai_compatible ↔ NOT NULL`, `fal ↔ NULL` invariant — this
- * guard fires first so the wizard gets a useful message instead of an
- * opaque 23514.
+ * coarser `openai_compatible ↔ NOT NULL`, `venice ↔ NOT NULL`,
+ * `fal ↔ NULL` invariant — this guard fires first so the wizard gets a
+ * useful message instead of an opaque 23514.
  */
 function validateImageProviderBaseUrl(type: ImageProviderTypeValue, baseUrl: string | null): void {
   // Exhaustive switch over `image_provider_type` — adding an enum value
@@ -280,9 +280,10 @@ function validateImageProviderBaseUrl(type: ImageProviderTypeValue, baseUrl: str
         throw new InvalidProviderConfigError("fal does not accept a base_url");
       }
       return;
-    case "openai_compatible": {
+    case "openai_compatible":
+    case "venice": {
       if (baseUrl === null) {
-        throw new InvalidProviderConfigError("openai_compatible requires a base_url");
+        throw new InvalidProviderConfigError(`${type} requires a base_url`);
       }
       let parsed: URL;
       try {
