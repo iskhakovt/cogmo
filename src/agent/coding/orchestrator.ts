@@ -2,12 +2,13 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
 import {
+  codingTaskFailed,
   codingTaskPermissionDecision,
   codingTaskPermissionRequested,
   codingTaskPlanApproved,
   codingTaskStart,
 } from "../../inngest/events.js";
-import type { StepRun, StepWaitForEvent } from "../../inngest/index.js";
+import type { StepRun, StepSendEvent, StepWaitForEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import {
   isLocalDockerSessionState,
@@ -29,7 +30,7 @@ import { allocateWorktree } from "./worktree.js";
 
 const log = logger.child({ component: "coding.orchestrator" });
 
-export type { StepRun } from "../../inngest/index.js";
+export type { StepRun, StepSendEvent } from "../../inngest/index.js";
 
 /**
  * Streaming surface the orchestrator writes to during the non-durable plan
@@ -130,7 +131,13 @@ export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: 
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
     async ({ event, step }) => {
-      return runCodingTask({ taskId: event.data.taskId, deps, stepRun: step.run, inngest });
+      return runCodingTask({
+        taskId: event.data.taskId,
+        deps,
+        stepRun: step.run,
+        stepSendEvent: step.sendEvent,
+        inngest,
+      });
     },
   );
 }
@@ -139,6 +146,13 @@ interface RunParams {
   taskId: string;
   deps: CodingOrchestratorDeps;
   stepRun: StepRun;
+  /**
+   * Durable bus emit. Used in the in-worker catch path so a transient
+   * send blip surfaces as a function failure (caught by the
+   * `coding-task-reconcile` system-event subscriber) rather than a
+   * silently-swallowed `coding/task/failed` event.
+   */
+  stepSendEvent: StepSendEvent;
   /**
    * Inngest client — used to emit `coding/task/failed` so cleanup
    * subscribers (run-branch deletion, future telemetry) hook in
@@ -159,7 +173,7 @@ interface RunParams {
  * retry.
  */
 export async function runCodingTask(params: RunParams): Promise<CodingOrchestratorResult> {
-  const { taskId, deps, stepRun, inngest } = params;
+  const { taskId, deps, stepRun, stepSendEvent, inngest } = params;
   const taskLog = log.child({ taskId });
   const {
     runInTx,
@@ -448,15 +462,26 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   } catch (err) {
     const reason = (err as Error).message;
     taskLog.error({ err }, "coding task failed");
-    // Catch-path writes deliberately bypass `stepRun`. The function runs
-    // with retries=0 (the plan-mode `claude` session is non-resumable
-    // from mid-stream — see the createFunction comment), so wrapping in
-    // `stepRun` here would just add observability noise without any
-    // exactly-once benefit. Revisit if retries ever become non-zero.
+    // Emit BEFORE the DB status update. If `step.sendEvent` ultimately
+    // fails (SDK exhausts its retry budget on a real bus outage), the
+    // catch throws, the function fails, and `inngest/function.failed`
+    // fires. The `coding-task-reconcile` subscriber sees a still-non-
+    // terminal row and re-emits via its own idempotency id. The DB
+    // status update reaching this catch first would leave the row
+    // terminal and the reconcile would see `already_terminal` and skip.
+    // Idempotency `id` dedups against an unlikely repeat fire for the
+    // same task.
+    await stepSendEvent("emit-task-failed", {
+      ...codingTaskFailed.create({ taskId, reason }),
+      id: `task-failed-${taskId}`,
+    });
+    // Letting this throw is load-bearing: a DB blip after a successful
+    // emit would otherwise return normally to Inngest, suppress
+    // `function.failed`, and leave the row non-terminal forever
+    // (reconcile only fires on function failure).
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-    ).catch(() => {});
-    await inngest.send({ name: "coding/task/failed", data: { taskId, reason } }).catch(() => {});
+    );
     if (assignment) {
       await safeTeardownWorktree({
         runInTx,
@@ -469,8 +494,6 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     if (containerCreated) {
       await sandbox.deleteByTaskId(taskId).catch(() => {});
     }
-    // Notify the plan stream if it was opened. Best-effort — we're already
-    // in the catch path, don't let a delivery failure mask the original error.
     await planStream?.fail(reason).catch(() => {});
     return { status: "failed", failureReason: reason };
   }
@@ -563,6 +586,7 @@ export function createCodingExecuteOrchestrator(deps: CodingOrchestratorDeps, in
         deps,
         stepRun: step.run,
         stepWaitForEvent: step.waitForEvent,
+        stepSendEvent: step.sendEvent,
         inngest,
       });
     },
@@ -647,6 +671,13 @@ interface ExecuteRunParams {
    */
   stepWaitForEvent: StepWaitForEvent;
   /**
+   * Durable bus emit. Used in the in-worker catch path so a transient
+   * send blip surfaces as a function failure (caught by the reconcile
+   * subscriber) rather than a silently-swallowed
+   * `coding/task/failed` event.
+   */
+  stepSendEvent: StepSendEvent;
+  /**
    * Inngest client — used to emit `coding/task/permission-requested` for
    * observability + Telegram delivery, and any future events the gate
    * fires.
@@ -667,7 +698,7 @@ interface ExecuteRunParams {
  * - `worktree_assignment` must be present (the plan phase allocated it).
  */
 export async function runCodingExecute(params: ExecuteRunParams): Promise<CodingExecuteResult> {
-  const { taskId, deps, stepRun, stepWaitForEvent, inngest } = params;
+  const { taskId, deps, stepRun, stepWaitForEvent, stepSendEvent, inngest } = params;
   const taskLog = log.child({ taskId });
   const { runInTx, store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
@@ -936,10 +967,17 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   } catch (err) {
     const reason = (err as Error).message;
     taskLog.error({ err }, "coding execute failed");
+    // Emit BEFORE the DB status update — see the rationale on the
+    // matching catch in `runCodingTask`.
+    await stepSendEvent("emit-task-failed", {
+      ...codingTaskFailed.create({ taskId, reason }),
+      id: `task-failed-${taskId}`,
+    });
+    // Letting this throw is load-bearing — see the matching catch in
+    // `runCodingTask`.
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
-    ).catch(() => {});
-    await inngest.send({ name: "coding/task/failed", data: { taskId, reason } }).catch(() => {});
+    );
     await safeTeardownWorktree({
       runInTx,
       ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),

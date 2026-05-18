@@ -26,6 +26,7 @@ import {
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
+import { makeStepRun, nullStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import type {
   CodingBackend,
@@ -76,7 +77,8 @@ const RESOURCE_LIMITS: ResourceLimits = {
   pids: 64,
 };
 
-const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any;
+const stepRun = makeStepRun();
+const stepSendEvent = nullStepSendEvent();
 
 async function seedRepoAndTask(): Promise<{ repo: CodingRepoRow; task: CodingTaskRow }> {
   const repo = await tx((trx) =>
@@ -243,6 +245,7 @@ describe("tool gate wiring", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
+      stepSendEvent,
       stepWaitForEvent,
       inngest: { send: inngestSend } as unknown as Inngest,
     });
@@ -294,6 +297,7 @@ describe("tool gate wiring", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
+      stepSendEvent,
       stepWaitForEvent,
       inngest: { send: inngestSend } as unknown as Inngest,
     });
@@ -339,6 +343,7 @@ describe("tool gate wiring", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
+      stepSendEvent,
       stepWaitForEvent,
       inngest: { send: inngestSend } as unknown as Inngest,
     });
@@ -393,6 +398,7 @@ describe("tool gate wiring", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
+      stepSendEvent,
       stepWaitForEvent,
       inngest: { send: inngestSend } as unknown as Inngest,
     });
@@ -422,6 +428,7 @@ describe("tool gate wiring", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
+      stepSendEvent,
       stepWaitForEvent,
       inngest: { send: vi.fn().mockResolvedValue(undefined) } as unknown as Inngest,
     });
@@ -470,6 +477,7 @@ describe("tool gate wiring", () => {
       taskId: task.id,
       deps: { ...deps, store: wrappedStore },
       stepRun,
+      stepSendEvent,
       stepWaitForEvent,
       inngest: { send: inngestSend } as unknown as Inngest,
     });
@@ -511,6 +519,7 @@ describe("tool gate wiring", () => {
       taskId: task.id,
       deps: { ...deps, store: wrappedStore },
       stepRun,
+      stepSendEvent,
       stepWaitForEvent: vi.fn(),
       inngest: { send: vi.fn().mockResolvedValue(undefined) } as unknown as Inngest,
     });
@@ -562,6 +571,7 @@ describe("tool gate wiring", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
+      stepSendEvent,
       stepWaitForEvent,
       inngest: { send: inngestSend } as unknown as Inngest,
     });
