@@ -294,12 +294,22 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     // awaits the same promise. If a build genuinely never terminates
     // (provider outage), Daytona's auto-stop reaper would eventually
     // clean it up server-side and our next call would 404 and rebuild.
+    //
+    // Exit condition is "treat unknown as terminal": continue only on
+    // the documented in-flight set (BUILDING / PENDING / PULLING). Any
+    // other observed state — ACTIVE (done), ERROR / BUILD_FAILED
+    // (settled failure), INACTIVE / REMOVING (someone deactivated /
+    // started deleting the row out from under us), or a future SDK
+    // state we don't know about — returns and lets
+    // `#ensureSnapshotActive` decide (return on ACTIVE, delete +
+    // rebuild on anything else). Bounds the loop so a stuck state
+    // can't wedge the warm-up forever.
     while (true) {
       const snap = await this.#daytona.snapshot.get(name);
       if (
-        snap.state === SnapshotState.ACTIVE ||
-        snap.state === SnapshotState.ERROR ||
-        snap.state === SnapshotState.BUILD_FAILED
+        snap.state !== SnapshotState.BUILDING &&
+        snap.state !== SnapshotState.PENDING &&
+        snap.state !== SnapshotState.PULLING
       ) {
         return snap;
       }

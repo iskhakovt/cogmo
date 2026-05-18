@@ -19,7 +19,10 @@ import { DaytonaSandboxClient, snapshotNameFor } from "./client.js";
  */
 const SnapshotState = {
   BUILDING: "building",
+  PENDING: "pending",
+  PULLING: "pulling",
   ACTIVE: "active",
+  INACTIVE: "inactive",
   BUILD_FAILED: "build_failed",
 } as const;
 // Test-side stub shape for Daytona's Snapshot — the client reads only
@@ -936,6 +939,69 @@ describe("DaytonaSandboxClient", () => {
         name: "cogmo-cogmo-devbase-1.66.0",
         image: "ghcr.io/iskhakovt/cogmo-devbase:1.66.0",
       });
+    });
+
+    it("snapshot in BUILDING → polls until ACTIVE, no extra create call", async () => {
+      // Models another cogmo instance (or a prior boot of this one)
+      // racing the warm. `snapshot.get` initially returns BUILDING; the
+      // poll cadence reads it again and observes the transition to
+      // ACTIVE. We must NOT call `snapshot.create` ourselves in this
+      // path — the in-flight build owns the name.
+      vi.useFakeTimers();
+      try {
+        daytonaCalls.snapshotGet
+          .mockResolvedValueOnce(
+            fakeSnapshot({ name: "cogmo-cogmo-devbase-1.66.0", state: SnapshotState.BUILDING }),
+          )
+          .mockResolvedValueOnce(
+            fakeSnapshot({ name: "cogmo-cogmo-devbase-1.66.0", state: SnapshotState.BUILDING }),
+          )
+          .mockResolvedValue(
+            fakeSnapshot({ name: "cogmo-cogmo-devbase-1.66.0", state: SnapshotState.ACTIVE }),
+          );
+        const client = await makeClient();
+        const warm = client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+        // Two poll cycles to land on ACTIVE — the SDK polls at 1s.
+        await vi.advanceTimersByTimeAsync(2_500);
+        await warm;
+        expect(daytonaCalls.snapshotCreate).not.toHaveBeenCalled();
+        expect(daytonaCalls.snapshotGet.mock.calls.length).toBeGreaterThanOrEqual(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("poll exits on unknown-non-inflight state (INACTIVE) → delete + recreate, no infinite loop", async () => {
+      // Regression for gemini-code-assist PR #275 finding: the poll
+      // loop must treat any state outside the documented in-flight set
+      // (BUILDING / PENDING / PULLING) as terminal-from-our-perspective.
+      // INACTIVE is the canonical non-{terminal-success, terminal-fail,
+      // in-flight} state — if the loop misses it, warm hangs forever.
+      // Reaching this branch: initial `get` returns BUILDING (enters
+      // poll), then poll's next `get` returns INACTIVE (exits poll),
+      // then the caller deletes + recreates.
+      vi.useFakeTimers();
+      try {
+        daytonaCalls.snapshotGet
+          .mockResolvedValueOnce(
+            fakeSnapshot({ name: "cogmo-cogmo-devbase-1.66.0", state: SnapshotState.BUILDING }),
+          )
+          .mockResolvedValueOnce(
+            fakeSnapshot({ name: "cogmo-cogmo-devbase-1.66.0", state: SnapshotState.INACTIVE }),
+          );
+        daytonaCalls.snapshotDelete.mockResolvedValue();
+        daytonaCalls.snapshotCreate.mockResolvedValue(
+          fakeSnapshot({ name: "cogmo-cogmo-devbase-1.66.0", state: SnapshotState.ACTIVE }),
+        );
+        const client = await makeClient();
+        const warm = client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+        await vi.advanceTimersByTimeAsync(2_500);
+        await warm;
+        expect(daytonaCalls.snapshotDelete).toHaveBeenCalledTimes(1);
+        expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("snapshot in failure state (BUILD_FAILED) → delete + recreate", async () => {
