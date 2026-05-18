@@ -2462,3 +2462,377 @@ describe("loop-pathology fingerprint", () => {
     expect(serialized).not.toContain("t3");
   });
 });
+
+// --- Volume-cluster trigger (Class D, per-tool budget) ---
+
+describe("volume-cluster trigger", () => {
+  function budgetedTool(name: string, budget: number, sideEffectful = false) {
+    return defineTool({
+      name,
+      description: `mock ${name}`,
+      schema: z.object({ q: z.string() }),
+      parallelSafe: true,
+      sideEffectful,
+      invocationBudget: budget,
+      handler: async (input) => `result for ${input.q}`,
+    });
+  }
+
+  function toolUseTurn(toolName: string, id: string, input: unknown): MockStreamTurn {
+    return {
+      events: [{ type: "tool_start", id, name: toolName, input }],
+      stopReason: "tool_use",
+    };
+  }
+
+  it("budget=2 admits the first 2 calls, intercepts the 3rd with synthetic tool_result", async () => {
+    // Three iterations all call the same budgeted tool with varying args.
+    // The first two execute; the third is intercepted before the handler
+    // runs. The synthetic tool_result is the loop's response — but the
+    // model has no further turn to consume it because the mock provider
+    // only has three turns scripted; the loop falls through naturally.
+    const provider = mockStreamProvider([
+      toolUseTurn("img", "t1", { q: "a" }),
+      toolUseTurn("img", "t2", { q: "b" }),
+      toolUseTurn("img", "t3", { q: "c" }),
+      // Fourth turn: model gives up and replies in text after seeing the intercept.
+      { events: [{ type: "text_delta", text: "ok" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    // Real-tool handler that ran for "a" and "b" appears as a successful
+    // tool_result; t3's synthetic is `isError: true`.
+    tools.register(budgetedTool("img", 2));
+    const turnLogger = mock<Logger>();
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+      turnLogger,
+    });
+
+    expect(result.degraded).toBeUndefined();
+    expect(result.iterations).toBe(4);
+    // Pull out tool_result blocks across the persisted history.
+    const toolResults = result.newMessages
+      .filter((m) => m.role === "user")
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((b) => b.type === "tool_result");
+    expect(toolResults).toHaveLength(3);
+    const byId = new Map(
+      toolResults.map((r) => [
+        (r as { toolUseId: string }).toolUseId,
+        r as { toolUseId: string; isError?: boolean; content: unknown },
+      ]),
+    );
+    expect(byId.get("t1")?.isError).toBeUndefined();
+    expect(byId.get("t2")?.isError).toBeUndefined();
+    expect(byId.get("t3")?.isError).toBe(true);
+    // Synthetic carries the intercepted tool_use's id (Anthropic pairing).
+    expect(byId.get("t3")?.toolUseId).toBe("t3");
+    // Telemetry on the intercept.
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "agent.repair",
+        subtype: "volume_cluster",
+        tool: "img",
+        count: 3,
+        budget: 2,
+      }),
+      expect.any(String),
+    );
+  });
+
+  it("counter persists across mixed-outcome sequences — successes do not reset", async () => {
+    // Same budget=2 but the first two calls succeed; the 3rd would still
+    // be intercepted. A failure-only counter would mistakenly reset on
+    // each success — this pins the volume framing.
+    const provider = mockStreamProvider([
+      toolUseTurn("img", "t1", { q: "a" }),
+      toolUseTurn("img", "t2", { q: "b" }),
+      toolUseTurn("img", "t3", { q: "c" }),
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(budgetedTool("img", 2)); // handler always succeeds
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded).toBeUndefined();
+    const toolResults = result.newMessages
+      .filter((m) => m.role === "user")
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((b) => b.type === "tool_result");
+    // 2 successes + 1 intercept (the 3rd call's synthetic isError).
+    expect(toolResults.filter((r) => "isError" in r && r.isError === true)).toHaveLength(1);
+    expect(toolResults.filter((r) => !("isError" in r && r.isError === true))).toHaveLength(2);
+  });
+
+  it("different tools have independent counters — exceeding one budget doesn't penalize another", async () => {
+    // img budget=2, search budget=5. Three img calls in a row — third
+    // intercepts. A subsequent search call must execute, not get caught
+    // by img's exhausted budget.
+    const provider = mockStreamProvider([
+      toolUseTurn("img", "t1", { q: "a" }),
+      toolUseTurn("img", "t2", { q: "b" }),
+      toolUseTurn("img", "t3", { q: "c" }),
+      toolUseTurn("search", "s1", { q: "x" }),
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(budgetedTool("img", 2));
+    tools.register(budgetedTool("search", 5));
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    const toolResults = result.newMessages
+      .filter((m) => m.role === "user")
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((b) => b.type === "tool_result");
+    const byId = new Map(toolResults.map((r) => [(r as { toolUseId: string }).toolUseId, r]));
+    expect(byId.get("t3")).toMatchObject({ isError: true });
+    // search ran normally — not intercepted, not isError.
+    const s1 = byId.get("s1");
+    expect(s1).toBeDefined();
+    expect((s1 as { isError?: boolean }).isError).toBeUndefined();
+  });
+
+  it("counter resets at turn boundary — each runStreamingAgentLoop invocation starts fresh", async () => {
+    // Two sequential turns, each with 2 img calls. budget=2, so neither
+    // turn trips the cluster. If the counter leaked across invocations,
+    // the second turn's calls would intercept.
+    const tools = new ToolRegistry();
+    tools.register(budgetedTool("img", 2));
+
+    const provider1 = mockStreamProvider([
+      toolUseTurn("img", "ta", { q: "a" }),
+      toolUseTurn("img", "tb", { q: "b" }),
+      { events: [{ type: "text_delta", text: "done1" }], stopReason: "end_turn" },
+    ]);
+    const r1 = await runStreamingAgentLoop({
+      provider: provider1,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+    expect(r1.degraded).toBeUndefined();
+    const r1Errors = r1.newMessages
+      .filter((m) => m.role === "user")
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((b) => b.type === "tool_result" && "isError" in b && b.isError === true);
+    expect(r1Errors).toHaveLength(0);
+
+    const provider2 = mockStreamProvider([
+      toolUseTurn("img", "tc", { q: "c" }),
+      toolUseTurn("img", "td", { q: "d" }),
+      { events: [{ type: "text_delta", text: "done2" }], stopReason: "end_turn" },
+    ]);
+    const r2 = await runStreamingAgentLoop({
+      provider: provider2,
+      model: "test",
+      systemPrompt: "sys",
+      // Fresh turn — caller does NOT carry the prior turn's tool_use
+      // history into the new invocation. (Production passes only the
+      // persisted messages; the loop scope is per-invocation.)
+      messages: [{ role: "user", content: "go again" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+    expect(r2.degraded).toBeUndefined();
+    const r2Errors = r2.newMessages
+      .filter((m) => m.role === "user")
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((b) => b.type === "tool_result" && "isError" in b && b.isError === true);
+    expect(r2Errors).toHaveLength(0);
+  });
+
+  it("derives counter from the message array (Inngest replay-safe)", async () => {
+    // The loop only sees `messages` from params; if the count were held
+    // in a closure variable the caller couldn't pre-seed prior calls. By
+    // pre-seeding the messages array with two prior tool_uses for `img`
+    // and emitting a third in the current turn, the trigger must fire
+    // — which it only can if the count is derived from the array, not
+    // from a fresh closure counter.
+    const priorMessages: Message[] = [
+      { role: "user", content: "earlier request" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "prior1", name: "img", input: { q: "p1" } }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "prior1", content: "ok" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "prior2", name: "img", input: { q: "p2" } }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "prior2", content: "ok" }],
+      },
+      { role: "user", content: "now go" },
+    ];
+
+    const provider = mockStreamProvider([
+      toolUseTurn("img", "new1", { q: "new" }),
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(budgetedTool("img", 2));
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: priorMessages,
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    // The fresh tool_use (new1) lands as the 3rd `img` call when counted
+    // from the start of this turn's iteration window (initialLength =
+    // priorMessages.length). Per the design, the counter scope is one
+    // runStreamingAgentLoop invocation — prior messages from earlier
+    // turns are NOT part of this turn's count. So new1 should be the
+    // 1st of this turn and NOT intercepted.
+    const toolResults = result.newMessages
+      .filter((m) => m.role === "user")
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((b) => b.type === "tool_result");
+    const new1 = toolResults.find((r) => (r as { toolUseId: string }).toolUseId === "new1");
+    expect(new1).toBeDefined();
+    expect((new1 as { isError?: boolean }).isError).toBeUndefined();
+  });
+
+  it("multiple tool_uses in one iteration share the in-iteration counter", async () => {
+    // Single iteration emits 3 parallel-safe img tool_uses. budget=2:
+    // first two run, third is intercepted by the in-iteration counter.
+    const provider = mockStreamProvider([
+      {
+        events: [
+          { type: "tool_start", id: "p1", name: "img", input: { q: "a" } },
+          { type: "tool_start", id: "p2", name: "img", input: { q: "b" } },
+          { type: "tool_start", id: "p3", name: "img", input: { q: "c" } },
+        ],
+        stopReason: "tool_use",
+      },
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(budgetedTool("img", 2));
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    const toolResults = result.newMessages
+      .filter((m) => m.role === "user")
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((b) => b.type === "tool_result");
+    const byId = new Map(toolResults.map((r) => [(r as { toolUseId: string }).toolUseId, r]));
+    expect((byId.get("p1") as { isError?: boolean }).isError).toBeUndefined();
+    expect((byId.get("p2") as { isError?: boolean }).isError).toBeUndefined();
+    expect(byId.get("p3")).toMatchObject({ isError: true });
+  });
+
+  it("composes with the fingerprint: cluster intercept → repeat-args → stuck_loop degrade", async () => {
+    // budget=2 admits 2 calls of img(args=A). Iter 3 emits img(args=A)
+    // again — INTERCEPTED (not executed). Iter 4 and 5 also emit
+    // img(args=A) — also intercepted. The fingerprint sees three
+    // consecutive iterations with the same (name, args) hash and no
+    // side effect (intercepts are isError: true). consecutiveCount
+    // reaches 3 and the loop degrades on stuck_loop.
+    const provider = mockStreamProvider([
+      toolUseTurn("img", "t1", { q: "same" }),
+      toolUseTurn("img", "t2", { q: "same" }),
+      toolUseTurn("img", "t3", { q: "same" }), // intercepted (count=3)
+      toolUseTurn("img", "t4", { q: "same" }), // intercepted (count=4)
+      toolUseTurn("img", "t5", { q: "same" }), // intercepted (count=5)
+    ]);
+    const tools = new ToolRegistry();
+    // sideEffectful: true so the first two successful runs reset the
+    // consecutive counter; once interception kicks in, all iterations
+    // are isError: true → no side effect → fingerprint accumulates.
+    tools.register(budgetedTool("img", 2, true));
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    // Iterations 1, 2 succeed. Iter 3 intercept = no side effect, fp
+    // consecutive=1. Iter 4 = consecutive=2. Iter 5 = consecutive=3
+    // → stuck_loop trip.
+    expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
+  });
+
+  it("unknown tool falls through the existing unknown-tool error path (not budgeted)", async () => {
+    // The interceptor doesn't try to budget tools it can't resolve — the
+    // existing runOne unknown-tool error path handles them. A single
+    // call to a non-registered tool returns the unknown-tool error
+    // without any volume_cluster telemetry firing.
+    const provider = mockStreamProvider([
+      toolUseTurn("nope", "u1", { q: "x" }),
+      { events: [{ type: "text_delta", text: "k" }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry(); // empty
+    const turnLogger = mock<Logger>();
+
+    await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+      turnLogger,
+    });
+
+    const volumeWarnings = turnLogger.warn.mock.calls.filter(
+      (call) =>
+        typeof call[0] === "object" &&
+        call[0] !== null &&
+        "subtype" in call[0] &&
+        (call[0] as { subtype?: string }).subtype === "volume_cluster",
+    );
+    expect(volumeWarnings).toHaveLength(0);
+  });
+});

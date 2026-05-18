@@ -60,7 +60,28 @@ export interface ToolSpec {
    * progress. Tools opt in to `false` only when the handler is a pure read.
    */
   sideEffectful?: boolean;
+  /**
+   * Per-turn cap on how many times this tool may be invoked before the
+   * Class D volume-cluster trigger intercepts further calls.
+   *
+   * Counted regardless of per-call outcome — volume is the signal, not
+   * failure rate. A successful same-tool result dilutes attention the
+   * same as a failed one. Default at the consumer is
+   * `DEFAULT_INVOCATION_BUDGET`; tools opt in to a different value when
+   * the cost / legitimate-use shape diverges from the default
+   * (image-gen 2, memory_recall 3, read_file 10, etc.).
+   *
+   * See `design/agent-resilience.md` → Volume cluster trigger.
+   */
+  invocationBudget?: number;
 }
+
+/**
+ * Default per-tool invocation budget when `ToolSpec.invocationBudget` is
+ * unset. Conservative fail-safe — see the section in
+ * `design/agent-resilience.md` for per-tool calibration.
+ */
+export const DEFAULT_INVOCATION_BUDGET = 5;
 
 /**
  * Typed helper for defining in-process TypeScript tools.
@@ -81,6 +102,8 @@ export function defineTool<T>(opts: {
   parallelSafe?: boolean;
   /** See `ToolSpec.sideEffectful`. */
   sideEffectful?: boolean;
+  /** See `ToolSpec.invocationBudget`. */
+  invocationBudget?: number;
 }): ToolSpec {
   // z.toJSONSchema returns Zod's JSONSchema7-flavoured shape; our internal
   // JsonSchema type is a narrower subset that the LLM providers accept.
@@ -103,6 +126,7 @@ export function defineTool<T>(opts: {
     ...(opts.durable !== undefined && { durable: opts.durable }),
     ...(opts.parallelSafe !== undefined && { parallelSafe: opts.parallelSafe }),
     ...(opts.sideEffectful !== undefined && { sideEffectful: opts.sideEffectful }),
+    ...(opts.invocationBudget !== undefined && { invocationBudget: opts.invocationBudget }),
   };
 }
 

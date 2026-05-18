@@ -26,7 +26,7 @@ import { createHash } from "node:crypto";
 import canonicalize from "canonicalize";
 import { ProviderProtocolError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
-import type { ContentBlock, StopReason, ToolUseBlock } from "../llm/types.js";
+import type { ContentBlock, Message, StopReason, ToolUseBlock } from "../llm/types.js";
 
 /**
  * Subtypes the in-loop classifier emits on the degraded off-ramp.
@@ -49,7 +49,17 @@ export type RepairSubtype =
   | "stream_truncation"
   | "refusal"
   | "stuck_loop"
-  | "stuck_loop_cumulative";
+  | "stuck_loop_cumulative"
+  | "volume_cluster";
+
+/**
+ * Subtypes that can land on the degraded off-ramp. `volume_cluster` is a
+ * repair only — the loop continues, no `conversation/degraded` event,
+ * no entry on {@link AgentLoopResult.degraded.subtype}. Narrowing here
+ * keeps the event schema and the result type aligned to what actually
+ * can show up at the degrade boundary.
+ */
+export type DegradeSubtype = Exclude<RepairSubtype, "volume_cluster">;
 
 /**
  * Subset of {@link RepairSubtype} that carries a per-turn repair budget.
@@ -123,7 +133,7 @@ export type RepairInstructions =
 export type TurnOutcome =
   | { kind: "ok" }
   | { kind: "repair"; subtype: BudgetedSubtype; instructions: RepairInstructions }
-  | { kind: "degrade"; reason: string; subtype: RepairSubtype };
+  | { kind: "degrade"; reason: string; subtype: DegradeSubtype };
 
 /**
  * Classify the just-finished turn based on its drained content and
@@ -229,7 +239,7 @@ export function classifyStreamError(
  * degraded off-ramp. Refusal carries a refusal-specific message; every
  * other subtype shares the same apology.
  */
-export function degradedReplyText(subtype: RepairSubtype | null): string {
+export function degradedReplyText(subtype: DegradeSubtype | null): string {
   if (subtype === "refusal") {
     return "The model declined that request. Try rephrasing, or switch model with `/model`.";
   }
@@ -332,4 +342,169 @@ function canonicalJson(value: unknown): string {
     );
   }
   return encoded;
+}
+
+/**
+ * Tally of prior same-tool outcomes within one turn, used to shape the
+ * volume-cluster nudge. Counts are over `tool_result` blocks already
+ * present in the iteration's accumulated message array — i.e. handlers
+ * that ran to completion or errored. `tool_use` blocks without a matching
+ * `tool_result` (the model-in-flight case) are ignored.
+ */
+export interface ToolOutcomeMix {
+  successes: number;
+  failures: number;
+  /** First-line summaries of failure tool_result content, deduped. */
+  failureReasons: string[];
+}
+
+/**
+ * Count how many times the model has emitted a `tool_use` block targeting
+ * `toolName` within the slice `messages[fromIdx..]` (the current turn's
+ * accumulated array). Counts assistant-message `tool_use` blocks; ignores
+ * `tool_result`s.
+ *
+ * Derives from the message array rather than a separate counter — Inngest
+ * function replay re-executes everything outside `step.run` from the top,
+ * so a closure-held counter would silently reset mid-turn. Scanning the
+ * already-built message array reflects the actual current state regardless
+ * of replay topology. See `design/agent-resilience.md` →
+ * "Implementation note: derive, don't store".
+ */
+export function countToolInvocations(
+  toolName: string,
+  messages: ReadonlyArray<Message>,
+  fromIdx: number,
+): number {
+  let count = 0;
+  for (let i = fromIdx; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg?.role !== "assistant") continue;
+    if (typeof msg.content === "string") continue;
+    for (const block of msg.content) {
+      if (block.type === "tool_use" && block.name === toolName) count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Summarize prior tool_results for `toolName` in the turn slice
+ * `messages[fromIdx..]`. Walks all user-message tool_result blocks and
+ * pairs them back to the matching tool_use by id to filter by tool name.
+ * Each failure's first non-empty line (capped at 120 chars) is captured
+ * as a deduped reason for the nudge text.
+ */
+export function summarizeToolOutcomes(
+  toolName: string,
+  messages: ReadonlyArray<Message>,
+  fromIdx: number,
+): ToolOutcomeMix {
+  const idsForTool = new Set<string>();
+  for (let i = fromIdx; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg?.role !== "assistant" || typeof msg.content === "string") continue;
+    for (const block of msg.content) {
+      if (block.type === "tool_use" && block.name === toolName) idsForTool.add(block.id);
+    }
+  }
+
+  let successes = 0;
+  let failures = 0;
+  const reasons: string[] = [];
+  const seenReasons = new Set<string>();
+  for (let i = fromIdx; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg?.role !== "user" || typeof msg.content === "string") continue;
+    for (const block of msg.content) {
+      if (block.type !== "tool_result") continue;
+      if (!idsForTool.has(block.toolUseId)) continue;
+      if (block.isError === true) {
+        failures++;
+        const reason = firstLineSummary(block.content);
+        if (reason && !seenReasons.has(reason)) {
+          seenReasons.add(reason);
+          reasons.push(reason);
+        }
+      } else {
+        successes++;
+      }
+    }
+  }
+  return { successes, failures, failureReasons: reasons };
+}
+
+function firstLineSummary(content: unknown): string | null {
+  const raw =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+            .map((b) =>
+              typeof b === "object" && b !== null && "text" in b && typeof b.text === "string"
+                ? b.text
+                : "",
+            )
+            .join("\n")
+        : "";
+  const trimmed =
+    raw
+      .split("\n")
+      .find((l) => l.trim().length > 0)
+      ?.trim() ?? "";
+  if (trimmed.length === 0) return null;
+  return trimmed.length > 120 ? `${trimmed.slice(0, 117)}…` : trimmed;
+}
+
+/**
+ * Build the synthetic `is_error: true` `tool_result` content the loop
+ * appends when the volume-cluster budget for `toolName` exhausts.
+ * Branches the text on outcome mix — all-fail, mixed, all-success — so
+ * the model gets actionable guidance instead of a generic stop signal.
+ */
+export function formatVolumeClusterContent(
+  toolName: string,
+  count: number,
+  outcomes: ToolOutcomeMix,
+): string {
+  const { successes, failures, failureReasons } = outcomes;
+  const reasonText = failureReasons.length > 0 ? ` Reasons: ${failureReasons.join("; ")}.` : "";
+  const stopRule =
+    `Do NOT call \`${toolName}\` again this turn. ` +
+    "Either reply to the user with what you have, ask a clarifying question, or use a different tool.";
+  if (failures > 0 && successes === 0) {
+    return (
+      `You have called \`${toolName}\` ${count} times this turn and every attempt failed.${reasonText} ` +
+      `${stopRule}`
+    );
+  }
+  if (successes > 0 && failures === 0) {
+    return (
+      `You have called \`${toolName}\` ${count} times this turn — ${successes} succeeded. ` +
+      `${stopRule}`
+    );
+  }
+  return (
+    `You have called \`${toolName}\` ${count} times this turn — ${successes} succeeded, ${failures} failed.${reasonText} ` +
+    `${stopRule}`
+  );
+}
+
+/**
+ * Decide whether a single tool_use block trips the volume-cluster budget
+ * for its tool, given the prior+in-iteration count of same-tool blocks
+ * already emitted this turn. Returns `null` when the budget is not yet
+ * exhausted — the caller proceeds with normal handler dispatch.
+ *
+ * The trip count semantic is "tool_use blocks the model produced for T
+ * this turn so far, including the one being decided." A budget of `B`
+ * means the first `B` calls execute; the `(B+1)`th and beyond are
+ * intercepted.
+ */
+export function classifyVolumeCluster(
+  count: number,
+  budget: number,
+): { kind: "intercept"; count: number } | null {
+  if (count > budget) return { kind: "intercept", count };
+  return null;
 }

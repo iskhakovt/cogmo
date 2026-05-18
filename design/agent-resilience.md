@@ -188,7 +188,7 @@ The side-effect gate requires every `ToolSpec` to declare `sideEffectful: boolea
 
 Adding the field is a one-shot migration: extend `ToolSpec` in `src/agent/tools.ts`, default to `true` at the consumer level, mark the read-only set above as `false`. Without this migration, the side-effect gate defaults to "always trip" and Class D never fires — so the migration is a precondition for shipping Class D detection, not an optional follow-up.
 
-### Volume cluster trigger `[proposed]`
+### Volume cluster trigger `[confirmed]`
 
 The fingerprint above catches the loop doing the *same work* repeatedly — `(name, args)` matches twice. It does not catch the loop doing *similar work at high volume* — six `generate_image` calls with different prompts, eight `web_search`es with varying queries. Each call is unique by fingerprint, so the existing trigger ignores it. The LLM's softmax attention budget does not make the same distinction: every additional same-tool result block dilutes attention on the original user intent, and the lost-in-the-middle effect compounds as same-tool results stack. Class D today catches the *repetition* corner case of loop pathology; the volume-cluster trigger closes the *accumulation* case.
 

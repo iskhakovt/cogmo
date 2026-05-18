@@ -10,6 +10,8 @@ export const readFile = defineTool({
     "Use to review notes, drafts, or any previously saved content.",
   parallelSafe: true,
   sideEffectful: false,
+  // Legitimate exploration of a workspace touches many files.
+  invocationBudget: 10,
   schema: z.object({
     path: z.string().describe("File path (e.g. 'notes/meeting.md')"),
   }),
@@ -45,6 +47,8 @@ export const listFiles = defineTool({
     "Use to see what files exist before reading or to find a specific file.",
   parallelSafe: true,
   sideEffectful: false,
+  // Legitimate codebase exploration touches many prefixes.
+  invocationBudget: 10,
   schema: z.object({
     prefix: z
       .string()
