@@ -198,6 +198,7 @@ async function classifyOne(
       messages: [{ role: "user", content: formatForClassifier(p) }],
       schema,
       name: "pending-memory-classification",
+      repair: {},
     });
     return {
       id: p.id,
