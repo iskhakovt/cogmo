@@ -1,6 +1,5 @@
 import type { GenerateImageResult } from "ai";
 import { z } from "zod";
-import { logger } from "../logger.js";
 
 /**
  * Generated images whose byte length falls below this threshold are treated
@@ -96,14 +95,6 @@ export function detectImageFailure(input: {
 
   const byteLength = input.image.uint8Array.byteLength;
   if (byteLength < SUSPICIOUS_SIZE_THRESHOLD_BYTES) {
-    logger.warn(
-      {
-        byteLength,
-        threshold: SUSPICIOUS_SIZE_THRESHOLD_BYTES,
-        providerKind: input.providerKind,
-      },
-      "image moderation: generated image is suspiciously small, likely a placeholder",
-    );
     return {
       ok: false,
       reason:

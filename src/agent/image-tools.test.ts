@@ -571,6 +571,27 @@ describe("createImageTools", () => {
     expect(attachments.upload).not.toHaveBeenCalled();
   });
 
+  it("honours the injected detectImageFailure override (test-stub bypass path)", async () => {
+    // Same too-small payload as the canary test above. With an injected
+    // detector that always passes, the tool must upload and return the
+    // JSON payload — proving the DI seam plumbs through to the handler.
+    mockGenerateImage.mockResolvedValueOnce({
+      image: { uint8Array: new Uint8Array(500), mediaType: "image/png" },
+    });
+    const attachments = fakeAttachments();
+    const detector = vi.fn().mockReturnValue({ ok: true });
+    const [tool] = createImageTools({
+      models: [falModel()],
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
+      attachments,
+      detectImageFailure: detector,
+    });
+    const result = await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+    expect(detector).toHaveBeenCalledTimes(1);
+    expect(result).not.toMatch(/^Error:/);
+    expect(attachments.upload).toHaveBeenCalledTimes(1);
+  });
+
   it("uploads and returns the payload when the result is clean", async () => {
     mockGenerateImage.mockResolvedValueOnce({
       image: healthyImage(),

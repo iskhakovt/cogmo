@@ -131,7 +131,15 @@ export function createImageTools(deps: {
   models: ReadonlyArray<ImageModelWithProvider>;
   providers: ReadonlyMap<string, ImageProvider>;
   attachments: AttachmentStore;
+  /**
+   * Override the post-generation moderation/failure detector. Defaults to
+   * the real `detectImageFailure`. Tests that exercise the happy path with
+   * tiny stub fixtures pass `() => ({ ok: true })` so the size canary
+   * doesn't trip on bytes that would never appear in production.
+   */
+  detectImageFailure?: typeof detectImageFailure;
 }): ToolSpec[] {
+  const moderate = deps.detectImageFailure ?? detectImageFailure;
   if (deps.models.length === 0) return [];
 
   // Build a slash-free identifier per model for the LLM-facing enum (see
@@ -310,7 +318,7 @@ export function createImageTools(deps: {
           { retries: 2, context: `image.generate.${row.name}` },
         );
 
-        const detection = detectImageFailure({
+        const detection = moderate({
           image,
           providerMetadata,
           providerKind: provider.kind,
