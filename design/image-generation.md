@@ -250,7 +250,7 @@ function createImageTools(deps: {
 
 Image providers sometimes return success with a placeholder image — a solid-color, blurred, or otherwise degraded fallback — when the prompt trips a safety filter or the model produces noise. Surfacing that as a normal-looking image is worse than no image: the user receives garbage and the LLM has no signal to react.
 
-All failure surfaces converge on a single `ImageFailure` shape in `src/agent/image-failure.ts`:
+All failure surfaces converge on a single `ImageFailure` shape. The error vocabulary (`ImageFailure`, `ImageFailureKind`, `ImageGenerationFailedError`, `ImageProviderKind`) lives in `src/llm/image-failure.ts` alongside the adapters that throw into it; the post-generation `detectImageFailure` inspector + size-canary live in `src/agent/image-failure.ts` and re-export the shared types so the tool handler and tests pull everything from one place.
 
 ```ts
 interface ImageFailure {
@@ -259,6 +259,8 @@ interface ImageFailure {
   provider: "fal" | "oai" | "venice";
 }
 ```
+
+`ImageGenerationFailedError(failure, options?)` accepts `ErrorOptions` so adapter-thrown failures can chain the original SDK error as `cause` — matches the `NonRetriableError({ cause: err })` pattern used elsewhere for non-retryable wraps. The APICallError → ImageGenerationFailedError converter in the tool handler chains the wrapped error so its request URL, response body, and status code survive in stack traces.
 
 Two surfaces produce it:
 
