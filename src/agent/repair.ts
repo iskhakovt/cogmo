@@ -23,6 +23,7 @@
  */
 
 import { createHash } from "node:crypto";
+import canonicalize from "canonicalize";
 import { ProviderProtocolError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { ContentBlock, StopReason, ToolUseBlock } from "../llm/types.js";
@@ -284,8 +285,9 @@ export function classifyClassDTrip(
  * asks "did this iteration do the same work as the previous one?" and
  * emission order isn't part of the work.
  *
- * Args are stringified through {@link canonicalJson} so object key order
- * (`{a: 1, b: 2}` vs `{b: 2, a: 1}`) doesn't move the hash.
+ * Args are stringified through the `canonicalize` library (RFC 8785 JSON
+ * Canonicalization Scheme) so object key order (`{a: 1, b: 2}` vs
+ * `{b: 2, a: 1}`) doesn't move the hash.
  *
  * Assistant text is deliberately **excluded** — text prefixes are
  * brittle (timestamps, hedging preambles, emoji noise), so two iterations
@@ -311,29 +313,16 @@ function sha256(s: string): string {
 }
 
 /**
- * Stable canonical-JSON encoding for fingerprint hashing.
- *
- * `JSON.stringify` with a key-sort replacer is enough: tool arguments
- * are JSON-compatible by construction (they flow through the
- * `tool_use.input` field, which providers serialize as JSON), so the
- * primitive coverage matches what the LLM emits.
- *
- * Sorted object keys at every depth — `{a: 1, b: 2}` and `{b: 2, a: 1}`
- * hash identically. Arrays preserve order (semantic positions). The
- * inline recursive sort avoids pulling in a new runtime dependency for
- * what is structurally a one-screen helper.
+ * Stable canonical-JSON encoding for fingerprint hashing. Wraps the
+ * `canonicalize` library (RFC 8785 JSON Canonicalization Scheme) — sorted
+ * object keys at every depth, arrays preserve order. Tool arguments are
+ * JSON-compatible by construction (they flow through the
+ * `tool_use.input` field, which providers serialize as JSON), so RFC 8785
+ * coverage matches what the LLM emits. The library returns `undefined`
+ * only for top-level `undefined` / function / symbol input — none of
+ * those can appear in a parsed `tool_use.input`, so the empty-string
+ * fallback is a defensive belt without a real failure mode.
  */
 function canonicalJson(value: unknown): string {
-  return JSON.stringify(sortKeys(value));
-}
-
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (value === null || typeof value !== "object") return value;
-  const obj = value as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
-  for (const k of Object.keys(obj).sort()) {
-    out[k] = sortKeys(obj[k]);
-  }
-  return out;
+  return canonicalize(value) ?? "";
 }

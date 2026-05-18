@@ -2370,4 +2370,55 @@ describe("loop-pathology fingerprint", () => {
     expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
     expect(result.iterations).toBe(3);
   });
+
+  it("persistence boundary: trip iteration's tool_use + tool_result pair is NOT persisted; prior identical iterations ARE", async () => {
+    // Class D consecutive trip on iteration 3. The first two iterations
+    // produced their own (identical, side-effect-free) tool_use +
+    // tool_result pairs that lived to completion — they ARE persisted.
+    // The third iteration is the one whose response triggered the
+    // degrade and per design/agent-resilience.md → Persistence boundary
+    // on a degraded turn, must NOT be persisted.
+    const provider = mockStreamProvider([
+      toolUseTurn("read_file", "t1", { path: "x.txt" }),
+      toolUseTurn("read_file", "t2", { path: "x.txt" }),
+      toolUseTurn("read_file", "t3", { path: "x.txt" }),
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(readOnlyTool());
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      service: stubService(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded).toEqual({ reason: "stuck_loop", subtype: "stuck_loop" });
+    // Iterations 1 and 2: assistant tool_use + user tool_result each.
+    // Iteration 3 (the trip) contributes nothing to newMessages.
+    expect(result.newMessages).toHaveLength(4);
+    expect(result.newMessages[0]).toEqual({
+      role: "assistant",
+      content: [{ type: "tool_use", id: "t1", name: "read_file", input: { path: "x.txt" } }],
+    });
+    expect(result.newMessages[1]).toEqual({
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "t1", content: "contents of x.txt" }],
+    });
+    expect(result.newMessages[2]).toEqual({
+      role: "assistant",
+      content: [{ type: "tool_use", id: "t2", name: "read_file", input: { path: "x.txt" } }],
+    });
+    expect(result.newMessages[3]).toEqual({
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "t2", content: "contents of x.txt" }],
+    });
+    // Negative assertion: the trip iteration's id (t3) appears in no
+    // persisted message — neither as tool_use nor as tool_result.
+    const serialized = JSON.stringify(result.newMessages);
+    expect(serialized).not.toContain("t3");
+  });
 });

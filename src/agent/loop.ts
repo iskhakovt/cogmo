@@ -723,6 +723,14 @@ export async function runStreamingAgentLoop(
         },
         "agent loop degraded (loop pathology)",
       );
+      // Trip iteration's tool_use + tool_result pair triggered the degrade
+      // and produced no observable side effect (that's what tripped the
+      // gate); don't persist them. Design rule: the iteration that
+      // triggered a degrade is not persisted (see
+      // design/agent-resilience.md → Persistence boundary on a degraded
+      // turn).
+      messages.pop(); // user (tool_results)
+      messages.pop(); // assistant (tool_use)
       return buildDegradedResult(
         messages,
         initialLength,

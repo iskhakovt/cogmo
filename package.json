@@ -66,6 +66,7 @@
     "@vectorize-io/hindsight-client": "^0.6.1",
     "ai": "^6.0.180",
     "ajv": "^8.20.0",
+    "canonicalize": "3.0.0",
     "croner": "^10.0.1",
     "date-fns": "^4.1.0",
     "dockerode": "5.0.0",
