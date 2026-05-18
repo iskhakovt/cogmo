@@ -4,6 +4,12 @@ export {
   consolidateRules,
 } from "./consolidate-rules.js";
 export {
+  type EvolutionEventPayload,
+  EvolutionEventPayloadSchema,
+  type EvolutionTrigger,
+  EvolutionTriggerSchema,
+} from "./event-schema.js";
+export {
   type ExtractionDeps,
   type ExtractionResult,
   extractCorrections,
@@ -14,4 +20,14 @@ export {
   type MemoryExtractionDeps,
   type MemoryExtractionResult,
 } from "./extract-memories.js";
-export { createObserver, type ObserverDeps } from "./observer.js";
+export {
+  createObserver,
+  MIN_MESSAGES_FOR_EXTRACTION,
+  type ObserverDeps,
+  type ObserverResult,
+} from "./observer.js";
+export {
+  type TriggerReflectionDeps,
+  type TriggerReflectionResult,
+  triggerReflection,
+} from "./trigger-reflection.js";

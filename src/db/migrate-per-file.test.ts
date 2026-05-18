@@ -18,6 +18,8 @@
  * Migrations are the contract under test here.
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { pg_uuidv7 } from "@electric-sql/pglite/pg_uuidv7";
 import { sql } from "drizzle-orm";
@@ -28,6 +30,19 @@ import { migratePerFile } from "./migrate-per-file.js";
 import * as schema from "./schemas.js";
 
 const MIGRATIONS_FOLDER = "./migrations";
+
+/**
+ * Count of migration files drizzle-kit knows about, read from the
+ * journal at test time. Derived rather than hardcoded so adding a new
+ * migration doesn't require touching this test — the test cares about
+ * "everything in the journal got applied", not an exact count.
+ */
+function expectedMigrationCount(): number {
+  const journal = JSON.parse(
+    readFileSync(join(MIGRATIONS_FOLDER, "meta/_journal.json"), "utf-8"),
+  ) as { entries: ReadonlyArray<unknown> };
+  return journal.entries.length;
+}
 
 let client: PGlite;
 let db: Database;
@@ -86,8 +101,9 @@ describe("migratePerFile", () => {
     const applied = (await db.execute(sql`
       SELECT COUNT(*)::int AS n FROM drizzle.__drizzle_migrations
     `)) as { rows: Array<{ n: number }> };
-    // 38 migrations: 0000..0037 inclusive.
-    expect(applied.rows[0]?.n).toBe(38);
+    // Every journal entry got applied — proves both completeness and
+    // (via the second invocation being a no-op) journal-tracked idempotency.
+    expect(applied.rows[0]?.n).toBe(expectedMigrationCount());
   });
 
   it("locks in the bug: ADD VALUE + CHECK using the new value in one tx fails", async () => {
