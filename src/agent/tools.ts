@@ -61,8 +61,10 @@ export interface ToolSpec {
    */
   sideEffectful?: boolean;
   /**
-   * Per-turn cap on how many times this tool may be invoked before the
-   * Class D volume-cluster trigger intercepts further calls.
+   * Per-turn cap on how many *iterations* this tool may run in before
+   * the Class D volume-cluster trigger intercepts further calls. Must
+   * be a positive integer (>= 1); `defineTool` rejects 0 and negative
+   * values at registration time.
    *
    * Counted regardless of per-call outcome — volume is the signal, not
    * failure rate. A successful same-tool result dilutes attention the
@@ -105,6 +107,14 @@ export function defineTool<T>(opts: {
   /** See `ToolSpec.invocationBudget`. */
   invocationBudget?: number;
 }): ToolSpec {
+  if (
+    opts.invocationBudget !== undefined &&
+    (!Number.isInteger(opts.invocationBudget) || opts.invocationBudget < 1)
+  ) {
+    throw new Error(
+      `defineTool(${opts.name}): invocationBudget must be a positive integer (>= 1); got ${opts.invocationBudget}`,
+    );
+  }
   // z.toJSONSchema returns Zod's JSONSchema7-flavoured shape; our internal
   // JsonSchema type is a narrower subset that the LLM providers accept.
   const inputSchema = z.toJSONSchema(opts.schema) as unknown as JsonSchema;

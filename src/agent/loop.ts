@@ -252,13 +252,24 @@ interface PlannedCall {
  * See `design/agent-resilience.md` → Volume cluster trigger.
  */
 function computeVolumeClusterInterceptions(
-  iterationContent: ReadonlyArray<ContentBlock>,
   messages: ReadonlyArray<Message>,
   initialLength: number,
   tools: ToolRegistry,
   log: Logger,
 ): Map<string, ContentBlock> {
   const interceptions = new Map<string, ContentBlock>();
+
+  // The current iteration's content is the last assistant message —
+  // the caller just pushed it. Deriving it here (rather than accepting
+  // it as a parameter) makes the function's invariant structural
+  // instead of an undocumented caller contract: it isn't possible to
+  // pass a stale `iterationContent` that disagrees with what's
+  // actually on the end of `messages`.
+  const lastMsg = messages.at(-1);
+  if (!lastMsg || lastMsg.role !== "assistant" || !Array.isArray(lastMsg.content)) {
+    return interceptions;
+  }
+  const iterationContent: ReadonlyArray<ContentBlock> = lastMsg.content;
 
   // Group this iteration's tool_use blocks by tool name — each name
   // gets exactly one batch decision regardless of how many blocks it
@@ -795,13 +806,7 @@ export async function runStreamingAgentLoop(
     // identical args, the existing fingerprint catches it and
     // degrades. See design/agent-resilience.md → Volume cluster
     // trigger.
-    const interceptions = computeVolumeClusterInterceptions(
-      iterationContent,
-      messages,
-      initialLength,
-      tools,
-      log,
-    );
+    const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
 
     // Execute tool calls, emit results, append to messages
     const toolResults = await executeToolCalls(

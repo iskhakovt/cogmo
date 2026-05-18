@@ -2672,13 +2672,20 @@ describe("volume-cluster trigger", () => {
     expect(r2Errors).toHaveLength(0);
   });
 
-  it("derives counter from the message array (Inngest replay-safe)", async () => {
-    // The loop only sees `messages` from params; if the count were held
-    // in a closure variable the caller couldn't pre-seed prior calls. By
-    // pre-seeding the messages array with two prior tool_uses for `img`
-    // and emitting a third in the current turn, the trigger must fire
-    // — which it only can if the count is derived from the array, not
-    // from a fresh closure counter.
+  it("turn scope is initialLength-bounded — prior-turn tool_uses do not contribute to this turn's batch counter", async () => {
+    // The turn-boundary test above proves the counter resets between
+    // separate `runStreamingAgentLoop` invocations. This one pins a
+    // related but distinct invariant: even when the caller seeds the
+    // messages array with prior-turn tool_uses (e.g. recovering from a
+    // persisted conversation), only the slice from `initialLength`
+    // onward counts. Pre-seeded `img` tool_uses at indices 1 and 3
+    // are BEFORE `initialLength` (= priorMessages.length = 6), so this
+    // turn's first `img` call lands as batch 1, not batch 3.
+    //
+    // Inngest replay-safety follows from this purity property
+    // (counter = pure function of (messages, initialLength)), but is
+    // not directly simulated here; that would require an Inngest-style
+    // function re-execution harness.
     const priorMessages: Message[] = [
       { role: "user", content: "earlier request" },
       {
