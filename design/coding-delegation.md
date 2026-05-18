@@ -664,14 +664,19 @@ The in-worker `try/catch` inside `runCodingTask` / `runCodingExecute` writes `st
 
 A per-function `onFailure` handler is **not** the right hook for this. Inngest's documented contract says `onFailure` fires "after maximum retries" ([handling-failures](https://www.inngest.com/docs/reference/functions/handling-failures)), and the open issue [inngest/inngest#3549](https://github.com/inngest/inngest/issues/3549) reports the symptom — runs stuck after a connect-mode worker disconnect, no clean terminal transition. The reliable hook is the system event [`inngest/function.failed`](https://www.inngest.com/docs/reference/system-events/inngest-function-failed), which fires environment-wide on every terminal-failed run regardless of how the worker exited.
 
-A dedicated Inngest function `coding-task-reconcile` subscribes to that event with a CEL filter pinning it to the coding orchestrators (`coding-task-start`, `coding-task-execute`, `coding-task-verify`). Its body:
+A dedicated Inngest function `coding-task-reconcile` subscribes to that event with a CEL filter pinning it to the coding orchestrators (`coding-task-start`, `coding-task-execute`, `coding-task-verify`). The function body uses **two separate durable steps**, not one:
 
-1. Pull `function_id` and the original event payload off `event.data` — `data.event.data.taskId` carries the task id (the orchestrator triggers all carry the same `{ taskId }` shape).
-2. Load the `coding_tasks` row. If terminal (`pr_open` / `failed` / `cancelled`), no-op — the in-worker catch already won the race. This handles the common case where `onFailure` *did* run: the reconcile arrives second and finds the row already correct.
-3. Conditional UPDATE: flip non-terminal → `failed` with `failure_reason = "inngest run terminated abnormally (run_id <id>, function_id <fn>): <error.message>"`. The condition prevents racefighting a concurrent execute-orchestrator transition.
-4. Emit `coding/task/failed` so `cleanup-run-branch` deletes the orphan run-branch and any downstream observer / telemetry consumer fires.
+1. `step.run("reconcile", …)` — pull `function_id` + `event.data.event.data.taskId`, conditional UPDATE: flip non-terminal → `failed` with `failure_reason = "inngest run terminated abnormally (run_id <id>, function_id <fn>): <error.message>"`. Returns a discriminated result; the `reconciled` variant carries `failureReason` so the next step has the payload.
+2. `step.sendEvent("emit-failed", { …codingTaskFailed.create({…}), id: \`reconcile-${run_id}\` })` — durable bus emit with an explicit idempotency `id` so a retry of this step after a transient send blip is deduplicated at the bus.
 
-`retries: 3` on the reconcile function — DB blips during reconcile shouldn't lose a recovery — but the work is idempotent (conditional UPDATE + Inngest dedup on the event id), so retries are safe. Concurrency keyed on `event.data.run_id` prevents a duplicate event from doing duplicate work.
+The split is load-bearing. Putting the emit inside the cached `step.run` is a durability bug: a transient `inngest.send` failure inside the body throws the step, Inngest retries, but the DB UPDATE committed on the first attempt — so the retry's conditional UPDATE returns `already_terminal` and the function returns `skipped`. The event never gets emitted. `cleanup-run-branch` never fires. Discovered in PR #267 review; pinned by the wrapper-level tests in `reconcile-on-failure.test.ts`.
+
+Branch logic:
+- `reconciled` (we wrote the row to `failed`) → run step 2.
+- `already_terminal` (in-worker catch already wrote `failed` and emitted) → no step 2; double-emit would re-fire `cleanup-run-branch`.
+- `not_found` / `missing_task_id` / `not_coding_orchestrator` → no step 2.
+
+`retries: 3` on the reconcile function — DB blips during reconcile shouldn't lose a recovery — and the two-step split keeps retries safe: step 1's conditional UPDATE is idempotent on the DB side; step 2's `id` is idempotent on the bus side. Concurrency keyed on `event.data.run_id` prevents a duplicate event from doing duplicate work.
 
 The 7-day permission-prompt wait is not at risk: it's a `step.waitForEvent`, not a `step.run`, so the run is parked durably and only terminates on event arrival or timeout — neither path emits `inngest/function.failed`. A genuine 7-day timeout would expire the wait and the orchestrator's normal path runs `set-status-failed`, so the reconcile sees a terminal row and no-ops.
 

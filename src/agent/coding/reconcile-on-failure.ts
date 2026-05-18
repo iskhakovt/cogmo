@@ -56,9 +56,19 @@ export interface CodingTaskReconcileDeps {
   store: CodingStore;
 }
 
-/** Result of a single reconcile evaluation — exposed so unit tests can assert. */
+/**
+ * Result of a single reconcile evaluation — exposed so unit tests can
+ * assert. `reconciled` carries `failureReason` so the outer Inngest
+ * wrapper can emit `coding/task/failed` durably (via `step.sendEvent`)
+ * AFTER this returns. Putting the emit inside `reconcileCodingTaskFailure`
+ * — which lives inside a `step.run` cache — was a durability bug: a
+ * transient `inngest.send` failure would throw the step, the retry would
+ * find the row already `failed` (DB UPDATE already committed), return
+ * `already_terminal`, and the event would never be emitted. See PR #267
+ * review for the full trace.
+ */
 export type ReconcileResult =
-  | { status: "reconciled"; taskId: string }
+  | { status: "reconciled"; taskId: string; failureReason: string }
   | { status: "skipped"; reason: "not_coding_orchestrator" }
   | { status: "skipped"; reason: "missing_task_id" }
   | { status: "skipped"; reason: "task_not_found" }
@@ -67,18 +77,22 @@ export type ReconcileResult =
 /**
  * Pure reconciliation logic — exported for unit tests so we don't have to
  * drive the full Inngest function wrapper to exercise the conditional
- * UPDATE + emit + skip branches. Production callers go through
- * `createCodingTaskReconcile`.
+ * UPDATE + skip branches. Production callers go through
+ * `createCodingTaskReconcile`, which wraps this in `step.run` and then
+ * emits `coding/task/failed` via `step.sendEvent` on the `reconciled`
+ * branch.
+ *
+ * No `inngest` dependency: event emission belongs to the durable wrapper,
+ * not the cached body. This separation is the fix for the bug described
+ * on `ReconcileResult` above.
  *
  * Idempotency: `failTaskIfNonTerminal` is a conditional SQL `UPDATE`
  * keyed on `status NOT IN (terminal)`. A second reconcile invocation
  * finds the row already `failed` and returns `already_terminal` — the
- * caller skips the `coding/task/failed` emit, so the existing cleanup
- * chain (`cleanup-run-branch`) doesn't double-fire.
+ * wrapper skips the emit step on that branch.
  */
 export async function reconcileCodingTaskFailure(
   deps: CodingTaskReconcileDeps,
-  inngest: Pick<Inngest, "send">,
   payload: {
     functionId: string;
     runId: string;
@@ -130,12 +144,6 @@ export async function reconcileCodingTaskFailure(
     };
   }
 
-  // Emit `coding/task/failed` so the existing cleanup chain fires —
-  // `cleanup-run-branch.ts` deletes the orphan `cogmo/run/<task-id>`
-  // ref, and any downstream observer / telemetry consumer hooks in
-  // without polling the DB.
-  await inngest.send(codingTaskFailed.create({ taskId, reason: failureReason }));
-
   log.warn(
     {
       taskId,
@@ -145,7 +153,7 @@ export async function reconcileCodingTaskFailure(
     },
     "reconcile: coding task marked failed from inngest/function.failed",
   );
-  return { status: "reconciled", taskId };
+  return { status: "reconciled", taskId, failureReason };
 }
 
 export function createCodingTaskReconcile(deps: CodingTaskReconcileDeps, inngest: Inngest) {
@@ -153,8 +161,10 @@ export function createCodingTaskReconcile(deps: CodingTaskReconcileDeps, inngest
     {
       id: "coding-task-reconcile",
       // `retries: 3` — a DB blip during reconcile shouldn't lose a
-      // recovery, and the work is idempotent (conditional UPDATE +
-      // already-terminal short-circuit).
+      // recovery. Two separate durable steps below (`reconcile`,
+      // `emit-failed`) — each retries independently, and the cached
+      // first step's return value carries `failureReason` forward so
+      // the second step's retry has what it needs.
       retries: 3,
       // One invocation per failing run. Inngest dedups events by id on
       // the bus; the concurrency key here is defense-in-depth against
@@ -166,17 +176,35 @@ export function createCodingTaskReconcile(deps: CodingTaskReconcileDeps, inngest
       const { function_id, run_id, error } = event.data;
       const taskId = event.data.event.data.taskId;
       const errorMessage = error.message ?? error.name ?? "unknown";
-      // Wrap the reconcile in one `step.run` so a duplicate event
-      // delivery (Inngest retry, dev-server replay) reuses the cached
-      // outcome instead of re-evaluating + re-emitting.
-      return step.run("reconcile", () =>
-        reconcileCodingTaskFailure(deps, inngest, {
+      // Step 1: durable DB write. Cached on success — a retry of
+      // step 2 below won't re-run this.
+      const result = await step.run("reconcile", () =>
+        reconcileCodingTaskFailure(deps, {
           functionId: function_id,
           runId: run_id,
           errorMessage,
           taskId,
         }),
       );
+      // Step 2: durable event emission. Only fires on the
+      // `reconciled` branch (the other branches don't have a new row
+      // transition to announce). Explicit idempotency `id` deduplicates
+      // at the Inngest bus, so a retry of this step after a transient
+      // send failure doesn't double-fire `cleanup-run-branch`. Without
+      // this split, a `inngest.send` failure inside the cached step 1
+      // would leave the row `failed` but the event never emitted —
+      // step 1's retry would see `already_terminal` and skip. See
+      // PR #267 review for the bug trace.
+      if (result.status === "reconciled") {
+        await step.sendEvent("emit-failed", {
+          ...codingTaskFailed.create({
+            taskId: result.taskId,
+            reason: result.failureReason,
+          }),
+          id: `reconcile-${run_id}`,
+        });
+      }
+      return result;
     },
   );
 }
