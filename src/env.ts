@@ -144,9 +144,9 @@ export const env = createEnv({
      * Computed from `process.env.VERSION` — see `defaultDevbaseImage`.
      * Override with the env var at deploy time to roll back to a specific build.
      */
-    COGMO_DEVBASE_IMAGE: z.string().default(defaultDevbaseImage()),
+    COGMO_DEVBASE_IMAGE: z.string().min(1).default(defaultDevbaseImage()),
     /** Base image for tier-2 (sysbox) skill workers. Same model as devbase. */
-    COGMO_SKILLS_IMAGE: z.string().default(defaultSkillsImage()),
+    COGMO_SKILLS_IMAGE: z.string().min(1).default(defaultSkillsImage()),
     /**
      * Always-warm tier-2 worker count. Default `0` — workers exist iff
      * there's an active or recently-active task. Lazy pool init means

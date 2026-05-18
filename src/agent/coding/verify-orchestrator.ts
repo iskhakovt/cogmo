@@ -215,7 +215,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   const sandboxEnv = authResult.value;
 
   let executeStream: ExecuteStreamHandle | null = null;
-  let containerCreated = false;
   let askpassProvisioned = false;
 
   try {
@@ -244,11 +243,17 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     );
 
     // Create a fresh container with the askpass dir mounted read-only at
-    // /.cogmo-askpass. Two checkpoints so a failed post-create wiring
-    // step (`checkout-feature-branch`) still triggers cleanup via the
-    // finally block — `containerCreated` is set OUTSIDE the step so it
-    // survives Inngest replay (step bodies are skipped on resume and
-    // only the checkpointed return value is loaded).
+    // /.cogmo-askpass. Cleanup goes through `deleteByTaskId(taskId)`
+    // unconditionally in the finally block — idempotent at the
+    // label-index layer, sweeps any provider-side state that survived
+    // a thrown create on managed backends, and a no-op when nothing
+    // labelled exists.
+    const containerImage = repo.devcontainer?.image ?? deps.devbaseImage;
+    // Delegate-gate on the named-snapshot warm. Boot fires-and-forgets;
+    // a verify task arriving before warm completes shares the promise.
+    await stepRun("ensure-image-present", async () => {
+      await sandbox.ensureImagePresent(containerImage);
+    });
     const sessionState = await stepRun("create-container", async () => {
       const session = await sandbox.create({
         taskId,
@@ -262,7 +267,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
           homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
         }),
-        image: repo.devcontainer?.image ?? deps.devbaseImage,
+        image: containerImage,
         resourceLimits: deps.defaultResourceLimits,
         expiresAt: new Date(Date.now() + deps.taskTtlMs),
         allowPrivilegedRunc: task.allowPrivilegedRunc,
@@ -271,7 +276,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       });
       return session.state;
     });
-    containerCreated = true;
 
     if (sandbox.capabilities.workingTreeTransport === "git-remote") {
       await stepRun("checkout-feature-branch", async () => {
@@ -461,19 +465,23 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     }
     return { status: "failed", failureReason: reason };
   } finally {
-    if (containerCreated) {
-      // deleteByTaskId cascades the container kill AND wipes the per-task
-      // askpass dir (slice 4.0d). Idempotent — safe to call even when
-      // create-container failed mid-flight.
-      await sandbox.deleteByTaskId(taskId).catch((err: unknown) => {
-        taskLog.warn({ err }, "verify: deleteByTaskId failed");
-      });
-    } else if (askpassProvisioned) {
-      // Container creation never started (or failed before stopTask could
-      // be wired up), so `sandbox.stopTask` would be a no-op and the
-      // askpass dir would leak the PAT + signing key. Wipe explicitly.
-      // Idempotent + tolerant of missing dirs (the recursive remove uses
-      // force:true), so it's safe even when provisioning itself threw.
+    // Unconditional sandbox sweep — idempotent at the label-index layer
+    // and reaps managed-backend state (Daytona) that survived a thrown
+    // create. No-op when no labelled sandbox exists.
+    await sandbox.deleteByTaskId(taskId).catch((err: unknown) => {
+      taskLog.warn({ err }, "verify: deleteByTaskId failed");
+    });
+    // The host-side askpass dir holds the PAT + signing key and is
+    // independent of the sandbox lifecycle — wipe it whenever
+    // provisioning got far enough to create the directory. Idempotent
+    // + tolerant of missing dirs (recursive remove with force:true),
+    // which matters here because on Local-Docker the
+    // `sandbox.deleteByTaskId` above already calls `cleanupAskpass`
+    // internally (supervisor's `delete()` owns the bind-mount); the
+    // second call is harmless and removes the per-task dir even on
+    // Daytona (where the sandbox-side copy is wiped server-side but
+    // the host source dir would otherwise leak the PAT).
+    if (askpassProvisioned) {
       cleanupAskpass({ baseDir: askpassBaseDir, rootTaskId: taskId });
     }
   }
