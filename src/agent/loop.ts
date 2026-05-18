@@ -1,11 +1,28 @@
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Logger } from "pino";
 import * as R from "remeda";
+import { ProviderProtocolError } from "../llm/errors.js";
+import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
-import type { ContentBlock, Message, StreamEvent, TextBlock, ToolUseBlock } from "../llm/types.js";
+import type {
+  ContentBlock,
+  Message,
+  StopReason,
+  StreamEvent,
+  TextBlock,
+  ToolUseBlock,
+  Usage,
+} from "../llm/types.js";
 import { logger } from "../logger.js";
 import { agentIterations } from "../metrics.js";
 import { validateHistory } from "./history-invariants.js";
+import {
+  type ClassCSubtype,
+  classifyPostStream,
+  classifyStreamError,
+  freshBudgets,
+  type RepairBudgets,
+} from "./repair.js";
 import type { Service } from "./service.js";
 import type { ToolRegistry, ToolSpec } from "./tools.js";
 
@@ -66,6 +83,20 @@ export interface AgentLoopResult {
   model: string;
   /** Number of LLM calls made */
   iterations: number;
+  /**
+   * Class C / D degraded off-ramp. When present, the loop exited because a
+   * repair budget exhausted (or a subtype was immediate-degrade) — the
+   * orchestrator posts a system-generated apology as the final assistant
+   * message rather than `text`. `text` is `""` and `newMessages` carries
+   * only the successfully completed intermediate iterations (the failing
+   * iteration's content is NOT included; synthetic continuation prompts
+   * are NOT included). See design/agent-resilience.md → Degraded reply.
+   *
+   * Backstops without a Class C tag (today: the iteration-cap) set
+   * `subtype: null`. PR 6 will add `stuck_loop` / `stuck_loop_cumulative`
+   * variants.
+   */
+  degraded?: { reason: string; subtype: ClassCSubtype | null };
 }
 
 const DEFAULT_MAX_ITERATIONS = 20;
@@ -171,7 +202,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     // tool_result" — content presence is the only safe gate.
     const hasToolUse = response.content.some((b) => b.type === "tool_use");
     if (!hasToolUse) {
-      return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
+      return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations);
     }
 
     // Execute tool calls and append results
@@ -182,7 +213,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   }
 
   log.warn({ maxIterations }, "agent loop hit iteration limit");
-  return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
+  return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations);
 }
 
 interface PlannedCall {
@@ -289,6 +320,7 @@ async function runOne(
 function buildResult(
   messages: Message[],
   initialLength: number,
+  ephemeralIndices: ReadonlyArray<number>,
   usage: { inputTokens: number; outputTokens: number },
   model: string,
   iterations: number,
@@ -307,17 +339,58 @@ function buildResult(
 
   agentIterations.record(iterations, { model });
 
+  const ephemeral = new Set(ephemeralIndices);
+  const newMessages = messages
+    .slice(initialLength)
+    .filter((_m, i) => !ephemeral.has(i + initialLength));
+
   // Defensive copy — don't leak the mutable internal array through the interface.
-  // newMessages is guaranteed non-empty: the loop always pushes at least one
-  // assistant message before reaching buildResult (either via end_turn/max_tokens
-  // or the iteration-limit fallback).
+  // newMessages is guaranteed non-empty on the success path: the loop always
+  // pushes at least one assistant message before reaching buildResult.
   return {
     text,
     messages: [...messages],
-    newMessages: messages.slice(initialLength),
+    newMessages,
     usage,
     model,
     iterations,
+  };
+}
+
+/**
+ * Build a degraded result for Class C / D off-ramp exits. Drops synthetic
+ * continuation prompts from `newMessages` so persistence sees only the
+ * successfully completed tool_use+tool_result pairs from prior
+ * iterations. The orchestrator overrides `text` with the user-facing
+ * apology and appends a single assistant text block on top of these
+ * messages; the loop itself doesn't manufacture the apology text — that
+ * lives next to the channel-aware delivery code.
+ */
+function buildDegradedResult(
+  messages: Message[],
+  initialLength: number,
+  ephemeralIndices: ReadonlyArray<number>,
+  usage: { inputTokens: number; outputTokens: number },
+  model: string,
+  iterations: number,
+  reason: string,
+  subtype: ClassCSubtype | null,
+): AgentLoopResult {
+  agentIterations.record(iterations, { model });
+
+  const ephemeral = new Set(ephemeralIndices);
+  const newMessages = messages
+    .slice(initialLength)
+    .filter((_m, i) => !ephemeral.has(i + initialLength));
+
+  return {
+    text: "",
+    messages: [...messages],
+    newMessages,
+    usage,
+    model,
+    iterations,
+    degraded: { reason, subtype },
   };
 }
 
@@ -334,6 +407,13 @@ export interface StreamingAgentLoopParams extends AgentLoopParams {
  * Each LLM turn streams text_delta events. Tool calls are accumulated
  * from the stream, executed, and emitted as tool_result events.
  * Loops until end_turn/max_tokens or iteration limit.
+ *
+ * In-loop Class C handling: after each iteration's stream drains (or
+ * throws), the turn outcome is classified. Empty `end_turn` triggers a
+ * single continuation-prompt retry; truncated tool-arg JSON
+ * (`ProviderProtocolError`) triggers a single non-streaming replay;
+ * refusal degrades immediately. See `repair.ts` and
+ * `design/agent-resilience.md` → Class C.
  */
 export async function runStreamingAgentLoop(
   params: StreamingAgentLoopParams,
@@ -353,6 +433,14 @@ export async function runStreamingAgentLoop(
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };
+  // Tracks messages that exist only in memory for the next iteration —
+  // synthetic continuation prompts injected by the repair flow. They feed
+  // the model on replay but must NOT be persisted (same convention as
+  // `validateHistory`-synthesized tool_results and compaction's prefix
+  // summary). The index is recomputed every iteration just before
+  // returning so newMessages reflects the persistable slice.
+  const ephemeralIndices: number[] = [];
+  const budgets: RepairBudgets = freshBudgets();
   let iterations = 0;
   let finalModel = model;
 
@@ -368,80 +456,152 @@ export async function runStreamingAgentLoop(
       chatParams.tools = toolDefs;
     }
 
-    const { events, response } = provider.chatStream(chatParams);
-    // Adapters reject `response` independently when the events stream
-    // throws (anthropic.ts, openai-compat.ts, and fallback.ts all do this).
-    // The success path below awaits `response` after draining `events`, but
-    // a `for await` throw skips that await — leaving the parallel rejection
-    // dangling. Node's default `unhandledRejection=throw` then terminates
-    // the process. The noop suppresses the unhandled-rejection signal; an
-    // `await response` later still surfaces the same error normally.
-    response.catch(() => {});
-
-    // Stream events + reconstruct content blocks for the messages array
-    const contentBlocks: ContentBlock[] = [];
-    let currentText = "";
-
-    for await (const event of events) {
-      // Don't forward thinking events to the delivery layer — they're internal
-      if (event.type !== "thinking_delta") {
-        await onEvent(event);
+    let iterationContent: ContentBlock[];
+    let iterationStopReason: StopReason;
+    try {
+      const drained = await drainStream(provider, chatParams, onEvent);
+      iterationContent = drained.content;
+      iterationStopReason = drained.stopReason;
+      finalModel = drained.model;
+      totalUsage.inputTokens += drained.usage.inputTokens;
+      totalUsage.outputTokens += drained.usage.outputTokens;
+    } catch (err) {
+      const outcome = classifyStreamError(err, budgets);
+      if (!outcome) throw err;
+      if (outcome.kind === "degrade") {
+        log.warn(
+          { event: "agent.degrade", reason: outcome.reason, subtype: outcome.subtype },
+          "agent loop degraded (stream error)",
+        );
+        return buildDegradedResult(
+          messages,
+          initialLength,
+          ephemeralIndices,
+          totalUsage,
+          finalModel,
+          iterations,
+          outcome.reason,
+          outcome.subtype,
+        );
       }
-
-      if (event.type === "text_delta") {
-        currentText += event.text;
-      } else if (event.type === "thinking_delta") {
-        // Flush any accumulated text before inserting thinking block
-        if (currentText) {
-          contentBlocks.push({ type: "text", text: currentText });
-          currentText = "";
-        }
-        contentBlocks.push({
-          type: "thinking",
-          thinking: event.thinking,
-          signature: event.signature,
-        });
-      } else if (event.type === "tool_start") {
-        // Flush accumulated text as a block
-        if (currentText) {
-          contentBlocks.push({ type: "text", text: currentText });
-          currentText = "";
-        }
-        contentBlocks.push({
-          type: "tool_use",
-          id: event.id,
-          name: event.name,
-          input: event.input,
-        });
+      // repair: stream_replay — one non-streaming retry of this iteration.
+      // Budget is consumed before the replay attempt, per design — a Class
+      // A failure during replay propagates to the orchestrator's outer
+      // Inngest retries; a Class C failure (Provider protocol /
+      // refusal) maps to a degrade with the matching subtype rather than
+      // bubbling out as an `errored` conversation. See
+      // design/agent-resilience.md → Per-subtype repair, stream-truncation
+      // row.
+      budgets.stream_truncation--;
+      log.warn(
+        {
+          event: "agent.repair",
+          subtype: outcome.subtype,
+          instructions: { kind: outcome.instructions.kind },
+        },
+        "agent loop class C repair (stream replay)",
+      );
+      const replayResult = await applyStreamReplay(provider, chatParams, onEvent);
+      if (replayResult.kind === "degrade") {
+        log.warn(
+          {
+            event: "agent.degrade",
+            reason: replayResult.reason,
+            subtype: replayResult.subtype,
+          },
+          "agent loop degraded (stream replay)",
+        );
+        return buildDegradedResult(
+          messages,
+          initialLength,
+          ephemeralIndices,
+          totalUsage,
+          finalModel,
+          iterations,
+          replayResult.reason,
+          replayResult.subtype,
+        );
       }
+      iterationContent = replayResult.content;
+      iterationStopReason = replayResult.stopReason;
+      finalModel = replayResult.model;
+      totalUsage.inputTokens += replayResult.usage.inputTokens;
+      totalUsage.outputTokens += replayResult.usage.outputTokens;
     }
-
-    // Flush remaining text
-    if (currentText) {
-      contentBlocks.push({ type: "text", text: currentText });
-    }
-
-    // Await final metadata
-    const meta = await response;
-    finalModel = meta.model;
-    totalUsage.inputTokens += meta.usage.inputTokens;
-    totalUsage.outputTokens += meta.usage.outputTokens;
 
     // Append assistant response to messages
-    messages.push({ role: "assistant", content: contentBlocks });
+    messages.push({ role: "assistant", content: iterationContent });
+
+    // Post-stream classifier. Runs BEFORE the hasToolUse gate so an empty
+    // end_turn that still has a tool_use somehow (unlikely) doesn't trip
+    // the empty-content path. Refusal goes straight to degrade; empty
+    // end_turn appends a synthetic user turn and re-iterates.
+    const outcome = classifyPostStream(iterationContent, iterationStopReason, budgets);
+    if (outcome.kind === "degrade") {
+      // The just-pushed assistant message is the one that triggered the
+      // degrade — pop it so newMessages doesn't carry the failing
+      // iteration's output. See design/agent-resilience.md → Persistence
+      // boundary on a degraded turn.
+      messages.pop();
+      log.warn(
+        { event: "agent.degrade", reason: outcome.reason, subtype: outcome.subtype },
+        "agent loop degraded (post-stream)",
+      );
+      return buildDegradedResult(
+        messages,
+        initialLength,
+        ephemeralIndices,
+        totalUsage,
+        finalModel,
+        iterations,
+        outcome.reason,
+        outcome.subtype,
+      );
+    }
+    if (outcome.kind === "repair") {
+      budgets[outcome.subtype]--;
+      log.warn(
+        {
+          event: "agent.repair",
+          subtype: outcome.subtype,
+          instructions: { kind: outcome.instructions.kind },
+        },
+        "agent loop class C repair (post-stream)",
+      );
+      if (outcome.instructions.kind === "continuation_prompt") {
+        // Drop the just-pushed empty assistant message — it has no
+        // content the model can build on and would just confuse next
+        // iteration's view of history. Then append the synthetic user
+        // turn and mark its index as ephemeral so it doesn't make it to
+        // persistence.
+        messages.pop();
+        messages.push({ role: "user", content: outcome.instructions.text });
+        ephemeralIndices.push(messages.length - 1);
+      }
+      // stream_replay was handled in-line in the catch above — no extra
+      // action here.
+      continue;
+    }
 
     // Drive flow on content, not `stop_reason` — see runAgentLoop above.
-    const hasToolUse = contentBlocks.some((b) => b.type === "tool_use");
+    const hasToolUse = iterationContent.some((b) => b.type === "tool_use");
     if (!hasToolUse) {
-      return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
+      return buildResult(
+        messages,
+        initialLength,
+        ephemeralIndices,
+        totalUsage,
+        finalModel,
+        iterations,
+      );
     }
 
     // Execute tool calls, emit results, append to messages
-    const toolResults = await executeToolCalls(contentBlocks, tools, service, stepRun);
+    const toolResults = await executeToolCalls(iterationContent, tools, service, stepRun);
 
     for (const block of toolResults) {
       if (block.type === "tool_result") {
-        const toolUse = contentBlocks.find(
+        const toolUse = iterationContent.find(
           (b): b is ToolUseBlock => b.type === "tool_use" && b.id === block.toolUseId,
         );
         const event: StreamEvent = {
@@ -463,5 +623,177 @@ export async function runStreamingAgentLoop(
   }
 
   log.warn({ maxIterations }, "streaming agent loop hit iteration limit");
-  return buildResult(messages, initialLength, totalUsage, finalModel, iterations);
+  log.warn(
+    { event: "agent.degrade", reason: "iteration_cap", subtype: null },
+    "agent loop degraded (iteration cap)",
+  );
+  return buildDegradedResult(
+    messages,
+    initialLength,
+    ephemeralIndices,
+    totalUsage,
+    finalModel,
+    iterations,
+    "iteration_cap",
+    null,
+  );
+}
+
+interface DrainedStream {
+  content: ContentBlock[];
+  stopReason: StopReason;
+  model: string;
+  usage: { inputTokens: number; outputTokens: number };
+}
+
+/**
+ * Drain the event stream into reconstructed content blocks plus the
+ * final metadata. Extracted from the loop body so the catch-on-throw
+ * classifier path stays tight. Errors propagate to the caller; the
+ * adapter's `response` rejection is suppressed locally so the unhandled-
+ * rejection signal doesn't fire on a stream that the loop already
+ * intends to classify.
+ */
+async function drainStream(
+  provider: LlmProvider,
+  chatParams: Parameters<LlmProvider["chat"]>[0],
+  onEvent: (event: StreamEvent) => Promise<void>,
+): Promise<DrainedStream> {
+  const { events, response } = provider.chatStream(chatParams);
+  // Adapters reject `response` independently when the events stream
+  // throws (anthropic.ts, openai-compat.ts, and fallback.ts all do this).
+  // The success path below awaits `response` after draining `events`, but
+  // a `for await` throw skips that await — leaving the parallel rejection
+  // dangling. Node's default `unhandledRejection=throw` then terminates
+  // the process. The noop suppresses the unhandled-rejection signal; an
+  // `await response` later still surfaces the same error normally.
+  response.catch(() => {});
+
+  const contentBlocks: ContentBlock[] = [];
+  let currentText = "";
+
+  for await (const event of events) {
+    // Don't forward thinking events to the delivery layer — they're internal
+    if (event.type !== "thinking_delta") {
+      await onEvent(event);
+    }
+
+    if (event.type === "text_delta") {
+      currentText += event.text;
+    } else if (event.type === "thinking_delta") {
+      // Flush any accumulated text before inserting thinking block
+      if (currentText) {
+        contentBlocks.push({ type: "text", text: currentText });
+        currentText = "";
+      }
+      contentBlocks.push({
+        type: "thinking",
+        thinking: event.thinking,
+        signature: event.signature,
+      });
+    } else if (event.type === "tool_start") {
+      // Flush accumulated text as a block
+      if (currentText) {
+        contentBlocks.push({ type: "text", text: currentText });
+        currentText = "";
+      }
+      contentBlocks.push({
+        type: "tool_use",
+        id: event.id,
+        name: event.name,
+        input: event.input,
+      });
+    }
+  }
+
+  // Flush remaining text
+  if (currentText) {
+    contentBlocks.push({ type: "text", text: currentText });
+  }
+
+  const meta = await response;
+  return {
+    content: contentBlocks,
+    stopReason: meta.stopReason,
+    model: meta.model,
+    usage: meta.usage,
+  };
+}
+
+/**
+ * Outcome of the non-streaming replay that recovers a stream-truncation
+ * (`ProviderProtocolError`) iteration. The replay is itself a Class C
+ * surface: it can raise another `ProviderProtocolError` (model still
+ * can't emit clean tool-arg JSON) or a `RefusalError` (model refuses the
+ * non-streaming retry). Both map to a `degrade` with the matching
+ * subtype rather than propagating to the orchestrator's `errored`
+ * off-ramp — we attempted the documented recovery and it didn't work.
+ * Class A errors (network, 5xx, unknown failures) re-throw and resume
+ * the normal Inngest retry path.
+ */
+type StreamReplayResult =
+  | {
+      kind: "success";
+      content: ContentBlock[];
+      stopReason: StopReason;
+      model: string;
+      usage: Usage;
+    }
+  | { kind: "degrade"; subtype: ClassCSubtype; reason: string };
+
+/**
+ * Replay the just-failed streaming iteration as a single non-streaming
+ * `chat()` call. Emits recovered `tool_use` blocks as `tool_start` events
+ * so the streaming delivery sees the tool calls the failed stream never
+ * surfaced (it threw mid-parse). Text deltas from the replay are NOT
+ * re-emitted — a partial reply from the failed stream may already have
+ * landed in the delivery layer and a second emission would double up.
+ *
+ * Class C errors on the replay degrade with the matching subtype; Class
+ * A errors propagate.
+ */
+async function applyStreamReplay(
+  provider: LlmProvider,
+  chatParams: Parameters<LlmProvider["chat"]>[0],
+  onEvent: (event: StreamEvent) => Promise<void>,
+): Promise<StreamReplayResult> {
+  let replay: Awaited<ReturnType<LlmProvider["chat"]>>;
+  try {
+    replay = await provider.chat(chatParams);
+  } catch (err) {
+    if (err instanceof ProviderProtocolError) {
+      return {
+        kind: "degrade",
+        subtype: "stream_truncation",
+        reason: "non-streaming replay still could not parse tool-call arguments",
+      };
+    }
+    if (err instanceof RefusalError) {
+      return {
+        kind: "degrade",
+        subtype: "refusal",
+        reason: "model refused the non-streaming replay",
+      };
+    }
+    throw err;
+  }
+
+  for (const block of replay.content) {
+    if (block.type === "tool_use") {
+      await onEvent({
+        type: "tool_start",
+        id: block.id,
+        name: block.name,
+        input: block.input,
+      });
+    }
+  }
+
+  return {
+    kind: "success",
+    content: replay.content,
+    stopReason: replay.stopReason,
+    model: replay.model,
+    usage: replay.usage,
+  };
 }
