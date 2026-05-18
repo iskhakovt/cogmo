@@ -139,8 +139,8 @@ export function createImageTools(deps: {
    */
   detectImageFailure?: typeof detectImageFailure;
 }): ToolSpec[] {
-  const moderate = deps.detectImageFailure ?? detectImageFailure;
   if (deps.models.length === 0) return [];
+  const moderate = deps.detectImageFailure ?? detectImageFailure;
 
   // Build a slash-free identifier per model for the LLM-facing enum (see
   // `imageModelSlug` for why). The map from slug back to the canonical row
@@ -325,7 +325,12 @@ export function createImageTools(deps: {
         });
         if (!detection.ok) {
           logger.warn(
-            { provider: row.name, model: row.modelString, reason: detection.reason },
+            {
+              rowName: row.name,
+              providerId: row.providerId,
+              slug: input.model,
+              reason: detection.reason,
+            },
             "image moderation/failure detected",
           );
           return `Error: ${detection.reason}`;

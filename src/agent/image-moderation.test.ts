@@ -7,7 +7,6 @@ import {
 } from "./image-moderation.js";
 
 type GeneratedImage = GenerateImageResult["image"];
-type ProviderMetadata = GenerateImageResult["providerMetadata"];
 
 function image(byteLength: number, mediaType = "image/png"): GeneratedImage {
   const bytes = new Uint8Array(byteLength);
@@ -30,7 +29,7 @@ describe("detectImageFailure — fal", () => {
   it("returns ok for a healthy image with no nsfw flag", () => {
     const result = detectImageFailure({
       image: image(HEALTHY_BYTES),
-      providerMetadata: { fal: { images: [{ nsfw: false }] } } as ProviderMetadata,
+      providerMetadata: { fal: { images: [{ nsfw: false }] } },
       providerKind: kind,
     });
     expect(result).toEqual({ ok: true });
@@ -48,7 +47,7 @@ describe("detectImageFailure — fal", () => {
   it("flags an image whose per-image `nsfw` is true", () => {
     const result = detectImageFailure({
       image: image(HEALTHY_BYTES),
-      providerMetadata: { fal: { images: [{ nsfw: true }] } } as ProviderMetadata,
+      providerMetadata: { fal: { images: [{ nsfw: true }] } },
       providerKind: kind,
     });
     expect(result.ok).toBe(false);
@@ -67,7 +66,7 @@ describe("detectImageFailure — fal", () => {
           images: [{ nsfw: true }],
           nsfw_concepts: ["nudity", "violence"],
         },
-      } as ProviderMetadata,
+      },
       providerKind: kind,
     });
     expect(result.ok).toBe(false);
@@ -81,7 +80,7 @@ describe("detectImageFailure — fal", () => {
       image: image(HEALTHY_BYTES),
       providerMetadata: {
         fal: { images: [{ nsfw: false }, { nsfw: true }] },
-      } as ProviderMetadata,
+      },
       providerKind: kind,
     });
     expect(result.ok).toBe(false);
@@ -90,8 +89,10 @@ describe("detectImageFailure — fal", () => {
   it("falls back gracefully on malformed providerMetadata.fal", () => {
     const result = detectImageFailure({
       image: image(HEALTHY_BYTES),
-      // images-as-string violates the schema — defensive parse must not throw
-      providerMetadata: { fal: { images: "not-an-array" } } as unknown as ProviderMetadata,
+      // @ts-expect-error — `images: "not-an-array"` deliberately violates
+      // the schema. The defensive Zod parse must absorb this without
+      // throwing; an unsafe cast would erase the type signal entirely.
+      providerMetadata: { fal: { images: "not-an-array" } },
       providerKind: kind,
     });
     // Schema parse fails → no nsfw branch fires → size canary checks → healthy.
@@ -101,7 +102,7 @@ describe("detectImageFailure — fal", () => {
   it("falls back gracefully when providerMetadata.fal is missing", () => {
     const result = detectImageFailure({
       image: image(HEALTHY_BYTES),
-      providerMetadata: {} as ProviderMetadata,
+      providerMetadata: {},
       providerKind: kind,
     });
     expect(result).toEqual({ ok: true });
@@ -148,7 +149,7 @@ describe("detectImageFailure — size canary (all providers)", () => {
       image: image(100),
       providerMetadata: {
         fal: { images: [{ nsfw: true }], nsfw_concepts: ["nudity"] },
-      } as ProviderMetadata,
+      },
       providerKind: "fal",
     });
     expect(result.ok).toBe(false);
@@ -168,7 +169,7 @@ describe("detectImageFailure — non-fal providers", () => {
       image: image(HEALTHY_BYTES),
       providerMetadata: {
         fal: { images: [{ nsfw: true }] },
-      } as ProviderMetadata,
+      },
       providerKind: "oai",
     });
     expect(result).toEqual({ ok: true });

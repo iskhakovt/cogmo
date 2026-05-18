@@ -3,6 +3,7 @@ import type { OpenAICompatibleProvider } from "@ai-sdk/openai-compatible";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ImageModelWithProvider } from "../agent/store/index.js";
 import type { ImageProvider } from "../llm/image-providers.js";
+import { logger } from "../logger.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { AbortError } from "../util/with-retry.js";
 import { SUSPICIOUS_SIZE_THRESHOLD_BYTES } from "./image-moderation.js";
@@ -569,6 +570,38 @@ describe("createImageTools", () => {
     expect(result).toMatch(/Error: generated image is suspiciously small/);
     expect(result).toMatch(/500 bytes/);
     expect(attachments.upload).not.toHaveBeenCalled();
+  });
+
+  it("logs the failure with operator-filterable fields (rowName, providerId, slug, reason)", async () => {
+    // The warn-log shape is the operator's primary observability surface
+    // when moderation fires. Pin every field so a future refactor that
+    // re-labels them (e.g. accidentally putting the model name under
+    // `provider`) breaks here instead of silently mis-tagging logs.
+    mockGenerateImage.mockResolvedValueOnce({
+      image: healthyImage(),
+      providerMetadata: { fal: { images: [{ nsfw: true }], nsfw_concepts: ["nudity"] } },
+    });
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => logger);
+    try {
+      const [tool] = createImageTools({
+        models: [falModel()],
+        providers: new Map([["provider-1", fakeFalProvider().provider]]),
+        attachments: fakeAttachments(),
+      });
+      await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        {
+          rowName: "fal/flux-dev",
+          providerId: "provider-1",
+          slug: "flux-dev",
+          reason: expect.stringMatching(/flagged as nsfw by fal/),
+        },
+        "image moderation/failure detected",
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("honours the injected detectImageFailure override (test-stub bypass path)", async () => {

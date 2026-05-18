@@ -50,6 +50,13 @@ const FalImageMetaSchema = z
  * `nsfw_concepts: string[]` may appear at the top level of the slice if
  * the upstream response carries it — `.passthrough()` keeps it
  * accessible without forcing every fixture to set it.
+ *
+ * `nsfw_concepts` is **response-level**, not per-image — fal returns a
+ * single concept list for the whole batch with no per-image attribution.
+ * When a multi-image response has only some images flagged, the reason
+ * string still attaches the full concept list to the user-visible
+ * message. Acceptable today (the LLM acts on the prompt, not on which
+ * specific image tripped); revisit if fal exposes per-image concepts.
  */
 const FalProviderMetaSchema = z
   .object({
