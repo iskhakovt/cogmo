@@ -94,7 +94,11 @@ Other tracking docs:
 
 **Infrastructure modules (`db/`, `inngest/`, `llm/`, `memory/`) contain only core setup and abstractions.** Business logic that uses them lives in domain modules (`agent/`, `transport/`). Example: the Inngest event definitions live in `src/inngest/events.ts`, but the `handle-message` orchestrator function that uses them lives in `src/agent/`. Respond functions live in `src/transport/`, not `src/inngest/functions/`.
 
-Per-domain store layout and the unit-of-work boundary: @.claude/rules/store-pattern.md
+## Store Pattern
+
+Per-domain store layout, the `tx`-first method shape, use-case files, and the REPEATABLE READ default. See [.claude/rules/store-pattern.md](.claude/rules/store-pattern.md).
+
+@.claude/rules/store-pattern.md
 
 ## Commits & PRs
 
@@ -107,9 +111,13 @@ Per-domain store layout and the unit-of-work boundary: @.claude/rules/store-patt
 
 ## Code Style
 
+TypeScript idioms, naming, imports, error handling, casts, encapsulation. See [.claude/rules/code-style.md](.claude/rules/code-style.md).
+
 @.claude/rules/code-style.md
 
 ## Testing
+
+Principles, three-tier structure, PGlite store tests, record/replay mocks, integration env injection. See [.claude/rules/testing.md](.claude/rules/testing.md).
 
 @.claude/rules/testing.md
 
@@ -144,5 +152,7 @@ After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 - **Service interface for tools** — tools access external systems exclusively through `Service`, never via direct service references. The orchestrator scopes the service per request (e.g., memory scoped to the current user's bank) and controls what each tool can access (ACL boundary). This is the same interface whether tools run in-process or in WASM. Tool inputs are validated at runtime — Zod for in-process TypeScript tools, JSON Schema validator for future plugins. See `design/agents.md` → Tool Architecture.
 
 ## Architecture Rules
+
+Transactions, UUIDv7 PKs, NOT NULL by default, JSONB+Zod, migrations from `pnpm db:generate`, secrets handling. See [.claude/rules/architecture-rules.md](.claude/rules/architecture-rules.md).
 
 @.claude/rules/architecture-rules.md
