@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ProviderProtocolError } from "../../llm/errors.js";
 import type { Message } from "../../llm/types.js";
 import { mockProvider } from "../../test/factories.js";
 import { extractMemories, type MemoryExtractionDeps } from "./extract-memories.js";
@@ -151,6 +152,33 @@ describe("extractMemories", () => {
       {
         provider: mockProvider({
           chat: vi.fn().mockRejectedValue(new Error("LLM timeout")),
+        }),
+      },
+    );
+
+    const result = await extractMemories(sampleHistory, "user-1", null, deps);
+
+    expect(result).toEqual({ extracted: 0, byNetwork: {} });
+    expect(deps.memory.retainBatch).not.toHaveBeenCalled();
+  });
+
+  it("degrades to a no-op when chatTyped throws ProviderProtocolError", async () => {
+    // When the structured-output parse fails irrecoverably (jsonrepair also
+    // chokes), chatTyped surfaces a ProviderProtocolError. extract-memories
+    // must catch it the same way as any other failure — degrade to zeros,
+    // skip retainBatch, no rethrow.
+    const deps = mockExtractionDeps(
+      { memories: [] },
+      {
+        provider: mockProvider({
+          chat: vi
+            .fn()
+            .mockRejectedValue(
+              new ProviderProtocolError(
+                'structured output for "memory-extraction" failed JSON.parse: empty input',
+                new SyntaxError("Unexpected end of JSON input"),
+              ),
+            ),
         }),
       },
     );

@@ -76,10 +76,12 @@ export interface TypedChatParams<T> {
   name: string;
   maxTokens?: number;
   /**
-   * Repair behavior. Pass `repair: {}` to opt into the defaults
-   * (`jsonrepair: true`, `maxRetries: 1`, `onZodFailure: "feedback"`).
-   * Omit entirely to use the same defaults — the field exists so callers
-   * can be explicit when policy review matters.
+   * Repair behavior. Pass `repair: {}` to signal "I want the default repair
+   * policy" — semantically identical to omitting the field, with grep-ability
+   * value for rollout review. `repair: {}` does **not** freeze defaults at
+   * today's values: future changes to {@link DEFAULT_REPAIR} (`jsonrepair`,
+   * `maxRetries`, `onZodFailure`) still apply to every callsite that passes
+   * `repair: {}`. Pass explicit fields to override individual defaults.
    */
   repair?: ChatTypedRepair;
 }
@@ -109,7 +111,7 @@ const DEFAULT_REPAIR: Required<ChatTypedRepair> = {
  *
  * {@link ProviderProtocolError} (raised by {@link parseProviderJson} when
  * `jsonrepair` also fails) propagates immediately — no feedback retry, no
- * additional call. The classifier (PR 5) owns that recovery path for
+ * additional call. The in-loop classifier owns that recovery path for
  * in-loop callsites; for out-of-loop callsites the wrapping Inngest step
  * handles the throw.
  */
@@ -161,7 +163,7 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
         { role: "assistant", content: text },
         {
           role: "user",
-          content: `The previous response failed validation: ${errorMessage}. Please correct and try again.`,
+          content: `Your response didn't match the expected format. Error: ${errorMessage}\n\nPlease try again with the correct format.`,
         },
       );
       retries++;

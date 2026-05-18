@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { expectDefined } from "../test/assertions.js";
 import { ProviderProtocolError } from "./errors.js";
 import type { LlmProvider } from "./provider.js";
 import { chatTyped } from "./typed.js";
@@ -106,11 +107,13 @@ describe("chatTyped", () => {
     expect(result.retries).toBe(1);
 
     // Second call: original user + bad assistant + synthetic feedback user turn.
-    const secondCall = vi.mocked(provider.chat).mock.calls[1]?.[0];
-    expect(secondCall?.messages).toHaveLength(3);
-    expect(secondCall?.messages[1]?.role).toBe("assistant");
-    expect(secondCall?.messages[2]?.role).toBe("user");
-    expect(secondCall?.messages[2]?.content).toContain("failed validation");
+    const secondCall = expectDefined(vi.mocked(provider.chat).mock.calls[1]?.[0], "secondCall");
+    expect(secondCall.messages).toHaveLength(3);
+    const assistantTurn = expectDefined(secondCall.messages[1], "secondCall.messages[1]");
+    const feedbackTurn = expectDefined(secondCall.messages[2], "secondCall.messages[2]");
+    expect(assistantTurn.role).toBe("assistant");
+    expect(feedbackTurn.role).toBe("user");
+    expect(feedbackTurn.content).toContain("didn't match the expected format");
   });
 
   it("does not persist the synthetic user turn back into the caller's messages array", async () => {
