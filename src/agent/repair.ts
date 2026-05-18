@@ -444,7 +444,15 @@ export function summarizeToolOutcomes(
     .filter(
       (b): b is Extract<ContentBlock, { type: "tool_result" }> =>
         b.type === "tool_result" && idsForTool.has(b.toolUseId),
-    );
+    )
+    // Exclude this tool's own prior volume-cluster nudges. The cluster
+    // trigger lands a synthetic `isError: true` tool_result whose content
+    // begins with `volumeClusterNudgePrefix(toolName)`; without this
+    // filter, a model that ignores one nudge and emits another batch
+    // would see the prior nudge quoted as a "failure reason" in the next
+    // nudge (recursive impurity). The fingerprint still degrades that
+    // scenario quickly, but the interim nudge would be confusing.
+    .filter((b) => !isVolumeClusterNudge(toolName, b.content));
 
   const failures = matchingResults.filter((r) => r.isError === true);
   const failureReasons = R.unique(
@@ -481,6 +489,23 @@ function firstLineSummary(content: unknown): string | null {
 }
 
 /**
+ * Common prefix every volume-cluster nudge starts with for a given
+ * tool. Shared between {@link formatVolumeClusterContent} (the builder)
+ * and {@link summarizeToolOutcomes} (the filter that excludes prior
+ * synthetic nudges of this same tool from outcome counts). Kept as one
+ * function so the two callsites can't drift apart silently — if the
+ * nudge format ever changes its leading clause, both ends update
+ * together.
+ */
+function volumeClusterNudgePrefix(toolName: string): string {
+  return `You have called \`${toolName}\` `;
+}
+
+function isVolumeClusterNudge(toolName: string, content: unknown): boolean {
+  return typeof content === "string" && content.startsWith(volumeClusterNudgePrefix(toolName));
+}
+
+/**
  * Build the synthetic `is_error: true` `tool_result` content the loop
  * appends when the volume-cluster budget for `toolName` exhausts.
  * Branches the text on outcome mix — all-fail, mixed, all-success — so
@@ -493,23 +518,20 @@ export function formatVolumeClusterContent(
 ): string {
   const { successes, failures, failureReasons } = outcomes;
   const reasonText = failureReasons.length > 0 ? ` Reasons: ${failureReasons.join("; ")}.` : "";
+  const prefix = volumeClusterNudgePrefix(toolName);
   const stopRule =
     `Do NOT call \`${toolName}\` again this turn. ` +
     "Either reply to the user with what you have, ask a clarifying question, or use a different tool.";
   if (failures > 0 && successes === 0) {
     return (
-      `You have called \`${toolName}\` ${count} times this turn and every attempt failed.${reasonText} ` +
-      `${stopRule}`
+      `${prefix}${count} times this turn and every attempt failed.${reasonText} ` + `${stopRule}`
     );
   }
   if (successes > 0 && failures === 0) {
-    return (
-      `You have called \`${toolName}\` ${count} times this turn — ${successes} succeeded. ` +
-      `${stopRule}`
-    );
+    return `${prefix}${count} times this turn — ${successes} succeeded. ` + `${stopRule}`;
   }
   return (
-    `You have called \`${toolName}\` ${count} times this turn — ${successes} succeeded, ${failures} failed.${reasonText} ` +
+    `${prefix}${count} times this turn — ${successes} succeeded, ${failures} failed.${reasonText} ` +
     `${stopRule}`
   );
 }

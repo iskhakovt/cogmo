@@ -348,6 +348,42 @@ describe("summarizeToolOutcomes", () => {
     expect(mix.successes).toBe(1);
     expect(mix.failures).toBe(0);
   });
+
+  it("excludes this tool's own prior volume-cluster nudges from failure counts and reasons", () => {
+    // Pin the recursive-impurity fix: if the model ignored a previous
+    // nudge and emitted another batch, computeVolumeClusterInterceptions
+    // would call summarizeToolOutcomes against a history that already
+    // contains the synthetic intercept. Without the prefix filter, that
+    // synthetic would be counted as a failure and its first line quoted
+    // back as a "reason" in the next nudge — recursive nonsense.
+    const messages: Message[] = [
+      ...pair("t1", "img", true, "Error: nsfw flagged"),
+      ...pair("t2", "img", true, "Error: nsfw flagged"),
+      // Synthetic from a prior intercept — matches the all-success
+      // branch of formatVolumeClusterContent ("You have called `img` 3
+      // times this turn — 2 succeeded. Do NOT call `img` again...").
+      ...pair(
+        "t3",
+        "img",
+        true,
+        "You have called `img` 3 times this turn — 2 succeeded. " +
+          "Do NOT call `img` again this turn. Either reply to the user with what you have, " +
+          "ask a clarifying question, or use a different tool.",
+      ),
+      ...pair("t4", "img", true, "Error: too long"),
+    ];
+    const mix = summarizeToolOutcomes("img", messages, 0);
+    // 3 real failures (t1, t2, t4); the synthetic t3 is excluded.
+    expect(mix.failures).toBe(3);
+    expect(mix.successes).toBe(0);
+    // failureReasons holds the real reasons, deduped — the nudge text
+    // is NOT in there.
+    expect(mix.failureReasons).toEqual(["Error: nsfw flagged", "Error: too long"]);
+    // Negative assertion: no reason starts with the prefix.
+    for (const reason of mix.failureReasons) {
+      expect(reason.startsWith("You have called `img`")).toBe(false);
+    }
+  });
 });
 
 describe("formatVolumeClusterContent", () => {
