@@ -109,7 +109,7 @@ The proposed extension: when a degrade fires (Class C exhaustion, Class D finger
 Synthesis call shape:
 
 - **Tools disabled at the API level** (`tools: []`), not via prompt — belt-and-braces against a model that "helpfully" tries to call a tool from a stale system instruction.
-- **Single attempt, no Class C repair on this call.** If it fails for any reason, fall back to the fixed string above and emit `agent.degrade.synthesis_failed`. Don't degrade-the-degrade — the user has waited long enough.
+- **Single attempt, no Class C repair on this call.** If it fails for any reason, fall back to the fixed string above and emit `agent.degrade.synthesis` with `ok: false`. Don't degrade-the-degrade — the user has waited long enough.
 - **Wall-clock cap of 5s** — tighter than the normal request budget. The user is already waiting on a failed turn.
 - **`temperature: 0`** — predictability matters more than variety on a failure reply.
 - **System prompt names the stop reason and asks for 1–3 sentences** covering: what was attempted, what went wrong, one concrete next step (rephrase, switch model, try later, etc.). No verbose apology.
@@ -122,7 +122,9 @@ Telemetry:
 { event: "agent.degrade.synthesis", reason, subtype?, tokens_in, tokens_out, ok: boolean }
 ```
 
-On failure, the fixed-string `agent.degrade` log fires as well; both rows join on `runId` + `conversationId`.
+Single event name, `ok: boolean` for outcome — no separate `synthesis_failed` event. Downstream queries count failures as `event == "agent.degrade.synthesis" AND ok == false`. The underlying `agent.degrade` log fires regardless of synthesis outcome (the turn is degrading either way); the synthesis event is the per-attempt forensic record.
+
+**Provider-outage falls through cleanly.** When the synthesis call hits a Class A failure on a dead provider, it returns `ok: false` and the fixed string is posted. A spike in `synthesis ok: false` correlated with provider-outage telemetry is *not* a synthesis-logic bug — the synthesis path inherits the failing turn's provider, so any upstream unavailability propagates here. Investigate the upstream symptom in that case, not the synthesis code.
 
 ### Outside the agent loop
 
@@ -196,6 +198,8 @@ The mechanism is intentionally outcome-agnostic. A failure-only counter under-fi
 
 A per-tool counter increments on each `tool_use` emission, scoped to one `runStreamingAgentLoop` invocation. When the counter for tool `T` reaches `T.invocationBudget`, the next `tool_use` block targeting `T` is intercepted: the handler does not run, and the loop synthesizes an `is_error: true` `tool_result` that names the cluster and forbids further calls to `T` this turn.
 
+**Implementation note: derive, don't store.** The counter must be recomputed by scanning the iteration's accumulated message array on each check, not maintained as a closure variable. Inngest function replay on retry replays cached `step.run` outputs in order but re-executes everything outside `step.run` from the top — a counter held in a closure resets to zero on every retry, silently letting the budget reset mid-turn. Deriving from the message array reflects the actual current state regardless of replay, and the scan is O(N) over a single-turn message array (cheap at the iteration count cap).
+
 Nudge text branches on outcome mix in the existing history:
 
 - **All failures:** "Every attempt to call `T` this turn failed (reasons: …). Do not call `T` again — change strategy."
@@ -232,7 +236,7 @@ A loop that varies args to evade the fingerprint hits the volume trigger. A loop
 The cluster trigger is a **repair**, not a degrade. When it fires:
 
 - The intercepted `tool_use` is **not** executed. No handler runs, no side effect, no provider cost.
-- The synthetic `tool_result` is appended to the iteration's results.
+- The synthetic `tool_result` is appended to the iteration's results, **carrying the intercepted `tool_use`'s `id`** to satisfy Anthropic's tool_use ↔ tool_result pairing requirement. The `tool_use` block exists in the assistant message regardless of handler execution; a matching `tool_result` must exist on the next user message or the API rejects the conversation. Intercept happens *after* the block lands in the assistant message and *before* the handler runs.
 - The loop continues — the model receives the nudge and emits its next response.
 
 If the model ignores the nudge and emits another `tool_use` for `T`, the args are likely identical to a prior call (the model has no new information). The existing fingerprint catches that as the consecutive trigger and degrades on `stuck_loop`. Volume cluster → fingerprint → degrade is the staircase; the volume trigger redirects, the fingerprint terminates.

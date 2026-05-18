@@ -64,7 +64,17 @@ Three strategies, applied in order from gentlest to most aggressive. Each has a 
 
 The three strategies below are **budget-pressure-triggered** — they fire when the conversation approaches the context limit. They do not fire when a single turn calls the same tool many times at low overall budget utilization: eight `generate_image` results at 30% of the budget evade Strategy 1 entirely.
 
-Volume-driven attention dilution is independent of budget utilization. Every same-tool `tool_result` block in the window dilutes the softmax weight on the original user intent, and the lost-in-the-middle effect compounds as same-tool results stack. The fix is **count-based**, not budget-based: when a new same-tool result lands and the count of that tool's prior results exceeds K, rewrite the prior results in place.
+Volume-driven attention dilution is independent of budget utilization. Every same-tool `tool_result` block in the window dilutes the softmax weight on the original user intent, and the lost-in-the-middle effect compounds as same-tool results stack. The fix is **count-based**, not budget-based: when a new same-tool result lands and the total same-tool result count exceeds the trigger threshold, rewrite the now-middle results in place.
+
+Three distinct parameters drive the strategy. Keeping the trigger and the retain knobs as separate symbols matters — collapsing them makes it impossible to set a trigger that fires only when there's enough to compact for the cache-invalidation cost to be worthwhile:
+
+| Parameter | Default | Meaning |
+|-|-|-|
+| `retainRecent` | 2 | Most recent K same-tool results stay verbatim. |
+| `retainFirst` | 1 | First same-tool result stays verbatim (sticky — see below). |
+| `triggerCount` | 5 | Strategy fires when current same-tool count (including the just-arrived result) reaches this. Derivation: `retainRecent + retainFirst + 2` — fires when at least 2 results would be compacted, making the cache-invalidation cost worthwhile. |
+
+At the first-fire boundary (count = 5): layout becomes `[R1, summary(R2,R3), R4, R5]` — 3 verbatim, 2 compacted into one summary block. Lower trigger values would compact 1 result per fire, eating cache invalidation for marginal attention savings; higher values let dilution accumulate longer than necessary. The default is the smallest trigger that compacts a worthwhile cluster on first fire.
 
 This strategy is intentionally narrower than Strategy 1:
 
@@ -81,11 +91,15 @@ The cardinal rule is **deterministic supersession**, not continuous editing. Mut
 
 #### What stays verbatim
 
-- The **most recent K results per tool** (default K=2) — the model leans hardest on these.
-- The **first result** in each tool's series — lost-in-the-middle says the start matters; the inflection point of "the model decided to start querying X" carries planning signal worth preserving.
+- The **most recent `retainRecent` results per tool** — the model leans hardest on these.
+- The **first result per tool's series — sticky** (see below).
 - All **non-same-tool blocks** between same-tool blocks — assistant text and other tool calls are not subject to this strategy.
 
-Prior same-tool results between the first and the last K get compacted into a single block of the form:
+**First-per-series is sticky.** Once the original first same-tool result is identified, its message-array position is preserved verbatim across all subsequent compactions. Later passes never re-evaluate which result counts as "first" — they grow the summary block in the middle. This is what the lost-in-the-middle argument actually demands: the *original* inflection point ("the model decided to start querying X") carries the planning signal, not whichever result happens to survive after compaction. Recomputing "first" on each pass — naive re-application of the rule — would let compaction creep into the original first slot over time, eroding the very signal the rule preserves.
+
+Cache-prefix consequence: the prefix `[user turn, system prompt, …, first same-tool result + its tool_use pair]` stays stable across all compactions of this tool. The summary block sitting between the first and the recent-K is rewritten on each fire, so cache *past* that position invalidates — accepted trade-off because the high-attention prefix slot is preserved. The cache invariance argument applies to everything *up to* the first sticky result, not to the whole `[first, summary]` prefix.
+
+Prior same-tool results between the first and the last `retainRecent` get compacted into a single block of the form:
 
 ```
 [Earlier this turn: 4 prior `web_search` results — first at iteration 2 ("react testing libraries"), then "vitest jest comparison", "react testing library setup", "jest deprecation"; combined ~3.2KB. Latest 2 verbatim below.]
@@ -167,7 +181,7 @@ Anthropic requires every `tool_result` block (on a user message) to have a match
 ## Pipeline Execution
 
 ```
-messages = compactSameToolClusters(messages, retainPerTool=2)   # Strategy 0 (count-based, always runs)
+messages = compactSameToolClusters(messages, retainRecent=2, retainFirst=1, triggerCount=5)   # Strategy 0 (count-based)
 
 count = countTokens(system, messages, tools)
 
@@ -185,7 +199,7 @@ if count > budget * 0.95:
     messages = truncate(messages)
 ```
 
-Strategy 0 is a count-based deterministic transform — no token-count threshold, no LLM call — so it runs unconditionally at the top. It always reduces or leaves token count unchanged, so subsequent threshold checks remain correct.
+Strategy 0 is a count-based deterministic transform — no token-count threshold, no LLM call — so its **check** runs unconditionally at the top of every turn. The **mutation** only fires when the per-tool same-tool count reaches `triggerCount`; most turns the check finds no cluster over threshold and returns the message array unchanged. Per-turn overhead is dominated by the O(N) scan over messages — negligible at conversation scale. The transform never increases token count, so subsequent threshold checks remain correct.
 
 Token counting calls are minimized: one initial count after Strategy 0, then re-count only after a strategy fires and the next threshold needs checking. Tool result clearing doesn't need a re-count (reduction is calculated from cleared content); summarization does (output size varies).
 
