@@ -258,7 +258,14 @@
       "idx": 36,
       "version": "7",
       "when": 1779667200000,
-      "tag": "0036_venice_image_provider",
+      "tag": "0036_add_venice_to_image_provider_type",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1779667200001,
+      "tag": "0037_extend_image_providers_base_url_check",
       "breakpoints": true
     }
   ]

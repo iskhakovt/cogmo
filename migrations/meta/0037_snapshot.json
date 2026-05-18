@@ -1,6 +1,6 @@
 {
-	"id": "ed3f3c5c-99ec-4ddd-aa76-d98c74f48a46",
-	"prevId": "49f43cd3-78ad-4413-afaf-ddbd38c51900",
+	"id": "a2e42252-e7dd-4b1c-bd5f-fc24098ba0ed",
+	"prevId": "ed3f3c5c-99ec-4ddd-aa76-d98c74f48a46",
 	"version": "7",
 	"dialect": "postgresql",
 	"tables": {
@@ -883,7 +883,7 @@
 			"checkConstraints": {
 				"chk_image_providers_base_url": {
 					"name": "chk_image_providers_base_url",
-					"value": "(\"image_providers\".\"type\" <> 'openai_compatible' OR \"image_providers\".\"base_url\" IS NOT NULL) AND (\"image_providers\".\"type\" <> 'fal' OR \"image_providers\".\"base_url\" IS NULL)"
+					"value": "(\"image_providers\".\"type\" <> 'openai_compatible' OR \"image_providers\".\"base_url\" IS NOT NULL)\n        AND (\"image_providers\".\"type\" <> 'venice' OR \"image_providers\".\"base_url\" IS NOT NULL)\n        AND (\"image_providers\".\"type\" <> 'fal' OR \"image_providers\".\"base_url\" IS NULL)"
 				}
 			},
 			"isRLSEnabled": false

@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { S3Client } from "@aws-sdk/client-s3";
 import Docker from "dockerode";
-import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { ClaudeCodeBackend } from "./agent/coding/claude.js";
 import { createOrphanRunBranchSweepFunctions } from "./agent/coding/cleanup-orphan-run-branches.js";
 import { createRunBranchCleanupSubscriber } from "./agent/coding/cleanup-run-branch.js";
@@ -45,6 +44,7 @@ import {
   loadHindsightCompat,
 } from "./boot/checks.js";
 import { type Database, db, type Transactor, transactor } from "./db/index.js";
+import { migratePerFile } from "./db/migrate-per-file.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
 import type { LlmProvider } from "./llm/provider.js";
@@ -247,7 +247,7 @@ export interface RuntimeDeps {
  * bootstrap is idempotent file writes.)
  */
 export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDeps> {
-  await migrate(db, { migrationsFolder: "./migrations" });
+  await migratePerFile(db, { migrationsFolder: "./migrations" });
   logger.info("database migrations applied");
 
   // Schema PKs default to `uuidv7()`. Verify the function is callable

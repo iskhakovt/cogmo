@@ -1,8 +1,8 @@
--- Add `venice` to image_provider_type and extend the base_url CHECK so the
--- new type carries the openai-compat-style "base_url required, https, no
--- trailing slash" rule. Hand-rolled adapter; see src/llm/image-providers.ts.
-
-ALTER TYPE "public"."image_provider_type" ADD VALUE 'venice';--> statement-breakpoint
+-- Extend `chk_image_providers_base_url` to cover the `venice` type that
+-- 0036 added to `image_provider_type`. Mirrors `openai_compatible`'s
+-- "base_url required" posture (venice's native endpoint takes a base_url
+-- like `https://api.venice.ai/api/v1`). Hand-rolled adapter; see
+-- `src/llm/venice.ts`.
 
 ALTER TABLE "image_providers" DROP CONSTRAINT "chk_image_providers_base_url";--> statement-breakpoint
 ALTER TABLE "image_providers" ADD CONSTRAINT "chk_image_providers_base_url" CHECK (("image_providers"."type" <> 'openai_compatible' OR "image_providers"."base_url" IS NOT NULL)
