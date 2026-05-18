@@ -1742,6 +1742,73 @@ describe("class C in-loop repair", () => {
     ).rejects.toBe(replayErr);
   });
 
+  it("ProviderProtocolError during stream replay → degrade with stream_truncation subtype", async () => {
+    // First streaming attempt throws a parse error → repair consumes the
+    // stream-truncation budget and invokes chat() for the replay. The
+    // replay ALSO throws ProviderProtocolError (model still couldn't emit
+    // clean tool-arg JSON). Per design/agent-resilience.md, this maps to
+    // a degrade with the matching subtype — NOT an `errored` off-ramp.
+    const streamErr = new ProviderProtocolError("first", new Error("boom"));
+    const replayErr = new ProviderProtocolError("replay-too", new Error("still bad"));
+    const { provider } = repairStreamProvider([{ kind: "throw", error: streamErr }]);
+    (provider.chat as ReturnType<typeof vi.fn>).mockReset();
+    (provider.chat as ReturnType<typeof vi.fn>).mockRejectedValue(replayErr);
+    const turnLogger = mock<Logger>();
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      service: stubService(),
+      onEvent: async () => {},
+      turnLogger,
+    });
+
+    expect(result.degraded).toEqual({
+      reason: "non-streaming replay still could not parse tool-call arguments",
+      subtype: "stream_truncation",
+    });
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.degrade", subtype: "stream_truncation" }),
+      expect.any(String),
+    );
+  });
+
+  it("RefusalError during stream replay → degrade with refusal subtype", async () => {
+    // First streaming attempt throws a parse error → repair invokes
+    // chat() for the replay. The replay throws RefusalError (model
+    // refused the policy-light path of the non-streaming retry).
+    // Maps to degrade with the refusal subtype, not `errored`.
+    const streamErr = new ProviderProtocolError("first", new Error("boom"));
+    const replayRefusal = new RefusalError("policy");
+    const { provider } = repairStreamProvider([{ kind: "throw", error: streamErr }]);
+    (provider.chat as ReturnType<typeof vi.fn>).mockReset();
+    (provider.chat as ReturnType<typeof vi.fn>).mockRejectedValue(replayRefusal);
+    const turnLogger = mock<Logger>();
+
+    const result = await runStreamingAgentLoop({
+      provider,
+      model: "test",
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      service: stubService(),
+      onEvent: async () => {},
+      turnLogger,
+    });
+
+    expect(result.degraded).toEqual({
+      reason: "model refused the non-streaming replay",
+      subtype: "refusal",
+    });
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.degrade", subtype: "refusal" }),
+      expect.any(String),
+    );
+  });
+
   it("two consecutive ProviderProtocolErrors → degrade after budget exhausted", async () => {
     const err1 = new ProviderProtocolError("first", new Error("boom"));
     const err2 = new ProviderProtocolError("second", new Error("boom"));

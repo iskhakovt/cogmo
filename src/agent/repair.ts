@@ -29,22 +29,47 @@ import type { ContentBlock, StopReason } from "../llm/types.js";
 export type ClassCSubtype = "empty_end_turn" | "stream_truncation" | "refusal";
 
 /**
- * Per-subtype repair budgets. Tracked per turn (one Inngest invocation =
- * one budget set). Per-subtype rather than shared because the subtypes
- * have genuinely different failure dynamics — exhausting one shouldn't
- * lock out the other.
+ * Subset of {@link ClassCSubtype} that carries a per-turn repair budget.
+ * Refusal is excluded — it's immediate-degrade with nothing to decrement.
+ * Used to keep the `repair` arm of {@link TurnOutcome} narrow so a
+ * `budgets[outcome.subtype]--` decrement is always sound.
+ */
+export type BudgetedSubtype = keyof RepairBudgets;
+
+/**
+ * Mutable budget tracker passed through the loop. Each repair attempt
+ * decrements the matching counter; classify routes through `degrade` once
+ * a counter reaches 0 for its subtype's repair-eligible cases. Refusal
+ * has no entry — it's immediate-degrade with nothing to decrement.
+ */
+export interface RepairBudgets {
+  empty_end_turn: number;
+  stream_truncation: number;
+}
+
+/**
+ * Per-subtype repair budget starting values. Tracked per turn (one Inngest
+ * invocation = one budget set). Per-subtype rather than shared because the
+ * subtypes have genuinely different failure dynamics — exhausting one
+ * shouldn't lock out the other.
  *
  *  - `empty_end_turn: 1` — Anthropic's documented recovery is a single
  *    continuation nudge.
  *  - `stream_truncation: 1` — one non-streaming replay of the same turn.
- *  - `refusal: 0` — refusal goes straight to degrade; re-prompting the
- *    same model on policy is the wrong shape.
+ *
+ * Refusal has no budget entry: the classifier degrades immediately and
+ * the loop never decrements anything on the refusal path. If a future
+ * "try refusal-recovery prompt" experiment wants a budget, it can re-add
+ * the field deliberately with logic.
  */
-export const INITIAL_BUDGETS: Readonly<Record<ClassCSubtype, number>> = Object.freeze({
+export const INITIAL_BUDGETS: Readonly<RepairBudgets> = Object.freeze({
   empty_end_turn: 1,
   stream_truncation: 1,
-  refusal: 0,
 });
+
+export function freshBudgets(): RepairBudgets {
+  return { ...INITIAL_BUDGETS };
+}
 
 /**
  * What `repairTurn` does for a given subtype.
@@ -72,23 +97,8 @@ export type RepairInstructions =
  */
 export type TurnOutcome =
   | { kind: "ok" }
-  | { kind: "repair"; subtype: ClassCSubtype; instructions: RepairInstructions }
+  | { kind: "repair"; subtype: BudgetedSubtype; instructions: RepairInstructions }
   | { kind: "degrade"; reason: string; subtype: ClassCSubtype };
-
-/**
- * Mutable budget tracker passed through the loop. Each repair attempt
- * decrements the matching counter; classify routes through `degrade` once
- * a counter reaches 0 for its subtype's repair-eligible cases.
- */
-export interface RepairBudgets {
-  empty_end_turn: number;
-  stream_truncation: number;
-  refusal: number;
-}
-
-export function freshBudgets(): RepairBudgets {
-  return { ...INITIAL_BUDGETS };
-}
 
 /**
  * Classify the just-finished turn based on its drained content and
@@ -107,8 +117,9 @@ export function classifyPostStream(
   budgets: RepairBudgets,
 ): TurnOutcome {
   if (stopReason === "refusal") {
-    // Refusal is immediate-degrade; the initial budget is 0 so we skip
-    // straight to the degrade branch regardless of any prior state.
+    // Refusal is immediate-degrade — no budget consulted, no repair
+    // attempt. Re-prompting the same model on policy is the wrong shape;
+    // a fallback chain (future) would have to opt in explicitly.
     return {
       kind: "degrade",
       reason: "model returned a policy refusal",

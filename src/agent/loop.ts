@@ -1,6 +1,8 @@
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Logger } from "pino";
 import * as R from "remeda";
+import { ProviderProtocolError } from "../llm/errors.js";
+import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type {
   ContentBlock,
@@ -9,6 +11,7 @@ import type {
   StreamEvent,
   TextBlock,
   ToolUseBlock,
+  Usage,
 } from "../llm/types.js";
 import { logger } from "../logger.js";
 import { agentIterations } from "../metrics.js";
@@ -482,13 +485,13 @@ export async function runStreamingAgentLoop(
         );
       }
       // repair: stream_replay — one non-streaming retry of this iteration.
-      // The replay can be a separate `chat()` call since we're past the
-      // streaming-required boundary; the streaming contract for the
-      // caller is already satisfied for events emitted so far (none, on
-      // a pre-event throw). A Class A failure during the replay
-      // propagates normally — the orchestrator's outer Inngest retries
-      // handle it. The stream-replay budget is consumed regardless of
-      // replay outcome, per the design doc.
+      // Budget is consumed before the replay attempt, per design — a Class
+      // A failure during replay propagates to the orchestrator's outer
+      // Inngest retries; a Class C failure (Provider protocol /
+      // refusal) maps to a degrade with the matching subtype rather than
+      // bubbling out as an `errored` conversation. See
+      // design/agent-resilience.md → Per-subtype repair, stream-truncation
+      // row.
       budgets.stream_truncation--;
       log.warn(
         {
@@ -498,28 +501,32 @@ export async function runStreamingAgentLoop(
         },
         "agent loop class C repair (stream replay)",
       );
-      const replay = await provider.chat(chatParams);
-      iterationContent = replay.content;
-      iterationStopReason = replay.stopReason;
-      finalModel = replay.model;
-      totalUsage.inputTokens += replay.usage.inputTokens;
-      totalUsage.outputTokens += replay.usage.outputTokens;
-      // Emit any tool_start events from the replay so the streaming
-      // delivery sees the recovered tool_use blocks — the original
-      // stream produced no usable tool_start event for them (it threw
-      // mid-parse). Text deltas from the replay aren't forwarded; the
-      // user has already seen a partial reply from the failed stream
-      // and another emission would double up.
-      for (const block of iterationContent) {
-        if (block.type === "tool_use") {
-          await onEvent({
-            type: "tool_start",
-            id: block.id,
-            name: block.name,
-            input: block.input,
-          });
-        }
+      const replayResult = await applyStreamReplay(provider, chatParams, onEvent);
+      if (replayResult.kind === "degrade") {
+        log.warn(
+          {
+            event: "agent.degrade",
+            reason: replayResult.reason,
+            subtype: replayResult.subtype,
+          },
+          "agent loop degraded (stream replay)",
+        );
+        return buildDegradedResult(
+          messages,
+          initialLength,
+          ephemeralIndices,
+          totalUsage,
+          finalModel,
+          iterations,
+          replayResult.reason,
+          replayResult.subtype,
+        );
       }
+      iterationContent = replayResult.content;
+      iterationStopReason = replayResult.stopReason;
+      finalModel = replayResult.model;
+      totalUsage.inputTokens += replayResult.usage.inputTokens;
+      totalUsage.outputTokens += replayResult.usage.outputTokens;
     }
 
     // Append assistant response to messages
@@ -710,5 +717,83 @@ async function drainStream(
     stopReason: meta.stopReason,
     model: meta.model,
     usage: meta.usage,
+  };
+}
+
+/**
+ * Outcome of the non-streaming replay that recovers a stream-truncation
+ * (`ProviderProtocolError`) iteration. The replay is itself a Class C
+ * surface: it can raise another `ProviderProtocolError` (model still
+ * can't emit clean tool-arg JSON) or a `RefusalError` (model refuses the
+ * non-streaming retry). Both map to a `degrade` with the matching
+ * subtype rather than propagating to the orchestrator's `errored`
+ * off-ramp — we attempted the documented recovery and it didn't work.
+ * Class A errors (network, 5xx, unknown failures) re-throw and resume
+ * the normal Inngest retry path.
+ */
+type StreamReplayResult =
+  | {
+      kind: "success";
+      content: ContentBlock[];
+      stopReason: StopReason;
+      model: string;
+      usage: Usage;
+    }
+  | { kind: "degrade"; subtype: ClassCSubtype; reason: string };
+
+/**
+ * Replay the just-failed streaming iteration as a single non-streaming
+ * `chat()` call. Emits recovered `tool_use` blocks as `tool_start` events
+ * so the streaming delivery sees the tool calls the failed stream never
+ * surfaced (it threw mid-parse). Text deltas from the replay are NOT
+ * re-emitted — a partial reply from the failed stream may already have
+ * landed in the delivery layer and a second emission would double up.
+ *
+ * Class C errors on the replay degrade with the matching subtype; Class
+ * A errors propagate.
+ */
+async function applyStreamReplay(
+  provider: LlmProvider,
+  chatParams: Parameters<LlmProvider["chat"]>[0],
+  onEvent: (event: StreamEvent) => Promise<void>,
+): Promise<StreamReplayResult> {
+  let replay: Awaited<ReturnType<LlmProvider["chat"]>>;
+  try {
+    replay = await provider.chat(chatParams);
+  } catch (err) {
+    if (err instanceof ProviderProtocolError) {
+      return {
+        kind: "degrade",
+        subtype: "stream_truncation",
+        reason: "non-streaming replay still could not parse tool-call arguments",
+      };
+    }
+    if (err instanceof RefusalError) {
+      return {
+        kind: "degrade",
+        subtype: "refusal",
+        reason: "model refused the non-streaming replay",
+      };
+    }
+    throw err;
+  }
+
+  for (const block of replay.content) {
+    if (block.type === "tool_use") {
+      await onEvent({
+        type: "tool_start",
+        id: block.id,
+        name: block.name,
+        input: block.input,
+      });
+    }
+  }
+
+  return {
+    kind: "success",
+    content: replay.content,
+    stopReason: replay.stopReason,
+    model: replay.model,
+    usage: replay.usage,
   };
 }
