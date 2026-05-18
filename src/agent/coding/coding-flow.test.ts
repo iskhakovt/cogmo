@@ -23,6 +23,7 @@ import {
   runCodingExecute,
   runCodingTask,
   type StepRun,
+  type StepSendEvent,
 } from "./orchestrator.js";
 import { CodingProgressSubscriber } from "./progress-subscriber.js";
 import { createCodingService } from "./service.js";
@@ -32,6 +33,7 @@ import { type CodingStreamEvent, CodingStreamingRegistry } from "./streaming-reg
 const execFileP = promisify(execFile);
 
 const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
+const stepSendEvent = (async () => ({ ids: [] })) as any as StepSendEvent;
 const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
 
 let db: Database;
@@ -292,6 +294,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         openPlanStream: async () => planStream,
       },
       stepRun,
+      stepSendEvent,
       inngest: { send: vi.fn().mockResolvedValue(undefined) },
     });
 
@@ -384,6 +387,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
         openExecuteStream: async () => executeStream,
       },
       stepRun,
+      stepSendEvent,
       stepWaitForEvent: (async () => null) as any,
       inngest: { send: vi.fn().mockResolvedValue(undefined) },
     });

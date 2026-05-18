@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
-import type { StepRun } from "../../inngest/index.js";
+import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import type {
   ExecStreamingHandle,
   GitRemoteWorktreeSpec,
@@ -123,6 +123,7 @@ afterAll(async () => {
 });
 
 const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as unknown as StepRun;
+const stepSendEvent = (async () => ({ ids: [] })) as unknown as StepSendEvent;
 const RESOURCE_LIMITS = { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 };
 const fakeInngest = { send: vi.fn().mockResolvedValue(undefined) };
 
@@ -278,6 +279,7 @@ describe("runCodingTask — git-remote transport", () => {
         secretsStore,
       }),
       stepRun,
+      stepSendEvent,
       inngest: fakeInngest,
     });
 
@@ -348,6 +350,7 @@ describe("runCodingTask — git-remote transport", () => {
         secretsStore: undefined,
       }),
       stepRun,
+      stepSendEvent,
       inngest: fakeInngest,
     });
 
@@ -391,6 +394,7 @@ describe("runCodingTask — git-remote transport", () => {
         secretsStore,
       }),
       stepRun,
+      stepSendEvent,
       inngest: fakeInngest,
     });
 
@@ -451,6 +455,7 @@ describe("runCodingExecute — git-remote transport", () => {
         secretsStore,
       }),
       stepRun,
+      stepSendEvent,
       stepWaitForEvent: (async () => null) as never,
       inngest: fakeInngest,
     });

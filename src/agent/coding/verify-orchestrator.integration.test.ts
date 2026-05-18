@@ -540,6 +540,10 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
       taskId,
       deps,
       stepRun,
+      stepSendEvent: (async (_: string, payload: unknown) => {
+        await inngestSend(payload as never);
+        return { ids: [] };
+      }) as never,
       inngest: { send: inngestSend },
     });
 
@@ -597,6 +601,10 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
       taskId,
       deps,
       stepRun,
+      stepSendEvent: (async (_: string, payload: unknown) => {
+        await inngestSend(payload as never);
+        return { ids: [] };
+      }) as never,
       inngest: { send: inngestSend },
     });
 
@@ -756,6 +764,10 @@ describe("verify orchestrator integration — git-remote transport (fake daytona
       taskId,
       deps,
       stepRun,
+      stepSendEvent: (async (_: string, payload: unknown) => {
+        await inngestSend(payload as never);
+        return { ids: [] };
+      }) as never,
       inngest: { send: inngestSend },
     });
 

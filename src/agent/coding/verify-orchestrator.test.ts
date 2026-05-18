@@ -10,7 +10,7 @@ import { PassThrough, type Readable } from "node:stream";
 import type { Octokit } from "@octokit/rest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
-import type { StepRun } from "../../inngest/index.js";
+import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import {
   type ExecOptions,
   type ExecStreamingHandle,
@@ -30,6 +30,17 @@ import { type CodingBackend, DrizzleCodingStore } from "./store/index.js";
 import { runCodingVerify, type VerifyOrchestratorDeps } from "./verify-orchestrator.js";
 
 const stepRun = ((_: string, fn: () => Promise<unknown>) => fn()) as any as StepRun;
+
+/**
+ * step.sendEvent shim — forwards catch-path emits through the test's
+ * `inngest.send` so existing event-name assertions see them.
+ */
+function makeStepSendEvent(inngest: Pick<import("inngest").Inngest, "send">): StepSendEvent {
+  return (async (_: string, payload: unknown) => {
+    await inngest.send(payload as never);
+    return { ids: [] };
+  }) as any as StepSendEvent;
+}
 
 const VALID_IDENTITY: GitHubIdentity = {
   pat: "ghp_dummy_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
@@ -253,7 +264,13 @@ describe("runCodingVerify", () => {
     const inngest = { send: inngestSend } as unknown as Pick<import("inngest").Inngest, "send">;
 
     const { taskId } = await seedTask();
-    const result = await runCodingVerify({ taskId, deps, stepRun, inngest });
+    const result = await runCodingVerify({
+      taskId,
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
 
     expect(result.status).toBe("pr_open");
     if (result.status === "pr_open") {
@@ -309,7 +326,13 @@ describe("runCodingVerify", () => {
     const inngest = { send: inngestSend } as unknown as Pick<import("inngest").Inngest, "send">;
 
     const { taskId } = await seedTask();
-    const result = await runCodingVerify({ taskId, deps, stepRun, inngest });
+    const result = await runCodingVerify({
+      taskId,
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
 
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
@@ -338,7 +361,13 @@ describe("runCodingVerify", () => {
     >;
 
     const { taskId } = await seedTask();
-    const result = await runCodingVerify({ taskId, deps, stepRun, inngest });
+    const result = await runCodingVerify({
+      taskId,
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
 
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
@@ -365,7 +394,13 @@ describe("runCodingVerify", () => {
     >;
 
     const { taskId } = await seedTask();
-    await runCodingVerify({ taskId, deps, stepRun, inngest });
+    await runCodingVerify({
+      taskId,
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
 
     const createCall = (deps.sandbox.create as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
     expect(createCall?.env).toEqual({
@@ -389,7 +424,13 @@ describe("runCodingVerify", () => {
     >;
 
     const { taskId } = await seedTask();
-    const result = await runCodingVerify({ taskId, deps, stepRun, inngest });
+    const result = await runCodingVerify({
+      taskId,
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
 
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
@@ -410,7 +451,13 @@ describe("runCodingVerify", () => {
     >;
 
     const { taskId } = await seedTask({ remoteUrl: "not-a-url" });
-    const result = await runCodingVerify({ taskId, deps, stepRun, inngest });
+    const result = await runCodingVerify({
+      taskId,
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
 
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
@@ -428,7 +475,13 @@ describe("runCodingVerify", () => {
     >;
 
     const { taskId } = await seedTask({ status: "queued" });
-    const result = await runCodingVerify({ taskId, deps, stepRun, inngest });
+    const result = await runCodingVerify({
+      taskId,
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
 
     expect(result.status).toBe("skipped");
     expect(deps.sandbox.create).not.toHaveBeenCalled();
@@ -449,7 +502,13 @@ describe("runCodingVerify", () => {
     >;
 
     const { taskId } = await seedTask();
-    await runCodingVerify({ taskId, deps, stepRun, inngest });
+    await runCodingVerify({
+      taskId,
+      deps,
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
 
     expect(deps.sandbox.deleteByTaskId).toHaveBeenCalledWith(taskId);
   });
