@@ -160,6 +160,7 @@ interface RunParams {
  */
 export async function runCodingTask(params: RunParams): Promise<CodingOrchestratorResult> {
   const { taskId, deps, stepRun, inngest } = params;
+  const taskLog = log.child({ taskId });
   const {
     runInTx,
     store,
@@ -418,7 +419,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       // doesn't escape into the outer catch and write a second failed
       // status that masks the original reason.
       await planStream.fail(reason).catch((streamErr: unknown) => {
-        log.warn({ err: streamErr, taskId }, "plan stream fail notification failed");
+        taskLog.warn({ err: streamErr }, "plan stream fail notification failed");
       });
       return { status: "failed", failureReason: reason };
     }
@@ -438,15 +439,15 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // Same wrap as the failure-path notification above — once status is
     // committed, a subscriber error must not regress the task to failed.
     await planStream.finalize(result.plan ?? "").catch((streamErr: unknown) => {
-      log.warn(
-        { err: streamErr, taskId },
+      taskLog.warn(
+        { err: streamErr },
         `plan stream finalize notification failed (task already ${nextStatus})`,
       );
     });
     return { status: nextStatus, plan: result.plan ?? "" };
   } catch (err) {
     const reason = (err as Error).message;
-    log.error({ err, taskId }, "coding task failed");
+    taskLog.error({ err }, "coding task failed");
     // Catch-path writes deliberately bypass `stepRun`. The function runs
     // with retries=0 (the plan-mode `claude` session is non-resumable
     // from mid-stream — see the createFunction comment), so wrapping in
@@ -667,6 +668,7 @@ interface ExecuteRunParams {
  */
 export async function runCodingExecute(params: ExecuteRunParams): Promise<CodingExecuteResult> {
   const { taskId, deps, stepRun, stepWaitForEvent, inngest } = params;
+  const taskLog = log.child({ taskId });
   const { runInTx, store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
 
@@ -679,8 +681,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     throw new Error(`coding task ${taskId} has no plan_approved_at — execute fired prematurely`);
   }
   if (task.status !== "awaiting_approval") {
-    log.info(
-      { taskId, status: task.status },
+    taskLog.info(
+      { status: task.status },
       "execute: task not in awaiting_approval — already started or terminated, skipping",
     );
     return { status: "skipped" };
@@ -708,8 +710,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       runInTx((tx) => store.transitionTaskStatus(tx, taskId, "awaiting_approval", "executing")),
     );
     if (transition.kind !== "transitioned") {
-      log.info(
-        { taskId, transition },
+      taskLog.info(
+        { transition },
         "execute: status transition lost the race (already cancelled or transitioned)",
       );
       return { status: "skipped" };
@@ -875,10 +877,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       // doesn't bubble into the outer catch, which would write a second
       // (less informative) failed-status overwriting the original reason.
       await executeStream.complete(false).catch((streamErr: unknown) => {
-        log.warn({ err: streamErr, taskId }, "execute stream complete(false) notification failed");
+        taskLog.warn({ err: streamErr }, "execute stream complete(false) notification failed");
       });
       await executeStream.fail(reason).catch((streamErr: unknown) => {
-        log.warn({ err: streamErr, taskId }, "execute stream fail notification failed");
+        taskLog.warn({ err: streamErr }, "execute stream fail notification failed");
       });
       return { status: "failed", failureReason: reason };
     }
@@ -925,15 +927,15 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     // see the final progress message edit, which is recoverable on next
     // interaction.
     await executeStream.complete(true, completionTokens).catch((streamErr: unknown) => {
-      log.warn(
-        { err: streamErr, taskId },
+      taskLog.warn(
+        { err: streamErr },
         "execute stream complete notification failed (task already pending_verify)",
       );
     });
     return { status: "pending_verify" };
   } catch (err) {
     const reason = (err as Error).message;
-    log.error({ err, taskId }, "coding execute failed");
+    taskLog.error({ err }, "coding execute failed");
     await runInTx((tx) =>
       store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
     ).catch(() => {});
@@ -1087,6 +1089,7 @@ async function handlePermissionRequest(
   params: HandlePermissionRequestParams,
 ): Promise<PermissionResponse> {
   const { taskId, requestId, tool, input, store, runInTx, stepWaitForEvent, inngest } = params;
+  const taskLog = log.child({ taskId });
   const call = { tool, input };
   const pattern = canonicalPattern(call);
 
@@ -1094,8 +1097,8 @@ async function handlePermissionRequest(
   const logRows = await runInTx((tx) => store.listToolDecisionsForTask(tx, taskId));
   const replayed = replayDecisionLog(call, logRows);
   if (replayed) {
-    log.info(
-      { taskId, requestId, tool, pattern, decision: replayed.decision },
+    taskLog.info(
+      { requestId, tool, pattern, decision: replayed.decision },
       "tool gate: decision-log match",
     );
     return replayed.decision === "allow" ? { behavior: "allow" } : { behavior: "deny" };
@@ -1104,15 +1107,12 @@ async function handlePermissionRequest(
   // 2. Static policy.
   const result = policy.evaluate(call);
   if (result.decision === "allow") {
-    log.info(
-      { taskId, requestId, tool, pattern, reason: result.reason },
-      "tool gate: policy allow",
-    );
+    taskLog.info({ requestId, tool, pattern, reason: result.reason }, "tool gate: policy allow");
     await persistDecision(store, runInTx, taskId, tool, pattern, "allow", "once");
     return { behavior: "allow" };
   }
   if (result.decision === "deny") {
-    log.info({ taskId, requestId, tool, pattern, reason: result.reason }, "tool gate: policy deny");
+    taskLog.info({ requestId, tool, pattern, reason: result.reason }, "tool gate: policy deny");
     await persistDecision(store, runInTx, taskId, tool, pattern, "deny", "once");
     return { behavior: "deny", message: result.reason };
   }
@@ -1123,8 +1123,8 @@ async function handlePermissionRequest(
     name: codingTaskPermissionRequested.name,
     data: { taskId, requestId: requestIdShort, tool },
   });
-  log.info(
-    { taskId, requestId, requestIdShort, tool, pattern },
+  taskLog.info(
+    { requestId, requestIdShort, tool, pattern },
     "tool gate: prompting user via Telegram",
   );
 
@@ -1138,7 +1138,7 @@ async function handlePermissionRequest(
     timeout: "7d",
   });
   if (!decisionEvent) {
-    log.warn({ taskId, requestId, tool }, "tool gate: prompt timed out (7d) — denying");
+    taskLog.warn({ requestId, tool }, "tool gate: prompt timed out (7d) — denying");
     await persistDecision(store, runInTx, taskId, tool, pattern, "deny", "once");
     return { behavior: "deny", message: "permission prompt timed out" };
   }
@@ -1148,8 +1148,8 @@ async function handlePermissionRequest(
   // requests in this task auto-apply; `once` is audit-only.
   await persistDecision(store, runInTx, taskId, tool, pattern, data.decision, data.scope);
 
-  log.info(
-    { taskId, requestId, tool, pattern, decision: data.decision, scope: data.scope },
+  taskLog.info(
+    { requestId, tool, pattern, decision: data.decision, scope: data.scope },
     "tool gate: user decision applied",
   );
   return data.decision === "allow"
