@@ -175,9 +175,10 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
       ),
     );
-    await stepRun("emit-task-failed", () =>
-      inngest.send({ name: "coding/task/failed", data: { taskId, reason } }).then(() => undefined),
-    );
+    await stepSendEvent("emit-task-failed", {
+      ...codingTaskFailed.create({ taskId, reason }),
+      id: `task-failed-${taskId}`,
+    });
     await stepRun("teardown-worktree", () =>
       safeTeardownWorktree({ secretsStore, runInTx, repo, taskId, worktreeAssignment }),
     ).catch(() => undefined);

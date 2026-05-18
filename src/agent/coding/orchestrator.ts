@@ -173,7 +173,7 @@ interface RunParams {
  * retry.
  */
 export async function runCodingTask(params: RunParams): Promise<CodingOrchestratorResult> {
-  const { taskId, deps, stepRun, stepSendEvent, inngest } = params;
+  const { taskId, deps, stepRun, stepSendEvent } = params;
   const {
     runInTx,
     store,
@@ -410,11 +410,10 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
           store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
         ),
       );
-      await stepRun("emit-task-failed", () =>
-        inngest
-          .send({ name: "coding/task/failed", data: { taskId, reason } })
-          .then(() => undefined),
-      );
+      await stepSendEvent("emit-task-failed", {
+        ...codingTaskFailed.create({ taskId, reason }),
+        id: `task-failed-${taskId}`,
+      });
       const a = assignment;
       if (a) {
         await stepRun("teardown-worktree", () =>
@@ -884,11 +883,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
           store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
         ),
       );
-      await stepRun("emit-task-failed", () =>
-        inngest
-          .send({ name: "coding/task/failed", data: { taskId, reason } })
-          .then(() => undefined),
-      );
+      await stepSendEvent("emit-task-failed", {
+        ...codingTaskFailed.create({ taskId, reason }),
+        id: `task-failed-${taskId}`,
+      });
       await stepRun("teardown-worktree", () =>
         safeTeardownWorktree({
           runInTx,
