@@ -93,6 +93,9 @@ importers:
       ajv:
         specifier: ^8.20.0
         version: 8.20.0
+      canonicalize:
+        specifier: 3.0.0
+        version: 3.0.0
       croner:
         specifier: ^10.0.1
         version: 10.0.1
@@ -2940,6 +2943,11 @@ packages:
 
   canonicalize@1.0.8:
     resolution: {integrity: sha512-0CNTVCLZggSh7bc5VkX5WWPWO+cyZbNd07IHIsSXLia/eAq+r836hgk+8BKoEh7949Mda87VUOitx5OddVj64A==}
+
+  canonicalize@3.0.0:
+    resolution: {integrity: sha512-yYLfHyDMIXRyRqsKBRLX023riFLpXY2YOfdtqKXZRZy9qsfOJ9U+4F9YZL7MEzL5+ziN2x2nlBvY/Voi3EBljA==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   chai@6.2.2:
     resolution: {integrity: sha512-NUPRluOfOiTKBKvWPtSD4PhFvWCqOi0BGStNWs57X9js7XGTprSmFoz5F0tWhR4WPjNeR9jXqdC7/UpSJTnlRg==}
@@ -8197,6 +8205,8 @@ snapshots:
       get-intrinsic: 1.3.0
 
   canonicalize@1.0.8: {}
+
+  canonicalize@3.0.0: {}
 
   chai@6.2.2: {}
 

@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { ProviderProtocolError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
+import type { ToolUseBlock } from "../llm/types.js";
 import {
+  CLASS_D_CONSECUTIVE_LIMIT,
+  CLASS_D_CUMULATIVE_LIMIT,
+  classifyClassDTrip,
   classifyPostStream,
   classifyStreamError,
+  computeIterationFingerprint,
   degradedReplyText,
   freshBudgets,
   INITIAL_BUDGETS,
@@ -145,15 +150,100 @@ describe("freshBudgets / INITIAL_BUDGETS", () => {
   });
 });
 
+describe("computeIterationFingerprint", () => {
+  function toolUse(id: string, name: string, input: unknown): ToolUseBlock {
+    return { type: "tool_use", id, name, input };
+  }
+
+  it("returns null when there are no tool calls", () => {
+    expect(computeIterationFingerprint([])).toBeNull();
+  });
+
+  it("produces identical hashes for identical (name, args) sequences", () => {
+    const a = computeIterationFingerprint([toolUse("a1", "read_file", { path: "x" })]);
+    const b = computeIterationFingerprint([toolUse("b2", "read_file", { path: "x" })]);
+    expect(a).not.toBeNull();
+    expect(a).toBe(b);
+  });
+
+  it("ignores emission order — sort-stable across parallel-tool reorderings", () => {
+    const a = computeIterationFingerprint([
+      toolUse("t1", "search", { q: "foo" }),
+      toolUse("t2", "fetch", { url: "https://x" }),
+    ]);
+    const b = computeIterationFingerprint([
+      toolUse("t3", "fetch", { url: "https://x" }),
+      toolUse("t4", "search", { q: "foo" }),
+    ]);
+    expect(a).toBe(b);
+  });
+
+  it("ignores object-key order in args (canonical JSON)", () => {
+    const a = computeIterationFingerprint([toolUse("t1", "read_file", { path: "x", mode: "r" })]);
+    const b = computeIterationFingerprint([toolUse("t2", "read_file", { mode: "r", path: "x" })]);
+    expect(a).toBe(b);
+  });
+
+  it("discriminates on args — different paths produce different hashes", () => {
+    const a = computeIterationFingerprint([toolUse("t1", "read_file", { path: "a.txt" })]);
+    const b = computeIterationFingerprint([toolUse("t2", "read_file", { path: "b.txt" })]);
+    const c = computeIterationFingerprint([toolUse("t3", "read_file", { path: "c.txt" })]);
+    expect(new Set([a, b, c]).size).toBe(3);
+  });
+
+  it("discriminates on tool name with identical args", () => {
+    const a = computeIterationFingerprint([toolUse("t1", "read_file", { path: "x" })]);
+    const b = computeIterationFingerprint([toolUse("t2", "list_files", { path: "x" })]);
+    expect(a).not.toBe(b);
+  });
+
+  it("ignores tool_use.id (per-call random IDs do not move the hash)", () => {
+    const a = computeIterationFingerprint([toolUse("ID-A", "read_file", { path: "x" })]);
+    const b = computeIterationFingerprint([toolUse("ID-Z", "read_file", { path: "x" })]);
+    expect(a).toBe(b);
+  });
+});
+
+describe("classifyClassDTrip", () => {
+  it("returns null below both thresholds", () => {
+    expect(classifyClassDTrip(1, 1)).toBeNull();
+    expect(
+      classifyClassDTrip(CLASS_D_CONSECUTIVE_LIMIT - 1, CLASS_D_CUMULATIVE_LIMIT - 1),
+    ).toBeNull();
+  });
+
+  it("returns stuck_loop when the consecutive threshold is reached", () => {
+    expect(classifyClassDTrip(CLASS_D_CONSECUTIVE_LIMIT, CLASS_D_CONSECUTIVE_LIMIT)).toBe(
+      "stuck_loop",
+    );
+  });
+
+  it("returns stuck_loop_cumulative when only the cumulative threshold is reached", () => {
+    // Consecutive count stays under the limit (e.g. alternating pattern
+    // never builds three in a row) but cumulative reaches the cap.
+    expect(classifyClassDTrip(1, CLASS_D_CUMULATIVE_LIMIT)).toBe("stuck_loop_cumulative");
+  });
+
+  it("prefers stuck_loop over stuck_loop_cumulative when both fire", () => {
+    // The tighter trigger wins — three in a row also accumulates three
+    // total, but the subtype tag distinguishes the failure shape.
+    expect(classifyClassDTrip(CLASS_D_CONSECUTIVE_LIMIT, CLASS_D_CUMULATIVE_LIMIT)).toBe(
+      "stuck_loop",
+    );
+  });
+});
+
 describe("degradedReplyText", () => {
   it("returns the refusal-specific message for the refusal subtype", () => {
     expect(degradedReplyText("refusal")).toMatch(/declined/i);
   });
 
-  it("returns the generic apology for empty_end_turn / stream_truncation / null", () => {
+  it("returns the generic apology for empty_end_turn / stream_truncation / stuck_loop / null", () => {
     const generic = degradedReplyText("empty_end_turn");
     expect(generic).toMatch(/trouble generating/i);
     expect(degradedReplyText("stream_truncation")).toBe(generic);
+    expect(degradedReplyText("stuck_loop")).toBe(generic);
+    expect(degradedReplyText("stuck_loop_cumulative")).toBe(generic);
     expect(degradedReplyText(null)).toBe(generic);
   });
 });
