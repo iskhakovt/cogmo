@@ -131,6 +131,25 @@ Runtime deps with breaking-change history (octokit, dockerode, sysbox image tags
 
 (Currently aspirational — listed in PROGRESS.md → Phase 6 → Test infrastructure as a future canary.)
 
+### Non-settling-promise regression guards
+
+When a unit test exercises a path whose contract is "this Promise must reject within N ms" (timeouts, watchdogs, deadline-bounded waits), the mock has to model the *absence* of a resolution — a Promise that never settles — not just an immediate rejection. Tests using `await unboundedPromise` rely on vitest's per-test default timeout to fail, which (a) looks like an unrelated flake in CI, (b) doesn't pin the contract the timeout exists to enforce, and (c) often hides the bug because the timeout fires *after* the test reports green via some side effect.
+
+The pattern:
+
+```typescript
+// WRONG — silent hang if `wait()` never settles, looks like an unrelated flake
+await handle.wait();
+expect(...).toBe(...);
+
+// RIGHT — structurally bounded, asserts on the rejection class
+const err = await handle.wait().catch((e: Error) => e);
+expect(err).toBeInstanceOf(ExecTimeoutError);
+expect((err as ExecTimeoutError).kind).toBe("total");
+```
+
+Reference: `src/sandbox/daytona/exec-streaming.test.ts → "timeoutMs: total wall-clock cap fires…"`. Motivating incident: the 4-day Daytona WS-wedge ([changelog 2026-05-18](../changelog.d/2026-05-18-coding-exec-wedge-resilience.md)) had no unit-tier regression test because earlier tests modelled `wait()` as always-settling.
+
 ### Concurrency invariants
 
 For in-process pub/sub (`CodingStreamingRegistry`, `EventEmitter` wrappers): pin listener-set snapshot semantics (subscribers added mid-emit don't fire for the in-flight event), self-unsubscribe-during-emit, re-entrant publish, and burst ordering across multiple subscribers. Catches refactors that introduce async dispatch or live-iteration regressions.
