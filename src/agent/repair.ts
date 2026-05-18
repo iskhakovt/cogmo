@@ -66,14 +66,14 @@ export type RepairInstructions =
  *  - `repair`: the loop should apply the instructions, decrement the
  *    matching budget, and re-iterate.
  *  - `degrade`: the loop exits and the orchestrator posts the degraded
- *    reply. `subtype` is optional so backstops without a Class C tag (e.g.
- *    iteration cap) remain representable; today every Class C emission
- *    carries one.
+ *    reply. Every classifier `degrade` carries a `subtype` tag; the
+ *    iteration-cap backstop bypasses the classifier entirely and is the
+ *    only callsite that constructs a degraded result with `subtype: null`.
  */
 export type TurnOutcome =
   | { kind: "ok" }
   | { kind: "repair"; subtype: ClassCSubtype; instructions: RepairInstructions }
-  | { kind: "degrade"; reason: string; subtype?: ClassCSubtype };
+  | { kind: "degrade"; reason: string; subtype: ClassCSubtype };
 
 /**
  * Mutable budget tracker passed through the loop. Each repair attempt

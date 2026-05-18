@@ -478,7 +478,7 @@ export async function runStreamingAgentLoop(
           finalModel,
           iterations,
           outcome.reason,
-          outcome.subtype ?? null,
+          outcome.subtype,
         );
       }
       // repair: stream_replay — one non-streaming retry of this iteration.
@@ -548,7 +548,7 @@ export async function runStreamingAgentLoop(
         finalModel,
         iterations,
         outcome.reason,
-        outcome.subtype ?? null,
+        outcome.subtype,
       );
     }
     if (outcome.kind === "repair") {

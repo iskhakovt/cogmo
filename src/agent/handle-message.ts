@@ -818,15 +818,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       );
 
       // ──── DURABLE: persist all new messages (tool turns + final assistant) ────
-      //
-      // For a degraded turn we also emit `conversation/degraded` from inside
-      // this step. Wrapping the emission in the same `step.run` as the
-      // persist gives exactly-once delivery (same pattern as
-      // `conversation/errored` in `onFailure`) — no explicit idempotency
-      // `id` needed. See design/agent-resilience.md → Telemetry.
 
       const assistantMsg = await step.run("persist-new-messages", async () => {
-        const inserted = await deps.runInTx((tx) =>
+        return await deps.runInTx((tx) =>
           agentStore.insertMessages(tx, {
             conversationId,
             messages: result.newMessages,
@@ -837,19 +831,25 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             lastMessageOutputTokens: result.usage.outputTokens,
           }),
         );
-        if (result.degraded) {
-          await inngest.send(
-            conversationDegraded.create({
-              conversationId,
-              runId,
-              triggerInboundId,
-              subtype: result.degraded.subtype,
-              reason: result.degraded.reason,
-            }),
-          );
-        }
-        return inserted;
       });
+
+      // Emit the degrade signal as a separate durable step after persist —
+      // `step.sendEvent` provides exactly-once delivery, same pattern as
+      // `conversation/errored` in `onFailure`. See
+      // design/agent-resilience.md → Telemetry.
+      if (result.degraded) {
+        const degradedSubtype = result.degraded.subtype;
+        await step.sendEvent(
+          "emit-conversation-degraded",
+          conversationDegraded.create({
+            conversationId,
+            runId,
+            triggerInboundId,
+            subtype: degradedSubtype,
+            reason: result.degraded.reason,
+          }),
+        );
+      }
 
       // ──── DURABLE: batch delivery ────
       //

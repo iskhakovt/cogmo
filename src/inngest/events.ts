@@ -56,17 +56,17 @@ export const conversationIdle = eventType("conversation/idle", {
  * system-generated apology and can retry. See design/agent-resilience.md →
  * Off-ramps + Degraded reply.
  *
- * Emitted from inside the durable persist step that writes the degraded
- * assistant message, so exactly-once delivery is provided by the wrapping
- * `step.run` (same pattern as `conversation/errored` in `onFailure`). No
- * explicit idempotency `id` needed.
+ * Emitted via `step.sendEvent` right after the durable persist step that
+ * writes the degraded assistant message — same pattern as
+ * `conversation/errored` in `onFailure`. Inngest's bus-level dedup on the
+ * named step provides exactly-once delivery; no explicit idempotency `id`
+ * needed.
  *
- * `subtype` enumerates every degrade trigger the loop produces today
- * (`empty_end_turn`, `stream_truncation`, `refusal`) plus the Class D
- * triggers (`stuck_loop`, `stuck_loop_cumulative`) and the iteration-cap
- * backstop. Nullable so future un-tagged degrade callsites stay
- * representable without widening the union; today every emission carries
- * a tag.
+ * `subtype` carries the classifier verdict when the loop exited through a
+ * Class C / D tagged off-ramp (`empty_end_turn`, `stream_truncation`,
+ * `refusal`, `stuck_loop`, `stuck_loop_cumulative`). It is `null` when the
+ * loop exited via the iteration-cap backstop — that path has no classifier
+ * subtype; `reason: "iteration_cap"` carries the distinguishing label.
  */
 export const conversationDegraded = eventType("conversation/degraded", {
   schema: z.object({
@@ -80,7 +80,6 @@ export const conversationDegraded = eventType("conversation/degraded", {
         "refusal",
         "stuck_loop",
         "stuck_loop_cumulative",
-        "iteration_cap",
       ])
       .nullable(),
     reason: z.string(),

@@ -1721,7 +1721,7 @@ describe("class C in-loop repair", () => {
     );
   });
 
-  it("stream truncation, replay also throws → degrade with stream_truncation subtype", async () => {
+  it("Class A error during stream replay propagates untouched (not classified as degrade)", async () => {
     const protocolErr1 = new ProviderProtocolError("first", new Error("boom"));
     const { provider } = repairStreamProvider([{ kind: "throw", error: protocolErr1 }]);
     // Override chat() to also throw a Class A error — the design says
