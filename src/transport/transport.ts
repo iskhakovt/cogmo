@@ -1311,71 +1311,84 @@ export function createTransport(deps: {
       },
 
       async update(platformUserHandle, profileId, changes, opts) {
-        return runInTx(async (tx) => {
-          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
-          if (!identity) return err({ code: "identity_rejected" as const });
-          const owner = await agentStore.getProfileOwner(tx, profileId);
-          if (!owner) return err({ code: "profile_not_found" as const });
-          if (owner.userId === null) {
-            return err({
-              code: "access_denied" as const,
-              reason: "org profiles are read-only via Transport",
-            });
-          }
-          if (owner.userId !== identity.userId) {
-            return err({ code: "access_denied" as const, reason: "profile not owned by caller" });
-          }
-          if (
-            changes.model !== undefined &&
-            !(await agentStore.isModelUserSelectable(tx, changes.model))
-          ) {
-            return err({ code: "model_unavailable" as const, model: changes.model });
-          }
-          if (changes.memoryScope) {
-            const unknown = await findUnknownCompartmentImpl(
-              tx,
-              agentStore,
-              identity.userId,
-              changes.memoryScope.compartments,
-            );
-            if (unknown !== null) {
-              return err({ code: "compartment_unknown" as const, name: unknown });
-            }
-          }
-          // Pre-validate the cooldown-clear side effect BEFORE the
-          // profile update commits, so a wrong / missing / mismatched
-          // conversation aborts the whole update rather than silently
-          // dropping the clear (or worse — clearing the cooldown on a
-          // conversation that doesn't use this profile, defeating the
-          // "context switch ends cooldown" rationale).
-          let shouldClearCooldown = false;
-          const clearTarget = opts?.clearCooldownForConversation;
-          if (clearTarget !== undefined) {
-            const conv = await agentStore.getConversation(tx, clearTarget);
-            if (!conv) return err({ code: "conversation_not_found" as const });
-            if (conv.userId !== identity.userId) {
+        // `UniqueViolationError` from the profile_name unique constraint
+        // is caught OUTSIDE `runInTx` so the underlying Postgres tx
+        // rolls back cleanly. Catching inside the tx (and `return
+        // err(...)`-ing) lets the cb resolve, which makes Drizzle send
+        // COMMIT — and Postgres turns COMMIT-after-failed-statement
+        // into a silent ROLLBACK plus a NOTICE. End-to-end behaviour is
+        // the same (no data persists, err result returned) but the
+        // intent is misleading and the log noise hides real issues.
+        // Letting the error propagate triggers Drizzle's proper
+        // ROLLBACK path before this handler translates the error.
+        try {
+          return await runInTx(async (tx) => {
+            const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+            if (!identity) return err({ code: "identity_rejected" as const });
+            const owner = await agentStore.getProfileOwner(tx, profileId);
+            if (!owner) return err({ code: "profile_not_found" as const });
+            if (owner.userId === null) {
               return err({
                 code: "access_denied" as const,
-                reason: "conversation not owned by caller",
+                reason: "org profiles are read-only via Transport",
               });
             }
-            if (conv.profileId !== profileId) {
-              // The clear's rationale is "the model the failing turn
-              // used changed". If the conversation doesn't actually
-              // use this profile, the new model isn't its model and
-              // the clear would be a spurious side effect. Reject
-              // rather than silently no-op so the caller surfaces a
-              // bug instead of hiding it.
+            if (owner.userId !== identity.userId) {
               return err({
                 code: "access_denied" as const,
-                reason: "conversation does not use this profile",
+                reason: "profile not owned by caller",
               });
             }
-            // Match setProfile's optimization — skip the UPDATE when
-            // there's nothing to clear, avoiding a no-op row write.
-            shouldClearCooldown = conv.cooldownState !== null;
-          }
-          try {
+            if (
+              changes.model !== undefined &&
+              !(await agentStore.isModelUserSelectable(tx, changes.model))
+            ) {
+              return err({ code: "model_unavailable" as const, model: changes.model });
+            }
+            if (changes.memoryScope) {
+              const unknown = await findUnknownCompartmentImpl(
+                tx,
+                agentStore,
+                identity.userId,
+                changes.memoryScope.compartments,
+              );
+              if (unknown !== null) {
+                return err({ code: "compartment_unknown" as const, name: unknown });
+              }
+            }
+            // Pre-validate the cooldown-clear side effect BEFORE the
+            // profile update commits, so a wrong / missing / mismatched
+            // conversation aborts the whole update rather than silently
+            // dropping the clear (or worse — clearing the cooldown on a
+            // conversation that doesn't use this profile, defeating the
+            // "context switch ends cooldown" rationale).
+            let shouldClearCooldown = false;
+            const clearTarget = opts?.clearCooldownForConversation;
+            if (clearTarget !== undefined) {
+              const conv = await agentStore.getConversation(tx, clearTarget);
+              if (!conv) return err({ code: "conversation_not_found" as const });
+              if (conv.userId !== identity.userId) {
+                return err({
+                  code: "access_denied" as const,
+                  reason: "conversation not owned by caller",
+                });
+              }
+              if (conv.profileId !== profileId) {
+                // The clear's rationale is "the model the failing turn
+                // used changed". If the conversation doesn't actually
+                // use this profile, the new model isn't its model and
+                // the clear would be a spurious side effect. Reject
+                // rather than silently no-op so the caller surfaces a
+                // bug instead of hiding it.
+                return err({
+                  code: "access_denied" as const,
+                  reason: "conversation does not use this profile",
+                });
+              }
+              // Match setProfile's optimization — skip the UPDATE when
+              // there's nothing to clear, avoiding a no-op row write.
+              shouldClearCooldown = conv.cooldownState !== null;
+            }
             const updated = await agentStore.updateProfile(tx, profileId, changes);
             // Same-tx clear — `/model` rationale: model switch is a
             // context change that ends any active cooldown. Atomicity
@@ -1386,12 +1399,13 @@ export function createTransport(deps: {
               await agentStore.clearCooldown(tx, clearTarget);
             }
             return ok(updated);
-          } catch (e) {
-            if (e instanceof UniqueViolationError)
-              return err({ code: "profile_name_taken" as const });
-            throw e;
+          });
+        } catch (e) {
+          if (e instanceof UniqueViolationError) {
+            return err({ code: "profile_name_taken" as const });
           }
-        });
+          throw e;
+        }
       },
 
       async delete(platformUserHandle, profileId) {

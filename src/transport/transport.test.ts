@@ -1210,6 +1210,53 @@ describe("createTransport", () => {
     // nothing to clear. Without this, every `/model` against a
     // not-currently-cooling-down conversation would write a no-op
     // row version on `conversations`.
+    // When `updateProfile` raises `UniqueViolationError`, Postgres
+    // marks the tx as aborted. The error MUST propagate out of
+    // `runInTx` so Drizzle issues a clean ROLLBACK before the outer
+    // catch translates to `err`. Catching inside the tx and returning
+    // `err` would let `runInTx` resolve, Drizzle would send COMMIT,
+    // and Postgres would silently turn that into a ROLLBACK with a
+    // NOTICE — end-to-end correct but misleading-on-paper. The
+    // observable contract this test pins: `clearCooldown` must NOT
+    // fire on the unique-violation path, even though
+    // `clearCooldownForConversation` was passed and the conversation
+    // was cooling down.
+    it("UniqueViolationError aborts the tx without firing clearCooldown", async () => {
+      const updateProfile = vi
+        .fn()
+        .mockRejectedValue(
+          new (await import("../agent/store/errors.js")).UniqueViolationError(
+            "uq_profiles_user_name",
+          ),
+        );
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-mine",
+          isPrivate: true,
+          cooldownState: {
+            lastErroredAt: "2026-05-19T11:00:00.000Z",
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
+        }),
+        updateProfile,
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { name: "taken" },
+        { clearCooldownForConversation: "c1" },
+      );
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_name_taken" });
+      expect(clearCooldown).not.toHaveBeenCalled();
+    });
+
     it("clearCooldownForConversation: skips the clear write when cooldown_state was already NULL", async () => {
       const clearCooldown = vi.fn();
       const agentStore = mockAgentStore({
