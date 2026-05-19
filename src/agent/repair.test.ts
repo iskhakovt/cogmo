@@ -671,6 +671,25 @@ describe("synthesizeDegradedReply", () => {
     );
   });
 
+  it("tags the fallback reason as 'protocol' on a ProviderProtocolError", async () => {
+    // Unreachable in practice with `tools: []` (no streamed tool-arg
+    // JSON to fail parsing), but the telemetry contract maps the error
+    // class to this tag, so pin it.
+    const log = fakeLogger();
+    const provider = providerThat(async () => {
+      throw new ProviderProtocolError("malformed tool-arg JSON", new SyntaxError("x"));
+    });
+    await synthesizeDegradedReply({ ...baseDeps(), provider, log });
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "agent.degrade.synthesis",
+        ok: false,
+        fallback: "protocol",
+      }),
+      expect.any(String),
+    );
+  });
+
   it("tags the fallback reason as 'timeout' when the timeout wins", async () => {
     const log = fakeLogger();
     const provider = providerThat(() => new Promise<LlmResponse>(() => {}));

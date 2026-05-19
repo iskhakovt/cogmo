@@ -126,6 +126,8 @@ Single event name, `ok: boolean` for outcome — no separate `synthesis_failed` 
 
 **Provider-outage falls through cleanly.** When the synthesis call hits a Class A failure on a dead provider, it returns `ok: false` and the fixed string is posted. A spike in `synthesis ok: false` correlated with provider-outage telemetry is *not* a synthesis-logic bug — the synthesis path inherits the failing turn's provider, so any upstream unavailability propagates here. Investigate the upstream symptom in that case, not the synthesis code.
 
+**Cost amplification on long contexts.** The synthesis call re-sends the full conversation history to produce a 1–3 sentence reply. For iteration-cap degrades — where the turn ran long *because the context grew* — that's a non-trivial re-send. The `tokens_in` field on `agent.degrade.synthesis` quantifies it per call; if a future telemetry pass shows a fat tail (large `tokens_in` correlated with `subtype: null` / `reason: "iteration_cap"`), the response is to compact before synthesis, not to skip it — the user is still owed an explanation. Skipping synthesis on long contexts trades a known cost for an unknown UX regression.
+
 ### Outside the agent loop
 
 `chatTyped` callsites in evolution background jobs — `drain-pending-memories.ts:194`, `extract-corrections.ts:79`, `extract-memories.ts:67`, `consolidate-rules.ts:121` — and untyped non-loop calls like the summarization step in `handle-message.ts:702` are still Class C surfaces, but they're not inside the agent loop and have no user to degrade to. They use **single-call retry-with-feedback** semantics:

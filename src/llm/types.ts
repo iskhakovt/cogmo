@@ -181,8 +181,9 @@ export interface ChatParams {
    * Sampling temperature. Provider default when unset (typically 1.0).
    * Set to 0 for deterministic / low-variance output — the
    * volume-cluster nudge synthesis and other failure-reply paths use
-   * this. Range and exact semantics are provider-specific (Anthropic
-   * and OpenAI both accept 0–1).
+   * this. Range is provider-specific: Anthropic accepts 0–1, OpenAI
+   * (and OpenAI-compat providers like xAI/OpenRouter) accepts 0–2.
+   * Stick to 0–1 for portability across the fallback chain.
    */
   temperature?: number;
 }

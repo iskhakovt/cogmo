@@ -431,11 +431,13 @@ function humanReasonForDegrade(subtype: DegradeSubtype | null, reason: string): 
       return "the loop detected the same tool call recurring across iterations without observable progress";
     case null:
       // Iteration-cap backstop. `reason: "iteration_cap"` is the only
-      // null-subtype path today.
+      // null-subtype path today; enumerate explicitly rather than
+      // interpolating `reason` so a future caller passing user-derived
+      // text can't slip prompt content into the system message.
       if (reason === "iteration_cap") {
         return "the conversation hit its iteration-count limit before producing a final reply";
       }
-      return `the conversation stopped (${reason})`;
+      return "the conversation hit an unspecified stopping condition";
   }
 }
 
