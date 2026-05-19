@@ -1,6 +1,6 @@
 {
-  "id": "3871ca17-fb15-4e9f-8d2a-78d24d386aeb",
-  "prevId": "d9250080-914c-4f4c-ac83-a29b079d3fd0",
+  "id": "cd634bc8-fafc-426c-85b7-faa29c14279f",
+  "prevId": "3871ca17-fb15-4e9f-8d2a-78d24d386aeb",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3113,6 +3113,100 @@
           "value": "(\"skills\".\"schedule\" IS NULL) = (\"skills\".\"next_run_at\" IS NULL)"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.boundary_pending": {
+      "name": "boundary_pending",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "uuidv7()"
+        },
+        "channel_id": {
+          "name": "channel_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "platform_address": {
+          "name": "platform_address",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "platform_user_handle": {
+          "name": "platform_user_handle",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "prior_conversation_id": {
+          "name": "prior_conversation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "prompt_message_id": {
+          "name": "prompt_message_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "buffered_inbounds": {
+          "name": "buffered_inbounds",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "boundary_pending_channel_id_channels_id_fk": {
+          "name": "boundary_pending_channel_id_channels_id_fk",
+          "tableFrom": "boundary_pending",
+          "tableTo": "channels",
+          "columnsFrom": ["channel_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "boundary_pending_prior_conversation_id_conversations_id_fk": {
+          "name": "boundary_pending_prior_conversation_id_conversations_id_fk",
+          "tableFrom": "boundary_pending",
+          "tableTo": "conversations",
+          "columnsFrom": ["prior_conversation_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_boundary_pending_address": {
+          "name": "uq_boundary_pending_address",
+          "nullsNotDistinct": false,
+          "columns": ["channel_id", "platform_address"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.channel_sessions": {

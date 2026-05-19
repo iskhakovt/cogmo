@@ -18,6 +18,7 @@ import {
 } from "../agent/store/errors.js";
 import type {
   AgentStore,
+  CodingAutoapproveMode,
   ConversationSummary,
   CustomCompartment,
   EvolutionEventRow,
@@ -89,6 +90,13 @@ export interface ProfileInput {
    */
   streamChunkChars?: number;
   streamEdits?: boolean;
+  /**
+   * Coding-delegation tool gate. `"on"` skips the Telegram permission round
+   * trip for prompt-worthy operations (`git push`, `gh pr/issue` mutations,
+   * publishes, external HTTP writes); `policy.deny` still denies. Toggled
+   * via `/profile autoapprove`. Default `"off"`.
+   */
+  codingAutoapproveMode?: CodingAutoapproveMode;
   // summarizationModel / extractionModel are profile-level fields in the DB but not yet exposed
   // via Transport — /profile edit doesn't cover them. Add back here when the dialog does.
 }

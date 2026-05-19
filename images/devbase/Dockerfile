@@ -16,6 +16,11 @@
 
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
+# Make `RUN ... | ...` fail when any element of the pipe fails. The
+# nodesource install (`curl ... | bash -`) below silently succeeds on a
+# truncated curl without this.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # devcontainers/base already ships git, gh, curl, jq, ripgrep — but `fd-find`
 # is missing on Ubuntu and the binary is named `fdfind` rather than `fd`.
 RUN apt-get update \

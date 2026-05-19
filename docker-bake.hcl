@@ -15,12 +15,11 @@
 //     calls (one per image) emit per-target bake-files with `tags` (semver
 //     + `latest`) + OCI labels; bake-action layers them on top of this
 //     file, so the empty `*-meta` stubs below populate at runtime.
-//   - images-pr-check.yml on PR: bake verify-only (no push), overrides
-//     cogmo to amd64-only + amd64-only cache scope so PR cost stays low.
-//   - sysbox-e2e.yml: VERSION=test, --load skills, WITH_ATTEST=false. No
-//     platform override needed (skills is already amd64-only by default).
+//   - sysbox-e2e.yml: VERSION=test, --load skills. No platform override
+//     needed (skills is already amd64-only by default).
 //   - Local: `docker buildx bake skills` builds with default tag :dev.
-//     For fast amd64-only on cogmo locally, override the same as PR check.
+//     For fast amd64-only on cogmo locally, override platform + cache
+//     scope to amd64.
 //
 // Local-dev convention: the runtime defaults to `cogmo-{devbase,skills}:latest`
 // when `process.env.VERSION` is unset (publish.yml pushes `:latest` alongside
@@ -36,18 +35,9 @@ variable "VERSION" {
   default = "dev"
 }
 
-// Provenance + SBOM produce extra entries in an OCI manifest list. The
-// Docker daemon's `--load` exporter can't import manifest lists, so the
-// build→test path in sysbox-e2e disables attestations by exporting
-// `WITH_ATTEST=false`. Release builds leave the default in place and ship
-// full supply-chain attestations.
-variable "WITH_ATTEST" {
-  default = "true"
-}
-
-// Default group builds every image — used by publish.yml on release and by
-// images-pr-check.yml for verify. Per-image targeting (`--targets skills`)
-// is for the sysbox-e2e build→test loop.
+// Default group builds every image — used by publish.yml on release.
+// Per-image targeting (`--targets skills`) is for the sysbox-e2e
+// build→test loop.
 group "default" {
   targets = ["cogmo", "devbase", "skills"]
 }
@@ -74,10 +64,6 @@ target "_common" {
   // because sysbox itself is amd64-only today; flip when sysbox grows
   // arm64 support.
   platforms = ["linux/amd64", "linux/arm64"]
-  attest = WITH_ATTEST == "true" ? [
-    "type=provenance,mode=max",
-    "type=sbom",
-  ] : []
 }
 
 target "cogmo" {

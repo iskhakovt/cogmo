@@ -79,6 +79,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       profileClass: null,
       streamChunkChars: 4000,
       streamEdits: true,
+      codingAutoapproveMode: "off",
     }),
     getDefaultProfile: vi.fn().mockResolvedValue({ id: "profile-1" }),
     createProfile: vi.fn().mockResolvedValue({
@@ -96,6 +97,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       profileClass: null,
       streamChunkChars: 4000,
       streamEdits: true,
+      codingAutoapproveMode: "off",
     }),
     getActiveRules: vi.fn().mockResolvedValue([]),
     getMessage: vi.fn().mockResolvedValue({ id: "msg-1", role: "assistant", content: "test" }),
@@ -198,6 +200,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       profileClass: null,
       streamChunkChars: 4000,
       streamEdits: true,
+      codingAutoapproveMode: "off",
     }),
     countProfileReferences: vi.fn().mockResolvedValue({ conversations: 0, messages: 0 }),
     deleteProfile: vi.fn().mockResolvedValue(undefined),
