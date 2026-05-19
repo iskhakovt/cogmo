@@ -377,6 +377,8 @@ export function createImageTools(deps: {
       // so we neither re-bill the provider nor produce duplicate uploads.
       durable: true,
       parallelSafe: true,
+      // Each call is paid and multi-second; legitimate multi-attempt is rare.
+      invocationBudget: 2,
       schema: z.object({
         prompt: z.string().min(1).describe("Detailed image description"),
         model: modelEnum

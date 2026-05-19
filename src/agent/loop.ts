@@ -19,13 +19,16 @@ import {
   classifyClassDTrip,
   classifyPostStream,
   classifyStreamError,
+  classifyVolumeCluster,
   computeIterationFingerprint,
+  type DegradeSubtype,
+  formatVolumeClusterContent,
   freshBudgets,
   type RepairBudgets,
-  type RepairSubtype,
+  summarizeToolHistory,
 } from "./repair.js";
 import type { Service } from "./service.js";
-import type { ToolRegistry, ToolSpec } from "./tools.js";
+import { DEFAULT_INVOCATION_BUDGET, type ToolRegistry, type ToolSpec } from "./tools.js";
 
 const tracer = trace.getTracer("cogmo.agent");
 
@@ -98,7 +101,7 @@ export interface AgentLoopResult {
    * backstop has no classifier verdict and sets `subtype: null`;
    * `reason: "iteration_cap"` carries the distinguishing label.
    */
-  degraded?: { reason: string; subtype: RepairSubtype | null };
+  degraded?: { reason: string; subtype: DegradeSubtype | null };
 }
 
 const DEFAULT_MAX_ITERATIONS = 20;
@@ -207,8 +210,17 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
       return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations);
     }
 
-    // Execute tool calls and append results
-    const toolResults = await executeToolCalls(response.content, tools, service, stepRun);
+    // Volume-cluster intercept (Class D) — same shape as the streaming
+    // variant. See computeVolumeClusterInterceptions and
+    // design/agent-resilience.md → Volume cluster trigger.
+    const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
+    const toolResults = await executeToolCalls(
+      response.content,
+      tools,
+      service,
+      stepRun,
+      interceptions,
+    );
     messages.push({ role: "user", content: toolResults });
 
     log.debug({ iteration: iterations, toolCalls: toolResults.length }, "tool round complete");
@@ -223,6 +235,116 @@ interface PlannedCall {
   spec: ToolSpec | null;
 }
 
+/**
+ * Decide volume-cluster interceptions for this iteration's tool_use
+ * blocks. Returns a map (toolUseId → synthetic tool_result) for blocks
+ * that should NOT be dispatched to their handler. Returns an empty map
+ * when nothing trips the per-tool `invocationBudget`.
+ *
+ * Counter semantics — **per iteration, not per block**. Budget `B` for
+ * tool `T` admits the first `B` *iterations* in which the model emits
+ * any `tool_use` for `T`; the `(B+1)`th iteration intercepts the entire
+ * same-tool batch within it. An iteration emitting 10 parallel
+ * `tool_use` blocks for `T` is one batch — all 10 run when the iteration
+ * is admitted; all 10 intercept when it isn't. This distinguishes the
+ * model "re-deciding to call T" (multiple iterations — the stuck-loop
+ * signature) from "deciding once to parallel-call T N times" (one
+ * iteration — a user-requested batch).
+ *
+ * Counter is derived from the message array (not stored) so Inngest
+ * function replay doesn't reset it. The just-pushed assistant message
+ * at the tail of `messages` is the current iteration; the prior-batch
+ * scan caps at one short of it.
+ *
+ * See `design/agent-resilience.md` → Volume cluster trigger.
+ */
+function computeVolumeClusterInterceptions(
+  messages: ReadonlyArray<Message>,
+  initialLength: number,
+  tools: ToolRegistry,
+  log: Logger,
+): Map<string, ContentBlock> {
+  const interceptions = new Map<string, ContentBlock>();
+
+  // The current iteration's content is the last assistant message —
+  // the caller just pushed it. Deriving it here (rather than accepting
+  // it as a parameter) makes the function's invariant structural
+  // instead of an undocumented caller contract: it isn't possible to
+  // pass a stale `iterationContent` that disagrees with what's
+  // actually on the end of `messages`.
+  const lastMsg = messages.at(-1);
+  if (!lastMsg || lastMsg.role !== "assistant" || !Array.isArray(lastMsg.content)) {
+    return interceptions;
+  }
+  const iterationContent: ReadonlyArray<ContentBlock> = lastMsg.content;
+
+  // Group this iteration's tool_use blocks by tool name — each name
+  // gets exactly one batch decision regardless of how many blocks it
+  // emitted in this iteration.
+  const blocksByName = R.pipe(
+    iterationContent,
+    R.filter((b): b is ToolUseBlock => b.type === "tool_use"),
+    R.groupBy((b) => b.name),
+  );
+
+  // One pass over the turn's messages builds the call/batch/outcome
+  // counts for every tool in the slice. The per-tool loop below is an
+  // O(1) lookup against this map rather than re-scanning the array
+  // per tool.
+  const history = summarizeToolHistory(messages, initialLength);
+
+  // for...of here is side-effectful (mutates `interceptions`, emits
+  // `log.warn`), the documented carve-out from the functional-only rule.
+  for (const [toolName, batchBlocks] of Object.entries(blocksByName)) {
+    if (batchBlocks === undefined) continue;
+    const spec = tools.get(toolName);
+    // Unknown tool falls through to runOne's existing unknown-tool
+    // error path. Don't budget it — no spec, no budget, and the error
+    // result is already explanatory.
+    if (!spec) continue;
+
+    const summary = history.get(toolName);
+    // Every tool with blocks in this iteration must have a summary —
+    // summarizeToolHistory scans the same message array that contains
+    // them. Defensive guard so a TS-narrowed map access doesn't need
+    // a non-null assertion.
+    if (summary === undefined) continue;
+
+    const budget = spec.invocationBudget ?? DEFAULT_INVOCATION_BUDGET;
+    // Including this iteration's batch.
+    const batchCount = summary.priorBatchCount + 1;
+    const verdict = classifyVolumeCluster(batchCount, budget);
+    if (verdict === null) continue;
+
+    const content = formatVolumeClusterContent(toolName, summary.callCount, summary.outcomes);
+    for (const block of batchBlocks) {
+      interceptions.set(block.id, {
+        type: "tool_result",
+        toolUseId: block.id,
+        content,
+        isError: true,
+      });
+    }
+    log.warn(
+      {
+        event: "agent.repair",
+        subtype: "volume_cluster",
+        tool: toolName,
+        batchCount,
+        callCount: summary.callCount,
+        blocksInBatch: batchBlocks.length,
+        budget,
+        outcomeMix: {
+          successes: summary.outcomes.successes,
+          failures: summary.outcomes.failures,
+        },
+      },
+      "agent loop class D volume-cluster intercept",
+    );
+  }
+  return interceptions;
+}
+
 // Unknown tools short-circuit to an error result with no side effects, so
 // they coalesce with safe runs.
 function isSafeCall(entry: PlannedCall): boolean {
@@ -234,6 +356,7 @@ async function executeToolCalls(
   tools: ToolRegistry,
   service: Service,
   stepRun: StepRunner | undefined,
+  interceptions?: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock[]> {
   const toolUseBlocks = content.filter((b): b is ToolUseBlock => b.type === "tool_use");
   if (toolUseBlocks.length === 0) return [];
@@ -263,7 +386,7 @@ async function executeToolCalls(
   const results: ContentBlock[] = [];
   for (const group of groups) {
     const batch = await Promise.all(
-      group.map(({ block, spec }) => runOne(block, spec, service, stepRun)),
+      group.map(({ block, spec }) => runOne(block, spec, service, stepRun, interceptions)),
     );
     results.push(...batch);
   }
@@ -315,7 +438,13 @@ async function runOne(
   spec: ToolSpec | null,
   service: Service,
   stepRun: StepRunner | undefined,
+  interceptions?: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock> {
+  // Volume-cluster intercept short-circuits the handler — synthetic
+  // tool_result already prepared by the caller, no span / step.run.
+  const intercepted = interceptions?.get(block.id);
+  if (intercepted) return intercepted;
+
   if (!spec) {
     return {
       type: "tool_result",
@@ -416,7 +545,7 @@ function buildDegradedResult(
   model: string,
   iterations: number,
   reason: string,
-  subtype: RepairSubtype | null,
+  subtype: DegradeSubtype | null,
 ): AgentLoopResult {
   agentIterations.record(iterations, { model });
 
@@ -672,8 +801,28 @@ export async function runStreamingAgentLoop(
       );
     }
 
+    // Volume-cluster intercept (Class D). For each tool_use in this
+    // iteration's content, count same-tool emissions across the whole
+    // turn so far (prior assistant messages plus in-iteration blocks
+    // before this one). If the count exceeds the tool's
+    // `invocationBudget`, synthesize an `is_error: true` tool_result
+    // with an outcome-aware nudge in place of running the handler. The
+    // synthetic tool_result carries the intercepted tool_use's id so
+    // the Anthropic pairing invariant holds. The trigger is a repair:
+    // the loop continues; if the model ignores the nudge and emits
+    // identical args, the existing fingerprint catches it and
+    // degrades. See design/agent-resilience.md → Volume cluster
+    // trigger.
+    const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
+
     // Execute tool calls, emit results, append to messages
-    const toolResults = await executeToolCalls(iterationContent, tools, service, stepRun);
+    const toolResults = await executeToolCalls(
+      iterationContent,
+      tools,
+      service,
+      stepRun,
+      interceptions,
+    );
 
     for (const block of toolResults) {
       if (block.type === "tool_result") {
@@ -889,7 +1038,7 @@ type StreamReplayResult =
       model: string;
       usage: Usage;
     }
-  | { kind: "degrade"; subtype: RepairSubtype; reason: string };
+  | { kind: "degrade"; subtype: DegradeSubtype; reason: string };
 
 /**
  * Replay the just-failed streaming iteration as a single non-streaming

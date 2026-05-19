@@ -135,6 +135,69 @@ describe("defineTool", () => {
     await spec.handler({}, stubService);
     expect(received).toBe(stubService);
   });
+
+  // invocationBudget < 1 / non-integer values silently fall into
+  // pathological intercept-everything behavior (`classifyVolumeCluster(1, 0)`
+  // intercepts the first call). Reject at registration so a typo can't
+  // ship a tool that's effectively disabled. The default (5) and
+  // explicit positive integers stay accepted unchanged.
+  it("rejects invocationBudget < 1", () => {
+    expect(() =>
+      defineTool({
+        name: "bad_zero",
+        description: "x",
+        schema: z.object({}),
+        invocationBudget: 0,
+        handler: async () => "ok",
+      }),
+    ).toThrow(/invocationBudget must be a positive integer/);
+  });
+
+  it("rejects negative invocationBudget", () => {
+    expect(() =>
+      defineTool({
+        name: "bad_negative",
+        description: "x",
+        schema: z.object({}),
+        invocationBudget: -1,
+        handler: async () => "ok",
+      }),
+    ).toThrow(/invocationBudget must be a positive integer/);
+  });
+
+  it("rejects non-integer invocationBudget", () => {
+    expect(() =>
+      defineTool({
+        name: "bad_float",
+        description: "x",
+        schema: z.object({}),
+        invocationBudget: 2.5,
+        handler: async () => "ok",
+      }),
+    ).toThrow(/invocationBudget must be a positive integer/);
+  });
+
+  it("accepts positive integer invocationBudget", () => {
+    expect(() =>
+      defineTool({
+        name: "ok_one",
+        description: "x",
+        schema: z.object({}),
+        invocationBudget: 1,
+        handler: async () => "ok",
+      }),
+    ).not.toThrow();
+  });
+
+  it("accepts omitted invocationBudget (default at consumer)", () => {
+    const spec = defineTool({
+      name: "no_budget",
+      description: "x",
+      schema: z.object({}),
+      handler: async () => "ok",
+    });
+    expect(spec.invocationBudget).toBeUndefined();
+  });
 });
 
 describe("ToolSpec.sideEffectful", () => {
