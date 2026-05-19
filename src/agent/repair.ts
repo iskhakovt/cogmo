@@ -694,7 +694,7 @@ function firstLineSummary(content: unknown): string | null {
       .find((l) => l.trim().length > 0)
       ?.trim() ?? "";
   if (trimmed.length === 0) return null;
-  return trimmed.length > 120 ? `${trimmed.slice(0, 117)}…` : trimmed;
+  return trimmed.length > 120 ? `${trimmed.slice(0, 117)}...` : trimmed;
 }
 
 /**

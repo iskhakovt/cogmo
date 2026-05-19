@@ -335,11 +335,11 @@ function formatToolUseArgs(input: unknown): string {
   const stringEntry = entries.find(([, v]) => typeof v === "string" && v.length > 0);
   if (stringEntry) {
     const [k, v] = stringEntry as [string, string];
-    const trimmed = v.length > 80 ? `${v.slice(0, 77)}…` : v;
+    const trimmed = v.length > 80 ? `${v.slice(0, 77)}...` : v;
     return `${k}: ${JSON.stringify(trimmed)}`;
   }
   const json = JSON.stringify(input);
-  return json.length > 100 ? `${json.slice(0, 97)}…` : json;
+  return json.length > 100 ? `${json.slice(0, 97)}...` : json;
 }
 
 function clearToolResults(

@@ -178,9 +178,9 @@ describe("compactMessages", () => {
       summarize,
     });
 
-    // All three strategies fired …
+    // All three strategies fired ...
     expect(result.event?.strategies).toEqual(["clear_tool_results", "summarize", "truncate"]);
-    // … but summarize was still called exactly once.
+    // ... but summarize was still called exactly once.
     expect(summarize.mock.calls.length).toBeLessThanOrEqual(1);
     expect(summarize).toHaveBeenCalledOnce();
   });
