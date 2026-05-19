@@ -155,28 +155,19 @@ const DEFAULT_BODY_REDACTIONS: ReadonlyArray<BodyRedaction> = [
 ];
 
 /**
- * Walk a JSON value and replace string values at keys named in
- * `rules`. Non-string values (numbers, nulls, nested objects) are
- * recursed; arrays are mapped element-wise. Returns a fresh structure
- * — the input isn't mutated.
+ * Replace string values at keys named in `rules` anywhere in a
+ * JSON-shaped value. Uses `JSON.stringify`'s replacer hook to walk
+ * the tree once; safe for the journaling path because the inputs are
+ * already `JSON.parse` outputs (no circular refs, no functions /
+ * BigInts / Dates that would round-trip incorrectly).
  */
 function redactBodyFields(value: unknown, rules: ReadonlyArray<BodyRedaction>): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => redactBodyFields(item, rules));
-  }
-  if (typeof value === "object" && value !== null) {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      const rule = rules.find((r) => r.fieldName === k);
-      if (rule && typeof v === "string") {
-        out[k] = rule.replacement;
-      } else {
-        out[k] = redactBodyFields(v, rules);
-      }
-    }
-    return out;
-  }
-  return value;
+  return JSON.parse(
+    JSON.stringify(value, (key, val) => {
+      const rule = rules.find((r) => r.fieldName === key);
+      return rule && typeof val === "string" ? rule.replacement : val;
+    }),
+  );
 }
 
 export interface DaytonaMockReplayOptions {
