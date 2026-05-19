@@ -174,6 +174,9 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     advanceScheduledTask: vi.fn().mockResolvedValue(undefined),
     setScheduledTaskEnabled: vi.fn().mockResolvedValue(undefined),
     deleteScheduledTask: vi.fn().mockResolvedValue(undefined),
+    recordEvolutionEvent: vi.fn().mockResolvedValue({ id: "evo-1" }),
+    listEvolutionEvents: vi.fn().mockResolvedValue([]),
+    getEvolutionEvent: vi.fn().mockResolvedValue(undefined),
     // --- Admin (Chunk 3) ---
     listProfiles: vi.fn().mockResolvedValue([]),
     getProfileOwner: vi.fn().mockResolvedValue(null),
@@ -275,6 +278,7 @@ export function mockTransportDeep(overrides: DeepPartial<Transport> = {}): Trans
     skills: { ...base.skills, ...(overrides.skills ?? {}) },
     scheduling: { ...base.scheduling, ...(overrides.scheduling ?? {}) },
     mcp: { ...base.mcp, ...(overrides.mcp ?? {}) },
+    evolution: { ...base.evolution, ...(overrides.evolution ?? {}) },
   };
 }
 
@@ -451,6 +455,11 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       approveServer: vi.fn().mockResolvedValue(ok(undefined)),
       approveTool: vi.fn().mockResolvedValue(ok(undefined)),
       rejectTool: vi.fn().mockResolvedValue(ok(undefined)),
+    },
+    evolution: {
+      listEvents: vi.fn().mockResolvedValue(ok([])),
+      getEvent: vi.fn().mockResolvedValue(ok(null)),
+      triggerReflection: vi.fn().mockResolvedValue(ok({ status: "no_session" })),
     },
     ...overrides,
   };

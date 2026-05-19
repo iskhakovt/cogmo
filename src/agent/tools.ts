@@ -60,7 +60,30 @@ export interface ToolSpec {
    * progress. Tools opt in to `false` only when the handler is a pure read.
    */
   sideEffectful?: boolean;
+  /**
+   * Per-turn cap on how many *iterations* this tool may run in before
+   * the Class D volume-cluster trigger intercepts further calls. Must
+   * be a positive integer (>= 1); `defineTool` rejects 0 and negative
+   * values at registration time.
+   *
+   * Counted regardless of per-call outcome — volume is the signal, not
+   * failure rate. A successful same-tool result dilutes attention the
+   * same as a failed one. Default at the consumer is
+   * `DEFAULT_INVOCATION_BUDGET`; tools opt in to a different value when
+   * the cost / legitimate-use shape diverges from the default
+   * (image-gen 2, memory_recall 3, read_file 10, etc.).
+   *
+   * See `design/agent-resilience.md` → Volume cluster trigger.
+   */
+  invocationBudget?: number;
 }
+
+/**
+ * Default per-tool invocation budget when `ToolSpec.invocationBudget` is
+ * unset. Conservative fail-safe — see the section in
+ * `design/agent-resilience.md` for per-tool calibration.
+ */
+export const DEFAULT_INVOCATION_BUDGET = 5;
 
 /**
  * Typed helper for defining in-process TypeScript tools.
@@ -81,7 +104,17 @@ export function defineTool<T>(opts: {
   parallelSafe?: boolean;
   /** See `ToolSpec.sideEffectful`. */
   sideEffectful?: boolean;
+  /** See `ToolSpec.invocationBudget`. */
+  invocationBudget?: number;
 }): ToolSpec {
+  if (
+    opts.invocationBudget !== undefined &&
+    (!Number.isInteger(opts.invocationBudget) || opts.invocationBudget < 1)
+  ) {
+    throw new Error(
+      `defineTool(${opts.name}): invocationBudget must be a positive integer (>= 1); got ${opts.invocationBudget}`,
+    );
+  }
   // z.toJSONSchema returns Zod's JSONSchema7-flavoured shape; our internal
   // JsonSchema type is a narrower subset that the LLM providers accept.
   const inputSchema = z.toJSONSchema(opts.schema) as unknown as JsonSchema;
@@ -103,6 +136,7 @@ export function defineTool<T>(opts: {
     ...(opts.durable !== undefined && { durable: opts.durable }),
     ...(opts.parallelSafe !== undefined && { parallelSafe: opts.parallelSafe }),
     ...(opts.sideEffectful !== undefined && { sideEffectful: opts.sideEffectful }),
+    ...(opts.invocationBudget !== undefined && { invocationBudget: opts.invocationBudget }),
   };
 }
 

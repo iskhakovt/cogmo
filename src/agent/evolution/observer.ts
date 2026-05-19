@@ -24,10 +24,18 @@ import type { TransportStore } from "../../transport/store/index.js";
 import type { AgentStore } from "../store/index.js";
 import { consolidateRules } from "./consolidate-rules.js";
 import { buildRetainItems, classifyPendingMemories } from "./drain-pending-memories.js";
+import type { EvolutionTrigger } from "./event-schema.js";
 import { extractCorrections } from "./extract-corrections.js";
 import { extractMemories } from "./extract-memories.js";
 
-const MIN_MESSAGES_FOR_EXTRACTION = 4; // 2 turns minimum
+/**
+ * Minimum transcript length (count of `messages` rows) before the
+ * Observer will spend tokens on extraction. Exported because the
+ * `/reflect` user-facing renderer needs to surface this value verbatim
+ * in its "conversation too short" reply — duplicating the literal would
+ * silently drift if the threshold changed.
+ */
+export const MIN_MESSAGES_FOR_EXTRACTION = 4; // 2 turns minimum
 
 /**
  * Max pending rows drained per Observer run. Caps the `step.run` output
@@ -79,6 +87,7 @@ export type ObserverResult =
   | {
       status: "processed";
       conversationId: string;
+      eventId: string;
       corrections: Awaited<ReturnType<typeof extractCorrections>>;
       consolidation: Awaited<ReturnType<typeof consolidateRules>> | null;
       memories: Awaited<ReturnType<typeof extractMemories>>;
@@ -90,14 +99,26 @@ export type ObserverResult =
  * fake `step` that just calls the closure. The production wrapper in
  * `createObserver` registers it with Inngest under the
  * `conversation/idle` trigger.
+ *
+ * `triggeredBy` defaults to `"idle"` — the autonomous path. The manual
+ * trigger (`/reflect` via Transport) passes `"manual"` so the
+ * `evolution_events` row records the source. Threaded as a runtime arg
+ * rather than an Inngest event-payload field so the `conversation/idle`
+ * event schema stays unchanged.
  */
 export async function runObserver(
   event: ObserverEvent,
   step: ObserverStepHarness,
   deps: ObserverDeps,
+  triggeredBy: EvolutionTrigger = "idle",
 ): Promise<ObserverResult> {
   const { agentStore, resolveProvider } = deps;
   const { conversationId } = event.data;
+  // Stamp the wall-clock duration of the fire into the audit row. Captured
+  // outside any step.run so retries don't reset the clock to the retry's
+  // wall time; the recorded value is meaningful as "how long the operator
+  // waited", not "how long the LLM calls took on the successful attempt".
+  const startedAt = Date.now();
 
   const conv = await step.run("load-conversation", async () => {
     return deps.runInTx((tx) => agentStore.getConversation(tx, conversationId));
@@ -250,9 +271,33 @@ export async function runObserver(
     }
   }
 
+  // Persist the audit row last — once everything above is memoised, a retry
+  // here only re-runs the DB insert, not the LLM-bearing steps. Status is
+  // implied (only `processed` fires earn a row), so skipped branches above
+  // returned early and never reach this point.
+  const { id: eventId } = await step.run("persist-evolution-event", async () => {
+    return deps.runInTx((tx) =>
+      agentStore.recordEvolutionEvent(tx, {
+        conversationId,
+        userId: conv.userId,
+        triggeredBy,
+        payload: {
+          corrections: result,
+          consolidation,
+          memories: memoryResult,
+          drained: drainResult,
+          messageCount: history.length,
+          profileId: conv.profileId,
+          durationMs: Date.now() - startedAt,
+        },
+      }),
+    );
+  });
+
   return {
     status: "processed",
     conversationId,
+    eventId,
     corrections: result,
     consolidation,
     memories: memoryResult,
