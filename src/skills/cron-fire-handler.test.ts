@@ -1,0 +1,154 @@
+/**
+ * Fire-handler unit tests via `InngestTestEngine`. Covers the dispatch
+ * branch matrix: success, runner-side error (run row persisted, no retry),
+ * skill-not-found / skill-disabled / invalid-inputs skipped reasons, and
+ * the replay-safety contract on the `dispatch` step.
+ */
+
+import { InngestTestEngine } from "@inngest/test";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { inngest } from "../inngest/client.js";
+import { createSkillCronFireHandler } from "./cron-fire-handler.js";
+import { InputValidationError, type SkillRunner } from "./runner.js";
+
+const baseEvent = {
+  name: "skills/cron.fire",
+  data: {
+    skillId: "skill-1",
+    skillName: "morning-brief",
+    gitSha: "0123456789abcdef0123456789abcdef01234567",
+    scheduledFor: "2026-06-01T09:00:00.000Z",
+  },
+} as const;
+
+function fakeRunner(over: Partial<SkillRunner> = {}): SkillRunner {
+  return {
+    register: vi.fn(),
+    approveDeploy: vi.fn(),
+    denyDeploy: vi.fn(),
+    rollback: vi.fn(),
+    deregister: vi.fn(),
+    enable: vi.fn(),
+    list: vi.fn(),
+    listAll: vi.fn(),
+    listToolDefs: vi.fn(),
+    invoke: vi.fn(),
+    ...over,
+  } as SkillRunner;
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("createSkillCronFireHandler", () => {
+  it("invokes the runner with empty inputs and trigger='cron', returns completed/success", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      runId: "run-7",
+      status: "success",
+      output: { message: "ok" },
+    });
+    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+
+    const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
+
+    expect(result).toEqual({ status: "completed", runId: "run-7", runStatus: "success" });
+    expect(invoke).toHaveBeenCalledWith({
+      name: "morning-brief",
+      inputs: {},
+      trigger: "cron",
+    });
+  });
+
+  it("returns completed/error when the skill itself fails — does NOT throw, doesn't burn retries", async () => {
+    // runner.invoke writes the failure into skill_runs; the handler reflects
+    // it back as runStatus='error' so the cron continues firing tomorrow.
+    const invoke = vi.fn().mockResolvedValue({
+      runId: "run-err",
+      status: "error",
+      error: "boom",
+    });
+    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+
+    const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
+
+    expect(result).toEqual({ status: "completed", runId: "run-err", runStatus: "error" });
+  });
+
+  it("skips with reason 'skill_not_found' when the row was deregistered between tick and fire", async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error("skill not found: morning-brief"));
+    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+
+    const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
+
+    expect(result).toMatchObject({ status: "skipped", reason: "skill_not_found" });
+  });
+
+  it("skips with reason 'skill_disabled' when the row was disabled between tick and fire", async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error("skill is disabled: morning-brief"));
+    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+
+    const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
+
+    expect(result).toMatchObject({ status: "skipped", reason: "skill_disabled" });
+  });
+
+  it("skips with reason 'invalid_inputs' when the manifest required inputs the cron path can't supply", async () => {
+    // Manifest-author foot-gun: declaring required inputs on a cron-triggered
+    // skill. Surfaces here as a non-retrying skipped result so the operator
+    // sees the misconfiguration in logs instead of an Inngest retry storm.
+    const invoke = vi
+      .fn()
+      .mockRejectedValue(
+        new InputValidationError("inputs failed schema validation: missing required field 'x'"),
+      );
+    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+
+    const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
+
+    expect(result).toMatchObject({ status: "skipped", reason: "invalid_inputs" });
+  });
+
+  it("propagates unknown errors so Inngest's retry budget catches transient failures", async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error("docker daemon unreachable"));
+    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+
+    const { error } = await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+    }).execute();
+    // Inngest's test engine surfaces the thrown error as a plain object
+    // (serialised through its run-state JSON pipe), not a real Error
+    // instance — assert the message directly.
+    expect((error as { message?: string } | undefined)?.message).toMatch(
+      /docker daemon unreachable/,
+    );
+  });
+
+  it("pins the function configuration (event trigger, retries, concurrency)", () => {
+    const fn = createSkillCronFireHandler({ runner: fakeRunner() }, inngest);
+    expect(fn.opts.id).toBe("skill-cron-fire");
+    expect(fn.opts.retries).toBe(2);
+    expect(fn.opts.concurrency).toEqual({ limit: 1, key: "event.data.skillId" });
+    expect(fn.opts.triggers).toHaveLength(1);
+    expect(fn.opts.triggers?.[0]).toMatchObject({ event: "skills/cron.fire" });
+  });
+
+  it("does NOT re-run dispatch when Inngest replays with a cached step result", async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error("must not run"));
+    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+
+    await new InngestTestEngine({
+      function: fn,
+      events: [baseEvent],
+      steps: [
+        {
+          id: "dispatch",
+          handler: () => ({ status: "completed", runId: "run-cached", runStatus: "success" }),
+        },
+      ],
+    }).execute();
+
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});

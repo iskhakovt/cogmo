@@ -375,6 +375,37 @@ export const scheduledTaskFire = eventType("agent/scheduled-task.fire", {
 });
 
 /**
+ * One fire of a skill whose manifest declared a `schedule:` cron expression.
+ * Emitted by the `skill-cron-ticker` (1-min cron) for each row whose
+ * `next_run_at` has passed and that is not disabled. The fire handler resolves
+ * the skill by id, no-ops if it has been disabled/deregistered since the tick
+ * locked the row, and otherwise invokes the skill with empty inputs.
+ *
+ * The event `id` (set by the ticker, not in the schema) is
+ * `${skillId}:${scheduledFor}` — Inngest dedup'es per id within its window,
+ * so a ticker retry that re-emits the same row produces a no-op.
+ *
+ * `gitSha` is the deploy pinned at lock time. The fire handler does not
+ * enforce it against the current row's `git_sha` — `runner.invoke` reads
+ * whatever sha `main` points at, which is the same semantics as a manual
+ * agent invocation. A rollback between tick and fire is observable in the
+ * `skill_runs` row (different sha than the event payload).
+ *
+ * Skills don't carry a `catchup_missed` policy: schedule cron skills always
+ * skip-ahead to the first occurrence after `now()` after a missed fire. The
+ * agent-scheduled prompts pathway has the catchup knob because the user
+ * sees the lateness; skills don't have an equivalent UX surface.
+ */
+export const skillCronFire = eventType("skills/cron.fire", {
+  schema: z.object({
+    skillId: z.string(),
+    skillName: z.string(),
+    gitSha: z.string(),
+    scheduledFor: z.string(), // ISO 8601 UTC
+  }),
+});
+
+/**
  * Direct channel — external clients emit this to send messages.
  * The direct-inbound Inngest function translates to inbound/arrived.
  */

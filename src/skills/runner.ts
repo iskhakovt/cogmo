@@ -1,4 +1,5 @@
 import { Ajv, type ValidateFunction } from "ajv";
+import { computeNextRun } from "../agent/scheduling/cron.js";
 import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
@@ -274,6 +275,13 @@ export interface SkillRunnerOptions {
       | "idleSweepIntervalMs"
     >
   >;
+  /**
+   * IANA timezone used to evaluate `manifest.schedule` cron expressions at
+   * register/approve/rollback time. Wired from `env.USER_TIMEZONE` in
+   * production; tests default to `"UTC"` for parity with the manifest's
+   * own cron-string conventions.
+   */
+  userTimezone?: string;
 }
 
 interface SkillSourceCacheEntry {
@@ -301,6 +309,7 @@ export class SkillRunnerImpl implements SkillRunner {
   #pyodidePackageCacheDir: string | undefined;
   #sandbox: SandboxClient | undefined;
   #tier2Image: string;
+  #userTimezone: string;
   /**
    * Lazily-created warm pool over `#sandbox`. Created on first tier-2
    * invocation, not at boot — keeps cogmo serve startup independent of
@@ -345,7 +354,19 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#sandbox = opts.sandbox;
     this.#tier2Image = opts.tier2Image ?? DEFAULT_TIER2_IMAGE;
     this.#poolOptions = opts.poolOptions;
+    this.#userTimezone = opts.userTimezone ?? "UTC";
     this.#ajv = new Ajv({ allErrors: true, strict: false });
+  }
+
+  /**
+   * Compute the first occurrence of the manifest's `schedule` after `now`,
+   * using the runner's configured timezone. Returns null when the manifest
+   * has no schedule — preserves the all-or-none invariant on
+   * `(schedule, scheduleNextRunAt)`.
+   */
+  #computeScheduleNextRunAt(schedule: string | null): Date | null {
+    if (schedule === null) return null;
+    return computeNextRun(schedule, this.#userTimezone, new Date());
   }
 
   static async create(opts: SkillRunnerOptions): Promise<SkillRunnerImpl> {
@@ -504,13 +525,15 @@ export class SkillRunnerImpl implements SkillRunner {
       return rejectedResult(branchSha, classifierLog.validation_errors.join("; "));
     }
 
+    const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeRegister(tx, {
         name: manifest.name,
         tier: manifest.tier,
         riskTier: classifierLog.risk_tier,
         effects: manifest.effects,
-        schedule: manifest.schedule ?? null,
+        schedule,
+        scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
         branchTipSha: branchSha,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
@@ -610,6 +633,7 @@ export class SkillRunnerImpl implements SkillRunner {
       };
     }
 
+    const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeApprove(tx, {
         pendingId: opts.pendingId,
@@ -620,7 +644,8 @@ export class SkillRunnerImpl implements SkillRunner {
         // different tier mid-flow, which would be confusing.
         riskTier: deploy.riskTier,
         effects: manifest.effects,
-        schedule: manifest.schedule ?? null,
+        schedule,
+        scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         applyFilesystem: async () => {
@@ -738,6 +763,7 @@ export class SkillRunnerImpl implements SkillRunner {
 
     const mainSha = await getMainSha(repoPath);
 
+    const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeRollback(tx, {
         name: opts.name,
@@ -745,7 +771,8 @@ export class SkillRunnerImpl implements SkillRunner {
         tier: manifest.tier,
         riskTier: classifierLog.risk_tier,
         effects: manifest.effects,
-        schedule: manifest.schedule ?? null,
+        schedule,
+        scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
@@ -1074,12 +1101,14 @@ export class SkillRunnerImpl implements SkillRunner {
     }
 
     const gitSha = params.gitSha ?? hashStub(params.manifestSource + params.body);
+    const schedule = manifest.schedule ?? null;
     const insertParams: InsertSkillParams = {
       name: manifest.name,
       tier: manifest.tier,
       riskTier: "auto",
       effects: manifest.effects,
-      schedule: manifest.schedule ?? null,
+      schedule,
+      scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
       gitSha,
       inputs: manifest.inputs,
       outputs: manifest.outputs ?? null,
