@@ -13,6 +13,7 @@ function mockService(coreOverrides?: Partial<Service["coreMemory"]>): Service {
     files: {
       read: vi.fn().mockResolvedValue(""),
       write: vi.fn().mockResolvedValue(undefined),
+      edit: vi.fn().mockResolvedValue(undefined),
       list: vi.fn().mockResolvedValue([]),
     },
     coreMemory: {

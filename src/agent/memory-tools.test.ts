@@ -16,6 +16,7 @@ function mockService(overrides?: Partial<Service["memory"]>): Service {
     files: {
       read: vi.fn().mockResolvedValue(""),
       write: vi.fn().mockResolvedValue(undefined),
+      edit: vi.fn().mockResolvedValue(undefined),
       list: vi.fn().mockResolvedValue([]),
     },
     coreMemory: {
@@ -203,6 +204,7 @@ describe("memory tools through a scope-filtered Service", () => {
       {
         read: vi.fn().mockResolvedValue(""),
         write: vi.fn().mockResolvedValue(undefined),
+        edit: vi.fn().mockResolvedValue(undefined),
         list: vi.fn().mockResolvedValue([]),
       },
       { get: vi.fn().mockResolvedValue([]), update: vi.fn().mockResolvedValue(undefined) },

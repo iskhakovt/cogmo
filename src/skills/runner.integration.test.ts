@@ -63,6 +63,7 @@ async function makeRunner() {
     files: {
       read: async () => "",
       write: async () => {},
+      edit: async () => {},
       list: async () => [],
     },
     user: { id: "it-user", timezone: "UTC" },

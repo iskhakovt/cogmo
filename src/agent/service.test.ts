@@ -8,6 +8,7 @@ import type { ProfileMemoryScope } from "./store/schema.js";
 const stubFiles: Service["files"] = {
   read: async () => "",
   write: async () => {},
+  edit: async () => {},
   list: async () => [],
 };
 

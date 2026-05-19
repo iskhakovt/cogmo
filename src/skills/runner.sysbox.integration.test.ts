@@ -29,6 +29,7 @@ function stubSecrets(): SecretsStore {
 const noopFiles = {
   read: async () => "",
   write: async () => {},
+  edit: async () => {},
   list: async () => [],
 };
 

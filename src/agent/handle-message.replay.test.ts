@@ -79,6 +79,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     fileService: {
       read: vi.fn().mockResolvedValue(""),
       write: vi.fn().mockResolvedValue(undefined),
+      edit: vi.fn().mockResolvedValue(undefined),
       list: vi.fn().mockResolvedValue([]),
     },
     attachments: {

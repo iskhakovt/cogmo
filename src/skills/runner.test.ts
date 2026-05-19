@@ -14,6 +14,7 @@ function makeMockFiles(): Service["files"] {
   return {
     read: vi.fn().mockResolvedValue(""),
     write: vi.fn().mockResolvedValue(undefined),
+    edit: vi.fn().mockResolvedValue(undefined),
     list: vi.fn().mockResolvedValue([]),
   };
 }

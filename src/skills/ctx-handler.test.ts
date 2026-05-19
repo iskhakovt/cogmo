@@ -45,6 +45,7 @@ function deps(overrides?: Partial<Deps>): Deps {
     files: {
       read: vi.fn().mockResolvedValue(""),
       write: vi.fn().mockResolvedValue(undefined),
+      edit: vi.fn().mockResolvedValue(undefined),
       list: vi.fn().mockResolvedValue([]),
     },
     recordContextCall: vi.fn().mockResolvedValue(undefined),

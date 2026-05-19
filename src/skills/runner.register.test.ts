@@ -170,6 +170,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       files: {
         read: vi.fn().mockResolvedValue(""),
         write: vi.fn().mockResolvedValue(undefined),
+        edit: vi.fn().mockResolvedValue(undefined),
         list: vi.fn().mockResolvedValue([]),
       },
       user: { id: "user-1", timezone: "UTC" },
@@ -1213,6 +1214,7 @@ effects:
           files: {
             read: vi.fn().mockResolvedValue(""),
             write: vi.fn().mockResolvedValue(undefined),
+            edit: vi.fn().mockResolvedValue(undefined),
             list: vi.fn().mockResolvedValue([]),
           },
           user: { id: "user-1", timezone: "UTC" },
@@ -1467,6 +1469,7 @@ effects:
         files: {
           read: vi.fn().mockResolvedValue(""),
           write: vi.fn().mockResolvedValue(undefined),
+          edit: vi.fn().mockResolvedValue(undefined),
           list: vi.fn().mockResolvedValue([]),
         },
         user: { id: "user-1", timezone: "UTC" },
