@@ -555,28 +555,59 @@ export async function bootstrapSandbox(
 }
 
 /**
- * Fire-and-forget image prewarm. On Daytona this drives
+ * Background image prewarm. On Daytona this drives
  * `snapshot.create({ name, image })` so the named snapshot reaches
  * `ACTIVE` state before the first task references it. On Local-Docker
- * this is a cheap inspect + pull. Errors are logged but never bubbled —
- * the call site is boot (we don't want a transient provider hiccup to
- * fail `cogmo serve` startup), and `ensureImagePresent` is idempotent
- * + retryable, so the per-task `step.run("ensure-image-present")` will
- * pick up wherever boot left off.
+ * this is a cheap inspect + pull. The call site is boot (we don't
+ * want a transient provider hiccup to fail `cogmo serve` startup),
+ * so the loop owns retries — without it, a single failure would
+ * leave the image cold until the first task pays the cold start, and
+ * that task's `coding-task-start` Inngest function pins `retries: 0`
+ * because plan-mode CLI sessions aren't replay-safe.
+ *
+ * Backoff is 5s → 10s → 20s → 40s → 60s (capped), capped at
+ * `BOOT_WARM_MAX_ATTEMPTS` total. On exhaustion the loop gives up;
+ * the per-task `ensureImagePresent` call evicts the failed-warm
+ * cache on rejection and will retry fresh on first task arrival.
  */
-function scheduleSandboxImageWarm(sandbox: SandboxClient, images: ReadonlyArray<string>): void {
+export function scheduleSandboxImageWarm(
+  sandbox: SandboxClient,
+  images: ReadonlyArray<string>,
+): void {
   for (const image of images) {
-    void sandbox.ensureImagePresent(image).then(
-      () => {
-        logger.info({ image }, "sandbox image warm complete");
-      },
-      (err: unknown) => {
+    void retryBootWarm(sandbox, image);
+  }
+}
+
+/** ~20 attempts × ~60s cap ≈ 20 min total wall-clock ceiling. */
+export const BOOT_WARM_MAX_ATTEMPTS = 20;
+const BOOT_WARM_MIN_DELAY_MS = 5_000;
+const BOOT_WARM_MAX_DELAY_MS = 60_000;
+const BOOT_WARM_JITTER_MS = 1_000;
+
+async function retryBootWarm(sandbox: SandboxClient, image: string): Promise<void> {
+  for (let attempt = 0; attempt < BOOT_WARM_MAX_ATTEMPTS; attempt++) {
+    try {
+      await sandbox.ensureImagePresent(image);
+      logger.info({ image, attempt }, "sandbox image warm complete");
+      return;
+    } catch (err) {
+      const isLastAttempt = attempt === BOOT_WARM_MAX_ATTEMPTS - 1;
+      if (isLastAttempt) {
         logger.warn(
-          { err, image },
-          "background sandbox image warm failed — task path will retry on first use",
+          { err, image, attempts: BOOT_WARM_MAX_ATTEMPTS },
+          "background sandbox image warm exhausted retries — task path will retry on first use",
         );
-      },
-    );
+        return;
+      }
+      const exp = Math.min(BOOT_WARM_MAX_DELAY_MS, BOOT_WARM_MIN_DELAY_MS * 2 ** attempt);
+      const delay = exp + Math.floor(Math.random() * BOOT_WARM_JITTER_MS);
+      logger.warn(
+        { err, image, attempt: attempt + 1, retryInMs: delay },
+        "background sandbox image warm failed — scheduling retry",
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
   }
 }
 

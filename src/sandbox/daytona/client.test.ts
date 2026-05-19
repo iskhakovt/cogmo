@@ -1013,19 +1013,108 @@ describe("DaytonaSandboxClient", () => {
       }
     });
 
-    it("snapshot in failure state (BUILD_FAILED) → delete + recreate", async () => {
+    it("snapshot in failure state (BUILD_FAILED) → delete + recreate under a fresh name", async () => {
       const stale = fakeSnapshot({
         name: DEVBASE_SNAPSHOT,
         state: SnapshotState.BUILD_FAILED,
       });
       daytonaCalls.snapshotGet.mockResolvedValue(stale);
       daytonaCalls.snapshotDelete.mockResolvedValue();
-      daytonaCalls.snapshotCreate.mockResolvedValue(
-        fakeSnapshot({ name: DEVBASE_SNAPSHOT, state: SnapshotState.ACTIVE }),
+      daytonaCalls.snapshotCreate.mockImplementation(async (arg: unknown) => {
+        const { name } = arg as { name: string };
+        return fakeSnapshot({ name, state: SnapshotState.ACTIVE });
+      });
+      daytonaCalls.create.mockResolvedValue(
+        fakeSandbox({ id: "sb-rebuilt", state: SandboxState.STARTED }),
       );
+
       const client = await makeClient();
       await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+      // Delete fires for the stale row; we never wait on it. Create
+      // dispatches against a freshly-suffixed name — `<original>-r-<hex>`
+      // — so a subsequent create can't race Daytona's async REMOVING
+      // state on the original.
       expect(daytonaCalls.snapshotDelete).toHaveBeenCalledWith(stale);
+      expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
+      const createArg = daytonaCalls.snapshotCreate.mock.calls[0]?.[0] as { name: string };
+      expect(createArg.name).toMatch(new RegExp(`^${DEVBASE_SNAPSHOT}-r-[0-9a-f]{8}$`));
+      expect(createArg.name).not.toBe(DEVBASE_SNAPSHOT);
+
+      // The cache must hold the resolved (rebuilt) name, not the
+      // original — otherwise the follow-up `create()` would dispatch
+      // against a snapshot that doesn't exist.
+      await client.create({ ...BASE_SPEC, image: "ghcr.io/iskhakovt/cogmo-devbase:1.66.0" });
+      const sandboxArg = daytonaCalls.create.mock.calls[0]?.[0] as { snapshot?: string };
+      expect(sandboxArg.snapshot).toBe(createArg.name);
+    });
+
+    it("rebuild proceeds even if the stale delete fails (fire-and-forget)", async () => {
+      // Models Daytona's documented behaviour: delete can fail or hang
+      // while the row sits in REMOVING. The warm path must NOT block on
+      // it — the rebuild uses a fresh name, so the stale row's eventual
+      // disposition is irrelevant.
+      const stale = fakeSnapshot({
+        name: DEVBASE_SNAPSHOT,
+        state: SnapshotState.BUILD_FAILED,
+      });
+      daytonaCalls.snapshotGet.mockResolvedValue(stale);
+      daytonaCalls.snapshotDelete.mockRejectedValue(new Error("REMOVING — please retry"));
+      daytonaCalls.snapshotCreate.mockImplementation(async (arg: unknown) => {
+        const { name } = arg as { name: string };
+        return fakeSnapshot({ name, state: SnapshotState.ACTIVE });
+      });
+
+      const client = await makeClient();
+      await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+      expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
+      // Let the fire-and-forget delete's microtask settle so the
+      // unhandled-rejection guard inside the implementation gets to
+      // catch — without this drain, vitest treats it as a leaked promise.
+      await new Promise((r) => setImmediate(r));
+    });
+
+    it("retries snapshot.create on transient 'repository … not found' daemon error", async () => {
+      // Models the Daytona-side builder pipeline race where the internal
+      // registry hasn't pre-provisioned the per-snapshot repo before
+      // push. The error surfaces as `unprocessable entity: Error response
+      // from daemon: unknown: repository sbox/daytona-<sha256> not
+      // found`. Transient — typically clears in 1-2s.
+      vi.useFakeTimers();
+      try {
+        daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+        const transient = new Error(
+          "unprocessable entity: Error response from daemon: unknown: repository sbox/daytona-abc123 not found",
+        );
+        daytonaCalls.snapshotCreate
+          .mockRejectedValueOnce(transient)
+          .mockResolvedValueOnce(
+            fakeSnapshot({ name: DEVBASE_SNAPSHOT, state: SnapshotState.ACTIVE }),
+          );
+
+        const client = await makeClient();
+        const warm = client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+        // Drive p-retry's setTimeout through its 1s base backoff (+ up
+        // to 1s jitter via `randomize: true` in `withRetry`).
+        await vi.advanceTimersByTimeAsync(3_000);
+        await warm;
+        expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does NOT retry snapshot.create on persistent (non-matching) errors", async () => {
+      // A real image-build failure (broken Dockerfile, missing upstream
+      // image, auth) doesn't match the transient signature and must
+      // surface immediately — burning the retry budget on a persistent
+      // failure just delays the user-visible error.
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockRejectedValue(new Error("invalid Dockerfile syntax"));
+
+      const client = await makeClient();
+      await expect(
+        client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0"),
+      ).rejects.toThrow(/invalid Dockerfile/);
       expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
     });
 

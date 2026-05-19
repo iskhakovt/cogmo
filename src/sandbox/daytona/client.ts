@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   Daytona,
   DaytonaNotFoundError,
@@ -6,6 +6,7 @@ import {
   SandboxState,
 } from "@daytonaio/sdk";
 import { logger } from "../../logger.js";
+import { withRetry } from "../../util/with-retry.js";
 import {
   type DaytonaSessionState,
   DaytonaSessionStateSchema,
@@ -68,6 +69,17 @@ const SNAPSHOT_POLL_INTERVAL_MS = 1_000;
  * observability — does NOT terminate the poll.
  */
 const SLOW_POLL_LOG_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Retry budget for `snapshot.create` against Daytona-side transient
+ * pipeline failures (see `isTransientSnapshotCreateError`). 3 retries
+ * + initial attempt = 4 calls total over ~1-2-4s backoff. Persistent
+ * failures (broken Dockerfile, auth, etc.) are filtered out by the
+ * predicate so they fail fast.
+ */
+const SNAPSHOT_CREATE_RETRIES = 3;
+const SNAPSHOT_CREATE_MIN_BACKOFF_MS = 1_000;
+const SNAPSHOT_CREATE_MAX_BACKOFF_MS = 8_000;
 
 const CAPABILITIES: SandboxCapabilities = {
   // Code inside the sandbox can spawn child containers, but they're
@@ -199,9 +211,15 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     }
     let promise = this.#warmPromises.get(image);
     if (!promise) {
+      // `#ensureSnapshotActive` resolves to the snapshot name that's
+      // actually ACTIVE — usually the derived `name`, but the rebuild
+      // path uses a fresh name to sidestep Daytona's async REMOVING
+      // state. The cache MUST be updated with the resolved name, not
+      // the closure `name`, or `create()` would dispatch against a
+      // stale reference.
       promise = this.#ensureSnapshotActive(image, name).then(
-        () => {
-          this.#snapshotByImage.set(image, name);
+        (activeName) => {
+          this.#snapshotByImage.set(image, activeName);
         },
         (err: unknown) => {
           // Evict on rejection so the next call retries fresh.
@@ -215,31 +233,39 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
   }
 
   /**
-   * Drive a snapshot to the `ACTIVE` state. Walks the state machine
-   * exposed by Daytona's snapshot API:
+   * Drive a snapshot to the `ACTIVE` state and return the snapshot
+   * name that's actually live. Walks the state machine exposed by
+   * Daytona's snapshot API:
    *
-   *   - `ACTIVE` — return immediately.
+   *   - `ACTIVE` — return the existing name immediately.
    *   - `BUILDING` / `PENDING` / `PULLING` — server-side build is
    *     in-flight (e.g. another cogmo instance kicked it off, or a
    *     previous boot of this instance). Poll until terminal.
-   *   - `ERROR` / `BUILD_FAILED` — prior attempt failed. Delete the
-   *     stale snapshot so the create below isn't blocked by a name
-   *     conflict, then rebuild.
-   *   - `INACTIVE` / `REMOVING` — best effort: delete + recreate.
-   *   - Not found (DaytonaNotFoundError) — first warm, fall through to
-   *     `snapshot.create` directly.
+   *   - `ERROR` / `BUILD_FAILED` / `INACTIVE` / `REMOVING` — prior
+   *     attempt is unusable. Fire-and-forget the delete of the stale
+   *     row and rebuild under a freshly-suffixed name.
+   *   - Not found (DaytonaNotFoundError) — first warm, build under
+   *     the derived name.
+   *
+   * Rebuilds use a fresh `${base}-r-<hex>` suffix because Daytona's
+   * delete returns 2xx immediately but the row drains in the
+   * background; a follow-up create against the same name 409s while
+   * the row is in `REMOVING`. The orphaned stale row times out and
+   * Daytona's reaper cleans it up eventually.
    *
    * `snapshot.create()` itself blocks until terminal (per
-   * `@daytonaio/sdk` `Snapshot.js`'s internal poll), so once we kick off
-   * a build the wait happens inside the SDK call.
+   * `@daytonaio/sdk` `Snapshot.js`'s internal poll); the inner
+   * `withRetry` covers Daytona-side pipeline flakes that surface as a
+   * thrown `snapshot.create` (e.g. internal-registry repository
+   * provisioning race).
    */
-  async #ensureSnapshotActive(image: string, name: string): Promise<void> {
+  async #ensureSnapshotActive(image: string, name: string): Promise<string> {
     log.info({ image, snapshot: name }, "ensuring Daytona snapshot is active");
     try {
       const existing = await this.#daytona.snapshot.get(name);
       if (existing.state === SnapshotState.ACTIVE) {
         log.debug({ image, snapshot: name }, "snapshot already active");
-        return;
+        return name;
       }
       if (
         existing.state === SnapshotState.BUILDING ||
@@ -251,46 +277,64 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
           "snapshot build in flight — polling for terminal state",
         );
         const settled = await this.#pollSnapshotUntilTerminal(name);
-        if (settled.state === SnapshotState.ACTIVE) return;
-        // Build-in-flight resolved to a failure — drop the stale row and
-        // fall through to create below for a fresh attempt.
-        await this.#daytona.snapshot.delete(settled).catch((err: unknown) => {
-          log.warn(
-            { err, image, snapshot: name, state: settled.state },
-            "failed to delete snapshot in failure state — create may 409 on name conflict",
-          );
-        });
+        if (settled.state === SnapshotState.ACTIVE) return name;
+        // Build-in-flight resolved to a failure — drop the stale row
+        // and rebuild under a fresh name below.
+        this.#fireAndForgetDelete(settled, image);
       } else {
-        // INACTIVE / ERROR / BUILD_FAILED / REMOVING. Daytona has no
-        // documented `reactivate` flow we can rely on here; delete and
-        // rebuild is the safe path. Idempotent: `.catch` swallows
-        // already-deleted / racing-with-another-instance.
+        // INACTIVE / ERROR / BUILD_FAILED / REMOVING. Rebuild under a
+        // fresh name; never wait for the stale row's delete to drain.
         log.info(
           { image, snapshot: name, state: existing.state },
-          "snapshot present but not active — deleting before rebuild",
+          "snapshot present but not active — rebuilding under fresh name",
         );
-        await this.#daytona.snapshot.delete(existing).catch((err: unknown) => {
-          log.warn(
-            { err, image, snapshot: name, state: existing.state },
-            "snapshot delete before rebuild failed — create may 409",
-          );
-        });
+        this.#fireAndForgetDelete(existing, image);
       }
+      return await this.#buildSnapshot(image, rebuildSnapshotName(name));
     } catch (err) {
       if (!(err instanceof DaytonaNotFoundError)) throw err;
-      // 404 — snapshot doesn't exist yet, proceed to create.
       log.info({ image, snapshot: name }, "snapshot not found — building");
+      return await this.#buildSnapshot(image, name);
     }
-    // Build. SDK's `snapshot.create()` polls internally until terminal
-    // and throws on `ERROR` / `BUILD_FAILED`. Resources are omitted —
-    // Daytona's platform default is reasonable for cogmo's workloads
-    // (coding-delegation: 2 cpu / 2 GiB; skills tier-2: smaller, but
-    // over-provisioning by a factor of 2 is acceptable at single-user
-    // scale). `CreateSandboxFromSnapshotParams` has no `resources` field
-    // anyway — resources bake at snapshot creation time, so picking one
-    // shape per image keeps the operational story simple.
-    await this.#daytona.snapshot.create({ name, image });
+  }
+
+  /**
+   * Issue `snapshot.create` with a tight retry envelope for the
+   * Daytona-side transient pipeline class (see
+   * `isTransientSnapshotCreateError`). Persistent failures (image
+   * Dockerfile error, auth, validation) are filtered out by the
+   * predicate so they fail fast.
+   */
+  async #buildSnapshot(image: string, name: string): Promise<string> {
+    await withRetry(() => this.#daytona.snapshot.create({ name, image }), {
+      retries: SNAPSHOT_CREATE_RETRIES,
+      minTimeoutMs: SNAPSHOT_CREATE_MIN_BACKOFF_MS,
+      maxTimeoutMs: SNAPSHOT_CREATE_MAX_BACKOFF_MS,
+      context: `daytona.snapshot.create ${name}`,
+      shouldRetry: isTransientSnapshotCreateError,
+    });
     log.info({ image, snapshot: name }, "snapshot active");
+    return name;
+  }
+
+  /**
+   * Fire-and-forget delete of a stale snapshot. The caller has
+   * already decided to rebuild under a fresh name; even if the delete
+   * stays stuck in Daytona's `REMOVING` state indefinitely, we no
+   * longer depend on the name. The catch swallows failure to a `warn`
+   * so a chronically-stuck reaper surfaces in logs without blocking
+   * the warm path.
+   */
+  #fireAndForgetDelete(
+    snapshot: Awaited<ReturnType<Daytona["snapshot"]["get"]>>,
+    image: string,
+  ): void {
+    void this.#daytona.snapshot.delete(snapshot).catch((err: unknown) => {
+      log.warn(
+        { err, image, snapshot: snapshot.name, staleState: snapshot.state },
+        "background delete of stale snapshot failed — Daytona reaper will retry",
+      );
+    });
   }
 
   async #pollSnapshotUntilTerminal(
@@ -692,6 +736,34 @@ export function snapshotNameFor(image: string): string | null {
   // images from different registries.
   const hash = createHash("sha256").update(image).digest("hex").slice(0, 8);
   return `cogmo-${slugSanitized}-${hash}`;
+}
+
+/**
+ * Suffix a base snapshot name with 32 bits of fresh entropy so a
+ * rebuild can't collide with the in-`REMOVING` original. The
+ * collision space (2^32) is large enough that a runaway rebuild loop
+ * on the same image would have to fire ~65k times before a 50% birthday
+ * collision — orders of magnitude past the bounded boot retry budget.
+ */
+function rebuildSnapshotName(base: string): string {
+  return `${base}-r-${randomBytes(4).toString("hex")}`;
+}
+
+/**
+ * Daytona's snapshot pipeline occasionally surfaces a Docker daemon
+ * error like
+ * `unprocessable entity: Error response from daemon: unknown:
+ *  repository sbox/daytona-<sha256> not found`
+ * when its internal registry hasn't pre-provisioned the per-snapshot
+ * repo before the build step pushes. The class is acknowledged
+ * upstream (daytonaio/daytona#3582). We retry only on this specific
+ * signature — broader patterns risk catching real persistent failures
+ * (Dockerfile errors, missing upstream images) and burning the retry
+ * budget on something that won't clear.
+ */
+function isTransientSnapshotCreateError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return /repository .* not found/i.test(err.message);
 }
 
 function resourcesFromLimits(limits: {
