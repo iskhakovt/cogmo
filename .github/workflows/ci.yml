@@ -105,7 +105,8 @@ jobs:
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    # hadolint-action is a Docker action — covers cold container build.
+    timeout-minutes: 3
     permissions:
       contents: read
     strategy:

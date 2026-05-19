@@ -33,11 +33,8 @@ on:
 
 # Note: paths include `images/skills/**`, `images/devbase/**`, and
 # `docker-bake.hcl` because the bake step builds both the skills image and
-# the devbase image as part of the test setup. Image-only changes
-# (Dockerfile bumps, bake refactors) ALSO trigger images-pr-check.yml in
-# parallel; the two are independent and exercise different things — this
-# job runs the CLI-against-real-binary integration test, the PR-check job
-# only verifies the image builds.
+# the devbase image as part of the test setup — a Dockerfile-only bump
+# still needs this job to verify the new image runs end-to-end.
 
 concurrency:
   group: sysbox-e2e-${{ github.ref }}

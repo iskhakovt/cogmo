@@ -228,14 +228,14 @@ jobs:
         run: |
           docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ needs.setup.outputs.version }}
 
-  # Vulnerability scan against the released images. Runs once all three are
-  # tagged at this version. Results upload to GitHub code-scanning (Security
-  # tab) — findings don't block the release. Triage happens async; an acute
-  # CVE drives a patch release rather than gating publish behind it.
+  # Vulnerability scan against the released images. SARIF → code-scanning
+  # (Security tab); findings don't block the release — triage async, ship
+  # a patch for anything acute.
   #
-  # Trivy scans the runner's native arch (amd64). The other arch shares the
-  # same Dockerfile + OS package set, so amd64 findings are a faithful proxy
-  # for the manifest list as a whole.
+  # amd64-only: most findings overlap with arm64, but arch-specific binaries
+  # (Node native, libssl variants) can carry arm64-only CVEs we miss.
+  # Acceptable gap at this scale; close by adding an arm64 row on
+  # `ubuntu-24.04-arm` scanning the per-arch digest, not the manifest-list tag.
   scan:
     name: Trivy scan (${{ matrix.image }})
     needs: [setup, merge-cogmo, base-images]
@@ -266,14 +266,18 @@ jobs:
           image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ needs.setup.outputs.version }}
           format: sarif
           output: trivy-results.sarif
-          # Surface only actionable findings — unfixed CVEs can't be patched
-          # by us today, and lower severities create triage noise that
-          # crowds out real signal.
+          # Explicit so a future trivy-action bump that changes the
+          # default doesn't silently flip behavior.
+          scanners: vuln,secret
+          # `ignore-unfixed` hides CVEs with no upstream patch — exactly
+          # the signal for base-image-swap decisions, so revisit then.
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           vuln-type: os,library
-          # `exit-code: 0` (default) — see job header for the don't-block
-          # rationale. Findings surface via the Security tab.
+          # Cache key is shared across the matrix; arms race on save.
+          # Key rotates daily + release cadence ~weekly = no cross-release
+          # hits anyway, so caching only buys log noise.
+          cache: false
 
       - uses: github/codeql-action/upload-sarif@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3.35.5
         # Run even if Trivy itself errored (e.g. DB download flake) so we
