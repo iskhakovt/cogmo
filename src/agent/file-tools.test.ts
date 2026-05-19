@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
+import { mockFilesService } from "../test/factories.js";
 import { fileTools } from "./file-tools.js";
 import type { Service } from "./service.js";
 
 const [readFile, writeFile, editFile, listFiles] = fileTools;
 
 function mockService(filesOverrides?: Partial<Service["files"]>): Service {
+  const files = mockFilesService({
+    read: vi.fn().mockResolvedValue("file content"),
+    ...filesOverrides,
+  });
   return {
     memory: {
       recall: vi.fn().mockResolvedValue({ memories: [] }),
@@ -12,13 +17,7 @@ function mockService(filesOverrides?: Partial<Service["files"]>): Service {
       reflect: vi.fn().mockResolvedValue({ answer: "" }),
       stageRetain: vi.fn().mockResolvedValue(undefined),
     },
-    files: {
-      read: vi.fn().mockResolvedValue("file content"),
-      write: vi.fn().mockResolvedValue(undefined),
-      edit: vi.fn().mockResolvedValue(undefined),
-      list: vi.fn().mockResolvedValue([]),
-      ...filesOverrides,
-    },
+    files,
     coreMemory: {
       get: vi.fn().mockResolvedValue([]),
       update: vi.fn().mockResolvedValue(undefined),

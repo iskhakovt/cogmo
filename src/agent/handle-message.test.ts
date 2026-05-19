@@ -16,6 +16,7 @@ import {
   mockAgentStore,
   mockDeliveryHandle,
   mockDeliveryRouter,
+  mockFilesService,
   mockMemoryProvider,
   mockProvider,
   mockResolver,
@@ -65,12 +66,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     tools: mockToolRegistry(),
     memory: mockMemoryProvider(),
     promptSource: { assemble: vi.fn().mockResolvedValue("system prompt") },
-    fileService: {
-      read: vi.fn().mockResolvedValue(""),
-      write: vi.fn().mockResolvedValue(undefined),
-      edit: vi.fn().mockResolvedValue(undefined),
-      list: vi.fn().mockResolvedValue([]),
-    },
+    fileService: mockFilesService(),
     attachments: {
       upload: vi.fn().mockResolvedValue("inbound/test.jpg"),
       download: vi.fn().mockResolvedValue(Buffer.from("fake-image")),

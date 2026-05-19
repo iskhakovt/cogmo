@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
 import { bootstrapSkillsRepo } from "./repo.js";
@@ -167,12 +168,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       runInTx: tx,
       memory: makeMockMemory(),
       secretsStore: makeMockSecrets(),
-      files: {
-        read: vi.fn().mockResolvedValue(""),
-        write: vi.fn().mockResolvedValue(undefined),
-        edit: vi.fn().mockResolvedValue(undefined),
-        list: vi.fn().mockResolvedValue([]),
-      },
+      files: mockFilesService(),
       user: { id: "user-1", timezone: "UTC" },
       memoryBankId: "bank-1",
       skillsRepoPath: repo.bare,
@@ -1211,12 +1207,7 @@ effects:
           runInTx: tx,
           memory: makeMockMemory(),
           secretsStore: makeMockSecrets(),
-          files: {
-            read: vi.fn().mockResolvedValue(""),
-            write: vi.fn().mockResolvedValue(undefined),
-            edit: vi.fn().mockResolvedValue(undefined),
-            list: vi.fn().mockResolvedValue([]),
-          },
+          files: mockFilesService(),
           user: { id: "user-1", timezone: "UTC" },
           memoryBankId: "bank-1",
           skillsRepoPath: repoWithRemote.bare,
@@ -1466,12 +1457,7 @@ effects:
         runInTx: tx,
         memory: makeMockMemory(),
         secretsStore: makeMockSecrets(),
-        files: {
-          read: vi.fn().mockResolvedValue(""),
-          write: vi.fn().mockResolvedValue(undefined),
-          edit: vi.fn().mockResolvedValue(undefined),
-          list: vi.fn().mockResolvedValue([]),
-        },
+        files: mockFilesService(),
         user: { id: "user-1", timezone: "UTC" },
         memoryBankId: "bank-1",
         skillsRepoPath,

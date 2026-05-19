@@ -14,6 +14,7 @@ import type {
   StreamEvent,
 } from "../llm/types.js";
 import { logger } from "../logger.js";
+import { mockFilesService } from "../test/factories.js";
 import type {
   AgentLoopParams,
   AgentLoopResult,
@@ -32,12 +33,7 @@ function stubService(): Service {
       reflect: vi.fn().mockResolvedValue({ answer: "" }),
       stageRetain: vi.fn().mockResolvedValue(undefined),
     },
-    files: {
-      read: vi.fn().mockResolvedValue(""),
-      write: vi.fn().mockResolvedValue(undefined),
-      edit: vi.fn().mockResolvedValue(undefined),
-      list: vi.fn().mockResolvedValue([]),
-    },
+    files: mockFilesService(),
     coreMemory: {
       get: vi.fn().mockResolvedValue([]),
       update: vi.fn().mockResolvedValue(undefined),

@@ -14,6 +14,7 @@ import {
 import { DrizzleSandboxStore } from "../sandbox/store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "../sandbox/supervisor.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -26,12 +27,7 @@ function stubSecrets(): SecretsStore {
   return mock<SecretsStore>();
 }
 
-const noopFiles = {
-  read: async () => "",
-  write: async () => {},
-  edit: async () => {},
-  list: async () => [],
-};
+const noopFiles = mockFilesService();
 
 /**
  * End-to-end tier-2 worker test against a real sysbox container running
