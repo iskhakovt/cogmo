@@ -2,14 +2,27 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DaytonaAuthenticationError,
+  DaytonaAuthorizationError,
+  DaytonaConflictError,
+  DaytonaConnectionError,
+  DaytonaError,
   DaytonaNotFoundError,
+  DaytonaRateLimitError,
   type Sandbox as DaytonaSdkSandbox,
+  DaytonaTimeoutError,
+  DaytonaValidationError,
   SandboxState,
 } from "@daytonaio/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../../logger.js";
 import { expectDefined } from "../../test/assertions.js";
+import {
+  expectCreatedNamesMatch,
+  FakeDaytonaSnapshotPipeline,
+} from "../../test/daytona-snapshot-pipeline-fake.js";
 import type { SessionSpec } from "../index.js";
-import { DaytonaSandboxClient, snapshotNameFor } from "./client.js";
+import { DaytonaSandboxClient, isTransientSnapshotCreateError, snapshotNameFor } from "./client.js";
 
 /**
  * Snapshot state literals match the SDK's `SnapshotState` enum (which
@@ -952,6 +965,46 @@ describe("DaytonaSandboxClient", () => {
       });
     });
 
+    it("bakes resourceLimits into snapshot.create so post-warm sessions inherit them", async () => {
+      // `daytona.create({ snapshot })` has no per-session resources
+      // override — the snapshot's baked CPU/memory/disk govern every
+      // session spun from it. Skipping the resources hint here would
+      // erase the consumer's intent (notably skills' 1 GiB disk),
+      // because once the snapshot is ACTIVE every subsequent task
+      // inherits Daytona's platform default (1 cpu / 1 GiB / 3 GiB).
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: PYTHON_SNAPSHOT, state: SnapshotState.ACTIVE }),
+      );
+      const client = await makeClient();
+      await client.ensureImagePresent(PYTHON_IMAGE, {
+        cpus: 1,
+        memory_bytes: 512 * 1024 * 1024,
+        pids: 1024,
+        disk_bytes: 1024 * 1024 * 1024,
+      });
+      expect(daytonaCalls.snapshotCreate).toHaveBeenCalledWith({
+        name: PYTHON_SNAPSHOT,
+        image: PYTHON_IMAGE,
+        resources: { cpu: 1, memory: 1, disk: 1 },
+      });
+    });
+
+    it("omits resources when ensureImagePresent is called without a hint (accepts platform default)", async () => {
+      // No-arg call should not silently fabricate resources — the
+      // overload exists so the lazy `{ image }` fallback in `create()`
+      // can take the platform default explicitly. Tested separately so
+      // the contract is visible in the matrix.
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: DEVBASE_SNAPSHOT, state: SnapshotState.ACTIVE }),
+      );
+      const client = await makeClient();
+      await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+      const createArg = daytonaCalls.snapshotCreate.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(createArg).not.toHaveProperty("resources");
+    });
+
     it("snapshot in BUILDING → polls until ACTIVE, no extra create call", async () => {
       // Models another cogmo instance (or a prior boot of this one)
       // racing the warm. `snapshot.get` initially returns BUILDING; the
@@ -1013,20 +1066,203 @@ describe("DaytonaSandboxClient", () => {
       }
     });
 
-    it("snapshot in failure state (BUILD_FAILED) → delete + recreate", async () => {
+    it("snapshot in failure state (BUILD_FAILED) → delete + recreate under a fresh name", async () => {
       const stale = fakeSnapshot({
         name: DEVBASE_SNAPSHOT,
         state: SnapshotState.BUILD_FAILED,
       });
       daytonaCalls.snapshotGet.mockResolvedValue(stale);
       daytonaCalls.snapshotDelete.mockResolvedValue();
-      daytonaCalls.snapshotCreate.mockResolvedValue(
-        fakeSnapshot({ name: DEVBASE_SNAPSHOT, state: SnapshotState.ACTIVE }),
+      daytonaCalls.snapshotCreate.mockImplementation(async (arg: unknown) => {
+        const { name } = arg as { name: string };
+        return fakeSnapshot({ name, state: SnapshotState.ACTIVE });
+      });
+      daytonaCalls.create.mockResolvedValue(
+        fakeSandbox({ id: "sb-rebuilt", state: SandboxState.STARTED }),
       );
+
       const client = await makeClient();
       await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+      // Delete fires for the stale row; we never wait on it. Create
+      // dispatches against a freshly-suffixed name — `<original>-r-<hex>`
+      // — so a subsequent create can't race Daytona's async REMOVING
+      // state on the original.
       expect(daytonaCalls.snapshotDelete).toHaveBeenCalledWith(stale);
       expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
+      const createArg = daytonaCalls.snapshotCreate.mock.calls[0]?.[0] as { name: string };
+      expect(createArg.name).toMatch(new RegExp(`^${DEVBASE_SNAPSHOT}-r-[0-9a-f]{8}$`));
+      expect(createArg.name).not.toBe(DEVBASE_SNAPSHOT);
+
+      // The cache must hold the resolved (rebuilt) name, not the
+      // original — otherwise the follow-up `create()` would dispatch
+      // against a snapshot that doesn't exist.
+      await client.create({ ...BASE_SPEC, image: "ghcr.io/iskhakovt/cogmo-devbase:1.66.0" });
+      const sandboxArg = daytonaCalls.create.mock.calls[0]?.[0] as { snapshot?: string };
+      expect(sandboxArg.snapshot).toBe(createArg.name);
+    });
+
+    it("rebuild proceeds even if the stale delete fails (fire-and-forget)", async () => {
+      // Models Daytona's documented behaviour: delete can fail or hang
+      // while the row sits in REMOVING. The warm path must NOT block on
+      // it — the rebuild uses a fresh name, so the stale row's eventual
+      // disposition is irrelevant.
+      const stale = fakeSnapshot({
+        name: DEVBASE_SNAPSHOT,
+        state: SnapshotState.BUILD_FAILED,
+      });
+      daytonaCalls.snapshotGet.mockResolvedValue(stale);
+      daytonaCalls.snapshotDelete.mockRejectedValue(new Error("REMOVING — please retry"));
+      daytonaCalls.snapshotCreate.mockImplementation(async (arg: unknown) => {
+        const { name } = arg as { name: string };
+        return fakeSnapshot({ name, state: SnapshotState.ACTIVE });
+      });
+
+      // Spy on the warn log the fire-and-forget catch fires. Asserting
+      // on it via `vi.waitFor` is sturdier than draining a `setImmediate`
+      // tick: it actively waits for the catch to attach + run, instead
+      // of hoping the microtask queue's ordering matches our drain.
+      const warnSpy = vi.spyOn(logger, "warn");
+      try {
+        const client = await makeClient();
+        await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+        expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
+        await vi.waitFor(() => {
+          expect(warnSpy).toHaveBeenCalledWith(
+            expect.objectContaining({
+              snapshot: DEVBASE_SNAPSHOT,
+              staleState: SnapshotState.BUILD_FAILED,
+            }),
+            "background delete of stale snapshot failed — Daytona reaper will retry",
+          );
+        });
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("retries snapshot.create on transient 'repository … not found' daemon error", async () => {
+      // Models the Daytona-side builder pipeline race where the internal
+      // registry hasn't pre-provisioned the per-snapshot repo before
+      // push. The error surfaces as `unprocessable entity: Error response
+      // from daemon: unknown: repository sbox/daytona-<sha256> not
+      // found`. Transient — typically clears in 1-2s.
+      vi.useFakeTimers();
+      try {
+        daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+        const transient = new Error(
+          "unprocessable entity: Error response from daemon: unknown: repository sbox/daytona-abc123 not found",
+        );
+        daytonaCalls.snapshotCreate
+          .mockRejectedValueOnce(transient)
+          .mockResolvedValueOnce(
+            fakeSnapshot({ name: DEVBASE_SNAPSHOT, state: SnapshotState.ACTIVE }),
+          );
+
+        const client = await makeClient();
+        const warm = client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+        // Drive p-retry's setTimeout through its 1s base backoff (+ up
+        // to 1s jitter via `randomize: true` in `withRetry`).
+        await vi.advanceTimersByTimeAsync(3_000);
+        await warm;
+        expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does NOT retry snapshot.create on persistent (non-matching) errors", async () => {
+      // A real image-build failure (broken Dockerfile, missing upstream
+      // image, auth) doesn't match the transient signature and must
+      // surface immediately — burning the retry budget on a persistent
+      // failure just delays the user-visible error.
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockRejectedValue(new Error("invalid Dockerfile syntax"));
+
+      const client = await makeClient();
+      await expect(
+        client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0"),
+      ).rejects.toThrow(/invalid Dockerfile/);
+      expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it("warns when a second ensureImagePresent call requests resourceLimits that differ from the cached bake", async () => {
+      // Snapshot resources are immutable post-create; a second caller
+      // can't get different limits without rebuilding. Drift is rare at
+      // single-user scale but the warn makes it operationally visible
+      // when it happens.
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: PYTHON_SNAPSHOT, state: SnapshotState.ACTIVE }),
+      );
+      const warnSpy = vi.spyOn(logger, "warn");
+      try {
+        const client = await makeClient();
+        const limitsA = { cpus: 1, memory_bytes: 512 * 1024 * 1024, pids: 256 };
+        const limitsB = { cpus: 2, memory_bytes: 2 * 1024 * 1024 * 1024, pids: 256 };
+        await client.ensureImagePresent(PYTHON_IMAGE, limitsA);
+        await client.ensureImagePresent(PYTHON_IMAGE, limitsB);
+        expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ image: PYTHON_IMAGE, cached: limitsA, requested: limitsB }),
+          expect.stringContaining("resourceLimits differ from prior warm"),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("does NOT warn when the same limits are passed twice", async () => {
+      // The matching case is the common path (boot → task-time uses
+      // identical limits). A warn here would spam the logs on every
+      // task arrival.
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: PYTHON_SNAPSHOT, state: SnapshotState.ACTIVE }),
+      );
+      const warnSpy = vi.spyOn(logger, "warn");
+      try {
+        const client = await makeClient();
+        const limits = { cpus: 1, memory_bytes: 512 * 1024 * 1024, pids: 256 };
+        await client.ensureImagePresent(PYTHON_IMAGE, limits);
+        await client.ensureImagePresent(PYTHON_IMAGE, { ...limits });
+        expect(warnSpy).not.toHaveBeenCalledWith(
+          expect.anything(),
+          expect.stringContaining("resourceLimits differ"),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("exhausts the retry budget under a sustained transient signature (not infinite)", async () => {
+      // Pins that the retry budget is finite (3 retries + initial = 4
+      // attempts). Without this assertion, a regression that changes
+      // the budget to "infinite" — or a predicate edit that flips
+      // the SDK's own retry into our envelope — would not be caught
+      // by the existing "retries once then succeeds" matrix.
+      vi.useFakeTimers();
+      try {
+        daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+        daytonaCalls.snapshotCreate.mockRejectedValue(
+          new Error(
+            "unprocessable entity: Error response from daemon: unknown: repository sbox/daytona-xyz not found",
+          ),
+        );
+
+        const client = await makeClient();
+        const warm = client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+        // Capture the rejection up front so vitest's unhandled-rejection
+        // tracker doesn't flag it during the timer-advance window.
+        const captured = warm.catch((e: unknown) => e);
+        await vi.advanceTimersByTimeAsync(20_000);
+        const err = await captured;
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error).message).toMatch(/repository sbox/);
+        // 1 initial + 3 retries = 4 calls.
+        expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(4);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("concurrent callers share one warm cycle", async () => {
@@ -1135,6 +1371,62 @@ describe("DaytonaSandboxClient", () => {
       });
     });
 
+    it("NotFound fallback re-warms with the spec's resourceLimits (regression: re-warm must not bake platform default)", async () => {
+      // The fallback fires a background `ensureImagePresent` to
+      // re-bake the snapshot. Earlier this path passed no
+      // `resourceLimits`, baking Daytona's platform default and
+      // silently undoing the consumer's intent on every subsequent
+      // session.
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockImplementation(async (arg: unknown) => {
+        const { name } = arg as { name: string };
+        return fakeSnapshot({ name, state: SnapshotState.ACTIVE });
+      });
+      daytonaCalls.create
+        .mockRejectedValueOnce(new DaytonaNotFoundError("snapshot not found"))
+        .mockResolvedValueOnce(fakeSandbox({ id: "sb-rewarm", state: SandboxState.STARTED }));
+
+      const customLimits = {
+        cpus: 1,
+        memory_bytes: 512 * 1024 * 1024,
+        pids: 1024,
+        disk_bytes: 1024 * 1024 * 1024,
+      };
+      const client = await makeClient();
+      await client.ensureImagePresent(PYTHON_IMAGE, customLimits);
+      // Triggers the NotFound → fallback path with `spec.resourceLimits`
+      // pulled from BASE_SPEC's defaults — but the limits the re-warm
+      // bakes must come from spec, not the original ensureImagePresent
+      // call.
+      const specLimits = {
+        cpus: 4,
+        memory_bytes: 4 * 1024 * 1024 * 1024,
+        pids: 512,
+      };
+      await client.create({
+        ...BASE_SPEC,
+        image: PYTHON_IMAGE,
+        resourceLimits: specLimits,
+      });
+
+      // Drain the background re-warm microtask. The re-warm fires via
+      // `void ensureImagePresent(...)`; its `snapshot.create` call has
+      // to land before we can assert on the resources argument.
+      await vi.waitFor(() => {
+        expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(2);
+      });
+      // The first warm baked the customLimits the test provided;
+      // the second (re-warm) bakes spec.resourceLimits = specLimits.
+      const firstCreate = daytonaCalls.snapshotCreate.mock.calls[0]?.[0] as {
+        resources: { cpu: number; memory: number; disk?: number };
+      };
+      expect(firstCreate.resources).toEqual({ cpu: 1, memory: 1, disk: 1 });
+      const secondCreate = daytonaCalls.snapshotCreate.mock.calls[1]?.[0] as {
+        resources: { cpu: number; memory: number };
+      };
+      expect(secondCreate.resources).toEqual({ cpu: 4, memory: 4 });
+    });
+
     it("snapshot path: non-NotFound errors do NOT fall back (auth / rate-limit / connection re-throw)", async () => {
       daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
       daytonaCalls.snapshotCreate.mockResolvedValue(
@@ -1158,6 +1450,235 @@ describe("DaytonaSandboxClient", () => {
       const result = await client.reconcileCrashedInstances("instance-1");
       expect(result).toEqual({ orphansReaped: 0 });
     });
+  });
+
+  describe("FakeDaytonaSnapshotPipeline contract", () => {
+    // Pins the fake's load-bearing invariant: a same-name recreate
+    // against a snapshot in REMOVING 409s. If this assertion ever
+    // weakens, the fake stops being a structural safety net for the
+    // rename-on-rebuild bug class, and the tests below would pass
+    // against the original buggy code path they exist to catch.
+    it("rejects snapshot.create against a name currently in REMOVING with DaytonaConflictError", async () => {
+      const pipeline = new FakeDaytonaSnapshotPipeline()
+        .setState("stuck", "build_failed")
+        .bindTo(daytonaCalls);
+      // Simulate the OLD delete-then-create-same-name path manually,
+      // bypassing the SUT, to prove the fake would have caught the
+      // original bug regardless of what `#ensureSnapshotActive` thinks
+      // it's doing.
+      const existing = await daytonaCalls.snapshotGet("stuck");
+      await daytonaCalls.snapshotDelete(existing);
+      await expect(
+        daytonaCalls.snapshotCreate({ name: "stuck", image: "any" }),
+      ).rejects.toBeInstanceOf(DaytonaConflictError);
+      expect(pipeline.state("stuck")).toBe("removing");
+    });
+  });
+
+  describe("ensureImagePresent against stateful snapshot pipeline", () => {
+    // These tests use `FakeDaytonaSnapshotPipeline` to model Daytona's
+    // async snapshot lifecycle — `REMOVING`-state drain, `BUILDING` →
+    // `ACTIVE` polling, conflict-on-same-name-recreate. The flat
+    // `vi.fn().mockResolvedValue(...)` mocks above can't represent these
+    // because they're stateless. The pipeline fake is the structural
+    // mechanism that catches the original 409-on-rebuild bug class:
+    // with a stateful model, `snapshot.create({ name: <existing> })`
+    // throws `DaytonaConflictError` while the row is in `REMOVING`,
+    // so any test that exercises rebuild-against-stale-name FAILS in
+    // the fake regardless of what the SUT thinks it's doing.
+
+    it("rebuild after BUILD_FAILED succeeds against a REMOVING-aware provider", async () => {
+      // The load-bearing scenario: with delete-then-recreate against
+      // the original name, this test would 409 (the fake models
+      // Daytona's async REMOVING drain). With rename-on-rebuild, it
+      // succeeds because the create dispatches against a fresh name.
+      const pipeline = new FakeDaytonaSnapshotPipeline()
+        .setState(DEVBASE_SNAPSHOT, "build_failed")
+        .bindTo(daytonaCalls);
+      // Drain the stale `REMOVING` row eventually — but slowly enough
+      // that any same-name recreate during the drain window 409s.
+      pipeline.scheduleTransition(DEVBASE_SNAPSHOT, { afterGets: 50, to: "absent" });
+
+      const client = await makeClient();
+      await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+
+      // Exactly one create, and against a freshly-suffixed name.
+      expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
+      expectCreatedNamesMatch(pipeline, [new RegExp(`^${DEVBASE_SNAPSHOT}-r-[0-9a-f]{8}$`)]);
+    });
+
+    it("transient builder error clears on retry; persistent error fails on the same name (no rename loop)", async () => {
+      const pipeline = new FakeDaytonaSnapshotPipeline()
+        .setState(DEVBASE_SNAPSHOT, "absent")
+        .setCreateBehavior((_name, _image, attempt, { setState }) => {
+          if (attempt === 1) {
+            throw new Error(
+              "unprocessable entity: Error response from daemon: unknown: repository sbox/daytona-xyz not found",
+            );
+          }
+          setState("active");
+        })
+        .bindTo(daytonaCalls);
+
+      vi.useFakeTimers();
+      try {
+        const client = await makeClient();
+        const warm = client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+        await vi.advanceTimersByTimeAsync(3_000);
+        await warm;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      // Two attempts on the SAME name — retry doesn't trigger rename
+      // (rename is a state-machine action, not a retry action).
+      expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(2);
+      expect(pipeline.attempts(DEVBASE_SNAPSHOT)).toBe(2);
+      expect(pipeline.createdNames()).toEqual([DEVBASE_SNAPSHOT]);
+    });
+
+    it("BUILDING in flight → polling reaches ACTIVE via the same observed name", async () => {
+      // Sanity-check the BUILDING → ACTIVE poll path through the fake.
+      // Catches a regression where the pipeline-fake's transition
+      // counter goes out of sync with the SUT's poll cadence.
+      const pipeline = new FakeDaytonaSnapshotPipeline()
+        .setState(DEVBASE_SNAPSHOT, "building")
+        .scheduleTransition(DEVBASE_SNAPSHOT, { afterGets: 2, to: "active" })
+        .bindTo(daytonaCalls);
+
+      vi.useFakeTimers();
+      try {
+        const client = await makeClient();
+        const warm = client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+        // Three poll ticks at the SDK's 1s cadence covers the
+        // 2-observation drain plus the final ACTIVE read.
+        await vi.advanceTimersByTimeAsync(3_500);
+        await warm;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      // No create — the in-flight build owned the name and reached ACTIVE.
+      expect(daytonaCalls.snapshotCreate).not.toHaveBeenCalled();
+      expect(pipeline.state(DEVBASE_SNAPSHOT)).toBe("active");
+    });
+  });
+
+  describe("isTransientSnapshotCreateError (retry predicate)", () => {
+    // The retry predicate is the gate between "retry, wait for the
+    // flake to clear" and "fail fast, surface the error". Misclassifying
+    // either side burns operator time — too aggressive retries an
+    // unrecoverable failure for ~7s before surfacing; too conservative
+    // drops a recoverable build into the user-visible error path.
+    // Pin behavior per documented Daytona error class so any future
+    // edit has to declare what the new policy is for each row.
+    const cases: ReadonlyArray<{
+      label: string;
+      err: unknown;
+      expected: boolean;
+      reason: string;
+    }> = [
+      {
+        label: "DaytonaAuthenticationError",
+        err: new DaytonaAuthenticationError("invalid api key", 401),
+        expected: false,
+        reason: "bad key — won't clear on retry",
+      },
+      {
+        label: "DaytonaAuthorizationError",
+        err: new DaytonaAuthorizationError("forbidden", 403),
+        expected: false,
+        reason: "scope error — won't clear",
+      },
+      {
+        label: "DaytonaValidationError",
+        err: new DaytonaValidationError("malformed request", 400),
+        expected: false,
+        reason: "request rejected for shape — won't clear",
+      },
+      {
+        label: "DaytonaNotFoundError",
+        err: new DaytonaNotFoundError("not found", 404),
+        expected: false,
+        reason: "snapshot 404 is the absent path; retry would re-404",
+      },
+      {
+        label: "DaytonaConflictError",
+        err: new DaytonaConflictError("snapshot already exists", 409),
+        expected: false,
+        reason:
+          "rebuild path uses fresh names, so reaching 409 means caller logic is wrong — retry hides the bug",
+      },
+      {
+        label: "DaytonaRateLimitError",
+        err: new DaytonaRateLimitError("rate limit exceeded", 429),
+        expected: true,
+        reason:
+          "SDK does NOT retry 429 (only OpenTelemetry interceptors, no Retry-After parsing); first hit surfaces straight through, retry envelope is the only defense",
+      },
+      {
+        label: "DaytonaTimeoutError",
+        err: new DaytonaTimeoutError("request timed out"),
+        expected: false,
+        reason:
+          "SDK's axios timeout is 24h, so this only fires on backend-side hangs; short retries won't unstick them",
+      },
+      {
+        label: "DaytonaConnectionError",
+        err: new DaytonaConnectionError("ECONNRESET"),
+        expected: true,
+        reason:
+          "transient network blip on one of the SDK's internal poll cycles; SDK rethrows raw, retry envelope is the only defense",
+      },
+      {
+        label: "DaytonaError (base) with transient signature",
+        err: new DaytonaError(
+          "unprocessable entity: Error response from daemon: unknown: repository sbox/daytona-xyz not found",
+          422,
+        ),
+        expected: true,
+        reason: "documented Daytona internal-registry race — clears on retry",
+      },
+      {
+        label: "Generic Error with transient signature",
+        err: new Error(
+          "Error response from daemon: unknown: repository sbox/daytona-abc not found",
+        ),
+        expected: true,
+        reason: "same signature, surfaced as a non-Daytona error class",
+      },
+      {
+        label: "Generic Error with persistent-Dockerfile signature",
+        err: new Error("invalid Dockerfile syntax: line 3"),
+        expected: false,
+        reason: "real image build failure — retry would just delay the error",
+      },
+      {
+        label: "Generic Error with missing-upstream signature",
+        err: new Error("manifest for ghcr.io/example/image:1.0 not found"),
+        expected: false,
+        reason:
+          "upstream image doesn't exist — won't clear, and the substring `not found` alone must NOT pass the regex",
+      },
+      {
+        label: "Non-Error throwable",
+        err: "string thrown directly",
+        expected: false,
+        reason: "predicate must not crash on non-Error values",
+      },
+      {
+        label: "null",
+        err: null,
+        expected: false,
+        reason: "predicate must not crash on null",
+      },
+    ];
+
+    for (const { label, err, expected, reason } of cases) {
+      it(`${expected ? "retries" : "does NOT retry"} ${label} — ${reason}`, () => {
+        expect(isTransientSnapshotCreateError(err)).toBe(expected);
+      });
+    }
   });
 
   describe("snapshotNameFor", () => {

@@ -140,14 +140,15 @@ export class SysboxSkillWorker {
   }
 
   static async create(opts: SysboxSkillWorkerOptions): Promise<SysboxSkillWorker> {
-    await opts.sandbox.ensureImagePresent(opts.image);
-
     const resourceLimits: ResourceLimits = {
       cpus: opts.resourceLimits?.cpus ?? DEFAULT_RESOURCE_LIMITS.cpus,
       memory_bytes: opts.resourceLimits?.memory_bytes ?? DEFAULT_RESOURCE_LIMITS.memory_bytes,
       pids: opts.resourceLimits?.pids ?? DEFAULT_RESOURCE_LIMITS.pids,
       disk_bytes: opts.resourceLimits?.disk_bytes ?? DEFAULT_RESOURCE_LIMITS.disk_bytes,
     };
+
+    // Pass limits so a first warm against a custom image bakes them in.
+    await opts.sandbox.ensureImagePresent(opts.image, resourceLimits);
 
     const session = await opts.sandbox.create({
       taskId: opts.workerId,
