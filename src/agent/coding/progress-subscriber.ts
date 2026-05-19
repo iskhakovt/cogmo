@@ -67,12 +67,10 @@ export function startCodingProgressSubscriber(args: SubscriberArgs): () => void 
   let pending: Promise<void> = Promise.resolve();
 
   async function postOrEdit(replyMarkup?: PlanInlineKeyboardMarkup): Promise<void> {
-    // Update the throttle timestamp synchronously, before chaining onto
-    // `pending`. The registry's `publish` is fire-and-forget on listener
-    // promises (see `streaming-registry.ts`), so concurrent handlers can
-    // interleave here; setting `lastEditAt` only after the bot call would
-    // let bursting events pass the throttle check with a stale timestamp
-    // and queue redundant edits.
+    // Update synchronously before awaiting the bot call. Registry.publish
+    // doesn't await listener promises, so handlers for back-to-back events
+    // interleave; the next handler's throttle check must see this bump or
+    // it reads a stale timestamp and queues a redundant edit.
     lastEditAt = Date.now();
     const text = formatProgressMessage(state);
     const opts = replyMarkup ? { reply_markup: replyMarkup } : undefined;
