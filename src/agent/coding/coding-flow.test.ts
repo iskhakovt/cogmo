@@ -28,7 +28,7 @@ import {
   runCodingExecute,
   runCodingTask,
 } from "./orchestrator.js";
-import { CodingProgressSubscriber } from "./progress-subscriber.js";
+import { startCodingProgressSubscriber } from "./progress-subscriber.js";
 import { createCodingService } from "./service.js";
 import { DrizzleCodingStore } from "./store/index.js";
 import { type CodingStreamEvent, CodingStreamingRegistry } from "./streaming-registry.js";
@@ -492,13 +492,13 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     expect(reloaded?.status).toBe("awaiting_approval");
   });
 
-  it("CodingProgressSubscriber renders the plan + execute message lifecycle from the same registry", async () => {
+  it("startCodingProgressSubscriber renders the plan + execute message lifecycle from the same registry", async () => {
     const registry = new CodingStreamingRegistry();
     const sent: { text: string; replyMarkup?: unknown }[] = [];
     const edits: { text: string; replyMarkup?: unknown }[] = [];
     const taskId = "019d0000-0000-7000-8000-000000000003";
 
-    CodingProgressSubscriber.start({
+    startCodingProgressSubscriber({
       taskId,
       chatId: 100,
       goal: "ship the slice",

@@ -24,9 +24,12 @@
 
 import { createHash } from "node:crypto";
 import canonicalize from "canonicalize";
+import type { Logger } from "pino";
+import * as R from "remeda";
 import { ProviderProtocolError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
-import type { ContentBlock, StopReason, ToolUseBlock } from "../llm/types.js";
+import type { LlmProvider } from "../llm/provider.js";
+import type { ContentBlock, Message, StopReason, ToolUseBlock } from "../llm/types.js";
 
 /**
  * Subtypes the in-loop classifier emits on the degraded off-ramp.
@@ -49,7 +52,17 @@ export type RepairSubtype =
   | "stream_truncation"
   | "refusal"
   | "stuck_loop"
-  | "stuck_loop_cumulative";
+  | "stuck_loop_cumulative"
+  | "volume_cluster";
+
+/**
+ * Subtypes that can land on the degraded off-ramp. `volume_cluster` is a
+ * repair only — the loop continues, no `conversation/degraded` event,
+ * no entry on {@link AgentLoopResult.degraded.subtype}. Narrowing here
+ * keeps the event schema and the result type aligned to what actually
+ * can show up at the degrade boundary.
+ */
+export type DegradeSubtype = Exclude<RepairSubtype, "volume_cluster">;
 
 /**
  * Subset of {@link RepairSubtype} that carries a per-turn repair budget.
@@ -123,7 +136,7 @@ export type RepairInstructions =
 export type TurnOutcome =
   | { kind: "ok" }
   | { kind: "repair"; subtype: BudgetedSubtype; instructions: RepairInstructions }
-  | { kind: "degrade"; reason: string; subtype: RepairSubtype };
+  | { kind: "degrade"; reason: string; subtype: DegradeSubtype };
 
 /**
  * Classify the just-finished turn based on its drained content and
@@ -229,11 +242,203 @@ export function classifyStreamError(
  * degraded off-ramp. Refusal carries a refusal-specific message; every
  * other subtype shares the same apology.
  */
-export function degradedReplyText(subtype: RepairSubtype | null): string {
+export function degradedReplyText(subtype: DegradeSubtype | null): string {
   if (subtype === "refusal") {
     return "The model declined that request. Try rephrasing, or switch model with `/model`.";
   }
   return "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?";
+}
+
+/**
+ * Default wall-clock cap for {@link synthesizeDegradedReply}. The user
+ * is already waiting on a failed turn — tighter than a normal request
+ * budget so the apology doesn't extend the perceived hang.
+ */
+export const DEGRADED_SYNTHESIS_TIMEOUT_MS = 5000;
+
+/**
+ * Inputs to {@link synthesizeDegradedReply}. The `messages` slice is the
+ * full conversation history at the point of degrade — the model needs
+ * it to know what the user asked and what was attempted. `reason` and
+ * `subtype` come from {@link AgentLoopResult.degraded}.
+ */
+export interface SynthesizeDegradedReplyDeps {
+  provider: LlmProvider;
+  model: string;
+  messages: ReadonlyArray<Message>;
+  reason: string;
+  subtype: DegradeSubtype | null;
+  log: Logger;
+  /** Wall-clock cap; defaults to {@link DEGRADED_SYNTHESIS_TIMEOUT_MS}. */
+  timeoutMs?: number;
+}
+
+export interface SynthesizeDegradedReplyResult {
+  /** Text to post as the user-facing degraded reply. */
+  text: string;
+  /** `true` when the synthesis LLM call returned usable text. */
+  ok: boolean;
+}
+
+/**
+ * One-shot, tools-free LLM call that produces a user-facing explanation
+ * of why the turn degraded. Replaces the fixed {@link degradedReplyText}
+ * baseline with a model-generated 1–3 sentence reply naming what was
+ * attempted, what went wrong, and one concrete next step.
+ *
+ * Constraints (all enforced at the callsite; see
+ * `design/agent-resilience.md` → Tools-free synthesis on degrade):
+ *
+ * - `tools: []` at the API level — defends against the model trying to
+ *   call a tool from a stale system instruction.
+ * - `temperature: 0` — predictability matters more than variety on a
+ *   failure reply.
+ * - Single attempt, no Class C repair — if it fails for any reason
+ *   (timeout, refusal, provider outage), fall back to the fixed string
+ *   and emit `agent.degrade.synthesis` with `ok: false`.
+ * - Wall-clock cap via `Promise.race`. The underlying request may
+ *   continue dangling after the race — acceptable for the rare
+ *   degrade-path; revisit with `AbortSignal` plumbing if cost
+ *   telemetry shows the waste matters.
+ * - Same provider as the failing turn — switching providers on the
+ *   apology message is a non-sequitur; the conversation is already
+ *   paying for that model's quirks.
+ *
+ * Provider-outage during synthesis falls through cleanly to the fixed
+ * string. A `synthesis ok: false` spike correlated with provider-outage
+ * events is an upstream symptom, not a synthesis-logic bug.
+ */
+export async function synthesizeDegradedReply(
+  deps: SynthesizeDegradedReplyDeps,
+): Promise<SynthesizeDegradedReplyResult> {
+  const { provider, model, messages, reason, subtype, log } = deps;
+  const timeoutMs = deps.timeoutMs ?? DEGRADED_SYNTHESIS_TIMEOUT_MS;
+
+  const reasonHuman = humanReasonForDegrade(subtype, reason);
+  const systemPrompt =
+    `You hit a stopping condition before completing the user's most recent request: ${reasonHuman}.\n\n` +
+    "Tools are disabled for this reply. Write a 1–3 sentence message to the user covering: " +
+    "(1) what you were trying to do, (2) what went wrong, " +
+    "(3) one concrete next step they can take (rephrase, try a different model, try later, etc.). " +
+    "Be direct. No verbose apology, no caveats about being an AI.";
+
+  const fallback = degradedReplyText(subtype);
+
+  const start = Date.now();
+  let timeoutId: NodeJS.Timeout | undefined;
+  try {
+    const response = await Promise.race([
+      provider.chat({
+        model,
+        system: systemPrompt,
+        messages: [...messages],
+        tools: [],
+        temperature: 0,
+        maxTokens: 512,
+      }),
+      new Promise<never>((_resolve, reject) => {
+        timeoutId = setTimeout(() => reject(new SynthesisTimeoutError(timeoutMs)), timeoutMs);
+      }),
+    ]);
+
+    const text = response.content
+      .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+
+    if (text.length === 0) {
+      log.warn(
+        {
+          event: "agent.degrade.synthesis",
+          reason,
+          subtype,
+          tokensIn: response.usage.inputTokens,
+          tokensOut: response.usage.outputTokens,
+          durationMs: Date.now() - start,
+          ok: false,
+          fallback: "empty_text",
+        },
+        "degraded synthesis returned empty text — falling back to fixed string",
+      );
+      return { text: fallback, ok: false };
+    }
+
+    log.warn(
+      {
+        event: "agent.degrade.synthesis",
+        reason,
+        subtype,
+        tokensIn: response.usage.inputTokens,
+        tokensOut: response.usage.outputTokens,
+        durationMs: Date.now() - start,
+        ok: true,
+      },
+      "degraded synthesis produced reply",
+    );
+    return { text, ok: true };
+  } catch (err) {
+    log.warn(
+      {
+        event: "agent.degrade.synthesis",
+        reason,
+        subtype,
+        durationMs: Date.now() - start,
+        ok: false,
+        fallback:
+          err instanceof SynthesisTimeoutError
+            ? "timeout"
+            : err instanceof RefusalError
+              ? "refusal"
+              : err instanceof ProviderProtocolError
+                ? "protocol"
+                : "error",
+        err,
+      },
+      "degraded synthesis failed — falling back to fixed string",
+    );
+    return { text: fallback, ok: false };
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
+}
+
+/** Raised when {@link synthesizeDegradedReply}'s wall-clock cap fires. */
+export class SynthesisTimeoutError extends Error {
+  constructor(public readonly timeoutMs: number) {
+    super(`degraded synthesis exceeded ${timeoutMs}ms wall-clock cap`);
+    this.name = "SynthesisTimeoutError";
+  }
+}
+
+/**
+ * Human-readable rendering of a degrade `(subtype, reason)` pair for
+ * the synthesis system prompt. The loop's `reason` string is internal
+ * (e.g. `"stuck_loop"`, `"iteration_cap"`); the model gets a sentence
+ * it can quote back to the user.
+ */
+function humanReasonForDegrade(subtype: DegradeSubtype | null, reason: string): string {
+  switch (subtype) {
+    case "empty_end_turn":
+      return "you produced an empty turn where a response was expected";
+    case "stream_truncation":
+      return "your response stream was truncated mid-tool-call and the recovery replay also failed to parse";
+    case "refusal":
+      return "you declined the request on policy grounds";
+    case "stuck_loop":
+      return "the loop detected the same tool call repeated three times in a row without observable progress";
+    case "stuck_loop_cumulative":
+      return "the loop detected the same tool call recurring across iterations without observable progress";
+    case null:
+      // Iteration-cap backstop. `reason: "iteration_cap"` is the only
+      // null-subtype path today; enumerate explicitly rather than
+      // interpolating `reason` so a future caller passing user-derived
+      // text can't slip prompt content into the system message.
+      if (reason === "iteration_cap") {
+        return "the conversation hit its iteration-count limit before producing a final reply";
+      }
+      return "the conversation hit an unspecified stopping condition";
+  }
 }
 
 /**
@@ -332,4 +537,229 @@ function canonicalJson(value: unknown): string {
     );
   }
   return encoded;
+}
+
+/**
+ * Per-tool history within one turn — the counts and outcome tally the
+ * volume-cluster trigger needs to decide an iteration's intercept
+ * verdict and shape its nudge text. Built in one pass over the turn's
+ * accumulated message array by {@link summarizeToolHistory}, keyed by
+ * tool name.
+ *
+ * - `callCount`: every `tool_use` block the model emitted for this tool
+ *   this turn. The nudge text shows this number because the model
+ *   thinks in calls, not batches.
+ * - `priorBatchCount`: distinct prior iterations (assistant messages
+ *   before the last one in `messages[fromIdx..]`) that emitted any
+ *   `tool_use` for this tool. The unit the budget compares against.
+ *   Per-iteration counting distinguishes "model re-deciding to call T"
+ *   (multiple iterations — the stuck-loop signature) from "model
+ *   decided to parallel-call T N times in one shot" (one iteration,
+ *   N blocks).
+ * - `outcomes`: tool_results paired by id back to same-name tool_use
+ *   blocks. This tool's own prior volume-cluster nudges are excluded
+ *   from the count and reasons so the helper stays pure under
+ *   recursion — a model that ignores a nudge and emits another batch
+ *   doesn't see the prior nudge text quoted as a "failure reason" in
+ *   the next nudge.
+ */
+export interface ToolHistorySummary {
+  callCount: number;
+  priorBatchCount: number;
+  outcomes: {
+    successes: number;
+    failures: number;
+    /** First-line summaries of failure tool_result content, deduped. */
+    failureReasons: string[];
+  };
+}
+
+/**
+ * Build per-tool history summaries for every tool that appeared in
+ * `messages[fromIdx..]`. Single pass over the turn's accumulated
+ * message array, keyed by tool name.
+ *
+ * Derives from the message array rather than maintaining a separate
+ * counter — Inngest function replay re-executes everything outside
+ * `step.run` from the top, so a closure-held counter would silently
+ * reset mid-turn. Scanning the already-built message array reflects
+ * the actual current state regardless of replay topology. See
+ * `design/agent-resilience.md` → "Implementation note: derive, don't
+ * store".
+ *
+ * `priorBatchCount` semantics: count of distinct assistant messages in
+ * the slice carrying a `tool_use` for that tool, **excluding the very
+ * last message in the slice if it is one of them**. Matches the
+ * volume-cluster call-site contract — the trigger calls this helper
+ * after pushing the current iteration's assistant message, so the
+ * "current" batch sits at the tail and gets excluded; the caller does
+ * `batchCount = priorBatchCount + 1` to include it. When the slice's
+ * last message is a user `tool_result` (no current iteration pending)
+ * no exclusion applies and `priorBatchCount` equals the total number
+ * of distinct same-tool batches in the slice. `callCount` and
+ * `outcomes` are unaffected by this exclusion.
+ */
+export function summarizeToolHistory(
+  messages: ReadonlyArray<Message>,
+  fromIdx: number,
+): Map<string, ToolHistorySummary> {
+  const slice = messages.slice(fromIdx);
+  const lastIdx = slice.length - 1;
+
+  // Every tool_use block, tagged with its assistant-message index so
+  // priorBatchCount can count distinct prior iterations.
+  const toolUses = R.pipe(
+    slice,
+    R.flatMap((msg, idx) =>
+      msg.role === "assistant" && Array.isArray(msg.content)
+        ? msg.content
+            .filter((b): b is ToolUseBlock => b.type === "tool_use")
+            .map((b) => ({ name: b.name, id: b.id, msgIdx: idx }))
+        : [],
+    ),
+  );
+
+  const usesByTool = R.groupBy(toolUses, (u) => u.name);
+  const idToName = new Map(toolUses.map((u) => [u.id, u.name] as const));
+
+  // Tool_results paired back to their tool name via the tool_use id
+  // index. Excludes this tool's own prior volume-cluster nudges (see
+  // `isVolumeClusterNudge`) so the helper stays pure under recursion.
+  const resultsByTool = R.pipe(
+    slice,
+    R.flatMap((msg) =>
+      msg.role === "user" && Array.isArray(msg.content)
+        ? msg.content.filter(
+            (b): b is Extract<ContentBlock, { type: "tool_result" }> => b.type === "tool_result",
+          )
+        : [],
+    ),
+    R.flatMap((r) => {
+      const name = idToName.get(r.toolUseId);
+      if (name === undefined) return [];
+      if (isVolumeClusterNudge(name, r.content)) return [];
+      return [{ name, result: r }];
+    }),
+    R.groupBy((x) => x.name),
+  );
+
+  const names = new Set([...Object.keys(usesByTool), ...Object.keys(resultsByTool)]);
+
+  return new Map(
+    R.pipe(
+      [...names],
+      R.map((name) => {
+        const uses = usesByTool[name] ?? [];
+        const results = (resultsByTool[name] ?? []).map((x) => x.result);
+        const failures = results.filter((r) => r.isError === true);
+        const priorMsgIdxs = new Set(uses.map((u) => u.msgIdx).filter((idx) => idx !== lastIdx));
+
+        return [
+          name,
+          {
+            callCount: uses.length,
+            priorBatchCount: priorMsgIdxs.size,
+            outcomes: {
+              successes: results.length - failures.length,
+              failures: failures.length,
+              failureReasons: R.unique(
+                failures
+                  .map((r) => firstLineSummary(r.content))
+                  .filter((s): s is string => s !== null),
+              ),
+            },
+          },
+        ] as const;
+      }),
+    ),
+  );
+}
+
+function firstLineSummary(content: unknown): string | null {
+  const raw =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+            .map((b) =>
+              typeof b === "object" && b !== null && "text" in b && typeof b.text === "string"
+                ? b.text
+                : "",
+            )
+            .join("\n")
+        : "";
+  const trimmed =
+    raw
+      .split("\n")
+      .find((l) => l.trim().length > 0)
+      ?.trim() ?? "";
+  if (trimmed.length === 0) return null;
+  return trimmed.length > 120 ? `${trimmed.slice(0, 117)}…` : trimmed;
+}
+
+/**
+ * Common prefix every volume-cluster nudge starts with for a given
+ * tool. Shared between {@link formatVolumeClusterContent} (the builder)
+ * and {@link summarizeToolHistory}'s synthetic-nudge filter (which
+ * drops a tool's own prior nudges from its outcome counts). Kept as
+ * one function so the two callsites can't drift apart silently — if
+ * the nudge format ever changes its leading clause, both ends update
+ * together.
+ */
+function volumeClusterNudgePrefix(toolName: string): string {
+  return `You have called \`${toolName}\` `;
+}
+
+function isVolumeClusterNudge(toolName: string, content: unknown): boolean {
+  return typeof content === "string" && content.startsWith(volumeClusterNudgePrefix(toolName));
+}
+
+/**
+ * Build the synthetic `is_error: true` `tool_result` content the loop
+ * appends when the volume-cluster budget for `toolName` exhausts.
+ * Branches the text on outcome mix — all-fail, mixed, all-success — so
+ * the model gets actionable guidance instead of a generic stop signal.
+ */
+export function formatVolumeClusterContent(
+  toolName: string,
+  count: number,
+  outcomes: ToolHistorySummary["outcomes"],
+): string {
+  const { successes, failures, failureReasons } = outcomes;
+  const reasonText = failureReasons.length > 0 ? ` Reasons: ${failureReasons.join("; ")}.` : "";
+  const prefix = volumeClusterNudgePrefix(toolName);
+  const stopRule =
+    `Do NOT call \`${toolName}\` again this turn. ` +
+    "Either reply to the user with what you have, ask a clarifying question, or use a different tool.";
+  if (failures > 0 && successes === 0) {
+    return (
+      `${prefix}${count} times this turn and every attempt failed.${reasonText} ` + `${stopRule}`
+    );
+  }
+  if (successes > 0 && failures === 0) {
+    return `${prefix}${count} times this turn — ${successes} succeeded. ` + `${stopRule}`;
+  }
+  return (
+    `${prefix}${count} times this turn — ${successes} succeeded, ${failures} failed.${reasonText} ` +
+    `${stopRule}`
+  );
+}
+
+/**
+ * Decide whether a single tool_use block trips the volume-cluster budget
+ * for its tool, given the prior+in-iteration count of same-tool blocks
+ * already emitted this turn. Returns `null` when the budget is not yet
+ * exhausted — the caller proceeds with normal handler dispatch.
+ *
+ * The trip count semantic is "tool_use blocks the model produced for T
+ * this turn so far, including the one being decided." A budget of `B`
+ * means the first `B` calls execute; the `(B+1)`th and beyond are
+ * intercepted.
+ */
+export function classifyVolumeCluster(
+  count: number,
+  budget: number,
+): { kind: "intercept"; count: number } | null {
+  if (count > budget) return { kind: "intercept", count };
+  return null;
 }

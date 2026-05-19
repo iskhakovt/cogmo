@@ -6,7 +6,7 @@ import {
   parsePermissionCallback,
 } from "../../../agent/coding/permission-keyboard.js";
 import { PLAN_CALLBACK_REGEX, parsePlanCallback } from "../../../agent/coding/plan-keyboard.js";
-import { CodingProgressSubscriber } from "../../../agent/coding/progress-subscriber.js";
+import { startCodingProgressSubscriber } from "../../../agent/coding/progress-subscriber.js";
 import { parseGeneratedDocumentPayload } from "../../../agent/document-tools.js";
 import { parseGeneratedImagePayload } from "../../../agent/image-tools.js";
 import {
@@ -1049,7 +1049,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
           const tgSession = sessions.find((s) => s.channelId === channelId);
           if (!tgSession) return { skipped: "no telegram session for this conversation" };
 
-          CodingProgressSubscriber.start({
+          startCodingProgressSubscriber({
             taskId,
             chatId: Number(tgSession.platformAddress),
             goal: task.goal,

@@ -2488,9 +2488,18 @@ describe("createHandleMessage", () => {
   // proceeds with the normal post-turn flow. Conversation stays `active`.
   // See design/agent-resilience.md → Degraded reply.
 
-  it("appends the default degraded apology to the stream and persists it", async () => {
+  it("synthesizes the degraded apology via a tools-free LLM call and persists it", async () => {
     const handle = mockDeliveryHandle();
+    const synthesisProvider = mockProvider({
+      chat: vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "I tried but the model returned empty — try rephrasing." }],
+        stopReason: "end_turn",
+        model: "mock-model",
+        usage: { inputTokens: 100, outputTokens: 12 },
+      }),
+    });
     const deps = mockDeps({
+      resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn().mockResolvedValue({
         text: "",
@@ -2509,7 +2518,13 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    // The user-facing apology was pushed onto the streaming delivery.
+    // Synthesis call was made with tools disabled at the API level and
+    // temperature: 0 — pins the design constraints at the wiring layer.
+    const chatCalls = vi.mocked(synthesisProvider.chat).mock.calls;
+    expect(chatCalls).toHaveLength(1);
+    expect(chatCalls[0]?.[0]).toMatchObject({ tools: [], temperature: 0 });
+
+    // The synthesized text was pushed onto the streaming delivery.
     const textPushes = vi
       .mocked(handle.push)
       .mock.calls.flat()
@@ -2517,16 +2532,14 @@ describe("createHandleMessage", () => {
     expect(textPushes).toHaveLength(1);
     expect(textPushes[0]).toEqual({
       type: "text_delta",
-      text: "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?",
+      text: "I tried but the model returned empty — try rephrasing.",
     });
 
     // Stream still finished (no abort).
     expect(handle.finish).toHaveBeenCalled();
     expect(handle.abort).not.toHaveBeenCalled();
 
-    // Persistence included the synthetic apology assistant message —
-    // newMessages was empty when the loop returned, so the orchestrator
-    // appended it.
+    // Persistence carries the synthesized apology assistant message.
     expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -2536,7 +2549,7 @@ describe("createHandleMessage", () => {
             content: [
               {
                 type: "text",
-                text: "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?",
+                text: "I tried but the model returned empty — try rephrasing.",
               },
             ],
           },
@@ -2545,9 +2558,53 @@ describe("createHandleMessage", () => {
     );
   });
 
-  it("uses the refusal-specific apology when subtype is refusal", async () => {
+  it("falls back to the fixed string when synthesis fails", async () => {
     const handle = mockDeliveryHandle();
+    const failingSynthesis = mockProvider({
+      chat: vi.fn().mockRejectedValue(new Error("synthesis provider down")),
+    });
     const deps = mockDeps({
+      resolveProvider: mockResolver(failingSynthesis),
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn().mockResolvedValue({
+        text: "",
+        messages: [],
+        newMessages: [],
+        usage: { inputTokens: 10, outputTokens: 5 },
+        model: "mock-model",
+        iterations: 2,
+        degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
+      }),
+    });
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    // Synthesis was attempted (proves the wiring) — and the orchestrator
+    // recovered via the fixed-string fallback without aborting the turn.
+    expect(failingSynthesis.chat).toHaveBeenCalledTimes(1);
+    expect(handle.finish).toHaveBeenCalled();
+    expect(handle.abort).not.toHaveBeenCalled();
+    const textPushes = vi
+      .mocked(handle.push)
+      .mock.calls.flat()
+      .filter((e) => (e as { type: string }).type === "text_delta");
+    expect(textPushes[0]).toEqual({
+      type: "text_delta",
+      text: "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?",
+    });
+  });
+
+  it("falls back to the refusal-specific fixed string when synthesis fails on a refusal degrade", async () => {
+    const handle = mockDeliveryHandle();
+    const failingSynthesis = mockProvider({
+      chat: vi.fn().mockRejectedValue(new Error("synthesis call refused")),
+    });
+    const deps = mockDeps({
+      resolveProvider: mockResolver(failingSynthesis),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn().mockResolvedValue({
         text: "",
@@ -2688,9 +2745,22 @@ describe("createHandleMessage", () => {
     );
   });
 
-  it("preserves successful intermediate iterations and appends the apology", async () => {
+  it("preserves successful intermediate iterations and appends the synthesized apology", async () => {
     const handle = mockDeliveryHandle({
       hasBatchTargets: vi.fn().mockReturnValue(false),
+    });
+    const synthesisProvider = mockProvider({
+      chat: vi.fn().mockResolvedValue({
+        content: [
+          {
+            type: "text",
+            text: "I made progress on the first step but the second attempt produced an empty response. Try again.",
+          },
+        ],
+        stopReason: "end_turn",
+        model: "mock-model",
+        usage: { inputTokens: 80, outputTokens: 24 },
+      }),
     });
     const successfulToolRound = [
       {
@@ -2703,6 +2773,7 @@ describe("createHandleMessage", () => {
       },
     ];
     const deps = mockDeps({
+      resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       runStreamingAgentLoop: vi.fn().mockResolvedValue({
         text: "",
@@ -2733,13 +2804,13 @@ describe("createHandleMessage", () => {
     // Successful tool_use + tool_result preserved.
     expect(persistArgs.messages[0]).toEqual(successfulToolRound[0]);
     expect(persistArgs.messages[1]).toEqual(successfulToolRound[1]);
-    // Final assistant is the apology.
+    // Final assistant is the synthesized apology.
     expect(persistArgs.messages[2]).toEqual({
       role: "assistant",
       content: [
         {
           type: "text",
-          text: "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?",
+          text: "I made progress on the first step but the second attempt produced an empty response. Try again.",
         },
       ],
     });

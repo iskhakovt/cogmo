@@ -139,6 +139,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
         createParams.tools = params.tools.map(toOpenAITool);
       }
 
+      if (params.temperature !== undefined) {
+        createParams.temperature = params.temperature;
+      }
+
       if (params.responseFormat) {
         createParams.response_format = {
           type: "json_schema",
@@ -209,6 +213,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
             max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
             messages: buildMessages(params.system, params.messages, caching),
             ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
+            ...(params.temperature !== undefined && { temperature: params.temperature }),
             stream: true,
             stream_options: { include_usage: true },
           })
@@ -321,12 +326,11 @@ function buildMessages(
 ): OpenAI.ChatCompletionMessageParam[] {
   // When promptCaching is enabled (OpenRouter → Anthropic), add cache_control
   // on the system message content block. OpenRouter passes it through to Claude.
+  const systemPart: OpenAI.ChatCompletionContentPartText & {
+    cache_control: { type: "ephemeral" };
+  } = { type: "text", text: system, cache_control: { type: "ephemeral" } };
   const systemMsg: OpenAI.ChatCompletionMessageParam = promptCaching
-    ? {
-        role: "system",
-        // cache_control is an OpenRouter extension, not in OpenAI's types
-        content: [{ type: "text", text: system, cache_control: { type: "ephemeral" } } as any],
-      }
+    ? { role: "system", content: [systemPart] }
     : { role: "system", content: system };
   const result: OpenAI.ChatCompletionMessageParam[] = [systemMsg];
 

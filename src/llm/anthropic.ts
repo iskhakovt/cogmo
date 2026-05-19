@@ -273,6 +273,7 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
       messages: params.messages.map(toAnthropicMessage),
       tools: [syntheticTool],
       tool_choice: { type: "tool", name: params.responseFormat.name },
+      ...(params.temperature !== undefined && { temperature: params.temperature }),
     };
   }
 
@@ -291,6 +292,7 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
     system: systemBlocks,
     messages: params.messages.map(toAnthropicMessage),
     ...(tools && { tools }),
+    ...(params.temperature !== undefined && { temperature: params.temperature }),
   };
 
   if (params.thinking) {
