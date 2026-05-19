@@ -22,6 +22,7 @@ import {
   InputValidationError,
   SandboxUnavailableError,
   SkillDisabledError,
+  SkillInflightError,
   SkillNotFoundError,
   type SkillRunner,
 } from "./runner.js";
@@ -36,7 +37,12 @@ type DispatchResult =
   | { status: "completed"; runId: string; runStatus: "success" | "error" }
   | {
       status: "skipped";
-      reason: "skill_not_found" | "skill_disabled" | "invalid_inputs" | "sandbox_unavailable";
+      reason:
+        | "skill_not_found"
+        | "skill_disabled"
+        | "invalid_inputs"
+        | "sandbox_unavailable"
+        | "inflight";
       detail?: string;
     };
 
@@ -51,12 +57,23 @@ export function createSkillCronFireHandler(deps: SkillCronFireDeps, inngest: Inn
     async ({ event, step }) => {
       const { skillId, skillName, scheduledFor } = event.data;
 
+      // Deterministic-per-fire idempotency key — same shape as the
+      // event-bus dedup id. A retry that crosses the bus-dedup window
+      // (rare but possible) lands in `runner.invoke` with the same key,
+      // and the recovery_point state machine takes over: cached terminal
+      // result → return without touching runtime; executed but not
+      // finished → finalize-only; in-flight (crash OR concurrent worker)
+      // → throw SkillInflightError (we translate that to a skipped
+      // result below so the operator can investigate).
+      const idempotencyKey = `skill-cron:${skillId}:${scheduledFor}`;
+
       const result = await step.run("dispatch", async (): Promise<DispatchResult> => {
         try {
           const invokeResult = await deps.runner.invoke({
             name: skillName,
             inputs: {},
             trigger: "cron",
+            idempotencyKey,
           });
           return {
             status: "completed",
@@ -66,10 +83,13 @@ export function createSkillCronFireHandler(deps: SkillCronFireDeps, inngest: Inn
         } catch (e) {
           // `runner.invoke` throws (rather than returns Result) for the
           // pre-invocation gates: skill missing, disabled, or input
-          // validation failed. Each one is a typed Error subclass so we
-          // discriminate via `instanceof` — no fragile string matching
-          // against `error.message`. Translate each into a non-retrying
-          // skipped result; Inngest retries can't repair any of them.
+          // validation failed. Plus `SkillInflightError` from the
+          // recovery_point=started replay branch (covers both crashed
+          // mid-execute and concurrent-worker scenarios). Each one is a
+          // typed Error subclass so we discriminate via `instanceof` —
+          // no fragile string matching against `error.message`.
+          // Translate each into a non-retrying skipped result; Inngest
+          // retries can't repair any of them.
           const msg = e instanceof Error ? e.message : String(e);
           if (e instanceof SkillNotFoundError) {
             return { status: "skipped", reason: "skill_not_found", detail: msg };
@@ -83,8 +103,13 @@ export function createSkillCronFireHandler(deps: SkillCronFireDeps, inngest: Inn
           if (e instanceof SandboxUnavailableError) {
             return { status: "skipped", reason: "sandbox_unavailable", detail: msg };
           }
+          if (e instanceof SkillInflightError) {
+            return { status: "skipped", reason: "inflight", detail: msg };
+          }
           // Anything else (sandbox transient, DB blip) propagates so
-          // Inngest's `retries: 2` budget kicks in.
+          // Inngest's `retries: 2` budget kicks in. The next retry will
+          // hit `runner.invoke` with the same idempotency key and
+          // replay-or-finalize as appropriate — no double-execution.
           throw e;
         }
       });

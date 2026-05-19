@@ -190,11 +190,17 @@ export class ClaudeCodeBackend implements CodingBackend {
 }
 
 /**
- * Plan-mode runner — same shape as before slice 3. `--permission-mode plan`
- * blocks edits at the source, so no permission_request events arrive; the
- * function closes stdin after writing the prompt and returns a single
- * AsyncIterable. Execute mode uses a different runner because it needs
- * stdin to stay open for control_response writes.
+ * Plan-mode runner. CLI 2.x routes the entire plan flow — read-y tools
+ * (Read/Glob/Bash/Grep), a `Write` to its own plan file, and the final
+ * `ExitPlanMode` — through stream-json `control_request` frames. The CLI
+ * blocks on stdin until a `control_response` lands for each one.
+ *
+ * Auto-allow unconditionally: `--permission-mode plan` is the policy
+ * authority, so any tool that reaches our control channel has already
+ * been vetted by the CLI as plan-mode-safe. Denying breaks the model's
+ * recovery path (the plan-file Write is part of the CLI's own
+ * completion protocol) and the run idle-times-out. Events are swallowed
+ * here; the orchestrator never sees plan-mode permission traffic.
  */
 async function* runClaudePlan(
   binary: string,
@@ -208,12 +214,23 @@ async function* runClaudePlan(
     idleTimeoutMs: CLAUDE_IDLE_TIMEOUT_MS,
   });
   if (!exec.stdin) throw new Error("ClaudeCodeBackend: stdin not attached");
-  writeUserMessage(exec.stdin, prompt);
-  exec.stdin.end();
-
+  const stdin = exec.stdin;
+  writeUserMessage(stdin, prompt);
+  // Stdin stays open until `parseClaudeStream` sees `result` and closes
+  // it — closing earlier wedges the CLI on its ExitPlanMode round-trip.
   drainStderr(exec, "plan");
 
-  yield* parseClaudeStream(exec, "plan");
+  // Dedupe of duplicate `control_request` frames lives in
+  // `parseClaudeStream` (`seenPermissionRequestIds`), so by the time a
+  // `permission_request` reaches this loop the request_id is already
+  // unique. No second-layer set needed here.
+  for await (const event of parseClaudeStream(exec, "plan")) {
+    if (event.kind === "permission_request") {
+      writeControlResponse(stdin, event.requestId, { behavior: "allow" });
+      continue;
+    }
+    yield event;
+  }
 }
 
 /**
@@ -254,22 +271,7 @@ async function runClaudeExecute(
       return;
     }
     answeredRequestIds.add(requestId);
-    if (stdin.writableEnded || stdin.destroyed) {
-      log.warn(
-        { requestId },
-        "respondPermission after stdin closed — CLI session has already ended",
-      );
-      return;
-    }
-    const frame = {
-      type: "control_response",
-      response: {
-        request_id: requestId,
-        subtype: "success",
-        response,
-      },
-    };
-    stdin.write(`${JSON.stringify(frame)}\n`);
+    writeControlResponse(stdin, requestId, response);
   };
 
   const events = parseClaudeStream(exec, "execute");
@@ -278,9 +280,40 @@ async function runClaudeExecute(
 }
 
 /**
+ * Frame a permission decision as a stream-json `control_response` and write
+ * it to the CLI's stdin. The CLI matches the response back to its pending
+ * `control_request` by `request_id`. No-op if stdin has already closed
+ * (the CLI session is over and any caller racing against `result` would
+ * otherwise throw EPIPE).
+ */
+function writeControlResponse(
+  stdin: Writable,
+  requestId: string,
+  response: PermissionResponse,
+): void {
+  if (stdin.writableEnded || stdin.destroyed) {
+    log.warn(
+      { requestId },
+      "writeControlResponse after stdin closed — CLI session has already ended",
+    );
+    return;
+  }
+  const frame = {
+    type: "control_response",
+    response: {
+      request_id: requestId,
+      subtype: "success",
+      response,
+    },
+  };
+  stdin.write(`${JSON.stringify(frame)}\n`);
+}
+
+/**
  * Frame the prompt as a stream-json user message and write it. The CLI
- * reads stream-json frames from stdin until EOF (plan) or the result
- * (execute, where stdin stays open for control_response replies).
+ * keeps reading stream-json frames from stdin throughout the run; both
+ * runners leave stdin open for `control_response` replies and let
+ * `parseClaudeStream` close it after `result`.
  */
 function writeUserMessage(stdin: Writable, prompt: string): void {
   const userMessage = {
@@ -437,9 +470,11 @@ async function* parseClaudeStream(
         yield { kind: "plan_ready", plan: textBuf };
       }
       // The CLI is done; no further control_request frames will arrive.
-      // Close stdin so the subprocess exits cleanly. Plan mode already
-      // ended stdin after the prompt; this guard is harmless there.
-      if (mode === "execute" && exec.stdin && !exec.stdin.writableEnded) {
+      // Close stdin so the subprocess exits cleanly. Both modes keep stdin
+      // open during the run to write `control_response` frames — plan for
+      // `ExitPlanMode`, execute for every gated tool — and rely on this
+      // path to close it on completion.
+      if (exec.stdin && !exec.stdin.writableEnded) {
         exec.stdin.end();
       }
     }

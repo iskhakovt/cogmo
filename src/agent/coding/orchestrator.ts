@@ -543,7 +543,11 @@ async function runPlanStreaming(params: PlanStreamingParams): Promise<PlanStream
           failureReason = `claude exit code ${event.exitCode}`;
         }
         break;
-      // tool_call / tool_result / permission_request: not emitted in plan mode
+      // tool_call / tool_result fall through to the default no-op — the CLI
+      // emits an `ExitPlanMode` tool_use as part of plan completion, but the
+      // plan stream surfaces the same text via `text_delta` + `plan_ready`,
+      // so the tool_call is redundant noise for the user. permission_request
+      // never escapes runClaudePlan — it auto-allows ExitPlanMode inline.
     }
   }
 

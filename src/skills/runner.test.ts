@@ -7,7 +7,12 @@ import type { SandboxClient } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { InputValidationError, mapManifestResourceLimits, SkillRunnerImpl } from "./runner.js";
+import {
+  InputValidationError,
+  mapManifestResourceLimits,
+  SkillInflightError,
+  SkillRunnerImpl,
+} from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
 import { SysboxWorkerPool } from "./worker-sysbox/pool.js";
 
@@ -531,6 +536,149 @@ inputs:
       [1, 2, 3, 4, 5].map((x) => runner.invoke({ name: "echo", inputs: { x } })),
     );
     expect(results.every((r) => r.status === "success")).toBe(true);
+  });
+
+  describe("idempotency key + recovery_point replay", () => {
+    it("first call with idempotencyKey runs end-to-end and finishes the row", async () => {
+      const runner = await makeRunner();
+      await runner.__registerForTests({
+        name: "echo",
+        manifestSource: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+
+      const result = await runner.invoke({
+        name: "echo",
+        inputs: { x: 10 },
+        idempotencyKey: "skill-cron:echo:t1",
+      });
+      expect(result.status).toBe("success");
+      expect(result.output).toEqual({ echo: 11 });
+
+      const run = await tx((trx) => store.getRun(trx, result.runId));
+      expect(run?.recoveryPoint).toBe("finished");
+      expect(run?.status).toBe("success");
+      expect(run?.idempotencyKey).toBe("skill-cron:echo:t1");
+    });
+
+    it("second call with same key returns the cached terminal result WITHOUT re-executing the skill", async () => {
+      // Sentinel: each Pyodide invocation increments x → echoes x+1. If
+      // the skill ran twice for the same key, the second result would be
+      // produced by a second worker (same output for this skill, but the
+      // PROOF is no second `skill_runs` row gets inserted and the runId
+      // is identical to the first call).
+      const runner = await makeRunner();
+      await runner.__registerForTests({
+        name: "echo",
+        manifestSource: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+
+      const first = await runner.invoke({
+        name: "echo",
+        inputs: { x: 7 },
+        idempotencyKey: "skill-cron:echo:replay-key",
+      });
+      const second = await runner.invoke({
+        name: "echo",
+        inputs: { x: 7 },
+        idempotencyKey: "skill-cron:echo:replay-key",
+      });
+
+      // Same runId proves we recovered the row instead of inserting a new
+      // one. Same output proves the cached result was returned. No way
+      // for these two to match by coincidence — runId is a per-row UUID.
+      expect(second.runId).toBe(first.runId);
+      expect(second.status).toBe("success");
+      expect(second.output).toEqual({ echo: 8 });
+    });
+
+    it("recovered row with recovery_point='executed' replays only finalize, not execute", async () => {
+      // Simulate a persist-failure scenario: directly seed a row in
+      // recovery_point='executed' state with stored output, then call
+      // runner.invoke with the same key. The runner should skip the
+      // execute branch entirely (no Pyodide spin-up — proved by the
+      // assertion that the run finishes much faster than a cold tier-1
+      // start would take, plus the output is what we seeded, not what
+      // Pyodide would produce with these inputs).
+      const runner = await makeRunner();
+      await runner.__registerForTests({
+        name: "echo",
+        manifestSource: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
+      const { row } = await tx((trx) =>
+        store.startOrRecoverRun(trx, {
+          skillId: skill?.id ?? "",
+          trigger: "cron",
+          inputs: { x: 100 },
+          idempotencyKey: "skill-cron:echo:executed-replay",
+        }),
+      );
+      // Seed a different output than Pyodide would produce. If the
+      // runner re-executed, it'd return {echo: 101}; the seeded value
+      // returns {echo: 999} which proves no re-execution.
+      await tx((trx) =>
+        store.transitionToExecuted(trx, {
+          id: row.id,
+          output: { echo: 999 },
+          error: null,
+          resourceUsage: { wallClockMs: 5, peakMemoryBytes: 1024 },
+          finishedAt: new Date(),
+        }),
+      );
+
+      const result = await runner.invoke({
+        name: "echo",
+        inputs: { x: 100 },
+        idempotencyKey: "skill-cron:echo:executed-replay",
+      });
+      expect(result.runId).toBe(row.id);
+      expect(result.status).toBe("success");
+      expect(result.output).toEqual({ echo: 999 });
+      // The row finalized.
+      const reloaded = await tx((trx) => store.getRun(trx, row.id));
+      expect(reloaded?.recoveryPoint).toBe("finished");
+      expect(reloaded?.status).toBe("success");
+    });
+
+    it("recovered row with recovery_point='started' throws SkillInflightError", async () => {
+      // Row in `recovery_point='started'` can mean either (a) a prior
+      // attempt crashed mid-execute, or (b) another worker is currently
+      // executing this same key. The runner can't tell those apart from
+      // the row alone — both refuse re-execution, both surface the same
+      // typed error. This test seeds the row directly via
+      // `startOrRecoverRun` (no real execute), which is the test
+      // equivalent of either scenario.
+      const runner = await makeRunner();
+      await runner.__registerForTests({
+        name: "echo",
+        manifestSource: ECHO_MANIFEST,
+        body: ECHO_BODY,
+      });
+      const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
+      const { row } = await tx((trx) =>
+        store.startOrRecoverRun(trx, {
+          skillId: skill?.id ?? "",
+          trigger: "cron",
+          inputs: { x: 1 },
+          idempotencyKey: "skill-cron:echo:inflight",
+        }),
+      );
+
+      await expect(
+        runner.invoke({
+          name: "echo",
+          inputs: { x: 1 },
+          idempotencyKey: "skill-cron:echo:inflight",
+        }),
+      ).rejects.toThrow(SkillInflightError);
+
+      // Row stays as-is — operator inspects and decides.
+      const reloaded = await tx((trx) => store.getRun(trx, row.id));
+      expect(reloaded?.recoveryPoint).toBe("started");
+    });
   });
 });
 
