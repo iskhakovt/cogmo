@@ -125,6 +125,59 @@ describe("handleResume", () => {
     await handleResume(transport, ctx);
     expect(ctx.reply).toHaveBeenCalledWith("Conversation not found.");
   });
+
+  it("resolves an open boundary hold to the requested alias instead of swapping sessions", async () => {
+    // Alias lookup happens before the resolve so identity + ownership are
+    // checked the same way as the post-hold `resumeConversation` path.
+    const resumeConversation = vi.fn();
+    const resolve = vi.fn().mockResolvedValue(
+      ok({
+        sessionId: "s-target",
+        conversationId: "c-target",
+        drainedInboundCount: 1,
+        platformAddress: "42",
+      }),
+    );
+    const transport = transportWith({
+      resumeConversation,
+      boundary: {
+        findActive: vi.fn().mockResolvedValue({
+          id: "boundary-1",
+          channelId: "ch",
+          platformAddress: "42",
+          platformUserHandle: "1",
+          priorConversationId: "c-prior",
+          promptMessageId: "9001",
+          bufferedInbounds: [{ content: "hey", platformTs: "2026-05-19T12:00:00.000Z" }],
+          expiresAt: new Date(),
+          createdAt: new Date(),
+        }),
+        resolve,
+      },
+      conversations: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            {
+              id: "c-target",
+              profileName: "assistant",
+              alias: "work",
+              lastMessagePreview: "",
+              lastMessageAt: new Date(),
+            },
+          ]),
+        ),
+      },
+    });
+    const ctx = mkCtx("work");
+    await handleResume(transport, ctx);
+    expect(resolve).toHaveBeenCalledWith({
+      boundaryId: "boundary-1",
+      choice: { kind: "resume-target", conversationId: "c-target" },
+      reason: "user_resume_target",
+    });
+    expect(resumeConversation).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith('Resumed conversation "work".');
+  });
 });
 
 describe("handleName", () => {
@@ -338,6 +391,99 @@ describe("handleNew", () => {
     await handleNew(transport, ctx);
     expect(createConversation).not.toHaveBeenCalled();
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('No profile named "ghost"'));
+  });
+
+  it("resolves an open boundary hold as fresh instead of creating a new conversation", async () => {
+    // When a hold is open, `/new` should drain its buffer into the fresh
+    // conversation via `boundary.resolve` — not call `createConversation`
+    // directly (which would orphan the buffer).
+    const createConversation = vi.fn();
+    const closeSession = vi.fn();
+    const resolve = vi.fn().mockResolvedValue(
+      ok({
+        sessionId: "s-fresh",
+        conversationId: "c-fresh",
+        drainedInboundCount: 1,
+        platformAddress: "42",
+      }),
+    );
+    const transport = transportWith({
+      createConversation,
+      closeSession,
+      boundary: {
+        findActive: vi.fn().mockResolvedValue({
+          id: "boundary-1",
+          channelId: "ch",
+          platformAddress: "42",
+          platformUserHandle: "1",
+          priorConversationId: "c-prior",
+          promptMessageId: "9001",
+          bufferedInbounds: [{ content: "hi", platformTs: "2026-05-19T12:00:00.000Z" }],
+          expiresAt: new Date(),
+          createdAt: new Date(),
+        }),
+        resolve,
+      },
+      conversations: {
+        getCurrent: vi.fn().mockResolvedValue(
+          ok({
+            conversationId: "c-fresh",
+            profileId: "p1",
+            profileName: "assistant",
+            model: "m",
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleNew(transport, ctx);
+    expect(resolve).toHaveBeenCalledWith({
+      boundaryId: "boundary-1",
+      choice: { kind: "fresh" },
+      reason: "user_command",
+    });
+    expect(createConversation).not.toHaveBeenCalled();
+    expect(closeSession).not.toHaveBeenCalled();
+    // Pin the full reply shape — the trailing "(assistant)." comes from
+    // `transport.conversations.getCurrent` returning profileName, not from
+    // the user's command arg. Regressions in either path would fall through
+    // to the "(default)" fallback and this assertion would catch it.
+    expect(ctx.reply).toHaveBeenCalledWith("Started a new conversation (assistant).");
+  });
+
+  it("forwards the explicit profile to boundary.resolve when /new <name> runs during a hold", async () => {
+    const resolve = vi.fn().mockResolvedValue(
+      ok({
+        sessionId: "s-fresh",
+        conversationId: "c-fresh",
+        drainedInboundCount: 1,
+        platformAddress: "42",
+      }),
+    );
+    const transport = transportWith({
+      profiles: { list: vi.fn().mockResolvedValue(ok([profile("p9", "coder")])) },
+      boundary: {
+        findActive: vi.fn().mockResolvedValue({
+          id: "boundary-1",
+          channelId: "ch",
+          platformAddress: "42",
+          platformUserHandle: "1",
+          priorConversationId: "c-prior",
+          promptMessageId: "9001",
+          bufferedInbounds: [{ content: "hi", platformTs: "2026-05-19T12:00:00.000Z" }],
+          expiresAt: new Date(),
+          createdAt: new Date(),
+        }),
+        resolve,
+      },
+    });
+    const ctx = mkCtx("coder");
+    await handleNew(transport, ctx);
+    expect(resolve).toHaveBeenCalledWith({
+      boundaryId: "boundary-1",
+      choice: { kind: "fresh", profileId: "p9" },
+      reason: "user_command",
+    });
   });
 });
 

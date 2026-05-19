@@ -14,6 +14,24 @@ export const inboundArrived = eventType("inbound/arrived", {
   }),
 });
 
+export type InboundArrivedData = z.infer<typeof inboundArrived.schema>;
+
+/**
+ * Build an `inbound/arrived` event payload with a bus-dedup `id` keyed on
+ * the inbound message — used wherever the emit may be retried after a
+ * partial-progress failure (e.g. `resolveBoundary` emits N events in a
+ * loop; an Inngest step.run retry after a mid-loop crash would re-emit
+ * already-sent ones without this dedup). One inbound row, one router run,
+ * regardless of how many times the emit path retries.
+ *
+ * `transport.emit` doesn't go through here because its emit is a single
+ * send after a single insert — there's no partial-progress shape to
+ * idempotently retry.
+ */
+export function buildInboundArrivedEvent(data: InboundArrivedData) {
+  return { ...inboundArrived.create(data), id: `inbound-arrived-${data.inboundMessageId}` };
+}
+
 /**
  * Fired when the orchestrator has persisted an assistant response.
  * Notification only — delivery is handled inline by the DeliveryRouter.
@@ -290,6 +308,69 @@ export function buildConversationCooldownClearedEvent(
   id: string,
 ) {
   return { ...conversationCooldownCleared.create(data), id };
+}
+
+// --- Boundary hold events ---
+
+/**
+ * The Telegram adapter has stashed an inbound in `boundary_pending` and
+ * sent the user a "Resume previous / Start fresh" prompt. The waiter
+ * function (`boundary-waiter`) consumes this and starts the timeout.
+ * `cancelOn` `boundary/resolved` ends the wait early when the user taps
+ * a button (or runs `/new` / `/resume` while the hold is open).
+ *
+ * Dedup id is `boundary-pending-${boundaryId}` so a retry of the
+ * boundary-creating tx (Inngest at-least-once) doesn't start two waiters.
+ */
+export const boundaryPendingEvent = eventType("conversation/boundary/pending", {
+  schema: z.object({
+    boundaryId: z.string(),
+    channelId: z.string(),
+    platformAddress: z.string(),
+    timeoutMs: z.number().int().positive(),
+  }),
+});
+
+export type BoundaryPendingData = z.infer<typeof boundaryPendingEvent.schema>;
+
+export function buildBoundaryPendingEvent(data: BoundaryPendingData) {
+  return { ...boundaryPendingEvent.create(data), id: `boundary-pending-${data.boundaryId}` };
+}
+
+/**
+ * Fired when a boundary hold has been resolved — by user button tap,
+ * by `/new` or `/resume` during the hold, or by waiter timeout falling
+ * back to "fresh." Cancels the waiter (`cancelOn`) and is observability
+ * for downstream consumers (no orchestrator dependency yet).
+ *
+ * `resolvedConversationId` carries the conversation the buffered inbounds
+ * landed in — the prior id for `resume`/`resume_target`, a freshly
+ * created id for `fresh`/`waiter_timeout`.
+ */
+export const boundaryResolvedReason = [
+  "user_resume",
+  "user_resume_target",
+  "user_fresh",
+  "user_command",
+  "waiter_timeout",
+] as const;
+export type BoundaryResolvedReason = (typeof boundaryResolvedReason)[number];
+
+export const boundaryResolvedEvent = eventType("conversation/boundary/resolved", {
+  schema: z.object({
+    boundaryId: z.string(),
+    channelId: z.string(),
+    platformAddress: z.string(),
+    resolvedConversationId: z.string(),
+    reason: z.enum(boundaryResolvedReason),
+    drainedInboundCount: z.number().int().nonnegative(),
+  }),
+});
+
+export type BoundaryResolvedData = z.infer<typeof boundaryResolvedEvent.schema>;
+
+export function buildBoundaryResolvedEvent(data: BoundaryResolvedData) {
+  return { ...boundaryResolvedEvent.create(data), id: `boundary-resolved-${data.boundaryId}` };
 }
 
 // --- Debounce events ---
