@@ -1339,12 +1339,16 @@ export function createTransport(deps: {
               return err({ code: "compartment_unknown" as const, name: unknown });
             }
           }
-          // Conversation ownership for the same-tx cooldown clear is
-          // verified BEFORE the profile update so a wrong / missing
-          // conversation aborts the whole update — better than
-          // silently dropping the cooldown-clear side effect.
-          if (opts?.clearCooldownForConversation !== undefined) {
-            const conv = await agentStore.getConversation(tx, opts.clearCooldownForConversation);
+          // Pre-validate the cooldown-clear side effect BEFORE the
+          // profile update commits, so a wrong / missing / mismatched
+          // conversation aborts the whole update rather than silently
+          // dropping the clear (or worse — clearing the cooldown on a
+          // conversation that doesn't use this profile, defeating the
+          // "context switch ends cooldown" rationale).
+          let shouldClearCooldown = false;
+          const clearTarget = opts?.clearCooldownForConversation;
+          if (clearTarget !== undefined) {
+            const conv = await agentStore.getConversation(tx, clearTarget);
             if (!conv) return err({ code: "conversation_not_found" as const });
             if (conv.userId !== identity.userId) {
               return err({
@@ -1352,6 +1356,21 @@ export function createTransport(deps: {
                 reason: "conversation not owned by caller",
               });
             }
+            if (conv.profileId !== profileId) {
+              // The clear's rationale is "the model the failing turn
+              // used changed". If the conversation doesn't actually
+              // use this profile, the new model isn't its model and
+              // the clear would be a spurious side effect. Reject
+              // rather than silently no-op so the caller surfaces a
+              // bug instead of hiding it.
+              return err({
+                code: "access_denied" as const,
+                reason: "conversation does not use this profile",
+              });
+            }
+            // Match setProfile's optimization — skip the UPDATE when
+            // there's nothing to clear, avoiding a no-op row write.
+            shouldClearCooldown = conv.cooldownState !== null;
           }
           try {
             const updated = await agentStore.updateProfile(tx, profileId, changes);
@@ -1360,8 +1379,8 @@ export function createTransport(deps: {
             // prevents the partial-commit "switched model but still
             // cooling down" state. See
             // design/agent-resilience.md → Clear triggers.
-            if (opts?.clearCooldownForConversation !== undefined) {
-              await agentStore.clearCooldown(tx, opts.clearCooldownForConversation);
+            if (shouldClearCooldown && clearTarget !== undefined) {
+              await agentStore.clearCooldown(tx, clearTarget);
             }
             return ok(updated);
           } catch (e) {
