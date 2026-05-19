@@ -2306,7 +2306,15 @@ describe("handleModel", () => {
     });
     const ctx = mkCtx("gpt-4o");
     await handleModel(transport, ctx);
-    expect(update).toHaveBeenCalledWith("1", "p1", { model: "gpt-4o" });
+    // The handler passes `clearCooldownForConversation` so the model
+    // update + cooldown clear land in one tx. See
+    // design/agent-resilience.md → Clear triggers.
+    expect(update).toHaveBeenCalledWith(
+      "1",
+      "p1",
+      { model: "gpt-4o" },
+      { clearCooldownForConversation: "c1" },
+    );
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("set to gpt-4o"));
   });
 

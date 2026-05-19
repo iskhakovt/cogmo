@@ -444,6 +444,19 @@ export interface Transport {
       platformUserHandle: string,
       profileId: string,
       changes: Partial<ProfileInput>,
+      /**
+       * When set, clears `cooldown_state` on this conversation in the
+       * same transaction as the profile update. Used by `/model` — the
+       * design treats model switches as context changes that should
+       * end any active cooldown; same-tx atomicity prevents a partial
+       * commit from leaving "switched model but still cooling down"
+       * state. Caller is responsible for verifying ownership of the
+       * conversation; the store call only requires that the
+       * conversation exists.
+       *
+       * See `design/agent-resilience.md` → Clear triggers.
+       */
+      opts?: { clearCooldownForConversation?: string },
     ): Promise<Result<Profile, TransportError>>;
     delete(platformUserHandle: string, profileId: string): Promise<Result<void, TransportError>>;
     /**
@@ -1147,6 +1160,18 @@ export function createTransport(deps: {
             });
           }
           await agentStore.setConversationProfile(tx, conversationId, profileId);
+          // Auto-repair clear trigger — `/profile` is a context switch
+          // ("the new profile has its own provider/tools and may not
+          // exhibit the failure"), so end any active cooldown in the
+          // same tx. Atomicity matters: a partial commit could leave
+          // the conversation switched but still cooling down. Cheap
+          // even when `cooldown_state` is already NULL — Postgres
+          // collapses UPDATE…SET cooldown_state=NULL to a no-op
+          // row-version if the value didn't change. See
+          // design/agent-resilience.md → Clear triggers.
+          if (conv.cooldownState !== null) {
+            await agentStore.clearCooldown(tx, conversationId);
+          }
           return ok(undefined);
         });
       },
@@ -1282,7 +1307,7 @@ export function createTransport(deps: {
         });
       },
 
-      async update(platformUserHandle, profileId, changes) {
+      async update(platformUserHandle, profileId, changes, opts) {
         return runInTx(async (tx) => {
           const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
           if (!identity) return err({ code: "identity_rejected" as const });
@@ -1314,8 +1339,30 @@ export function createTransport(deps: {
               return err({ code: "compartment_unknown" as const, name: unknown });
             }
           }
+          // Conversation ownership for the same-tx cooldown clear is
+          // verified BEFORE the profile update so a wrong / missing
+          // conversation aborts the whole update — better than
+          // silently dropping the cooldown-clear side effect.
+          if (opts?.clearCooldownForConversation !== undefined) {
+            const conv = await agentStore.getConversation(tx, opts.clearCooldownForConversation);
+            if (!conv) return err({ code: "conversation_not_found" as const });
+            if (conv.userId !== identity.userId) {
+              return err({
+                code: "access_denied" as const,
+                reason: "conversation not owned by caller",
+              });
+            }
+          }
           try {
             const updated = await agentStore.updateProfile(tx, profileId, changes);
+            // Same-tx clear — `/model` rationale: model switch is a
+            // context change that ends any active cooldown. Atomicity
+            // prevents the partial-commit "switched model but still
+            // cooling down" state. See
+            // design/agent-resilience.md → Clear triggers.
+            if (opts?.clearCooldownForConversation !== undefined) {
+              await agentStore.clearCooldown(tx, opts.clearCooldownForConversation);
+            }
             return ok(updated);
           } catch (e) {
             if (e instanceof UniqueViolationError)
