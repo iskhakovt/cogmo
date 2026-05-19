@@ -702,4 +702,54 @@ describe("tool gate wiring", () => {
     expect(log[0]?.scope).toBe("once");
     expect(log[0]?.pattern).toBe("Bash(git push *)");
   });
+
+  it("decision-log task-scoped deny beats profile autoapprove=on", async () => {
+    // Pins the gate's evaluation order: replay first, then policy, then
+    // autoapprove. A prior user-tapped "Deny for task" on a pattern
+    // must hold even if the profile would otherwise auto-approve.
+    const { task } = await seedRepoAndTaskWithAutoapprove();
+    await tx((trx) =>
+      store.insertToolDecision(trx, {
+        taskId: task.id,
+        tool: "Bash",
+        pattern: "Bash(git push *)",
+        decision: "deny",
+        scope: "task",
+      }),
+    );
+
+    const { sandbox } = fakeSandbox();
+    const { backend, handle } = fakeBackend([
+      { kind: "session_started", sessionId: "sess-x" },
+      {
+        kind: "permission_request",
+        requestId: "req_push_denied",
+        tool: "Bash",
+        input: { command: "git push origin main" },
+      },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const inngestSend = vi.fn().mockResolvedValue(undefined);
+    const stepWaitForEvent = vi.fn();
+    await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      stepWaitForEvent,
+      inngest: { send: inngestSend } as unknown as Inngest,
+    });
+
+    // Replay branch wins — no Telegram round trip, no fresh decision-log
+    // row (replay matches return early without persistDecision).
+    const eventNames = inngestSend.mock.calls.map((c) => c[0].name);
+    expect(eventNames).not.toContain("coding/task/permission-requested");
+    expect(stepWaitForEvent).not.toHaveBeenCalled();
+    expect(handle.responses[0]?.response).toEqual({ behavior: "deny" });
+    const log = await tx((trx) => store.listToolDecisionsForTask(trx, task.id));
+    expect(log).toHaveLength(1); // the seeded deny, no new row
+    expect(log[0]?.decision).toBe("deny");
+    expect(log[0]?.scope).toBe("task");
+  });
 });

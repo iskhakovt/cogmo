@@ -2391,6 +2391,30 @@ describe("/profile autoapprove subcommand", () => {
     expect(update).not.toHaveBeenCalled();
     expect(ctx.reply.mock.calls[0]?.[0]).toContain('No profile named "ghost"');
   });
+
+  it("ambiguous profile name replies with disambiguation hint without writing", async () => {
+    // Two org profiles sharing a name is the practical trigger — both
+    // user_id IS NULL, so `resolveProfileByName`'s "pick the owned one"
+    // tiebreaker can't help and the resolver surfaces ambiguous.
+    const update = vi.fn();
+    const transport = transportWith({
+      profiles: {
+        list: vi
+          .fn()
+          .mockResolvedValue(
+            ok([
+              makeProfile({ id: "p1", userId: null, name: "shared" }),
+              makeProfile({ id: "p2", userId: null, name: "shared" }),
+            ]),
+          ),
+        update,
+      },
+    });
+    const ctx = mkCtx("autoapprove shared on");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("shared");
+  });
 });
 
 describe("formatScope", () => {

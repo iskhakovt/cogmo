@@ -1316,5 +1316,15 @@ describe("DrizzleCodingStore", () => {
       const mode = await tx((trx) => store.getCodingAutoapproveModeForTask(trx, task.id));
       expect(mode).toBeNull();
     });
+
+    it("returns null for a task id that doesn't exist", async () => {
+      // The orchestrator's `??  'off'` fallback turns this into the safe
+      // default — pinning the null return so a future refactor that
+      // changes the join shape can't silently flip the fallback.
+      const mode = await tx((trx) =>
+        store.getCodingAutoapproveModeForTask(trx, "00000000-0000-7000-8000-deadbeef0000"),
+      );
+      expect(mode).toBeNull();
+    });
   });
 });
