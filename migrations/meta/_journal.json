@@ -274,6 +274,20 @@
       "when": 1779130254678,
       "tag": "0038_evolution_events",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1779193648988,
+      "tag": "0039_drop_conversation_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1779193680662,
+      "tag": "0040_add_cooldown_state",
+      "breakpoints": true
     }
   ]
 }

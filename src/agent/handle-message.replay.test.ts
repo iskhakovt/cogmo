@@ -254,6 +254,8 @@ describe("handle-message — crash recovery / step replay", () => {
             userId: "user-1",
             profileId: "profile-1",
             isPrivate: true,
+            cooldownState: null,
+            voiceMode: null,
           }),
         },
         { id: "last-assistant", handler: () => null },
