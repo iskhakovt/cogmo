@@ -2,7 +2,7 @@ Per-profile auto-approve for the coding-delegation tool gate. When a profile has
 
 The trade-off the user opts into: silence in exchange for unattended execution of prompt-worthy operations — `git push`, `gh pr/issue` mutations, registry publishes, external HTTP writes. Sensible when the profile is doing trusted refactoring work and the prompt churn outweighs the safety benefit; not sensible when the model might invent a `gh release create` mid-task. Default stays `off` so existing profiles see no behavior change.
 
-Schema: `profiles.coding_autoapprove_mode` (new `pgEnum` with values `off`, `on`), NOT NULL DEFAULT `'off'`. Migration `0043_profile_coding_autoapprove.sql`. Future tiers (e.g. `trusted` allow-listing only the lowest-risk mutations like `gh issue comment`) can land as enum additions without a column-type migration.
+Schema: `profiles.coding_autoapprove_mode` (new `pgEnum` with values `off`, `on`), NOT NULL DEFAULT `'off'`. Migration `0044_profile_coding_autoapprove.sql`. The enum-with-one-non-default-value shape leaves room for future tiers (e.g. `trusted` allow-listing only the lowest-risk mutations) without a column-type migration.
 
 Store: `Profile` interface gains `codingAutoapproveMode: "off" | "on"`; threaded through `ProfileUpdates` and `transport.profiles.update`'s `ProfileInput` so the existing Transport surface covers writes without a dedicated single-field setter. New `CodingStore.getCodingAutoapproveModeForTask(tx, taskId)` joins `coding_tasks → conversations → profiles` in one query; returns `null` for evolution / signal-pipeline triggers that have no conversation chain (those run with the default `off` semantics).
 
