@@ -29,6 +29,8 @@ export type SkillRiskTier = "auto" | "notify" | "approve";
 export type SkillRunStatus = "running" | "success" | "error";
 export type SkillRunTrigger = "manual" | "cron" | "event";
 export type SkillDeployStatus = "pending_approval" | "approved" | "denied" | "live" | "rolled_back";
+/** See {@link skillRunRecoveryPoint} in schema.ts for the per-state contract. */
+export type SkillRunRecoveryPoint = "started" | "executed" | "finished";
 
 export interface SkillRow {
   id: string;
@@ -75,10 +77,26 @@ export interface SkillRunRow {
   error: string | null;
   /**
    * Per-run wall-clock + peak-memory metrics. Null while the run is in
-   * `status='running'`; populated by `updateRunResult` at finalisation
-   * time. Shape: {@link SkillRunResourceUsage}.
+   * `recovery_point='started'`; populated by `transitionToExecuted` when
+   * the worker returns. Shape: {@link SkillRunResourceUsage}.
    */
   resourceUsage: SkillRunResourceUsage | null;
+  /**
+   * Caller-supplied deterministic token. Null for one-shot invocations
+   * (CLI, ad-hoc tests). When present, the `uniq_skill_runs_idempotency_key`
+   * UNIQUE constraint plus the {@link recoveryPoint} state machine give
+   * exactly-once execution semantics across retries — see `runner.invoke`.
+   * Postgres's default NULL-not-equal semantics let null-key rows coexist
+   * freely under the same constraint.
+   */
+  idempotencyKey: string | null;
+  /**
+   * Stripe-pattern phase marker. `started` → row inserted, execute may
+   * not have completed; `executed` → execute completed and its result
+   * committed; `finished` → row terminal. Drives `runner.invoke`'s
+   * replay branches.
+   */
+  recoveryPoint: SkillRunRecoveryPoint;
   createdAt: Date;
   finishedAt: Date | null;
 }
@@ -124,21 +142,14 @@ export interface InsertRunParams {
   skillId: string;
   trigger: SkillRunTrigger;
   inputs: unknown;
-}
-
-export interface UpdateRunResultParams {
-  id: string;
-  status: SkillRunStatus;
-  output: unknown | null;
-  error: string | null;
   /**
-   * Per-run metrics — `wallClockMs` is always set by the caller (host-side
-   * derived from `finishedAt - createdAt`); `peakMemoryBytes` is null
-   * when the runtime didn't surface a `rusage` block (tier-1 Pyodide,
-   * synthesised tier-2 timeouts/crashes). See {@link SkillRunResourceUsage}.
+   * Optional deterministic token. When provided, the row is inserted with
+   * an `ON CONFLICT DO NOTHING` clause against
+   * `uniq_skill_runs_idempotency_key`; the caller distinguishes "we
+   * inserted" from "someone else holds the row" via
+   * {@link SkillStore.startOrRecoverRun}.
    */
-  resourceUsage: SkillRunResourceUsage;
-  finishedAt: Date;
+  idempotencyKey?: string;
 }
 
 export interface RecordContextCallParams {
@@ -345,8 +356,60 @@ export interface SkillStore {
 
   // --- skill_runs ---
   insertRun(tx: Transaction, params: InsertRunParams): Promise<SkillRunRow>;
-  updateRunResult(tx: Transaction, params: UpdateRunResultParams): Promise<void>;
   getRun(tx: Transaction, id: string): Promise<SkillRunRow | undefined>;
+
+  /**
+   * Race-safe lookup-or-create for a keyed run. Used by `runner.invoke`
+   * when an idempotency key is supplied:
+   *
+   *   - `kind: 'new'` — the row didn't exist; we just inserted it in
+   *     `recovery_point='started'`. Caller proceeds with execute.
+   *   - `kind: 'recovered'` — the row existed (either a prior attempt
+   *     that crashed, or a successful run being replayed). Caller
+   *     branches on `row.recoveryPoint`.
+   *
+   * Implementation: `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING
+   * RETURNING *`; when zero rows return, follow up with `SELECT ... FOR
+   * UPDATE` so the recovered row is locked for the caller's transition.
+   */
+  startOrRecoverRun(
+    tx: Transaction,
+    params: { skillId: string; trigger: SkillRunTrigger; inputs: unknown; idempotencyKey: string },
+  ): Promise<{ kind: "new" | "recovered"; row: SkillRunRow }>;
+
+  /**
+   * Atomic transition `started → executed`. Writes the executed payload
+   * (output / error / rusage / finished_at) in the same UPDATE that
+   * advances `recovery_point`. Caller wraps in `runInTx`. A retry whose
+   * cached `executed` row already exists short-circuits this write via
+   * the row-state check inside `runner.invoke`.
+   */
+  transitionToExecuted(
+    tx: Transaction,
+    params: {
+      id: string;
+      output: unknown | null;
+      error: string | null;
+      resourceUsage: SkillRunResourceUsage;
+      finishedAt: Date;
+    },
+  ): Promise<void>;
+
+  /**
+   * Atomic transition `executed → finished`. Writes the terminal `status`
+   * (which the execute step doesn't have — output validation runs after)
+   * and flips `recovery_point` to `finished`. Output is overwritten with
+   * `null` when output validation rejected the executed payload.
+   */
+  transitionToFinished(
+    tx: Transaction,
+    params: {
+      id: string;
+      status: SkillRunStatus;
+      output: unknown | null;
+      error: string | null;
+    },
+  ): Promise<void>;
 
   // --- skill_context_calls ---
   recordContextCall(tx: Transaction, params: RecordContextCallParams): Promise<void>;
@@ -827,22 +890,115 @@ export class DrizzleSkillStore implements SkillStore {
           trigger: params.trigger,
           inputs: params.inputs,
           status: "running",
+          ...(params.idempotencyKey !== undefined && {
+            idempotencyKey: params.idempotencyKey,
+          }),
         })
         .returning(),
     );
   }
 
-  async updateRunResult(tx: Transaction, params: UpdateRunResultParams): Promise<void> {
-    await tx
+  async startOrRecoverRun(
+    tx: Transaction,
+    params: { skillId: string; trigger: SkillRunTrigger; inputs: unknown; idempotencyKey: string },
+  ): Promise<{ kind: "new" | "recovered"; row: SkillRunRow }> {
+    if (params.inputs === null || params.inputs === undefined) {
+      throw new Error("startOrRecoverRun: inputs must not be null/undefined");
+    }
+    // ON CONFLICT DO NOTHING against the `uniq_skill_runs_idempotency_key`
+    // UNIQUE constraint. Postgres default NULL semantics treat nulls as
+    // not-equal in unique constraints, so multiple null-key rows
+    // (CLI / tests) coexist; non-null keys collide and the no-op path
+    // fires. RETURNING yields zero rows on collision; the caller
+    // re-selects with FOR UPDATE to lock the existing row for its own
+    // transition.
+    const inserted = await tx
+      .insert(skillRuns)
+      .values({
+        skillId: params.skillId,
+        trigger: params.trigger,
+        inputs: params.inputs,
+        status: "running",
+        idempotencyKey: params.idempotencyKey,
+      })
+      .onConflictDoNothing({ target: skillRuns.idempotencyKey })
+      .returning();
+    if (inserted.length > 0) {
+      return { kind: "new", row: single(inserted) };
+    }
+    // Recovered: prior attempt holds the row. Lock for our subsequent
+    // UPDATE so concurrent retries serialize on this row instead of
+    // racing.
+    const existing = await tx
+      .select()
+      .from(skillRuns)
+      .where(eq(skillRuns.idempotencyKey, params.idempotencyKey))
+      .limit(1)
+      .for("update");
+    return { kind: "recovered", row: single(existing) };
+  }
+
+  async transitionToExecuted(
+    tx: Transaction,
+    params: {
+      id: string;
+      output: unknown | null;
+      error: string | null;
+      resourceUsage: SkillRunResourceUsage;
+      finishedAt: Date;
+    },
+  ): Promise<void> {
+    // Guard the transition on the current recovery_point so a
+    // programmer error (calling transitionToExecuted on a row that has
+    // already moved past 'started') surfaces as an assertion failure
+    // instead of silently regressing the row. The UPDATE matches zero
+    // rows when the precondition fails; we re-select to discriminate
+    // "row vanished" from "row in wrong state" for a useful message.
+    const updated = await tx
+      .update(skillRuns)
+      .set({
+        output: params.output,
+        error: params.error,
+        resourceUsage: params.resourceUsage,
+        finishedAt: params.finishedAt,
+        recoveryPoint: "executed",
+      })
+      .where(and(eq(skillRuns.id, params.id), eq(skillRuns.recoveryPoint, "started")))
+      .returning({ id: skillRuns.id });
+    if (updated.length === 0) {
+      throw new Error(
+        `transitionToExecuted(${params.id}): row not found or recovery_point != 'started'`,
+      );
+    }
+  }
+
+  async transitionToFinished(
+    tx: Transaction,
+    params: {
+      id: string;
+      status: SkillRunStatus;
+      output: unknown | null;
+      error: string | null;
+    },
+  ): Promise<void> {
+    // Guard the transition on `recovery_point='executed'`. Same
+    // rationale as transitionToExecuted — catch out-of-order calls
+    // at the DB layer instead of silently regressing the row.
+    const updated = await tx
       .update(skillRuns)
       .set({
         status: params.status,
         output: params.output,
         error: params.error,
-        resourceUsage: params.resourceUsage,
-        finishedAt: params.finishedAt,
+        recoveryPoint: "finished",
       })
-      .where(eq(skillRuns.id, params.id));
+      .where(and(eq(skillRuns.id, params.id), eq(skillRuns.recoveryPoint, "executed")))
+      .returning({ id: skillRuns.id });
+    if (updated.length === 0) {
+      throw new Error(
+        `transitionToFinished(${params.id}): row not found or recovery_point != 'executed'`,
+      );
+    }
   }
 
   async getRun(tx: Transaction, id: string): Promise<SkillRunRow | undefined> {
