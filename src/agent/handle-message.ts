@@ -233,12 +233,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // unbatched — when the cooldown elapses the next `inbound/ready`
       // loads the backlog as one batch. See design/agent-resilience.md
       // → Auto-repair.
-      if (conv.cooldownState !== null && isInCooldown(conv.cooldownState, new Date())) {
+      const guardNow = new Date();
+      if (conv.cooldownState !== null && isInCooldown(conv.cooldownState, guardNow)) {
         const cooldownState = conv.cooldownState;
         await step.run("in-cooldown-reply", async () => {
           await deliveryRouter.notifyConversation(
             conversationId,
-            buildInCooldownReply(cooldownState, new Date()),
+            buildInCooldownReply(cooldownState, guardNow),
           );
         });
         return { status: "skipped", reason: "cooldown" };

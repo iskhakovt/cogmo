@@ -46,12 +46,17 @@ export function createRecoverConversation(deps: RecoverConversationDeps) {
       const { conversationId, errorClass, causeClass, errorMessage } = event.data;
 
       const result = await step.run("write-cooldown", async () => {
+        // Capture `now` outside `runInTx` so a 40001 retry inside the
+        // transactor reuses the same anchor (recover-conversation has
+        // `retries: 0`, but the transactor's own once-retry would
+        // otherwise re-anchor `lastErroredAt` by a few ms across attempts).
+        const now = new Date();
         return runInTx(async (tx) => {
           const conv = await agentStore.getConversation(tx, conversationId);
           if (!conv) {
             return { kind: "not_found" as const };
           }
-          const next = nextCooldownState(conv.cooldownState, new Date());
+          const next = nextCooldownState(conv.cooldownState, now);
           await agentStore.writeCooldownState(tx, conversationId, next);
           return { kind: "wrote" as const, state: next };
         });
