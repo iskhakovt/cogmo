@@ -225,7 +225,7 @@ describe("renderConversationStatus", () => {
     return {
       conversationId: "11111111-2222-3333-4444-aaaaaaaabbbb",
       alias: "work",
-      status: "active",
+      cooldownState: null,
       createdAt: new Date("2026-04-16T10:00:00Z"),
       lastMessageAt: new Date("2026-04-16T11:30:00Z"),
       messageCount: 7,
@@ -253,6 +253,39 @@ describe("renderConversationStatus", () => {
     const text = renderConversationStatus(mkStatus(), { now: NOW });
     expect(text).toContain("work · status: active · age: 3h");
     expect(text).toContain("messages: 7 · idle: 1h");
+  });
+
+  it("renders cooling-down status with remaining time when within the window", () => {
+    const text = renderConversationStatus(
+      mkStatus({
+        cooldownState: {
+          // 2 minutes ago, 5-minute window → 3 minutes remaining
+          lastErroredAt: new Date(NOW.getTime() - 2 * 60_000).toISOString(),
+          cooldownSeconds: 300,
+          consecutiveFailures: 3,
+        },
+      }),
+      { now: NOW },
+    );
+    expect(text).toContain("status: cooling down (~3 minutes · 3 consecutive failures)");
+  });
+
+  it("renders 'awaiting probe' once the cooldown window has elapsed", () => {
+    const text = renderConversationStatus(
+      mkStatus({
+        cooldownState: {
+          lastErroredAt: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
+          cooldownSeconds: 60,
+          consecutiveFailures: 2,
+        },
+      }),
+      { now: NOW },
+    );
+    expect(text).toContain("status: awaiting probe (2 consecutive failures)");
+  });
+
+  it("renders the same fields under the Closed state header", () => {
+    const text = renderConversationStatus(mkStatus(), { now: NOW });
     expect(text).toContain("main · claude-sonnet-4-6 · tools: 4 · auto-recall: heuristic");
     expect(text).toContain("scope: unrestricted");
     expect(text).toContain("last turn — in: 23.4k · out: 412 · budget: 180k (13%)");

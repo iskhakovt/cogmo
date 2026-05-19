@@ -652,7 +652,11 @@ describe("createTransport", () => {
           userId: "user-other",
           profileId: "p1",
           isPrivate: true,
-          status: "errored",
+          cooldownState: {
+            lastErroredAt: "2026-05-19T11:00:00.000Z",
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
         }),
       });
       const { transport } = setup({ agentStore });
@@ -663,40 +667,44 @@ describe("createTransport", () => {
       });
     });
 
-    it("flips status to active and reports wasErrored: true", async () => {
-      const setConversationStatus = vi.fn();
+    it("clears cooldown_state and reports wasCoolingDown: true", async () => {
+      const clearCooldown = vi.fn();
       const agentStore = mockAgentStore({
         getConversation: vi.fn().mockResolvedValue({
           id: "c1",
           userId: "user-1",
           profileId: "p1",
           isPrivate: true,
-          status: "errored",
+          cooldownState: {
+            lastErroredAt: "2026-05-19T11:00:00.000Z",
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
         }),
-        setConversationStatus,
+        clearCooldown,
       });
       const { transport } = setup({ agentStore });
       const res = await transport.conversations.repair("handle", "c1");
-      expect(res._unsafeUnwrap()).toEqual({ wasErrored: true });
-      expect(setConversationStatus).toHaveBeenCalledWith(expect.anything(), "c1", "active");
+      expect(res._unsafeUnwrap()).toEqual({ wasCoolingDown: true });
+      expect(clearCooldown).toHaveBeenCalledWith(expect.anything(), "c1");
     });
 
-    it("is idempotent on already-active conversations and skips the write", async () => {
-      const setConversationStatus = vi.fn();
+    it("is idempotent on conversations not cooling down and skips the write", async () => {
+      const clearCooldown = vi.fn();
       const agentStore = mockAgentStore({
         getConversation: vi.fn().mockResolvedValue({
           id: "c1",
           userId: "user-1",
           profileId: "p1",
           isPrivate: true,
-          status: "active",
+          cooldownState: null,
         }),
-        setConversationStatus,
+        clearCooldown,
       });
       const { transport } = setup({ agentStore });
       const res = await transport.conversations.repair("handle", "c1");
-      expect(res._unsafeUnwrap()).toEqual({ wasErrored: false });
-      expect(setConversationStatus).not.toHaveBeenCalled();
+      expect(res._unsafeUnwrap()).toEqual({ wasCoolingDown: false });
+      expect(clearCooldown).not.toHaveBeenCalled();
     });
   });
 
@@ -708,7 +716,7 @@ describe("createTransport", () => {
           userId: "user-1",
           profileId: "p1",
           isPrivate: true,
-          status: "active",
+          cooldownState: null,
           voiceMode: null,
         }),
         getProfile: vi.fn().mockResolvedValue({
@@ -771,7 +779,7 @@ describe("createTransport", () => {
           userId: "user-other",
           profileId: "p1",
           isPrivate: true,
-          status: "active",
+          cooldownState: null,
           voiceMode: null,
         }),
       });
@@ -806,7 +814,7 @@ describe("createTransport", () => {
       expect(value).toMatchObject({
         conversationId: "c1",
         alias: "work",
-        status: "active",
+        cooldownState: null,
         messageCount: 7,
         profile: {
           id: "p1",
@@ -884,7 +892,7 @@ describe("createTransport", () => {
           userId: "user-other",
           profileId: "p1",
           isPrivate: true,
-          status: "active",
+          cooldownState: null,
           voiceMode: null,
         }),
       });

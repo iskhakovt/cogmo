@@ -18,7 +18,6 @@ import {
 } from "../agent/store/errors.js";
 import type {
   AgentStore,
-  ConversationStatus,
   ConversationSummary,
   CustomCompartment,
   EvolutionEventRow,
@@ -26,7 +25,7 @@ import type {
   ProfileClass,
   VoiceMode,
 } from "../agent/store/index.js";
-import type { ProfileMemoryScope, ToolSet } from "../agent/store/schema.js";
+import type { CooldownState, ProfileMemoryScope, ToolSet } from "../agent/store/schema.js";
 import type { Transaction, Transactor } from "../db/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
@@ -149,7 +148,12 @@ export interface CurrentConversation {
 export interface ConversationStatusSummary {
   conversationId: string;
   alias: string | undefined;
-  status: ConversationStatus;
+  /**
+   * Auto-repair cooldown blob; null = normal operation. When set, the
+   * `/status` renderer surfaces "cooling down" with a time-remaining
+   * estimate. See `design/agent-resilience.md` → Auto-repair.
+   */
+  cooldownState: CooldownState | null;
   createdAt: Date;
   lastMessageAt: Date | null;
   messageCount: number;
@@ -373,11 +377,12 @@ export interface Transport {
       profileId: string,
     ): Promise<Result<void, TransportError>>;
     /**
-     * Flip a conversation's `status` from `errored` back to `active`. Used
-     * by the `/repair` control command — the user-facing escape hatch over
-     * the `recover-conversation` automated path. Idempotent: a `/repair`
-     * on an already-active conversation returns `wasErrored: false` and
-     * succeeds without writing.
+     * Clear the auto-repair `cooldown_state` blob, ending any active
+     * cooldown so the next inbound runs `handle-message` normally. Used
+     * by the `/repair` control command — the user-facing escape hatch
+     * over the `recover-conversation` automated path. Idempotent: a
+     * `/repair` on an already-clear conversation returns
+     * `wasCoolingDown: false` and succeeds without writing.
      *
      * Identity + ownership checked like `setAlias` / `setProfile` —
      * `identity_rejected` for non-resolved handles, `conversation_not_found`
@@ -387,7 +392,7 @@ export interface Transport {
     repair(
       platformUserHandle: string,
       conversationId: string,
-    ): Promise<Result<{ wasErrored: boolean }, TransportError>>;
+    ): Promise<Result<{ wasCoolingDown: boolean }, TransportError>>;
     /**
      * Set or clear the per-conversation voice mode override. `null` clears
      * the override (the conversation falls back to the profile default).
@@ -1066,7 +1071,7 @@ export function createTransport(deps: {
             return ok({
               conversationId: conv.id,
               alias,
-              status: conv.status,
+              cooldownState: conv.cooldownState,
               createdAt: stats.createdAt,
               lastMessageAt: stats.lastMessageAt,
               messageCount: stats.messageCount,
@@ -1158,13 +1163,11 @@ export function createTransport(deps: {
               reason: "conversation not owned by caller",
             });
           }
-          const wasErrored = conv.status === "errored";
-          // Idempotent: skip the write when already active. Saves a row update
-          // and lets the command surface "already active" cleanly.
-          if (wasErrored) {
-            await agentStore.setConversationStatus(tx, conversationId, "active");
+          const wasCoolingDown = conv.cooldownState !== null;
+          if (wasCoolingDown) {
+            await agentStore.clearCooldown(tx, conversationId);
           }
-          return ok({ wasErrored });
+          return ok({ wasCoolingDown });
         });
       },
 

@@ -528,20 +528,24 @@ describe("DrizzleAgentStore", () => {
         userId,
         profileId,
         isPrivate: true,
-        status: "active",
+        cooldownState: null,
         voiceMode: null,
       });
     });
 
-    it("setConversationStatus flips status and getConversation reflects it", async () => {
+    it("writeCooldownState persists the blob and clearCooldown resets it", async () => {
       const { conversationId } = await seedConversation();
-      await tx((trx) => store.setConversationStatus(trx, conversationId, "errored"));
+      const cooldown = {
+        lastErroredAt: "2026-05-19T11:00:00.000Z",
+        cooldownSeconds: 120,
+        consecutiveFailures: 2,
+      };
+      await tx((trx) => store.writeCooldownState(trx, conversationId, cooldown));
       const conv = await tx((trx) => store.getConversation(trx, conversationId));
-      expect(conv?.status).toBe("errored");
-      // Reversibility — future `/repair` (or manual psql) flips back
-      await tx((trx) => store.setConversationStatus(trx, conversationId, "active"));
+      expect(conv?.cooldownState).toEqual(cooldown);
+      await tx((trx) => store.clearCooldown(trx, conversationId));
       const conv2 = await tx((trx) => store.getConversation(trx, conversationId));
-      expect(conv2?.status).toBe("active");
+      expect(conv2?.cooldownState).toBeNull();
     });
 
     it("returns null for unknown conversation", async () => {
