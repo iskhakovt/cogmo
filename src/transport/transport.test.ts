@@ -9,6 +9,22 @@ import { createTransport } from "./transport.js";
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
+// Filter `inngest.send` mock calls down to events whose payload name
+// matches. Tighter than `.find(...)` — a future regression that
+// double-fires the event surfaces as `toHaveLength(2)` instead of
+// silently passing the same `.find` assertion.
+function inngestSendCallsForEvent(calls: unknown[][], eventName: string): unknown[][] {
+  return calls.filter((c) => {
+    const payload = c[0];
+    return (
+      typeof payload === "object" &&
+      payload !== null &&
+      "name" in payload &&
+      payload.name === eventName
+    );
+  });
+}
+
 function setup(overrides?: {
   transportStore?: ReturnType<typeof mockTransportStore>;
   agentStore?: ReturnType<typeof mockAgentStore>;
@@ -598,9 +614,13 @@ describe("createTransport", () => {
     it("allows switching to an org profile (user_id = null)", async () => {
       const setConversationProfile = vi.fn();
       const agentStore = mockAgentStore({
-        getConversation: vi
-          .fn()
-          .mockResolvedValue({ id: "c1", userId: "user-1", profileId: "p-old", isPrivate: true }),
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-old",
+          isPrivate: true,
+          cooldownState: null,
+        }),
         getProfileOwner: vi.fn().mockResolvedValue({ userId: null }),
         setConversationProfile,
       });
@@ -675,6 +695,72 @@ describe("createTransport", () => {
       const { transport } = setup({ agentStore });
       await transport.conversations.setProfile("handle", "c1", "p-new");
       expect(clearCooldown).not.toHaveBeenCalled();
+    });
+
+    // Telemetry — emit AFTER the tx commits so a rolled-back tx
+    // doesn't produce a phantom `cleared` event. Emit fires only
+    // when a clear actually happened (prior cooldown_state non-null).
+    it("emits conversation/cooldown/cleared with clearedBy=profile_switch when a clear happens", async () => {
+      // Fake timers pin `elapsedCooldownSeconds` to an exact value
+      // (3600s = the gap between `lastErroredAt` and `now`). Without
+      // fake timers the integration assertion can only do
+      // `expect.any(Number)`, missing a Math.max regression or a
+      // wrong-anchor wiring slip.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-19T12:00:00.000Z"));
+      try {
+        const agentStore = mockAgentStore({
+          getConversation: vi.fn().mockResolvedValue({
+            id: "c1",
+            userId: "user-1",
+            profileId: "p-old",
+            isPrivate: true,
+            cooldownState: {
+              lastErroredAt: "2026-05-19T11:00:00.000Z",
+              cooldownSeconds: 60,
+              consecutiveFailures: 1,
+            },
+          }),
+          getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        });
+        const { transport, inngestSend } = setup({ agentStore });
+        await transport.conversations.setProfile("handle", "c1", "p-new");
+        const clearedCalls = inngestSendCallsForEvent(
+          inngestSend.mock.calls,
+          "conversation/cooldown/cleared",
+        );
+        expect(clearedCalls).toHaveLength(1);
+        expect(clearedCalls[0]?.[0]).toMatchObject({
+          name: "conversation/cooldown/cleared",
+          // Bus-dedup id keyed on (conversationId, lastErroredAt).
+          id: "cooldown-cleared-c1-2026-05-19T11:00:00.000Z",
+          data: {
+            conversationId: "c1",
+            clearedBy: "profile_switch",
+            elapsedCooldownSeconds: 3600,
+          },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does NOT emit cleared when cooldown_state was already NULL", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-old",
+          isPrivate: true,
+          cooldownState: null,
+        }),
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+      });
+      const { transport, inngestSend } = setup({ agentStore });
+      await transport.conversations.setProfile("handle", "c1", "p-new");
+      expect(
+        inngestSendCallsForEvent(inngestSend.mock.calls, "conversation/cooldown/cleared"),
+      ).toHaveLength(0);
     });
   });
 
@@ -757,6 +843,58 @@ describe("createTransport", () => {
       const res = await transport.conversations.repair("handle", "c1");
       expect(res._unsafeUnwrap()).toEqual({ wasCoolingDown: false });
       expect(clearCooldown).not.toHaveBeenCalled();
+    });
+
+    it("emits conversation/cooldown/cleared with clearedBy=user_repair on a real clear", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-19T11:00:30.000Z")); // 30s into the cooldown
+      try {
+        const agentStore = mockAgentStore({
+          getConversation: vi.fn().mockResolvedValue({
+            id: "c1",
+            userId: "user-1",
+            profileId: "p1",
+            isPrivate: true,
+            cooldownState: {
+              lastErroredAt: "2026-05-19T11:00:00.000Z",
+              cooldownSeconds: 60,
+              consecutiveFailures: 1,
+            },
+          }),
+        });
+        const { transport, inngestSend } = setup({ agentStore });
+        await transport.conversations.repair("handle", "c1");
+        const clearedCalls = inngestSendCallsForEvent(
+          inngestSend.mock.calls,
+          "conversation/cooldown/cleared",
+        );
+        expect(clearedCalls).toHaveLength(1);
+        expect(clearedCalls[0]?.[0]).toMatchObject({
+          name: "conversation/cooldown/cleared",
+          id: "cooldown-cleared-c1-2026-05-19T11:00:00.000Z",
+          // Clear fired mid-window — elapsed < the prior cooldownSeconds
+          data: { conversationId: "c1", clearedBy: "user_repair", elapsedCooldownSeconds: 30 },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does NOT emit cleared when /repair was a no-op", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p1",
+          isPrivate: true,
+          cooldownState: null,
+        }),
+      });
+      const { transport, inngestSend } = setup({ agentStore });
+      await transport.conversations.repair("handle", "c1");
+      expect(
+        inngestSendCallsForEvent(inngestSend.mock.calls, "conversation/cooldown/cleared"),
+      ).toHaveLength(0);
     });
   });
 
@@ -1279,6 +1417,90 @@ describe("createTransport", () => {
       );
       expect(res.isOk()).toBe(true);
       expect(clearCooldown).not.toHaveBeenCalled();
+    });
+
+    it("emits cleared with clearedBy=model_switch when a clear happens", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-19T11:00:00.000Z"));
+      try {
+        const agentStore = mockAgentStore({
+          getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+          getConversation: vi.fn().mockResolvedValue({
+            id: "c1",
+            userId: "user-1",
+            profileId: "p-mine",
+            isPrivate: true,
+            cooldownState: {
+              lastErroredAt: "2026-05-19T11:00:00.000Z",
+              cooldownSeconds: 60,
+              consecutiveFailures: 1,
+            },
+          }),
+        });
+        const { transport, inngestSend } = setup({ agentStore });
+        await transport.profiles.update(
+          "handle",
+          "p-mine",
+          { model: "gpt-4o" },
+          { clearCooldownForConversation: "c1" },
+        );
+        const clearedCalls = inngestSendCallsForEvent(
+          inngestSend.mock.calls,
+          "conversation/cooldown/cleared",
+        );
+        expect(clearedCalls).toHaveLength(1);
+        expect(clearedCalls[0]?.[0]).toMatchObject({
+          name: "conversation/cooldown/cleared",
+          id: "cooldown-cleared-c1-2026-05-19T11:00:00.000Z",
+          // now === lastErroredAt → elapsed is exactly 0
+          data: {
+            conversationId: "c1",
+            clearedBy: "model_switch",
+            elapsedCooldownSeconds: 0,
+          },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // UniqueViolation path: tx rolls back, so no clear actually
+    // happened. The post-tx emit must NOT fire even though
+    // priorCooldownStateForEmit was captured inside the cb.
+    it("does NOT emit cleared when updateProfile throws (rolled-back clear)", async () => {
+      const updateProfile = vi
+        .fn()
+        .mockRejectedValue(
+          new (await import("../agent/store/errors.js")).UniqueViolationError(
+            "uq_profiles_user_name",
+          ),
+        );
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-mine",
+          isPrivate: true,
+          cooldownState: {
+            lastErroredAt: "2026-05-19T11:00:00.000Z",
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
+        }),
+        updateProfile,
+      });
+      const { transport, inngestSend } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { name: "taken" },
+        { clearCooldownForConversation: "c1" },
+      );
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_name_taken" });
+      expect(
+        inngestSendCallsForEvent(inngestSend.mock.calls, "conversation/cooldown/cleared"),
+      ).toHaveLength(0);
     });
   });
 

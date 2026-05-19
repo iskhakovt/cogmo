@@ -2,7 +2,9 @@ import { NonRetriableError } from "inngest";
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import {
+  buildConversationCooldownClearedEvent,
   buildConversationErroredEvent,
+  calculateElapsedCooldown,
   conversationDegraded,
   inboundReady,
   responseReady,
@@ -906,6 +908,34 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           return inserted;
         });
       });
+
+      // Half-open success: cooldown was cleared inside the persist tx.
+      // Emit `conversation/cooldown/cleared` as a separate durable step
+      // AFTER persist commits so the event can't fire on a rolled-back
+      // tx. Same pattern as the degrade emit below. Pre-tx
+      // `conv.cooldownState` carries `lastErroredAt` for the elapsed
+      // calculation. Explicit bus-dedup `id` keyed on the cooldown
+      // being cleared protects against `step.sendEvent`'s at-least-once
+      // delivery contract — a retry after the send registers but before
+      // the cache write would otherwise double-fire downstream
+      // consumers. See design/agent-resilience.md → Telemetry.
+      //
+      // Narrow once via the local — `wasCoolingDown` is the same
+      // predicate but doesn't help TS narrow `conv.cooldownState`.
+      const priorCooldown = conv.cooldownState;
+      if (priorCooldown !== null) {
+        await step.sendEvent(
+          "emit-cooldown-cleared",
+          buildConversationCooldownClearedEvent(
+            {
+              conversationId,
+              clearedBy: "success",
+              elapsedCooldownSeconds: calculateElapsedCooldown(priorCooldown.lastErroredAt),
+            },
+            `cooldown-cleared-${conversationId}-${priorCooldown.lastErroredAt}`,
+          ),
+        );
+      }
 
       // Emit the degrade signal as a separate durable step after persist —
       // `step.sendEvent` provides exactly-once delivery, same pattern as

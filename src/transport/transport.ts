@@ -27,7 +27,12 @@ import type {
 } from "../agent/store/index.js";
 import type { CooldownState, ProfileMemoryScope, ToolSet } from "../agent/store/schema.js";
 import type { Transaction, Transactor } from "../db/index.js";
-import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
+import {
+  buildConversationCooldownClearedEvent,
+  type CooldownClearedBy,
+  calculateElapsedCooldown,
+  type inboundArrived as InboundArrivedEvent,
+} from "../inngest/events.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
 import { logger } from "../logger.js";
 import {
@@ -845,6 +850,38 @@ export function createTransport(deps: {
     idleTimeoutMs,
   } = deps;
 
+  // Helper for the three transport clear-trigger sites (`/repair`,
+  // `setProfile`, `profiles.update` w/ `clearCooldownForConversation`).
+  // Each site (a) loads the conversation's prior `cooldown_state` inside
+  // `runInTx`, (b) writes the clear, (c) calls this helper AFTER the tx
+  // commits. Skipping the emit when `priorState` is null mirrors the
+  // tx's `clearCooldown !== null` gate — only emit when a clear
+  // actually happened.
+  //
+  // Explicit bus-dedup `id` keyed on `(conversationId, lastErroredAt)`
+  // — the specific cooldown being cleared. Transport methods aren't
+  // wrapped in Inngest's retry harness, but the explicit id is
+  // belt-and-braces against a caller-side retry (e.g. a Telegram
+  // command retried by the user) double-firing downstream consumers.
+  // See design/agent-resilience.md → Telemetry.
+  async function emitCooldownClearedIfAny(
+    priorState: CooldownState | null,
+    conversationId: string,
+    clearedBy: CooldownClearedBy,
+  ): Promise<void> {
+    if (priorState === null) return;
+    await inngest.send(
+      buildConversationCooldownClearedEvent(
+        {
+          conversationId,
+          clearedBy,
+          elapsedCooldownSeconds: calculateElapsedCooldown(priorState.lastErroredAt),
+        },
+        `cooldown-cleared-${conversationId}-${priorState.lastErroredAt}`,
+      ),
+    );
+  }
+
   return {
     async resolveSession(platformAddress) {
       const session = await runInTx((tx) =>
@@ -1139,7 +1176,7 @@ export function createTransport(deps: {
       },
 
       async setProfile(platformUserHandle, conversationId, profileId) {
-        return runInTx(async (tx) => {
+        const txResult = await runInTx(async (tx) => {
           const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
           if (!identity) return err({ code: "identity_rejected" as const });
           const conv = await agentStore.getConversation(tx, conversationId);
@@ -1175,12 +1212,23 @@ export function createTransport(deps: {
           if (conv.cooldownState !== null) {
             await agentStore.clearCooldown(tx, conversationId);
           }
-          return ok(undefined);
+          // Return the prior cooldown_state so the telemetry emit
+          // outside the tx can compute elapsed time and decide whether
+          // to fire at all. Emitting inside the tx would risk a
+          // phantom event on rollback.
+          return ok({ priorCooldownState: conv.cooldownState });
         });
+        if (txResult.isErr()) return err(txResult.error);
+        await emitCooldownClearedIfAny(
+          txResult.value.priorCooldownState,
+          conversationId,
+          "profile_switch",
+        );
+        return ok(undefined);
       },
 
       async repair(platformUserHandle, conversationId) {
-        return runInTx(async (tx) => {
+        const txResult = await runInTx(async (tx) => {
           const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
           if (!identity) return err({ code: "identity_rejected" as const });
           const conv = await agentStore.getConversation(tx, conversationId);
@@ -1195,8 +1243,15 @@ export function createTransport(deps: {
           if (wasCoolingDown) {
             await agentStore.clearCooldown(tx, conversationId);
           }
-          return ok({ wasCoolingDown });
+          return ok({ wasCoolingDown, priorCooldownState: conv.cooldownState });
         });
+        if (txResult.isErr()) return err(txResult.error);
+        await emitCooldownClearedIfAny(
+          txResult.value.priorCooldownState,
+          conversationId,
+          "user_repair",
+        );
+        return ok({ wasCoolingDown: txResult.value.wasCoolingDown });
       },
 
       async setVoiceMode(platformUserHandle, conversationId, mode) {
@@ -1321,8 +1376,16 @@ export function createTransport(deps: {
         // intent is misleading and the log noise hides real issues.
         // Letting the error propagate triggers Drizzle's proper
         // ROLLBACK path before this handler translates the error.
+        // Closure-captured so the post-tx telemetry emit knows the
+        // prior cooldown state. Stays `null` when no clear happened
+        // (either `clearTarget` was absent or validation rejected
+        // before the capture). Only read AFTER runInTx resolves
+        // successfully — never on the catch path, since a thrown
+        // UniqueViolation means the clear was rolled back.
+        let priorCooldownStateForEmit: CooldownState | null = null;
+        const clearTarget = opts?.clearCooldownForConversation;
         try {
-          return await runInTx(async (tx) => {
+          const result = await runInTx(async (tx) => {
             const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
             if (!identity) return err({ code: "identity_rejected" as const });
             const owner = await agentStore.getProfileOwner(tx, profileId);
@@ -1363,7 +1426,6 @@ export function createTransport(deps: {
             // conversation that doesn't use this profile, defeating the
             // "context switch ends cooldown" rationale).
             let shouldClearCooldown = false;
-            const clearTarget = opts?.clearCooldownForConversation;
             if (clearTarget !== undefined) {
               const conv = await agentStore.getConversation(tx, clearTarget);
               if (!conv) return err({ code: "conversation_not_found" as const });
@@ -1388,6 +1450,10 @@ export function createTransport(deps: {
               // Match setProfile's optimization — skip the UPDATE when
               // there's nothing to clear, avoiding a no-op row write.
               shouldClearCooldown = conv.cooldownState !== null;
+              // Capture the prior state for the post-tx telemetry emit.
+              // Stays null when there's nothing to clear, which makes
+              // `emitCooldownClearedIfAny` skip below.
+              priorCooldownStateForEmit = conv.cooldownState;
             }
             const updated = await agentStore.updateProfile(tx, profileId, changes);
             // Same-tx clear — `/model` rationale: model switch is a
@@ -1400,6 +1466,13 @@ export function createTransport(deps: {
             }
             return ok(updated);
           });
+          // Emit AFTER the tx commits successfully — a validation err
+          // (`result.isErr()`) means the clear didn't happen, so don't
+          // fire telemetry. The thrown-error path is the catch below.
+          if (result.isOk() && clearTarget !== undefined) {
+            await emitCooldownClearedIfAny(priorCooldownStateForEmit, clearTarget, "model_switch");
+          }
+          return result;
         } catch (e) {
           if (e instanceof UniqueViolationError) {
             return err({ code: "profile_name_taken" as const });
