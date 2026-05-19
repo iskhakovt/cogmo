@@ -109,11 +109,6 @@ jobs:
         uses: docker/bake-action@a66e1c87e2eca0503c343edf1d208c716d54b8a8 # v7.1.0
         env:
           VERSION: test
-          # Disable provenance + SBOM attestations — they produce extra
-          # entries in an OCI manifest list, which `--load` can't import.
-          # Release builds (publish.yml) leave `WITH_ATTEST` at its default
-          # and ship full supply-chain attestations.
-          WITH_ATTEST: "false"
         with:
           source: .
           files: ./docker-bake.hcl

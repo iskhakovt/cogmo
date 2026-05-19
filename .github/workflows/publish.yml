@@ -227,3 +227,62 @@ jobs:
       - name: Inspect multi-arch image
         run: |
           docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ needs.setup.outputs.version }}
+
+  # Vulnerability scan against the released images. Runs once all three are
+  # tagged at this version. Results upload to GitHub code-scanning (Security
+  # tab) — findings don't block the release. Triage happens async; an acute
+  # CVE drives a patch release rather than gating publish behind it.
+  #
+  # Trivy scans the runner's native arch (amd64). The other arch shares the
+  # same Dockerfile + OS package set, so amd64 findings are a faithful proxy
+  # for the manifest list as a whole.
+  scan:
+    name: Trivy scan (${{ matrix.image }})
+    needs: [setup, merge-cogmo, base-images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+      # Upload SARIF to code-scanning. Without this, the action fails with
+      # "Resource not accessible by integration" on the upload step.
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [cogmo, cogmo-devbase, cogmo-skills]
+    steps:
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          # ghcr.io/iskhakovt/cogmo[-devbase|-skills]:VERSION. github.repository
+          # is `iskhakovt/cogmo`; the matrix value substitutes the package
+          # name component.
+          image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ needs.setup.outputs.version }}
+          format: sarif
+          output: trivy-results.sarif
+          # Surface only actionable findings — unfixed CVEs can't be patched
+          # by us today, and lower severities create triage noise that
+          # crowds out real signal.
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          vuln-type: os,library
+          # `exit-code: 0` (default) — see job header for the don't-block
+          # rationale. Findings surface via the Security tab.
+
+      - uses: github/codeql-action/upload-sarif@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3.35.5
+        # Run even if Trivy itself errored (e.g. DB download flake) so we
+        # don't lose partial results. The upload action no-ops on a missing
+        # file but logs a clear message.
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+          # Distinct category per image so the Security tab keeps them
+          # separated instead of overwriting each other on subsequent
+          # uploads.
+          category: trivy-${{ matrix.image }}

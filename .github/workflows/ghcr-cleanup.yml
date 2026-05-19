@@ -2,9 +2,9 @@ name: GHCR Cleanup
 
 # Weekly prune of old container manifests in ghcr.io. Without this, every
 # release accumulates three new tagged manifests (cogmo, cogmo-devbase,
-# cogmo-skills) and untagged child manifests for multi-arch + attestation
-# entries — the storage stays free-tier-shaped for a while but the package
-# UI and `imagetools inspect` output get noisy fast.
+# cogmo-skills) and untagged child manifests for the multi-arch entries —
+# the storage stays free-tier-shaped for a while but the package UI and
+# `imagetools inspect` output get noisy fast.
 
 on:
   schedule:
@@ -46,7 +46,7 @@ jobs:
           # Prune untagged manifests older than 14 days. Multi-arch child
           # manifests referenced by a kept manifest list are preserved
           # automatically; the older-than filter only removes truly orphan
-          # entries (e.g. attestation manifests for deleted parents).
+          # entries (e.g. children of deleted parents).
           older-than: 14 days
           delete-untagged: true
           # Manual runs default to dry-run so a human can verify the
