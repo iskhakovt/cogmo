@@ -65,25 +65,29 @@ One JSONB column on `conversations`:
 const CooldownStateSchema = z.object({
   lastErroredAt: z.string().datetime(),
   cooldownSeconds: z.number().int().positive(),
+  consecutiveFailures: z.number().int().positive(),
 });
 
 cooldown_state: jsonbZod("cooldown_state", CooldownStateSchema).$type<...>()
   // nullable
 ```
 
-Validated at the store boundary via `jsonbZod(name, CooldownStateSchema)` (see `src/db/helpers.ts`). The Zod schema enforces the all-or-none invariant — either both fields are set or the column is `NULL`. Per [data-model.md](data-model.md): atomic multi-field state goes in one nullable JSONB column, not multiple nullable columns.
+Validated at the store boundary via `jsonbZod(name, CooldownStateSchema)` (see `src/db/helpers.ts`). The Zod schema enforces the all-or-none invariant — all three fields are set together or the column is `NULL`. Per [data-model.md](data-model.md): atomic multi-field state goes in one nullable JSONB column, not multiple nullable columns.
 
-`consecutiveFailures` is **not** stored — derivable from `cooldownSeconds` as `log2(cooldownSeconds / 60) + 1` (and 0 when `cooldown_state IS NULL`). Materialized on emitted events for downstream convenience.
+`consecutiveFailures` is stored explicitly rather than derived from `cooldownSeconds`. The naive inverse (`log2(cooldownSeconds / 60) + 1`) collapses to a constant once `cooldownSeconds` hits the 3600s cap — at the 8th, 9th, 10th consecutive failure the formula still says 7. Telemetry surfaces consecutive-failure counts (chronic-failure conversations are the most important signal); accuracy past the cap matters precisely when it's most needed. Cost is ~4 bytes per row.
 
 The existing `conversations.status` enum and column are dropped. `'errored'` was the only value other than `'active'`; once auto-repair lands, no code branches on the enum — "in cooldown" is a derived predicate on `cooldown_state`. A single-value enum is pure noise. Future lifecycle states (`'archived'`, `'paused'`) would add a fresh column with a new enum at that time — not by carrying a vestigial one forward today.
 
 ### Triggers `[proposed]`
 
-Three paths set or extend `cooldown_state`:
+Two paths emit `conversation/errored`; one handler writes `cooldown_state`:
 
-1. **`handle-message.onFailure`** — Inngest function failure handler. Fires after Inngest's per-invocation retry budget exhausts (Class A persistence, Class B `NonRetriableError`, history-invariant violation, programmer-bug exception). The handler emits `conversation/errored`; `recover-conversation` consumes the event and writes `cooldown_state` — reading the prior blob (if any), doubling `cooldownSeconds` or starting at 60s, capping at 3600s.
-2. **Worker-death reconcile** — new Inngest function subscribed to the environment-wide `inngest/function.failed` system event (`src/inngest/events.ts` → `inngestFunctionFailed`), filtered to `handle-message`. Mirrors `createCodingTaskReconcile` (`src/agent/coding/reconcile-on-failure.ts`) introduced in PR #267 for `coding-task-start`. Catches the case where the worker dies before `onFailure` can fire — without this, `cooldown_state` stays `NULL` and the next inbound retries immediately, burning the same failure. Reconcile sets `cooldown_state` directly with idempotency key `cooldown-reconcile-${runId}` and emits its own `conversation/errored` event so downstream consumers stay event-driven.
-3. **Half-open failure** — first inbound past the cooldown threshold runs `handle-message`; if it fails again, path 1 applies, doubling `cooldownSeconds` from the prior value (not starting fresh at 60s).
+1. **`handle-message.onFailure`** — Inngest function failure handler. Fires after Inngest's per-invocation retry budget exhausts (Class A persistence, Class B `NonRetriableError`, history-invariant violation, programmer-bug exception). Emits `conversation/errored` with `id: "errored-${runId}"`.
+2. **Worker-death reconcile** — new Inngest function subscribed to the environment-wide `inngest/function.failed` system event (`src/inngest/events.ts` → `inngestFunctionFailed`), filtered to `handle-message`. Mirrors `createCodingTaskReconcile` (`src/agent/coding/reconcile-on-failure.ts`) introduced in PR #267 for `coding-task-start`. Catches the case where the worker dies before `onFailure` can fire. Emits `conversation/errored` with the **same** `id: "errored-${runId}"`. Bus-level dedup ensures `recover-conversation` runs exactly once per `runId` regardless of which path emitted first — same pattern as PR #273's `task-failed-${taskId}` shape.
+
+`recover-conversation` consumes `conversation/errored` and writes `cooldown_state` inside `runInTx` — REPEATABLE READ is the project default (see [.claude/rules/architecture-rules.md](../.claude/rules/architecture-rules.md) → All DB operations use transactions; [.claude/rules/store-pattern.md](../.claude/rules/store-pattern.md) → Default isolation is REPEATABLE READ). The read-modify-write reads the prior blob (if any), increments `consecutiveFailures`, doubles `cooldownSeconds` (or starts at 60s) capped at 3600s, writes the new blob. Snapshot isolation prevents the lost-update race if two `conversation/errored` events somehow slip past bus dedup; the second write either sees the first's commit and bumps from there, or hits a `40001` and retries through the transactor's once-retry budget.
+
+**Half-open failure** — first inbound past the cooldown threshold runs `handle-message`; if it fails again, path 1 applies, the `recover-conversation` handler reads the prior `cooldownSeconds` and doubles it (not starting fresh at 60s).
 
 **Degraded does NOT trigger cooldown.** A degraded reply means the loop produced *something* the user can act on; conversation flow continues. Repeated `degraded` on the same conversation surfaces in telemetry but doesn't escalate. (Telemetry-driven escalation — "5 degrades in 10 min → cooldown" — is a deferred follow-up.)
 
@@ -97,7 +101,8 @@ Rules:
 
 - **Delivered through the same transport path as normal replies** (`response/ready` event → channel adapter). The reply is generated by `handle-message`'s entry guard, not by invoking the LLM.
 - **Retry-time estimate** is the remaining cooldown rounded to a coarse unit (seconds under a minute, minutes under an hour). Stale by the time the user reads it — acceptable: they get an order-of-magnitude, not a stopwatch.
-- **One reply per inbound.** A user batching five messages during cooldown gets five replies, not one summary. Same shape as the debounce contract — every distinct inbound deserves a response, even if it's the same response.
+- **One reply per debounce batch.** A burst of user messages during cooldown coalesces through the debouncer into one `inbound/ready` and gets one in-cooldown reply. Subsequent activity (after the debounce idle window) triggers another `inbound/ready` and another reply if still in cooldown — N user-active windows → N replies, not a tight loop.
+- **Inbounds are NOT consumed.** The in-cooldown skip path returns `{ status: "skipped", reason: "cooldown" }` before loading inbounds (matching today's `errored` skip-path shape at `handle-message.ts:235`). The inbounds stay unbatched. When cooldown elapses, the next `inbound/ready` loads the entire backlog as one batch — the user's cooldown-era messages get a real response as part of the next successful turn. Pile-up semantic, not consume-and-acknowledge.
 - **Model is NOT invoked.** The in-cooldown reply is a hand-built text response; no tokens spent. Cooldown's whole point is to stop burning tokens on something that just failed.
 
 ### Clear triggers `[proposed]`
