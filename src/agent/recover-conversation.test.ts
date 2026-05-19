@@ -30,6 +30,23 @@ const baseEvent = {
   },
 };
 
+// Filter step.sendEvent mock calls down to the entries whose payload
+// matches `eventName`, returning ALL matches (not just the first).
+// Tighter than `.find(...)` — a future regression that double-fires
+// the event surfaces as `toHaveLength(2)` instead of silently passing
+// the same `.find` assertion. Negative tests assert `toHaveLength(0)`.
+function callsForEvent(calls: unknown[][], eventName: string): unknown[][] {
+  return calls.filter((c) => {
+    const payload = c[1];
+    return (
+      typeof payload === "object" &&
+      payload !== null &&
+      "name" in payload &&
+      payload.name === eventName
+    );
+  });
+}
+
 const baseConv = {
   id: "conv-1",
   userId: "user-1",
@@ -135,6 +152,72 @@ describe("createRecoverConversation", () => {
       "recover-conversation: cooldown armed",
     );
     warnSpy.mockRestore();
+  });
+
+  // Telemetry — `conversation/cooldown/entered` fires after the
+  // durable cooldown write. Payload carries the derived `causeClass`
+  // (NonRetriableError → "B" here), the full curve state, and a
+  // bus-dedup `id: cooldown-entered-${runId}` so an Inngest retry of
+  // this function (or a future second emitter for the same failed
+  // run) doesn't double-fire downstream consumers. See
+  // design/agent-resilience.md → Telemetry.
+  it("emits conversation/cooldown/entered after the cooldown write", async () => {
+    const agentStore = mockAgentStore();
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
+    const step = mockStep();
+    await invokeInngestFn<RecoverConversationCtx>(fn, { event: baseEvent, step });
+    const enteredCalls = callsForEvent(step.sendEvent.mock.calls, "conversation/cooldown/entered");
+    expect(enteredCalls).toHaveLength(1);
+    expect(enteredCalls[0]?.[0]).toBe("emit-cooldown-entered");
+    expect(enteredCalls[0]?.[1]).toMatchObject({
+      name: "conversation/cooldown/entered",
+      id: "cooldown-entered-run-failed-1",
+      data: {
+        conversationId: "conv-1",
+        runId: "run-failed-1",
+        cooldownSeconds: 60,
+        consecutiveFailures: 1,
+        causeClass: "B",
+      },
+    });
+  });
+
+  it("maps WorkerDeath errorClass to causeClass A in the emitted event", async () => {
+    const agentStore = mockAgentStore();
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
+    const step = mockStep();
+    await invokeInngestFn<RecoverConversationCtx>(fn, {
+      event: { data: { ...baseEvent.data, errorClass: "WorkerDeath", causeClass: null } },
+      step,
+    });
+    const enteredCalls = callsForEvent(step.sendEvent.mock.calls, "conversation/cooldown/entered");
+    expect(enteredCalls).toHaveLength(1);
+    expect(enteredCalls[0]?.[1]).toMatchObject({ data: { causeClass: "A" } });
+  });
+
+  it("falls back to causeClass 'bug' for unrecognised errorClass values", async () => {
+    const agentStore = mockAgentStore();
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
+    const step = mockStep();
+    await invokeInngestFn<RecoverConversationCtx>(fn, {
+      event: { data: { ...baseEvent.data, errorClass: "RandomError" } },
+      step,
+    });
+    const enteredCalls = callsForEvent(step.sendEvent.mock.calls, "conversation/cooldown/entered");
+    expect(enteredCalls).toHaveLength(1);
+    expect(enteredCalls[0]?.[1]).toMatchObject({ data: { causeClass: "bug" } });
+  });
+
+  it("does NOT emit cooldown/entered when conversation_not_found short-circuits", async () => {
+    const agentStore = mockAgentStore({
+      getConversation: vi.fn().mockResolvedValue(undefined),
+    });
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
+    const step = mockStep();
+    await invokeInngestFn<RecoverConversationCtx>(fn, { event: baseEvent, step });
+    expect(callsForEvent(step.sendEvent.mock.calls, "conversation/cooldown/entered")).toHaveLength(
+      0,
+    );
   });
 
   // Idempotency-under-duplicate-events documentation.

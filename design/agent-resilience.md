@@ -31,7 +31,7 @@ The Errored off-ramp is the conversation-level circuit breaker: it sets an expon
 
 **Both Degraded and Errored are events, not statuses.** The conversation row carries no failure-state enum. "The last turn was degraded" lives in the `conversation/degraded` event stream; "this conversation is currently cooling down after an error" is a derived predicate on a JSONB `cooldown_state` column (see [Auto-repair](#auto-repair-proposed)). No major agent framework introduces failure-state enum values on the conversation (OpenAI Threads keep thread-level state binary with run-level status enums; Letta tracks per-step `stop_reason`; CrewAI / AutoGen rely on event signals only). A status enum value wouldn't intrinsically gate anything an event-driven predicate doesn't — it would be net new complexity with two sources of truth to keep in sync.
 
-## Auto-repair `[proposed]`
+## Auto-repair `[confirmed]`
 
 Inbounds to a conversation that just took the Errored off-ramp wait through an exponentially-backing-off cooldown before the next turn fires, rather than blocking until a human resets the row. Maps to the canonical circuit breaker pattern (`CLOSED` / `OPEN` / `HALF-OPEN`) at the conversation level, collapsed to two persistent states because there's no concurrent traffic to gate.
 
@@ -122,7 +122,7 @@ Rules:
 
 **`/model` and `/profile` gain a new responsibility.** Today neither command touches conversation failure state — they're context switches that affect the next turn. Under auto-repair they also clear `cooldown_state` as a side effect of the switch, on the rationale that the user has signaled "external state changed, try again with this new context." The model-/profile-switch happens first; the `clearCooldown` call runs in the same transaction so a partial commit can't leave the conversation in a "switched profile but still cooling down" state.
 
-### Telemetry `[proposed]`
+### Telemetry `[confirmed]`
 
 Two events emitted as durable Inngest events:
 
@@ -131,7 +131,7 @@ Two events emitted as durable Inngest events:
 
 Structured logs at each transition use the per-turn `turnLogger` so `runId` + `conversationId` are bound — matching the existing `agent.repair` / `agent.degrade` shape (see [Telemetry](#telemetry-confirmed)).
 
-### Where this composes `[proposed]`
+### Where this composes `[confirmed]`
 
 | Layer | Responsibility |
 |-|-|
@@ -142,7 +142,7 @@ Structured logs at each transition use the per-turn `turnLogger` so `runId` + `c
 | **`handle-message` entry guard** | Reads `cooldown_state`. In Open state, generates the in-cooldown reply via the transport and returns; doesn't invoke the LLM. |
 | **Command handlers (`/model`, `/profile`, `/repair`)** | After the state change, call `clearCooldown(conversationId, "model_switch" | "profile_switch" | "user_repair")`. `/repair`'s implementation switches from a `status` enum flip to the `clearCooldown` call; the user-facing command shape (current vs. named target, idempotent on already-clear) is preserved. |
 
-### Non-goals `[proposed]`
+### Non-goals `[confirmed]`
 
 | Idea | Why excluded |
 |-|-|
@@ -437,6 +437,7 @@ Decisions taken with their follow-up trigger. Not blockers — listed so the rat
 3. **Per-provider Class C rate counter with paging threshold.** A per-provider counter (`agent.classC.rate{provider}`) with a threshold ("rate > 10% over 1h → page") would surface a degraded provider before the bill. Wire when there's a metrics sink to attach to.
 4. **Per-adapter `decodeRefusal` hook for OpenAI-compat.** OpenAI-compat refusals degrade through the empty-content path in v1 (see [Class C](#class-c-model-misbehavior-proposed)). Wire a permissive regex-default hook when telemetry shows the wasted continuation-prompt budget is a real cost driver.
 5. **Telemetry-driven degraded → cooldown escalation.** Today repeated `degraded` events on the same conversation surface in telemetry but never escalate. A threshold ("5 degrades within 10 minutes → enter cooldown") would treat chronic in-loop failure as equivalent to a Class B failure for circuit-breaker purposes. Wire when telemetry shows real conversations stuck in repeat-degrade loops.
+6. **Refine `deriveCauseClass` with the inner provider class.** Today's mapping in `src/inngest/events.ts` uses only `event.data.errorClass`: `NonRetriableError → B`, `WorkerDeath → A`, else `bug`. Class A retriable errors (Anthropic/OpenAI rate-limit, 5xx, network) that exhaust Inngest's retry budget propagate as their original class name (e.g. `RateLimitError`) — the current mapping collapses them into `bug`. The `providerCauseClass` (event.data.causeClass — the upstream provider error class) carries the discriminator needed to distinguish "transport-class retriable that exhausted" from "history-invariant violation that surfaced as a generic Error". Wire a richer mapping when telemetry shows the `bug` bucket conflating signals the failure-reflector wants separated. Until then the residual bucket is acceptable — `errorClass` + `causeClass` are both preserved on `conversation/errored`, so subscribers can re-derive precisely if they need to.
 
 The failure-reflector's downstream consumption — proposing steering rules from repair-subtype telemetry — lives in [evolution.md](evolution.md), not here.
 
