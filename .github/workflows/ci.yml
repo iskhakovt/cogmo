@@ -97,6 +97,31 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
 
+  # Dockerfile lint. Runs against all three repo-owned Dockerfiles. Matrix
+  # over files so a violation in one image reports independently. Config
+  # in .hadolint.yaml at the repo root (auto-picked-up).
+  hadolint:
+    name: Hadolint (${{ matrix.dockerfile }})
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    # hadolint-action is a Docker action — covers cold container build.
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile:
+          - Dockerfile
+          - images/devbase/Dockerfile
+          - images/skills/Dockerfile
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+
   skills-runtime:
     name: Skills Runtime (Python)
     needs: [changes]
@@ -255,12 +280,9 @@ jobs:
       # to amd64-only with a matching cache scope — multi-arch is for
       # release artifacts, not test verification, and an amd64-only build
       # writing to the arm64 scope would degrade the next release's arm64
-      # cache hits (moby/buildkit#2758). `WITH_ATTEST=false` because
-      # `--load` can't import the manifest list that attestations produce.
+      # cache hits (moby/buildkit#2758).
       # Tag overridden to `cogmo:ci` to match `E2E_IMAGE` below.
       - uses: docker/bake-action@a66e1c87e2eca0503c343edf1d208c716d54b8a8 # v7.1.0
-        env:
-          WITH_ATTEST: "false"
         with:
           source: .
           files: ./docker-bake.hcl
@@ -318,11 +340,11 @@ jobs:
   required-checks:
     name: Required Checks
     if: always()
-    needs: [changes, pr-title, check, skills-runtime, unit, integration, e2e]
+    needs: [changes, pr-title, check, hadolint, skills-runtime, unit, integration, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
       - uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
         with:
           jobs: ${{ toJSON(needs) }}
-          allowed-skips: pr-title,check,skills-runtime,unit,integration,e2e
+          allowed-skips: pr-title,check,hadolint,skills-runtime,unit,integration,e2e
