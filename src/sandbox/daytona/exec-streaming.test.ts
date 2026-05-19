@@ -21,13 +21,9 @@ interface Script {
 
 function fakeProcess(script: Script): Process {
   const createSession = vi.fn(async () => undefined);
-  // Track deleted sessions so `getSessionCommand` can 404 once
-  // `deleteSession` has been called — mirrors live Daytona, where the
-  // session row is gone post-delete and any subsequent fetch returns
-  // 404. The unit suite catches lifecycle-ordering regressions only
-  // when the mock reflects this; the pre-2026-05-19 mock returned the
-  // exit code regardless, and a wrong cleanup-before-fetch ordering
-  // passed CI for a full release as a result.
+  // `getSessionCommand(sid)` 404s after `deleteSession(sid)` —
+  // mirrors live Daytona. Without this invariant, the unit suite
+  // can't catch lifecycle-ordering regressions on the success path.
   const deletedSessions = new Set<string>();
   const deleteSession = vi.fn(async (sid: string) => {
     deletedSessions.add(sid);
@@ -437,13 +433,9 @@ describe("startExecStreaming", () => {
   });
 
   it("natural-success lifecycle ordering: getSessionCommand fires BEFORE deleteSession", async () => {
-    // Daytona's `getSessionCommand` returns 404 once the session is
-    // deleted. Any cleanup-before-fetch ordering on the success path
-    // breaks every successful exec call. The strengthened fake mirrors
-    // this — `getSessionCommand` after `deleteSession` throws
-    // `DaytonaNotFoundError`. This test pins the relative order so a
-    // future refactor that lifts cleanup back above the fetch (the
-    // PR #267 regression class) surfaces here.
+    // `getSessionCommand` 404s once the session is deleted, so any
+    // cleanup-before-fetch ordering breaks every successful exec
+    // call. Pin the relative order on the success path.
     const order: string[] = [];
     const proc = fakeProcess({ wsResolve: { stdoutChunks: ["ok\n"] }, exitCode: 7 });
     vi.mocked(proc.getSessionCommand).mockImplementation(async () => {
@@ -468,12 +460,10 @@ describe("startExecStreaming", () => {
     expect(order).toEqual(["getSessionCommand", "deleteSession"]);
   });
 
-  it("strengthened fake: a wrong cleanup-before-fetch ordering would 404 on getSessionCommand", async () => {
-    // Contract test for the test double itself. Pins the fake's
-    // load-bearing invariant: after `deleteSession(sid)`, any
-    // `getSessionCommand(sid, ...)` throws `DaytonaNotFoundError`.
-    // Without this, a regression in the SUT that reverts to
-    // cleanup-before-fetch would pass CI silently.
+  it("fake contract: getSessionCommand(sid) 404s after deleteSession(sid)", async () => {
+    // Pins the fake's invariant — the SUT's success-path ordering
+    // test depends on this. Verified separately so a fake-side
+    // regression doesn't silently disable the SUT-side test.
     const proc = fakeProcess({ exitCode: 0 });
     await proc.deleteSession("sid-x");
     await expect(proc.getSessionCommand("sid-x", "cmd-x")).rejects.toBeInstanceOf(

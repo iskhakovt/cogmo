@@ -234,12 +234,11 @@ export async function startExecStreaming(args: {
         stdout.end();
         stderr.end();
         if (onClose) onClose();
-        // `getSessionCommand` returns 404 once the session is deleted,
-        // so cleanup MUST run after the fetch on the natural-success
-        // path. `try/finally` runs `cleanupSession()` exactly once on
-        // every settle path (timedOut, disposed, success, fetch-error)
-        // — symmetric without inverting the order the success path
-        // depends on.
+        // `getSessionCommand` 404s once the session is deleted, so
+        // cleanup must run after the fetch on the success path.
+        // `try/finally` ensures cleanup on every settle path
+        // (timedOut, disposed, success, fetch-error). Idempotent via
+        // the `cleanedUp` guard in `cleanupSession`.
         try {
           if (timedOut) {
             reject(timedOut);
@@ -260,13 +259,12 @@ export async function startExecStreaming(args: {
           }
           resolve({ exitCode: cmd.exitCode });
         } catch (err) {
-          // A `dispose()` racing the in-flight `getSessionCommand`
-          // surfaces as `DaytonaNotFoundError` (the session is gone) —
-          // map back to the contract-documented sentinel so consumers
-          // see `DisposedError` instead of a raw SDK error. Mirrors
-          // the .catch branch's symmetric shape. `timedOut` is
-          // theoretically unreachable here (clearTimers runs above the
-          // try) but checked for parity.
+          // Map back to the documented sentinel when a settle flag is
+          // set — `dispose()` racing the in-flight fetch surfaces as
+          // `DaytonaNotFoundError` from the SDK; consumers branching
+          // on outcome must see `DisposedError`. Mirrors `.catch`'s
+          // shape. `timedOut` is unreachable here (clearTimers runs
+          // above the try) but checked for parity.
           if (timedOut) {
             timedOut.cause = err as Error;
             reject(timedOut);
