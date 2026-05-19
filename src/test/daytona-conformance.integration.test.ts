@@ -181,6 +181,11 @@ async function makeWrapperClient(
   });
 }
 
+// Shared task ID across both wrapper scenarios. Safe under vitest's
+// serial-per-file execution model — if a future split puts the
+// scenarios into separate files running in parallel forks, switch to
+// per-scenario IDs so one scenario's `deleteByTaskId` doesn't reap
+// the other's sandboxes via the `cogmo.task` label index.
 const WRAPPER_TASK_ID = "wrapper-conf";
 const WRAPPER_IMAGE = "python:3.14-slim";
 // Mirror skills tier-2's `DEFAULT_RESOURCE_LIMITS` so the recorded
@@ -215,10 +220,9 @@ function wrapperSpec(): {
     taskId: WRAPPER_TASK_ID,
     image: WRAPPER_IMAGE,
     resourceLimits: WRAPPER_RESOURCE_LIMITS,
-    // Fixed five minutes — `autoStopInterval` derivation uses
-    // `Math.ceil((expiresAt - now) / 60_000)`, so the same wall-clock
-    // delta gives the same value in record and replay. Body-side only;
-    // doesn't affect URL matching but keeps the recorded body stable.
+    // `autoStopInterval` derivation is `Math.ceil((expiresAt - now)
+    // / 60_000)`, so a fixed 5-min wall-clock delta gives the same
+    // baked value (5) on every run regardless of record vs replay.
     expiresAt: new Date(Date.now() + 5 * 60 * 1000),
   };
 }

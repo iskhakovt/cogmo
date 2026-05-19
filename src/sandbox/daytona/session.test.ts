@@ -1,6 +1,7 @@
 import { PassThrough, type Readable } from "node:stream";
 import type { Sandbox as DaytonaSdkSandbox, Process } from "@daytonaio/sdk";
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { DaytonaSessionState, ExecStreamingHandle } from "../index.js";
 import { DaytonaSandboxSession } from "./session.js";
 
@@ -59,7 +60,7 @@ function makeSession(proc: Process): DaytonaSandboxSession {
       taskId: "019d0000-0000-7000-8000-000000000aaa",
       sandboxId: "sb-1",
     } satisfies DaytonaSessionState,
-    sdkSandbox: { process: proc } as unknown as DaytonaSdkSandbox,
+    sdkSandbox: mock<DaytonaSdkSandbox>({ process: proc }),
   });
 }
 
@@ -208,7 +209,7 @@ describe("DaytonaSandboxSession.exec", () => {
         taskId: "019d0000-0000-7000-8000-000000000aaa",
         sandboxId: "sb-1",
       } satisfies DaytonaSessionState,
-      sdkSandbox: { process: proc } as unknown as DaytonaSdkSandbox,
+      sdkSandbox: mock<DaytonaSdkSandbox>({ process: proc }),
       random: () => `pinned-${++seq}`,
     });
 

@@ -2,6 +2,4 @@ Two new scenarios in `daytona-conformance.integration.test.ts` route `session.ex
 
 The internal `CreateOptions` shape (not the exported `DaytonaSandboxClientOptions`) gains an optional `random?: () => string` slot plumbed through `DaytonaSandboxSession` → `startExecStreaming` so conformance tests can pin the per-call session-id randomness for `(method, path)` FIFO matching. Defaults to `randomUUID` in `startExecStreaming`; production wiring can't reach the slot via the public type. A unit test in `session.test.ts` pins the wiring so a refactor that drops the conditional-spread surfaces immediately rather than as a record/replay drift.
 
-The shared `expectFixtureMissing(scenario)` helper carries the dual-assertion rationale (fixture-absent vs `RECORD=1` set without a key) — all four marker tests delegate to it.
-
 Fixtures land in `test/fixtures/daytona/`: `wrapper-success.json` and `wrapper-stderr-nonzero.json` are new; `create-exec-delete.json` and `python-upload-fail.json` re-recorded to match the current Daytona wire shape. Per-test timeout on the wrapper scenarios is 600s to accommodate a first-time `python:3.14-slim` snapshot build via `snapshot.create` — subsequent records reuse the named snapshot and replay is ~10-12 s per scenario.
