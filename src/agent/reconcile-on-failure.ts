@@ -18,7 +18,11 @@
  */
 
 import type { Inngest } from "inngest";
-import { conversationErrored, inboundReady, inngestFunctionFailed } from "../inngest/events.js";
+import {
+  buildConversationErroredEvent,
+  inboundReady,
+  inngestFunctionFailed,
+} from "../inngest/events.js";
 import { logger } from "../logger.js";
 
 const log = logger.child({ component: "handle-message.reconcile-on-failure" });
@@ -44,6 +48,7 @@ export type ReconcileResult =
       status: "reconciled";
       conversationId: string;
       runId: string;
+      functionId: string;
       triggerInboundId: string | null;
       errorMessage: string;
     }
@@ -52,10 +57,11 @@ export type ReconcileResult =
   | { status: "skipped"; reason: "wrong_inner_event" };
 
 /**
- * Pure decision function — takes the failed-run payload, decides whether
- * this reconcile should re-emit, and returns the data the durable wrapper
- * needs to build the event. No emit here so the wrapper can split the
- * decision and the `step.sendEvent` into separate durable steps.
+ * Decide whether this reconcile should re-emit and, if so, package the
+ * fields the wrapper needs into a single typed value. The function logs
+ * `warn` on the two anomalous skip paths (so a misconfigured upstream
+ * shows up in operator logs even when no event lands on the bus) but
+ * does no I/O — emit is the wrapper's job.
  */
 export function decideReconcile(payload: {
   functionId: string;
@@ -94,6 +100,7 @@ export function decideReconcile(payload: {
     status: "reconciled",
     conversationId: payload.conversationId,
     runId: payload.runId,
+    functionId: payload.functionId,
     triggerInboundId: payload.triggerInboundId ?? null,
     errorMessage: payload.errorMessage,
   };
@@ -125,11 +132,14 @@ export function createHandleMessageReconcile(inngest: Inngest) {
 
       if (decision.status !== "reconciled") return decision;
 
-      // Bus-level dedup via the explicit `id` — same shape `onFailure`'s
-      // `emit-conversation-errored` step uses, so whichever path emits
-      // first wins and `recover-conversation` runs exactly once.
-      await step.sendEvent("emit-errored", {
-        ...conversationErrored.create({
+      // Bus-level dedup via the shared `buildConversationErroredEvent`
+      // helper — both this reconcile and `handle-message`'s `onFailure`
+      // funnel through it, so the `id: errored-${runId}` is identical and
+      // Inngest dedups whichever event arrives second.
+      // `recover-conversation` runs exactly once per failed run.
+      await step.sendEvent(
+        "emit-errored",
+        buildConversationErroredEvent({
           conversationId: decision.conversationId,
           runId: decision.runId,
           triggerInboundId: decision.triggerInboundId,
@@ -137,18 +147,20 @@ export function createHandleMessageReconcile(inngest: Inngest) {
           // `onFailure`'s typical `NonRetriableError`. The evolution
           // failure-reflector can bucket by class to keep
           // worker-disconnect noise out of the model-error corpus.
+          // (When dedup wins for `onFailure`, this label is dropped —
+          // only the case where the reconcile got to the bus first
+          // actually surfaces "WorkerDeath" downstream.)
           errorClass: "WorkerDeath",
           causeClass: null,
-          errorMessage: `inngest run terminated abnormally (run_id ${decision.runId}, function_id ${function_id}): ${decision.errorMessage}`,
+          errorMessage: `inngest run terminated abnormally (run_id ${decision.runId}, function_id ${decision.functionId}): ${decision.errorMessage}`,
         }),
-        id: `errored-${decision.runId}`,
-      });
+      );
 
       log.warn(
         {
           conversationId: decision.conversationId,
           runId: decision.runId,
-          functionId: function_id,
+          functionId: decision.functionId,
           errorMessage,
         },
         "reconcile: emitted conversation/errored from inngest/function.failed",

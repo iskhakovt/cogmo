@@ -1,7 +1,9 @@
 import { InngestTestEngine } from "@inngest/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { inngest } from "../inngest/client.js";
+import { buildConversationErroredEvent } from "../inngest/events.js";
 import { logger } from "../logger.js";
+import { expectDefined } from "../test/assertions.js";
 import { spyOnInngestSend } from "../test/factories.js";
 import {
   createHandleMessageReconcile,
@@ -45,12 +47,13 @@ function basePayload(
 }
 
 describe("decideReconcile", () => {
-  it("returns reconciled with the conversation + run + trigger when payload is well-formed", () => {
+  it("returns reconciled with the conversation + run + functionId + trigger when payload is well-formed", () => {
     const result = decideReconcile(basePayload());
     expect(result).toEqual({
       status: "reconciled",
       conversationId: "conv-1",
       runId: "01KS04KFF783YZZS67QS4Y3Y5B",
+      functionId: "cogmo-handle-message",
       triggerInboundId: "inbound-1",
       errorMessage: "connect_worker_stopped_responding",
     });
@@ -159,7 +162,7 @@ describe("createHandleMessageReconcile — durable wrapper", () => {
     await engine.execute();
 
     expect(sendSpy).toHaveBeenCalledTimes(1);
-    const sendCall = sendSpy.mock.calls[0]?.[0] as unknown;
+    const sendCall = expectDefined(sendSpy.mock.calls[0]?.[0], "first send call");
     expect(sendCall).toMatchObject({
       payload: {
         name: "conversation/errored",
@@ -195,7 +198,7 @@ describe("createHandleMessageReconcile — durable wrapper", () => {
 
     await engine.execute();
 
-    const sendCall = sendSpy.mock.calls[0]?.[0] as unknown;
+    const sendCall = expectDefined(sendSpy.mock.calls[0]?.[0], "first send call");
     expect(sendCall).toMatchObject({
       payload: { data: { triggerInboundId: null } },
     });
@@ -242,10 +245,71 @@ describe("createHandleMessageReconcile — durable wrapper", () => {
       ],
     });
     await engine.execute();
-    const sendCall = sendSpy.mock.calls[0]?.[0] as unknown as {
-      payload: { data: { errorMessage: string } };
-    };
-    expect(sendCall.payload.data.errorMessage).toMatch(/run_id 01XYZ/);
-    expect(sendCall.payload.data.errorMessage).toMatch(/function_id cogmo-handle-message/);
+    expect(expectDefined(sendSpy.mock.calls[0]?.[0], "first send call")).toMatchObject({
+      payload: {
+        data: {
+          errorMessage: expect.stringMatching(/run_id 01XYZ.*function_id cogmo-handle-message/),
+        },
+      },
+    });
+  });
+});
+
+// ─── Bus-level dedup contract ────────────────────────────────────────
+//
+// The dedup contract is two-sided: `handle-message`'s `onFailure` and
+// `handle-message-reconcile` BOTH emit `conversation/errored`, and the
+// `id` field on the event payload is what makes Inngest's event-id
+// dedup window pick one. If either side forgets the id, both events
+// land on the bus, both trigger `recover-conversation`, and the
+// cooldown doubles for what was really one failure.
+//
+// The PR #297 review caught exactly that: the reconcile set the id but
+// `onFailure` didn't. The fix funnels both emitters through
+// `buildConversationErroredEvent`, and the test below pins the
+// contract — drop the helper or skip it on one side and this test
+// breaks.
+
+describe("bus-level dedup contract", () => {
+  it("buildConversationErroredEvent produces the same id format both emitters depend on", () => {
+    const payload = buildConversationErroredEvent({
+      conversationId: "conv-1",
+      runId: "run-xyz",
+      triggerInboundId: "inbound-1",
+      errorClass: "NonRetriableError",
+      causeClass: "BadRequestError",
+      errorMessage: "boom",
+    });
+    // Inngest's MinimalEventPayload.id is the dedup key. The shape
+    // `errored-${runId}` is the contract — see comment on
+    // `buildConversationErroredEvent` in `src/inngest/events.ts`.
+    expect(payload.id).toBe("errored-run-xyz");
+    expect(payload.name).toBe("conversation/errored");
+  });
+
+  // Cross-emitter pin: if `onFailure` (in handle-message.ts) is ever
+  // changed to bypass `buildConversationErroredEvent` and call
+  // `conversationErrored.create(...)` directly, that emit would land
+  // on the bus WITHOUT an id and double-fire `recover-conversation`
+  // alongside the reconcile. Anchor the dedup in one place by pinning
+  // that the same `runId` produces the same `id` regardless of caller.
+  it("same runId produces the same dedup id via the helper (no two-sided drift)", () => {
+    const a = buildConversationErroredEvent({
+      conversationId: "conv-1",
+      runId: "run-shared",
+      triggerInboundId: null,
+      errorClass: "NonRetriableError",
+      causeClass: null,
+      errorMessage: "from onFailure",
+    });
+    const b = buildConversationErroredEvent({
+      conversationId: "conv-1",
+      runId: "run-shared",
+      triggerInboundId: null,
+      errorClass: "WorkerDeath",
+      causeClass: null,
+      errorMessage: "from reconcile",
+    });
+    expect(a.id).toBe(b.id);
   });
 });

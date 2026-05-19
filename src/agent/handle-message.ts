@@ -2,8 +2,8 @@ import { NonRetriableError } from "inngest";
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import {
+  buildConversationErroredEvent,
   conversationDegraded,
-  conversationErrored,
   inboundReady,
   responseReady,
 } from "../inngest/events.js";
@@ -184,9 +184,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         // upstream class rather than every error coalescing to one bucket.
         const cause = error.cause;
         const causeClass = cause instanceof Error ? cause.name : null;
+        // Bus-level dedup with the worker-death reconcile (subscriber on
+        // `inngest/function.failed`). Both emit `conversation/errored`
+        // via `buildConversationErroredEvent`, which bakes in
+        // `id: "errored-${runId}"`. Inngest's event-id dedup window
+        // ensures `recover-conversation` runs exactly once even when
+        // both paths fire for the same failed run. See
+        // `src/inngest/events.ts → buildConversationErroredEvent` and
+        // `design/agent-resilience.md → Triggers`.
         await step.sendEvent(
           "emit-conversation-errored",
-          conversationErrored.create({
+          buildConversationErroredEvent({
             conversationId,
             runId,
             triggerInboundId,
