@@ -100,21 +100,23 @@ export function createFileService(
   /**
    * Confirm the bytes on disk still match what the caller has seen.
    *
-   * Called by every `write` to an existing path and by every `edit`.
-   * Three rejection paths:
+   * Takes the current HEAD as an argument so the caller can capture
+   * it once and reuse it (overwrite needs to know existence; edit
+   * uses it for staleness). Three rejection paths:
    *   - Caller never read this path in this instance.
    *   - Caller's last read was truncated (partial view).
    *   - mtime advanced AND the on-disk bytes diverged from the cache.
    *
    * On a benign mtime bump (mtime advanced, content unchanged — e.g.
    * a re-upload of identical bytes), the cached timestamp is refreshed
-   * and the operation proceeds.
-   *
-   * Returns the up-to-date fetched view when content differed from
-   * the cache (rejected), or `null` when the cache is still valid and
-   * no fresh fetch was needed.
+   * and the operation proceeds. A `null` head means the file vanished
+   * externally; the operation is allowed to proceed and (re-)create it.
    */
-  async function assertFresh(path: string, kind: "edit" | "overwrite"): Promise<void> {
+  async function assertFresh(
+    path: string,
+    kind: "edit" | "overwrite",
+    head: Date | null,
+  ): Promise<void> {
     const entry = readState.get(path);
     if (!entry) {
       throw new Error(
@@ -126,8 +128,7 @@ export function createFileService(
         `Cannot ${kind} ${path}: the last read returned a truncated view (file is larger than ${MAX_READ_LENGTH} bytes).`,
       );
     }
-    const head = await headExisting(path);
-    if (!head) return; // File vanished externally; let the operation proceed and create it.
+    if (!head) return;
     if (head.getTime() <= entry.lastModified.getTime()) return;
     // mtime advanced — verify content actually changed before failing.
     const fresh = await fetchObject(path);
@@ -171,8 +172,8 @@ export function createFileService(
     },
 
     async write(path: string, content: string): Promise<void> {
-      const existing = await headExisting(path);
-      if (existing) await assertFresh(path, "overwrite");
+      const head = await headExisting(path);
+      if (head) await assertFresh(path, "overwrite", head);
       await putObject(path, content);
       // Reflect the write in the read cache — the caller now knows the current bytes.
       readState.set(path, {
@@ -189,7 +190,8 @@ export function createFileService(
       opts?: { replaceAll?: boolean },
     ): Promise<void> {
       const replaceAll = opts?.replaceAll ?? false;
-      await assertFresh(path, "edit");
+      const head = await headExisting(path);
+      await assertFresh(path, "edit", head);
       // assertFresh guarantees a cached entry for `path`.
       const entry = readState.get(path);
       if (!entry) throw new Error(`Internal: read cache missing for ${path} after freshness check`);

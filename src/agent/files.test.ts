@@ -189,6 +189,19 @@ describe("createFileService.write", () => {
     expect(put?.input).toMatchObject({ Key: "notes/x.md", Body: "updated" });
   });
 
+  it("issues a single HEAD per overwrite — existence check and freshness check are one pass", async () => {
+    const { client, calls } = s3Mock({
+      head: () => ({ LastModified: T0 }),
+      get: () => ({ Body: body("original"), LastModified: T0 }),
+    });
+    const files = createFileService(client, "bucket");
+
+    await files.read("notes/x.md");
+    await files.write("notes/x.md", "updated");
+
+    expect(calls.filter((c) => c.kind === "head")).toHaveLength(1);
+  });
+
   it("rejects overwrite when the file changed on disk since the read", async () => {
     const { client } = s3Mock({
       head: () => ({ LastModified: T1 }), // mtime is newer than what read captured
