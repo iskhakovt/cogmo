@@ -13,6 +13,7 @@ const mockBotApi = {
   sendMessage: vi.fn().mockResolvedValue({ message_id: 100 }),
   sendChatAction: vi.fn().mockResolvedValue(true),
   editMessageText: vi.fn().mockResolvedValue({}),
+  editMessageReplyMarkup: vi.fn().mockResolvedValue({}),
   sendPhoto: vi.fn().mockResolvedValue({ message_id: 101 }),
   sendVoice: vi.fn().mockResolvedValue({ message_id: 102 }),
   sendAudio: vi.fn().mockResolvedValue({ message_id: 103 }),
@@ -173,6 +174,7 @@ describe("telegram adapter", () => {
       credentials: { token: "fake" },
       transport,
       attachments,
+      boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
     });
 
     return { adapter: result.adapter, transport, attachments };
@@ -279,6 +281,7 @@ describe("telegram adapter", () => {
       credentials: { token: "fake" },
       transport,
       attachments: mockAttachmentStore(),
+      boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
     });
 
     // Enter /profile new flow
@@ -1062,6 +1065,7 @@ describe("telegram adapter", () => {
         credentials: { token: "fake" },
         transport,
         attachments,
+        boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
       });
       return { adapter: result.adapter as unknown as StreamingAdapter, attachments };
     }
@@ -1526,6 +1530,7 @@ describe("telegram adapter", () => {
         credentials: { token: "fake" },
         transport,
         attachments,
+        boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
       });
       return { adapter: result.adapter as unknown as StreamingAdapter, attachments };
     }
@@ -1653,6 +1658,228 @@ describe("telegram adapter", () => {
       expect(editedText).not.toContain("🔍 send_document");
       expect(editedText).toContain("your file");
       expect(editedText).toContain("Done");
+    });
+  });
+
+  describe("boundary hold", () => {
+    async function createAdapterWithBoundary(
+      boundaryOverrides: Partial<ReturnType<typeof mockTransport>["boundary"]>,
+    ) {
+      const boundary = {
+        peek: vi.fn().mockResolvedValue(null),
+        findActive: vi.fn().mockResolvedValue(null),
+        start: vi.fn().mockResolvedValue({ boundaryId: "boundary-77" }),
+        append: vi.fn().mockResolvedValue(undefined),
+        resolve: vi.fn().mockResolvedValue(
+          ok({
+            sessionId: "session-resolved",
+            conversationId: "conv-resolved",
+            drainedInboundCount: 1,
+            platformAddress: "42",
+          }),
+        ),
+        ...boundaryOverrides,
+      };
+      // resolveSession returns null so the adapter takes the rotation path.
+      const transport = mockTransport({
+        resolveSession: vi.fn().mockResolvedValue(null),
+        boundary,
+        createConversation: vi.fn().mockResolvedValue(
+          ok({
+            id: "session-fresh",
+            channelId: "tg-ch",
+            platformAddress: "42",
+            conversationId: "conv-fresh",
+            status: "active",
+            receive: "routed",
+            profileName: "assistant",
+          }),
+        ),
+        emit: vi.fn().mockResolvedValue(ok(undefined)),
+      });
+      await setup({
+        channelId: "tg-ch",
+        credentials: { token: "fake" },
+        transport,
+        attachments: mockAttachmentStore(),
+        boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
+      });
+      return { transport };
+    }
+
+    it("fires the boundary prompt when peek finds a substantial prior", async () => {
+      const { transport } = await createAdapterWithBoundary({
+        peek: vi.fn().mockResolvedValue({
+          conversationId: "conv-prior",
+          userTurnCount: 5,
+          lastMessageAt: new Date("2026-05-19T12:00:00Z"),
+          alias: "research notes",
+          firstUserSnippet: null,
+        }),
+      });
+
+      const ctx = makeCtx(111, "hey, are you there?", 42);
+      // ctx.reply returns a message_id so the adapter can attach an inline keyboard to it.
+      ctx.reply = vi.fn().mockResolvedValue({ message_id: 9001 });
+
+      await handlers.get("on:message:text")!(ctx);
+
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Pick up where we left off"));
+      expect(transport.boundary.start).toHaveBeenCalledWith(
+        expect.objectContaining({
+          platformAddress: "42",
+          platformUserHandle: "111",
+          priorConversationId: "conv-prior",
+          promptMessageId: "9001",
+          firstInbound: expect.objectContaining({ content: "hey, are you there?" }),
+          timeoutMs: 30000,
+        }),
+      );
+      expect(mockBotApi.editMessageReplyMarkup).toHaveBeenCalledWith(
+        42,
+        9001,
+        expect.objectContaining({
+          reply_markup: expect.objectContaining({
+            inline_keyboard: expect.arrayContaining([
+              expect.arrayContaining([
+                expect.objectContaining({
+                  text: expect.stringContaining("research notes"),
+                  callback_data: "boundary:boundary-77:resume",
+                }),
+                expect.objectContaining({
+                  text: "✦ Start fresh",
+                  callback_data: "boundary:boundary-77:fresh",
+                }),
+              ]),
+            ]),
+          }),
+        }),
+      );
+      // No emit — the inbound is buffered, not persisted yet.
+      expect(transport.emit).not.toHaveBeenCalled();
+      expect(transport.createConversation).not.toHaveBeenCalled();
+    });
+
+    it("appends to the buffer when a hold is already active for this chat", async () => {
+      const { transport } = await createAdapterWithBoundary({
+        findActive: vi.fn().mockResolvedValue({
+          id: "boundary-77",
+          channelId: "tg-ch",
+          platformAddress: "42",
+          platformUserHandle: "111",
+          priorConversationId: "conv-prior",
+          promptMessageId: "9001",
+          bufferedInbounds: [{ content: "hey", platformTs: "2026-05-19T12:00:00.000Z" }],
+          expiresAt: new Date(),
+          createdAt: new Date(),
+        }),
+      });
+
+      const ctx = makeCtx(111, "follow-up message", 42);
+      await handlers.get("on:message:text")!(ctx);
+
+      expect(transport.boundary.append).toHaveBeenCalledWith(
+        "boundary-77",
+        expect.objectContaining({ content: "follow-up message" }),
+      );
+      // No prompt sent — the existing hold takes precedence.
+      expect(transport.boundary.start).not.toHaveBeenCalled();
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
+
+    it("falls through to createConversation when peek returns null (one-shot prior)", async () => {
+      const { transport } = await createAdapterWithBoundary({
+        peek: vi.fn().mockResolvedValue(null),
+      });
+
+      const ctx = makeCtx(111, "first contact", 42);
+      await handlers.get("on:message:text")!(ctx);
+
+      expect(transport.boundary.start).not.toHaveBeenCalled();
+      expect(transport.createConversation).toHaveBeenCalled();
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-fresh",
+        "first contact",
+        expect.any(Date),
+      );
+    });
+
+    it("resume callback invokes boundary.resolve with resume-prior and clears the keyboard", async () => {
+      const { transport } = await createAdapterWithBoundary({});
+      const callbackHandler = handlers.get(
+        "callbackQuery:^boundary:([0-9a-f-]{36}):(resume|fresh)$",
+      )!;
+      const ctx = {
+        match: [
+          "boundary:abcdef01-1234-7000-8000-000000000001:resume",
+          "abcdef01-1234-7000-8000-000000000001",
+          "resume",
+        ],
+        editMessageReplyMarkup: vi.fn().mockResolvedValue({}),
+        answerCallbackQuery: vi.fn().mockResolvedValue({}),
+      };
+      await callbackHandler(ctx);
+
+      expect(transport.boundary.resolve).toHaveBeenCalledWith({
+        boundaryId: "abcdef01-1234-7000-8000-000000000001",
+        choice: { kind: "resume-prior" },
+        reason: "user_resume",
+      });
+      expect(ctx.editMessageReplyMarkup).toHaveBeenCalledWith({
+        reply_markup: { inline_keyboard: [] },
+      });
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+        text: expect.stringContaining("Picking up"),
+      });
+    });
+
+    it("fresh callback invokes boundary.resolve with fresh", async () => {
+      const { transport } = await createAdapterWithBoundary({});
+      const callbackHandler = handlers.get(
+        "callbackQuery:^boundary:([0-9a-f-]{36}):(resume|fresh)$",
+      )!;
+      const ctx = {
+        match: [
+          "boundary:abcdef01-1234-7000-8000-000000000001:fresh",
+          "abcdef01-1234-7000-8000-000000000001",
+          "fresh",
+        ],
+        editMessageReplyMarkup: vi.fn().mockResolvedValue({}),
+        answerCallbackQuery: vi.fn().mockResolvedValue({}),
+      };
+      await callbackHandler(ctx);
+
+      expect(transport.boundary.resolve).toHaveBeenCalledWith({
+        boundaryId: "abcdef01-1234-7000-8000-000000000001",
+        choice: { kind: "fresh" },
+        reason: "user_fresh",
+      });
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+        text: expect.stringContaining("Starting fresh"),
+      });
+    });
+
+    it("callback handler surfaces 'Already resolved' when the hold is gone", async () => {
+      await createAdapterWithBoundary({
+        resolve: vi.fn().mockResolvedValue(err({ code: "boundary_not_found" })),
+      });
+      const callbackHandler = handlers.get(
+        "callbackQuery:^boundary:([0-9a-f-]{36}):(resume|fresh)$",
+      )!;
+      const ctx = {
+        match: [
+          "boundary:abcdef01-1234-7000-8000-000000000001:fresh",
+          "abcdef01-1234-7000-8000-000000000001",
+          "fresh",
+        ],
+        editMessageReplyMarkup: vi.fn().mockResolvedValue({}),
+        answerCallbackQuery: vi.fn().mockResolvedValue({}),
+      };
+      await callbackHandler(ctx);
+
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+        text: "Already resolved",
+      });
     });
   });
 });

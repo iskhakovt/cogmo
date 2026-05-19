@@ -107,6 +107,19 @@ export const env = createEnv({
     DEBOUNCE_IDLE_SECONDS: z.coerce.number().default(3),
     DEBOUNCE_MAXWAIT_SECONDS: z.coerce.number().default(30),
     DEBOUNCE_RESUME_POLICY: z.enum(["debounce", "flush", "await_input"]).default("debounce"),
+    /**
+     * Wait (seconds) for a user response on the "Resume previous / Start
+     * fresh" boundary prompt before defaulting to fresh. Long enough for a
+     * phone tap, short enough that an absent user gets a reply close to the
+     * pre-boundary-hold latency. See design/transport/sessions.md.
+     */
+    BOUNDARY_PROMPT_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(30),
+    /**
+     * Minimum user-turn count on the prior conversation before the boundary
+     * prompt fires on rotation. One-shot conversations stay silent so the
+     * UX isn't noisy for trivial chats.
+     */
+    BOUNDARY_PROMPT_MIN_USER_TURNS: z.coerce.number().int().positive().default(3),
     COGMO_MASTER_KEY: z.string().optional(),
     /** Semver set at build time (Dockerfile `ARG VERSION`). `dev` when unset. */
     VERSION: z.string().default("dev"),

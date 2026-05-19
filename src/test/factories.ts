@@ -247,6 +247,12 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     clearChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     findReachableChannelsForUserProfile: vi.fn().mockResolvedValue([]),
     findInboundByScheduledFireKey: vi.fn().mockResolvedValue(undefined),
+    peekPriorClosedConversation: vi.fn().mockResolvedValue(undefined),
+    createBoundaryPending: vi.fn().mockResolvedValue({ id: "boundary-1" }),
+    getBoundaryPendingByAddress: vi.fn().mockResolvedValue(undefined),
+    getBoundaryPendingById: vi.fn().mockResolvedValue(undefined),
+    appendBoundaryBuffer: vi.fn().mockResolvedValue(undefined),
+    deleteBoundaryPending: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -270,6 +276,7 @@ export function mockTransportDeep(overrides: DeepPartial<Transport> = {}): Trans
   return {
     ...base,
     ...overrides,
+    boundary: { ...base.boundary, ...(overrides.boundary ?? {}) },
     conversations: { ...base.conversations, ...(overrides.conversations ?? {}) },
     chats: { ...base.chats, ...(overrides.chats ?? {}) },
     profiles: { ...base.profiles, ...(overrides.profiles ?? {}) },
@@ -288,6 +295,20 @@ export function mockTransportDeep(overrides: DeepPartial<Transport> = {}): Trans
 export function mockTransport(overrides?: Partial<Transport>): Transport {
   return {
     resolveSession: vi.fn().mockResolvedValue(null),
+    boundary: {
+      peek: vi.fn().mockResolvedValue(null),
+      findActive: vi.fn().mockResolvedValue(null),
+      start: vi.fn().mockResolvedValue({ boundaryId: "boundary-1" }),
+      append: vi.fn().mockResolvedValue(undefined),
+      resolve: vi.fn().mockResolvedValue(
+        ok({
+          sessionId: "session-resolved",
+          conversationId: "conv-resolved",
+          drainedInboundCount: 0,
+          platformAddress: "addr",
+        }),
+      ),
+    },
     createConversation: vi.fn().mockResolvedValue(
       ok({
         id: "session-1",

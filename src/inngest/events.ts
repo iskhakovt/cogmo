@@ -292,6 +292,69 @@ export function buildConversationCooldownClearedEvent(
   return { ...conversationCooldownCleared.create(data), id };
 }
 
+// --- Boundary hold events ---
+
+/**
+ * The Telegram adapter has stashed an inbound in `boundary_pending` and
+ * sent the user a "Resume previous / Start fresh" prompt. The waiter
+ * function (`boundary-waiter`) consumes this and starts the timeout.
+ * `cancelOn` `boundary/resolved` ends the wait early when the user taps
+ * a button (or runs `/new` / `/resume` while the hold is open).
+ *
+ * Dedup id is `boundary-pending-${boundaryId}` so a retry of the
+ * boundary-creating tx (Inngest at-least-once) doesn't start two waiters.
+ */
+export const boundaryPendingEvent = eventType("conversation/boundary/pending", {
+  schema: z.object({
+    boundaryId: z.string(),
+    channelId: z.string(),
+    platformAddress: z.string(),
+    timeoutMs: z.number().int().positive(),
+  }),
+});
+
+export type BoundaryPendingData = z.infer<typeof boundaryPendingEvent.schema>;
+
+export function buildBoundaryPendingEvent(data: BoundaryPendingData) {
+  return { ...boundaryPendingEvent.create(data), id: `boundary-pending-${data.boundaryId}` };
+}
+
+/**
+ * Fired when a boundary hold has been resolved — by user button tap,
+ * by `/new` or `/resume` during the hold, or by waiter timeout falling
+ * back to "fresh." Cancels the waiter (`cancelOn`) and is observability
+ * for downstream consumers (no orchestrator dependency yet).
+ *
+ * `resolvedConversationId` carries the conversation the buffered inbounds
+ * landed in — the prior id for `resume`/`resume_target`, a freshly
+ * created id for `fresh`/`waiter_timeout`.
+ */
+export const boundaryResolvedReason = [
+  "user_resume",
+  "user_resume_target",
+  "user_fresh",
+  "user_command",
+  "waiter_timeout",
+] as const;
+export type BoundaryResolvedReason = (typeof boundaryResolvedReason)[number];
+
+export const boundaryResolvedEvent = eventType("conversation/boundary/resolved", {
+  schema: z.object({
+    boundaryId: z.string(),
+    channelId: z.string(),
+    platformAddress: z.string(),
+    resolvedConversationId: z.string(),
+    reason: z.enum(boundaryResolvedReason),
+    drainedInboundCount: z.number().int().nonnegative(),
+  }),
+});
+
+export type BoundaryResolvedData = z.infer<typeof boundaryResolvedEvent.schema>;
+
+export function buildBoundaryResolvedEvent(data: BoundaryResolvedData) {
+  return { ...boundaryResolvedEvent.create(data), id: `boundary-resolved-${data.boundaryId}` };
+}
+
 // --- Debounce events ---
 
 export const debounceIdle = eventType("debounce/idle", {

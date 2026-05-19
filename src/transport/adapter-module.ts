@@ -39,6 +39,19 @@ export interface SkillsApprovalDeps {
 }
 
 /**
+ * Boundary-hold UX configuration — see `design/transport/sessions.md`.
+ * Threaded from the runtime env at registry time; adapters use it to gate
+ * when the "Resume previous / Start fresh" prompt fires after an idle
+ * rotation and how long the waiter holds before defaulting to fresh.
+ */
+export interface BoundaryConfig {
+  /** Milliseconds the waiter sleeps before resolving as fresh. */
+  promptTimeoutMs: number;
+  /** Prior must have at least this many user turns to be worth prompting about. */
+  minUserTurns: number;
+}
+
+/**
  * Dependencies available to adapter setup.
  */
 export interface AdapterDeps {
@@ -47,6 +60,7 @@ export interface AdapterDeps {
   transport: Transport;
   /** Binary storage — adapters may download generated attachments for outbound delivery. */
   attachments: AttachmentStore;
+  boundary: BoundaryConfig;
   /** Optional — present only when the sandbox module is initialized. */
   codingProgress?: CodingProgressDeps;
   /** Optional — present only when the skills module is wired. */

@@ -159,6 +159,53 @@ export async function handleResume(
   // Accept both alias and UUID forms so `/sessions` numbered output (which emits `/resume <uuid>`
   // for unaliased entries) stays actionable. The callback-query path already does this.
   const isUuid = looksLikeUuid(target);
+
+  // Boundary hold open? Drain the buffered inbounds into the user-specified
+  // target instead of taking the standard `resumeConversation` path. Aliases
+  // resolve through the same `findConversationByAlias` lookup that
+  // `resumeConversation` uses, so identity + ownership are still checked
+  // (ACL semantics live inside `resolveBoundary`).
+  const pending = await transport.boundary.findActive(addr);
+  if (pending) {
+    let conversationId: string;
+    if (isUuid) {
+      conversationId = target;
+    } else {
+      const list = await transport.conversations.list(handle);
+      if (list.isErr()) {
+        await ctx.reply(errorMessage(list.error));
+        return;
+      }
+      const found = list.value.find((c) => c.alias === target);
+      if (!found) {
+        await ctx.reply(`No conversation aliased "${target}". Use /sessions to list.`);
+        return;
+      }
+      conversationId = found.id;
+    }
+    const resolved = await transport.boundary.resolve({
+      boundaryId: pending.id,
+      choice: { kind: "resume-target", conversationId },
+      reason: "user_resume_target",
+    });
+    if (resolved.isErr()) {
+      const code = resolved.error.code;
+      await ctx.reply(
+        code === "access_denied"
+          ? `Cannot resume "${target}" — not yours.`
+          : code === "conversation_not_found"
+            ? `No conversation matching "${target}".`
+            : code === "boundary_not_found"
+              ? "That prompt already resolved."
+              : "Resume failed.",
+      );
+      return;
+    }
+    const label = isUuid ? await resumeLabelFor(transport, handle, conversationId) : target;
+    await ctx.reply(`Resumed conversation "${label}".`);
+    return;
+  }
+
   const key = isUuid ? ({ conversationId: target } as const) : ({ alias: target } as const);
   const res = await transport.resumeConversation(addr, handle, key);
   if (res.isErr()) {
@@ -809,6 +856,28 @@ export async function handleNew(transport: Transport, ctx: TelegramCommandContex
       return;
     }
     profileId = res.profile.id;
+  }
+
+  // Boundary hold open? The user just resolved their own ambivalence: drain
+  // the buffered inbounds into a fresh conversation under the requested
+  // profile and let `resolveBoundary` emit `boundary/resolved` (which
+  // cancels the waiter). Skip the regular createConversation path.
+  const pending = await transport.boundary.findActive(addr);
+  if (pending) {
+    const res = await transport.boundary.resolve({
+      boundaryId: pending.id,
+      choice: profileId ? { kind: "fresh", profileId } : { kind: "fresh" },
+      reason: "user_command",
+    });
+    if (res.isErr()) {
+      await ctx.reply("Could not start a new conversation right now.");
+      return;
+    }
+    const profile = await transport.conversations.getCurrent(handle, addr);
+    const used =
+      profile.isOk() && profile.value ? profile.value.profileName : (profileName ?? "default");
+    await ctx.reply(`Started a new conversation (${used}).`);
+    return;
   }
 
   const existing = await transport.resolveSession(addr);

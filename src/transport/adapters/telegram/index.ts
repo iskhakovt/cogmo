@@ -30,6 +30,7 @@ import {
 } from "../../adapter-module.js";
 import { type AttachmentStore, mediaTypeToExt } from "../../attachment-store.js";
 import type { InboundContent } from "../../content.js";
+import type { BufferedInboundEntry, PriorClosedConversation } from "../../store/index.js";
 import type { Adapter, StreamHandle, StreamingAdapter, StreamOpts } from "../../types.js";
 import {
   handleClasses,
@@ -83,6 +84,20 @@ const TELEGRAM_MIN_HEAD_CHARS = 500;
 // append-only mode. Telegram's typing action auto-clears after ~5s, so we
 // refresh inside that window. 3500ms leaves a small overlap.
 const TELEGRAM_TYPING_REFRESH_MS = 3500;
+
+/**
+ * Max characters in the first-user-message snippet used for the "↶ Resume X"
+ * button label. Telegram inline button labels render up to ~40 chars cleanly
+ * before truncation on mobile; this leaves room for the `↶ Resume ` prefix.
+ */
+const BOUNDARY_SNIPPET_MAX_CHARS = 25;
+
+/**
+ * Regex matched against `callback_data` for boundary prompt taps. UUIDv7
+ * format (`[0-9a-f-]{36}`) keeps the pattern unambiguous against other
+ * `…:…` callback shapes (`resume:`, `plan:`, `perm:`, `skill:`).
+ */
+const BOUNDARY_CALLBACK_REGEX = /^boundary:([0-9a-f-]{36}):(resume|fresh)$/;
 
 /**
  * If `head` ends inside an open fenced code block, close the fence at the
@@ -627,7 +642,7 @@ function toCmdCtx(ctx: GrammyCtxLite, overrideMatch?: string): TelegramCommandCo
 }
 
 export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
-  const { credentials, transport, attachments } = deps;
+  const { credentials, transport, attachments, boundary: boundaryConfig } = deps;
   const creds = credentials as { token: string; apiRoot?: string };
   const bot = new Bot(creds.token, creds.apiRoot ? { client: { apiRoot: creds.apiRoot } } : {});
   const adapter = new TelegramAdapter(bot, attachments);
@@ -710,6 +725,42 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     } else {
       await ctx.reply("Nothing to cancel.");
     }
+  });
+
+  // Boundary prompt taps — callback_data = "boundary:<boundaryId>:<resume|fresh>"
+  bot.callbackQuery(BOUNDARY_CALLBACK_REGEX, async (ctx) => {
+    const boundaryId = ctx.match?.[1];
+    const action = ctx.match?.[2];
+    if (!boundaryId || !action) return;
+
+    const isResume = action === "resume";
+    const result = await transport.boundary.resolve({
+      boundaryId,
+      choice: isResume ? { kind: "resume-prior" } : { kind: "fresh" },
+      reason: isResume ? "user_resume" : "user_fresh",
+    });
+
+    try {
+      // Drop the keyboard so the buttons can't be tapped twice. Same pattern
+      // as plan / permission / skills-approval callback handlers.
+      await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "";
+      if (!msg.includes("message is not modified")) {
+        logger.warn({ err }, "telegram: failed to clear boundary keyboard");
+      }
+    }
+
+    if (result.isErr()) {
+      const code = result.error.code;
+      const toast = code === "boundary_not_found" ? "Already resolved" : "Resolution failed";
+      await ctx.answerCallbackQuery({ text: toast });
+      return;
+    }
+
+    await ctx.answerCallbackQuery({
+      text: isResume ? "Picking up where we left off." : "Starting fresh.",
+    });
   });
 
   // Inline keyboard taps from /sessions list — callback_data = "resume:<alias|conversationId>"
@@ -801,9 +852,97 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     await ctx.answerCallbackQuery({ text: outcome.toast });
   });
 
-  async function resolveOrCreateSession(addr: string, handle: string) {
+  function boundaryButtonLabel(prior: PriorClosedConversation): string {
+    return prior.alias ?? prior.firstUserSnippet ?? "previous chat";
+  }
+
+  /**
+   * Send the boundary prompt and persist the hold. Two-message-API trip:
+   * `ctx.reply` first to obtain a message id, then `editMessageReplyMarkup`
+   * once the boundary row exists (so the inline-keyboard `callback_data` can
+   * carry the row's id). The intermediate state — prompt text without
+   * buttons — is only visible for the round-trip latency.
+   *
+   * Returns `true` when the hold was created (caller should NOT emit the
+   * inbound; it's buffered). Returns `false` to fall through to fresh-create.
+   */
+  async function fireBoundaryPrompt(
+    ctx: { reply: (text: string) => Promise<{ message_id: number }> },
+    addr: string,
+    handle: string,
+    prior: PriorClosedConversation,
+    firstInbound: BufferedInboundEntry,
+  ): Promise<boolean> {
+    try {
+      const label = boundaryButtonLabel(prior);
+      const sent = await ctx.reply(
+        "It's been a while since our last chat. Pick up where we left off, or start fresh?",
+      );
+      const { boundaryId } = await transport.boundary.start({
+        platformAddress: addr,
+        platformUserHandle: handle,
+        priorConversationId: prior.conversationId,
+        promptMessageId: String(sent.message_id),
+        firstInbound,
+        timeoutMs: boundaryConfig.promptTimeoutMs,
+      });
+      await bot.api.editMessageReplyMarkup(Number(addr), sent.message_id, {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: `↶ Resume ${label}`, callback_data: `boundary:${boundaryId}:resume` },
+              { text: "✦ Start fresh", callback_data: `boundary:${boundaryId}:fresh` },
+            ],
+          ],
+        },
+      });
+      return true;
+    } catch (err) {
+      logger.error({ err }, "telegram: failed to fire boundary prompt — falling back to fresh");
+      return false;
+    }
+  }
+
+  /**
+   * Single entry point for every channel-side inbound (text, photo, document,
+   * voice). Routes through the boundary-hold gate before falling back to the
+   * normal `resolveSession` → `createConversation` → `emit` flow.
+   *
+   *   1. If a hold is already open for this address, append + return.
+   *   2. `resolveSession` — if active, emit normally.
+   *   3. Else `boundary.peek` — if there's a substantive prior, fire the
+   *      prompt + buffer the inbound and return.
+   *   4. Else `createConversation` + emit as before.
+   */
+  async function dispatchInbound(
+    ctx: { reply: (text: string) => Promise<{ message_id: number }> },
+    addr: string,
+    handle: string,
+    content: InboundContent,
+    platformTs: Date,
+  ): Promise<void> {
+    const buffered: BufferedInboundEntry = {
+      content,
+      platformTs: platformTs.toISOString(),
+    };
+
+    const pending = await transport.boundary.findActive(addr);
+    if (pending) {
+      await transport.boundary.append(pending.id, buffered);
+      return;
+    }
+
     let session = await transport.resolveSession(addr);
     if (!session) {
+      const prior = await transport.boundary.peek(
+        addr,
+        boundaryConfig.minUserTurns,
+        BOUNDARY_SNIPPET_MAX_CHARS,
+      );
+      if (prior) {
+        const fired = await fireBoundaryPrompt(ctx, addr, handle, prior, buffered);
+        if (fired) return;
+      }
       const result = await transport.createConversation(addr, handle, { isPrivate: true });
       if (result.isErr()) {
         if (result.error.code === "identity_rejected") {
@@ -811,11 +950,15 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         } else {
           logger.error({ error: result.error }, "failed to create conversation");
         }
-        return null;
+        return;
       }
       session = result.value;
     }
-    return session;
+
+    const emitResult = await transport.emit(session.id, content, platformTs);
+    if (emitResult.isErr()) {
+      logger.error({ error: emitResult.error }, "failed to emit message");
+    }
   }
 
   bot.on("message:text", async (ctx) => {
@@ -837,13 +980,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     const handle = String(ctx.from.id);
     const platformTs = new Date(ctx.message.date * 1000);
 
-    const session = await resolveOrCreateSession(addr, handle);
-    if (!session) return;
-
-    const emitResult = await transport.emit(session.id, ctx.message.text, platformTs);
-    if (emitResult.isErr()) {
-      logger.error({ error: emitResult.error }, "failed to emit message");
-    }
+    await dispatchInbound(ctx, addr, handle, ctx.message.text, platformTs);
   });
 
   bot.on("message:photo", async (ctx) => {
@@ -852,9 +989,6 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     const addr = String(ctx.chat.id);
     const handle = String(ctx.from.id);
     const platformTs = new Date(ctx.message.date * 1000);
-
-    const session = await resolveOrCreateSession(addr, handle);
-    if (!session) return;
 
     try {
       // Get the largest photo (last in array)
@@ -870,10 +1004,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       if (caption) content.push({ type: "text", text: caption });
       content.push({ type: "image", path, mediaType: "image/jpeg" });
 
-      const emitResult = await transport.emit(session.id, content, platformTs);
-      if (emitResult.isErr()) {
-        logger.error({ error: emitResult.error }, "failed to emit photo message");
-      }
+      await dispatchInbound(ctx, addr, handle, content, platformTs);
     } catch (err) {
       logger.error({ err }, "failed to process photo");
     }
@@ -885,9 +1016,6 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     const addr = String(ctx.chat.id);
     const handle = String(ctx.from.id);
     const platformTs = new Date(ctx.message.date * 1000);
-
-    const session = await resolveOrCreateSession(addr, handle);
-    if (!session) return;
 
     try {
       const doc = ctx.message.document;
@@ -921,10 +1049,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         });
       }
 
-      const emitResult = await transport.emit(session.id, content, platformTs);
-      if (emitResult.isErr()) {
-        logger.error({ error: emitResult.error }, "failed to emit document message");
-      }
+      await dispatchInbound(ctx, addr, handle, content, platformTs);
     } catch (err) {
       logger.error({ err }, "failed to process document");
     }
@@ -940,9 +1065,6 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     const addr = String(ctx.chat.id);
     const handle = String(ctx.from.id);
     const platformTs = new Date(ctx.message.date * 1000);
-
-    const session = await resolveOrCreateSession(addr, handle);
-    if (!session) return;
 
     try {
       const voice = ctx.message.voice;
@@ -964,10 +1086,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         ...(durationMs !== undefined && { durationMs }),
       });
 
-      const emitResult = await transport.emit(session.id, content, platformTs);
-      if (emitResult.isErr()) {
-        logger.error({ error: emitResult.error }, "failed to emit voice message");
-      }
+      await dispatchInbound(ctx, addr, handle, content, platformTs);
     } catch (err) {
       logger.error({ err }, "failed to process voice message");
     }

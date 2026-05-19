@@ -1126,4 +1126,196 @@ describe("DrizzleTransportStore", () => {
       expect(reachableForA[0]?.platformAddress).toBe("chat-X");
     });
   });
+
+  describe("peekPriorClosedConversation", () => {
+    async function seedUserMessage(
+      conversationId: string,
+      profileId: string,
+      text: string,
+    ): Promise<void> {
+      await tx((trx) =>
+        agentStore.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content: text,
+          profileId,
+          model: "test",
+          lastInboundMessageId: "00000000-0000-7000-8000-000000000000",
+        }),
+      );
+    }
+
+    it("returns the snapshot when the prior session is closed and meets the turn gate", async () => {
+      const channelId = await seedChannel();
+      const { profileId, conversationId } = await seedConversation();
+      const sessionId = await seedSession(channelId, conversationId, "chat-A");
+      for (let i = 0; i < 3; i++) {
+        await seedUserMessage(conversationId, profileId, `hello world ${i}`);
+      }
+      await tx((trx) => store.closeSession(trx, sessionId));
+
+      const peek = await tx((trx) =>
+        store.peekPriorClosedConversation(trx, channelId, "chat-A", 3, 25),
+      );
+      expect(peek?.conversationId).toBe(conversationId);
+      expect(peek?.userTurnCount).toBe(3);
+      expect(peek?.firstUserSnippet).toBe("hello world 0");
+      expect(peek?.alias).toBeNull();
+      expect(peek?.lastMessageAt).toBeInstanceOf(Date);
+    });
+
+    it("returns undefined when prior has fewer than minUserTurns", async () => {
+      const channelId = await seedChannel();
+      const { profileId, conversationId } = await seedConversation();
+      const sessionId = await seedSession(channelId, conversationId, "chat-B");
+      await seedUserMessage(conversationId, profileId, "single message");
+      await tx((trx) => store.closeSession(trx, sessionId));
+
+      const peek = await tx((trx) =>
+        store.peekPriorClosedConversation(trx, channelId, "chat-B", 3, 25),
+      );
+      expect(peek).toBeUndefined();
+    });
+
+    it("returns undefined when the prior session is still active", async () => {
+      const channelId = await seedChannel();
+      const { profileId, conversationId } = await seedConversation();
+      await seedSession(channelId, conversationId, "chat-C");
+      for (let i = 0; i < 3; i++) {
+        await seedUserMessage(conversationId, profileId, `m${i}`);
+      }
+
+      const peek = await tx((trx) =>
+        store.peekPriorClosedConversation(trx, channelId, "chat-C", 3, 25),
+      );
+      expect(peek).toBeUndefined();
+    });
+
+    it("returns undefined when no session exists on the address", async () => {
+      const channelId = await seedChannel();
+      const peek = await tx((trx) =>
+        store.peekPriorClosedConversation(trx, channelId, "never-used", 3, 25),
+      );
+      expect(peek).toBeUndefined();
+    });
+
+    it("truncates the snippet at snippetMaxChars", async () => {
+      const channelId = await seedChannel();
+      const { profileId, conversationId } = await seedConversation();
+      const sessionId = await seedSession(channelId, conversationId, "chat-D");
+      await seedUserMessage(
+        conversationId,
+        profileId,
+        "this is a very long opening message that exceeds the cap",
+      );
+      await seedUserMessage(conversationId, profileId, "two");
+      await seedUserMessage(conversationId, profileId, "three");
+      await tx((trx) => store.closeSession(trx, sessionId));
+
+      const peek = await tx((trx) =>
+        store.peekPriorClosedConversation(trx, channelId, "chat-D", 3, 10),
+      );
+      expect(peek?.firstUserSnippet).toHaveLength(10);
+      expect(peek?.firstUserSnippet?.endsWith("…")).toBe(true);
+    });
+  });
+
+  describe("boundary pending", () => {
+    it("creates, fetches by address, fetches by id, appends, and deletes", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const expiresAt = new Date("2026-06-01T00:00:00Z");
+
+      const created = await tx((trx) =>
+        store.createBoundaryPending(trx, {
+          channelId,
+          platformAddress: "chat-7",
+          platformUserHandle: "tg-user-123",
+          priorConversationId: conversationId,
+          promptMessageId: "tg:42",
+          bufferedInbounds: [
+            {
+              content: "first",
+              platformTs: "2026-05-19T12:00:00.000Z",
+            },
+          ],
+          expiresAt,
+        }),
+      );
+
+      const byAddr = await tx((trx) => store.getBoundaryPendingByAddress(trx, channelId, "chat-7"));
+      expect(byAddr?.id).toBe(created.id);
+      expect(byAddr?.platformUserHandle).toBe("tg-user-123");
+      expect(byAddr?.priorConversationId).toBe(conversationId);
+      expect(byAddr?.promptMessageId).toBe("tg:42");
+      expect(byAddr?.bufferedInbounds).toHaveLength(1);
+      expect(byAddr?.bufferedInbounds[0]?.content).toBe("first");
+
+      await tx((trx) =>
+        store.appendBoundaryBuffer(trx, created.id, {
+          content: "second",
+          platformTs: "2026-05-19T12:00:05.000Z",
+        }),
+      );
+
+      const afterAppend = await tx((trx) => store.getBoundaryPendingById(trx, created.id));
+      expect(afterAppend?.bufferedInbounds).toHaveLength(2);
+      expect(afterAppend?.bufferedInbounds[1]?.content).toBe("second");
+
+      await tx((trx) => store.deleteBoundaryPending(trx, created.id));
+      expect(await tx((trx) => store.getBoundaryPendingById(trx, created.id))).toBeUndefined();
+    });
+
+    it("UNIQUE (channel_id, platform_address) rejects a second hold on the same chat", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const expiresAt = new Date("2026-06-01T00:00:00Z");
+
+      await tx((trx) =>
+        store.createBoundaryPending(trx, {
+          channelId,
+          platformAddress: "chat-9",
+          platformUserHandle: "tg-user-1",
+          priorConversationId: conversationId,
+          promptMessageId: "tg:1",
+          bufferedInbounds: [
+            {
+              content: "x",
+              platformTs: "2026-05-19T12:00:00.000Z",
+            },
+          ],
+          expiresAt,
+        }),
+      );
+
+      await expect(
+        tx((trx) =>
+          store.createBoundaryPending(trx, {
+            channelId,
+            platformAddress: "chat-9",
+            platformUserHandle: "tg-user-2",
+            priorConversationId: conversationId,
+            promptMessageId: "tg:2",
+            bufferedInbounds: [
+              {
+                content: "y",
+                platformTs: "2026-05-19T12:00:01.000Z",
+              },
+            ],
+            expiresAt,
+          }),
+        ),
+      ).rejects.toThrow();
+    });
+
+    it("appendBoundaryBuffer is a no-op for a missing id", async () => {
+      await tx((trx) =>
+        store.appendBoundaryBuffer(trx, "00000000-0000-7000-8000-000000000001", {
+          content: "x",
+          platformTs: "2026-05-19T12:00:00.000Z",
+        }),
+      );
+      // Reaching this point without throwing is the assertion.
+    });
+  });
 });

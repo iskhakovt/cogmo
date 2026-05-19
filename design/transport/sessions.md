@@ -30,10 +30,79 @@ A channel session is a row in `channel_sessions` that links a platform address (
 `status` flips to `closed` in three places:
 
 1. **Explicit end** — `/new`, `/end`, or profile change. `swapSession` closes the old row and opens a fresh one in a single transaction.
-2. **Lazy rotation on stale inbound** — when a new inbound arrives on a session whose conversation's last message is older than the idle window. The next inbound starts a fresh conversation.
+2. **Lazy rotation on stale inbound** — when a new inbound arrives on a session whose conversation's last message is older than the idle window. The next inbound starts a fresh conversation (or, when the prior was substantial, fires the [boundary hold](#boundary-hold-resume--start-fresh-prompt) instead).
 3. **Scheduled fire into an idle conversation** — the fire handler treats this like a synthetic `/new`, rotating every reachable channel for the user+profile onto a fresh conversation (see [scheduling.md](../scheduling.md) → *Synthetic conversation turn*).
 
 The idle timer does **not** close sessions. Its only job is emitting `conversation/idle` for the Observer; reachability is unrelated to whether the user is mid-conversation.
+
+## Boundary Hold: Resume / Start Fresh Prompt `[confirmed]`
+
+Lazy rotation without a signal is invisible to the user: their next message lands in a fresh conversation with no prior thread context, and they don't know they could have continued the previous one. Memory + core memory still carry across, but turn-level context doesn't.
+
+The boundary hold is a single Telegram-native UX move: on rotation, if the prior conversation accumulated at least `BOUNDARY_PROMPT_MIN_USER_TURNS` user turns, the adapter sends an inline-keyboard prompt — **"It's been a while since our last chat. Pick up where we left off, or start fresh?"** — with two buttons (`↶ Resume <alias-or-snippet>` / `✦ Start fresh`). The inbound is buffered, not persisted to `inbound_messages`, until the user picks (or the waiter times out after `BOUNDARY_PROMPT_TIMEOUT_SECONDS`).
+
+This avoids the "first reply generated in the wrong context" failure mode of the alternative (eagerly create a fresh conversation, repair on tap): the agent never runs in a conversation the user didn't choose, so there are no side effects to reverse.
+
+### Lifecycle
+
+```
+inbound on stale chat
+   │
+   ▼
+resolveSession → null           ← safety-net closed the prior session
+   │
+   ▼
+peekPriorClosedConversation     ← guarded on userTurnCount ≥ minUserTurns
+   │
+   ├─ null  ───────────────────▶ createConversation + emit       (today's silent path)
+   │
+   ▼
+send prompt, persist boundary_pending, emit boundary/pending
+   │
+   ├─ button tapped (resume)  ─▶ swap session → prior conv,        drain buffer, emit
+   ├─ button tapped (fresh)   ─▶ create new conv,                  drain buffer, emit
+   ├─ /new during hold        ─▶ resolveBoundary(kind: "fresh")  ← inherits explicit profile
+   ├─ /resume <alias> in hold ─▶ resolveBoundary(kind: "resume-target")
+   └─ waiter timeout          ─▶ resolveBoundary(kind: "fresh", reason: "waiter_timeout")
+```
+
+Any inbound (text, photo, document, voice) that arrives while a hold is open is appended to the buffered list rather than starting a second prompt. The buffer drains in arrival order into `inbound_messages` on resolution, and one `inbound/arrived` event fires per drained row.
+
+### Idempotency
+
+Both event emissions carry bus-dedup ids:
+- `boundary/pending` → `boundary-pending-${boundaryId}` (one waiter per hold).
+- `boundary/resolved` → `boundary-resolved-${boundaryId}` (one resolution per hold).
+
+The waiter cancels on `boundary/resolved` matched on `data.boundaryId`. A button tap that races the waiter wake is harmless: `resolveBoundary` is idempotent — a second call against a deleted row returns `boundary_not_found` and the caller no-ops.
+
+### Schema
+
+```sql
+boundary_pending (
+  id                     UUID v7 PK,
+  channel_id             UUID FK → channels NOT NULL ON DELETE CASCADE,
+  platform_address       TEXT NOT NULL,
+  platform_user_handle   TEXT NOT NULL,                          -- for waiter-timeout identity check
+  prior_conversation_id  UUID FK → conversations NOT NULL ON DELETE CASCADE,
+  prompt_message_id      TEXT NOT NULL,                          -- for editMessageReplyMarkup
+  buffered_inbounds      JSONB NOT NULL,                         -- BufferedInboundsSchema
+  expires_at             TIMESTAMPTZ NOT NULL,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (channel_id, platform_address)
+);
+```
+
+`UNIQUE (channel_id, platform_address)` guarantees one hold per chat — concurrent attempts surface as a constraint violation rather than dual prompts. `buffered_inbounds` is a JSONB array of `{content, platformTs}`; no `channel_session_id` is stored because at hold creation the prior session is already closed and the new one doesn't exist yet — both get assigned at drain time. `BoundaryPendingSchema` validates the JSONB at the store boundary per the standard `jsonbZod` rule.
+
+### Configuration
+
+| Env var | Default | Meaning |
+|-|-|-|
+| `BOUNDARY_PROMPT_TIMEOUT_SECONDS` | `30` | Waiter sleep before defaulting to fresh. |
+| `BOUNDARY_PROMPT_MIN_USER_TURNS` | `3` | Prior must have at least this many user turns. One-shot priors stay silent. |
+
+These gate the prompt to cases where continuation is plausibly worth the tap; everything else falls through to the silent fresh-create path.
 
 ## Session Creation
 

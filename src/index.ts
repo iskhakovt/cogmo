@@ -77,6 +77,7 @@ import { DrizzleSkillStore } from "./skills/store/index.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "./skills/worker-sysbox/host.js";
 import type { AttachmentStore } from "./transport/attachment-store.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
+import { createBoundaryWaiter } from "./transport/boundary/waiter.js";
 import { createDeliveryRouter } from "./transport/delivery-router.js";
 import { wrapAttachmentStoreWithEncryption } from "./transport/encrypted-attachment-store.js";
 import { startChannels } from "./transport/registry.js";
@@ -954,6 +955,10 @@ export async function bootstrapRuntime(
     inboundArrived,
     attachments: core.attachmentStore,
     idleTimeoutMs,
+    boundary: {
+      promptTimeoutMs: env.BOUNDARY_PROMPT_TIMEOUT_SECONDS * 1000,
+      minUserTurns: env.BOUNDARY_PROMPT_MIN_USER_TURNS,
+    },
     secretsStore: core.secretsStore,
     reposDir: env.COGMO_REPOS_DIR,
   });
@@ -965,6 +970,13 @@ export async function bootstrapRuntime(
   });
   const idleTimer = createIdleTimer({ idleTimeoutMs });
   const debounceFunctions = createDebounceFunctions(debounceConfig);
+  const boundaryWaiter = createBoundaryWaiter({
+    runInTx: core.runInTx,
+    transportStore: core.transportStore,
+    agentStore: core.agentStore,
+    inngest,
+    defaultProfileId: core.profile.id,
+  });
 
   // Voice — lazy per-turn resolver. Reads `voice_config` + decrypts both
   // secrets per call (sub-ms each), caches constructed providers by content
@@ -1071,6 +1083,7 @@ export async function bootstrapRuntime(
     scheduledTaskFire,
     skillCronTicker,
     skillCronFire,
+    boundaryWaiter,
     ...debounceFunctions,
     ...channelFunctions,
     ...codingFunctions,
