@@ -2116,6 +2116,179 @@ describe("/profile class subcommand", () => {
     await handleProfile(transport, ctx, mkDialogs());
     expect(ctx.reply.mock.calls[0]?.[0]).toContain('Unknown profile class "nope"');
   });
+
+  it("/profile class on an ambiguous name replies with the ambiguity hint", async () => {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            { ...makeProfile(), id: "p1", name: "shared", userId: "u1" },
+            { ...makeProfile(), id: "p2", name: "shared", userId: "u2" },
+          ]),
+        ),
+        setClass: vi.fn(),
+      },
+    });
+    const ctx = mkCtx("class shared intimate");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("ambiguous");
+  });
+
+  it("/profile class surfaces an error from profiles.list via errorMessage", async () => {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
+        setClass: vi.fn(),
+      },
+    });
+    const ctx = mkCtx("class personal intimate");
+    await handleProfile(transport, ctx, mkDialogs());
+    const reply = ctx.reply.mock.calls[0]?.[0];
+    // Positive assertion catches the exact friendly-error wording wired
+    // in `commands.ts:errorMessage("identity_rejected")`. The
+    // accompanying `not.toContain("set to")` rules out a misleading
+    // success message — both halves are necessary because a silent
+    // return would pass the negative alone.
+    expect(reply).toBe("You're not authorized on this bot.");
+    expect(reply).not.toContain("set to");
+  });
+});
+
+describe("/profile stream subcommand", () => {
+  function makeProfile(overrides: Partial<Profile> = {}, userId: string | null = "u"): Profile {
+    return {
+      id: "p1",
+      userId,
+      name: "personal",
+      basePrompt: "",
+      model: "claude-sonnet-4-6",
+      summarizationModel: null,
+      extractionModel: null,
+      autoRecall: "heuristic",
+      voiceMode: "auto",
+      toolSet: [],
+      memoryScope: null,
+      profileClass: null,
+      streamChunkChars: 4000,
+      streamEdits: true,
+      ...overrides,
+    };
+  }
+
+  it("with no name argument replies with usage", async () => {
+    const transport = transportWith({ profiles: { update: vi.fn() } });
+    const ctx = mkCtx("stream");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /profile");
+  });
+
+  it("`show` form: no tokens → renders current prefs without writing", async () => {
+    const update = vi.fn();
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile()])),
+        update,
+      },
+    });
+    const ctx = mkCtx("stream personal");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).not.toHaveBeenCalled();
+    const reply = ctx.reply.mock.calls[0]?.[0] ?? "";
+    expect(reply).toContain('Stream prefs for "personal"');
+    expect(reply).toContain("chunk: 4000");
+    expect(reply).toContain("edits on");
+  });
+
+  it("`set` form: chunk=… edits=off applies changes and renders updated prefs", async () => {
+    const update = vi
+      .fn()
+      .mockResolvedValue(ok(makeProfile({ streamChunkChars: 500, streamEdits: false })));
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile()])),
+        update,
+      },
+    });
+    const ctx = mkCtx("stream personal chunk=500 edits=off");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).toHaveBeenCalledWith("1", "p1", {
+      streamChunkChars: 500,
+      streamEdits: false,
+    });
+    const reply = ctx.reply.mock.calls[0]?.[0] ?? "";
+    expect(reply).toContain("chunk: 500");
+    expect(reply).toContain("edits off");
+  });
+
+  it("bad token surfaces the parser error instead of writing", async () => {
+    const update = vi.fn();
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile()])),
+        update,
+      },
+    });
+    const ctx = mkCtx("stream personal chunk=99999");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("chunk must be an integer");
+  });
+
+  it("unknown profile name replies friendly without writing", async () => {
+    const update = vi.fn();
+    const transport = transportWith({
+      profiles: { list: vi.fn().mockResolvedValue(ok([])), update },
+    });
+    const ctx = mkCtx("stream ghost edits=on");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain('No profile named "ghost"');
+  });
+
+  it("ambiguous name replies with the ambiguity hint", async () => {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            { ...makeProfile(), id: "p1", name: "shared", userId: "u1" },
+            { ...makeProfile(), id: "p2", name: "shared", userId: "u2" },
+          ]),
+        ),
+        update: vi.fn(),
+      },
+    });
+    const ctx = mkCtx("stream shared chunk=200");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("ambiguous");
+  });
+
+  it("surfaces an error from profiles.list via errorMessage", async () => {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
+        update: vi.fn(),
+      },
+    });
+    const ctx = mkCtx("stream personal chunk=200");
+    await handleProfile(transport, ctx, mkDialogs());
+    const reply = ctx.reply.mock.calls[0]?.[0];
+    expect(reply).toBe("You're not authorized on this bot.");
+    expect(reply).not.toContain("Stream prefs");
+  });
+
+  it("surfaces an error from profiles.update via errorMessage", async () => {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile()])),
+        update: vi.fn().mockResolvedValue(err({ code: "profile_not_found" })),
+      },
+    });
+    const ctx = mkCtx("stream personal chunk=200");
+    await handleProfile(transport, ctx, mkDialogs());
+    const reply = ctx.reply.mock.calls[0]?.[0];
+    expect(reply).toBe("Profile not found.");
+    expect(reply).not.toContain("Stream prefs");
+  });
 });
 
 describe("formatScope", () => {

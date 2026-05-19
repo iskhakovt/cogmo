@@ -49,6 +49,7 @@ function makeSkillParams(overrides: Partial<InsertSkillParams> = {}): InsertSkil
     riskTier: "auto",
     effects: [],
     schedule: null,
+    scheduleNextRunAt: null,
     gitSha: SHA,
     inputs: INPUTS_SCHEMA,
     outputs: null,
@@ -504,6 +505,137 @@ describe("DrizzleSkillStore", () => {
       );
       const reloaded = await tx((trx) => store.getRun(trx, run.id));
       expect(reloaded?.trigger).toBe(trigger);
+    });
+  });
+
+  describe("schedule / next_run_at invariant", () => {
+    it("inserts a scheduled skill with both schedule and next_run_at set", async () => {
+      const nra = new Date("2026-06-01T09:00:00Z");
+      const row = await seedSkill({
+        name: "cron-skill",
+        schedule: "0 9 * * *",
+        scheduleNextRunAt: nra,
+      });
+      expect(row.schedule).toBe("0 9 * * *");
+      expect(row.nextRunAt?.toISOString()).toBe(nra.toISOString());
+      expect(row.lastFiredAt).toBeNull();
+    });
+
+    it("rejects schedule set without scheduleNextRunAt at the store boundary", async () => {
+      await expect(
+        tx((trx) =>
+          store.insertSkill(
+            trx,
+            makeSkillParams({ schedule: "0 9 * * *", scheduleNextRunAt: null }),
+          ),
+        ),
+      ).rejects.toThrow(/schedule and scheduleNextRunAt must agree/);
+    });
+
+    it("rejects scheduleNextRunAt set without schedule at the store boundary", async () => {
+      await expect(
+        tx((trx) =>
+          store.insertSkill(
+            trx,
+            makeSkillParams({ schedule: null, scheduleNextRunAt: new Date() }),
+          ),
+        ),
+      ).rejects.toThrow(/schedule and scheduleNextRunAt must agree/);
+    });
+  });
+
+  describe("lockDueScheduledSkills + advanceSkillSchedule", () => {
+    it("returns nothing when no rows are due", async () => {
+      await seedSkill({
+        name: "future",
+        schedule: "0 9 * * *",
+        scheduleNextRunAt: new Date("2099-01-01T00:00:00Z"),
+      });
+      const due = await tx((trx) =>
+        store.lockDueScheduledSkills(trx, {
+          now: new Date("2026-06-01T09:00:00Z"),
+          limit: 10,
+        }),
+      );
+      expect(due).toEqual([]);
+    });
+
+    it("locks due rows in next_run_at order", async () => {
+      const a = await seedSkill({
+        name: "later",
+        schedule: "30 9 * * *",
+        scheduleNextRunAt: new Date("2026-06-01T08:30:00Z"),
+      });
+      const b = await seedSkill({
+        name: "earlier",
+        schedule: "0 8 * * *",
+        scheduleNextRunAt: new Date("2026-06-01T08:00:00Z"),
+      });
+      const due = await tx((trx) =>
+        store.lockDueScheduledSkills(trx, {
+          now: new Date("2026-06-01T09:00:00Z"),
+          limit: 10,
+        }),
+      );
+      expect(due.map((r) => r.id)).toEqual([b.id, a.id]);
+    });
+
+    it("skips disabled rows", async () => {
+      const row = await seedSkill({
+        name: "disabled-scheduled",
+        schedule: "0 9 * * *",
+        scheduleNextRunAt: new Date("2026-06-01T09:00:00Z"),
+      });
+      await tx((trx) => store.setSkillDisabled(trx, { id: row.id, disabled: true }));
+      const due = await tx((trx) =>
+        store.lockDueScheduledSkills(trx, {
+          now: new Date("2026-06-01T10:00:00Z"),
+          limit: 10,
+        }),
+      );
+      expect(due).toEqual([]);
+    });
+
+    it("skips rows with null schedule (defense in depth — partial index already filters)", async () => {
+      await seedSkill({ name: "unscheduled", schedule: null, scheduleNextRunAt: null });
+      const due = await tx((trx) =>
+        store.lockDueScheduledSkills(trx, {
+          now: new Date("2026-06-01T10:00:00Z"),
+          limit: 10,
+        }),
+      );
+      expect(due).toEqual([]);
+    });
+
+    it("honours the limit cap", async () => {
+      for (let i = 0; i < 3; i++) {
+        await seedSkill({
+          name: `s${i}`,
+          schedule: "0 9 * * *",
+          scheduleNextRunAt: new Date(`2026-06-0${i + 1}T09:00:00Z`),
+        });
+      }
+      const due = await tx((trx) =>
+        store.lockDueScheduledSkills(trx, {
+          now: new Date("2026-07-01T00:00:00Z"),
+          limit: 2,
+        }),
+      );
+      expect(due).toHaveLength(2);
+    });
+
+    it("advanceSkillSchedule writes both last_fired_at and next_run_at", async () => {
+      const row = await seedSkill({
+        name: "advancing",
+        schedule: "0 9 * * *",
+        scheduleNextRunAt: new Date("2026-06-01T09:00:00Z"),
+      });
+      const lastFiredAt = new Date("2026-06-01T09:00:00Z");
+      const nextRunAt = new Date("2026-06-02T09:00:00Z");
+      await tx((trx) => store.advanceSkillSchedule(trx, row.id, { lastFiredAt, nextRunAt }));
+      const after = await tx((trx) => store.getSkillById(trx, row.id));
+      expect(after?.lastFiredAt?.toISOString()).toBe(lastFiredAt.toISOString());
+      expect(after?.nextRunAt?.toISOString()).toBe(nextRunAt.toISOString());
     });
   });
 });

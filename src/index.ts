@@ -68,6 +68,8 @@ import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
 import { DrizzleSecretsStore } from "./secrets/store/index.js";
 import { ensureFalImageDefaults } from "./setup/seed.js";
+import { createSkillCronFireHandler } from "./skills/cron-fire-handler.js";
+import { createSkillCronTicker } from "./skills/cron-ticker.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo } from "./skills/repo.js";
 import { SkillRunnerImpl } from "./skills/runner.js";
 import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
@@ -1040,6 +1042,24 @@ export async function bootstrapRuntime(
     inngest,
   );
 
+  // Skill cron ticker — parallel 1-min cron that locks due rows from
+  // `skills` (where `schedule IS NOT NULL`) and fans out
+  // `skills/cron.fire`. Separate from `scheduled-task-ticker` because
+  // skills are host-scoped and dispatch via `runner.invoke` rather than
+  // the inbound pipeline. See `src/skills/cron-ticker.ts`.
+  const skillCronTicker = createSkillCronTicker(
+    {
+      runInTx: core.runInTx,
+      store: core.skillStore,
+      userTimezone: env.USER_TIMEZONE,
+    },
+    inngest,
+  );
+
+  // Skill cron fire handler — receives `skills/cron.fire` and invokes
+  // the skill with empty inputs. See `src/skills/cron-fire-handler.ts`.
+  const skillCronFire = createSkillCronFireHandler({ runner: skillRunner }, inngest);
+
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [
     handleMessage,
@@ -1049,6 +1069,8 @@ export async function bootstrapRuntime(
     handleMessageReconcile,
     scheduledTaskTicker,
     scheduledTaskFire,
+    skillCronTicker,
+    skillCronFire,
     ...debounceFunctions,
     ...channelFunctions,
     ...codingFunctions,

@@ -112,6 +112,20 @@ interface CreateOptions extends DaytonaSandboxClientOptions {
    * `cogmo.instance` label.
    */
   instanceId: string;
+  /**
+   * Conformance-tests-only override for per-call session-id
+   * randomness, threaded into every `DaytonaSandboxSession` this
+   * client mints. Tests pin a deterministic value so record/replay's
+   * `(method, path)` FIFO matching stays stable.
+   *
+   * **MUST return values with collision-resistance comparable to
+   * `randomUUID`'s 128-bit space.** A weak source (`() => "x"`)
+   * would silently collide across concurrent sessions in the same
+   * client and let `dispose()` on one exec tear down a sibling's
+   * Daytona session. Off the public `DaytonaSandboxClientOptions`
+   * type so production wiring can't reach it by accident.
+   */
+  random?: () => string;
 }
 
 /**
@@ -171,6 +185,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
    * Logged at warn-level so configuration drift surfaces operationally.
    */
   #resourcesByImage = new Map<string, ResourceLimits>();
+  #random: (() => string) | undefined;
 
   private constructor(opts: CreateOptions) {
     const config: ConstructorParameters<typeof Daytona>[0] = {
@@ -180,6 +195,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     if (opts.organizationId) config.organizationId = opts.organizationId;
     this.#daytona = new Daytona(config);
     this.#instanceId = opts.instanceId;
+    this.#random = opts.random;
   }
 
   static async create(opts: CreateOptions): Promise<DaytonaSandboxClient> {
@@ -640,6 +656,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     return new DaytonaSandboxSession({
       state: { type: "daytona", taskId, sandboxId: sdkSandbox.id },
       sdkSandbox,
+      ...(this.#random && { random: this.#random }),
     });
   }
 
