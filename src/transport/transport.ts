@@ -450,9 +450,9 @@ export interface Transport {
        * design treats model switches as context changes that should
        * end any active cooldown; same-tx atomicity prevents a partial
        * commit from leaving "switched model but still cooling down"
-       * state. Caller is responsible for verifying ownership of the
-       * conversation; the store call only requires that the
-       * conversation exists.
+       * state. Transport validates that the conversation is owned by
+       * the caller AND uses this profile before applying the clear;
+       * mismatch surfaces `access_denied` or `conversation_not_found`.
        *
        * See `design/agent-resilience.md` → Clear triggers.
        */
@@ -1164,11 +1164,14 @@ export function createTransport(deps: {
           // ("the new profile has its own provider/tools and may not
           // exhibit the failure"), so end any active cooldown in the
           // same tx. Atomicity matters: a partial commit could leave
-          // the conversation switched but still cooling down. Cheap
-          // even when `cooldown_state` is already NULL — Postgres
-          // collapses UPDATE…SET cooldown_state=NULL to a no-op
-          // row-version if the value didn't change. See
-          // design/agent-resilience.md → Clear triggers.
+          // the conversation switched but still cooling down. Skip
+          // the write when `cooldown_state` is already NULL —
+          // Postgres MVCC writes a fresh tuple version on every
+          // UPDATE regardless of whether values changed (no
+          // suppress_redundant_updates_trigger on this table), so
+          // the gate avoids a wasted row version + WAL entry per
+          // profile switch. See design/agent-resilience.md → Clear
+          // triggers.
           if (conv.cooldownState !== null) {
             await agentStore.clearCooldown(tx, conversationId);
           }

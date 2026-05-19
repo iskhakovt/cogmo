@@ -1175,8 +1175,7 @@ describe("createTransport", () => {
     // changed." If the conversation doesn't actually use this profile,
     // the new model isn't its model and the clear would be spurious.
     // Reject so the caller surfaces a bug rather than silently
-    // clearing cooldown on an unrelated conversation. Flagged on
-    // PR #302 review.
+    // clearing cooldown on an unrelated conversation.
     it("clearCooldownForConversation: returns access_denied when conversation uses a different profile", async () => {
       const updateProfile = vi.fn().mockResolvedValue({});
       const clearCooldown = vi.fn();
