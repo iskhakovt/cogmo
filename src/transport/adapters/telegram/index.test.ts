@@ -1736,7 +1736,7 @@ describe("telegram adapter", () => {
         }),
       );
       expect(mockBotApi.editMessageReplyMarkup).toHaveBeenCalledWith(
-        42,
+        "42",
         9001,
         expect.objectContaining({
           reply_markup: expect.objectContaining({

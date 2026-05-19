@@ -886,7 +886,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         firstInbound,
         timeoutMs: boundaryConfig.promptTimeoutMs,
       });
-      await bot.api.editMessageReplyMarkup(Number(addr), sent.message_id, {
+      await bot.api.editMessageReplyMarkup(addr, sent.message_id, {
         reply_markup: {
           inline_keyboard: [
             [
