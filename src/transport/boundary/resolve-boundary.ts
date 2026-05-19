@@ -84,11 +84,14 @@ export async function resolveBoundary(
     if (args.choice.kind === "resume-prior" || args.choice.kind === "resume-target") {
       const targetConvId =
         args.choice.kind === "resume-prior" ? row.priorConversationId : args.choice.conversationId;
-      const conv = await agentStore.getConversation(tx, targetConvId);
-      if (!conv) return { kind: "err", code: "conversation_not_found" } as const;
 
+      // Identity first, mirroring the fresh branch — an `identity_rejected`
+      // handle short-circuits without paying for the conversation read.
       const identity = await transportStore.resolveUser(tx, channelId, row.platformUserHandle);
       if (!identity) return { kind: "err", code: "identity_rejected" } as const;
+
+      const conv = await agentStore.getConversation(tx, targetConvId);
+      if (!conv) return { kind: "err", code: "conversation_not_found" } as const;
       if (identity.userId !== conv.userId) {
         return { kind: "err", code: "access_denied" } as const;
       }
@@ -160,10 +163,16 @@ export async function resolveBoundary(
   if (dbResult.kind === "err") return err({ code: dbResult.code });
 
   for (const inboundMessageId of dbResult.inboundIds) {
-    // Dedup id keyed on the inbound row so a retry after a partial-emit
-    // crash (waiter's step.run replays the whole step on throw, the
-    // boundary-janitor may re-resolve an orphan row) doesn't fan out two
-    // router runs for the same inbound.
+    // `resolveBoundary` is invoked both from raw async contexts (callback
+    // handlers, command handlers) AND from inside `step.run` bodies (waiter
+    // wakeup, janitor row-by-row). In the latter, a thrown error after some
+    // sends have already gone through replays the entire step body on
+    // retry — including the prior emits. The `inbound-arrived-${id}`
+    // dedup id collapses those duplicates at the bus, so router runs are
+    // exactly-once per inbound regardless of how many step.run retries the
+    // outer caller chains around us. Same posture as the
+    // `buildBoundaryResolvedEvent` send below — dedup id is load-bearing
+    // for retry safety, not just nice-to-have.
     await deps.inngest.send(
       buildInboundArrivedEvent({
         conversationId: dbResult.conversationId,

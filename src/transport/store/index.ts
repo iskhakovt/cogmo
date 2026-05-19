@@ -339,13 +339,12 @@ export interface TransportStore {
   getBoundaryPendingById(tx: Transaction, id: string): Promise<BoundaryPendingRow | undefined>;
 
   /**
-   * Append a buffered inbound to an existing hold. Read-modify-write inside
-   * the caller's tx: under REPEATABLE READ, two concurrent appends on the
-   * same row surface as a `40001 serialization_failure` on the second
-   * commit, which the `transactor` retry-once budget covers. Snapshot
-   * isolation detects the conflict — it does not prevent it. At Cogmo
-   * single-process scale and given the dispatchInbound chat-level mutex,
-   * concurrent appends on the same hold don't occur in practice anyway.
+   * Append a buffered inbound to an existing hold. Single SQL UPDATE using
+   * Postgres' JSONB `||` operator — no read-modify-write, so concurrent
+   * appends on the same row don't race regardless of isolation level or
+   * caller assumptions about per-chat mutexes. Safe under webhook
+   * deployments and multi-process adapters that bypass the in-process
+   * dispatch mutex.
    */
   appendBoundaryBuffer(tx: Transaction, id: string, entry: BufferedInboundEntry): Promise<void>;
 
@@ -977,12 +976,16 @@ export class DrizzleTransportStore implements TransportStore {
     id: string,
     entry: BufferedInboundEntry,
   ): Promise<void> {
-    const row = await this.getBoundaryPendingById(tx, id);
-    if (!row) return;
-    const next = [...row.bufferedInbounds, entry];
+    // Atomic JSONB-array concatenation: `existing || [entry]`. Postgres
+    // resolves this on the server side — no select-then-update window,
+    // race-free regardless of isolation level. UPDATE on a missing id
+    // matches zero rows and is a no-op (matches the prior
+    // getBoundaryPendingById-then-skip behaviour).
     await tx
       .update(boundaryPending)
-      .set({ bufferedInbounds: next })
+      .set({
+        bufferedInbounds: sql`${boundaryPending.bufferedInbounds} || ${JSON.stringify([entry])}::jsonb`,
+      })
       .where(eq(boundaryPending.id, id));
   }
 

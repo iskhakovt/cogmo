@@ -444,7 +444,11 @@ describe("handleNew", () => {
     });
     expect(createConversation).not.toHaveBeenCalled();
     expect(closeSession).not.toHaveBeenCalled();
-    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Started a new conversation"));
+    // Pin the full reply shape — the trailing "(assistant)." comes from
+    // `transport.conversations.getCurrent` returning profileName, not from
+    // the user's command arg. Regressions in either path would fall through
+    // to the "(default)" fallback and this assertion would catch it.
+    expect(ctx.reply).toHaveBeenCalledWith("Started a new conversation (assistant).");
   });
 
   it("forwards the explicit profile to boundary.resolve when /new <name> runs during a hold", async () => {

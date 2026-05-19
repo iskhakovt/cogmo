@@ -14,6 +14,7 @@ const mockBotApi = {
   sendChatAction: vi.fn().mockResolvedValue(true),
   editMessageText: vi.fn().mockResolvedValue({}),
   editMessageReplyMarkup: vi.fn().mockResolvedValue({}),
+  deleteMessage: vi.fn().mockResolvedValue(true),
   sendPhoto: vi.fn().mockResolvedValue({ message_id: 101 }),
   sendVoice: vi.fn().mockResolvedValue({ message_id: 102 }),
   sendAudio: vi.fn().mockResolvedValue({ message_id: 103 }),
@@ -1846,6 +1847,36 @@ describe("telegram adapter", () => {
       expect(ctx2.reply).not.toHaveBeenCalled();
       // Sanity: transport.emit was never called (both buffered).
       expect(transport.emit).not.toHaveBeenCalled();
+    });
+
+    it("deletes the dangling prompt when boundary.start throws after the reply was sent", async () => {
+      // Regression: if start fails (DB blip, UNIQUE race) AFTER ctx.reply
+      // succeeded, the user is left looking at a button-less "Pick up where
+      // we left off?" message. The adapter must best-effort delete the
+      // orphan so the createConversation fallback's reply isn't preceded by
+      // dangling boundary chrome.
+      const startMock = vi.fn().mockRejectedValue(new Error("simulated DB error"));
+      const { transport } = await createAdapterWithBoundary({
+        peek: vi.fn().mockResolvedValue({
+          conversationId: "conv-prior",
+          userTurnCount: 5,
+          lastMessageAt: new Date(),
+          alias: null,
+          firstUserSnippet: "hi",
+        }),
+        start: startMock,
+      });
+
+      const ctx = makeCtx(111, "hey", 42);
+      ctx.reply = vi.fn().mockResolvedValue({ message_id: 9001 });
+      await handlers.get("on:message:text")!(ctx);
+
+      expect(startMock).toHaveBeenCalledTimes(1);
+      // Dangling prompt cleanup: deleteMessage called on the just-sent reply.
+      expect(mockBotApi.deleteMessage).toHaveBeenCalledWith("42", 9001);
+      // Fell through to createConversation + emit (no boundary hold).
+      expect(transport.createConversation).toHaveBeenCalled();
+      expect(transport.emit).toHaveBeenCalled();
     });
 
     it("falls through to createConversation when peek returns null (one-shot prior)", async () => {

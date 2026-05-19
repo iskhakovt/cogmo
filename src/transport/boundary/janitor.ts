@@ -60,6 +60,11 @@ export function createBoundaryJanitor(deps: BoundaryJanitorDeps) {
 
       let resolved = 0;
       for (const row of expired) {
+        // Per-row `step.run` makes each row's resolution independently
+        // retriable. `resolveBoundary` emits `inbound/arrived` per drained
+        // buffer entry + a single `boundary/resolved`; both carry bus-
+        // dedup ids so a step replay after a partial-emit crash doesn't
+        // produce duplicate router or downstream runs.
         const outcome = await step.run(`resolve-${row.id}`, async () => {
           const res = await resolveBoundary(
             {

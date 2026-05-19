@@ -96,6 +96,12 @@ const BOUNDARY_SNIPPET_MAX_CHARS = 25;
  * Regex matched against `callback_data` for boundary prompt taps. UUIDv7
  * format (`[0-9a-f-]{36}`) keeps the pattern unambiguous against other
  * `…:…` callback shapes (`resume:`, `plan:`, `perm:`, `skill:`).
+ *
+ * **Budget:** Telegram caps `callback_data` at 64 bytes. The longest shape
+ * here is `boundary:<36-char-uuid>:resume` = 51 bytes, leaving ~13 bytes
+ * of headroom. Adding a third cofactor (e.g. a profile id) would blow the
+ * cap; truncate the boundary id to its UUIDv7 timestamp prefix or move to
+ * a callback-id table before extending this shape.
  */
 const BOUNDARY_CALLBACK_REGEX = /^boundary:([0-9a-f-]{36}):(resume|fresh)$/;
 
@@ -882,11 +888,13 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     prior: PriorClosedConversation,
     firstInbound: BufferedInboundEntry,
   ): Promise<boolean> {
+    let promptMessageId: number | null = null;
     try {
       const label = boundaryButtonLabel(prior);
       const sent = await ctx.reply(
         "It's been a while since our last chat. Pick up where we left off, or start fresh?",
       );
+      promptMessageId = sent.message_id;
       const { boundaryId } = await transport.boundary.start({
         platformAddress: addr,
         platformUserHandle: handle,
@@ -908,6 +916,22 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       return true;
     } catch (err) {
       logger.error({ err }, "telegram: failed to fire boundary prompt — falling back to fresh");
+      // If `ctx.reply` succeeded but a later step (boundary.start /
+      // editMessageReplyMarkup) threw, the user is staring at a
+      // button-less "Pick up where we left off?" prompt with no follow-up.
+      // Best-effort delete so the caller's createConversation+emit fallback
+      // produces a clean reply thread. Failure to delete is logged at warn
+      // — the user just sees a stale prompt above the agent reply.
+      if (promptMessageId !== null) {
+        try {
+          await bot.api.deleteMessage(addr, promptMessageId);
+        } catch (delErr) {
+          logger.warn(
+            { err: delErr, promptMessageId },
+            "telegram: failed to delete dangling boundary prompt",
+          );
+        }
+      }
       return false;
     }
   }

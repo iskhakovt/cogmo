@@ -1266,6 +1266,50 @@ describe("DrizzleTransportStore", () => {
       expect(await tx((trx) => store.getBoundaryPendingById(trx, created.id))).toBeUndefined();
     });
 
+    it("UNIQUE (channel_id, platform_address) allows the same address across DIFFERENT channels", async () => {
+      // Invariant guard against accidental over-scoping of the unique
+      // constraint: chat ids from different channels (e.g. telegram and
+      // direct) can collide as opaque strings; the schema must scope per
+      // channel. Without the channel_id in the uniqueness key, a user on
+      // Telegram with chat-id "42" and a Direct-channel client with
+      // address "42" would compete for the same boundary slot.
+      const chA = await seedChannel("telegram");
+      const chB = await seedChannel("direct");
+      const { conversationId: convA } = await seedConversation();
+      const { conversationId: convB } = await seedConversation();
+      const expiresAt = new Date("2026-06-01T00:00:00Z");
+
+      await tx((trx) =>
+        store.createBoundaryPending(trx, {
+          channelId: chA,
+          platformAddress: "42",
+          platformUserHandle: "tg-1",
+          priorConversationId: convA,
+          promptMessageId: "tg:1",
+          bufferedInbounds: [{ content: "x", platformTs: "2026-05-19T12:00:00.000Z" }],
+          expiresAt,
+        }),
+      );
+      // Same platform_address on a DIFFERENT channel must succeed.
+      await tx((trx) =>
+        store.createBoundaryPending(trx, {
+          channelId: chB,
+          platformAddress: "42",
+          platformUserHandle: "direct-1",
+          priorConversationId: convB,
+          promptMessageId: "d:1",
+          bufferedInbounds: [{ content: "y", platformTs: "2026-05-19T12:00:00.000Z" }],
+          expiresAt,
+        }),
+      );
+
+      const onA = await tx((trx) => store.getBoundaryPendingByAddress(trx, chA, "42"));
+      const onB = await tx((trx) => store.getBoundaryPendingByAddress(trx, chB, "42"));
+      expect(onA?.priorConversationId).toBe(convA);
+      expect(onB?.priorConversationId).toBe(convB);
+      expect(onA?.id).not.toBe(onB?.id);
+    });
+
     it("UNIQUE (channel_id, platform_address) rejects a second hold on the same chat", async () => {
       const channelId = await seedChannel();
       const { conversationId } = await seedConversation();

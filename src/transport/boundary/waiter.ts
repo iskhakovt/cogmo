@@ -46,6 +46,12 @@ export function createBoundaryWaiter(deps: BoundaryWaiterDeps) {
       // history — neverthrow `Result` objects don't round-trip through that.
       // Flatten to a plain discriminated record inside the step, then react
       // outside.
+      //
+      // `resolveBoundary` calls `inngest.send` directly inside this body
+      // (not via `step.sendEvent`). A mid-step retry replays those sends —
+      // but each carries a bus-dedup id (see resolve-boundary.ts loop +
+      // buildBoundaryResolvedEvent), so the duplicates collapse at the bus
+      // rather than producing extra router / consumer runs.
       const outcome = await step.run("resolve-as-fresh", async () => {
         const result = await resolveBoundary(
           {

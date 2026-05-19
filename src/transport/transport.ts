@@ -983,6 +983,13 @@ export function createTransport(deps: {
       },
 
       async start(params) {
+        // Wall-clock from the bot host, not the DB. Used by the
+        // `boundary-janitor` cron to detect orphan rows; the waiter sleeps
+        // on `event.data.timeoutMs` instead. Bot/DB clock skew can shift
+        // janitor's "expired?" judgment by the skew amount — at single-host
+        // Cogmo scale this is negligible. If the waiter is ever rewired to
+        // read `expires_at`, switch this to `now() + interval` in SQL to
+        // pin both clocks to the same source.
         const expiresAt = new Date(Date.now() + params.timeoutMs);
         const { id } = await runInTx((tx) =>
           transportStore.createBoundaryPending(tx, {
