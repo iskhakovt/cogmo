@@ -2419,6 +2419,7 @@ describe("volume-cluster trigger", () => {
       tools,
       service: stubService(),
       onEvent: async () => {},
+      turnLogger: logger,
     });
 
     expect(result.degraded).toBeUndefined();
@@ -2454,6 +2455,7 @@ describe("volume-cluster trigger", () => {
       tools,
       service: stubService(),
       onEvent: async () => {},
+      turnLogger: logger,
     });
 
     const toolResults = result.newMessages
@@ -2488,6 +2490,7 @@ describe("volume-cluster trigger", () => {
       tools,
       service: stubService(),
       onEvent: async () => {},
+      turnLogger: logger,
     });
     expect(r1.degraded).toBeUndefined();
     const r1Errors = r1.newMessages
@@ -2512,6 +2515,7 @@ describe("volume-cluster trigger", () => {
       tools,
       service: stubService(),
       onEvent: async () => {},
+      turnLogger: logger,
     });
     expect(r2.degraded).toBeUndefined();
     const r2Errors = r2.newMessages
@@ -2571,6 +2575,7 @@ describe("volume-cluster trigger", () => {
       tools,
       service: stubService(),
       onEvent: async () => {},
+      turnLogger: logger,
     });
 
     // The fresh tool_use (new1) lands as the 3rd `img` call when counted
@@ -2732,6 +2737,7 @@ describe("volume-cluster trigger", () => {
       tools,
       service: stubService(),
       onEvent: async () => {},
+      turnLogger: logger,
     });
 
     // Iterations 1, 2 succeed. Iter 3 intercept = no side effect, fp
