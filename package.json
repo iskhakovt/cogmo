@@ -102,7 +102,7 @@
     "@total-typescript/ts-reset": "^0.6.1",
     "@types/dockerode": "4.0.1",
     "@types/jsdom": "^28.0.3",
-    "@types/node": "^25.7.0",
+    "@types/node": "^25.9.0",
     "@types/picomatch": "^4.0.3",
     "@types/semver": "^7.7.1",
     "@types/split2": "4.2.3",
