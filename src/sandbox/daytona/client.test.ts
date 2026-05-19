@@ -15,6 +15,7 @@ import {
   SandboxState,
 } from "@daytonaio/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../../logger.js";
 import { expectDefined } from "../../test/assertions.js";
 import {
   expectCreatedNamesMatch,
@@ -964,6 +965,46 @@ describe("DaytonaSandboxClient", () => {
       });
     });
 
+    it("bakes resourceLimits into snapshot.create so post-warm sessions inherit them", async () => {
+      // `daytona.create({ snapshot })` has no per-session resources
+      // override — the snapshot's baked CPU/memory/disk govern every
+      // session spun from it. Skipping the resources hint here would
+      // erase the consumer's intent (notably skills' 1 GiB disk),
+      // because once the snapshot is ACTIVE every subsequent task
+      // inherits Daytona's platform default (1 cpu / 1 GiB / 3 GiB).
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: PYTHON_SNAPSHOT, state: SnapshotState.ACTIVE }),
+      );
+      const client = await makeClient();
+      await client.ensureImagePresent(PYTHON_IMAGE, {
+        cpus: 1,
+        memory_bytes: 512 * 1024 * 1024,
+        pids: 1024,
+        disk_bytes: 1024 * 1024 * 1024,
+      });
+      expect(daytonaCalls.snapshotCreate).toHaveBeenCalledWith({
+        name: PYTHON_SNAPSHOT,
+        image: PYTHON_IMAGE,
+        resources: { cpu: 1, memory: 1, disk: 1 },
+      });
+    });
+
+    it("omits resources when ensureImagePresent is called without a hint (accepts platform default)", async () => {
+      // No-arg call should not silently fabricate resources — the
+      // overload exists so the lazy `{ image }` fallback in `create()`
+      // can take the platform default explicitly. Tested separately so
+      // the contract is visible in the matrix.
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: DEVBASE_SNAPSHOT, state: SnapshotState.ACTIVE }),
+      );
+      const client = await makeClient();
+      await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+      const createArg = daytonaCalls.snapshotCreate.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(createArg).not.toHaveProperty("resources");
+    });
+
     it("snapshot in BUILDING → polls until ACTIVE, no extra create call", async () => {
       // Models another cogmo instance (or a prior boot of this one)
       // racing the warm. `snapshot.get` initially returns BUILDING; the
@@ -1076,13 +1117,27 @@ describe("DaytonaSandboxClient", () => {
         return fakeSnapshot({ name, state: SnapshotState.ACTIVE });
       });
 
-      const client = await makeClient();
-      await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
-      expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
-      // Let the fire-and-forget delete's microtask settle so the
-      // unhandled-rejection guard inside the implementation gets to
-      // catch — without this drain, vitest treats it as a leaked promise.
-      await new Promise((r) => setImmediate(r));
+      // Spy on the warn log the fire-and-forget catch fires. Asserting
+      // on it via `vi.waitFor` is sturdier than draining a `setImmediate`
+      // tick: it actively waits for the catch to attach + run, instead
+      // of hoping the microtask queue's ordering matches our drain.
+      const warnSpy = vi.spyOn(logger, "warn");
+      try {
+        const client = await makeClient();
+        await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+        expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
+        await vi.waitFor(() => {
+          expect(warnSpy).toHaveBeenCalledWith(
+            expect.objectContaining({
+              snapshot: DEVBASE_SNAPSHOT,
+              staleState: SnapshotState.BUILD_FAILED,
+            }),
+            "background delete of stale snapshot failed — Daytona reaper will retry",
+          );
+        });
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
 
     it("retries snapshot.create on transient 'repository … not found' daemon error", async () => {
@@ -1421,21 +1476,23 @@ describe("DaytonaSandboxClient", () => {
       {
         label: "DaytonaRateLimitError",
         err: new DaytonaRateLimitError("rate limit exceeded", 429),
-        expected: false,
+        expected: true,
         reason:
-          "SDK retries with Retry-After; our 1s/2s/4s envelope is too short, would defeat the SDK's backoff",
+          "SDK does NOT retry 429 (only OpenTelemetry interceptors, no Retry-After parsing); first hit surfaces straight through, retry envelope is the only defense",
       },
       {
         label: "DaytonaTimeoutError",
         err: new DaytonaTimeoutError("request timed out"),
         expected: false,
-        reason: "SDK already times out internally; double-retrying compounds the wait",
+        reason:
+          "SDK's axios timeout is 24h, so this only fires on backend-side hangs; short retries won't unstick them",
       },
       {
         label: "DaytonaConnectionError",
         err: new DaytonaConnectionError("ECONNRESET"),
-        expected: false,
-        reason: "SDK already retries connection failures",
+        expected: true,
+        reason:
+          "transient network blip on one of the SDK's internal poll cycles; SDK rethrows raw, retry envelope is the only defense",
       },
       {
         label: "DaytonaError (base) with transient signature",

@@ -1,7 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   Daytona,
+  DaytonaConnectionError,
   DaytonaNotFoundError,
+  DaytonaRateLimitError,
   type Sandbox as DaytonaSdkSandbox,
   SandboxState,
 } from "@daytonaio/sdk";
@@ -10,6 +12,7 @@ import { withRetry } from "../../util/with-retry.js";
 import {
   type DaytonaSessionState,
   DaytonaSessionStateSchema,
+  type ResourceLimits,
   type SandboxCapabilities,
   type SandboxClient,
   type SandboxSession,
@@ -187,7 +190,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     return { orphansReaped: 0 };
   }
 
-  async ensureImagePresent(image: string): Promise<void> {
+  async ensureImagePresent(image: string, resourceLimits?: ResourceLimits): Promise<void> {
     // Pre-bake a named snapshot via `daytona.snapshot.create({ name, image })`
     // so subsequent `daytona.create({ snapshot: name })` calls hit Daytona's
     // runner cache and provision in ~1s instead of paying the multi-minute
@@ -217,7 +220,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
       // state. The cache MUST be updated with the resolved name, not
       // the closure `name`, or `create()` would dispatch against a
       // stale reference.
-      promise = this.#ensureSnapshotActive(image, name).then(
+      promise = this.#ensureSnapshotActive(image, name, resourceLimits).then(
         (activeName) => {
           this.#snapshotByImage.set(image, activeName);
         },
@@ -259,7 +262,11 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
    * thrown `snapshot.create` (e.g. internal-registry repository
    * provisioning race).
    */
-  async #ensureSnapshotActive(image: string, name: string): Promise<string> {
+  async #ensureSnapshotActive(
+    image: string,
+    name: string,
+    resourceLimits: ResourceLimits | undefined,
+  ): Promise<string> {
     log.info({ image, snapshot: name }, "ensuring Daytona snapshot is active");
     try {
       const existing = await this.#daytona.snapshot.get(name);
@@ -290,11 +297,11 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
         );
         this.#fireAndForgetDelete(existing, image);
       }
-      return await this.#buildSnapshot(image, rebuildSnapshotName(name));
+      return await this.#buildSnapshot(image, rebuildSnapshotName(name), resourceLimits);
     } catch (err) {
       if (!(err instanceof DaytonaNotFoundError)) throw err;
       log.info({ image, snapshot: name }, "snapshot not found — building");
-      return await this.#buildSnapshot(image, name);
+      return await this.#buildSnapshot(image, name, resourceLimits);
     }
   }
 
@@ -304,16 +311,36 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
    * `isTransientSnapshotCreateError`). Persistent failures (image
    * Dockerfile error, auth, validation) are filtered out by the
    * predicate so they fail fast.
+   *
+   * `resourceLimits` bakes into the snapshot. Subsequent
+   * `daytona.create({ snapshot })` sessions inherit these values —
+   * `CreateSandboxFromSnapshotParams` has no per-session resources
+   * override, so the caller's intent at warm time is the only chance
+   * to set them. When omitted, Daytona's platform default applies
+   * (1 cpu / 1 GiB RAM / 3 GiB disk at the time of writing).
    */
-  async #buildSnapshot(image: string, name: string): Promise<string> {
-    await withRetry(() => this.#daytona.snapshot.create({ name, image }), {
-      retries: SNAPSHOT_CREATE_RETRIES,
-      minTimeoutMs: SNAPSHOT_CREATE_MIN_BACKOFF_MS,
-      maxTimeoutMs: SNAPSHOT_CREATE_MAX_BACKOFF_MS,
-      context: `daytona.snapshot.create ${name}`,
-      shouldRetry: isTransientSnapshotCreateError,
-    });
-    log.info({ image, snapshot: name }, "snapshot active");
+  async #buildSnapshot(
+    image: string,
+    name: string,
+    resourceLimits: ResourceLimits | undefined,
+  ): Promise<string> {
+    const resources = resourceLimits ? resourcesFromLimits(resourceLimits) : undefined;
+    await withRetry(
+      () =>
+        this.#daytona.snapshot.create({
+          name,
+          image,
+          ...(resources && { resources }),
+        }),
+      {
+        retries: SNAPSHOT_CREATE_RETRIES,
+        minTimeoutMs: SNAPSHOT_CREATE_MIN_BACKOFF_MS,
+        maxTimeoutMs: SNAPSHOT_CREATE_MAX_BACKOFF_MS,
+        context: `daytona.snapshot.create ${name}`,
+        shouldRetry: isTransientSnapshotCreateError,
+      },
+    );
+    log.info({ image, snapshot: name, resources }, "snapshot active");
     return name;
   }
 
@@ -750,28 +777,41 @@ function rebuildSnapshotName(base: string): string {
 }
 
 /**
- * Daytona's snapshot pipeline occasionally surfaces a Docker daemon
- * error like
- * `unprocessable entity: Error response from daemon: unknown:
- *  repository sbox/daytona-<sha256> not found`
- * when its internal registry hasn't pre-provisioned the per-snapshot
- * repo before the build step pushes. The class is acknowledged
- * upstream (daytonaio/daytona#3582). We retry only on this specific
- * signature — broader patterns risk catching real persistent failures
- * (Dockerfile errors, missing upstream images) and burning the retry
- * budget on something that won't clear.
+ * Three classes of error are retried, none others.
  *
- * Auth / authorization / validation / not-found / conflict are
- * intentionally NOT retried even though they're transport-level
- * errors — they don't clear on retry, just delay the user-visible
- * failure. Rate-limit and connection errors fall to the SDK's own
- * retry layer; we don't double-up here.
+ * 1. **Rate limit (`DaytonaRateLimitError`, HTTP 429).** The Daytona
+ *    SDK does not retry 429 internally — its only axios interceptor
+ *    is for OpenTelemetry tracing; no `Retry-After` parsing, no
+ *    exponential backoff. The first 429 surfaces straight through, so
+ *    swallowing it here is the right call.
+ *
+ * 2. **Network blip (`DaytonaConnectionError`).** The SDK's internal
+ *    `snapshot.create` loop polls `get(name)` every second to await
+ *    terminal state; any one of those reads is exposed to a transient
+ *    socket/DNS hiccup. The SDK rethrows it raw, so we cover.
+ *
+ * 3. **Daytona internal-registry race** — a `snapshot.create` POST or
+ *    poll-cycle response carrying
+ *    `unprocessable entity: Error response from daemon: unknown:
+ *     repository sbox/daytona-<sha256> not found`, which Daytona's
+ *    builder pipeline emits when the per-snapshot internal repo
+ *    wasn't pre-provisioned before push (acknowledged upstream as
+ *    daytonaio/daytona#3582).
+ *
+ * Auth / authorization / validation / not-found / conflict /
+ * timeout are intentionally NOT retried — they don't clear on retry,
+ * just delay the user-visible failure. The narrow regex is also load-
+ * bearing for the Docker-daemon path: broader patterns risk catching
+ * persistent failures like a malformed Dockerfile or a missing
+ * upstream image.
  *
  * Exported for the table-driven matrix test in `client.test.ts`.
  */
 export function isTransientSnapshotCreateError(err: unknown): boolean {
+  if (err instanceof DaytonaRateLimitError) return true;
+  if (err instanceof DaytonaConnectionError) return true;
   if (!(err instanceof Error)) return false;
-  return /repository .* not found/i.test(err.message);
+  return /repository .* not found/i.test(err.message ?? "");
 }
 
 function resourcesFromLimits(limits: {

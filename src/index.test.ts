@@ -82,6 +82,8 @@ describe("scheduleReconcileCrashedInstances", () => {
 });
 
 describe("scheduleSandboxImageWarm (bounded boot retry)", () => {
+  const TEST_LIMITS = { cpus: 1, memory_bytes: 512 * 1024 * 1024, pids: 256 };
+
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -94,11 +96,12 @@ describe("scheduleSandboxImageWarm (bounded boot retry)", () => {
     client.ensureImagePresent.mockResolvedValue();
     const infoSpy = vi.spyOn(logger, "info");
     try {
-      scheduleSandboxImageWarm(client, ["img:1.0"]);
+      scheduleSandboxImageWarm(client, [{ image: "img:1.0", resourceLimits: TEST_LIMITS }]);
       await vi.runAllTimersAsync();
       expect(client.ensureImagePresent).toHaveBeenCalledTimes(1);
+      expect(client.ensureImagePresent).toHaveBeenCalledWith("img:1.0", TEST_LIMITS);
       expect(infoSpy).toHaveBeenCalledWith(
-        { image: "img:1.0", attempt: 0 },
+        { image: "img:1.0", attempt: 1 },
         "sandbox image warm complete",
       );
     } finally {
@@ -113,7 +116,7 @@ describe("scheduleSandboxImageWarm (bounded boot retry)", () => {
       .mockRejectedValueOnce(new Error("transient 2"))
       .mockResolvedValue();
 
-    scheduleSandboxImageWarm(client, ["img:1.0"]);
+    scheduleSandboxImageWarm(client, [{ image: "img:1.0", resourceLimits: TEST_LIMITS }]);
     // First attempt fires synchronously, fails; subsequent retries
     // wait on the timer. Drain the entire schedule.
     await vi.runAllTimersAsync();
@@ -125,13 +128,13 @@ describe("scheduleSandboxImageWarm (bounded boot retry)", () => {
     client.ensureImagePresent.mockRejectedValue(new Error("provider down"));
     const warnSpy = vi.spyOn(logger, "warn");
     try {
-      scheduleSandboxImageWarm(client, ["img:1.0"]);
+      scheduleSandboxImageWarm(client, [{ image: "img:1.0", resourceLimits: TEST_LIMITS }]);
       await vi.runAllTimersAsync();
       expect(client.ensureImagePresent).toHaveBeenCalledTimes(BOOT_WARM_MAX_ATTEMPTS);
       expect(warnSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           image: "img:1.0",
-          attempts: BOOT_WARM_MAX_ATTEMPTS,
+          attemptsTaken: BOOT_WARM_MAX_ATTEMPTS,
         }),
         "background sandbox image warm exhausted retries — task path will retry on first use",
       );
@@ -153,7 +156,10 @@ describe("scheduleSandboxImageWarm (bounded boot retry)", () => {
       return Promise.resolve();
     });
 
-    scheduleSandboxImageWarm(client, ["slow:1", "fast:1"]);
+    scheduleSandboxImageWarm(client, [
+      { image: "slow:1", resourceLimits: TEST_LIMITS },
+      { image: "fast:1", resourceLimits: TEST_LIMITS },
+    ]);
     await vi.runAllTimersAsync();
     const slowCalls = client.ensureImagePresent.mock.calls.filter(([i]) => i === "slow:1").length;
     const fastCalls = client.ensureImagePresent.mock.calls.filter(([i]) => i === "fast:1").length;

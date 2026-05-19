@@ -262,8 +262,16 @@ export interface SandboxClient<TState extends SandboxSessionState = SandboxSessi
    * Verify `image` is reachable from the backend (locally cached on
    * Local-Docker, registry-reachable on Daytona). Idempotent and cheap
    * when satisfied.
+   *
+   * `resourceLimits` is a hint baked into the provider's snapshot at
+   * warm time (Daytona only — the snapshot path on `create()` reuses
+   * the baked CPU/memory/disk and cannot override them per-session).
+   * Local-Docker ignores the hint. When omitted, the provider's
+   * platform defaults govern. Callers that already know the consumer's
+   * limits should pass them at warm time so post-warm sessions inherit
+   * intentional values instead of platform defaults.
    */
-  ensureImagePresent(image: string): Promise<void>;
+  ensureImagePresent(image: string, resourceLimits?: ResourceLimits): Promise<void>;
 
   /** Mint a new session per `spec`. */
   create(spec: SessionSpec): Promise<SandboxSession<TState>>;

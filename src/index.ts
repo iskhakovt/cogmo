@@ -61,7 +61,7 @@ import { DrizzleMcpStore } from "./mcp/store/index.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
 import { DAYTONA_API_KEY_SECRET } from "./sandbox/daytona/auth.js";
 import { createSandboxBackend } from "./sandbox/factory.js";
-import { CogmoSocketProxy, type SandboxClient } from "./sandbox/index.js";
+import { CogmoSocketProxy, type ResourceLimits, type SandboxClient } from "./sandbox/index.js";
 import { createSandboxReaper } from "./sandbox/reaper.js";
 import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
@@ -71,6 +71,7 @@ import { bootstrapSkillsRepo, ensureSkillsCodingRepo } from "./skills/repo.js";
 import { SkillRunnerImpl } from "./skills/runner.js";
 import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
 import { DrizzleSkillStore } from "./skills/store/index.js";
+import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "./skills/worker-sysbox/host.js";
 import type { AttachmentStore } from "./transport/attachment-store.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
 import { createDeliveryRouter } from "./transport/delivery-router.js";
@@ -210,6 +211,28 @@ export const NO_SANDBOX: SandboxDeps = {
   sandboxInstanceId: null,
   sandboxDocker: null,
 };
+
+/**
+ * Resource limits for coding-delegation sandboxes (devbase image).
+ * 2 cpu / 2 GiB RAM accommodate `claude` CLI + a typical build step
+ * (TypeScript compilation, pnpm install) without OOMing. `pids: 256`
+ * is fork-bomb defence, not a budget. `disk_bytes` is omitted so the
+ * Daytona platform default (3 GiB at the time of writing) governs;
+ * cogmo's devbase image weighs ~1.5 GiB and a typical worktree adds
+ * a few hundred MB, so the 3 GiB default has reasonable headroom.
+ *
+ * These limits are passed in TWO places: orchestrator construction
+ * (per-session on the lazy `daytona.create({ image, resources })`
+ * fallback path) and `ensureImagePresent` (baked into the snapshot
+ * at warm time so subsequent `daytona.create({ snapshot })` sessions
+ * inherit them — the snapshot path has no per-session resources
+ * override on the SDK side).
+ */
+const DEFAULT_CODING_RESOURCE_LIMITS = {
+  cpus: 2,
+  memory_bytes: 2 * 1024 * 1024 * 1024,
+  pids: 256,
+} as const;
 
 /**
  * Skill runner + its construction inputs. Returned by `bootstrapSkillRunner`.
@@ -541,7 +564,18 @@ export async function bootstrapSandbox(
     // task arrivals share the in-flight promise via
     // `ensureImagePresent`'s memoisation. Failures evict the cache so
     // the task path retries on its own.
-    scheduleSandboxImageWarm(sandbox, [env.COGMO_DEVBASE_IMAGE, env.COGMO_SKILLS_IMAGE]);
+    // Pair each image with the resource limits its consumer will use,
+    // so Daytona bakes them into the snapshot at warm time. Once the
+    // snapshot is ACTIVE, every `daytona.create({ snapshot })` session
+    // inherits these — `CreateSandboxFromSnapshotParams` has no
+    // per-session resources override. Omitting the hint would silently
+    // fall back to Daytona's platform default (currently 1 cpu /
+    // 1 GiB RAM / 3 GiB disk) and erase the consumer's intent (notably
+    // skills' 1 GiB disk choice in `worker-sysbox/host.ts`).
+    scheduleSandboxImageWarm(sandbox, [
+      { image: env.COGMO_DEVBASE_IMAGE, resourceLimits: DEFAULT_CODING_RESOURCE_LIMITS },
+      { image: env.COGMO_SKILLS_IMAGE, resourceLimits: SKILLS_DEFAULT_RESOURCE_LIMITS },
+    ]);
     logger.info(
       {
         instanceId: sandboxInstanceId,
@@ -570,43 +604,78 @@ export async function bootstrapSandbox(
  * the per-task `ensureImagePresent` call evicts the failed-warm
  * cache on rejection and will retry fresh on first task arrival.
  */
+export interface SandboxImageWarmSpec {
+  image: string;
+  /**
+   * Resource limits baked into the snapshot at warm time. Required at
+   * boot because the snapshot path (`daytona.create({ snapshot })`)
+   * has no per-session resources override — the baked values govern
+   * every subsequent session. Omitting would silently fall back to
+   * Daytona's platform default and erase the consumer's intent.
+   */
+  resourceLimits: ResourceLimits;
+}
+
 export function scheduleSandboxImageWarm(
   sandbox: SandboxClient,
-  images: ReadonlyArray<string>,
+  specs: ReadonlyArray<SandboxImageWarmSpec>,
 ): void {
-  for (const image of images) {
-    void retryBootWarm(sandbox, image);
+  for (const spec of specs) {
+    void retryBootWarm(sandbox, spec.image, spec.resourceLimits);
   }
 }
 
-/** ~20 attempts × ~60s cap ≈ 20 min total wall-clock ceiling. */
+/**
+ * ~20 attempts × ~60s cap ≈ 20 min total wall-clock ceiling.
+ *
+ * Exported for the `retryBootWarm` unit test in `index.test.ts` —
+ * lets the test pin "exhaustion fires at exactly this count" without
+ * hardcoding the value in two places. Not a public API; do not
+ * consume from outside the boot path.
+ */
 export const BOOT_WARM_MAX_ATTEMPTS = 20;
 const BOOT_WARM_MIN_DELAY_MS = 5_000;
 const BOOT_WARM_MAX_DELAY_MS = 60_000;
 const BOOT_WARM_JITTER_MS = 1_000;
 
-async function retryBootWarm(sandbox: SandboxClient, image: string): Promise<void> {
-  for (let attempt = 0; attempt < BOOT_WARM_MAX_ATTEMPTS; attempt++) {
+/**
+ * Hand-rolled loop instead of `withRetry`. `withRetry` uses p-retry,
+ * which uses `setTimeout` without calling `.unref()`. At boot we
+ * fire-and-forget; if a retry is mid-backoff during `SIGTERM`, a
+ * non-unrefed timer keeps the event loop alive for up to ~60s before
+ * `cogmo serve` can exit. Our own `setTimeout` calls `.unref()` so
+ * shutdown is prompt.
+ */
+async function retryBootWarm(
+  sandbox: SandboxClient,
+  image: string,
+  resourceLimits: ResourceLimits,
+): Promise<void> {
+  for (let attempt = 1; attempt <= BOOT_WARM_MAX_ATTEMPTS; attempt++) {
     try {
-      await sandbox.ensureImagePresent(image);
+      await sandbox.ensureImagePresent(image, resourceLimits);
       logger.info({ image, attempt }, "sandbox image warm complete");
       return;
     } catch (err) {
-      const isLastAttempt = attempt === BOOT_WARM_MAX_ATTEMPTS - 1;
+      const isLastAttempt = attempt === BOOT_WARM_MAX_ATTEMPTS;
       if (isLastAttempt) {
         logger.warn(
-          { err, image, attempts: BOOT_WARM_MAX_ATTEMPTS },
+          { err, image, attemptsTaken: BOOT_WARM_MAX_ATTEMPTS },
           "background sandbox image warm exhausted retries — task path will retry on first use",
         );
         return;
       }
-      const exp = Math.min(BOOT_WARM_MAX_DELAY_MS, BOOT_WARM_MIN_DELAY_MS * 2 ** attempt);
+      // 5s, 10s, 20s, 40s, 60s (capped); + up to 1s jitter.
+      const exp = Math.min(BOOT_WARM_MAX_DELAY_MS, BOOT_WARM_MIN_DELAY_MS * 2 ** (attempt - 1));
       const delay = exp + Math.floor(Math.random() * BOOT_WARM_JITTER_MS);
       logger.warn(
-        { err, image, attempt: attempt + 1, retryInMs: delay },
+        { err, image, attempt, retryInMs: delay },
         "background sandbox image warm failed — scheduling retry",
       );
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, delay);
+        t.unref();
+      });
     }
   }
 }
@@ -691,7 +760,7 @@ export async function bootstrapRuntime(
       // dirty/unpushed worktrees to `refs/cogmo-wip/<taskId>` on failure.
       secretsStore: core.secretsStore,
       devbaseImage: env.COGMO_DEVBASE_IMAGE,
-      defaultResourceLimits: { cpus: 2, memory_bytes: 2 * 1024 * 1024 * 1024, pids: 256 },
+      defaultResourceLimits: DEFAULT_CODING_RESOURCE_LIMITS,
       taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
       worktreesDir: env.COGMO_WORKTREES_DIR,
       openPlanStream: async (taskId: string): Promise<PlanStreamHandle> => ({
