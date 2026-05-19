@@ -111,6 +111,14 @@ The summary preserves: count, tool name, original arg-shape per call (so the mod
 
 `tool_result` blocks must pair with `tool_use` blocks on the preceding assistant message (the existing pairing invariant; see "Pair-Aware Compaction" below). Strategy 0 rewrites the `tool_result` content into the summary block but leaves the `tool_use` blocks intact. The conversation transcript still records *what* the model called and with *what args*; only the *result content* is compacted. This matches Strategy 1's invariant.
 
+#### Size gate
+
+The summary string is template-derived and roughly ~150–250 chars. For tools that return verbose payloads (`web_search`, `read_file`, `fetch_url`) this is much smaller than what it replaces. But a write-style tool returning a one-byte `"ok"` would be *grown* by compaction. Strategy 0 guards against this with a per-cluster size gate: if the aggregate byte length of the middle slice is less than `middleCount × summaryLen`, the cluster is skipped. This preserves the "doesn't increase token count" invariant for the tool surfaces Strategy 0 actually targets, without baking surface-specific exceptions into the policy. The gate also makes the strategy idempotent in a stronger sense — even when content is grown by an exotic tool result we'd never see today, the array doesn't bloat across passes.
+
+#### No-op idempotence
+
+On the second invocation against an already-compacted array, the per-block apply pass compares the planned summary against the existing `tool_result.content`. When they're byte-identical (the steady state after the first fire), no rewrite happens, `resultsCompacted` stays at 0, and downstream telemetry (`didCompact`) doesn't flip every turn. The cluster count likewise reflects only clusters that produced an actual rewrite this pass.
+
 #### Failure mode and rollback
 
 If summary generation needs an LLM call (it shouldn't — the summary is template-based and cheap), Strategy 0 falls through to "leave the cluster alone, let Strategy 1 handle it on the next budget check." Strategy 0 is best-effort optimization; it never blocks a turn.
@@ -199,7 +207,9 @@ if count > budget * 0.95:
     messages = truncate(messages)
 ```
 
-Strategy 0 is a count-based deterministic transform — no token-count threshold, no LLM call — so its **check** runs unconditionally at the top of every turn. The **mutation** only fires when the per-tool same-tool count reaches `triggerCount`; most turns the check finds no cluster over threshold and returns the message array unchanged. Per-turn overhead is dominated by the O(N) scan over messages — negligible at conversation scale. The transform never increases token count, so subsequent threshold checks remain correct.
+Strategy 0 is a count-based deterministic transform — no token-count threshold, no LLM call — so its **check** runs unconditionally at the top of every turn. The **mutation** only fires when the per-tool same-tool count reaches `triggerCount` *and* the summary would shrink the aggregate bytes of the middle slice (the size gate, see "Pair-aware" below). Most turns the check finds no cluster over threshold and returns the message array unchanged. Per-turn overhead is dominated by the O(N) scan over messages — negligible at conversation scale. With the size gate in place, the transform doesn't increase total token count, so subsequent threshold checks remain correct.
+
+**Skip-counting fast path.** `compactMessages` accepts a `skipBudgetStrategies` flag. When the caller has already decided via `shouldSkipCounting` that the turn is comfortably under the context budget, it passes `true` — `compactMessages` still runs Strategy 0 (cheap, no `countTokens` call) but skips Strategies 1–3 entirely. This preserves Strategy 0's design intent ("runs every turn regardless of budget headroom") while keeping the fast-path's avoidance of the expensive `provider.countTokens` round-trip.
 
 Token counting calls are minimized: one initial count after Strategy 0, then re-count only after a strategy fires and the next threshold needs checking. Tool result clearing doesn't need a re-count (reduction is calculated from cleared content); summarization does (output size varies).
 

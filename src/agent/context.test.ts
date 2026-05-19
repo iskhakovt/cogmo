@@ -508,13 +508,29 @@ describe("compactSameToolClusters", () => {
       } as Message,
       {
         role: "user",
-        content: [{ type: "tool_result", toolUseId: c.id, content: c.result }],
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: c.id,
+            // Pad the result so the per-cluster size gate (compaction
+            // must shrink the aggregate) doesn't trip on short tag
+            // strings. Real tool outputs (web_search, fetch_url, etc.)
+            // are kilobytes; the marker stays at the start so tests
+            // can assert on it via toMatch / startsWith.
+            content: padResult(c.result),
+          },
+        ],
       } as Message,
     ]);
   }
 
+  function padResult(marker: string): string {
+    return marker.padEnd(400, "·");
+  }
+
   function getToolResultContents(messages: ReadonlyArray<Message>, toolName: string): string[] {
     // Map tool_use id -> name so we can identify which tool_results belong to this cluster.
+    // ToolResultBlock.content is statically z.string() (src/llm/types.ts), so no JSON branch needed.
     const idsForTool = new Set(
       messages
         .filter((m) => m.role === "assistant" && Array.isArray(m.content))
@@ -526,7 +542,7 @@ describe("compactSameToolClusters", () => {
       .filter((m) => m.role === "user" && Array.isArray(m.content))
       .flatMap((m) => m.content as ContentBlock[])
       .filter((b): b is ToolResultBlock => b.type === "tool_result" && idsForTool.has(b.toolUseId))
-      .map((b) => (typeof b.content === "string" ? b.content : JSON.stringify(b.content)));
+      .map((b) => b.content);
   }
 
   const defaultOpts = { retainRecent: 2, retainFirst: 1, triggerCount: 5 };
@@ -541,8 +557,13 @@ describe("compactSameToolClusters", () => {
     const result = compactSameToolClusters(messages, defaultOpts);
     expect(result.clusters).toBe(0);
     expect(result.resultsCompacted).toBe(0);
-    // Result contents byte-identical to inputs.
-    expect(getToolResultContents(result.messages, "web_search")).toEqual(["r1", "r2", "r3", "r4"]);
+    // Result contents byte-identical to inputs (markers + padding).
+    expect(getToolResultContents(result.messages, "web_search")).toEqual([
+      padResult("r1"),
+      padResult("r2"),
+      padResult("r3"),
+      padResult("r4"),
+    ]);
   });
 
   it("fires at triggerCount — first fire produces [R1, S, S, R4, R5]", () => {
@@ -558,9 +579,9 @@ describe("compactSameToolClusters", () => {
     expect(result.resultsCompacted).toBe(2);
     const contents = getToolResultContents(result.messages, "web_search");
     // R1, R4, R5 verbatim; positions 1 and 2 are the compacted summary.
-    expect(contents[0]).toBe("R1");
-    expect(contents[3]).toBe("R4");
-    expect(contents[4]).toBe("R5");
+    expect(contents[0]).toMatch(/^R1/);
+    expect(contents[3]).toMatch(/^R4/);
+    expect(contents[4]).toMatch(/^R5/);
     expect(contents[1]).toMatch(/Same-tool cluster.*web_search/);
     expect(contents[1]).toContain("beta");
     expect(contents[1]).toContain("gamma");
@@ -580,7 +601,7 @@ describe("compactSameToolClusters", () => {
     ]);
     const pass1 = compactSameToolClusters(pass1Input, defaultOpts);
     const pass1First = getToolResultContents(pass1.messages, "web_search")[0];
-    expect(pass1First).toBe("FIRST_R1");
+    expect(pass1First).toMatch(/^FIRST_R1/);
 
     // Pass 2: simulate "a new tool_result arrives" by appending R6 to
     // the already-compacted array.
@@ -592,28 +613,70 @@ describe("compactSameToolClusters", () => {
     const pass2Contents = getToolResultContents(pass2.messages, "web_search");
     // R1 is still FIRST_R1; R6 verbatim; previous middle gets re-compacted
     // (now covering 3 results: original t2, t3, t4).
-    expect(pass2Contents[0]).toBe("FIRST_R1");
-    expect(pass2Contents[pass2Contents.length - 1]).toBe("R6");
-    expect(pass2Contents[pass2Contents.length - 2]).toBe("R5");
+    expect(pass2Contents[0]).toMatch(/^FIRST_R1/);
+    expect(pass2Contents[pass2Contents.length - 1]).toMatch(/^R6/);
+    expect(pass2Contents[pass2Contents.length - 2]).toMatch(/^R5/);
   });
 
-  it("idempotent — running twice on the same input produces the same output", () => {
+  it("idempotent — running twice on the same input is a no-op on the second pass", () => {
     const messages = cluster("web_search", [
-      { id: "t1", input: { query: "alpha" }, result: "R1" },
-      { id: "t2", input: { query: "beta" }, result: "R2" },
-      { id: "t3", input: { query: "gamma" }, result: "R3" },
-      { id: "t4", input: { query: "delta" }, result: "R4" },
-      { id: "t5", input: { query: "epsilon" }, result: "R5" },
+      { id: "t1", input: { query: "alpha" }, result: "R1-long-enough-result-content-XXXXX" },
+      { id: "t2", input: { query: "beta" }, result: "R2-long-enough-result-content-XXXXX" },
+      { id: "t3", input: { query: "gamma" }, result: "R3-long-enough-result-content-XXXXX" },
+      { id: "t4", input: { query: "delta" }, result: "R4-long-enough-result-content-XXXXX" },
+      { id: "t5", input: { query: "epsilon" }, result: "R5-long-enough-result-content-XXXXX" },
     ]);
     const pass1 = compactSameToolClusters(messages, defaultOpts);
+    expect(pass1.resultsCompacted).toBe(2); // First pass actually does work.
+
     const pass2 = compactSameToolClusters(pass1.messages, defaultOpts);
+    // Output bytes identical to pass1.
     expect(getToolResultContents(pass2.messages, "web_search")).toEqual(
       getToolResultContents(pass1.messages, "web_search"),
     );
-    // Second pass touches the same blocks because their content already
-    // matches the deterministic summary (no-op rewrite); the counter
-    // reflects that.
-    expect(pass2.resultsCompacted).toBe(2);
+    // Per-block byte comparison detects the summary is already in place
+    // and skips the rewrite. resultsCompacted reflects real work, so
+    // downstream telemetry (compactMessages's didCompact flag) doesn't
+    // flip every turn after a cluster first fires.
+    expect(pass2.resultsCompacted).toBe(0);
+    expect(pass2.clusters).toBe(0);
+  });
+
+  it("size gate — skips compaction when the summary would not shrink the aggregate", () => {
+    // 5 calls returning very short content ("ok"). The summary string
+    // is ~150-250 chars; replacing 3 middle "ok"s would grow the array.
+    // Strategy 0 must skip in that case so its "doesn't increase token
+    // count" invariant holds. Inline messages (bypassing the test
+    // helper's default padding) so the actual short content reaches
+    // the size gate.
+    const messages: Message[] = [];
+    for (const c of [
+      { id: "t1", p: "a.txt" },
+      { id: "t2", p: "b.txt" },
+      { id: "t3", p: "c.txt" },
+      { id: "t4", p: "d.txt" },
+      { id: "t5", p: "e.txt" },
+    ]) {
+      messages.push({
+        role: "assistant",
+        content: [{ type: "tool_use", id: c.id, name: "delete_file", input: { path: c.p } }],
+      });
+      messages.push({
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: c.id, content: "ok" }],
+      });
+    }
+    const result = compactSameToolClusters(messages, defaultOpts);
+    expect(result.clusters).toBe(0);
+    expect(result.resultsCompacted).toBe(0);
+    // Original content preserved.
+    expect(getToolResultContents(result.messages, "delete_file")).toEqual([
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+    ]);
   });
 
   it("preserves tool_use blocks intact — only tool_result content is mutated", () => {
@@ -713,9 +776,9 @@ describe("compactSameToolClusters", () => {
     const messages = [...searchCalls, ...readCalls];
     const result = compactSameToolClusters(messages, defaultOpts);
     expect(result.clusters).toBe(1);
-    // web_search cluster compacted; read_file cluster intact.
+    // web_search cluster compacted; read_file cluster intact (padded).
     const readContents = getToolResultContents(result.messages, "read_file");
-    expect(readContents).toEqual(["FILE_A", "FILE_B"]);
+    expect(readContents).toEqual([padResult("FILE_A"), padResult("FILE_B")]);
   });
 
   it("returns a new array even when no compaction fires (defensive copy)", () => {
@@ -755,7 +818,9 @@ describe("compactMessages — Strategy 0 wiring", () => {
   it("runs Strategy 0 unconditionally before the token-count threshold check", async () => {
     // 5 web_search calls — enough to trip Strategy 0 — but total
     // budget usage is small. Strategy 1's 60% threshold doesn't fire,
-    // but Strategy 0 should still rewrite the cluster.
+    // but Strategy 0 should still rewrite the cluster. Result content
+    // is long enough (real-search-result sized) to clear the size
+    // gate.
     const messages: Message[] = [];
     for (const c of [
       { id: "t1", q: "alpha" },
@@ -770,7 +835,13 @@ describe("compactMessages — Strategy 0 wiring", () => {
       });
       messages.push({
         role: "user",
-        content: [{ type: "tool_result", toolUseId: c.id, content: `body-of-${c.q}` }],
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: c.id,
+            content: `body-of-${c.q}-${"·".repeat(500)}`,
+          },
+        ],
       });
     }
     const result = await compactMessages("system", messages, undefined, {
@@ -793,5 +864,67 @@ describe("compactMessages — Strategy 0 wiring", () => {
       budget: 1000,
     });
     expect(result.didCompact).toBe(false);
+  });
+
+  // Pins issue #1's fix: Strategy 0 runs even when the budget
+  // strategies are skipped via the fast-path. Before this fix, the
+  // outer `if (!skip)` gate in handle-message bypassed compactMessages
+  // entirely whenever shouldSkipCounting said the turn was under 50%
+  // budget — exactly the scenario Strategy 0 was designed for.
+  it("Strategy 0 still runs when skipBudgetStrategies is true (fast-path skip)", async () => {
+    const messages: Message[] = [];
+    for (const c of [
+      { id: "t1", q: "alpha" },
+      { id: "t2", q: "beta" },
+      { id: "t3", q: "gamma" },
+      { id: "t4", q: "delta" },
+      { id: "t5", q: "epsilon" },
+    ]) {
+      messages.push({
+        role: "assistant",
+        content: [{ type: "tool_use", id: c.id, name: "web_search", input: { query: c.q } }],
+      });
+      messages.push({
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: c.id,
+            content: `body-of-${c.q}-${"·".repeat(500)}`,
+          },
+        ],
+      });
+    }
+    const countTokens = vi.fn().mockResolvedValue(100);
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      { countTokens, budget: 1000 },
+      true, // skipBudgetStrategies
+    );
+    expect(result.didCompact).toBe(true);
+    expect(result.event?.strategies).toEqual(["compact_same_tool_clusters"]);
+    expect(result.event?.sameToolResultsSuperseded).toBe(2);
+    // countTokens is the cost of Strategies 1–3; the fast-path skip
+    // must not call it.
+    expect(countTokens).not.toHaveBeenCalled();
+  });
+
+  it("does not call countTokens or fire any strategies when skipBudgetStrategies and no cluster trips", async () => {
+    const messages: Message[] = [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi" },
+    ];
+    const countTokens = vi.fn().mockResolvedValue(100);
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      { countTokens, budget: 1000 },
+      true,
+    );
+    expect(result.didCompact).toBe(false);
+    expect(countTokens).not.toHaveBeenCalled();
   });
 });
