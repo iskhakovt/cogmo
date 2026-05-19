@@ -12,6 +12,9 @@ export const memoryRecall = defineTool({
     "Prefer this over asking the user something you might already know.",
   parallelSafe: true,
   sideEffectful: false,
+  // Repeated recall on one turn usually means the model isn't finding what it
+  // wants — nudge to switch tactics earlier than the default.
+  invocationBudget: 3,
   schema: z.object({
     query: z.string().describe("Semantic search query — describe what you're looking for"),
   }),
