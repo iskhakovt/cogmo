@@ -1,0 +1,8 @@
+Replaced the buildkit attestations (`type=provenance,mode=max` + `type=sbom`) on release images with actionable security tooling. The attestations we shipped were unsigned — anyone with `packages:write` on the registry could forge them, no Sigstore entry, no `gh attestation verify`, no tool in the ecosystem consumed them — so they cost runner time and `--load`-incompatibility plumbing (the `WITH_ATTEST=false` overrides in `ci.yml` and `sysbox-e2e.yml`) without buying verifiable supply-chain signal.
+
+In their place:
+
+- **Trivy** runs on each released image (`cogmo`, `cogmo-devbase`, `cogmo-skills`) as the final job of `publish.yml`, after the multi-arch manifest is tagged. SARIF results upload to GitHub code-scanning under per-image categories. `severity: HIGH,CRITICAL`, `ignore-unfixed: true` — findings surface in the Security tab and don't block the release.
+- **Hadolint** lints all three repo-owned Dockerfiles on every PR (matrix job in `ci.yml`, wired into `required-checks`). Repo-root `.hadolint.yaml` sets `failure-threshold: warning` and silences `DL3008` (apt-version pinning is more churn than safety when the base image is already digest-pinned). `devbase` gained an explicit `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` so the `curl … | bash -` nodesource install can't silently succeed on a truncated download.
+
+If a future cogmo deploy step or external consumer needs verifiable provenance, the canonical replacement is `actions/attest-build-provenance` (signs via Sigstore, lands in the GitHub attestation store, verifiable with `gh attestation verify`) — not the buildkit kind.
