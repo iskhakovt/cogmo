@@ -51,6 +51,7 @@ async function setupAdapter(transportOverrides?: Partial<ReturnType<typeof mockT
     credentials: {},
     transport,
     attachments: mockAttachmentStore(),
+    boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
   });
 
   // The inbound Inngest function

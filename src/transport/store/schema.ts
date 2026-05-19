@@ -13,6 +13,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import { z } from "zod";
 import { conversations, profiles, users } from "../../agent/store/schema.js";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { InboundContentSchema } from "../content.js";
@@ -149,6 +150,67 @@ export const chatDefaultProfiles = pgTable(
     createdAt: ts(),
   },
   (t) => [unique("uq_chat_default_profiles").on(t.channelId, t.platformAddress)],
+);
+
+/**
+ * One buffered inbound held during a boundary prompt — message content + the
+ * platform timestamp at which the user sent it. Multiple entries accumulate
+ * when the user keeps typing while the prompt is unanswered.
+ *
+ * No `channel_session_id` is stored: at hold creation the prior session is
+ * already closed and a new session won't exist until resolution. The session
+ * is assigned when the buffered rows are drained into `inbound_messages`.
+ *
+ * `platformTs` is serialised as an ISO 8601 string (JSON doesn't have a Date
+ * type), then converted back at drain time.
+ */
+export const BufferedInboundEntrySchema = z.object({
+  content: InboundContentSchema,
+  platformTs: z.string().datetime(),
+});
+export type BufferedInboundEntry = z.infer<typeof BufferedInboundEntrySchema>;
+
+export const BufferedInboundsSchema = z.array(BufferedInboundEntrySchema);
+
+/**
+ * `boundary_pending` is the holding area for an inbound that arrived after
+ * `resolveSession` decided to rotate due to idle and the prior conversation
+ * was substantial enough to be worth asking about. The bot has sent a prompt
+ * with "Resume / Start fresh" buttons; nothing is persisted to
+ * `inbound_messages` until the user picks (or the waiter times out).
+ *
+ * Holding logic:
+ *   - One row per (channel_id, platform_address) — UNIQUE enforces it.
+ *   - Subsequent inbounds during the hold append to `buffered_inbounds`;
+ *     they don't create a second prompt.
+ *   - On resolution (button tap / `/new` / `/resume` / waiter timeout), the
+ *     resolver drains the buffer into `inbound_messages` bound to the chosen
+ *     conversation, emits `inbound/arrived` per row, and deletes this row.
+ */
+export const boundaryPending = pgTable(
+  "boundary_pending",
+  {
+    id: pk(),
+    channelId: uuid("channel_id")
+      .notNull()
+      .references(() => channels.id, { onDelete: "cascade" }),
+    platformAddress: text("platform_address").notNull(),
+    /**
+     * Platform-side user handle (e.g. Telegram user id) captured at prompt
+     * time. Stored so the waiter-timeout path — which has no Telegram
+     * context — can call `createConversation`/`resumeConversation` with the
+     * same identity that would have been checked on a button tap.
+     */
+    platformUserHandle: text("platform_user_handle").notNull(),
+    priorConversationId: uuid("prior_conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    promptMessageId: text("prompt_message_id").notNull(),
+    bufferedInbounds: jsonbZod("buffered_inbounds", BufferedInboundsSchema).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: ts(),
+  },
+  (t) => [unique("uq_boundary_pending_address").on(t.channelId, t.platformAddress)],
 );
 
 export const userIdentities = pgTable(

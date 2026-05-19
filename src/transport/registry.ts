@@ -11,6 +11,7 @@ import type { McpRegistry } from "../mcp/registry.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { SkillRunner } from "../skills/runner.js";
 import type { SkillStore } from "../skills/store/index.js";
+import type { BoundaryConfig } from "./adapter-module.js";
 import { adaptersByType } from "./adapters/index.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { AdapterEntry } from "./delivery-router.js";
@@ -32,6 +33,7 @@ export interface RegistryDeps {
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
   idleTimeoutMs: number;
+  boundary: BoundaryConfig;
   /** Resolves secret references in channel credentials before passing to adapters. */
   secretsStore: SecretsStore;
   /** Host root for git clones registered via `/repo add`. */
@@ -128,6 +130,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       credentials,
       transport,
       attachments: deps.attachments,
+      boundary: deps.boundary,
       ...(deps.codingStore &&
         deps.codingStreamingRegistry && {
           codingProgress: {
