@@ -48,8 +48,15 @@ export async function startExecStreaming(args: {
   opts: ExecOptions;
   /** Called whenever stdout/stderr would have been written; fires on close too. */
   onClose?: () => void;
+  /**
+   * Override the per-call session-id randomness. Defaults to
+   * `randomUUID`. Conformance tests pin a deterministic value so
+   * record/replay's `(method, path)` FIFO matching stays stable.
+   */
+  random?: () => string;
 }): Promise<ExecStreamingHandle> {
   const { process: daytonaProcess, sessionIdPrefix, cmd, opts, onClose } = args;
+  const random = args.random ?? randomUUID;
 
   // Phase 3a does not implement `opts.user` for Daytona. The
   // Local-Docker backend honours it via dockerode's `User` field;
@@ -68,7 +75,7 @@ export async function startExecStreaming(args: {
   // effectively impossible — important because a collision wouldn't
   // fail loudly, it would silently make `dispose()` on one call tear
   // down a sibling call's session.
-  const sessionId = `${sessionIdPrefix}-${randomUUID()}`;
+  const sessionId = `${sessionIdPrefix}-${random()}`;
   await daytonaProcess.createSession(sessionId);
 
   // Idempotent session teardown. Called from every termination path —

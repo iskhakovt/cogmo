@@ -20,10 +20,17 @@ const EXEC_BUFFER_LIMIT_BYTES = 1024 * 1024;
 export class DaytonaSandboxSession implements SandboxSession<DaytonaSessionState> {
   readonly state: DaytonaSessionState;
   #sdkSandbox: DaytonaSdkSandbox;
+  #random: (() => string) | undefined;
 
-  constructor(args: { state: DaytonaSessionState; sdkSandbox: DaytonaSdkSandbox }) {
+  constructor(args: {
+    state: DaytonaSessionState;
+    sdkSandbox: DaytonaSdkSandbox;
+    /** Override per-call session-id randomness. Conformance tests only. */
+    random?: () => string;
+  }) {
     this.state = args.state;
     this.#sdkSandbox = args.sdkSandbox;
+    this.#random = args.random;
   }
 
   async exec(cmd: readonly string[], opts: ExecOptions = {}): Promise<ExecResult> {
@@ -68,6 +75,7 @@ export class DaytonaSandboxSession implements SandboxSession<DaytonaSessionState
       sessionIdPrefix: `cogmo-${this.state.taskId.slice(0, 12)}`,
       cmd,
       opts,
+      ...(this.#random && { random: this.#random }),
     });
   }
 }
