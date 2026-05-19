@@ -260,6 +260,23 @@ describe("createFileService.write", () => {
     await expect(files.write("big.txt", "short replacement")).rejects.toThrow("truncated view");
   });
 
+  it("read always issues a fresh GET, even after a write populated the cache", async () => {
+    // The cache exists to gate edits/overwrites, not to serve reads. If disk
+    // and cache diverge (e.g. another process wrote in between), read must
+    // surface the on-disk bytes — pinning so a future "optimization" that
+    // serves read from cache has to consciously update this contract.
+    const { client, calls } = s3Mock({
+      get: () => ({ Body: body("from disk"), LastModified: T0 }),
+    });
+    const files = createFileService(client, "bucket");
+
+    await files.write("notes/x.md", "from write");
+    const result = await files.read("notes/x.md");
+
+    expect(result).toBe("from disk");
+    expect(calls.filter((c) => c.kind === "get")).toHaveLength(1);
+  });
+
   it("writing populates the read cache so a subsequent edit works without re-reading", async () => {
     // Stateful HEAD: starts as NotFound (so write creates), flips to Found
     // after PUT (so the follow-up edit sees the file as still present).
