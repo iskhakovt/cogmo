@@ -225,26 +225,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       });
       if (!conv) throw new Error(`Conversation not found: ${conversationId}`);
 
-      // Cooldown guard — `recover-conversation` writes a `cooldown_state`
-      // blob on conversations whose `handle-message` runs exhausted
-      // retries (or failed non-retriably). While the cooldown window is
-      // open, we refuse to spend more LLM calls; the user gets a terse
-      // hand-built reply with a retry-time estimate. Inbounds stay
-      // unbatched — when the cooldown elapses the next `inbound/ready`
-      // loads the backlog as one batch. See design/agent-resilience.md
-      // → Auto-repair.
-      const guardNow = new Date();
-      if (conv.cooldownState !== null && isInCooldown(conv.cooldownState, guardNow)) {
-        const cooldownState = conv.cooldownState;
-        await step.run("in-cooldown-reply", async () => {
-          await deliveryRouter.notifyConversation(
-            conversationId,
-            buildInCooldownReply(cooldownState, guardNow),
-          );
-        });
-        return { status: "skipped", reason: "cooldown" };
-      }
-
       const { userId, profileId } = conv;
 
       const lastAssistant = await step.run("last-assistant", async () => {
@@ -302,6 +282,52 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // No unbatched messages — nothing to process (e.g., flush with no new input)
       if (inboundMessages.length === 0) {
         return { status: "skipped", reason: "no_messages" };
+      }
+
+      // Cooldown guard — `recover-conversation` writes a `cooldown_state`
+      // blob on conversations whose `handle-message` runs exhausted retries
+      // (or failed non-retriably). While the cooldown window is open, we
+      // refuse to spend more LLM calls; the user gets a terse hand-built
+      // reply with a retry-time estimate.
+      //
+      // Placement is deliberate — *after* the no_messages / staleness /
+      // await_input exits — so the cooldown reply only fires when there's
+      // a real triggering inbound the user is actively trying to deliver.
+      // Otherwise a null-trigger flush during cooldown would send a reply
+      // to a message that doesn't exist.
+      //
+      // The debounce contract caps the reply rate naturally: a burst of
+      // user messages during one debounce window coalesces to one
+      // `inbound/ready` and one cooldown reply. Across multiple debounce
+      // windows in the same cooldown the user gets N replies, where N is
+      // the number of user-active windows — not a tight loop. See
+      // design/agent-resilience.md → In-cooldown reply.
+      //
+      // Inbounds stay unbatched — `getUnbatchedInbound` is a pure SELECT,
+      // so when the cooldown elapses the next `inbound/ready` loads the
+      // entire backlog as one batch.
+      const guardNow = new Date();
+      if (conv.cooldownState !== null && isInCooldown(conv.cooldownState, guardNow)) {
+        const cooldownState = conv.cooldownState;
+        await step.run("in-cooldown-reply", async () => {
+          try {
+            await deliveryRouter.notifyConversation(
+              conversationId,
+              buildInCooldownReply(cooldownState, guardNow),
+            );
+          } catch (notifyErr) {
+            // Best-effort delivery — same shape as `onFailure`'s
+            // `notify-user`. Swallowing prevents a transient session-lookup
+            // or transport blip from propagating up, exhausting Inngest's
+            // retry budget, and tripping `onFailure` → spuriously doubling
+            // the cooldown for what's really just a delivery hiccup.
+            turnLogger.error(
+              { err: notifyErr },
+              "in-cooldown-reply: notifyConversation failed; conversation stays in cooldown",
+            );
+          }
+        });
+        return { status: "skipped", reason: "cooldown" };
       }
 
       const inboundBlocks = inboundMessages.flatMap((m) => contentToBlocks(m.content));

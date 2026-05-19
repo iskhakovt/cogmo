@@ -1,11 +1,6 @@
 /**
- * Auto-repair cooldown curve and predicates. Pure functions; the storage
- * column lives on `conversations.cooldown_state` and the read/write live
- * in `AgentStore`.
- *
- * Curve: 60s base → 2× per consecutive failure → capped at 1h.
- * Reaches the cap on the 7th consecutive failure; reset to 60s on any
- * successful turn. See `design/agent-resilience.md` → Cooldown curve.
+ * Auto-repair cooldown curve and predicates. See
+ * `design/agent-resilience.md` → Cooldown curve.
  */
 
 import type { CooldownState } from "./store/schema.js";
@@ -81,5 +76,5 @@ export function formatRemainingCooldown(state: CooldownState, now: Date): string
  * during the Open state. Hand-built, no LLM call.
  */
 export function buildInCooldownReply(state: CooldownState, now: Date): string {
-  return `I hit an error on the last message and I'm waiting before trying again. Try once more in ~${formatRemainingCooldown(state, now)}.`;
+  return `I hit an error on the last message and I'm waiting before trying again. Try again in ${formatRemainingCooldown(state, now)}.`;
 }

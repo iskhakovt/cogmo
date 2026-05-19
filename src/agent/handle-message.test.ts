@@ -955,6 +955,81 @@ describe("createHandleMessage", () => {
     expect(clearCooldown).not.toHaveBeenCalled();
   });
 
+  // Cooldown + no inbounds (e.g. a debounce flush with the queue already
+  // drained) must NOT fire a reply. Sending "I hit an error" without a
+  // triggering user message would be spurious. Exit via the `no_messages`
+  // path instead.
+  it("does not deliver the cooldown reply when there are no unbatched inbounds", async () => {
+    const futureLastErroredAt = new Date(Date.now() - 5_000).toISOString();
+    const notifyConversation = vi.fn().mockResolvedValue(undefined);
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "conv-1",
+          userId: "user-1",
+          profileId: "profile-1",
+          isPrivate: true,
+          cooldownState: {
+            lastErroredAt: futureLastErroredAt,
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
+          voiceMode: null,
+        }),
+      }),
+      transportStore: mockTransportStore({
+        getUnbatchedInbound: vi.fn().mockResolvedValue([]),
+      }),
+      deliveryRouter: mockDeliveryRouter({ notifyConversation }),
+    });
+    const result = await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: { data: { conversationId: "conv-1", triggerInboundId: null } },
+      step: mockStep(),
+      runId: testRunId,
+    });
+    expect(result).toEqual({ status: "skipped", reason: "no_messages" });
+    expect(notifyConversation).not.toHaveBeenCalled();
+  });
+
+  // Best-effort delivery — a transient blip in `notifyConversation`
+  // (DB outage on session lookup, transport unreachable) must NOT
+  // propagate. Otherwise Inngest retries × 2, `onFailure` fires,
+  // emits `conversation/errored`, and `recover-conversation` doubles
+  // the cooldown for what was really just a delivery hiccup —
+  // spuriously inflating `consecutiveFailures`. Mirrors the
+  // try/catch in `onFailure`'s `notify-user`.
+  it("swallows notifyConversation failures inside the in-cooldown-reply step", async () => {
+    const futureLastErroredAt = new Date(Date.now() - 5_000).toISOString();
+    const notifyConversation = vi.fn().mockRejectedValue(new Error("transport unreachable"));
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "conv-1",
+          userId: "user-1",
+          profileId: "profile-1",
+          isPrivate: true,
+          cooldownState: {
+            lastErroredAt: futureLastErroredAt,
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
+          voiceMode: null,
+        }),
+      }),
+      deliveryRouter: mockDeliveryRouter({ notifyConversation }),
+    });
+    const result = await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+    // Notify failed but the step returned cleanly — function didn't
+    // throw, no retries triggered, no `conversation/errored` emitted.
+    expect(result).toEqual({ status: "skipped", reason: "cooldown" });
+    expect(notifyConversation).toHaveBeenCalled();
+    expect(deps.runStreamingAgentLoop).not.toHaveBeenCalled();
+  });
+
   it("skips processing when triggerInboundId is stale", async () => {
     const deps = mockDeps({
       agentStore: mockAgentStore({

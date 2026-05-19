@@ -33,7 +33,13 @@ Schema: the `conversation_status` pgEnum and `conversations.status`
 column are dropped (single-value enums after auto-repair lands — pure
 noise); `cooldown_state` is added as a nullable JSONB column.
 Migrations `0039_drop_conversation_status.sql` and
-`0040_add_cooldown_state.sql`. Tests: `cooldown.test.ts` pins the curve
+`0040_add_cooldown_state.sql`. **Migration story:** any conversation
+sitting at `status='errored'` at upgrade time becomes implicitly clear
+(`cooldown_state IS NULL`) — the migration drops the column without
+seeding `cooldown_state`, so a previously-stuck conversation will
+accept the next inbound and run a full turn. Re-run `/repair` if
+behavior surprises you; at single-user scale this is the right
+trade-off vs. backfilling a synthetic cooldown blob. Tests: `cooldown.test.ts` pins the curve
 + predicates + retry-time formatter; `recover-conversation.test.ts`,
 `handle-message.test.ts`, `transport.test.ts`, and `store.test.ts`
 cover the new write paths, the cooldown / half-open / closed entry-guard

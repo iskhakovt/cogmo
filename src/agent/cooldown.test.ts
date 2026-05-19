@@ -156,7 +156,7 @@ describe("buildInCooldownReply", () => {
       consecutiveFailures: 2,
     };
     expect(buildInCooldownReply(state, NOW)).toBe(
-      "I hit an error on the last message and I'm waiting before trying again. Try once more in ~2 minutes.",
+      "I hit an error on the last message and I'm waiting before trying again. Try again in 2 minutes.",
     );
   });
 });

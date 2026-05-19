@@ -36,19 +36,9 @@ export const pendingMemorySource = pgEnum("pending_memory_source", ["live_retain
 export const voiceMode = pgEnum("voice_mode", ["auto", "always", "never"]);
 
 /**
- * Conversation-level circuit-breaker state. Set by `recover-conversation`
- * after `handle-message` exhausts retries; cleared on the first successful
- * turn past the cooldown threshold, by `/repair`, or by `/model` / `/profile`
- * switches. `handle-message`'s entry guard reads this column and returns
- * `{ status: "skipped", reason: "cooldown" }` (without consuming inbounds)
- * when `now() < lastErroredAt + cooldownSeconds`.
- *
- * All three fields are atomic — either the column is `NULL` (CLOSED state)
- * or all three are populated (OPEN state). `consecutiveFailures` is stored
- * rather than derived because `cooldownSeconds` collapses to a constant
- * once it reaches the 1h cap and the failure counter is the most useful
- * chronic-failure telemetry signal. See `design/agent-resilience.md` →
- * Auto-repair.
+ * Zod schema for `conversations.cooldown_state`. The column's column
+ * comment carries the lifecycle and atomicity contract; see also
+ * `design/agent-resilience.md` → Auto-repair.
  */
 export const CooldownStateSchema = z.object({
   lastErroredAt: z.string().datetime({ offset: true }),
@@ -561,12 +551,19 @@ export const conversations = pgTable(
       .references(() => profiles.id),
     isPrivate: boolean("is_private").notNull(),
     /**
-     * Auto-repair cooldown state. `NULL` = normal (CLOSED state). When
-     * populated, `handle-message` returns a terse in-cooldown reply
-     * (without invoking the LLM) until `now() >= lastErroredAt +
-     * cooldownSeconds`, after which the next inbound runs normally and
-     * either clears the column on success or re-arms it through
-     * `recover-conversation` on failure. See `CooldownStateSchema` and
+     * Conversation-level circuit-breaker state. Set by
+     * `recover-conversation` after `handle-message` exhausts retries;
+     * cleared on the first successful turn past the cooldown threshold,
+     * by `/repair`, or by `/model` / `/profile` switches.
+     * `handle-message`'s entry guard reads this column and returns a
+     * terse in-cooldown reply (without invoking the LLM) while
+     * `now() < lastErroredAt + cooldownSeconds`.
+     *
+     * Atomic by construction — either `NULL` (CLOSED state) or all
+     * three blob fields populated (OPEN state). `consecutiveFailures`
+     * is stored rather than derived because `cooldownSeconds` collapses
+     * to a constant past the 1h cap and the failure counter is the
+     * most useful chronic-failure telemetry signal. See
      * `design/agent-resilience.md` → Auto-repair.
      */
     cooldownState: jsonbZod("cooldown_state", CooldownStateSchema),
