@@ -139,6 +139,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
         createParams.tools = params.tools.map(toOpenAITool);
       }
 
+      if (params.temperature !== undefined) {
+        createParams.temperature = params.temperature;
+      }
+
       if (params.responseFormat) {
         createParams.response_format = {
           type: "json_schema",
@@ -209,6 +213,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
             max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
             messages: buildMessages(params.system, params.messages, caching),
             ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
+            ...(params.temperature !== undefined && { temperature: params.temperature }),
             stream: true,
             stream_options: { include_usage: true },
           })
