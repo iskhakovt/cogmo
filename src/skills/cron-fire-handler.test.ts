@@ -9,7 +9,12 @@ import { InngestTestEngine } from "@inngest/test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { inngest } from "../inngest/client.js";
 import { createSkillCronFireHandler } from "./cron-fire-handler.js";
-import { InputValidationError, type SkillRunner } from "./runner.js";
+import {
+  InputValidationError,
+  SkillDisabledError,
+  SkillNotFoundError,
+  type SkillRunner,
+} from "./runner.js";
 
 const baseEvent = {
   name: "skills/cron.fire",
@@ -76,7 +81,7 @@ describe("createSkillCronFireHandler", () => {
   });
 
   it("skips with reason 'skill_not_found' when the row was deregistered between tick and fire", async () => {
-    const invoke = vi.fn().mockRejectedValue(new Error("skill not found: morning-brief"));
+    const invoke = vi.fn().mockRejectedValue(new SkillNotFoundError("morning-brief"));
     const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
@@ -85,12 +90,26 @@ describe("createSkillCronFireHandler", () => {
   });
 
   it("skips with reason 'skill_disabled' when the row was disabled between tick and fire", async () => {
-    const invoke = vi.fn().mockRejectedValue(new Error("skill is disabled: morning-brief"));
+    const invoke = vi.fn().mockRejectedValue(new SkillDisabledError("morning-brief"));
     const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
     expect(result).toMatchObject({ status: "skipped", reason: "skill_disabled" });
+  });
+
+  it("propagates a plain Error whose message coincidentally contains 'skill not found' — discriminates by class, not substring", async () => {
+    // Regression guard for the old `msg.includes("skill not found")`
+    // matcher: a deeper-layer error whose text mentions the phrase must
+    // NOT be classified as skill_not_found. Only `SkillNotFoundError`
+    // counts.
+    const invoke = vi
+      .fn()
+      .mockRejectedValue(new Error("registry lookup failed: skill not found in cache"));
+    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+
+    const { error } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
+    expect((error as { message?: string } | undefined)?.message).toMatch(/registry lookup failed/);
   });
 
   it("skips with reason 'invalid_inputs' when the manifest required inputs the cron path can't supply", async () => {

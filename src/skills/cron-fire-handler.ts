@@ -18,7 +18,12 @@
 import type { Inngest } from "inngest";
 import { skillCronFire } from "../inngest/events.js";
 import { logger } from "../logger.js";
-import { InputValidationError, type SkillRunner } from "./runner.js";
+import {
+  InputValidationError,
+  SkillDisabledError,
+  SkillNotFoundError,
+  type SkillRunner,
+} from "./runner.js";
 
 const log = logger.child({ component: "skills.cron-fire-handler" });
 
@@ -60,17 +65,19 @@ export function createSkillCronFireHandler(deps: SkillCronFireDeps, inngest: Inn
         } catch (e) {
           // `runner.invoke` throws (rather than returns Result) for the
           // pre-invocation gates: skill missing, disabled, or input
-          // validation failed. Translate each into a non-retrying
-          // skipped result — Inngest retries can't repair any of these.
+          // validation failed. Each one is a typed Error subclass so we
+          // discriminate via `instanceof` — no fragile string matching
+          // against `error.message`. Translate each into a non-retrying
+          // skipped result; Inngest retries can't repair any of them.
           const msg = e instanceof Error ? e.message : String(e);
-          if (e instanceof InputValidationError) {
-            return { status: "skipped", reason: "invalid_inputs", detail: msg };
-          }
-          if (msg.includes("skill not found")) {
+          if (e instanceof SkillNotFoundError) {
             return { status: "skipped", reason: "skill_not_found", detail: msg };
           }
-          if (msg.includes("skill is disabled")) {
+          if (e instanceof SkillDisabledError) {
             return { status: "skipped", reason: "skill_disabled", detail: msg };
+          }
+          if (e instanceof InputValidationError) {
+            return { status: "skipped", reason: "invalid_inputs", detail: msg };
           }
           // Anything else (sandbox transient, DB blip) propagates so
           // Inngest's `retries: 2` budget kicks in.

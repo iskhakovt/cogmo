@@ -922,10 +922,10 @@ export class SkillRunnerImpl implements SkillRunner {
   }): Promise<SkillRunResult> {
     const skill = await this.#runInTx((tx) => this.#store.getSkillByName(tx, opts.name));
     if (!skill) {
-      throw new Error(`skill not found: ${opts.name}`);
+      throw new SkillNotFoundError(opts.name);
     }
     if (skill.disabled) {
-      throw new Error(`skill is disabled: ${opts.name}`);
+      throw new SkillDisabledError(opts.name);
     }
 
     const cached = await this.#loadSourceForRow(skill);
@@ -1395,6 +1395,31 @@ export class InputValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "InputValidationError";
+  }
+}
+
+/**
+ * `invoke` was called with a name that doesn't resolve to a skills row.
+ * Discriminated via `instanceof` rather than substring matching against
+ * `error.message` — call sites (the cron-fire-handler is the only one
+ * today) translate it into their own skipped-result reason without
+ * coupling to message wording.
+ */
+export class SkillNotFoundError extends Error {
+  constructor(name: string) {
+    super(`skill not found: ${name}`);
+    this.name = "SkillNotFoundError";
+  }
+}
+
+/**
+ * `invoke` was called on a row whose `disabled = true`. Same rationale as
+ * {@link SkillNotFoundError}: `instanceof` discrimination, not string match.
+ */
+export class SkillDisabledError extends Error {
+  constructor(name: string) {
+    super(`skill is disabled: ${name}`);
+    this.name = "SkillDisabledError";
   }
 }
 
