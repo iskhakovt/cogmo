@@ -343,5 +343,37 @@ describe("startCodingProgressSubscriber", () => {
       expect(failEdit.text).toContain("❌ Failed");
       expect(failEdit.text).toContain("boom");
     });
+
+    it("coalesces a burst of events fired at the same wall-clock tick", async () => {
+      // The registry's `publish` calls listeners synchronously but does
+      // not await the returned promise (`streaming-registry.ts:102-113`),
+      // so handlers for back-to-back events can interleave. If the
+      // throttle timestamp were only updated *after* the bot call
+      // resolved, all three events below would see stale `lastEditAt`,
+      // pass the throttle, and queue three editMessageText calls onto
+      // `pending`. The synchronous update at the top of `postOrEdit`
+      // pins the throttle so only the first event in the burst fires.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(0));
+
+      const { registry, bot } = start({ editIntervalMs: 500 });
+
+      // Initial post lands at t=0.
+      registry.publish(TASK_ID, { kind: "text", delta: "a" });
+      await new Promise((r) => setImmediate(r));
+      expect(bot.sent).toHaveLength(1);
+      expect(bot.edits).toHaveLength(0);
+
+      // Cross the throttle window, then burst three events synchronously
+      // without awaiting in between — this is what registry.publish does
+      // when text deltas stream in from the orchestrator.
+      vi.setSystemTime(new Date(600));
+      registry.publish(TASK_ID, { kind: "text", delta: "b" });
+      registry.publish(TASK_ID, { kind: "text", delta: "c" });
+      registry.publish(TASK_ID, { kind: "text", delta: "d" });
+      await new Promise((r) => setImmediate(r));
+
+      expect(bot.edits).toHaveLength(1);
+    });
   });
 });
