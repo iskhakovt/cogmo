@@ -163,33 +163,48 @@ describe("runMigrateMemoriesCli", () => {
     expect(hindsightCtor).toHaveBeenCalledWith({ baseUrl: "http://hindsight:8080" });
   });
 
-  it("clearBankMemories dep throws when sdk returns an error", async () => {
+  // The four tests below assert *both* that the CLI dispatch completes
+  // with `code === 0` AND that the closure-built `migrationDeps.<dep>`
+  // behaves correctly. The dep assertion has to run from inside the
+  // mocked `migrateUntaggedMemories` implementation because that's the
+  // only place the real `migrationDeps` is in scope. The CLI exit-code
+  // check is the bookend that proves the dispatch didn't crash on the
+  // dep's behaviour.
+  it("CLI exits 0; clearBankMemories dep translates an sdk error into a thrown Error", async () => {
     const deps = buildDeps({ defaultBankId: "u" });
+    let depAsserted = false;
     migrateUntaggedMemoriesSpy.mockImplementationOnce(async (_id, migrationDeps) => {
       clearSpy.mockResolvedValueOnce({ error: { detail: "boom" } });
       await expect(migrationDeps.clearBankMemories("u")).rejects.toThrow(
         /clearBankMemories failed/,
       );
+      depAsserted = true;
       return { migrated: 0 };
     });
 
     const code = await runMigrateMemoriesCli([], deps);
     expect(code).toBe(0);
+    // Confirm the inner assertion actually ran — guards against a future
+    // refactor that bypasses the mock implementation entirely.
+    expect(depAsserted).toBe(true);
   });
 
-  it("clearBankMemories returns success when sdk has no error", async () => {
+  it("CLI exits 0; clearBankMemories dep resolves to undefined on sdk success", async () => {
     const deps = buildDeps({ defaultBankId: "u" });
+    let depAsserted = false;
     migrateUntaggedMemoriesSpy.mockImplementationOnce(async (_id, migrationDeps) => {
       clearSpy.mockResolvedValueOnce({ data: { ok: true } });
       await expect(migrationDeps.clearBankMemories("u")).resolves.toBeUndefined();
+      depAsserted = true;
       return { migrated: 0 };
     });
 
     const code = await runMigrateMemoriesCli([], deps);
     expect(code).toBe(0);
+    expect(depAsserted).toBe(true);
   });
 
-  it("writeBackup persists the staged rows", async () => {
+  it("CLI exits 0; writeBackup dep persists the staged rows", async () => {
     const deps = buildDeps({ defaultBankId: "u" });
     const fs = await import("node:fs");
     migrateUntaggedMemoriesSpy.mockImplementationOnce(async (_id, migrationDeps) => {
@@ -197,24 +212,28 @@ describe("runMigrateMemoriesCli", () => {
       return { migrated: 1 };
     });
 
-    await runMigrateMemoriesCli([], deps);
-
+    const code = await runMigrateMemoriesCli([], deps);
+    expect(code).toBe(0);
     expect(fs.writeFileSync).toHaveBeenCalledWith(
       expect.stringMatching(/u-.*\.json$/),
       expect.any(String),
     );
   });
 
-  it("listMemories dep proxies through HindsightClient", async () => {
+  it("CLI exits 0; listMemories dep proxies through HindsightClient", async () => {
     const deps = buildDeps({ defaultBankId: "u" });
+    let depAsserted = false;
     migrateUntaggedMemoriesSpy.mockImplementationOnce(async (_id, migrationDeps) => {
       listMemoriesSpy.mockResolvedValueOnce({ items: [], total: 0, limit: 100, offset: 0 });
       await migrationDeps.listMemories("u", { limit: 100, offset: 0 });
       expect(listMemoriesSpy).toHaveBeenCalledWith("u", { limit: 100, offset: 0 });
+      depAsserted = true;
       return { migrated: 0 };
     });
 
-    await runMigrateMemoriesCli([], deps);
+    const code = await runMigrateMemoriesCli([], deps);
+    expect(code).toBe(0);
+    expect(depAsserted).toBe(true);
   });
 });
 
@@ -295,28 +314,34 @@ describe("runBackfillProfileClassCli", () => {
     expect(warnCalls.some((s) => /Pause Observer/.test(s))).toBe(true);
   });
 
-  it("backfillDeps.clearBankMemories surfaces sdk error", async () => {
+  it("CLI exits 0; backfillDeps.clearBankMemories surfaces sdk error", async () => {
     const deps = buildDeps({ defaultBankId: "u" });
+    let depAsserted = false;
     backfillProfileClassSpy.mockImplementationOnce(async (_id, backfillDeps) => {
       clearSpy.mockResolvedValueOnce({ error: { detail: "boom" } });
       await expect(backfillDeps.clearBankMemories("u")).rejects.toThrow(/clearBankMemories failed/);
+      depAsserted = true;
       return { total: 0, classified: 0, skipped: 0 };
     });
 
     const code = await runBackfillProfileClassCli(["profile-class", "--tag=x"], deps);
     expect(code).toBe(0);
+    expect(depAsserted).toBe(true);
   });
 
-  it("backfillDeps.retainBatch awaits async:false retain", async () => {
+  it("CLI exits 0; backfillDeps.retainBatch awaits async:false retain", async () => {
     const deps = buildDeps({ defaultBankId: "u" });
+    let depAsserted = false;
     backfillProfileClassSpy.mockImplementationOnce(async (_id, backfillDeps) => {
       retainBatchSpy.mockResolvedValueOnce(undefined);
       await backfillDeps.retainBatch("u", [{ content: "x", tags: [], timestamp: "t" }]);
       expect(retainBatchSpy).toHaveBeenCalledWith("u", expect.any(Array), { async: false });
+      depAsserted = true;
       return { total: 0, classified: 0, skipped: 0 };
     });
 
     const code = await runBackfillProfileClassCli(["profile-class", "--tag=x"], deps);
     expect(code).toBe(0);
+    expect(depAsserted).toBe(true);
   });
 });

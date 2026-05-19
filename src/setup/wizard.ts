@@ -131,6 +131,18 @@ const PROVIDER_HELP: Partial<Record<ProviderType, { url: string; path: string; k
   };
 
 // --- Wizard steps ---
+//
+// The `step…` functions below are exported for direct unit-test
+// invocation by `src/setup/wizard-steps.test.ts` (each driven against a
+// `vi.mock("@clack/prompts", …)` boundary). They are NOT part of the
+// module's intended public API — production code calls them only
+// through `runWizard`'s closed-over local references. New callers should
+// reach the wizard via `runWizard` instead; if you find yourself
+// importing a `step…` from another module, that's a signal to revisit
+// the boundary.
+//
+// Naming convention: matches existing `Exported for unit tests` notes
+// elsewhere in the codebase (e.g., `cleanup-orphan-run-branches.ts:108`).
 
 async function stepSeedDefaults(deps: WizardDeps): Promise<{ userId: string; profileId: string }> {
   const s = p.spinner();

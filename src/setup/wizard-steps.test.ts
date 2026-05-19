@@ -1,3 +1,37 @@
+/**
+ * Unit tests for `src/setup/wizard.ts`'s `step…` functions.
+ *
+ * Mocking strategy:
+ *
+ *   - `@clack/prompts` is the prompt boundary. Every interactive call —
+ *     `select`, `confirm`, `password`, `text`, `spinner`, `note`, `log.*`
+ *     — is stubbed at module scope so tests drive deterministic prompt
+ *     responses with `mockResolvedValueOnce` / `mockReturnValueOnce`.
+ *
+ *   - Real-API modules used by individual steps are mocked one at a
+ *     time, keeping each step's collaborator surface explicit:
+ *       - `./validate.js` (HTTP probes against provider APIs)
+ *       - `./seed.js` (DB seeding helpers)
+ *       - `./env.js` (frozen `env` proxy so `process.env` reads stay
+ *         deterministic — pair with `vi.stubEnv` in tests that need to
+ *         override specific keys)
+ *       - `../secrets/ssh-keygen.js` (SSH key material)
+ *       - `../skills/repo.js`, `../skills/configure-remote.js`,
+ *         `../skills/configure-remote-prompts.js` (skills-remote flow)
+ *       - `../agent/coding/store/index.js`,
+ *         `../agent/provider/{add-provider,discover-models,add-model-routing}.js`
+ *         (LLM provider registration)
+ *
+ *   - Stores (`AgentStore`, `SecretsStore`, `TransportStore`) are typed
+ *     stubs from `vitest-mock-extended`'s `mock<T>()`. Tests drive each
+ *     step's queries via `deps.secretsStore.getSecretMeta.mockResolvedValue`
+ *     etc.
+ *
+ * If a future refactor moves I/O across modules, the mock list above
+ * needs to follow. The single-module-per-mock layout is deliberate —
+ * one mistakenly-overlapping mock would hide a step's real collaborator
+ * surface from the tests.
+ */
 import * as p from "@clack/prompts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";

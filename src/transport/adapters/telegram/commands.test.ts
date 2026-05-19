@@ -2144,6 +2144,12 @@ describe("/profile class subcommand", () => {
     const ctx = mkCtx("class personal intimate");
     await handleProfile(transport, ctx, mkDialogs());
     const reply = ctx.reply.mock.calls[0]?.[0];
+    // Positive assertion catches the exact friendly-error wording wired
+    // in `commands.ts:errorMessage("identity_rejected")`. The
+    // accompanying `not.toContain("set to")` rules out a misleading
+    // success message — both halves are necessary because a silent
+    // return would pass the negative alone.
+    expect(reply).toBe("You're not authorized on this bot.");
     expect(reply).not.toContain("set to");
   });
 });
@@ -2266,6 +2272,7 @@ describe("/profile stream subcommand", () => {
     const ctx = mkCtx("stream personal chunk=200");
     await handleProfile(transport, ctx, mkDialogs());
     const reply = ctx.reply.mock.calls[0]?.[0];
+    expect(reply).toBe("You're not authorized on this bot.");
     expect(reply).not.toContain("Stream prefs");
   });
 
@@ -2279,6 +2286,7 @@ describe("/profile stream subcommand", () => {
     const ctx = mkCtx("stream personal chunk=200");
     await handleProfile(transport, ctx, mkDialogs());
     const reply = ctx.reply.mock.calls[0]?.[0];
+    expect(reply).toBe("Profile not found.");
     expect(reply).not.toContain("Stream prefs");
   });
 });

@@ -330,7 +330,9 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // a task arriving before the warm completes shares the in-flight
     // promise. Local-Docker `ensureImagePresent` is the cheap pull check.
     await stepRun("ensure-image-present", async () => {
-      await sandbox.ensureImagePresent(containerImage);
+      // Pass limits so a task-time first warm (before boot warm
+      // completes, or after a failed boot warm) bakes them in.
+      await sandbox.ensureImagePresent(containerImage, defaultResourceLimits);
     });
     const sessionState = await stepRun("create-container", async () => {
       const session = await sandbox.create({
@@ -778,7 +780,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       // image pull check (Local-Docker) before paying the create cost.
       const containerImage = repo.devcontainer?.image ?? devbaseImage;
       await stepRun("ensure-image-present", async () => {
-        await sandbox.ensureImagePresent(containerImage);
+        await sandbox.ensureImagePresent(containerImage, defaultResourceLimits);
       });
       sessionState = await stepRun("create-container", async () => {
         let sandboxEnv: Record<string, string> | undefined;
