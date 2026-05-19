@@ -268,6 +268,48 @@ describe("startExecStreaming", () => {
     expect(proc.createSession).not.toHaveBeenCalled();
   });
 
+  it("dispose() racing in-flight getSessionCommand rejects with DisposedError, not the raw 404", async () => {
+    // Race window: WS resolves naturally, the success-path
+    // `getSessionCommand` is in flight, consumer calls dispose() which
+    // deletes the session. The in-flight fetch then 404s. Per the
+    // ExecStreamingHandle contract, consumers branching on outcome
+    // must see `DisposedError`, not the raw SDK NotFound. Mirrors the
+    // .catch branch's mapping.
+    const proc = fakeProcess({ wsResolve: {} });
+    let resolveFetch!: (v: Awaited<ReturnType<Process["getSessionCommand"]>>) => void;
+    let rejectFetch!: (e: Error) => void;
+    const fetchGate = new Promise<Awaited<ReturnType<Process["getSessionCommand"]>>>(
+      (resolve, reject) => {
+        resolveFetch = resolve;
+        rejectFetch = reject;
+      },
+    );
+    vi.mocked(proc.getSessionCommand).mockImplementation(() => fetchGate);
+
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: {},
+    });
+    handle.stdout.on("data", () => {});
+
+    // Let .then() reach the await on getSessionCommand. One microtask
+    // tick is enough to drain the synchronous prelude.
+    await new Promise<void>((r) => setImmediate(r));
+
+    // Dispose mid-fetch — sets disposed=true and deletes the session.
+    const disposing = handle.dispose();
+    // Simulate Daytona's 404 surfacing through the in-flight fetch.
+    rejectFetch(new DaytonaNotFoundError("session not found", 404));
+    await disposing;
+
+    await expect(handle.wait()).rejects.toBeInstanceOf(DisposedError);
+    // Suppress the unused `resolveFetch` lint signal — kept for symmetry
+    // so readers see both halves of the gate.
+    void resolveFetch;
+  });
+
   it("rejects wait() when getSessionCommand throws post-WS-resolve (network blip on exit-code fetch)", async () => {
     // Race window: WS closes naturally, then the follow-up
     // `getSessionCommand` HTTP fetch fails (transient daemon error,

@@ -260,7 +260,21 @@ export async function startExecStreaming(args: {
           }
           resolve({ exitCode: cmd.exitCode });
         } catch (err) {
-          reject(err as Error);
+          // A `dispose()` racing the in-flight `getSessionCommand`
+          // surfaces as `DaytonaNotFoundError` (the session is gone) —
+          // map back to the contract-documented sentinel so consumers
+          // see `DisposedError` instead of a raw SDK error. Mirrors
+          // the .catch branch's symmetric shape. `timedOut` is
+          // theoretically unreachable here (clearTimers runs above the
+          // try) but checked for parity.
+          if (timedOut) {
+            timedOut.cause = err as Error;
+            reject(timedOut);
+          } else if (disposed) {
+            reject(new DisposedError());
+          } else {
+            reject(err as Error);
+          }
         } finally {
           await cleanupSession();
         }
