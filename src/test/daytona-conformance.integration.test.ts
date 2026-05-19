@@ -182,6 +182,7 @@ async function makeWrapperClient(
 }
 
 const WRAPPER_TASK_ID = "wrapper-conf";
+const WRAPPER_IMAGE = "python:3.14-slim";
 // Mirror skills tier-2's `DEFAULT_RESOURCE_LIMITS` so the recorded
 // fixture exercises the wrapper at production-typical limits and the
 // snapshot Daytona bakes during record doesn't pay 3 GiB platform
@@ -193,6 +194,17 @@ const WRAPPER_RESOURCE_LIMITS = {
   disk_bytes: 1024 * 1024 * 1024,
 };
 
+/**
+ * Marker assertion for a scenario whose fixture is missing AND the
+ * test wasn't run in RECORD mode. Both dimensions checked separately
+ * so the failure message identifies the cause — fixture absent vs.
+ * `RECORD=1` set without `DAYTONA_API_KEY`.
+ */
+function expectFixtureMissing(scenario: ScenarioHandle): void {
+  expect(scenario.fixtureExists).toBe(false);
+  expect(IS_RECORD).toBe(false);
+}
+
 function wrapperSpec(): {
   taskId: string;
   image: string;
@@ -201,7 +213,7 @@ function wrapperSpec(): {
 } {
   return {
     taskId: WRAPPER_TASK_ID,
-    image: "python:3.14-slim",
+    image: WRAPPER_IMAGE,
     resourceLimits: WRAPPER_RESOURCE_LIMITS,
     // Fixed five minutes — `autoStopInterval` derivation uses
     // `Math.ceil((expiresAt - now) / 60_000)`, so the same wall-clock
@@ -286,13 +298,7 @@ describe("Daytona conformance — create-exec-delete", () => {
 
   it.skipIf(scenario.runnable)(
     "fixture missing — set RECORD=1 + DAYTONA_API_KEY and re-run to capture",
-    () => {
-      // Marker: prints the gap loudly in CI output. Asserting both
-      // dimensions separately so the failure message identifies which
-      // one is the cause (no fixture vs. no record-mode trigger).
-      expect(scenario.fixtureExists).toBe(false);
-      expect(IS_RECORD).toBe(false);
-    },
+    () => expectFixtureMissing(scenario),
   );
 });
 
@@ -407,10 +413,7 @@ describe("Daytona conformance — python-upload-fail", () => {
 
   it.skipIf(scenario.runnable)(
     "fixture missing — set RECORD=1 + DAYTONA_API_KEY and re-run to capture",
-    () => {
-      expect(scenario.fixtureExists).toBe(false);
-      expect(IS_RECORD).toBe(false);
-    },
+    () => expectFixtureMissing(scenario),
   );
 });
 
@@ -437,6 +440,13 @@ describe("Daytona conformance — wrapper-success", () => {
     async () => {
       const mock = scenario.getMock();
       const client = await makeWrapperClient(mock, scenario.recordable, "wrapper-success");
+      // Mirror the production path: `ensureImagePresent` bakes a named
+      // snapshot, then `client.create()` takes the fast
+      // `{ snapshot }` route on every subsequent session. The lazy
+      // `{ image }` fallback in `client.create()` is the SDK's 60s-
+      // `waitUntilStarted` path, which is exactly what
+      // `scheduleSandboxImageWarm` is designed to avoid in prod.
+      await client.ensureImagePresent(WRAPPER_IMAGE, WRAPPER_RESOURCE_LIMITS);
       const session = await client.create(wrapperSpec());
 
       const result = await session.exec(["echo", "wrapper-hello"]);
@@ -450,15 +460,17 @@ describe("Daytona conformance — wrapper-success", () => {
         await mock.endScenario();
       }
     },
-    120_000,
+    // 10 min — `ensureImagePresent`'s `snapshot.create` polls until
+    // terminal with no SDK timeout, so a first-time build for
+    // `python:3.14-slim` (3-10 min, per Daytona's image-build pipeline)
+    // mustn't trip the vitest test timeout. Subsequent records reuse
+    // the named snapshot and complete in seconds.
+    600_000,
   );
 
   it.skipIf(scenario.runnable)(
     "fixture missing — set RECORD=1 + DAYTONA_API_KEY and re-run to capture",
-    () => {
-      expect(scenario.fixtureExists).toBe(false);
-      expect(IS_RECORD).toBe(false);
-    },
+    () => expectFixtureMissing(scenario),
   );
 });
 
@@ -483,8 +495,13 @@ describe("Daytona conformance — wrapper-stderr-nonzero", () => {
     async () => {
       const mock = scenario.getMock();
       const client = await makeWrapperClient(mock, scenario.recordable, "wrapper-stderr-nonzero");
+      await client.ensureImagePresent(WRAPPER_IMAGE, WRAPPER_RESOURCE_LIMITS);
       const session = await client.create(wrapperSpec());
 
+      // Demux check is buffer-routing, not event-order: assertions
+      // confirm bytes ended up in the correct ExecResult field, not
+      // that stdout/stderr interleaved at any particular cadence.
+      // Wrong-stream routing would still trip the substring miss.
       const result = await session.exec(["sh", "-c", "echo out; echo err >&2; exit 3"]);
       expect(result.exitCode).toBe(3);
       expect(result.stdout).toContain("out");
@@ -496,14 +513,11 @@ describe("Daytona conformance — wrapper-stderr-nonzero", () => {
         await mock.endScenario();
       }
     },
-    120_000,
+    600_000,
   );
 
   it.skipIf(scenario.runnable)(
     "fixture missing — set RECORD=1 + DAYTONA_API_KEY and re-run to capture",
-    () => {
-      expect(scenario.fixtureExists).toBe(false);
-      expect(IS_RECORD).toBe(false);
-    },
+    () => expectFixtureMissing(scenario),
   );
 });

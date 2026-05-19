@@ -101,14 +101,6 @@ export interface DaytonaSandboxClientOptions {
   apiUrl?: string;
   /** Optional org id when the API key is scoped to multiple orgs. */
   organizationId?: string;
-  /**
-   * Override per-call session-id randomness threaded into every
-   * `DaytonaSandboxSession` this client mints. Conformance tests
-   * pin a deterministic value so record/replay's `(method, path)`
-   * FIFO matching stays stable across runs. Production wiring
-   * leaves this undefined and `randomUUID` governs.
-   */
-  random?: () => string;
 }
 
 interface CreateOptions extends DaytonaSandboxClientOptions {
@@ -120,6 +112,20 @@ interface CreateOptions extends DaytonaSandboxClientOptions {
    * `cogmo.instance` label.
    */
   instanceId: string;
+  /**
+   * Conformance-tests-only override for per-call session-id
+   * randomness, threaded into every `DaytonaSandboxSession` this
+   * client mints. Tests pin a deterministic value so record/replay's
+   * `(method, path)` FIFO matching stays stable.
+   *
+   * **MUST return values with collision-resistance comparable to
+   * `randomUUID`'s 128-bit space.** A weak source (`() => "x"`)
+   * would silently collide across concurrent sessions in the same
+   * client and let `dispose()` on one exec tear down a sibling's
+   * Daytona session. Off the public `DaytonaSandboxClientOptions`
+   * type so production wiring can't reach it by accident.
+   */
+  random?: () => string;
 }
 
 /**

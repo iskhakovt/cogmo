@@ -191,4 +191,32 @@ describe("DaytonaSandboxSession.exec", () => {
     expect(sids[0]).toMatch(/^cogmo-019d0000-000-/);
     expect(sids[1]).toMatch(/^cogmo-019d0000-000-/);
   });
+
+  it("execStreaming threads the constructor-supplied random into the session-id suffix", async () => {
+    // Pins the wiring `DaytonaSandboxClient → DaytonaSandboxSession →
+    // startExecStreaming` for the `random` injection slot. A future
+    // refactor that breaks the plumbing (e.g. drops the conditional-
+    // spread that forwards `random` from session to exec-streaming)
+    // would silently fall back to `randomUUID` and surface only as a
+    // record/replay drift in the conformance suite — which is skipped
+    // until fixtures land.
+    const proc = fakeProcess({ stdoutChunks: [], exitCode: 0 });
+    let seq = 0;
+    const session = new DaytonaSandboxSession({
+      state: {
+        type: "daytona",
+        taskId: "019d0000-0000-7000-8000-000000000aaa",
+        sandboxId: "sb-1",
+      } satisfies DaytonaSessionState,
+      sdkSandbox: { process: proc } as unknown as DaytonaSdkSandbox,
+      random: () => `pinned-${++seq}`,
+    });
+
+    const a = await session.execStreaming(["echo", "a"]);
+    const b = await session.execStreaming(["echo", "b"]);
+    await Promise.all([a.wait(), b.wait()]);
+
+    const sids = vi.mocked(proc.createSession).mock.calls.map((c) => c[0]);
+    expect(sids).toEqual(["cogmo-019d0000-000-pinned-1", "cogmo-019d0000-000-pinned-2"]);
+  });
 });
