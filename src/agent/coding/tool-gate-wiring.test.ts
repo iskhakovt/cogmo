@@ -28,6 +28,7 @@ import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
 import { makeStepRun, nullStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { DrizzleAgentStore } from "../store/index.js";
 import type {
   CodingBackend,
   CodingEvent,
@@ -46,12 +47,14 @@ let db: Database;
 let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleCodingStore;
+let agentStore: DrizzleAgentStore;
 let sandboxStore: DrizzleSandboxStore;
 let baseDir: string;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
   store = new DrizzleCodingStore();
+  agentStore = new DrizzleAgentStore();
   sandboxStore = new DrizzleSandboxStore();
   baseDir = mkdtempSync(join(tmpdir(), "cogmo-tool-gate-test-"));
 });
@@ -98,6 +101,78 @@ async function seedRepoAndTask(): Promise<{ repo: CodingRepoRow; task: CodingTas
   const task = await tx((trx) =>
     store.insertTask(trx, {
       repoId: repo.id,
+      goal: "test",
+      triggerSource: "user",
+      backend: "claude",
+      allowPrivilegedRunc: false,
+    }),
+  );
+  await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-x"));
+  await tx((trx) =>
+    store.setTaskWorktreeAssignment(trx, task.id, {
+      type: "host-path",
+      branch: "cogmo/x",
+      worktreePath: `${baseDir}/wt`,
+    }),
+  );
+  await tx((trx) =>
+    store.updateTaskStatus(trx, {
+      id: task.id,
+      status: "awaiting_approval",
+      planApprovedAt: new Date(),
+    }),
+  );
+  const reloaded = (await tx((trx) => store.getTask(trx, task.id))) as CodingTaskRow;
+  return { repo, task: reloaded };
+}
+
+/**
+ * Variant of `seedRepoAndTask` that wires the task to a real
+ * profile/conversation chain with `coding_autoapprove_mode = 'on'`.
+ * Used by the autoapprove-bypass test — `seedRepoAndTask` alone leaves
+ * `conversation_id` null, which the join returns as null, which the
+ * orchestrator treats as the default `off`.
+ */
+async function seedRepoAndTaskWithAutoapprove(): Promise<{
+  repo: CodingRepoRow;
+  task: CodingTaskRow;
+}> {
+  const repo = await tx((trx) =>
+    store.insertRepo(trx, {
+      name: `repo-${Math.random().toString(36).slice(2)}`,
+      localPath: `${baseDir}/repo`,
+      defaultBranch: "main",
+      remoteUrl: "git@example.com:x.git",
+      devcontainer: null,
+      allowedBackends: ["claude"],
+      verifyCommand: "true",
+      taskTokenBudget: 100_000,
+      taskWallTimeSeconds: 60,
+      maxConcurrentTasks: 1,
+    }),
+  );
+  const user = await tx((trx) => agentStore.createUser(trx));
+  const profile = await tx((trx) =>
+    agentStore.createProfile(trx, {
+      userId: user.id,
+      name: `prof-${Math.random().toString(36).slice(2)}`,
+      basePrompt: "test",
+      model: "claude-haiku-4-5-20251001",
+      toolSet: [],
+    }),
+  );
+  await tx((trx) => agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }));
+  const conv = await tx((trx) =>
+    agentStore.createConversation(trx, {
+      userId: user.id,
+      profileId: profile.id,
+      isPrivate: true,
+    }),
+  );
+  const task = await tx((trx) =>
+    store.insertTask(trx, {
+      repoId: repo.id,
+      conversationId: conv.id,
       goal: "test",
       triggerSource: "user",
       backend: "claude",
@@ -585,5 +660,150 @@ describe("tool gate wiring", () => {
       "Bash(git push *)/allow/task",
       "Bash(npm publish *)/deny/once",
     ]);
+  });
+
+  it("profile autoapprove=on flips a policy.prompt to allow without Telegram round trip", async () => {
+    const { task } = await seedRepoAndTaskWithAutoapprove();
+    const { sandbox } = fakeSandbox();
+    const { backend, handle } = fakeBackend([
+      { kind: "session_started", sessionId: "sess-x" },
+      {
+        kind: "permission_request",
+        requestId: "req_push_ap",
+        tool: "Bash",
+        // `git push` is in the policy prompt set; without autoapprove this
+        // would route to Telegram. With profile.codingAutoapproveMode='on'
+        // it short-circuits to allow.
+        input: { command: "git push origin cogmo/abc" },
+      },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const inngestSend = vi.fn().mockResolvedValue(undefined);
+    const stepWaitForEvent = vi.fn();
+    await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      stepWaitForEvent,
+      inngest: { send: inngestSend } as unknown as Inngest,
+    });
+
+    const eventNames = inngestSend.mock.calls.map((c) => c[0].name);
+    expect(eventNames).not.toContain("coding/task/permission-requested");
+    expect(stepWaitForEvent).not.toHaveBeenCalled();
+    expect(handle.responses).toEqual([
+      { requestId: "req_push_ap", response: { behavior: "allow" } },
+    ]);
+    const log = await tx((trx) => store.listToolDecisionsForTask(trx, task.id));
+    expect(log).toHaveLength(1);
+    expect(log[0]?.decision).toBe("allow");
+    expect(log[0]?.scope).toBe("once");
+    expect(log[0]?.pattern).toBe("Bash(git push *)");
+  });
+
+  it("profile autoapprove=on applies to every prompt-worthy call in the run", async () => {
+    // Pins the "resolved once per execute run" optimization at the
+    // behavioral layer: every subsequent prompt-worthy permission_request
+    // must hit the autoapprove path, not just the first. If a future
+    // refactor accidentally moves the resolve onto a per-request path
+    // and breaks caching, the wiring still works — but if it accidentally
+    // moves to "resolve only for the first call," only this multi-call
+    // test would catch that regression.
+    const { task } = await seedRepoAndTaskWithAutoapprove();
+    const { sandbox } = fakeSandbox();
+    const { backend, handle } = fakeBackend([
+      { kind: "session_started", sessionId: "sess-x" },
+      {
+        kind: "permission_request",
+        requestId: "req_push_1",
+        tool: "Bash",
+        input: { command: "git push origin cogmo/abc" },
+      },
+      {
+        kind: "permission_request",
+        requestId: "req_publish_1",
+        tool: "Bash",
+        input: { command: "npm publish" },
+      },
+      {
+        kind: "permission_request",
+        requestId: "req_push_2",
+        tool: "Bash",
+        input: { command: "git push origin cogmo/abc --force-with-lease" },
+      },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const inngestSend = vi.fn().mockResolvedValue(undefined);
+    const stepWaitForEvent = vi.fn();
+    await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      stepWaitForEvent,
+      inngest: { send: inngestSend } as unknown as Inngest,
+    });
+
+    expect(inngestSend.mock.calls.map((c) => c[0].name)).not.toContain(
+      "coding/task/permission-requested",
+    );
+    expect(stepWaitForEvent).not.toHaveBeenCalled();
+    expect(handle.responses.map((r) => r.response.behavior)).toEqual(["allow", "allow", "allow"]);
+    const log = await tx((trx) => store.listToolDecisionsForTask(trx, task.id));
+    expect(log).toHaveLength(3);
+    expect(log.every((r) => r.decision === "allow" && r.scope === "once")).toBe(true);
+  });
+
+  it("decision-log task-scoped deny beats profile autoapprove=on", async () => {
+    // Pins the gate's evaluation order: replay first, then policy, then
+    // autoapprove. A prior user-tapped "Deny for task" on a pattern
+    // must hold even if the profile would otherwise auto-approve.
+    const { task } = await seedRepoAndTaskWithAutoapprove();
+    await tx((trx) =>
+      store.insertToolDecision(trx, {
+        taskId: task.id,
+        tool: "Bash",
+        pattern: "Bash(git push *)",
+        decision: "deny",
+        scope: "task",
+      }),
+    );
+
+    const { sandbox } = fakeSandbox();
+    const { backend, handle } = fakeBackend([
+      { kind: "session_started", sessionId: "sess-x" },
+      {
+        kind: "permission_request",
+        requestId: "req_push_denied",
+        tool: "Bash",
+        input: { command: "git push origin main" },
+      },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const inngestSend = vi.fn().mockResolvedValue(undefined);
+    const stepWaitForEvent = vi.fn();
+    await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      stepWaitForEvent,
+      inngest: { send: inngestSend } as unknown as Inngest,
+    });
+
+    // Replay branch wins — no Telegram round trip, no fresh decision-log
+    // row (replay matches return early without persistDecision).
+    const eventNames = inngestSend.mock.calls.map((c) => c[0].name);
+    expect(eventNames).not.toContain("coding/task/permission-requested");
+    expect(stepWaitForEvent).not.toHaveBeenCalled();
+    expect(handle.responses[0]?.response).toEqual({ behavior: "deny" });
+    const log = await tx((trx) => store.listToolDecisionsForTask(trx, task.id));
+    expect(log).toHaveLength(1); // the seeded deny, no new row
+    expect(log[0]?.decision).toBe("deny");
+    expect(log[0]?.scope).toBe("task");
   });
 });
