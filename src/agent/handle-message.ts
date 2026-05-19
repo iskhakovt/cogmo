@@ -30,6 +30,7 @@ import type { VoiceProviderResolver } from "../voice/resolver.js";
 import type { CodingService } from "./coding/service.js";
 import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
 import { loadConversationContext } from "./conversation/load-conversation-context.js";
+import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
@@ -224,16 +225,23 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       });
       if (!conv) throw new Error(`Conversation not found: ${conversationId}`);
 
-      // Status guard — `recover-conversation` marks a conversation `errored`
-      // after retries on this function exhausted (or it failed
-      // non-retriably). We refuse to spend more LLM calls on a known-broken
-      // conversation until status flips back to `active` (manual psql for
-      // now; future `/repair` command). Catches any unrecoverable failure
-      // class — model deprecated, credentials revoked, content-moderation
-      // block, persistent provider outage, malformed tool schema — that
-      // would otherwise produce a retry-storm with every new inbound.
-      if (conv.status === "errored") {
-        return { status: "skipped", reason: "errored" };
+      // Cooldown guard — `recover-conversation` writes a `cooldown_state`
+      // blob on conversations whose `handle-message` runs exhausted
+      // retries (or failed non-retriably). While the cooldown window is
+      // open, we refuse to spend more LLM calls; the user gets a terse
+      // hand-built reply with a retry-time estimate. Inbounds stay
+      // unbatched — when the cooldown elapses the next `inbound/ready`
+      // loads the backlog as one batch. See design/agent-resilience.md
+      // → Auto-repair.
+      if (conv.cooldownState !== null && isInCooldown(conv.cooldownState, new Date())) {
+        const cooldownState = conv.cooldownState;
+        await step.run("in-cooldown-reply", async () => {
+          await deliveryRouter.notifyConversation(
+            conversationId,
+            buildInCooldownReply(cooldownState, new Date()),
+          );
+        });
+        return { status: "skipped", reason: "cooldown" };
       }
 
       const { userId, profileId } = conv;
@@ -815,10 +823,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       );
 
       // ──── DURABLE: persist all new messages (tool turns + final assistant) ────
+      //
+      // Half-open success: when the entry guard saw an elapsed cooldown
+      // and admitted this probe turn, clear `cooldown_state` in the same
+      // transaction. Strict prior-cooldown gating avoids a per-turn
+      // pointless UPDATE on Closed conversations.
 
+      const wasCoolingDown = conv.cooldownState !== null;
       const assistantMsg = await step.run("persist-new-messages", async () => {
-        return await deps.runInTx((tx) =>
-          agentStore.insertMessages(tx, {
+        return await deps.runInTx(async (tx) => {
+          const inserted = await agentStore.insertMessages(tx, {
             conversationId,
             messages: result.newMessages,
             profileId: snapshot.profileId,
@@ -826,8 +840,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             lastInboundMessageId: maxInboundId,
             lastMessageInputTokens: result.usage.inputTokens,
             lastMessageOutputTokens: result.usage.outputTokens,
-          }),
-        );
+          });
+          if (wasCoolingDown) {
+            await agentStore.clearCooldown(tx, conversationId);
+          }
+          return inserted;
+        });
       });
 
       // Emit the degrade signal as a separate durable step after persist —

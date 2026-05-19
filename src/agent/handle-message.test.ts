@@ -840,14 +840,14 @@ describe("createHandleMessage", () => {
     ]);
   });
 
-  // Status guard — `recover-conversation` flips a conversation to `errored`
-  // after retries on this function exhausted (or it failed non-retriably).
-  // handle-message must refuse to spend more LLM calls until status flips
-  // back to `active` — covers any unrecoverable failure class (auth
-  // revoked, model deprecated, content moderation, malformed tool schema,
-  // programmer bug) that would otherwise produce a retry-storm with every
-  // new inbound.
-  it("early-returns with reason: errored when conversations.status is 'errored'", async () => {
+  // Cooldown guard — `recover-conversation` writes `cooldown_state` after
+  // `handle-message` exhausts retries (or fails non-retriably). While the
+  // window is open, refuse to spend more LLM calls and deliver a terse
+  // hand-built reply. Inbounds stay unbatched. See
+  // design/agent-resilience.md → Auto-repair.
+  it("delivers in-cooldown reply and skips when cooldown window is open", async () => {
+    const futureLastErroredAt = new Date(Date.now() - 5_000).toISOString();
+    const notifyConversation = vi.fn().mockResolvedValue(undefined);
     const deps = mockDeps({
       agentStore: mockAgentStore({
         getConversation: vi.fn().mockResolvedValue({
@@ -855,18 +855,104 @@ describe("createHandleMessage", () => {
           userId: "user-1",
           profileId: "profile-1",
           isPrivate: true,
-          status: "errored",
+          cooldownState: {
+            lastErroredAt: futureLastErroredAt,
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
+          voiceMode: null,
         }),
       }),
+      deliveryRouter: mockDeliveryRouter({ notifyConversation }),
     });
     const result = await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
       step: mockStep(),
       runId: testRunId,
     });
-    expect(result).toEqual({ status: "skipped", reason: "errored" });
+    expect(result).toEqual({ status: "skipped", reason: "cooldown" });
+    expect(notifyConversation).toHaveBeenCalledWith(
+      "conv-1",
+      expect.stringContaining("I hit an error"),
+    );
     expect(deps.runStreamingAgentLoop).not.toHaveBeenCalled();
     expect(deps.agentStore.insertMessage).not.toHaveBeenCalled();
+  });
+
+  // Half-open: cooldown_state is present but the window has elapsed. The
+  // next inbound IS the probe — full handle-message runs and the entry
+  // guard does NOT skip.
+  it("runs the loop when cooldown window has elapsed (half-open)", async () => {
+    const longAgo = new Date(Date.now() - 10 * 60_000).toISOString();
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "conv-1",
+          userId: "user-1",
+          profileId: "profile-1",
+          isPrivate: true,
+          cooldownState: {
+            lastErroredAt: longAgo,
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
+          voiceMode: null,
+        }),
+      }),
+    });
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+    expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
+  });
+
+  // Half-open success: when the loop completes after a cooldown window
+  // elapsed, the same tx that writes the assistant reply clears
+  // cooldown_state.
+  it("clears cooldown_state on a successful turn that started cooling down", async () => {
+    const longAgo = new Date(Date.now() - 10 * 60_000).toISOString();
+    const clearCooldown = vi.fn();
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "conv-1",
+          userId: "user-1",
+          profileId: "profile-1",
+          isPrivate: true,
+          cooldownState: {
+            lastErroredAt: longAgo,
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
+          voiceMode: null,
+        }),
+        clearCooldown,
+      }),
+    });
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+    expect(clearCooldown).toHaveBeenCalledWith(expect.anything(), "conv-1");
+  });
+
+  // Closed state (no prior cooldown) — successful turns must NOT
+  // unconditionally hit clearCooldown; otherwise every turn writes a
+  // pointless UPDATE.
+  it("does not call clearCooldown on a successful turn from Closed state", async () => {
+    const clearCooldown = vi.fn();
+    const deps = mockDeps({
+      agentStore: mockAgentStore({ clearCooldown }),
+    });
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+    expect(clearCooldown).not.toHaveBeenCalled();
   });
 
   it("skips processing when triggerInboundId is stale", async () => {

@@ -36,18 +36,26 @@ export const pendingMemorySource = pgEnum("pending_memory_source", ["live_retain
 export const voiceMode = pgEnum("voice_mode", ["auto", "always", "never"]);
 
 /**
- * Lifecycle status of a conversation.
+ * Conversation-level circuit-breaker state. Set by `recover-conversation`
+ * after `handle-message` exhausts retries; cleared on the first successful
+ * turn past the cooldown threshold, by `/repair`, or by `/model` / `/profile`
+ * switches. `handle-message`'s entry guard reads this column and returns
+ * `{ status: "skipped", reason: "cooldown" }` (without consuming inbounds)
+ * when `now() < lastErroredAt + cooldownSeconds`.
  *
- * `active` — normal; `handle-message` processes inbound. Default for new rows.
- * `errored` — `recover-conversation` marked the conversation irrecoverable
- *   after retries on `handle-message` exhausted (or it failed
- *   non-retriably). `handle-message` early-returns with
- *   `{ status: "skipped", reason: "errored" }` for any inbound while in
- *   this state, refusing to spend more LLM calls on a known-broken
- *   conversation. Cleared back to `active` by future `/repair` (P3) or
- *   manually via psql.
+ * All three fields are atomic — either the column is `NULL` (CLOSED state)
+ * or all three are populated (OPEN state). `consecutiveFailures` is stored
+ * rather than derived because `cooldownSeconds` collapses to a constant
+ * once it reaches the 1h cap and the failure counter is the most useful
+ * chronic-failure telemetry signal. See `design/agent-resilience.md` →
+ * Auto-repair.
  */
-export const conversationStatus = pgEnum("conversation_status", ["active", "errored"]);
+export const CooldownStateSchema = z.object({
+  lastErroredAt: z.string().datetime({ offset: true }),
+  cooldownSeconds: z.number().int().positive(),
+  consecutiveFailures: z.number().int().positive(),
+});
+export type CooldownState = z.infer<typeof CooldownStateSchema>;
 
 /**
  * LLM provider adapter discriminator. Maps to which `LlmProvider` class is
@@ -553,13 +561,15 @@ export const conversations = pgTable(
       .references(() => profiles.id),
     isPrivate: boolean("is_private").notNull(),
     /**
-     * `active` (default) — normal processing; `errored` — `recover-conversation`
-     * marked the conversation as irrecoverable after `handle-message` exhausted
-     * retries (or failed non-retriably). The orchestrator refuses to spend
-     * more LLM calls until status flips back to `active`. See
-     * `conversationStatus` enum and `recover-conversation`.
+     * Auto-repair cooldown state. `NULL` = normal (CLOSED state). When
+     * populated, `handle-message` returns a terse in-cooldown reply
+     * (without invoking the LLM) until `now() >= lastErroredAt +
+     * cooldownSeconds`, after which the next inbound runs normally and
+     * either clears the column on success or re-arms it through
+     * `recover-conversation` on failure. See `CooldownStateSchema` and
+     * `design/agent-resilience.md` → Auto-repair.
      */
-    status: conversationStatus("status").notNull().default("active"),
+    cooldownState: jsonbZod("cooldown_state", CooldownStateSchema),
     /**
      * Per-conversation voice mode override. NULL = follow profile default.
      * The conversation override is what `/voice` mutates; clearing it

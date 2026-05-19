@@ -42,7 +42,7 @@ describe("triggerReflection", () => {
       userId: USER_ID,
       profileId: PROFILE_ID,
       isPrivate: true,
-      status: "active",
+      cooldownState: null,
       voiceMode: null,
     });
     agentStore.getProfile.mockResolvedValue({

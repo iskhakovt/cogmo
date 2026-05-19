@@ -603,14 +603,15 @@ async function resolveProfileByName(
 }
 
 /**
- * `/repair` — flip a conversation's status from `errored` back to `active`.
+ * `/repair` — clear a conversation's auto-repair cooldown so the next
+ * inbound runs normally.
  *
  * `/repair`              → acts on the current session's conversation.
  * `/repair <alias|uuid>` → acts on the named conversation.
  *
  * The user-facing escape hatch over `recover-conversation`'s automated
- * `mark-errored` write. Idempotent — repairing an already-active
- * conversation succeeds with a "no-op" reply rather than erroring.
+ * cooldown write. Idempotent — repairing a conversation that isn't
+ * cooling down succeeds with a "no-op" reply rather than erroring.
  */
 export async function handleRepair(
   transport: Transport,
@@ -655,10 +656,10 @@ export async function handleRepair(
     await ctx.reply(errorMessage(res.error));
     return;
   }
-  if (res.value.wasErrored) {
+  if (res.value.wasCoolingDown) {
     await ctx.reply(`Repaired ${label}. Send a message to retry.`);
   } else {
-    await ctx.reply(`${label} is already active — nothing to repair.`);
+    await ctx.reply(`${label} isn't cooling down — nothing to repair.`);
   }
 }
 

@@ -5,6 +5,7 @@
  * don't need grammY; the adapter wires the buttons to an `InlineKeyboard`.
  */
 
+import { formatRemainingCooldown, isInCooldown } from "../../../agent/cooldown.js";
 import type { ConversationSummary, Profile } from "../../../agent/store/index.js";
 import type { ProfileMemoryScope } from "../../../agent/store/schema.js";
 import { truncate } from "../../../util/string.js";
@@ -216,9 +217,10 @@ export function renderConversationStatus(
   const ageMs = now.getTime() - summary.createdAt.getTime();
   const idleMs =
     summary.lastMessageAt === null ? null : now.getTime() - summary.lastMessageAt.getTime();
+  const status = renderStatusFragment(summary, now);
   const lines: string[] = [
     "Conversation",
-    `  ${head} · status: ${summary.status} · age: ${formatDuration(ageMs)}`,
+    `  ${head} · status: ${status} · age: ${formatDuration(ageMs)}`,
     `  messages: ${summary.messageCount}${idleMs !== null ? ` · idle: ${formatDuration(idleMs)}` : ""}`,
     "",
     "Profile",
@@ -285,6 +287,15 @@ export function renderConversationStatus(
   lines.push("", tail.join(" · "));
 
   return lines.join("\n");
+}
+
+function renderStatusFragment(summary: ConversationStatusSummary, now: Date): string {
+  const c = summary.cooldownState;
+  if (c === null) return "active";
+  if (isInCooldown(c, now)) {
+    return `cooling down (~${formatRemainingCooldown(c, now)} · ${c.consecutiveFailures} consecutive failures)`;
+  }
+  return `awaiting probe (${c.consecutiveFailures} consecutive failures)`;
 }
 
 function formatTokens(n: number): string {
