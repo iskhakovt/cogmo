@@ -271,4 +271,133 @@ describe("RepoDialogs", () => {
     const consumed = await dlg.handleMessage(transportWith(), mkCtx("hello"));
     expect(consumed).toBe(false);
   });
+
+  it("rejects empty URL at the remote step (and keeps the dialog alive)", async () => {
+    const dlg = new RepoDialogs();
+    const transport = transportWith({
+      repos: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        add: vi.fn(),
+        cloneAndAdd: vi.fn(),
+        remove: vi.fn(),
+      },
+    });
+    await dlg.start(mkCtx());
+    await dlg.handleMessage(transport, mkCtx("notes"));
+    const ctx = mkCtx("");
+    await dlg.handleMessage(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("URL can't be empty"));
+    expect(dlg.has(100)).toBe(true);
+  });
+
+  it("rejects URL that fails parseRemoteUrl (typo / missing host)", async () => {
+    const dlg = new RepoDialogs();
+    const transport = transportWith({
+      repos: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        add: vi.fn(),
+        cloneAndAdd: vi.fn(),
+        remove: vi.fn(),
+      },
+    });
+    await dlg.start(mkCtx());
+    await dlg.handleMessage(transport, mkCtx("notes"));
+    const ctx = mkCtx("not-a-url");
+    await dlg.handleMessage(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringContaining("doesn't look like a git remote URL"),
+    );
+    expect(dlg.has(100)).toBe(true);
+  });
+
+  it("surfaces a transport error from list() and clears the dialog", async () => {
+    const dlg = new RepoDialogs();
+    const transport = transportWith({
+      repos: {
+        list: vi.fn().mockResolvedValue(err({ code: "identity_rejected" as const })),
+        add: vi.fn(),
+        cloneAndAdd: vi.fn(),
+        remove: vi.fn(),
+      },
+    });
+    await dlg.start(mkCtx());
+    const ctx = mkCtx("notes");
+    await dlg.handleMessage(transport, ctx);
+    expect(dlg.has(100)).toBe(false);
+  });
+
+  it("'cancel' at the confirm step clears state (lowercase variant)", async () => {
+    const dlg = new RepoDialogs();
+    const transport = transportWith({
+      repos: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        add: vi.fn(),
+        cloneAndAdd: vi.fn(),
+        remove: vi.fn(),
+      },
+    });
+    await dlg.start(mkCtx());
+    await dlg.handleMessage(transport, mkCtx("notes"));
+    await dlg.handleMessage(transport, mkCtx("https://github.com/u/notes.git"));
+    const ctx = mkCtx("cancel");
+    await dlg.handleMessage(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith("Cancelled.");
+    expect(dlg.has(100)).toBe(false);
+  });
+
+  it("surfaces sandbox_disabled friendly error", async () => {
+    const dlg = new RepoDialogs();
+    const transport = transportWith({
+      repos: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        add: vi.fn(),
+        cloneAndAdd: vi.fn().mockResolvedValue(err({ code: "sandbox_disabled" as const })),
+        remove: vi.fn(),
+      },
+    });
+    await dlg.start(mkCtx());
+    await dlg.handleMessage(transport, mkCtx("notes"));
+    await dlg.handleMessage(transport, mkCtx("https://github.com/u/notes.git"));
+    const ctx = mkCtx("save");
+    await dlg.handleMessage(transport, ctx);
+    expect(ctx.reply.mock.calls.at(-1)?.[0]).toMatch(/SANDBOX_RUNTIME/);
+  });
+
+  it("surfaces repo_name_taken friendly error", async () => {
+    const dlg = new RepoDialogs();
+    const transport = transportWith({
+      repos: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        add: vi.fn(),
+        cloneAndAdd: vi
+          .fn()
+          .mockResolvedValue(err({ code: "repo_name_taken" as const, name: "notes" })),
+        remove: vi.fn(),
+      },
+    });
+    await dlg.start(mkCtx());
+    await dlg.handleMessage(transport, mkCtx("notes"));
+    await dlg.handleMessage(transport, mkCtx("https://github.com/u/notes.git"));
+    const ctx = mkCtx("save");
+    await dlg.handleMessage(transport, ctx);
+    expect(ctx.reply.mock.calls.at(-1)?.[0]).toMatch(/"notes" already exists/);
+  });
+
+  it("falls back to generic message for an unknown error code (default branch)", async () => {
+    const dlg = new RepoDialogs();
+    const transport = transportWith({
+      repos: {
+        list: vi.fn().mockResolvedValue(ok([])),
+        add: vi.fn(),
+        cloneAndAdd: vi.fn().mockResolvedValue(err({ code: "operation_not_permitted" as const })),
+        remove: vi.fn(),
+      },
+    });
+    await dlg.start(mkCtx());
+    await dlg.handleMessage(transport, mkCtx("notes"));
+    await dlg.handleMessage(transport, mkCtx("https://github.com/u/notes.git"));
+    const ctx = mkCtx("save");
+    await dlg.handleMessage(transport, ctx);
+    expect(ctx.reply.mock.calls.at(-1)?.[0]).toMatch(/Something went wrong/);
+  });
 });

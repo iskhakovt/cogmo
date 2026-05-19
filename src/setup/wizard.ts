@@ -140,7 +140,7 @@ async function stepSeedDefaults(deps: WizardDeps): Promise<{ userId: string; pro
   return result;
 }
 
-async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
+export async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
 
   if (existing.length > 0) {
@@ -474,7 +474,7 @@ async function retryPrompt<T>(fn: () => Promise<T>, label: string): Promise<T> {
   }
 }
 
-async function stepConfigureTelegram(
+export async function stepConfigureTelegram(
   deps: WizardDeps,
   userId: string,
 ): Promise<{ botUsername?: string }> {
@@ -590,7 +590,7 @@ async function stepConfigureTelegram(
   return botUsername ? { botUsername } : {};
 }
 
-async function stepConfigureOptionalTools(deps: WizardDeps): Promise<void> {
+export async function stepConfigureOptionalTools(deps: WizardDeps): Promise<void> {
   const addTools = await p.confirm({
     message: "Configure optional tools? (Tavily search, fal.ai image generation, etc.)",
     initialValue: false,
@@ -643,7 +643,7 @@ async function stepConfigureOptionalTools(deps: WizardDeps): Promise<void> {
  * automatically. This step covers the other half: providers that require
  * per-model registration.
  */
-async function stepConfigureImageProviders(deps: WizardDeps): Promise<void> {
+export async function stepConfigureImageProviders(deps: WizardDeps): Promise<void> {
   const allExisting = await deps.runInTx((tx) => deps.agentStore.listImageProviders(tx));
   // Both non-fal provider types share the same wizard flow (name + base
   // URL + key + per-model loop); the type discriminator picks venice's
@@ -1317,7 +1317,7 @@ export async function stepConfigureVoice(deps: WizardDeps): Promise<void> {
   }
 }
 
-async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
+export async function stepConfigureGitHubIdentity(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) =>
     resolveGitHubIdentity(tx, deps.secretsStore, DEFAULT_GITHUB_IDENTITY_NAME),
   );
@@ -1496,7 +1496,7 @@ async function collectAndStorePat(deps: WizardDeps, existing: GitHubIdentity): P
   p.log.success("GitHub PAT rotated.");
 }
 
-async function stepConfigureClaudeCodeAuth(deps: WizardDeps): Promise<void> {
+export async function stepConfigureClaudeCodeAuth(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) =>
     deps.secretsStore.getSecretMeta(tx, CLAUDE_CODE_OAUTH_TOKEN_SECRET),
   );
@@ -1568,7 +1568,7 @@ async function stepConfigureClaudeCodeAuth(deps: WizardDeps): Promise<void> {
   p.log.success("Claude Code OAuth token stored.");
 }
 
-async function stepConfigureDaytona(deps: WizardDeps): Promise<void> {
+export async function stepConfigureDaytona(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) =>
     deps.secretsStore.getSecretMeta(tx, DAYTONA_API_KEY_SECRET),
   );
@@ -1647,7 +1647,7 @@ async function stepConfigureDaytona(deps: WizardDeps): Promise<void> {
   p.log.success("Daytona API key stored.");
 }
 
-async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void> {
+export async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void> {
   const skillsRepoPath = env.COGMO_SKILLS_PATH;
 
   // Bootstrap the bare repo so we have something to attach `origin` to.
@@ -1713,7 +1713,7 @@ async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void> {
   p.log.success(`Skills remote ${directionVerb}: ${result.value.remoteUrl}`);
 }
 
-async function stepValidateHindsight(): Promise<void> {
+export async function stepValidateHindsight(): Promise<void> {
   const s = p.spinner();
   s.start("Checking Hindsight memory server...");
   // Use the env value or default
@@ -1727,7 +1727,7 @@ async function stepValidateHindsight(): Promise<void> {
   }
 }
 
-async function stepSummary(deps: WizardDeps, botUsername?: string): Promise<void> {
+export async function stepSummary(deps: WizardDeps, botUsername?: string): Promise<void> {
   const providers = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
   const secrets = await deps.runInTx((tx) => deps.secretsStore.listSecrets(tx));
   const telegramChannel = await deps.runInTx((tx) =>

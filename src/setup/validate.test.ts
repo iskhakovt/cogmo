@@ -264,4 +264,111 @@ describe("validateHindsight", () => {
     expect(result.valid).toBe(false);
     expect(result.error).toContain("ECONNREFUSED");
   });
+
+  it("returns invalid with the status when /health returns non-2xx", async () => {
+    vi.stubGlobal("fetch", mockFetch(503));
+    const result = await validateHindsight("http://localhost:8888");
+    expect(result).toEqual({ valid: false, error: "Health check returned 503" });
+  });
+});
+
+describe("validateClaudeCodeOauthToken", () => {
+  const validateClaudeCodeOauthToken = async (token: string) =>
+    (await import("./validate.js")).validateClaudeCodeOauthToken(token);
+
+  it("returns valid when /v1/models returns 200", async () => {
+    vi.stubGlobal("fetch", mockFetch(200));
+    const result = await validateClaudeCodeOauthToken("sk-ant-oauth-token-very-long");
+    expect(result).toEqual({ valid: true });
+  });
+
+  it("returns invalid with a 401-specific message on 401", async () => {
+    vi.stubGlobal("fetch", mockFetch(401));
+    const result = await validateClaudeCodeOauthToken("sk-ant-bad-token");
+    expect(result).toEqual({ valid: false, error: "Token rejected (401 Unauthorized)" });
+  });
+
+  it("surfaces an unexpected status code in the error message", async () => {
+    vi.stubGlobal("fetch", mockFetch(503));
+    const result = await validateClaudeCodeOauthToken("sk-ant-token");
+    expect(result).toEqual({ valid: false, error: "Unexpected response: 503" });
+  });
+
+  it("returns error on connection failure", async () => {
+    vi.stubGlobal("fetch", mockFetchError("ECONNRESET"));
+    const result = await validateClaudeCodeOauthToken("sk-ant-token");
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain("ECONNRESET");
+  });
+});
+
+describe("validate* small uncovered branches", () => {
+  it("validateAnthropicKey: surfaces unexpected status (non-401, non-2xx)", async () => {
+    vi.stubGlobal("fetch", mockFetch(500));
+    const { validateAnthropicKey: v } = await import("./validate.js");
+    const result = await v("key");
+    expect(result).toEqual({ valid: false, error: "Unexpected response: 500" });
+  });
+
+  it("validateOpenAICompatibleKey: 401 → invalid", async () => {
+    vi.stubGlobal("fetch", mockFetch(401));
+    const { validateOpenAICompatibleKey: v } = await import("./validate.js");
+    const result = await v("key", "https://example.com/v1");
+    expect(result).toEqual({ valid: false, error: "Invalid API key" });
+  });
+
+  it("validateOpenAICompatibleKey: surfaces unexpected status", async () => {
+    vi.stubGlobal("fetch", mockFetch(502));
+    const { validateOpenAICompatibleKey: v } = await import("./validate.js");
+    const result = await v("key", "https://example.com/v1");
+    expect(result).toEqual({ valid: false, error: "Unexpected response: 502" });
+  });
+
+  it("validateOpenAICompatibleKey: catch returns connection failure", async () => {
+    vi.stubGlobal("fetch", mockFetchError("nope"));
+    const { validateOpenAICompatibleKey: v } = await import("./validate.js");
+    const result = await v("key", "https://example.com/v1");
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain("nope");
+  });
+
+  it("validateTelegramToken: catch returns connection failure", async () => {
+    vi.stubGlobal("fetch", mockFetchError("dns"));
+    const { validateTelegramToken: v } = await import("./validate.js");
+    const result = await v("token");
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain("dns");
+  });
+
+  it("validateTelegramToken: ok:false body returned by Telegram → invalid", async () => {
+    vi.stubGlobal(
+      "fetch",
+      () => Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: false }) }) as never,
+    );
+    const { validateTelegramToken: v } = await import("./validate.js");
+    const result = await v("token");
+    expect(result).toEqual({ valid: false, error: "Telegram API returned ok: false" });
+  });
+
+  it("validateTavilyKey: surfaces unexpected status", async () => {
+    vi.stubGlobal("fetch", mockFetch(503));
+    const { validateTavilyKey: v } = await import("./validate.js");
+    const result = await v("key");
+    expect(result).toEqual({ valid: false, error: "Unexpected response: 503" });
+  });
+
+  it("validateTavilyKey: catch returns connection failure", async () => {
+    vi.stubGlobal("fetch", mockFetchError("eai"));
+    const { validateTavilyKey: v } = await import("./validate.js");
+    const result = await v("key");
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain("eai");
+  });
+
+  it("validateDaytonaApiKey: non-Daytona Error falls through to Unexpected error arm", async () => {
+    daytonaListMock.mockRejectedValue(new Error("plain js error"));
+    const result = await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
+    expect(result.valid).toBe(false);
+    expect(result.error).toMatch(/Unexpected error: plain js error/);
+  });
 });

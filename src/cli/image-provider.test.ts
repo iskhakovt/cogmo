@@ -248,4 +248,140 @@ describe("runImageProviderCli", () => {
     expect(rc).toBe(1);
     expect(err.join("\n")).toMatch(/No image provider named "ghost"/);
   });
+
+  it("rejects unknown commands with exit code 1 and the usage banner", async () => {
+    const { io, err } = makeIo();
+    const rc = await runImageProviderCli(
+      ["bogosity"],
+      { runInTx: tx, agentStore: {} as AgentStore, secretsStore: {} as SecretsStore },
+      io,
+    );
+    expect(rc).toBe(1);
+    expect(err.join("\n")).toMatch(/Unknown command: bogosity/);
+    expect(err.join("\n")).toMatch(/Usage: cogmo image-provider/);
+  });
+
+  it("traps thrown errors mid-dispatch and surfaces exit code 2", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {
+      listImageProviders: vi.fn().mockRejectedValue(new Error("db gone")),
+    } as unknown as AgentStore;
+    const rc = await runImageProviderCli(
+      ["list"],
+      { runInTx: tx, agentStore, secretsStore: {} as SecretsStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/Error: db gone/);
+  });
+
+  it("rejects --safe-mode with a non-boolean value", async () => {
+    const { io, err } = makeIo();
+    const rc = await runImageProviderCli(
+      ["add", "venice", "venice", "sk", "https://x", "--safe-mode", "maybe"],
+      { runInTx: tx, agentStore: {} as AgentStore, secretsStore: {} as SecretsStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--safe-mode requires "true" or "false"/);
+  });
+
+  it("rejects --safe-mode when value is missing entirely", async () => {
+    const { io, err } = makeIo();
+    const rc = await runImageProviderCli(
+      ["add", "venice", "venice", "sk", "https://x", "--safe-mode"],
+      { runInTx: tx, agentStore: {} as AgentStore, secretsStore: {} as SecretsStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--safe-mode requires "true" or "false"/);
+  });
+
+  it("rejects --hide-watermark with a non-boolean value", async () => {
+    const { io, err } = makeIo();
+    const rc = await runImageProviderCli(
+      ["add", "venice", "venice", "sk", "https://x", "--hide-watermark", "yes"],
+      { runInTx: tx, agentStore: {} as AgentStore, secretsStore: {} as SecretsStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--hide-watermark requires "true" or "false"/);
+  });
+
+  it("rejects --style-preset when value is missing or empty", async () => {
+    const { io, err } = makeIo();
+    const rc = await runImageProviderCli(
+      ["add", "venice", "venice", "sk", "https://x", "--style-preset"],
+      { runInTx: tx, agentStore: {} as AgentStore, secretsStore: {} as SecretsStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--style-preset requires a non-empty string/);
+  });
+
+  it("rejects a missing positional triple with the usage banner", async () => {
+    const { io, err } = makeIo();
+    const rc = await runImageProviderCli(
+      ["add", "fal", "fal"], // missing api-key
+      { runInTx: tx, agentStore: {} as AgentStore, secretsStore: {} as SecretsStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/Usage: cogmo image-provider add/);
+  });
+
+  it("rejects an invalid provider name (shell-unsafe chars)", async () => {
+    const { io, err } = makeIo();
+    const rc = await runImageProviderCli(
+      ["add", "fal", "Bad Name", "sk-fal"],
+      { runInTx: tx, agentStore: {} as AgentStore, secretsStore: {} as SecretsStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/Invalid name "Bad Name"/);
+  });
+
+  it("maps InvalidProviderConfigError to exit code 2", async () => {
+    const { io, err } = makeIo();
+    const { InvalidProviderConfigError } = await import("../agent/store/errors.js");
+    const agentStore = mock<AgentStore>();
+    agentStore.createImageProvider.mockRejectedValue(
+      new InvalidProviderConfigError("not allowed here"),
+    );
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.putSecret.mockResolvedValue({ id: "s-1" });
+    const rc = await runImageProviderCli(
+      ["add", "fal", "fal", "sk"],
+      { runInTx: tx, agentStore, secretsStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/Invalid config: not allowed here/);
+  });
+
+  it("maps generic creation failures to exit code 1", async () => {
+    const { io, err } = makeIo();
+    const agentStore = mock<AgentStore>();
+    agentStore.createImageProvider.mockRejectedValue(new Error("upstream timeout"));
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.putSecret.mockResolvedValue({ id: "s-1" });
+    const rc = await runImageProviderCli(
+      ["add", "fal", "fal", "sk"],
+      { runInTx: tx, agentStore, secretsStore },
+      io,
+    );
+    expect(rc).toBe(1);
+    expect(err.join("\n")).toMatch(/Failed to add image provider: upstream timeout/);
+  });
+
+  it("`remove` with no name returns 2 and prints usage", async () => {
+    const { io, err } = makeIo();
+    const rc = await runImageProviderCli(
+      ["remove"],
+      { runInTx: tx, agentStore: {} as AgentStore, secretsStore: {} as SecretsStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/Usage: cogmo image-provider remove/);
+  });
 });
