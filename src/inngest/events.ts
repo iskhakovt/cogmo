@@ -257,6 +257,40 @@ export const conversationCooldownCleared = eventType("conversation/cooldown/clea
 
 export type ConversationCooldownClearedData = z.infer<typeof conversationCooldownCleared.schema>;
 
+/**
+ * Wall-clock seconds from a cooldown's `lastErroredAt` anchor to now.
+ * Shared by every clear-site so the elapsed math can't drift between
+ * `handle-message`'s success-path emit and the transport-side emits.
+ *
+ * `Math.max(0, ...)` guards against clock skew on hosts whose system
+ * clock moved backward between the cooldown write and the clear (NTP
+ * step, VM clock drift). Downstream consumers can assume the field is
+ * non-negative even under adversarial timing.
+ */
+export function calculateElapsedCooldown(lastErroredAt: string): number {
+  return Math.max(0, (Date.now() - Date.parse(lastErroredAt)) / 1000);
+}
+
+/**
+ * Build a `conversation/cooldown/cleared` event payload, optionally
+ * baking in a bus-dedup `id`. Callers inside Inngest functions should
+ * pass the id so Inngest's at-least-once retry semantics on
+ * `step.sendEvent` don't produce duplicate events on the bus.
+ *
+ * Canonical id shape: `cooldown-cleared-${conversationId}-${lastErroredAt}`
+ * — keys on the specific cooldown being cleared, so two paths
+ * attempting to clear the same cooldown (theoretical race; in
+ * practice the second sees `priorState === null` and skips) would
+ * dedup to one event.
+ */
+export function buildConversationCooldownClearedEvent(
+  data: ConversationCooldownClearedData,
+  id?: string,
+) {
+  const event = conversationCooldownCleared.create(data);
+  return id === undefined ? event : { ...event, id };
+}
+
 // --- Debounce events ---
 
 export const debounceIdle = eventType("debounce/idle", {

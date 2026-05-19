@@ -953,6 +953,9 @@ describe("createHandleMessage", () => {
     expect(clearedCall?.[0]).toBe("emit-cooldown-cleared");
     expect(clearedCall?.[1]).toMatchObject({
       name: "conversation/cooldown/cleared",
+      // Bus-dedup id keyed on the specific cooldown being cleared —
+      // protects against `step.sendEvent` at-least-once double-fire.
+      id: `cooldown-cleared-conv-1-${longAgo}`,
       data: {
         conversationId: "conv-1",
         clearedBy: "success",

@@ -706,6 +706,8 @@ describe("createTransport", () => {
       );
       expect(clearedCall?.[0]).toMatchObject({
         name: "conversation/cooldown/cleared",
+        // Bus-dedup id keyed on (conversationId, lastErroredAt).
+        id: "cooldown-cleared-c1-2026-05-19T11:00:00.000Z",
         data: {
           conversationId: "c1",
           clearedBy: "profile_switch",
@@ -836,6 +838,7 @@ describe("createTransport", () => {
       );
       expect(clearedCall?.[0]).toMatchObject({
         name: "conversation/cooldown/cleared",
+        id: "cooldown-cleared-c1-2026-05-19T11:00:00.000Z",
         data: { conversationId: "c1", clearedBy: "user_repair" },
       });
     });
@@ -1407,6 +1410,7 @@ describe("createTransport", () => {
       );
       expect(clearedCall?.[0]).toMatchObject({
         name: "conversation/cooldown/cleared",
+        id: "cooldown-cleared-c1-2026-05-19T11:00:00.000Z",
         data: { conversationId: "c1", clearedBy: "model_switch" },
       });
     });

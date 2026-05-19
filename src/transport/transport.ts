@@ -28,8 +28,9 @@ import type {
 import type { CooldownState, ProfileMemoryScope, ToolSet } from "../agent/store/schema.js";
 import type { Transaction, Transactor } from "../db/index.js";
 import {
+  buildConversationCooldownClearedEvent,
   type CooldownClearedBy,
-  conversationCooldownCleared,
+  calculateElapsedCooldown,
   type inboundArrived as InboundArrivedEvent,
 } from "../inngest/events.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
@@ -771,18 +772,6 @@ export interface Transport {
 }
 
 /**
- * Wall-clock seconds from a cooldown's `lastErroredAt` anchor to now.
- * Used for `conversation/cooldown/cleared.elapsedCooldownSeconds`.
- * Can be less than the prior `cooldownSeconds` (clear mid-window via
- * `/repair` or context switch) OR greater (half-open success, where
- * the probe ran past the threshold). Subscribers compare against the
- * prior `entered` event's `cooldownSeconds` to discriminate.
- */
-function elapsedCooldownSeconds(state: { lastErroredAt: string }): number {
-  return (Date.now() - Date.parse(state.lastErroredAt)) / 1000;
-}
-
-/**
  * Create a Transport scoped to a channel.
  */
 export function createTransport(deps: {
@@ -869,10 +858,12 @@ export function createTransport(deps: {
   // tx's `clearCooldown !== null` gate — only emit when a clear
   // actually happened.
   //
-  // No explicit idempotency `id`: transport methods are one-shot
-  // (callers don't retry), and emitting after `runInTx` resolves means
-  // a rolled-back tx never produces a phantom event. See
-  // design/agent-resilience.md → Telemetry.
+  // Explicit bus-dedup `id` keyed on `(conversationId, lastErroredAt)`
+  // — the specific cooldown being cleared. Transport methods aren't
+  // wrapped in Inngest's retry harness, but the explicit id is
+  // belt-and-braces against a caller-side retry (e.g. a Telegram
+  // command retried by the user) double-firing downstream consumers.
+  // See design/agent-resilience.md → Telemetry.
   async function emitCooldownClearedIfAny(
     priorState: CooldownState | null,
     conversationId: string,
@@ -880,11 +871,14 @@ export function createTransport(deps: {
   ): Promise<void> {
     if (priorState === null) return;
     await inngest.send(
-      conversationCooldownCleared.create({
-        conversationId,
-        clearedBy,
-        elapsedCooldownSeconds: elapsedCooldownSeconds(priorState),
-      }),
+      buildConversationCooldownClearedEvent(
+        {
+          conversationId,
+          clearedBy,
+          elapsedCooldownSeconds: calculateElapsedCooldown(priorState.lastErroredAt),
+        },
+        `cooldown-cleared-${conversationId}-${priorState.lastErroredAt}`,
+      ),
     );
   }
 
