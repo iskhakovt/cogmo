@@ -7,6 +7,7 @@
  */
 
 import { actionToDecision } from "../../../agent/coding/permission-keyboard.js";
+import { MIN_MESSAGES_FOR_EXTRACTION } from "../../../agent/evolution/index.js";
 import {
   CORE_COMPARTMENTS,
   isCoreCompartment,
@@ -17,7 +18,12 @@ import { type ProfileMemoryScope, ProfileMemoryScopeSchema } from "../../../agen
 import { SERVER_NAME_RE } from "../../../mcp/config.js";
 import { truncate } from "../../../util/string.js";
 import { isUuid } from "../../../util/uuid.js";
-import type { ScheduledTaskAdminEntry, Transport, TransportError } from "../../transport.js";
+import type {
+  EvolutionEventEntry,
+  ScheduledTaskAdminEntry,
+  Transport,
+  TransportError,
+} from "../../transport.js";
 import type { ProfileDialogs } from "./profile-dialog.js";
 import type { RepoDialogs } from "./repo-dialog.js";
 import {
@@ -112,6 +118,10 @@ const USAGE = {
     "  /schedules enable <id>       → re-enable a previously disabled task\n" +
     "  /schedules delete <id>       → permanently remove a task (no undo)\n" +
     "  Get task ids from `/schedules` output. Full UUID required.",
+  learned:
+    "Usage: /learned [<id>]\n" +
+    "  /learned         → recent evolution events (newest first)\n" +
+    "  /learned <id>    → full detail for one event (copy id from the list)",
 };
 
 // ---- Public handlers ----
@@ -2018,6 +2028,8 @@ function errorMessage(err: TransportError): string {
       return `No scheduled task with id "${shortenId(err.id)}". Use /schedules to list.`;
     case "schedule_id_malformed":
       return `"${err.id}" doesn't look like a valid task id. Use /schedules to list and copy an id.`;
+    case "evolution_unavailable":
+      return "Evolution isn't wired in this deployment.";
   }
 }
 
@@ -2184,4 +2196,256 @@ function toReplyOptions(
  */
 function looksLikeUuid(s: string): boolean {
   return isUuid(s.toLowerCase());
+}
+
+// ── /learned + /reflect ───────────────────────────────────────────────
+
+/**
+ * `/learned` — list the most recent evolution events for the user.
+ * `/learned <id>` — detail view for one event.
+ *
+ * Surfaces the audit log written by every processed Observer fire (both
+ * autonomous on `conversation/idle` and manual via `/reflect`). The digest
+ * shows enough to spot what changed at a glance; the detail view fans out
+ * each branch (corrections / memories / consolidation / pending drain).
+ *
+ * See `design/evolution.md` → Audit Log & Manual Trigger.
+ */
+export async function handleLearned(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const handle = String(ctx.from.id);
+  const arg = ctx.match?.trim() ?? "";
+
+  if (arg === "") {
+    const res = await transport.evolution.listEvents(handle, { limit: 10 });
+    if (res.isErr()) {
+      await ctx.reply(errorMessage(res.error));
+      return;
+    }
+    if (res.value.length === 0) {
+      await ctx.reply(
+        "No evolution events yet. The Observer runs after a conversation goes idle, " +
+          "or you can run it now with /reflect.",
+      );
+      return;
+    }
+    await ctx.reply(formatEvolutionDigest(res.value));
+    return;
+  }
+
+  // Anything else is treated as an id lookup. Reject obviously-bad shapes
+  // early so the DB hit only happens on plausible UUIDs.
+  if (!looksLikeUuid(arg)) {
+    await ctx.reply(USAGE.learned);
+    return;
+  }
+
+  const res = await transport.evolution.getEvent(handle, arg);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  if (res.value === null) {
+    await ctx.reply(`No evolution event with id "${shortenId(arg)}". Use /learned to list.`);
+    return;
+  }
+  await ctx.reply(formatEvolutionDetail(res.value));
+}
+
+/**
+ * `/reflect` — run the Observer synchronously for the current conversation
+ * and reply with a one-line digest. The autonomous idle-fire path is
+ * untouched; this is the user-initiated debug-shaped trigger that lets the
+ * operator see what extraction would do without waiting for idle.
+ *
+ * Respects the same min-message gate (`MIN_MESSAGES_FOR_EXTRACTION = 4`)
+ * as the autonomous path — too-short conversations reply with a clear
+ * "not enough yet" message rather than silently no-op.
+ */
+export async function handleReflect(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const handle = String(ctx.from.id);
+  const addr = String(ctx.chat.id);
+
+  await ctx.reply("Reflecting on this conversation…");
+
+  const res = await transport.evolution.triggerReflection(handle, addr);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+
+  const outcome = res.value;
+  switch (outcome.status) {
+    case "no_session":
+      await ctx.reply("No active conversation here — send a message first.");
+      return;
+    case "skipped": {
+      const message =
+        outcome.reason === "too_short"
+          ? `Conversation too short to reflect on yet (need at least ${MIN_MESSAGES_FOR_EXTRACTION} messages).`
+          : // `conversation_not_found` / `profile_not_found` mean the underlying
+            // row vanished mid-call — surfaces as a soft error rather than an
+            // exception so the command doesn't crash the bot.
+            "Couldn't load the conversation. Try /sessions to confirm it's there.";
+      await ctx.reply(message);
+      return;
+    }
+    case "processed": {
+      const { ruleChanges, memoryCount, drained, eventId } = outcome;
+      const ruleSummary =
+        ruleChanges.extracted + ruleChanges.reinforced + ruleChanges.promoted === 0
+          ? "no rule changes"
+          : `${ruleChanges.extracted} new, ${ruleChanges.reinforced} reinforced, ${ruleChanges.promoted} promoted`;
+      const memorySummary =
+        memoryCount === 0 && drained === 0
+          ? "no memories"
+          : `${memoryCount} extracted, ${drained} drained`;
+      await ctx.reply(
+        `Reflected. Rules: ${ruleSummary}. Memories: ${memorySummary}.\n` +
+          `/learned ${eventId} for the full breakdown.`,
+      );
+      return;
+    }
+  }
+}
+
+/**
+ * Render the `/learned` digest — one line per event, newest first. Keeps
+ * each entry under ~120 chars so a 10-event list fits well under
+ * Telegram's 4096-char message cap with room for the header.
+ */
+function formatEvolutionDigest(
+  events: ReadonlyArray<EvolutionEventEntry>,
+  now: Date = new Date(),
+): string {
+  const header = `Evolution events (${events.length}):`;
+  const lines = events.map((e, i) => {
+    const c = e.payload.corrections;
+    const m = e.payload.memories;
+    const ruleDelta = c.extracted + c.reinforced + c.promoted;
+    const memoryDelta = m.extracted;
+    const tag = e.triggeredBy === "manual" ? " [manual]" : "";
+    return (
+      `${i + 1}. ${e.id}${tag}\n` +
+      `   ${formatRelativeTime(e.createdAt, now)} — ${ruleDelta} rule change(s), ${memoryDelta} memory write(s)`
+    );
+  });
+  return [header, ...lines].join("\n");
+}
+
+/**
+ * Render `/learned <id>` — full breakdown of one event. Mirrors the
+ * structured-log fields the Observer emits per fire so the operator can
+ * cross-reference against process logs when debugging.
+ */
+function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date()): string {
+  const { payload } = event;
+  const skipped =
+    payload.corrections.outOfScopeReinforcementsSkipped +
+    payload.corrections.unknownRuleReinforcementsSkipped;
+  const lines: string[] = [
+    `Event ${event.id}`,
+    // Both forms: relative for at-a-glance scanning, ISO for log-grep parity.
+    `When: ${formatRelativeTime(event.createdAt, now)} (${event.createdAt.toISOString()})`,
+    `Triggered by: ${event.triggeredBy}`,
+    `Conversation: ${event.conversationId}`,
+    `Profile: ${payload.profileId}`,
+    `Transcript: ${payload.messageCount} message(s)`,
+  ];
+  if (payload.durationMs !== undefined) {
+    lines.push(`Took: ${formatDurationMs(payload.durationMs)}`);
+  }
+  lines.push(
+    "",
+    "Corrections:",
+    `  extracted:    ${payload.corrections.extracted}`,
+    `  reinforced:   ${payload.corrections.reinforced}`,
+    `  promoted:     ${payload.corrections.promoted}`,
+    `  contradicted: ${payload.corrections.contradictions}`,
+  );
+  // Surface the skipped counters only when non-zero — they're zero on
+  // most fires and the silence is the signal. When something WAS
+  // skipped, the operator wants to see it spelled out so they can
+  // reconcile against `extracted + reinforced`. Pre-computed total
+  // gates the whole block so a "0 skipped" line never adds noise.
+  if (skipped > 0) {
+    lines.push(
+      `  skipped:      ${skipped} (${payload.corrections.outOfScopeReinforcementsSkipped} out-of-scope, ${payload.corrections.unknownRuleReinforcementsSkipped} unknown-rule)`,
+    );
+  }
+  if (payload.consolidation) {
+    lines.push("", "Consolidation:");
+    lines.push(`  merged groups: ${payload.consolidation.mergedGroups}`);
+    lines.push(`  rules removed: ${payload.consolidation.rulesRemoved}`);
+  }
+  lines.push("", `Memories: ${payload.memories.extracted} extracted`);
+  for (const [network, count] of Object.entries(payload.memories.byNetwork)) {
+    lines.push(`  ${network}: ${count}`);
+  }
+  if (payload.drained.drained > 0) {
+    lines.push("", `Pending drained: ${payload.drained.drained}`);
+    for (const [network, count] of Object.entries(payload.drained.byNetwork)) {
+      lines.push(`  ${network}: ${count}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Format a past instant as a short human-readable delta from `now`.
+ * Optimised for at-a-glance scanning in chat. Delegates the formatting
+ * to `Intl.RelativeTimeFormat` (built-in, Node ≥18) so the strings
+ * follow locale conventions ("yesterday" / "5 minutes ago"). The Intl
+ * API can't pick the "best" unit itself — caller still chooses
+ * seconds/minutes/hours/days — but everything past unit selection
+ * (pluralisation, "yesterday" vs "1 day ago", negative sign placement)
+ * is handled by the platform.
+ *
+ * Older than a week → fall back to an ISO date stamp. Future
+ * timestamps work too (Intl produces "in 5 minutes" etc.); a future
+ * `createdAt` would be a stamping bug, but the renderer shouldn't
+ * crash on it.
+ *
+ * Exported so unit tests can pin `now` deterministically.
+ */
+const RELATIVE_TIME_FORMAT = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+
+export function formatRelativeTime(when: Date, now: Date): string {
+  // Negative delta = past, positive = future; `RelativeTimeFormat`
+  // matches that sign convention.
+  const deltaSec = (when.getTime() - now.getTime()) / 1000;
+  const absSec = Math.abs(deltaSec);
+  if (absSec < 45) return RELATIVE_TIME_FORMAT.format(0, "second");
+  const min = deltaSec / 60;
+  if (Math.abs(min) < 60) return RELATIVE_TIME_FORMAT.format(Math.round(min), "minute");
+  const hr = min / 60;
+  if (Math.abs(hr) < 24) return RELATIVE_TIME_FORMAT.format(Math.round(hr), "hour");
+  const day = hr / 24;
+  if (Math.abs(day) < 7) return RELATIVE_TIME_FORMAT.format(Math.round(day), "day");
+  // Anything older than a week is calendar-scale; a relative phrase
+  // ("3 weeks ago") loses too much resolution for an audit log. ISO
+  // date stamp keeps grep parity with structured logs.
+  return when.toISOString().slice(0, 10);
+}
+
+/**
+ * Compact ms → human duration. Uses `Intl.DurationFormat` (Node ≥22)
+ * with `style: "narrow"` ("1m 32s") and trims to the largest two
+ * relevant units. Sub-second values stay raw ms because the Intl
+ * variant collapses them to "0 seconds".
+ */
+const DURATION_FORMAT = new Intl.DurationFormat("en", { style: "narrow" });
+
+function formatDurationMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const totalSec = Math.round(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  if (min === 0) return DURATION_FORMAT.format({ seconds: sec });
+  return DURATION_FORMAT.format(sec === 0 ? { minutes: min } : { minutes: min, seconds: sec });
 }

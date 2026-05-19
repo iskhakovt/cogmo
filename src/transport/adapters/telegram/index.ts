@@ -37,6 +37,7 @@ import {
   handleDisable,
   handleEnable,
   handleEnd,
+  handleLearned,
   handleMcp,
   handleModel,
   handleName,
@@ -44,6 +45,7 @@ import {
   handlePermissionCallback,
   handlePlanCallback,
   handleProfile,
+  handleReflect,
   handleRepair,
   handleRepo,
   handleResume,
@@ -663,6 +665,10 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         "",
         "Status:",
         "  /status — show conversation, profile, and context stats",
+        "",
+        "Evolution:",
+        "  /learned [<id>] — recent evolution events, or detail by id",
+        "  /reflect — run the Observer for this conversation now",
       ].join("\n"),
     );
   });
@@ -688,6 +694,8 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("disable", (ctx) => handleDisable(transport, toCmdCtx(ctx)));
   bot.command("enable", (ctx) => handleEnable(transport, toCmdCtx(ctx)));
   bot.command("schedules", (ctx) => handleSchedules(transport, toCmdCtx(ctx)));
+  bot.command("learned", (ctx) => handleLearned(transport, toCmdCtx(ctx)));
+  bot.command("reflect", (ctx) => handleReflect(transport, toCmdCtx(ctx)));
 
   // Mid-dialog abort for /profile new|edit and /repo add flows. Evaluate
   // both branches (no `||` short-circuit) so a hypothetical "both dialogs
@@ -998,6 +1006,8 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       { command: "disable", description: "Soft-disable a skill by name" },
       { command: "enable", description: "Re-enable a previously-disabled skill" },
       { command: "schedules", description: "List/disable/enable/delete scheduled tasks" },
+      { command: "learned", description: "List recent evolution events" },
+      { command: "reflect", description: "Run the Observer for this conversation now" },
       { command: "cancel", description: "Abort the current interactive dialog" },
       { command: "start", description: "Show help" },
     ])

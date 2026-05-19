@@ -145,3 +145,80 @@ Add these incrementally as complexity demands:
 ## Dual-Mode Monitoring `[research]`
 
 From memU. For ingestion agents: cheap embedding scan first, LLM only when relevant. Saves ~30% of ingestion costs by filtering before LLM processing.
+
+## Audit Log & Manual Trigger `[confirmed]`
+
+The Observer's structured output (`ObserverResult`) was originally only logged. Two product surfaces sit on top of an append-only audit row per Observer fire:
+
+- **Read:** `/learned` in Telegram — digest of recent evolution events; `/learned <id>` for one event's detail.
+- **Trigger:** `/reflect` in Telegram — runs the Observer for the current conversation synchronously, replies with a one-line summary.
+
+Both share the same persistence model. Industry validation in [decisions.md](decisions.md) → Evolution audit log + manual trigger.
+
+### `evolution_events` table
+
+Append-only, one row per Observer fire (`status: "processed"` only — skipped fires don't earn a row since there's nothing to surface). Owned by `agent/store/schema.ts`.
+
+| Column | Type | Notes |
+|-|-|-|
+| `id` | UUIDv7 PK | DB-generated |
+| `conversation_id` | UUID NOT NULL | FK → `conversations.id`; the Observer's fire trigger. Append-only — never re-pointed, so cascade is unnecessary. |
+| `user_id` | UUID NOT NULL | FK → `users.id`; denormalised from the conversation to make `/learned` lookups a single index scan. |
+| `triggered_by` | text NOT NULL | `"idle"` (autonomous fire on `conversation/idle`) or `"manual"` (`/reflect`). pgEnum `evolution_trigger`. |
+| `payload` | JSONB NOT NULL | The `ObserverResult` extended with the trigger metadata; validated via `EvolutionEventPayloadSchema`. |
+| `created_at` | TIMESTAMPTZ NOT NULL | `now()` default. |
+
+Index: `(user_id, created_at DESC)` for the `/learned` digest path.
+
+**Why one row per fire, not per atomic change.** Atomic-change granularity (one row per rule promoted / memory written) duplicates information the underlying tables already carry (`steering_rules.observation_count`, Hindsight write timestamps) and forces the digest path to fan out across kinds. The Observer's per-fire output is already a natural unit: counts + per-rule outcomes + extraction reasoning live in one structured object. Per-fire rows let the digest summarise a fire in one line and the detail view show the full reasoning trace without joins.
+
+**Why denormalise `user_id` from `conversations.user_id`.** The digest is per-user (`/learned` shows what *I* learned across all my conversations) and `conversations` is large; scanning by `conversation_id IN (SELECT ...)` defeats the index. Append-only + immutable conversation ownership means the denormalisation can't drift.
+
+**Why no `outcome` / `reverted_at` columns yet.** Undo / per-rule revert are deliberately deferred — the digest is the smallest useful slice that earns the table. When undo lands, add `superseded_at` + a reverse-event row rather than mutating the original (DGM pattern: append, never overwrite).
+
+### `EvolutionEventPayloadSchema`
+
+Wraps the Observer's existing `ObserverResult` (the `status: "processed"` variant) plus the trigger context. Defined in `src/agent/evolution/event-schema.ts` and consumed via `jsonbZod`. Fields:
+
+- `corrections` — `{extracted, reinforced, contradictions, promoted, outOfScopeReinforcementsSkipped, unknownRuleReinforcementsSkipped, consolidationNeeded}` from `ExtractionResult`.
+- `consolidation` — nullable; the `consolidateRules` result when it ran.
+- `memories` — `{extracted, byNetwork}` from `MemoryExtractionResult`.
+- `drained` — `{drained, byNetwork}` from the pending-memory drain step.
+- `messageCount` — transcript length at fire time (the gating value against `MIN_MESSAGES_FOR_EXTRACTION`).
+- `profileId` — the profile active for the conversation at fire time. Stored so the digest can render "from profile X" without a join.
+- `durationMs` — wall-clock duration of the fire, optional. Stamped at the end of `runObserver` from a `Date.now()` snapshot taken at the top, so it captures "how long the operator waited" rather than "how long the successful retry's LLM calls took." Surfaced in the detail view as `Took: 32s` so a regression in extraction latency is visible per fire without grepping logs.
+
+### Observer integration
+
+After the `processed` branch in `runObserver` (`src/agent/evolution/observer.ts`) finishes its existing work, a single `step.run("persist-evolution-event", …)` writes the row via `agentStore.recordEvolutionEvent`. Wrapped in its own `step.run` so the persistence is memoised separately from the LLM-bearing steps — a retry after a successful extraction-and-retain doesn't re-spend tokens, just retries the DB write. `skipped` results don't persist (nothing happened worth surfacing).
+
+The `triggered_by` value is threaded as an optional parameter to `runObserver` (default `"idle"`). The autonomous Inngest function passes nothing; the manual trigger (`/reflect`) passes `"manual"`. The event schema (`conversation/idle`) stays unchanged — this is a runtime detail, not an event-bus contract.
+
+### Manual trigger (`/reflect`)
+
+The Telegram command resolves the current conversation, calls `transport.evolution.triggerReflection(conversationId)`, and replies with one of:
+
+- `"Conversation too short to reflect on yet (need ≥4 messages)."` — Observer returned `{status: "skipped", reason: "too_short"}`.
+- `"No active conversation."` — no session for the address.
+- `"Reflected — N rules extracted, M memories. /learned for details."` — the digest of the `ProcessedObserverResult`.
+
+`triggerReflection` invokes `runObserver` directly (not via Inngest) with a step harness that just calls the closure — single-user, immediate feedback wins over durability for an explicitly-user-initiated debug action. The autonomous idle path keeps the full Inngest pipeline (concurrency limit per `conversationId`, retry budget, memoisation).
+
+**Concurrency-cap bypass, acknowledged.** The autonomous Inngest function is registered with `concurrency: { limit: 1, key: "event.data.conversationId" }` — at most one in-flight Observer per conversation. `/reflect` sidesteps that registry entirely. If a `/reflect` fires while an idle run is in flight for the same conversation, both succeed independently: two LLM extractions, two audit rows, overlapping transcript windows. At single-user scale (one operator, one tap on `/reflect`) the window for this is human-scale and the cost is two extra audit rows — benign. If/when this gets wider use, the right guard is a `pg_advisory_xact_lock(hashtext('observer:' || conversation_id))` at the top of `runObserver` (cheap, predicate-free, releases on tx commit) rather than reaching for the Inngest cap from the manual path — which would re-introduce async-reply UX and lose the in-chat digest.
+
+**Wall-clock budget.** The handler sends a "Reflecting on this conversation…" pre-message and then awaits the full pipeline (corrections + memories + drain) end-to-end. Practical budget: 10–60 s on Claude/GPT-class models, longer on slower providers. The autonomous idle path falls back to Inngest's per-function timeout if the LLM hangs; the manual path has no such backstop — a wedged provider call blocks the reply until the LLM SDK eventually times out (~minutes). Mitigations not yet implemented but worth considering when the pattern bites: a timer-driven "this may take another minute" follow-up, or a hard `AbortSignal` on the LLM calls capped at e.g. 90 s.
+
+### Read surface (`/learned`)
+
+- `/learned` — last 10 events for the user, one line per event: `id timestamp from profile-name: N rules, M memories`.
+- `/learned <id>` — full detail: trigger source, message count, corrections breakdown (extracted / reinforced / promoted / contradictions), memory counts by network, consolidation summary if it ran. No reasoning trace surfaced yet (the per-correction reasoning lives in the LLM response and isn't currently captured in `ExtractionResult` — surfacing it is a follow-up that requires extending the extractor's return shape).
+
+### Deferred (intentionally)
+
+- **Inline "noted: X" pill** on the next assistant turn — adds chat noise on every fire; the documented anti-pattern is alert fatigue. Revisit after a week of digest-based use.
+- **Undo / per-rule revert** — requires the append-only pattern's reverse-event shape. Cheap once needed; useless without first feeling the pain.
+- **Reasoning trace in detail view** — requires `ExtractionResult` and `MemoryExtractionResult` to surface the per-item `reasoning` field. One-line change to each, but worth landing once the digest UX is in actual use and proves it's the missing piece.
+
+### Forward consideration: deleting a conversation
+
+`evolution_events.conversation_id` is a FK with `ON DELETE no action`. Deliberate — audit rows are append-only, and silently cascading them away on conversation delete defeats the whole point of an audit log. The trade-off: until a delete-conversation command lands, there's no friction. Once one does, it'll need an explicit choice — either refuse the delete while audit rows exist (force the operator to `/learned undo` first, when undo lands), null out `conversation_id` on the audit row (keeps the lineage but loses the back-reference), or move the audit row into a tombstoned shape with the conversation snapshot inlined. Pick at the point of building the delete path; flagged here so it's not a surprise.
