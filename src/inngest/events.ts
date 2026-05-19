@@ -14,6 +14,24 @@ export const inboundArrived = eventType("inbound/arrived", {
   }),
 });
 
+export type InboundArrivedData = z.infer<typeof inboundArrived.schema>;
+
+/**
+ * Build an `inbound/arrived` event payload with a bus-dedup `id` keyed on
+ * the inbound message — used wherever the emit may be retried after a
+ * partial-progress failure (e.g. `resolveBoundary` emits N events in a
+ * loop; an Inngest step.run retry after a mid-loop crash would re-emit
+ * already-sent ones without this dedup). One inbound row, one router run,
+ * regardless of how many times the emit path retries.
+ *
+ * `transport.emit` doesn't go through here because its emit is a single
+ * send after a single insert — there's no partial-progress shape to
+ * idempotently retry.
+ */
+export function buildInboundArrivedEvent(data: InboundArrivedData) {
+  return { ...inboundArrived.create(data), id: `inbound-arrived-${data.inboundMessageId}` };
+}
+
 /**
  * Fired when the orchestrator has persisted an assistant response.
  * Notification only — delivery is handled inline by the DeliveryRouter.

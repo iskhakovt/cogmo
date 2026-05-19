@@ -256,6 +256,7 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     getBoundaryPendingById: vi.fn().mockResolvedValue(undefined),
     appendBoundaryBuffer: vi.fn().mockResolvedValue(undefined),
     deleteBoundaryPending: vi.fn().mockResolvedValue(undefined),
+    listExpiredBoundaryPending: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }

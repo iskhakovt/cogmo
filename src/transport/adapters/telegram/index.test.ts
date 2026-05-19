@@ -1787,6 +1787,67 @@ describe("telegram adapter", () => {
       expect(transport.emit).not.toHaveBeenCalled();
     });
 
+    it("serializes per-chat dispatches so two concurrent inbounds share one prompt", async () => {
+      // Two parallel inbounds on the same chat MUST NOT both fireBoundaryPrompt:
+      // the per-chat mutex makes the second observe the first's hold via
+      // findActive and append instead of starting a second hold.
+      let holdActive = false;
+      const startMock = vi.fn().mockImplementation(async () => {
+        holdActive = true;
+        return { boundaryId: "boundary-77" };
+      });
+      const findActiveMock = vi.fn().mockImplementation(async () =>
+        holdActive
+          ? {
+              id: "boundary-77",
+              channelId: "tg-ch",
+              platformAddress: "42",
+              platformUserHandle: "111",
+              priorConversationId: "conv-prior",
+              promptMessageId: "9001",
+              bufferedInbounds: [],
+              expiresAt: new Date(),
+              createdAt: new Date(),
+            }
+          : null,
+      );
+      const appendMock = vi.fn().mockResolvedValue(undefined);
+      const { transport } = await createAdapterWithBoundary({
+        peek: vi.fn().mockResolvedValue({
+          conversationId: "conv-prior",
+          userTurnCount: 4,
+          lastMessageAt: new Date(),
+          alias: null,
+          firstUserSnippet: "hi",
+        }),
+        findActive: findActiveMock,
+        start: startMock,
+        append: appendMock,
+      });
+
+      const ctx1 = makeCtx(111, "first", 42);
+      ctx1.reply = vi.fn().mockResolvedValue({ message_id: 9001 });
+      const ctx2 = makeCtx(111, "second", 42);
+      ctx2.reply = vi.fn().mockResolvedValue({ message_id: 9002 });
+
+      const handler = handlers.get("on:message:text")!;
+      await Promise.all([handler(ctx1), handler(ctx2)]);
+
+      // Only the first dispatch fired a prompt — the second observed the
+      // hold and appended.
+      expect(startMock).toHaveBeenCalledTimes(1);
+      expect(appendMock).toHaveBeenCalledTimes(1);
+      expect(appendMock).toHaveBeenCalledWith(
+        "boundary-77",
+        expect.objectContaining({ content: "second" }),
+      );
+      // Only the first reply was sent.
+      expect(ctx1.reply).toHaveBeenCalledTimes(1);
+      expect(ctx2.reply).not.toHaveBeenCalled();
+      // Sanity: transport.emit was never called (both buffered).
+      expect(transport.emit).not.toHaveBeenCalled();
+    });
+
     it("falls through to createConversation when peek returns null (one-shot prior)", async () => {
       const { transport } = await createAdapterWithBoundary({
         peek: vi.fn().mockResolvedValue(null),

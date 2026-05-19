@@ -1308,6 +1308,45 @@ describe("DrizzleTransportStore", () => {
       ).rejects.toThrow();
     });
 
+    it("listExpiredBoundaryPending returns only rows whose expires_at < cutoff", async () => {
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+
+      const past = new Date("2026-05-19T11:00:00Z");
+      const future = new Date("2026-05-19T13:00:00Z");
+
+      const expiredId = (
+        await tx((trx) =>
+          store.createBoundaryPending(trx, {
+            channelId,
+            platformAddress: "chat-old",
+            platformUserHandle: "u-1",
+            priorConversationId: conversationId,
+            promptMessageId: "tg:1",
+            bufferedInbounds: [{ content: "x", platformTs: "2026-05-19T10:00:00.000Z" }],
+            expiresAt: past,
+          }),
+        )
+      ).id;
+      await tx((trx) =>
+        store.createBoundaryPending(trx, {
+          channelId,
+          platformAddress: "chat-new",
+          platformUserHandle: "u-2",
+          priorConversationId: conversationId,
+          promptMessageId: "tg:2",
+          bufferedInbounds: [{ content: "y", platformTs: "2026-05-19T12:30:00.000Z" }],
+          expiresAt: future,
+        }),
+      );
+
+      const cutoff = new Date("2026-05-19T12:00:00Z");
+      const expired = await tx((trx) => store.listExpiredBoundaryPending(trx, cutoff));
+      expect(expired).toHaveLength(1);
+      expect(expired[0]?.id).toBe(expiredId);
+      expect(expired[0]?.platformAddress).toBe("chat-old");
+    });
+
     it("appendBoundaryBuffer is a no-op for a missing id", async () => {
       await tx((trx) =>
         store.appendBoundaryBuffer(trx, "00000000-0000-7000-8000-000000000001", {

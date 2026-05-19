@@ -5,7 +5,7 @@ import type { Transactor } from "../../db/index.js";
 import {
   type BoundaryResolvedReason,
   buildBoundaryResolvedEvent,
-  inboundArrived,
+  buildInboundArrivedEvent,
 } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import type { TransportStore } from "../store/index.js";
@@ -160,8 +160,12 @@ export async function resolveBoundary(
   if (dbResult.kind === "err") return err({ code: dbResult.code });
 
   for (const inboundMessageId of dbResult.inboundIds) {
+    // Dedup id keyed on the inbound row so a retry after a partial-emit
+    // crash (waiter's step.run replays the whole step on throw, the
+    // boundary-janitor may re-resolve an orphan row) doesn't fan out two
+    // router runs for the same inbound.
     await deps.inngest.send(
-      inboundArrived.create({
+      buildInboundArrivedEvent({
         conversationId: dbResult.conversationId,
         inboundMessageId,
       }),

@@ -117,6 +117,9 @@ describe("resolveBoundary", () => {
       conversationId: "conv-prior",
       inboundMessageId: "inbound-1",
     });
+    // Dedup id so a retry after partial-emit crash doesn't double-fire the router.
+    expect(arrivedCalls[0]?.[0]?.id).toBe("inbound-arrived-inbound-1");
+    expect(arrivedCalls[1]?.[0]?.id).toBe("inbound-arrived-inbound-2");
     const resolvedCalls = sendSpy.mock.calls.filter(
       ([e]) => e?.name === "conversation/boundary/resolved",
     );

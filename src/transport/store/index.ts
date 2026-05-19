@@ -339,14 +339,30 @@ export interface TransportStore {
   getBoundaryPendingById(tx: Transaction, id: string): Promise<BoundaryPendingRow | undefined>;
 
   /**
-   * Append a buffered inbound to an existing hold. Implementations do a
-   * read-modify-write inside the caller's tx — REPEATABLE READ snapshots
-   * make this race-free against concurrent appends on the same row.
+   * Append a buffered inbound to an existing hold. Read-modify-write inside
+   * the caller's tx: under REPEATABLE READ, two concurrent appends on the
+   * same row surface as a `40001 serialization_failure` on the second
+   * commit, which the `transactor` retry-once budget covers. Snapshot
+   * isolation detects the conflict — it does not prevent it. At Cogmo
+   * single-process scale and given the dispatchInbound chat-level mutex,
+   * concurrent appends on the same hold don't occur in practice anyway.
    */
   appendBoundaryBuffer(tx: Transaction, id: string, entry: BufferedInboundEntry): Promise<void>;
 
   /** Delete a resolved boundary row. */
   deleteBoundaryPending(tx: Transaction, id: string): Promise<void>;
+
+  /**
+   * Boundary rows whose `expires_at` is older than `cutoff`. The janitor
+   * cron passes `cutoff = now() - grace` so it only sees rows the
+   * in-flight waiter has had time to handle. Returned rows carry
+   * `channelId` because `resolveBoundary` needs to know which channel's
+   * deps closure to use (the janitor runs across all channels).
+   */
+  listExpiredBoundaryPending(
+    tx: Transaction,
+    cutoff: Date,
+  ): Promise<ReadonlyArray<{ id: string; channelId: string; platformAddress: string }>>;
 }
 
 /**
@@ -972,6 +988,20 @@ export class DrizzleTransportStore implements TransportStore {
 
   async deleteBoundaryPending(tx: Transaction, id: string): Promise<void> {
     await tx.delete(boundaryPending).where(eq(boundaryPending.id, id));
+  }
+
+  async listExpiredBoundaryPending(
+    tx: Transaction,
+    cutoff: Date,
+  ): Promise<ReadonlyArray<{ id: string; channelId: string; platformAddress: string }>> {
+    return tx
+      .select({
+        id: boundaryPending.id,
+        channelId: boundaryPending.channelId,
+        platformAddress: boundaryPending.platformAddress,
+      })
+      .from(boundaryPending)
+      .where(sql`${boundaryPending.expiresAt} < ${cutoff}`);
   }
 
   async findReachableChannelsForUserProfile(

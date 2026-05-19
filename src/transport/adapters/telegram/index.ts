@@ -853,7 +853,16 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   });
 
   function boundaryButtonLabel(prior: PriorClosedConversation): string {
-    return prior.alias ?? prior.firstUserSnippet ?? "previous chat";
+    // Snippet is already capped at BOUNDARY_SNIPPET_MAX_CHARS by the store;
+    // alias is user-set and unbounded — truncate to the same cap so a long
+    // emoji-laden alias can't push the button past Telegram's 64-byte
+    // callback-text limit. Code-point slice (Array.from) so multi-byte
+    // graphemes don't split mid-char.
+    const raw = prior.alias ?? prior.firstUserSnippet ?? "previous chat";
+    const chars = Array.from(raw);
+    return chars.length <= BOUNDARY_SNIPPET_MAX_CHARS
+      ? raw
+      : `${chars.slice(0, BOUNDARY_SNIPPET_MAX_CHARS - 1).join("")}…`;
   }
 
   /**
@@ -914,7 +923,45 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
    *      prompt + buffer the inbound and return.
    *   4. Else `createConversation` + emit as before.
    */
+  /**
+   * Per-chat dispatch tail. Serialises `dispatchInbound` calls keyed on
+   * `addr` so two inbounds arriving close-together don't both observe
+   * `findActive → null` + `peek → prior` and race to create competing
+   * boundary holds (UNIQUE constraint catches the conflict but the loser
+   * would otherwise fall through to `createConversation` and split the
+   * chat across two conversations).
+   *
+   * grammY's default polling runner already serialises updates from one
+   * chat through the middleware chain, so this is belt-and-braces — but
+   * the cost is one Map entry per active chat and the future-proofing is
+   * worth it for webhook deployments or concurrency-enabled runners.
+   */
+  const dispatchTails = new Map<string, Promise<void>>();
+
   async function dispatchInbound(
+    ctx: { reply: (text: string) => Promise<{ message_id: number }> },
+    addr: string,
+    handle: string,
+    content: InboundContent,
+    platformTs: Date,
+  ): Promise<void> {
+    const prev = dispatchTails.get(addr) ?? Promise.resolve();
+    const myTurn = prev.then(() => doDispatch(ctx, addr, handle, content, platformTs));
+    // Wrap with a swallowed-error tail so a thrown body doesn't break the
+    // chain for the next inbound on this chat.
+    const tail: Promise<void> = myTurn.then(
+      () => undefined,
+      () => undefined,
+    );
+    dispatchTails.set(addr, tail);
+    // Auto-cleanup once we're the still-most-recent tail.
+    tail.then(() => {
+      if (dispatchTails.get(addr) === tail) dispatchTails.delete(addr);
+    });
+    return myTurn;
+  }
+
+  async function doDispatch(
     ctx: { reply: (text: string) => Promise<{ message_id: number }> },
     addr: string,
     handle: string,

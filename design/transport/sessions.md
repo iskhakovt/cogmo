@@ -70,11 +70,26 @@ Any inbound (text, photo, document, voice) that arrives while a hold is open is 
 
 ### Idempotency
 
-Both event emissions carry bus-dedup ids:
+Three layers of dedup keep events from double-firing:
+
 - `boundary/pending` → `boundary-pending-${boundaryId}` (one waiter per hold).
 - `boundary/resolved` → `boundary-resolved-${boundaryId}` (one resolution per hold).
+- `inbound/arrived` emitted from `resolveBoundary` → `inbound-arrived-${inboundMessageId}` (one router run per drained inbound row, even if the resolve loop is retried mid-emit).
 
 The waiter cancels on `boundary/resolved` matched on `data.boundaryId`. A button tap that races the waiter wake is harmless: `resolveBoundary` is idempotent — a second call against a deleted row returns `boundary_not_found` and the caller no-ops.
+
+### Recovery: `boundary-janitor`
+
+The waiter alone can't cover three failure modes:
+  1. `inngest.send(boundary/pending)` fails after the holding row is inserted — no waiter ever starts.
+  2. The bot process crashes between the resolver's tx commit and the per-row `inbound/arrived` emit loop — the buffer is durable but the agent never wakes up.
+  3. The waiter itself fails past Inngest's retry budget.
+
+The `boundary-janitor` Inngest function (cron `* * * * *`) scans `boundary_pending` for rows older than `now() − 2 × promptTimeoutMs` (grace > waiter window) and calls `resolveBoundary({kind:"fresh", reason:"waiter_timeout"})` per row. Same path as the waiter's timeout, idempotent against rows already drained, and emits with the same dedup ids so a waiter + janitor double-fire collapses at the bus. Max latency from orphan creation to recovery: ~2 minutes (one full cron cycle past the grace boundary).
+
+### `expires_at`
+
+`boundary_pending.expires_at` is set to `now() + promptTimeoutMs` at create time and is the column the janitor scans. The waiter doesn't read it (it sleeps based on the event payload); the column exists for orphan-recovery.
 
 ### Schema
 
