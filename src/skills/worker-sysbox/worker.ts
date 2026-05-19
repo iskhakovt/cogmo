@@ -6,7 +6,7 @@ import type {
   SandboxSession,
 } from "../../sandbox/index.js";
 import { type CtxHandler, Dispatcher } from "../dispatcher.js";
-import type { RuntimeRusage, TaskInvoke } from "../protocol.js";
+import type { RuntimeRusage, TaskInvoke, TaskResult } from "../protocol.js";
 import { DEFAULT_RESOURCE_LIMITS } from "./host.js";
 import { createNdjsonTransport } from "./transport.js";
 
@@ -252,7 +252,12 @@ export class SysboxSkillWorker {
       wallClockS,
     };
 
-    let taskPromise: Promise<unknown>;
+    // `dispatcher.invoke` returns `Promise<TaskResult>` — that's what the
+    // protocol guarantees and what the dispatcher's `#handleTaskResult`
+    // resolves with. Tracking the type through the race keeps `winner.r`
+    // typed as `TaskResult` so the discriminated union narrows on `.ok`
+    // without a cast.
+    let taskPromise: Promise<TaskResult>;
     try {
       taskPromise = this.#dispatcher.invoke(invoke, { ctxHandler: params.ctxHandler });
     } catch (e) {
@@ -302,12 +307,7 @@ export class SysboxSkillWorker {
       return { ok: false, error: `dispatcher_error: ${message}`, workerReusable: false };
     }
 
-    const taskResult = winner.r as {
-      ok: boolean;
-      output?: unknown;
-      error?: string;
-      rusage?: RuntimeRusage;
-    };
+    const taskResult = winner.r;
     // `isolation: recycle` poisons the worker after the task regardless of
     // success — the manifest declared it can't share state with another
     // task on the same supervisor.
@@ -315,9 +315,9 @@ export class SysboxSkillWorker {
       this.markPoisoned();
     }
     return {
-      ok: taskResult.ok,
-      ...(taskResult.output !== undefined && { output: taskResult.output }),
-      ...(taskResult.error !== undefined && { error: taskResult.error }),
+      ...(taskResult.ok
+        ? { ok: true as const, output: taskResult.output }
+        : { ok: false as const, error: taskResult.error }),
       ...(taskResult.rusage !== undefined && { rusage: taskResult.rusage }),
       workerReusable: this.#state === "busy",
     };
