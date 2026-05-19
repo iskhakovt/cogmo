@@ -213,20 +213,9 @@ export const NO_SANDBOX: SandboxDeps = {
 };
 
 /**
- * Resource limits for coding-delegation sandboxes (devbase image).
- * 2 cpu / 2 GiB RAM accommodate `claude` CLI + a typical build step
- * (TypeScript compilation, pnpm install) without OOMing. `pids: 256`
- * is fork-bomb defence, not a budget. `disk_bytes` is omitted so the
- * Daytona platform default (3 GiB at the time of writing) governs;
- * cogmo's devbase image weighs ~1.5 GiB and a typical worktree adds
- * a few hundred MB, so the 3 GiB default has reasonable headroom.
- *
- * These limits are passed in TWO places: orchestrator construction
- * (per-session on the lazy `daytona.create({ image, resources })`
- * fallback path) and `ensureImagePresent` (baked into the snapshot
- * at warm time so subsequent `daytona.create({ snapshot })` sessions
- * inherit them — the snapshot path has no per-session resources
- * override on the SDK side).
+ * Coding-delegation sandboxes (devbase image). 2 cpu / 2 GiB fits
+ * `claude` CLI + a TS compile + pnpm install. `disk_bytes` omitted —
+ * Daytona's 3 GiB default has headroom over the ~1.5 GiB devbase image.
  */
 const DEFAULT_CODING_RESOURCE_LIMITS = {
   cpus: 2,
@@ -564,14 +553,9 @@ export async function bootstrapSandbox(
     // task arrivals share the in-flight promise via
     // `ensureImagePresent`'s memoisation. Failures evict the cache so
     // the task path retries on its own.
-    // Pair each image with the resource limits its consumer will use,
-    // so Daytona bakes them into the snapshot at warm time. Once the
-    // snapshot is ACTIVE, every `daytona.create({ snapshot })` session
-    // inherits these — `CreateSandboxFromSnapshotParams` has no
-    // per-session resources override. Omitting the hint would silently
-    // fall back to Daytona's platform default (currently 1 cpu /
-    // 1 GiB RAM / 3 GiB disk) and erase the consumer's intent (notably
-    // skills' 1 GiB disk choice in `worker-sysbox/host.ts`).
+    // Pair each image with its consumer's limits — baked into the
+    // snapshot at warm time; the `daytona.create({ snapshot })` path
+    // has no per-session override.
     scheduleSandboxImageWarm(sandbox, [
       { image: env.COGMO_DEVBASE_IMAGE, resourceLimits: DEFAULT_CODING_RESOURCE_LIMITS },
       { image: env.COGMO_SKILLS_IMAGE, resourceLimits: SKILLS_DEFAULT_RESOURCE_LIMITS },
@@ -589,30 +573,13 @@ export async function bootstrapSandbox(
 }
 
 /**
- * Background image prewarm. On Daytona this drives
- * `snapshot.create({ name, image })` so the named snapshot reaches
- * `ACTIVE` state before the first task references it. On Local-Docker
- * this is a cheap inspect + pull. The call site is boot (we don't
- * want a transient provider hiccup to fail `cogmo serve` startup),
- * so the loop owns retries — without it, a single failure would
- * leave the image cold until the first task pays the cold start, and
- * that task's `coding-task-start` Inngest function pins `retries: 0`
- * because plan-mode CLI sessions aren't replay-safe.
- *
- * Backoff is 5s → 10s → 20s → 40s → 60s (capped), capped at
- * `BOOT_WARM_MAX_ATTEMPTS` total. On exhaustion the loop gives up;
- * the per-task `ensureImagePresent` call evicts the failed-warm
- * cache on rejection and will retry fresh on first task arrival.
+ * Background prewarm at boot. Owns retries (`coding-task-start` pins
+ * `retries: 0`); on exhaustion the per-task `ensureImagePresent`
+ * triggers a fresh cycle via cache eviction.
  */
 export interface SandboxImageWarmSpec {
   image: string;
-  /**
-   * Resource limits baked into the snapshot at warm time. Required at
-   * boot because the snapshot path (`daytona.create({ snapshot })`)
-   * has no per-session resources override — the baked values govern
-   * every subsequent session. Omitting would silently fall back to
-   * Daytona's platform default and erase the consumer's intent.
-   */
+  /** Baked into the snapshot at warm time; the snapshot path inherits these forever. */
   resourceLimits: ResourceLimits;
 }
 
@@ -625,27 +592,13 @@ export function scheduleSandboxImageWarm(
   }
 }
 
-/**
- * ~20 attempts × ~60s cap ≈ 20 min total wall-clock ceiling.
- *
- * Exported for the `retryBootWarm` unit test in `index.test.ts` —
- * lets the test pin "exhaustion fires at exactly this count" without
- * hardcoding the value in two places. Not a public API; do not
- * consume from outside the boot path.
- */
+/** ~20 attempts × ~60s cap ≈ 20 min ceiling. Exported for tests only. */
 export const BOOT_WARM_MAX_ATTEMPTS = 20;
 const BOOT_WARM_MIN_DELAY_MS = 5_000;
 const BOOT_WARM_MAX_DELAY_MS = 60_000;
 const BOOT_WARM_JITTER_MS = 1_000;
 
-/**
- * Hand-rolled loop instead of `withRetry`. `withRetry` uses p-retry,
- * which uses `setTimeout` without calling `.unref()`. At boot we
- * fire-and-forget; if a retry is mid-backoff during `SIGTERM`, a
- * non-unrefed timer keeps the event loop alive for up to ~60s before
- * `cogmo serve` can exit. Our own `setTimeout` calls `.unref()` so
- * shutdown is prompt.
- */
+/** Not `withRetry` — p-retry's internal setTimeout isn't unrefed and would block SIGTERM. */
 async function retryBootWarm(
   sandbox: SandboxClient,
   image: string,

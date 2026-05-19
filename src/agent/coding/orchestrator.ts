@@ -330,13 +330,8 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // a task arriving before the warm completes shares the in-flight
     // promise. Local-Docker `ensureImagePresent` is the cheap pull check.
     await stepRun("ensure-image-present", async () => {
-      // Pass `defaultResourceLimits` so a task-time first warm bakes
-      // the coding-delegation limits into the snapshot. Boot already
-      // warms with the same values, so this only matters when a task
-      // arrives before boot warm completes (or after a prior warm
-      // failed) — but in that case the snapshot would otherwise carry
-      // Daytona's platform default and every subsequent session would
-      // inherit it. Idempotent at warm time; no-op once ACTIVE.
+      // Pass limits so a task-time first warm (before boot warm
+      // completes, or after a failed boot warm) bakes them in.
       await sandbox.ensureImagePresent(containerImage, defaultResourceLimits);
     });
     const sessionState = await stepRun("create-container", async () => {

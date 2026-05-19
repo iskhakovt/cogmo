@@ -163,6 +163,14 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
    * which lazy-builds the snapshot on the provider side.
    */
   #snapshotByImage = new Map<string, string>();
+  /**
+   * Per-image resource limits baked into the cached snapshot, used to
+   * detect drift: a later caller asking for different limits on the
+   * same image silently gets the first caller's bake (the snapshot's
+   * resources are baked at create time and not editable in-place).
+   * Logged at warn-level so configuration drift surfaces operationally.
+   */
+  #resourcesByImage = new Map<string, ResourceLimits>();
 
   private constructor(opts: CreateOptions) {
     const config: ConstructorParameters<typeof Daytona>[0] = {
@@ -191,38 +199,39 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
   }
 
   async ensureImagePresent(image: string, resourceLimits?: ResourceLimits): Promise<void> {
-    // Pre-bake a named snapshot via `daytona.snapshot.create({ name, image })`
-    // so subsequent `daytona.create({ snapshot: name })` calls hit Daytona's
-    // runner cache and provision in ~1s instead of paying the multi-minute
-    // image-pull-and-snapshot-build cost on first task. Daytona's own
-    // `daytona.create({ image })` path lazy-builds the snapshot and the
-    // SDK's hardcoded 60s `waitUntilStarted` cap fires before any
-    // realistic image build completes; using the snapshot reference
-    // splits the long-pole work into a dedicated `snapshot.create`
-    // call that blocks until ACTIVE.
-    //
-    // Idempotent + memoised: concurrent callers share one warm cycle.
-    // A failed warm clears the cache (`.catch` below) so the next caller
-    // retries fresh instead of inheriting the failure.
+    // Bake a named snapshot so `daytona.create({ snapshot })` hits the
+    // runner cache (~1s) instead of paying the SDK's 60s waitUntilStarted
+    // cap on the lazy `{ image }` path — image builds routinely exceed
+    // that cap. Memoised per image; rejected promises evict.
     const name = snapshotNameFor(image);
     if (!name) {
-      // Unversioned tag (`:latest`, no tag) — Daytona's `snapshot.create`
-      // rejects these with "Images with tag ':latest' are not allowed",
-      // so we let `create()` fall back to the lazy `{ image }` path. The
-      // miss is documented; the path still works, just slow on first call.
+      // Daytona rejects `snapshot.create` for `:latest` and untagged
+      // images. Fall through silently; `create()` uses the lazy path.
       return;
     }
     let promise = this.#warmPromises.get(image);
-    if (!promise) {
-      // `#ensureSnapshotActive` resolves to the snapshot name that's
-      // actually ACTIVE — usually the derived `name`, but the rebuild
-      // path uses a fresh name to sidestep Daytona's async REMOVING
-      // state. The cache MUST be updated with the resolved name, not
-      // the closure `name`, or `create()` would dispatch against a
-      // stale reference.
+    if (promise) {
+      // Snapshot resources are immutable post-create. A second caller
+      // with different limits silently gets the first caller's bake —
+      // warn so the drift is visible in logs.
+      if (resourceLimits !== undefined) {
+        const cached = this.#resourcesByImage.get(image);
+        if (cached !== undefined && !resourceLimitsEqual(cached, resourceLimits)) {
+          log.warn(
+            { image, cached, requested: resourceLimits },
+            "ensureImagePresent: resourceLimits differ from prior warm — snapshot is already baked, request ignored",
+          );
+        }
+      }
+    } else {
+      // The resolved name may differ from `name` (rebuild path uses a
+      // fresh suffix); cache the actual ACTIVE name.
       promise = this.#ensureSnapshotActive(image, name, resourceLimits).then(
         (activeName) => {
           this.#snapshotByImage.set(image, activeName);
+          if (resourceLimits !== undefined) {
+            this.#resourcesByImage.set(image, resourceLimits);
+          }
         },
         (err: unknown) => {
           // Evict on rejection so the next call retries fresh.
@@ -236,31 +245,18 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
   }
 
   /**
-   * Drive a snapshot to the `ACTIVE` state and return the snapshot
-   * name that's actually live. Walks the state machine exposed by
-   * Daytona's snapshot API:
+   * Drive a snapshot to `ACTIVE` and return the live name. States:
    *
-   *   - `ACTIVE` — return the existing name immediately.
-   *   - `BUILDING` / `PENDING` / `PULLING` — server-side build is
-   *     in-flight (e.g. another cogmo instance kicked it off, or a
-   *     previous boot of this instance). Poll until terminal.
-   *   - `ERROR` / `BUILD_FAILED` / `INACTIVE` / `REMOVING` — prior
-   *     attempt is unusable. Fire-and-forget the delete of the stale
-   *     row and rebuild under a freshly-suffixed name.
-   *   - Not found (DaytonaNotFoundError) — first warm, build under
-   *     the derived name.
+   *   - `ACTIVE` → return as-is.
+   *   - `BUILDING` / `PENDING` / `PULLING` → poll until terminal.
+   *   - `ERROR` / `BUILD_FAILED` / `INACTIVE` / `REMOVING` → fire-and-
+   *     forget delete + rebuild under `<name>-r-<hex>`. Same-name
+   *     recreate against an in-`REMOVING` row 409s — Daytona's delete
+   *     is 2xx immediately but drains in the background.
+   *   - Not found → build under the derived name.
    *
-   * Rebuilds use a fresh `${base}-r-<hex>` suffix because Daytona's
-   * delete returns 2xx immediately but the row drains in the
-   * background; a follow-up create against the same name 409s while
-   * the row is in `REMOVING`. The orphaned stale row times out and
-   * Daytona's reaper cleans it up eventually.
-   *
-   * `snapshot.create()` itself blocks until terminal (per
-   * `@daytonaio/sdk` `Snapshot.js`'s internal poll); the inner
-   * `withRetry` covers Daytona-side pipeline flakes that surface as a
-   * thrown `snapshot.create` (e.g. internal-registry repository
-   * provisioning race).
+   * `snapshot.create()` blocks until terminal (SDK polls internally);
+   * `withRetry` covers transient pipeline flakes.
    */
   async #ensureSnapshotActive(
     image: string,
@@ -306,18 +302,10 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
   }
 
   /**
-   * Issue `snapshot.create` with a tight retry envelope for the
-   * Daytona-side transient pipeline class (see
-   * `isTransientSnapshotCreateError`). Persistent failures (image
-   * Dockerfile error, auth, validation) are filtered out by the
-   * predicate so they fail fast.
-   *
-   * `resourceLimits` bakes into the snapshot. Subsequent
-   * `daytona.create({ snapshot })` sessions inherit these values —
-   * `CreateSandboxFromSnapshotParams` has no per-session resources
-   * override, so the caller's intent at warm time is the only chance
-   * to set them. When omitted, Daytona's platform default applies
-   * (1 cpu / 1 GiB RAM / 3 GiB disk at the time of writing).
+   * `resourceLimits` bake into the snapshot — `daytona.create({
+   * snapshot })` has no per-session resources override, so warm time
+   * is the only chance to set them. Omitting falls back to Daytona's
+   * platform default (1 cpu / 1 GiB / 3 GiB at the time of writing).
    */
   async #buildSnapshot(
     image: string,
@@ -344,14 +332,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     return name;
   }
 
-  /**
-   * Fire-and-forget delete of a stale snapshot. The caller has
-   * already decided to rebuild under a fresh name; even if the delete
-   * stays stuck in Daytona's `REMOVING` state indefinitely, we no
-   * longer depend on the name. The catch swallows failure to a `warn`
-   * so a chronically-stuck reaper surfaces in logs without blocking
-   * the warm path.
-   */
+  /** Rebuild uses a fresh name, so we never need to await the delete drain. */
   #fireAndForgetDelete(
     snapshot: Awaited<ReturnType<Daytona["snapshot"]["get"]>>,
     image: string,
@@ -490,12 +471,16 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
           );
           this.#snapshotByImage.delete(spec.image);
           this.#warmPromises.delete(spec.image);
-          void this.ensureImagePresent(spec.image).catch((rewarmErr: unknown) => {
-            log.warn(
-              { err: rewarmErr, image: spec.image },
-              "background re-warm after NotFound failed — next task will fall back again",
-            );
-          });
+          // Forward limits so the re-baked snapshot carries the
+          // consumer's intent, not Daytona's platform default.
+          void this.ensureImagePresent(spec.image, spec.resourceLimits).catch(
+            (rewarmErr: unknown) => {
+              log.warn(
+                { err: rewarmErr, image: spec.image },
+                "background re-warm after NotFound failed — next task will fall back again",
+              );
+            },
+          );
           sdkSandbox = await createFromImage();
         } else {
           throw err;
@@ -777,41 +762,28 @@ function rebuildSnapshotName(base: string): string {
 }
 
 /**
- * Three classes of error are retried, none others.
+ * Retries: rate-limit (429), connection errors, and the Daytona
+ * internal-registry race (`repository … not found` from the builder
+ * — daytonaio/daytona#3582). The SDK doesn't retry any of these
+ * internally. Everything else — auth, validation, conflict, timeout,
+ * Dockerfile errors — doesn't clear on retry and surfaces immediately.
  *
- * 1. **Rate limit (`DaytonaRateLimitError`, HTTP 429).** The Daytona
- *    SDK does not retry 429 internally — its only axios interceptor
- *    is for OpenTelemetry tracing; no `Retry-After` parsing, no
- *    exponential backoff. The first 429 surfaces straight through, so
- *    swallowing it here is the right call.
- *
- * 2. **Network blip (`DaytonaConnectionError`).** The SDK's internal
- *    `snapshot.create` loop polls `get(name)` every second to await
- *    terminal state; any one of those reads is exposed to a transient
- *    socket/DNS hiccup. The SDK rethrows it raw, so we cover.
- *
- * 3. **Daytona internal-registry race** — a `snapshot.create` POST or
- *    poll-cycle response carrying
- *    `unprocessable entity: Error response from daemon: unknown:
- *     repository sbox/daytona-<sha256> not found`, which Daytona's
- *    builder pipeline emits when the per-snapshot internal repo
- *    wasn't pre-provisioned before push (acknowledged upstream as
- *    daytonaio/daytona#3582).
- *
- * Auth / authorization / validation / not-found / conflict /
- * timeout are intentionally NOT retried — they don't clear on retry,
- * just delay the user-visible failure. The narrow regex is also load-
- * bearing for the Docker-daemon path: broader patterns risk catching
- * persistent failures like a malformed Dockerfile or a missing
- * upstream image.
- *
- * Exported for the table-driven matrix test in `client.test.ts`.
+ * Exported for the matrix test in `client.test.ts`.
  */
 export function isTransientSnapshotCreateError(err: unknown): boolean {
   if (err instanceof DaytonaRateLimitError) return true;
   if (err instanceof DaytonaConnectionError) return true;
   if (!(err instanceof Error)) return false;
-  return /repository .* not found/i.test(err.message ?? "");
+  return /repository .* not found/i.test(err.message);
+}
+
+function resourceLimitsEqual(a: ResourceLimits, b: ResourceLimits): boolean {
+  return (
+    a.cpus === b.cpus &&
+    a.memory_bytes === b.memory_bytes &&
+    a.pids === b.pids &&
+    a.disk_bytes === b.disk_bytes
+  );
 }
 
 function resourcesFromLimits(limits: {

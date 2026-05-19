@@ -147,10 +147,7 @@ export class SysboxSkillWorker {
       disk_bytes: opts.resourceLimits?.disk_bytes ?? DEFAULT_RESOURCE_LIMITS.disk_bytes,
     };
 
-    // Pass `resourceLimits` so a first warm (no boot prewarm match for
-    // a custom skills image) bakes the right values into the snapshot.
-    // Idempotent at warm time; no-op once the boot warm has already
-    // resolved against the same image.
+    // Pass limits so a first warm against a custom image bakes them in.
     await opts.sandbox.ensureImagePresent(opts.image, resourceLimits);
 
     const session = await opts.sandbox.create({

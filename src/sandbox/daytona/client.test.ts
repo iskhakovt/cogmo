@@ -1185,6 +1185,86 @@ describe("DaytonaSandboxClient", () => {
       expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
     });
 
+    it("warns when a second ensureImagePresent call requests resourceLimits that differ from the cached bake", async () => {
+      // Snapshot resources are immutable post-create; a second caller
+      // can't get different limits without rebuilding. Drift is rare at
+      // single-user scale but the warn makes it operationally visible
+      // when it happens.
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: PYTHON_SNAPSHOT, state: SnapshotState.ACTIVE }),
+      );
+      const warnSpy = vi.spyOn(logger, "warn");
+      try {
+        const client = await makeClient();
+        const limitsA = { cpus: 1, memory_bytes: 512 * 1024 * 1024, pids: 256 };
+        const limitsB = { cpus: 2, memory_bytes: 2 * 1024 * 1024 * 1024, pids: 256 };
+        await client.ensureImagePresent(PYTHON_IMAGE, limitsA);
+        await client.ensureImagePresent(PYTHON_IMAGE, limitsB);
+        expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(1);
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ image: PYTHON_IMAGE, cached: limitsA, requested: limitsB }),
+          expect.stringContaining("resourceLimits differ from prior warm"),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("does NOT warn when the same limits are passed twice", async () => {
+      // The matching case is the common path (boot → task-time uses
+      // identical limits). A warn here would spam the logs on every
+      // task arrival.
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockResolvedValue(
+        fakeSnapshot({ name: PYTHON_SNAPSHOT, state: SnapshotState.ACTIVE }),
+      );
+      const warnSpy = vi.spyOn(logger, "warn");
+      try {
+        const client = await makeClient();
+        const limits = { cpus: 1, memory_bytes: 512 * 1024 * 1024, pids: 256 };
+        await client.ensureImagePresent(PYTHON_IMAGE, limits);
+        await client.ensureImagePresent(PYTHON_IMAGE, { ...limits });
+        expect(warnSpy).not.toHaveBeenCalledWith(
+          expect.anything(),
+          expect.stringContaining("resourceLimits differ"),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("exhausts the retry budget under a sustained transient signature (not infinite)", async () => {
+      // Pins that the retry budget is finite (3 retries + initial = 4
+      // attempts). Without this assertion, a regression that changes
+      // the budget to "infinite" — or a predicate edit that flips
+      // the SDK's own retry into our envelope — would not be caught
+      // by the existing "retries once then succeeds" matrix.
+      vi.useFakeTimers();
+      try {
+        daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+        daytonaCalls.snapshotCreate.mockRejectedValue(
+          new Error(
+            "unprocessable entity: Error response from daemon: unknown: repository sbox/daytona-xyz not found",
+          ),
+        );
+
+        const client = await makeClient();
+        const warm = client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+        // Capture the rejection up front so vitest's unhandled-rejection
+        // tracker doesn't flag it during the timer-advance window.
+        const captured = warm.catch((e: unknown) => e);
+        await vi.advanceTimersByTimeAsync(20_000);
+        const err = await captured;
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error).message).toMatch(/repository sbox/);
+        // 1 initial + 3 retries = 4 calls.
+        expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(4);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("concurrent callers share one warm cycle", async () => {
       let resolveCreate: (value: DaytonaSnapshot) => void = () => {};
       const createGate = new Promise<DaytonaSnapshot>((resolve) => {
@@ -1289,6 +1369,62 @@ describe("DaytonaSandboxClient", () => {
       expect(daytonaCalls.create.mock.calls[1]?.[0]).toMatchObject({
         image: PYTHON_IMAGE,
       });
+    });
+
+    it("NotFound fallback re-warms with the spec's resourceLimits (regression: re-warm must not bake platform default)", async () => {
+      // The fallback fires a background `ensureImagePresent` to
+      // re-bake the snapshot. Earlier this path passed no
+      // `resourceLimits`, baking Daytona's platform default and
+      // silently undoing the consumer's intent on every subsequent
+      // session.
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      daytonaCalls.snapshotCreate.mockImplementation(async (arg: unknown) => {
+        const { name } = arg as { name: string };
+        return fakeSnapshot({ name, state: SnapshotState.ACTIVE });
+      });
+      daytonaCalls.create
+        .mockRejectedValueOnce(new DaytonaNotFoundError("snapshot not found"))
+        .mockResolvedValueOnce(fakeSandbox({ id: "sb-rewarm", state: SandboxState.STARTED }));
+
+      const customLimits = {
+        cpus: 1,
+        memory_bytes: 512 * 1024 * 1024,
+        pids: 1024,
+        disk_bytes: 1024 * 1024 * 1024,
+      };
+      const client = await makeClient();
+      await client.ensureImagePresent(PYTHON_IMAGE, customLimits);
+      // Triggers the NotFound → fallback path with `spec.resourceLimits`
+      // pulled from BASE_SPEC's defaults — but the limits the re-warm
+      // bakes must come from spec, not the original ensureImagePresent
+      // call.
+      const specLimits = {
+        cpus: 4,
+        memory_bytes: 4 * 1024 * 1024 * 1024,
+        pids: 512,
+      };
+      await client.create({
+        ...BASE_SPEC,
+        image: PYTHON_IMAGE,
+        resourceLimits: specLimits,
+      });
+
+      // Drain the background re-warm microtask. The re-warm fires via
+      // `void ensureImagePresent(...)`; its `snapshot.create` call has
+      // to land before we can assert on the resources argument.
+      await vi.waitFor(() => {
+        expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(2);
+      });
+      // The first warm baked the customLimits the test provided;
+      // the second (re-warm) bakes spec.resourceLimits = specLimits.
+      const firstCreate = daytonaCalls.snapshotCreate.mock.calls[0]?.[0] as {
+        resources: { cpu: number; memory: number; disk?: number };
+      };
+      expect(firstCreate.resources).toEqual({ cpu: 1, memory: 1, disk: 1 });
+      const secondCreate = daytonaCalls.snapshotCreate.mock.calls[1]?.[0] as {
+        resources: { cpu: number; memory: number };
+      };
+      expect(secondCreate.resources).toEqual({ cpu: 4, memory: 4 });
     });
 
     it("snapshot path: non-NotFound errors do NOT fall back (auth / rate-limit / connection re-throw)", async () => {
