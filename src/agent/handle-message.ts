@@ -2,8 +2,8 @@ import { NonRetriableError } from "inngest";
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import {
+  buildConversationErroredEvent,
   conversationDegraded,
-  conversationErrored,
   inboundReady,
   responseReady,
 } from "../inngest/events.js";
@@ -30,6 +30,7 @@ import type { VoiceProviderResolver } from "../voice/resolver.js";
 import type { CodingService } from "./coding/service.js";
 import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
 import { loadConversationContext } from "./conversation/load-conversation-context.js";
+import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
@@ -183,9 +184,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         // upstream class rather than every error coalescing to one bucket.
         const cause = error.cause;
         const causeClass = cause instanceof Error ? cause.name : null;
+        // Bus-level dedup with the worker-death reconcile (subscriber on
+        // `inngest/function.failed`). Both emit `conversation/errored`
+        // via `buildConversationErroredEvent`, which bakes in
+        // `id: "errored-${runId}"`. Inngest's event-id dedup window
+        // ensures `recover-conversation` runs exactly once even when
+        // both paths fire for the same failed run. See
+        // `src/inngest/events.ts → buildConversationErroredEvent` and
+        // `design/agent-resilience.md → Triggers`.
         await step.sendEvent(
           "emit-conversation-errored",
-          conversationErrored.create({
+          buildConversationErroredEvent({
             conversationId,
             runId,
             triggerInboundId,
@@ -223,18 +232,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return deps.runInTx((tx) => agentStore.getConversation(tx, conversationId));
       });
       if (!conv) throw new Error(`Conversation not found: ${conversationId}`);
-
-      // Status guard — `recover-conversation` marks a conversation `errored`
-      // after retries on this function exhausted (or it failed
-      // non-retriably). We refuse to spend more LLM calls on a known-broken
-      // conversation until status flips back to `active` (manual psql for
-      // now; future `/repair` command). Catches any unrecoverable failure
-      // class — model deprecated, credentials revoked, content-moderation
-      // block, persistent provider outage, malformed tool schema — that
-      // would otherwise produce a retry-storm with every new inbound.
-      if (conv.status === "errored") {
-        return { status: "skipped", reason: "errored" };
-      }
 
       const { userId, profileId } = conv;
 
@@ -293,6 +290,52 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // No unbatched messages — nothing to process (e.g., flush with no new input)
       if (inboundMessages.length === 0) {
         return { status: "skipped", reason: "no_messages" };
+      }
+
+      // Cooldown guard — `recover-conversation` writes a `cooldown_state`
+      // blob on conversations whose `handle-message` runs exhausted retries
+      // (or failed non-retriably). While the cooldown window is open, we
+      // refuse to spend more LLM calls; the user gets a terse hand-built
+      // reply with a retry-time estimate.
+      //
+      // Placement is deliberate — *after* the no_messages / staleness /
+      // await_input exits — so the cooldown reply only fires when there's
+      // a real triggering inbound the user is actively trying to deliver.
+      // Otherwise a null-trigger flush during cooldown would send a reply
+      // to a message that doesn't exist.
+      //
+      // The debounce contract caps the reply rate naturally: a burst of
+      // user messages during one debounce window coalesces to one
+      // `inbound/ready` and one cooldown reply. Across multiple debounce
+      // windows in the same cooldown the user gets N replies, where N is
+      // the number of user-active windows — not a tight loop. See
+      // design/agent-resilience.md → In-cooldown reply.
+      //
+      // Inbounds stay unbatched — `getUnbatchedInbound` is a pure SELECT,
+      // so when the cooldown elapses the next `inbound/ready` loads the
+      // entire backlog as one batch.
+      const guardNow = new Date();
+      if (conv.cooldownState !== null && isInCooldown(conv.cooldownState, guardNow)) {
+        const cooldownState = conv.cooldownState;
+        await step.run("in-cooldown-reply", async () => {
+          try {
+            await deliveryRouter.notifyConversation(
+              conversationId,
+              buildInCooldownReply(cooldownState, guardNow),
+            );
+          } catch (notifyErr) {
+            // Best-effort delivery — same shape as `onFailure`'s
+            // `notify-user`. Swallowing prevents a transient session-lookup
+            // or transport blip from propagating up, exhausting Inngest's
+            // retry budget, and tripping `onFailure` → spuriously doubling
+            // the cooldown for what's really just a delivery hiccup.
+            turnLogger.error(
+              { err: notifyErr },
+              "in-cooldown-reply: notifyConversation failed; conversation stays in cooldown",
+            );
+          }
+        });
+        return { status: "skipped", reason: "cooldown" };
       }
 
       const inboundBlocks = inboundMessages.flatMap((m) => contentToBlocks(m.content));
@@ -702,15 +745,26 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const summarizationModel = snapshot.summarizationModel;
 
       const lastTokens = await deps.runInTx((tx) => agentStore.getLastTokens(tx, conversationId));
-      const skip = shouldSkipCounting(
+      const skipBudgetStrategies = shouldSkipCounting(
         lastTokens?.inputTokens ?? null,
         lastTokens?.outputTokens ?? null,
         userContentText.length,
         budget,
       );
 
-      if (!skip) {
-        const compactResult = await compactMessages(fullPrompt, historyMessages, toolDefs, {
+      // Always invoke compaction. Strategy 0 (same-tool supersession)
+      // is structural and runs regardless of budget — gating it behind
+      // shouldSkipCounting would defeat the design (volume-driven
+      // attention dilution doesn't care about budget headroom). The
+      // skip-counting decision now flows in as `skipBudgetStrategies`,
+      // which gates Strategies 1–3 inside compactMessages so the
+      // expensive provider.countTokens round-trip is only paid when
+      // budget pressure could matter.
+      const compactResult = await compactMessages(
+        fullPrompt,
+        historyMessages,
+        toolDefs,
+        {
           countTokens: (params) => provider.countTokens({ ...params, model }),
           budget,
           summarize: async (system, msgs) => {
@@ -748,9 +802,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           onStatus: (message) => {
             delivery.push({ type: "status", message });
           },
-        });
-        historyMessages = compactResult.messages;
-      }
+        },
+        skipBudgetStrategies,
+      );
+      historyMessages = compactResult.messages;
 
       let result: AgentLoopResult;
       try {
@@ -827,10 +882,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       );
 
       // ──── DURABLE: persist all new messages (tool turns + final assistant) ────
+      //
+      // Half-open success: when the entry guard saw an elapsed cooldown
+      // and admitted this probe turn, clear `cooldown_state` in the same
+      // transaction. Strict prior-cooldown gating avoids a per-turn
+      // pointless UPDATE on Closed conversations.
 
+      const wasCoolingDown = conv.cooldownState !== null;
       const assistantMsg = await step.run("persist-new-messages", async () => {
-        return await deps.runInTx((tx) =>
-          agentStore.insertMessages(tx, {
+        return await deps.runInTx(async (tx) => {
+          const inserted = await agentStore.insertMessages(tx, {
             conversationId,
             messages: result.newMessages,
             profileId: snapshot.profileId,
@@ -838,8 +899,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             lastInboundMessageId: maxInboundId,
             lastMessageInputTokens: result.usage.inputTokens,
             lastMessageOutputTokens: result.usage.outputTokens,
-          }),
-        );
+          });
+          if (wasCoolingDown) {
+            await agentStore.clearCooldown(tx, conversationId);
+          }
+          return inserted;
+        });
       });
 
       // Emit the degrade signal as a separate durable step after persist —

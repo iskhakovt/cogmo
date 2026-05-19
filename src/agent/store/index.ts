@@ -22,6 +22,7 @@ import {
 } from "./errors.js";
 import {
   aliases,
+  type CooldownState,
   conversations,
   coreMemoryBlocks,
   customCompartments,
@@ -76,9 +77,6 @@ const CANONICAL_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
  *      recent **assistant** row, which always carries the real count.
  */
 export const UNKNOWN_OUTPUT_TOKENS = -1;
-
-/** Mirrors the `conversation_status` PG enum. */
-export type ConversationStatus = "active" | "errored";
 
 /** Voice mode preference. Mirrors the `voice_mode` pgEnum exactly. */
 export type VoiceMode = "auto" | "always" | "never";
@@ -329,7 +327,8 @@ export interface AgentStore {
         userId: string;
         profileId: string;
         isPrivate: boolean;
-        status: ConversationStatus;
+        /** Auto-repair cooldown blob; null = CLOSED (normal operation). */
+        cooldownState: CooldownState | null;
         /** Per-conversation voice mode override; null = follow profile default. */
         voiceMode: VoiceMode | null;
       }
@@ -337,18 +336,20 @@ export interface AgentStore {
   >;
 
   /**
-   * Update a conversation's status. Used by `recover-conversation` to mark
-   * a conversation as `errored` after retries on `handle-message` exhausted,
-   * and by future `/repair` to flip back to `active`. The orchestrator
-   * early-returns with `{ status: "skipped", reason: "errored" }` for any
-   * inbound while `errored`, refusing to spend more LLM calls on a
-   * known-broken conversation.
+   * Write the auto-repair cooldown blob. Called by `recover-conversation`
+   * after `handle-message` exhausts retries — the caller computes the
+   * next blob from the prior one via `nextCooldownState` and passes it
+   * here. The store is unaware of the curve; it just persists the row.
    */
-  setConversationStatus(
-    tx: Transaction,
-    conversationId: string,
-    status: ConversationStatus,
-  ): Promise<void>;
+  writeCooldownState(tx: Transaction, conversationId: string, state: CooldownState): Promise<void>;
+
+  /**
+   * Clear the auto-repair cooldown blob to `NULL`. Called on the first
+   * successful turn past the cooldown threshold (half-open success), by
+   * `/repair`, and by `/model` / `/profile` switches. Idempotent — clearing
+   * an already-clear row is a no-op write.
+   */
+  clearCooldown(tx: Transaction, conversationId: string): Promise<void>;
 
   /**
    * Set or clear the per-conversation voice mode override. `null` clears
@@ -1225,7 +1226,7 @@ export class DrizzleAgentStore implements AgentStore {
         userId: string;
         profileId: string;
         isPrivate: boolean;
-        status: ConversationStatus;
+        cooldownState: CooldownState | null;
         voiceMode: VoiceMode | null;
       }
     | undefined
@@ -1236,7 +1237,7 @@ export class DrizzleAgentStore implements AgentStore {
         userId: conversations.userId,
         profileId: conversations.profileId,
         isPrivate: conversations.isPrivate,
-        status: conversations.status,
+        cooldownState: conversations.cooldownState,
         voiceMode: conversations.voiceMode,
       })
       .from(conversations)
@@ -1245,12 +1246,22 @@ export class DrizzleAgentStore implements AgentStore {
     return rows[0];
   }
 
-  async setConversationStatus(
+  async writeCooldownState(
     tx: Transaction,
     conversationId: string,
-    status: ConversationStatus,
+    state: CooldownState,
   ): Promise<void> {
-    await tx.update(conversations).set({ status }).where(eq(conversations.id, conversationId));
+    await tx
+      .update(conversations)
+      .set({ cooldownState: state })
+      .where(eq(conversations.id, conversationId));
+  }
+
+  async clearCooldown(tx: Transaction, conversationId: string): Promise<void> {
+    await tx
+      .update(conversations)
+      .set({ cooldownState: null })
+      .where(eq(conversations.id, conversationId));
   }
 
   async setConversationVoiceMode(

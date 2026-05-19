@@ -259,11 +259,12 @@ export interface SandboxClient<TState extends SandboxSessionState = SandboxSessi
   reconcileCrashedInstances(currentInstanceId: string): Promise<{ orphansReaped: number }>;
 
   /**
-   * Verify `image` is reachable from the backend (locally cached on
-   * Local-Docker, registry-reachable on Daytona). Idempotent and cheap
-   * when satisfied.
+   * Verify `image` is reachable. Idempotent. `resourceLimits` bakes
+   * into the Daytona snapshot at warm time — the snapshot-path
+   * `create()` has no per-session override. Ignored by Local-Docker;
+   * omit to accept the provider's default.
    */
-  ensureImagePresent(image: string): Promise<void>;
+  ensureImagePresent(image: string, resourceLimits?: ResourceLimits): Promise<void>;
 
   /** Mint a new session per `spec`. */
   create(spec: SessionSpec): Promise<SandboxSession<TState>>;

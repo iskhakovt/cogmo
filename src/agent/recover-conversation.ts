@@ -1,40 +1,30 @@
 /**
- * Recovery function — listens for `conversation/errored` and marks the
- * conversation as irrecoverable so `handle-message`'s status guard
- * refuses further inbound until a human resets it.
+ * Auto-repair cooldown writer. Listens for `conversation/errored` and
+ * writes the next `cooldown_state` blob so `handle-message`'s entry guard
+ * starts skipping inbounds until the cooldown elapses.
  *
- * Triggered by the `onFailure` handler on `handle-message` after Inngest
- * retries exhaust (or immediately on a `NonRetriableError`).
+ * Triggered by `handle-message.onFailure` after Inngest retries exhaust
+ * (or immediately on a `NonRetriableError`). Bus-level dedup on
+ * `id: "errored-${runId}"` ensures one run per `runId` even when both
+ * `onFailure` and the worker-death reconcile path emit for the same
+ * failed turn (see design/agent-resilience.md → Triggers).
  *
- * Minimal scope: this version just sets `status = errored`. It doesn't
- * attempt repair-and-retry — without a repair pathway in place, retrying
- * a deterministic failure (auth revoked, model deprecated, content
- * moderation, malformed tool schema, programmer bug) just burns LLM
- * calls on the same upstream error. The status guard makes failures
- * cheap; a future PR can add a repair branch on top if/when concrete
- * recovery cases arise (orphan history reintroduced by a second writer,
- * provider transient classification expanded, etc.).
+ * Read-modify-write: reads the prior blob (if any), feeds it to
+ * `nextCooldownState` (60s base → 2× → 1h cap), writes the result.
+ * REPEATABLE READ keeps the read/write consistent; the transactor's
+ * once-retry covers the 40001 case if a second errored event somehow
+ * slips past bus dedup.
  *
  * `retries: 0` — one shot per failure event. If this function itself
  * fails mid-run, Inngest's standard alerting catches it; we don't want
  * a recovery cascade.
- *
- * Race window between `conversation/errored` emission and the status
- * write: a new inbound arriving in that gap will pass `handle-message`'s
- * status guard (status is still `active`), run the agent loop, fail the
- * same way, and trip `onFailure` again — which re-emits
- * `conversation/errored` and re-runs this function. The cycle converges:
- * each failed retry costs one LLM call, but eventually a `recover-conversation`
- * run lands its `setConversationStatus` write before the next inbound
- * passes the guard, and the guard starts skipping. Self-healing without
- * an explicit retry policy. Worth knowing this isn't a bug if you're
- * tracing duplicate `conversation/errored` events in telemetry.
  */
 
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import { conversationErrored } from "../inngest/events.js";
 import { logger } from "../logger.js";
+import { nextCooldownState } from "./cooldown.js";
 import type { AgentStore } from "./store/index.js";
 
 export interface RecoverConversationDeps {
@@ -55,30 +45,47 @@ export function createRecoverConversation(deps: RecoverConversationDeps) {
     async ({ event, step }) => {
       const { conversationId, errorClass, causeClass, errorMessage } = event.data;
 
-      const conv = await step.run("load-conversation", async () => {
-        return runInTx((tx) => agentStore.getConversation(tx, conversationId));
+      const result = await step.run("write-cooldown", async () => {
+        // Capture `now` outside `runInTx` so a 40001 retry inside the
+        // transactor reuses the same anchor (recover-conversation has
+        // `retries: 0`, but the transactor's own once-retry would
+        // otherwise re-anchor `lastErroredAt` by a few ms across attempts).
+        const now = new Date();
+        return runInTx(async (tx) => {
+          const conv = await agentStore.getConversation(tx, conversationId);
+          if (!conv) {
+            return { kind: "not_found" as const };
+          }
+          const next = nextCooldownState(conv.cooldownState, now);
+          await agentStore.writeCooldownState(tx, conversationId, next);
+          return { kind: "wrote" as const, state: next };
+        });
       });
-      if (!conv) {
+
+      if (result.kind === "not_found") {
         logger.warn(
           { conversationId, errorClass, errorMessage },
           "recover-conversation: conversation not found",
         );
         return { status: "skipped", reason: "conversation_not_found" };
       }
-      if (conv.status === "errored") {
-        // Already marked — earlier failure on the same conversation already
-        // tripped this. Nothing to do.
-        return { status: "skipped", reason: "already_errored" };
-      }
 
-      await step.run("mark-errored", async () => {
-        await runInTx((tx) => agentStore.setConversationStatus(tx, conversationId, "errored"));
-      });
       logger.warn(
-        { conversationId, errorClass, causeClass, errorMessage },
-        "recover-conversation: conversation marked errored",
+        {
+          conversationId,
+          errorClass,
+          causeClass,
+          errorMessage,
+          cooldownSeconds: result.state.cooldownSeconds,
+          consecutiveFailures: result.state.consecutiveFailures,
+        },
+        "recover-conversation: cooldown armed",
       );
-      return { status: "marked_errored" };
+      return {
+        status: "cooldown_armed",
+        cooldownSeconds: result.state.cooldownSeconds,
+        consecutiveFailures: result.state.consecutiveFailures,
+      };
     },
   );
 }

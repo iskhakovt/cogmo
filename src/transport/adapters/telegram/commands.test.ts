@@ -3022,7 +3022,7 @@ describe("handleRepair", () => {
   // Bare `/repair` (no arg) acts on the current session. Mirrors `/name`'s
   // pattern of calling resolveSession to find the active conversation id.
   it("uses the active session when called with no arg", async () => {
-    const repair = vi.fn().mockResolvedValue(ok({ wasErrored: true }));
+    const repair = vi.fn().mockResolvedValue(ok({ wasCoolingDown: true }));
     const transport = transportWith({
       resolveSession: vi.fn().mockResolvedValue({
         id: "s1",
@@ -3046,7 +3046,7 @@ describe("handleRepair", () => {
     expect(ctx.reply).toHaveBeenCalledWith(expect.stringMatching(/Repaired/));
   });
 
-  it("replies 'already active' when wasErrored: false", async () => {
+  it("replies 'isn't cooling down' when wasCoolingDown: false", async () => {
     const transport = transportWith({
       resolveSession: vi.fn().mockResolvedValue({
         id: "s1",
@@ -3061,12 +3061,12 @@ describe("handleRepair", () => {
         getCurrent: vi.fn().mockResolvedValue(ok(null)),
         setAlias: vi.fn().mockResolvedValue(ok(undefined)),
         setProfile: vi.fn().mockResolvedValue(ok(undefined)),
-        repair: vi.fn().mockResolvedValue(ok({ wasErrored: false })),
+        repair: vi.fn().mockResolvedValue(ok({ wasCoolingDown: false })),
       },
     });
     const ctx = mkCtx();
     await handleRepair(transport, ctx);
-    expect(ctx.reply).toHaveBeenCalledWith(expect.stringMatching(/already active/));
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringMatching(/isn't cooling down/));
   });
 
   it("tells the user when there's no active session and no arg", async () => {
@@ -3080,7 +3080,7 @@ describe("handleRepair", () => {
 
   // UUID arg path — bypasses the alias lookup.
   it("uses the UUID directly when given a UUID arg", async () => {
-    const repair = vi.fn().mockResolvedValue(ok({ wasErrored: true }));
+    const repair = vi.fn().mockResolvedValue(ok({ wasCoolingDown: true }));
     const transport = transportWith({
       conversations: {
         list: vi.fn().mockResolvedValue(ok([])),
@@ -3098,7 +3098,7 @@ describe("handleRepair", () => {
   // Alias arg path — looks up the conversation in `list`, then calls repair
   // with the resolved id.
   it("resolves alias args via conversations.list", async () => {
-    const repair = vi.fn().mockResolvedValue(ok({ wasErrored: true }));
+    const repair = vi.fn().mockResolvedValue(ok({ wasCoolingDown: true }));
     const transport = transportWith({
       conversations: {
         list: vi.fn().mockResolvedValue(
@@ -3131,7 +3131,7 @@ describe("handleRepair", () => {
         getCurrent: vi.fn().mockResolvedValue(ok(null)),
         setAlias: vi.fn().mockResolvedValue(ok(undefined)),
         setProfile: vi.fn().mockResolvedValue(ok(undefined)),
-        repair: vi.fn().mockResolvedValue(ok({ wasErrored: false })),
+        repair: vi.fn().mockResolvedValue(ok({ wasCoolingDown: false })),
       },
     });
     const ctx = mkCtx("ghost");
@@ -3286,7 +3286,7 @@ describe("handleStatus", () => {
       ok({
         conversationId: "11111111-2222-3333-4444-555555556666",
         alias: "work",
-        status: "active",
+        cooldownState: null,
         createdAt: new Date(),
         lastMessageAt: new Date(),
         messageCount: 4,
@@ -3343,7 +3343,7 @@ describe("handleStatus", () => {
           ok({
             conversationId: "11111111-2222-3333-4444-555555556666",
             alias: "private",
-            status: "active",
+            cooldownState: null,
             createdAt: new Date(),
             lastMessageAt: new Date(),
             messageCount: 4,
@@ -3389,7 +3389,7 @@ describe("handleStatus", () => {
           ok({
             conversationId: "11111111-2222-3333-4444-555555556666",
             alias: "private",
-            status: "active",
+            cooldownState: null,
             createdAt: new Date(),
             lastMessageAt: new Date(),
             messageCount: 4,
@@ -3446,7 +3446,7 @@ describe("handleStatus", () => {
           ok({
             conversationId: "11111111-2222-3333-4444-555555556666",
             alias: "work",
-            status: "active",
+            cooldownState: null,
             createdAt: new Date(),
             lastMessageAt: new Date(),
             messageCount: 4,
@@ -3488,7 +3488,7 @@ describe("handleStatus", () => {
           ok({
             conversationId: "11111111-2222-3333-4444-555555556666",
             alias: "private",
-            status: "active",
+            cooldownState: null,
             createdAt: new Date(),
             lastMessageAt: new Date(),
             messageCount: 4,

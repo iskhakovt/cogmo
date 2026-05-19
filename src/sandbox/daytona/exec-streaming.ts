@@ -234,16 +234,20 @@ export async function startExecStreaming(args: {
         stdout.end();
         stderr.end();
         if (onClose) onClose();
-        await cleanupSession();
-        if (timedOut) {
-          reject(timedOut);
-          return;
-        }
-        if (disposed) {
-          reject(new DisposedError());
-          return;
-        }
+        // `getSessionCommand` 404s once the session is deleted, so
+        // cleanup must run after the fetch on the success path.
+        // `try/finally` ensures cleanup on every settle path
+        // (timedOut, disposed, success, fetch-error). Idempotent via
+        // the `cleanedUp` guard in `cleanupSession`.
         try {
+          if (timedOut) {
+            reject(timedOut);
+            return;
+          }
+          if (disposed) {
+            reject(new DisposedError());
+            return;
+          }
           const cmd = await daytonaProcess.getSessionCommand(sessionId, commandId);
           if (cmd.exitCode === undefined || cmd.exitCode === null) {
             reject(
@@ -255,7 +259,22 @@ export async function startExecStreaming(args: {
           }
           resolve({ exitCode: cmd.exitCode });
         } catch (err) {
-          reject(err as Error);
+          // Map back to the documented sentinel when a settle flag is
+          // set — `dispose()` racing the in-flight fetch surfaces as
+          // `DaytonaNotFoundError` from the SDK; consumers branching
+          // on outcome must see `DisposedError`. Mirrors `.catch`'s
+          // shape. `timedOut` is unreachable here (clearTimers runs
+          // above the try) but checked for parity.
+          if (timedOut) {
+            timedOut.cause = err as Error;
+            reject(timedOut);
+          } else if (disposed) {
+            reject(new DisposedError());
+          } else {
+            reject(err as Error);
+          }
+        } finally {
+          await cleanupSession();
         }
       })
       .catch(async (err: Error) => {

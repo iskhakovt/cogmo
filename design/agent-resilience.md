@@ -35,7 +35,7 @@ The Errored off-ramp is the conversation-level circuit breaker: it sets an expon
 
 Inbounds to a conversation that just took the Errored off-ramp wait through an exponentially-backing-off cooldown before the next turn fires, rather than blocking until a human resets the row. Maps to the canonical circuit breaker pattern (`CLOSED` / `OPEN` / `HALF-OPEN`) at the conversation level, collapsed to two persistent states because there's no concurrent traffic to gate.
 
-### State machine `[proposed]`
+### State machine `[confirmed]`
 
 | State | Predicate | Behavior |
 |-|-|-|
@@ -45,7 +45,7 @@ Inbounds to a conversation that just took the Errored off-ramp wait through an e
 
 Standard three-state circuit breakers reserve `HALF-OPEN` to gate concurrent probes ("send one request, see if it works, before opening the floodgates"). At single-user scale there's no concurrent traffic to gate — the next inbound IS the probe. Collapsing to two persistent states is a deliberate simplification, not an oversight.
 
-### Cooldown curve `[proposed]`
+### Cooldown curve `[confirmed]`
 
 - **Base:** 60 seconds. Sub-minute backoffs belong inside Inngest's per-step retry budget, not the conversation layer.
 - **Multiplier:** 2× per consecutive failure.
@@ -57,7 +57,7 @@ Sequence: `60s → 120s → 240s → 480s → 960s → 1920s → 3600s` (capped)
 
 Defaults align with LiteLLM Router's `cooldown_time: 60` and AWS Bedrock retry guidance ("max backoff cap: 10-60s for user-facing operations, longer for background"). Conversation-level cooldown sits between these — LLM responses are user-facing, but the user's tolerance for "I had an error, give me a minute" is measured in minutes, not seconds.
 
-### Storage `[proposed]`
+### Storage `[confirmed]`
 
 One JSONB column on `conversations`:
 
@@ -78,7 +78,7 @@ Validated at the store boundary via `jsonbZod(name, CooldownStateSchema)` (see `
 
 The existing `conversations.status` enum and column are dropped. `'errored'` was the only value other than `'active'`; once auto-repair lands, no code branches on the enum — "in cooldown" is a derived predicate on `cooldown_state`. A single-value enum is pure noise. Future lifecycle states (`'archived'`, `'paused'`) would add a fresh column with a new enum at that time — not by carrying a vestigial one forward today.
 
-### Triggers `[proposed]`
+### Triggers `[confirmed]`
 
 Two paths emit `conversation/errored`; one handler writes `cooldown_state`:
 
@@ -91,7 +91,9 @@ Two paths emit `conversation/errored`; one handler writes `cooldown_state`:
 
 **Degraded does NOT trigger cooldown.** A degraded reply means the loop produced *something* the user can act on; conversation flow continues. Repeated `degraded` on the same conversation surfaces in telemetry but doesn't escalate. (Telemetry-driven escalation — "5 degrades in 10 min → cooldown" — is a deferred follow-up.)
 
-### In-cooldown reply `[proposed]`
+**`errorClass` on `conversation/errored` is best-effort under bus race.** Both paths emit with the same dedup `id`, so Inngest delivers exactly one event to `recover-conversation` — but *which* one is whichever lands on the bus first. When `onFailure` runs successfully AND the worker exits cleanly, `inngest/function.failed` still fires; if the reconcile's emit arrives first, `recover-conversation` sees `errorClass: "WorkerDeath"` even though the real cause was e.g. `NonRetriableError(BadRequestError)`. Cooldown writes don't branch on `errorClass`, so this is harmless for the circuit-breaker layer. Downstream consumers that DO want to bucket by class (evolution failure-reflector) must cross-check against `runId` in the structured logs — `agent.repair` / `agent.degrade` log lines and Inngest's run metadata carry the authoritative class. Treat `errorClass` as a hint, not a label.
+
+### In-cooldown reply `[confirmed]`
 
 Inbound arriving in the Open state gets a terse system-generated reply rather than a stalled response. Shape:
 
