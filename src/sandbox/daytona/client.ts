@@ -760,8 +760,16 @@ function rebuildSnapshotName(base: string): string {
  * signature — broader patterns risk catching real persistent failures
  * (Dockerfile errors, missing upstream images) and burning the retry
  * budget on something that won't clear.
+ *
+ * Auth / authorization / validation / not-found / conflict are
+ * intentionally NOT retried even though they're transport-level
+ * errors — they don't clear on retry, just delay the user-visible
+ * failure. Rate-limit and connection errors fall to the SDK's own
+ * retry layer; we don't double-up here.
+ *
+ * Exported for the table-driven matrix test in `client.test.ts`.
  */
-function isTransientSnapshotCreateError(err: unknown): boolean {
+export function isTransientSnapshotCreateError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   return /repository .* not found/i.test(err.message);
 }
