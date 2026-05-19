@@ -310,10 +310,9 @@ describe("ClaudeCodeBackend.plan", () => {
       expect(responseFrame.response.response).toEqual({ behavior: "allow" });
     });
 
-    // Regression assertion: a control_response must land on stdin
-    // *after* the user prompt. If stdin closed prematurely (the bug),
-    // only the user prompt would appear.
-    it("keeps stdin open until the control_response is written (regression)", async () => {
+    // A `control_response` must land on stdin AFTER the user prompt —
+    // proves stdin stayed writable through the permission round-trip.
+    it("keeps stdin open until the control_response is written", async () => {
       const { container, stdinChunks } = fakeContainer(EXIT_PLAN_MODE_FIXTURE);
       await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
 
@@ -352,7 +351,10 @@ describe("ClaudeCodeBackend.plan", () => {
       expect(responseFrame.response.response).toEqual({ behavior: "allow" });
     });
 
-    it("dedupes duplicate control_request frames for the same request_id", async () => {
+    // Parser-level dedupe (`parseClaudeStream`'s `seenPermissionRequestIds`)
+    // collapses repeated control_request frames at the source — the runner
+    // sees only one permission_request, and writes one control_response.
+    it("collapses duplicate control_request frames at the parser layer", async () => {
       const fixture = [
         '{"type":"system","subtype":"init","session_id":"sess-dup","model":"m"}',
         '{"type":"control_request","request_id":"req_dup","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{}}}',

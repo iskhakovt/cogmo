@@ -220,11 +220,12 @@ async function* runClaudePlan(
   // it — closing earlier wedges the CLI on its ExitPlanMode round-trip.
   drainStderr(exec, "plan");
 
-  const answeredRequestIds = new Set<string>();
+  // Dedupe of duplicate `control_request` frames lives in
+  // `parseClaudeStream` (`seenPermissionRequestIds`), so by the time a
+  // `permission_request` reaches this loop the request_id is already
+  // unique. No second-layer set needed here.
   for await (const event of parseClaudeStream(exec, "plan")) {
     if (event.kind === "permission_request") {
-      if (answeredRequestIds.has(event.requestId)) continue;
-      answeredRequestIds.add(event.requestId);
       writeControlResponse(stdin, event.requestId, { behavior: "allow" });
       continue;
     }
@@ -270,13 +271,6 @@ async function runClaudeExecute(
       return;
     }
     answeredRequestIds.add(requestId);
-    if (stdin.writableEnded || stdin.destroyed) {
-      log.warn(
-        { requestId },
-        "respondPermission after stdin closed — CLI session has already ended",
-      );
-      return;
-    }
     writeControlResponse(stdin, requestId, response);
   };
 
@@ -288,14 +282,22 @@ async function runClaudeExecute(
 /**
  * Frame a permission decision as a stream-json `control_response` and write
  * it to the CLI's stdin. The CLI matches the response back to its pending
- * `control_request` by `request_id`. Caller is responsible for guarding
- * against `stdin.writableEnded` (the runners do).
+ * `control_request` by `request_id`. No-op if stdin has already closed
+ * (the CLI session is over and any caller racing against `result` would
+ * otherwise throw EPIPE).
  */
 function writeControlResponse(
   stdin: Writable,
   requestId: string,
   response: PermissionResponse,
 ): void {
+  if (stdin.writableEnded || stdin.destroyed) {
+    log.warn(
+      { requestId },
+      "writeControlResponse after stdin closed — CLI session has already ended",
+    );
+    return;
+  }
   const frame = {
     type: "control_response",
     response: {
