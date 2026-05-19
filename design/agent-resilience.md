@@ -78,7 +78,7 @@ Validated at the store boundary via `jsonbZod(name, CooldownStateSchema)` (see `
 
 The existing `conversations.status` enum and column are dropped. `'errored'` was the only value other than `'active'`; once auto-repair lands, no code branches on the enum — "in cooldown" is a derived predicate on `cooldown_state`. A single-value enum is pure noise. Future lifecycle states (`'archived'`, `'paused'`) would add a fresh column with a new enum at that time — not by carrying a vestigial one forward today.
 
-### Triggers `[proposed]`
+### Triggers `[confirmed]`
 
 Two paths emit `conversation/errored`; one handler writes `cooldown_state`:
 
@@ -90,6 +90,8 @@ Two paths emit `conversation/errored`; one handler writes `cooldown_state`:
 **Half-open failure** — first inbound past the cooldown threshold runs `handle-message`; if it fails again, path 1 applies, the `recover-conversation` handler reads the prior `cooldownSeconds` and doubles it (not starting fresh at 60s).
 
 **Degraded does NOT trigger cooldown.** A degraded reply means the loop produced *something* the user can act on; conversation flow continues. Repeated `degraded` on the same conversation surfaces in telemetry but doesn't escalate. (Telemetry-driven escalation — "5 degrades in 10 min → cooldown" — is a deferred follow-up.)
+
+**`errorClass` on `conversation/errored` is best-effort under bus race.** Both paths emit with the same dedup `id`, so Inngest delivers exactly one event to `recover-conversation` — but *which* one is whichever lands on the bus first. When `onFailure` runs successfully AND the worker exits cleanly, `inngest/function.failed` still fires; if the reconcile's emit arrives first, `recover-conversation` sees `errorClass: "WorkerDeath"` even though the real cause was e.g. `NonRetriableError(BadRequestError)`. Cooldown writes don't branch on `errorClass`, so this is harmless for the circuit-breaker layer. Downstream consumers that DO want to bucket by class (evolution failure-reflector) must cross-check against `runId` in the structured logs — `agent.repair` / `agent.degrade` log lines and Inngest's run metadata carry the authoritative class. Treat `errorClass` as a hint, not a label.
 
 ### In-cooldown reply `[confirmed]`
 

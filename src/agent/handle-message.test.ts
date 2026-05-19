@@ -470,6 +470,11 @@ describe("createHandleMessage", () => {
     expect(stepId).toBe("emit-conversation-errored");
     expect(payload).toMatchObject({
       name: "conversation/errored",
+      // Bus-level dedup with the worker-death reconcile. Both emitters
+      // funnel through `buildConversationErroredEvent` so the id format
+      // can't drift. Removing this assertion silently re-opens the
+      // double-cooldown-bump bug PR #297 review caught — keep it.
+      id: "errored-run-failed-1",
       data: {
         conversationId: "conv-1",
         runId: "run-failed-1",

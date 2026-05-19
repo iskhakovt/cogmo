@@ -114,6 +114,37 @@ export const conversationErrored = eventType("conversation/errored", {
   }),
 });
 
+/**
+ * Type alias for the `conversation/errored` event data shape — both
+ * emitters import this so changes to the schema propagate without an
+ * `as` cast.
+ */
+export type ConversationErroredData = z.infer<typeof conversationErrored.schema>;
+
+/**
+ * Build a `conversation/errored` event payload with the bus-level dedup
+ * `id` baked in. Both emitters — `handle-message`'s `onFailure` and the
+ * `handle-message-reconcile` subscriber on `inngest/function.failed` —
+ * MUST go through this helper. Inngest's event-id dedup window then
+ * ensures `recover-conversation` runs exactly once per failed run no
+ * matter which path observed the failure first (or whether both fired).
+ *
+ * Without the shared helper, the two emitters can drift — and silently:
+ * neither file's tests can see that the OTHER emitter is missing the
+ * id. The contract is two-sided, so the implementation must be too.
+ *
+ * `id: "errored-${runId}"` is the canonical shape; the
+ * `recover-conversation` consumer also documents this format. Don't
+ * change the prefix without updating both emitters AND the dedup
+ * regression test in `recover-conversation-dedup.test.ts`.
+ */
+export function buildConversationErroredEvent(data: ConversationErroredData) {
+  return {
+    ...conversationErrored.create(data),
+    id: `errored-${data.runId}`,
+  };
+}
+
 // --- Debounce events ---
 
 export const debounceIdle = eventType("debounce/idle", {
@@ -282,9 +313,13 @@ export const codingTaskFailed = eventType("coding/task/failed", {
  * this system event fires regardless of how the worker exited.
  *
  * Schema is permissive (`passthrough()` for the inner event payload and
- * the error blob) because the inner shape varies by triggering function;
- * the reconcile function only needs `function_id`, `run_id`, and
- * (optionally) `data.event.data.taskId` to identify the coding task.
+ * the error blob) because the inner shape varies by triggering function.
+ * Subscribers narrow on `function_id` and the inner `data` fields they
+ * need: coding reconcile reads `data.event.data.taskId`; the
+ * `handle-message` reconcile reads `data.event.data.conversationId` and
+ * `data.event.data.triggerInboundId`. Each consumer's declared fields
+ * stay optional here so the schema accepts every triggering event shape
+ * without dropping anything to passthrough.
  */
 export const inngestFunctionFailed = eventType("inngest/function.failed", {
   schema: z.object({
@@ -302,6 +337,8 @@ export const inngestFunctionFailed = eventType("inngest/function.failed", {
         data: z
           .object({
             taskId: z.string().optional(),
+            conversationId: z.string().optional(),
+            triggerInboundId: z.string().nullable().optional(),
           })
           .passthrough(),
       })
