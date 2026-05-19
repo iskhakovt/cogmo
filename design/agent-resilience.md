@@ -78,7 +78,7 @@ Validated at the store boundary via `jsonbZod(name, CooldownStateSchema)` (see `
 
 The existing `conversations.status` enum and column are dropped. `'errored'` was the only value other than `'active'`; once auto-repair lands, no code branches on the enum — "in cooldown" is a derived predicate on `cooldown_state`. A single-value enum is pure noise. Future lifecycle states (`'archived'`, `'paused'`) would add a fresh column with a new enum at that time — not by carrying a vestigial one forward today.
 
-### Triggers `[proposed]`
+### Triggers `[confirmed]`
 
 Two paths emit `conversation/errored`; one handler writes `cooldown_state`:
 

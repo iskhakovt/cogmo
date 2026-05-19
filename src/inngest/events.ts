@@ -282,9 +282,13 @@ export const codingTaskFailed = eventType("coding/task/failed", {
  * this system event fires regardless of how the worker exited.
  *
  * Schema is permissive (`passthrough()` for the inner event payload and
- * the error blob) because the inner shape varies by triggering function;
- * the reconcile function only needs `function_id`, `run_id`, and
- * (optionally) `data.event.data.taskId` to identify the coding task.
+ * the error blob) because the inner shape varies by triggering function.
+ * Subscribers narrow on `function_id` and the inner `data` fields they
+ * need: coding reconcile reads `data.event.data.taskId`; the
+ * `handle-message` reconcile reads `data.event.data.conversationId` and
+ * `data.event.data.triggerInboundId`. Each consumer's declared fields
+ * stay optional here so the schema accepts every triggering event shape
+ * without dropping anything to passthrough.
  */
 export const inngestFunctionFailed = eventType("inngest/function.failed", {
   schema: z.object({
@@ -302,6 +306,8 @@ export const inngestFunctionFailed = eventType("inngest/function.failed", {
         data: z
           .object({
             taskId: z.string().optional(),
+            conversationId: z.string().optional(),
+            triggerInboundId: z.string().nullable().optional(),
           })
           .passthrough(),
       })

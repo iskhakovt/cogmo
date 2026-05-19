@@ -29,6 +29,7 @@ import { ImageToolsLoader } from "./agent/image-tools-loader.js";
 import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
+import { createHandleMessageReconcile } from "./agent/reconcile-on-failure.js";
 import { createRecoverConversation } from "./agent/recover-conversation.js";
 import { createScheduledTaskFireHandler } from "./agent/scheduling/fire-handler.js";
 import { createScheduledTaskTicker } from "./agent/scheduling/ticker.js";
@@ -1010,6 +1011,13 @@ export async function bootstrapRuntime(
     agentStore: core.agentStore,
   });
 
+  // Worker-death reconcile — subscribes to `inngest/function.failed` and
+  // re-emits `conversation/errored` with bus-level dedup
+  // (`id: errored-${runId}`) when `handle-message`'s `onFailure` couldn't
+  // fire (Inngest connect-mode worker-death class). Mirrors the coding
+  // reconciler shape. See design/agent-resilience.md → Triggers.
+  const handleMessageReconcile = createHandleMessageReconcile(inngest);
+
   // Scheduled-task ticker — static 1-min cron that locks due rows from
   // `scheduled_tasks` and fans out `agent/scheduled-task.fire` events.
   // See `src/agent/scheduling/ticker.ts`.
@@ -1038,6 +1046,7 @@ export async function bootstrapRuntime(
     idleTimer,
     observer,
     recoverConversation,
+    handleMessageReconcile,
     scheduledTaskTicker,
     scheduledTaskFire,
     ...debounceFunctions,
