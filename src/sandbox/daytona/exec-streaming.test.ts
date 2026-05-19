@@ -1,4 +1,4 @@
-import type { Process } from "@daytonaio/sdk";
+import { DaytonaNotFoundError, type Process } from "@daytonaio/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { ExecTimeoutError } from "../index.js";
 import { DisposedError, startExecStreaming } from "./exec-streaming.js";
@@ -21,7 +21,14 @@ interface Script {
 
 function fakeProcess(script: Script): Process {
   const createSession = vi.fn(async () => undefined);
-  const deleteSession = vi.fn(async () => undefined);
+  // `getSessionCommand(sid)` 404s after `deleteSession(sid)` —
+  // mirrors live Daytona. Without this invariant, the unit suite
+  // can't catch lifecycle-ordering regressions on the success path.
+  const deletedSessions = new Set<string>();
+  const deleteSession = vi.fn(async (sid: string) => {
+    deletedSessions.add(sid);
+    return undefined;
+  });
   const sendSessionCommandInput = vi.fn(async () => undefined);
   const executeSessionCommand = vi.fn(async () => ({
     cmdId: script.cmdId ?? "cmd-fake",
@@ -30,11 +37,16 @@ function fakeProcess(script: Script): Process {
     stderr: "",
     exitCode: undefined as number | undefined,
   }));
-  const getSessionCommand = vi.fn(async () => ({
-    id: "cmd-fake",
-    command: "true",
-    exitCode: script.exitCode ?? 0,
-  }));
+  const getSessionCommand = vi.fn(async (sid: string) => {
+    if (deletedSessions.has(sid)) {
+      throw new DaytonaNotFoundError("session not found", 404);
+    }
+    return {
+      id: "cmd-fake",
+      command: "true",
+      exitCode: script.exitCode ?? 0,
+    };
+  });
   const getSessionCommandLogs = vi.fn(
     async (
       _sid: string,
@@ -252,6 +264,48 @@ describe("startExecStreaming", () => {
     expect(proc.createSession).not.toHaveBeenCalled();
   });
 
+  it("dispose() racing in-flight getSessionCommand rejects with DisposedError, not the raw 404", async () => {
+    // Race window: WS resolves naturally, the success-path
+    // `getSessionCommand` is in flight, consumer calls dispose() which
+    // deletes the session. The in-flight fetch then 404s. Per the
+    // ExecStreamingHandle contract, consumers branching on outcome
+    // must see `DisposedError`, not the raw SDK NotFound. Mirrors the
+    // .catch branch's mapping.
+    const proc = fakeProcess({ wsResolve: {} });
+    let resolveFetch!: (v: Awaited<ReturnType<Process["getSessionCommand"]>>) => void;
+    let rejectFetch!: (e: Error) => void;
+    const fetchGate = new Promise<Awaited<ReturnType<Process["getSessionCommand"]>>>(
+      (resolve, reject) => {
+        resolveFetch = resolve;
+        rejectFetch = reject;
+      },
+    );
+    vi.mocked(proc.getSessionCommand).mockImplementation(() => fetchGate);
+
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: {},
+    });
+    handle.stdout.on("data", () => {});
+
+    // Let .then() reach the await on getSessionCommand. One microtask
+    // tick is enough to drain the synchronous prelude.
+    await new Promise<void>((r) => setImmediate(r));
+
+    // Dispose mid-fetch — sets disposed=true and deletes the session.
+    const disposing = handle.dispose();
+    // Simulate Daytona's 404 surfacing through the in-flight fetch.
+    rejectFetch(new DaytonaNotFoundError("session not found", 404));
+    await disposing;
+
+    await expect(handle.wait()).rejects.toBeInstanceOf(DisposedError);
+    // Suppress the unused `resolveFetch` lint signal — kept for symmetry
+    // so readers see both halves of the gate.
+    void resolveFetch;
+  });
+
   it("rejects wait() when getSessionCommand throws post-WS-resolve (network blip on exit-code fetch)", async () => {
     // Race window: WS closes naturally, then the follow-up
     // `getSessionCommand` HTTP fetch fails (transient daemon error,
@@ -376,6 +430,45 @@ describe("startExecStreaming", () => {
     // Wait one tick for the cleanup chained off the WS resolve.
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(proc.deleteSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("natural-success lifecycle ordering: getSessionCommand fires BEFORE deleteSession", async () => {
+    // `getSessionCommand` 404s once the session is deleted, so any
+    // cleanup-before-fetch ordering breaks every successful exec
+    // call. Pin the relative order on the success path.
+    const order: string[] = [];
+    const proc = fakeProcess({ wsResolve: { stdoutChunks: ["ok\n"] }, exitCode: 7 });
+    vi.mocked(proc.getSessionCommand).mockImplementation(async () => {
+      order.push("getSessionCommand");
+      return { id: "cmd-fake", command: "true", exitCode: 7 };
+    });
+    vi.mocked(proc.deleteSession).mockImplementation(async () => {
+      order.push("deleteSession");
+      return undefined;
+    });
+
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: {},
+    });
+    handle.stdout.on("data", () => {});
+    const result = await handle.wait();
+
+    expect(result.exitCode).toBe(7);
+    expect(order).toEqual(["getSessionCommand", "deleteSession"]);
+  });
+
+  it("fake contract: getSessionCommand(sid) 404s after deleteSession(sid)", async () => {
+    // Pins the fake's invariant — the SUT's success-path ordering
+    // test depends on this. Verified separately so a fake-side
+    // regression doesn't silently disable the SUT-side test.
+    const proc = fakeProcess({ exitCode: 0 });
+    await proc.deleteSession("sid-x");
+    await expect(proc.getSessionCommand("sid-x", "cmd-x")).rejects.toBeInstanceOf(
+      DaytonaNotFoundError,
+    );
   });
 
   it("upstream WS error rejects wait() AND deletes the session (no leak on real failure)", async () => {
