@@ -30,6 +30,23 @@ const baseEvent = {
   },
 };
 
+// Filter step.sendEvent mock calls down to the entries whose payload
+// matches `eventName`, returning ALL matches (not just the first).
+// Tighter than `.find(...)` — a future regression that double-fires
+// the event surfaces as `toHaveLength(2)` instead of silently passing
+// the same `.find` assertion. Negative tests assert `toHaveLength(0)`.
+function callsForEvent(calls: unknown[][], eventName: string): unknown[][] {
+  return calls.filter((c) => {
+    const payload = c[1];
+    return (
+      typeof payload === "object" &&
+      payload !== null &&
+      "name" in payload &&
+      payload.name === eventName
+    );
+  });
+}
+
 const baseConv = {
   id: "conv-1",
   userId: "user-1",
@@ -149,13 +166,10 @@ describe("createRecoverConversation", () => {
     const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
     const step = mockStep();
     await invokeInngestFn<RecoverConversationCtx>(fn, { event: baseEvent, step });
-    const sendCalls = step.sendEvent.mock.calls;
-    const enteredCall = sendCalls.find(
-      (c) => (c[1] as { name?: string }).name === "conversation/cooldown/entered",
-    );
-    expect(enteredCall).toBeDefined();
-    expect(enteredCall?.[0]).toBe("emit-cooldown-entered");
-    expect(enteredCall?.[1]).toMatchObject({
+    const enteredCalls = callsForEvent(step.sendEvent.mock.calls, "conversation/cooldown/entered");
+    expect(enteredCalls).toHaveLength(1);
+    expect(enteredCalls[0]?.[0]).toBe("emit-cooldown-entered");
+    expect(enteredCalls[0]?.[1]).toMatchObject({
       name: "conversation/cooldown/entered",
       id: "cooldown-entered-run-failed-1",
       data: {
@@ -176,10 +190,9 @@ describe("createRecoverConversation", () => {
       event: { data: { ...baseEvent.data, errorClass: "WorkerDeath", causeClass: null } },
       step,
     });
-    const enteredCall = step.sendEvent.mock.calls.find(
-      (c) => (c[1] as { name?: string }).name === "conversation/cooldown/entered",
-    );
-    expect(enteredCall?.[1]).toMatchObject({ data: { causeClass: "A" } });
+    const enteredCalls = callsForEvent(step.sendEvent.mock.calls, "conversation/cooldown/entered");
+    expect(enteredCalls).toHaveLength(1);
+    expect(enteredCalls[0]?.[1]).toMatchObject({ data: { causeClass: "A" } });
   });
 
   it("falls back to causeClass 'bug' for unrecognised errorClass values", async () => {
@@ -190,10 +203,9 @@ describe("createRecoverConversation", () => {
       event: { data: { ...baseEvent.data, errorClass: "RandomError" } },
       step,
     });
-    const enteredCall = step.sendEvent.mock.calls.find(
-      (c) => (c[1] as { name?: string }).name === "conversation/cooldown/entered",
-    );
-    expect(enteredCall?.[1]).toMatchObject({ data: { causeClass: "bug" } });
+    const enteredCalls = callsForEvent(step.sendEvent.mock.calls, "conversation/cooldown/entered");
+    expect(enteredCalls).toHaveLength(1);
+    expect(enteredCalls[0]?.[1]).toMatchObject({ data: { causeClass: "bug" } });
   });
 
   it("does NOT emit cooldown/entered when conversation_not_found short-circuits", async () => {
@@ -203,10 +215,9 @@ describe("createRecoverConversation", () => {
     const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
     const step = mockStep();
     await invokeInngestFn<RecoverConversationCtx>(fn, { event: baseEvent, step });
-    const enteredCall = step.sendEvent.mock.calls.find(
-      (c) => (c[1] as { name?: string }).name === "conversation/cooldown/entered",
+    expect(callsForEvent(step.sendEvent.mock.calls, "conversation/cooldown/entered")).toHaveLength(
+      0,
     );
-    expect(enteredCall).toBeUndefined();
   });
 
   // Idempotency-under-duplicate-events documentation.

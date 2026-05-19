@@ -272,23 +272,24 @@ export function calculateElapsedCooldown(lastErroredAt: string): number {
 }
 
 /**
- * Build a `conversation/cooldown/cleared` event payload, optionally
- * baking in a bus-dedup `id`. Callers inside Inngest functions should
- * pass the id so Inngest's at-least-once retry semantics on
- * `step.sendEvent` don't produce duplicate events on the bus.
+ * Build a `conversation/cooldown/cleared` event payload with a
+ * required bus-dedup `id`. Mirrors `buildConversationErroredEvent` and
+ * `buildConversationCooldownEnteredEvent` — the dedup contract is
+ * symmetric across all `conversation/*` events, and a missing id is
+ * always a bug in the caller (Inngest's at-least-once delivery on
+ * `step.sendEvent` would otherwise produce duplicate events; same risk
+ * for caller-side retries through `inngest.send`).
  *
  * Canonical id shape: `cooldown-cleared-${conversationId}-${lastErroredAt}`
- * — keys on the specific cooldown being cleared, so two paths
- * attempting to clear the same cooldown (theoretical race; in
- * practice the second sees `priorState === null` and skips) would
- * dedup to one event.
+ * — keys on the specific cooldown being cleared. Two paths attempting
+ * to clear the same cooldown (theoretical race; in practice the second
+ * sees `priorState === null` and skips) dedup to one event.
  */
 export function buildConversationCooldownClearedEvent(
   data: ConversationCooldownClearedData,
-  id?: string,
+  id: string,
 ) {
-  const event = conversationCooldownCleared.create(data);
-  return id === undefined ? event : { ...event, id };
+  return { ...conversationCooldownCleared.create(data), id };
 }
 
 // --- Debounce events ---

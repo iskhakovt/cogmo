@@ -919,17 +919,20 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // delivery contract — a retry after the send registers but before
       // the cache write would otherwise double-fire downstream
       // consumers. See design/agent-resilience.md → Telemetry.
-      if (wasCoolingDown && conv.cooldownState !== null) {
-        const cooldownState = conv.cooldownState;
+      //
+      // Narrow once via the local — `wasCoolingDown` is the same
+      // predicate but doesn't help TS narrow `conv.cooldownState`.
+      const priorCooldown = conv.cooldownState;
+      if (priorCooldown !== null) {
         await step.sendEvent(
           "emit-cooldown-cleared",
           buildConversationCooldownClearedEvent(
             {
               conversationId,
               clearedBy: "success",
-              elapsedCooldownSeconds: calculateElapsedCooldown(cooldownState.lastErroredAt),
+              elapsedCooldownSeconds: calculateElapsedCooldown(priorCooldown.lastErroredAt),
             },
-            `cooldown-cleared-${conversationId}-${cooldownState.lastErroredAt}`,
+            `cooldown-cleared-${conversationId}-${priorCooldown.lastErroredAt}`,
           ),
         );
       }

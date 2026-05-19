@@ -71,17 +71,7 @@ describe("calculateElapsedCooldown", () => {
 });
 
 describe("buildConversationCooldownClearedEvent", () => {
-  it("omits id when not supplied (transport callers without idempotency need)", () => {
-    const event = buildConversationCooldownClearedEvent({
-      conversationId: "conv-1",
-      clearedBy: "success",
-      elapsedCooldownSeconds: 42,
-    });
-    expect(event.name).toBe("conversation/cooldown/cleared");
-    expect((event as { id?: string }).id).toBeUndefined();
-  });
-
-  it("bakes in id when supplied (step.sendEvent callers depend on bus dedup)", () => {
+  it("bakes in the required dedup id", () => {
     const event = buildConversationCooldownClearedEvent(
       {
         conversationId: "conv-1",
@@ -90,6 +80,7 @@ describe("buildConversationCooldownClearedEvent", () => {
       },
       "cooldown-cleared-conv-1-2026-05-19T12:00:00.000Z",
     );
+    expect(event.name).toBe("conversation/cooldown/cleared");
     expect(event.id).toBe("cooldown-cleared-conv-1-2026-05-19T12:00:00.000Z");
   });
 });

@@ -47,7 +47,23 @@ export function createRecoverConversation(deps: RecoverConversationDeps) {
       concurrency: { limit: 1, key: "event.data.conversationId" },
     },
     async ({ event, step }) => {
-      const { conversationId, runId, errorClass, causeClass, errorMessage } = event.data;
+      // Two distinct `causeClass` concepts live in this function:
+      //   - `event.data.causeClass` (renamed `providerCauseClass` here)
+      //     is the upstream provider error class — "BadRequestError",
+      //     "RateLimitError", etc. Forwarded into the warn log so the
+      //     evolution failure-reflector can bucket by upstream class.
+      //   - The new `conversation/cooldown/entered.causeClass` is the
+      //     design's failure taxonomy — "A" | "B" | "invariant" | "bug"
+      //     — computed via `deriveCauseClass(errorClass)`.
+      // Two different namings on purpose, but the destructure rename
+      // avoids the shadow confusion at the emit site below.
+      const {
+        conversationId,
+        runId,
+        errorClass,
+        causeClass: providerCauseClass,
+        errorMessage,
+      } = event.data;
 
       const result = await step.run("write-cooldown", async () => {
         // Capture `now` outside `runInTx` so a 40001 retry inside the
@@ -98,7 +114,7 @@ export function createRecoverConversation(deps: RecoverConversationDeps) {
         {
           conversationId,
           errorClass,
-          causeClass,
+          causeClass: providerCauseClass,
           errorMessage,
           cooldownSeconds: result.state.cooldownSeconds,
           consecutiveFailures: result.state.consecutiveFailures,
