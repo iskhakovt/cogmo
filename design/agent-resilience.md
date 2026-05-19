@@ -100,7 +100,7 @@ The degraded reply is persisted as a normal assistant message (role `assistant`,
 
 The forensic record of *what the model produced before degrading* lives in the `agent.repair` / `agent.degrade` structured logs (see Telemetry below), not in `messages`. The `messages` table is the conversation transcript; structured logs are the failure audit.
 
-#### Tools-free synthesis on degrade `[proposed]`
+#### Tools-free synthesis on degrade `[confirmed]`
 
 The fixed text above is the conservative baseline — no LLM call, deterministic, no failure modes. But it tells the user nothing about *what* the model was trying to do or *why* it stopped. A user who asked for an image and got "I had trouble generating a clean response" can't tell whether to rephrase, switch model, give up, or wait.
 

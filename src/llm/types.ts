@@ -177,6 +177,14 @@ export interface ChatParams {
   thinking?: { budgetTokens: number };
   /** Request structured JSON output. Mutually exclusive with tools. */
   responseFormat?: ResponseFormat;
+  /**
+   * Sampling temperature. Provider default when unset (typically 1.0).
+   * Set to 0 for deterministic / low-variance output — the
+   * volume-cluster nudge synthesis and other failure-reply paths use
+   * this. Range and exact semantics are provider-specific (Anthropic
+   * and OpenAI both accept 0–1).
+   */
+  temperature?: number;
 }
 
 // --- Token counting ---
