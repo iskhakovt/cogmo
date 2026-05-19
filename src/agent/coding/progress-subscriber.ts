@@ -58,12 +58,22 @@ export function startCodingProgressSubscriber(args: SubscriberArgs): () => void 
 
   const state: ProgressFormatInput = { goal, phase: "planning", body: "" };
   let messageId: number | null = null;
-  let lastEditAt = 0;
+  // Sentinel — the first event sees an effectively infinite gap and
+  // always passes the throttle, so no `messageId === null` bypass is
+  // needed in `maybeEdit`.
+  let lastEditAt = Number.NEGATIVE_INFINITY;
   // Serialize bot calls so concurrent in-flight edits can't race the
   // sendMessage that creates the initial message id.
   let pending: Promise<void> = Promise.resolve();
 
   async function postOrEdit(replyMarkup?: PlanInlineKeyboardMarkup): Promise<void> {
+    // Update the throttle timestamp synchronously, before chaining onto
+    // `pending`. The registry's `publish` is fire-and-forget on listener
+    // promises (see `streaming-registry.ts`), so concurrent handlers can
+    // interleave here; setting `lastEditAt` only after the bot call would
+    // let bursting events pass the throttle check with a stale timestamp
+    // and queue redundant edits.
+    lastEditAt = Date.now();
     const text = formatProgressMessage(state);
     const opts = replyMarkup ? { reply_markup: replyMarkup } : undefined;
     pending = pending.then(async () => {
@@ -79,7 +89,6 @@ export function startCodingProgressSubscriber(args: SubscriberArgs): () => void 
         } else {
           await bot.editMessageText(chatId, messageId, text, opts);
         }
-        lastEditAt = Date.now();
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "";
         // Telegram returns 400 on no-op edits; benign.
@@ -92,8 +101,7 @@ export function startCodingProgressSubscriber(args: SubscriberArgs): () => void 
 
   async function maybeEdit(): Promise<void> {
     const now = Date.now();
-    // First edit always sends; subsequent edits respect the interval.
-    if (messageId !== null && now - lastEditAt < editIntervalMs) return;
+    if (now - lastEditAt < editIntervalMs) return;
     await postOrEdit();
   }
 
