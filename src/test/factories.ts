@@ -5,6 +5,8 @@
 import type { Inngest } from "inngest";
 import { ok } from "neverthrow";
 import { vi } from "vitest";
+import { mock } from "vitest-mock-extended";
+import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
 import type { Transactor } from "../db/transactor.js";
@@ -472,6 +474,23 @@ export function mockAdapter(overrides?: Partial<Adapter>): Adapter {
     stop: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
+}
+
+/**
+ * Auto-mocked stub of `Service["files"]`. Every method is a `vi.fn()`;
+ * `read` resolves to `""` and `list` to `[]` so callers that don't care
+ * about file behavior get sensible defaults without enumerating each
+ * method. Adding a new method to the namespace doesn't require touching
+ * tests that only need a passthrough stub. For per-method overrides,
+ * call `files.read.mockResolvedValue(...)` after construction or pass
+ * `overrides` to replace whole methods.
+ */
+export function mockFilesService(overrides?: Partial<Service["files"]>): Service["files"] {
+  const files = mock<Service["files"]>();
+  files.read.mockResolvedValue("");
+  files.list.mockResolvedValue([]);
+  if (overrides) Object.assign(files, overrides);
+  return files;
 }
 
 export function mockMemoryProvider(overrides?: Partial<MemoryProvider>): MemoryProvider {

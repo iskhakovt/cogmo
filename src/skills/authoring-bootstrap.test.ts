@@ -28,7 +28,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { fetchFeatureBranch } from "../agent/coding/git-as-transport.js";
 import { DrizzleCodingStore } from "../agent/coding/store/index.js";
@@ -36,6 +36,7 @@ import type { Database, Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { GitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo, SKILLS_CODING_REPO_NAME } from "./repo.js";
 import { SkillRunnerImpl } from "./runner.js";
@@ -262,11 +263,7 @@ describe("skill authoring bootstrap — boot → fetch → register chain", () =
       runInTx: tx,
       memory: makeMockMemory(),
       secretsStore: mock<SecretsStore>(),
-      files: {
-        read: vi.fn().mockResolvedValue(""),
-        write: vi.fn().mockResolvedValue(undefined),
-        list: vi.fn().mockResolvedValue([]),
-      },
+      files: mockFilesService(),
       user: { id: "user-1", timezone: "UTC" },
       memoryBankId: "bank-1",
       skillsRepoPath: repos.skillsBare,

@@ -4,6 +4,7 @@ import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { mockFilesService } from "../test/factories.js";
 import type { DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import { DefaultCtxHandler } from "./ctx-handler.js";
 import { CtxError } from "./dispatcher.js";
@@ -42,11 +43,7 @@ function deps(overrides?: Partial<Deps>): Deps {
   return {
     secretsStore: mock<SecretsStore>(),
     memory,
-    files: {
-      read: vi.fn().mockResolvedValue(""),
-      write: vi.fn().mockResolvedValue(undefined),
-      list: vi.fn().mockResolvedValue([]),
-    },
+    files: mockFilesService(),
     recordContextCall: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };

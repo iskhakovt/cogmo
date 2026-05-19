@@ -145,6 +145,153 @@ export function buildConversationErroredEvent(data: ConversationErroredData) {
   };
 }
 
+// --- Auto-repair cooldown telemetry ---
+
+/**
+ * Discriminator for `conversation/cooldown/entered.causeClass`.
+ * Matches `design/agent-resilience.md` → Failure taxonomy:
+ *  - `"A"` — transport/infra transient that exhausted Inngest retries
+ *    (also covers worker-disconnect via the reconcile path).
+ *  - `"B"` — provider-permanent / non-retriable (rewrapped as
+ *    `NonRetriableError` upstream).
+ *  - `"invariant"` — history-invariant violation.
+ *  - `"bug"` — programmer-bug exception or otherwise unclassified.
+ *
+ * Class C and D do NOT trigger cooldown so they never appear here.
+ */
+export const cooldownCauseClass = ["A", "B", "invariant", "bug"] as const;
+export type CooldownCauseClass = (typeof cooldownCauseClass)[number];
+
+/**
+ * Map the `conversation/errored.errorClass` field onto the
+ * `causeClass` taxonomy. v1 mapping:
+ *  - `"NonRetriableError"` → `"B"`
+ *  - `"WorkerDeath"` (injected by `handle-message-reconcile`) → `"A"`
+ *  - else → `"bug"` (residual bucket — covers retriable-class errors
+ *    that exhausted Inngest retries AND history-invariant violations
+ *    that don't have a typed Error class today).
+ *
+ * Refine when a typed `HistoryInvariantError` lands and/or when
+ * retriable-class names need to map to `"A"` precisely.
+ */
+export function deriveCauseClass(errorClass: string): CooldownCauseClass {
+  if (errorClass === "NonRetriableError") return "B";
+  if (errorClass === "WorkerDeath") return "A";
+  return "bug";
+}
+
+/**
+ * Fires every time `recover-conversation` writes `cooldown_state`
+ * (initial arm or doubled-on-half-open-failure). Subscribers: evolution
+ * failure-reflector, future alerting / metrics sinks. Pairs with
+ * `conversation/cooldown/cleared`.
+ *
+ * See `design/agent-resilience.md` → Telemetry.
+ */
+export const conversationCooldownEntered = eventType("conversation/cooldown/entered", {
+  schema: z.object({
+    conversationId: z.string(),
+    /** The failed `handle-message` run that triggered the cooldown write. */
+    runId: z.string(),
+    lastErroredAt: z.string().datetime({ offset: true }),
+    cooldownSeconds: z.number().int().positive(),
+    consecutiveFailures: z.number().int().positive(),
+    causeClass: z.enum(cooldownCauseClass),
+  }),
+});
+
+export type ConversationCooldownEnteredData = z.infer<typeof conversationCooldownEntered.schema>;
+
+/**
+ * Build a `conversation/cooldown/entered` event payload with a bus-level
+ * dedup `id` baked in. `id: "cooldown-entered-${runId}"` keys on the
+ * failed run that triggered the cooldown write — so an Inngest retry
+ * of the `recover-conversation` function (or any future second emitter)
+ * for the same failed run is deduplicated at the bus.
+ */
+export function buildConversationCooldownEnteredEvent(data: ConversationCooldownEnteredData) {
+  return {
+    ...conversationCooldownEntered.create(data),
+    id: `cooldown-entered-${data.runId}`,
+  };
+}
+
+/**
+ * Discriminator for `conversation/cooldown/cleared.clearedBy`.
+ * Matches `design/agent-resilience.md` → Clear triggers.
+ *
+ * `secrets_rotated` is reserved — the `/secrets rotate` clear trigger
+ * is a deferred follow-up; the value is in the union today so
+ * subscribers don't need a schema change when that command ships.
+ */
+export const cooldownClearedBy = [
+  "success",
+  "model_switch",
+  "profile_switch",
+  "user_repair",
+  "secrets_rotated",
+] as const;
+export type CooldownClearedBy = (typeof cooldownClearedBy)[number];
+
+/**
+ * Fires when `cooldown_state` clears (success past the threshold,
+ * `/repair`, `/model`, `/profile`, future `/secrets rotate`). Pairs
+ * with `conversation/cooldown/entered`.
+ *
+ * `elapsedCooldownSeconds` is the wall-clock distance from
+ * `cooldown_state.lastErroredAt` to the clear moment. Can be less than
+ * the prior `cooldownSeconds` (e.g. `/repair` mid-window) OR greater
+ * (e.g. half-open probe ran after the window elapsed). Subscribers
+ * compare against the prior `entered` event's `cooldownSeconds` if
+ * they want to discriminate the two.
+ *
+ * See `design/agent-resilience.md` → Telemetry.
+ */
+export const conversationCooldownCleared = eventType("conversation/cooldown/cleared", {
+  schema: z.object({
+    conversationId: z.string(),
+    clearedBy: z.enum(cooldownClearedBy),
+    elapsedCooldownSeconds: z.number().nonnegative(),
+  }),
+});
+
+export type ConversationCooldownClearedData = z.infer<typeof conversationCooldownCleared.schema>;
+
+/**
+ * Wall-clock seconds from a cooldown's `lastErroredAt` anchor to now.
+ * Shared by every clear-site so the elapsed math can't drift between
+ * `handle-message`'s success-path emit and the transport-side emits.
+ *
+ * `Math.max(0, ...)` guards against clock skew on hosts whose system
+ * clock moved backward between the cooldown write and the clear (NTP
+ * step, VM clock drift). Downstream consumers can assume the field is
+ * non-negative even under adversarial timing.
+ */
+export function calculateElapsedCooldown(lastErroredAt: string): number {
+  return Math.max(0, (Date.now() - Date.parse(lastErroredAt)) / 1000);
+}
+
+/**
+ * Build a `conversation/cooldown/cleared` event payload with a
+ * required bus-dedup `id`. Mirrors `buildConversationErroredEvent` and
+ * `buildConversationCooldownEnteredEvent` — the dedup contract is
+ * symmetric across all `conversation/*` events, and a missing id is
+ * always a bug in the caller (Inngest's at-least-once delivery on
+ * `step.sendEvent` would otherwise produce duplicate events; same risk
+ * for caller-side retries through `inngest.send`).
+ *
+ * Canonical id shape: `cooldown-cleared-${conversationId}-${lastErroredAt}`
+ * — keys on the specific cooldown being cleared. Two paths attempting
+ * to clear the same cooldown (theoretical race; in practice the second
+ * sees `priorState === null` and skips) dedup to one event.
+ */
+export function buildConversationCooldownClearedEvent(
+  data: ConversationCooldownClearedData,
+  id: string,
+) {
+  return { ...conversationCooldownCleared.create(data), id };
+}
+
 // --- Debounce events ---
 
 export const debounceIdle = eventType("debounce/idle", {

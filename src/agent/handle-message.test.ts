@@ -16,6 +16,7 @@ import {
   mockAgentStore,
   mockDeliveryHandle,
   mockDeliveryRouter,
+  mockFilesService,
   mockMemoryProvider,
   mockProvider,
   mockResolver,
@@ -65,11 +66,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     tools: mockToolRegistry(),
     memory: mockMemoryProvider(),
     promptSource: { assemble: vi.fn().mockResolvedValue("system prompt") },
-    fileService: {
-      read: vi.fn().mockResolvedValue(""),
-      write: vi.fn().mockResolvedValue(undefined),
-      list: vi.fn().mockResolvedValue([]),
-    },
+    fileService: mockFilesService(),
     attachments: {
       upload: vi.fn().mockResolvedValue("inbound/test.jpg"),
       download: vi.fn().mockResolvedValue(Buffer.from("fake-image")),
@@ -917,31 +914,68 @@ describe("createHandleMessage", () => {
   // elapsed, the same tx that writes the assistant reply clears
   // cooldown_state.
   it("clears cooldown_state on a successful turn that started cooling down", async () => {
-    const longAgo = new Date(Date.now() - 10 * 60_000).toISOString();
-    const clearCooldown = vi.fn();
-    const deps = mockDeps({
-      agentStore: mockAgentStore({
-        getConversation: vi.fn().mockResolvedValue({
-          id: "conv-1",
-          userId: "user-1",
-          profileId: "profile-1",
-          isPrivate: true,
-          cooldownState: {
-            lastErroredAt: longAgo,
-            cooldownSeconds: 60,
-            consecutiveFailures: 1,
-          },
-          voiceMode: null,
+    // Fake timers pin `elapsedCooldownSeconds` to an exact value
+    // (600s = 10 minutes between `lastErroredAt` and `now`). Without
+    // them the integration assertion can only do `expect.any(Number)`
+    // — a Math.max regression or a wrong-anchor wiring slip wouldn't
+    // surface here. With them the contract is concrete.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-19T12:00:00.000Z"));
+    const longAgo = "2026-05-19T11:50:00.000Z";
+    try {
+      const clearCooldown = vi.fn();
+      const step = mockStep();
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          getConversation: vi.fn().mockResolvedValue({
+            id: "conv-1",
+            userId: "user-1",
+            profileId: "profile-1",
+            isPrivate: true,
+            cooldownState: {
+              lastErroredAt: longAgo,
+              cooldownSeconds: 60,
+              consecutiveFailures: 1,
+            },
+            voiceMode: null,
+          }),
+          clearCooldown,
         }),
-        clearCooldown,
-      }),
-    });
-    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
-      event: testEvent,
-      step: mockStep(),
-      runId: testRunId,
-    });
-    expect(clearCooldown).toHaveBeenCalledWith(expect.anything(), "conv-1");
+      });
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step,
+        runId: testRunId,
+      });
+      expect(clearCooldown).toHaveBeenCalledWith(expect.anything(), "conv-1");
+      // `conversation/cooldown/cleared` fires after persist commits.
+      // Filter (not `.find`) so a double-fire regression surfaces as
+      // `toHaveLength(2)`.
+      const clearedCalls = step.sendEvent.mock.calls.filter((c) => {
+        const payload = c[1];
+        return (
+          typeof payload === "object" &&
+          payload !== null &&
+          "name" in payload &&
+          payload.name === "conversation/cooldown/cleared"
+        );
+      });
+      expect(clearedCalls).toHaveLength(1);
+      expect(clearedCalls[0]?.[0]).toBe("emit-cooldown-cleared");
+      expect(clearedCalls[0]?.[1]).toMatchObject({
+        name: "conversation/cooldown/cleared",
+        // Bus-dedup id keyed on the specific cooldown being cleared —
+        // protects against `step.sendEvent` at-least-once double-fire.
+        id: `cooldown-cleared-conv-1-${longAgo}`,
+        data: {
+          conversationId: "conv-1",
+          clearedBy: "success",
+          elapsedCooldownSeconds: 600,
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // Closed state (no prior cooldown) — successful turns must NOT

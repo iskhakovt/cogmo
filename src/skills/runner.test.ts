@@ -5,6 +5,7 @@ import type { Database, Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import {
   InputValidationError,
@@ -16,11 +17,7 @@ import { DrizzleSkillStore } from "./store/index.js";
 import { SysboxWorkerPool } from "./worker-sysbox/pool.js";
 
 function makeMockFiles(): Service["files"] {
-  return {
-    read: vi.fn().mockResolvedValue(""),
-    write: vi.fn().mockResolvedValue(undefined),
-    list: vi.fn().mockResolvedValue([]),
-  };
+  return mockFilesService();
 }
 
 let db: Database;
