@@ -737,15 +737,26 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const summarizationModel = snapshot.summarizationModel;
 
       const lastTokens = await deps.runInTx((tx) => agentStore.getLastTokens(tx, conversationId));
-      const skip = shouldSkipCounting(
+      const skipBudgetStrategies = shouldSkipCounting(
         lastTokens?.inputTokens ?? null,
         lastTokens?.outputTokens ?? null,
         userContentText.length,
         budget,
       );
 
-      if (!skip) {
-        const compactResult = await compactMessages(fullPrompt, historyMessages, toolDefs, {
+      // Always invoke compaction. Strategy 0 (same-tool supersession)
+      // is structural and runs regardless of budget — gating it behind
+      // shouldSkipCounting would defeat the design (volume-driven
+      // attention dilution doesn't care about budget headroom). The
+      // skip-counting decision now flows in as `skipBudgetStrategies`,
+      // which gates Strategies 1–3 inside compactMessages so the
+      // expensive provider.countTokens round-trip is only paid when
+      // budget pressure could matter.
+      const compactResult = await compactMessages(
+        fullPrompt,
+        historyMessages,
+        toolDefs,
+        {
           countTokens: (params) => provider.countTokens({ ...params, model }),
           budget,
           summarize: async (system, msgs) => {
@@ -783,9 +794,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           onStatus: (message) => {
             delivery.push({ type: "status", message });
           },
-        });
-        historyMessages = compactResult.messages;
-      }
+        },
+        skipBudgetStrategies,
+      );
+      historyMessages = compactResult.messages;
 
       let result: AgentLoopResult;
       try {
