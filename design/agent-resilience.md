@@ -11,7 +11,7 @@ Every provider failure falls into one of four classes. The class determines the 
 | Class | Examples | Response |
 |-|-|-|
 | **A. Transport / infra** | DNS/TLS timeout, 408, 425, 429, any 5xx, mid-stream socket reset before first event | Provider chain (`FallbackLlmProvider`) tries the next candidate. Inngest `retries: 2` retries the whole turn if the chain exhausts. |
-| **B. Provider-permanent** | 4xx auth/quota, model deprecated, malformed tool schema (ours), `ProviderConfigError` | `NonRetriableError`. `onFailure` emits `conversation/errored`. `recover-conversation` flips `conversations.status = 'errored'`. Future inbound is skipped until a human resets it. |
+| **B. Provider-permanent** | 4xx auth/quota, model deprecated, malformed tool schema (ours), `ProviderConfigError` | `NonRetriableError`. `onFailure` emits `conversation/errored`. `recover-conversation` writes a `cooldown_state` blob on the conversation (see [Auto-repair](#auto-repair-proposed)). New inbounds get an in-cooldown reply until the cooldown elapses or a clear-trigger command (`/repair`, `/model`, `/profile`) runs. |
 | **C. Model misbehavior, recoverable** | Empty `content` + `end_turn`, truncated tool-arg JSON, schema-invalid `chatTyped` output, model refusal (`stop_reason: "refusal"` / `finish_reason: "content_filter"` / 400 with content-policy class) | **In-loop per-subtype repair budgets** (most subtypes: 1; refusal: 0, immediate degrade). On exhaustion: degraded reply, conversation stays `active`. |
 | **D. Loop pathology** | N consecutive turns producing the same tool calls with no successful side effect; iteration cap hit | Progress fingerprint trips → degraded reply, conversation stays `active`. |
 
@@ -21,15 +21,133 @@ Class A and B are provider-layer concerns and live in `FallbackLlmProvider` + `r
 
 A turn ends in one of three states. Each is a durable signal downstream consumers (evolution failure-reflector, telemetry) can subscribe to.
 
-| Off-ramp | Status | Event | Trigger |
-|-|-|-|-|
-| Normal | `active` | `response/ready` | Turn produced a usable assistant reply |
-| Degraded | `active` | `conversation/degraded` | Class C repair budget exhausted, or Class D fingerprint tripped. User sees a system-generated apology; can retry. |
-| Errored | `errored` | `conversation/errored` | Class B failure, Inngest function retries exhausted on Class A, history-invariant violation, programmer-bug exception. Requires human reset. |
+| Off-ramp | Event | Trigger |
+|-|-|-|
+| Normal | `response/ready` | Turn produced a usable assistant reply |
+| Degraded | `conversation/degraded` | Class C repair budget exhausted, or Class D fingerprint tripped. User sees a system-generated apology; can retry. |
+| Errored | `conversation/errored` | Class B failure, Inngest function retries exhausted on Class A, history-invariant violation, programmer-bug exception. Enters auto-repair cooldown — see [Auto-repair](#auto-repair-proposed). |
 
-`errored` is a circuit breaker for invariant violations and persistent infrastructure failure. `degraded` is a soft recovery for "the model wouldn't cooperate." Class C never escalates to `errored` — repeated Class C exhaustion on the same conversation produces repeated `degraded` events, each carrying its subtype tag for telemetry.
+The Errored off-ramp is the conversation-level circuit breaker: it sets an exponentially-backing-off cooldown that holds off new turns until either the cooldown elapses or an explicit clear-trigger command runs. `degraded` is a soft recovery for "the model wouldn't cooperate" — conversation continues. Class C never escalates to Errored — repeated Class C exhaustion on the same conversation produces repeated `degraded` events, each carrying its subtype tag for telemetry.
 
-**`degraded` is an event, not a status.** The conversation row's `status` enum stays `'active' | 'errored'`; the semantic distinction "the last turn was degraded" lives in the `conversation/degraded` event stream, not in a third enum value. No major agent framework introduces a `degraded` conversation status (OpenAI Threads keep thread-level state binary with run-level status enums; Letta tracks per-step `stop_reason`; CrewAI / AutoGen rely on event signals only). A separate `'degraded'` enum value wouldn't intrinsically gate anything — any gating behavior would come from a check we'd have to add to `handle-message`'s entry guard — so it would be net new complexity without buying anything the event signal doesn't already deliver.
+**Both Degraded and Errored are events, not statuses.** The conversation row carries no failure-state enum. "The last turn was degraded" lives in the `conversation/degraded` event stream; "this conversation is currently cooling down after an error" is a derived predicate on a JSONB `cooldown_state` column (see [Auto-repair](#auto-repair-proposed)). No major agent framework introduces failure-state enum values on the conversation (OpenAI Threads keep thread-level state binary with run-level status enums; Letta tracks per-step `stop_reason`; CrewAI / AutoGen rely on event signals only). A status enum value wouldn't intrinsically gate anything an event-driven predicate doesn't — it would be net new complexity with two sources of truth to keep in sync.
+
+## Auto-repair `[proposed]`
+
+Inbounds to a conversation that just took the Errored off-ramp wait through an exponentially-backing-off cooldown before the next turn fires, rather than blocking until a human resets the row. Maps to the canonical circuit breaker pattern (`CLOSED` / `OPEN` / `HALF-OPEN`) at the conversation level, collapsed to two persistent states because there's no concurrent traffic to gate.
+
+### State machine `[proposed]`
+
+| State | Predicate | Behavior |
+|-|-|-|
+| **Closed** | `cooldown_state IS NULL` | Normal operation. Every inbound runs `handle-message`. |
+| **Open** | `cooldown_state IS NOT NULL AND now() < lastErroredAt + cooldownSeconds` | Inbound emits a terse reply with a retry-time estimate. `handle-message` returns `{ status: "skipped", reason: "cooldown" }` without invoking the LLM. |
+| (Half-open) | `cooldown_state IS NOT NULL AND now() >= lastErroredAt + cooldownSeconds` | Implicit — the next inbound IS the probe. Entry guard does **not** skip; full `handle-message` runs as a normal turn. Success clears `cooldown_state` to `NULL`; failure routes back through `onFailure` → `recover-conversation` which doubles `cooldownSeconds` (capped at 3600s) and resets `lastErroredAt`. |
+
+Standard three-state circuit breakers reserve `HALF-OPEN` to gate concurrent probes ("send one request, see if it works, before opening the floodgates"). At single-user scale there's no concurrent traffic to gate — the next inbound IS the probe. Collapsing to two persistent states is a deliberate simplification, not an oversight.
+
+### Cooldown curve `[proposed]`
+
+- **Base:** 60 seconds. Sub-minute backoffs belong inside Inngest's per-step retry budget, not the conversation layer.
+- **Multiplier:** 2× per consecutive failure.
+- **Cap:** 3600 seconds (1 hour). Past an hour the user has either fixed something themselves or moved on; longer cooldowns don't buy more recovery.
+- **Reset:** Any successful turn clears `cooldown_state` to `NULL`. The next failure starts the curve over at 60s, not where it left off.
+- **No jitter.** Industry guidance adds jitter to anti-correlate retries across a fleet; at single-user scale there's no fleet.
+
+Sequence: `60s → 120s → 240s → 480s → 960s → 1920s → 3600s` (capped). Seven consecutive failures reach the cap in ~2.5 hours of accumulated wait.
+
+Defaults align with LiteLLM Router's `cooldown_time: 60` and AWS Bedrock retry guidance ("max backoff cap: 10-60s for user-facing operations, longer for background"). Conversation-level cooldown sits between these — LLM responses are user-facing, but the user's tolerance for "I had an error, give me a minute" is measured in minutes, not seconds.
+
+### Storage `[proposed]`
+
+One JSONB column on `conversations`:
+
+```typescript
+const CooldownStateSchema = z.object({
+  lastErroredAt: z.string().datetime(),
+  cooldownSeconds: z.number().int().positive(),
+  consecutiveFailures: z.number().int().positive(),
+});
+
+// In conversations schema:
+cooldown_state: jsonbZod("cooldown_state", CooldownStateSchema), // nullable
+```
+
+Validated at the store boundary via `jsonbZod(name, CooldownStateSchema)` (see `src/db/helpers.ts`). The Zod schema enforces the all-or-none invariant — all three fields are set together or the column is `NULL`. Same shape as `coding_tasks.worktree_assignment` (the canonical atomic-JSONB precedent called out in [`.claude/rules/architecture-rules.md`](../.claude/rules/architecture-rules.md) → "Group atomic multi-field state in a JSONB blob").
+
+`consecutiveFailures` is stored explicitly rather than derived from `cooldownSeconds`. The naive inverse (`log2(cooldownSeconds / 60) + 1`) collapses to a constant once `cooldownSeconds` hits the 3600s cap — at the 8th, 9th, 10th consecutive failure the formula still says 7. Telemetry surfaces consecutive-failure counts (chronic-failure conversations are the most important signal); accuracy past the cap matters precisely when it's most needed. Cost is ~4 bytes per row.
+
+The existing `conversations.status` enum and column are dropped. `'errored'` was the only value other than `'active'`; once auto-repair lands, no code branches on the enum — "in cooldown" is a derived predicate on `cooldown_state`. A single-value enum is pure noise. Future lifecycle states (`'archived'`, `'paused'`) would add a fresh column with a new enum at that time — not by carrying a vestigial one forward today.
+
+### Triggers `[proposed]`
+
+Two paths emit `conversation/errored`; one handler writes `cooldown_state`:
+
+1. **`handle-message.onFailure`** — Inngest function failure handler. Fires after Inngest's per-invocation retry budget exhausts (Class A persistence, Class B `NonRetriableError`, history-invariant violation, programmer-bug exception). Emits `conversation/errored` with `id: "errored-${runId}"`.
+2. **Worker-death reconcile** — new Inngest function subscribed to the environment-wide `inngest/function.failed` system event (`src/inngest/events.ts` → `inngestFunctionFailed`), filtered to `handle-message`. Mirrors `createCodingTaskReconcile` (`src/agent/coding/reconcile-on-failure.ts`) introduced in PR #267 for `coding-task-start`. Catches the case where the worker dies before `onFailure` can fire. Emits `conversation/errored` with the **same** `id: "errored-${runId}"`. Bus-level dedup ensures `recover-conversation` runs exactly once per `runId` regardless of which path emitted first — same pattern as PR #273's `task-failed-${taskId}` shape.
+
+`recover-conversation` consumes `conversation/errored` and writes `cooldown_state` inside `runInTx` — REPEATABLE READ is the project default (see [.claude/rules/architecture-rules.md](../.claude/rules/architecture-rules.md) → All DB operations use transactions; [.claude/rules/store-pattern.md](../.claude/rules/store-pattern.md) → Default isolation is REPEATABLE READ). The read-modify-write reads the prior blob (if any), increments `consecutiveFailures`, doubles `cooldownSeconds` (or starts at 60s) capped at 3600s, writes the new blob. Snapshot isolation prevents the lost-update race if two `conversation/errored` events somehow slip past bus dedup; the second write either sees the first's commit and bumps from there, or hits a `40001` and retries through the transactor's once-retry budget.
+
+**Half-open failure** — first inbound past the cooldown threshold runs `handle-message`; if it fails again, path 1 applies, the `recover-conversation` handler reads the prior `cooldownSeconds` and doubles it (not starting fresh at 60s).
+
+**Degraded does NOT trigger cooldown.** A degraded reply means the loop produced *something* the user can act on; conversation flow continues. Repeated `degraded` on the same conversation surfaces in telemetry but doesn't escalate. (Telemetry-driven escalation — "5 degrades in 10 min → cooldown" — is a deferred follow-up.)
+
+### In-cooldown reply `[proposed]`
+
+Inbound arriving in the Open state gets a terse system-generated reply rather than a stalled response. Shape:
+
+> I hit an error on the last message and I'm waiting before trying again. Try once more in ~3 minutes.
+
+Rules:
+
+- **Delivered through the same transport path as normal replies** (`response/ready` event → channel adapter). The reply is generated by `handle-message`'s entry guard, not by invoking the LLM.
+- **Ephemeral — not persisted to `messages`.** The cooldown reply exists only on the outbound transport; no `assistant` row is written. Persisting it would leave an assistant row with no corresponding user row (inbounds stay unbatched — see below), producing a transcript hole that future-turn retrieval and the failure-reflector would have to special-case. Pairs with the existing ephemeral patterns for synthetic continuation prompts and the in-loop `[Previous conversation summary]` turn. The next successful turn's transcript covers the user's cooldown-era messages with a real LLM-generated response; the canned cooldown text only ever existed in the user's inbox.
+- **Retry-time estimate** is the remaining cooldown rounded to a coarse unit (seconds under a minute, minutes under an hour). Stale by the time the user reads it — acceptable: they get an order-of-magnitude, not a stopwatch.
+- **One reply per debounce batch.** A burst of user messages during cooldown coalesces through the debouncer into one `inbound/ready` and gets one in-cooldown reply. Subsequent activity (after the debounce idle window) triggers another `inbound/ready` and another reply if still in cooldown — N user-active windows → N replies, not a tight loop.
+- **Inbounds are NOT consumed.** The in-cooldown skip path returns `{ status: "skipped", reason: "cooldown" }` before loading inbounds (matching today's `errored` skip-path shape at `handle-message.ts:235`). The inbounds stay unbatched. When cooldown elapses, the next `inbound/ready` loads the entire backlog as one batch — the user's cooldown-era messages get a real response as part of the next successful turn. Pile-up semantic, not consume-and-acknowledge.
+- **Model is NOT invoked.** The in-cooldown reply is a hand-built text response; no tokens spent. Cooldown's whole point is to stop burning tokens on something that just failed.
+
+### Clear triggers `[proposed]`
+
+`cooldown_state` clears (becomes `NULL`) on any of:
+
+- **First successful turn past the cooldown threshold.** Half-open success — the implicit probe path. Cleared in the same transaction that writes the assistant reply.
+- **`/model` command.** User switched models — the previous model may have been the failure cause, and the new one gets a clean slate.
+- **`/profile` command.** Profile switch is a context change; the new profile has its own provider/tools and may not exhibit the failure.
+- **`/repair` command.** Explicit user-initiated clear. Unique among the clear triggers in supporting non-current conversations: `/repair <alias|uuid>` targets a named conversation, `/repair` (no args) targets the current session. The other clear triggers are scoped to the current session.
+- **Future `/secrets rotate` command** (when shipped). Provider credentials refreshed — the most likely cause of Class B auth failures.
+
+`/repair` exists today as a `status='errored' → 'active'` flip; auto-repair repurposes its implementation to clear `cooldown_state` while preserving the user-facing contract ("this conversation is stuck — let it try again"). The targeting syntax (current vs. named) and idempotent semantics (clearing an already-clear conversation succeeds with a no-op reply) carry over unchanged.
+
+**`/model` and `/profile` gain a new responsibility.** Today neither command touches conversation failure state — they're context switches that affect the next turn. Under auto-repair they also clear `cooldown_state` as a side effect of the switch, on the rationale that the user has signaled "external state changed, try again with this new context." The model-/profile-switch happens first; the `clearCooldown` call runs in the same transaction so a partial commit can't leave the conversation in a "switched profile but still cooling down" state.
+
+### Telemetry `[proposed]`
+
+Two events emitted as durable Inngest events:
+
+- **`conversation/cooldown/entered`** — fires whenever `cooldown_state` is set or doubled. Payload: `{ conversationId, lastErroredAt, cooldownSeconds, consecutiveFailures, causeClass, runId }` where `causeClass: "A" | "B" | "invariant" | "bug"` matches the [Failure taxonomy](#failure-taxonomy-confirmed) (Class A transient that exhausted Inngest retries, Class B non-retriable, history-invariant violation, programmer-bug exception). Class C and D don't appear — neither triggers cooldown. Subscribers: evolution failure-reflector, future alerting / metrics sinks.
+- **`conversation/cooldown/cleared`** — fires on clear. Payload: `{ conversationId, clearedBy: "success" | "model_switch" | "profile_switch" | "user_repair" | "secrets_rotated", elapsedCooldownSeconds }`.
+
+Structured logs at each transition use the per-turn `turnLogger` so `runId` + `conversationId` are bound — matching the existing `agent.repair` / `agent.degrade` shape (see [Telemetry](#telemetry-confirmed)).
+
+### Where this composes `[proposed]`
+
+| Layer | Responsibility |
+|-|-|
+| **Inngest per-function retries** | `retries: 2`. Catches Class A transients. Already in place. Doesn't touch cooldown. |
+| **`handle-message.onFailure`** | Emits `conversation/errored`. Already in place; payload extends with `causeClass` for the reflector. |
+| **`recover-conversation`** | Subscribes to `conversation/errored`, reads prior `cooldown_state`, writes new blob with doubled-or-base `cooldownSeconds`, emits `conversation/cooldown/entered`. Replaces today's `setConversationStatus(..., 'errored')` call. |
+| **Worker-death reconcile** | New Inngest function subscribed to `inngest/function.failed` filtered to `handle-message`. Writes `cooldown_state` directly when the row's still-`NULL` state proves the worker died before `onFailure` ran. |
+| **`handle-message` entry guard** | Reads `cooldown_state`. In Open state, generates the in-cooldown reply via the transport and returns; doesn't invoke the LLM. |
+| **Command handlers (`/model`, `/profile`, `/repair`)** | After the state change, call `clearCooldown(conversationId, "model_switch" | "profile_switch" | "user_repair")`. `/repair`'s implementation switches from a `status` enum flip to the `clearCooldown` call; the user-facing command shape (current vs. named target, idempotent on already-clear) is preserved. |
+
+### Non-goals `[proposed]`
+
+| Idea | Why excluded |
+|-|-|
+| Jitter on cooldown | Anti-thundering-herd measure. Single user, no herd to anti-correlate. |
+| Explicit half-open probe state in storage | The next inbound IS the probe at single-user scale; persisting an explicit state adds writes for nothing. |
+| Degraded → cooldown escalation | Degraded means the loop produced something usable. Cooldown is for "couldn't produce anything." Escalating one to the other conflates two distinct off-ramps. |
+| Per-error-class thresholds (LiteLLM-style `AuthenticationErrorAllowedFails: 1`) | Conversation-level cooldown has a single trigger (`onFailure` fires for any class that escapes the loop). Per-class thresholds live one layer down in the provider resolver — orthogonal concern. |
 
 ## Class C: model misbehavior `[confirmed]`
 
@@ -311,9 +429,10 @@ Each layer handles one class. None of them double-handles another layer's class:
 Decisions taken with their follow-up trigger. Not blockers — listed so the rationale is durable and reviewers don't relitigate.
 
 1. **Per-conversation repair budget.** Current design budgets per-turn (one Inngest invocation). Per-conversation would catch "this conversation keeps repairing" without an extra signal but risks one bad model burning budget across many turns. Wire if telemetry shows the same conversation repairing on most turns.
-2. **`repair_attempts` column on `messages`.** Today the design persists only the final degraded reply plus successful intermediate iterations. A JSONB column would let the failure-reflector query historically by SQL. In the interim the `agent.repair` / `agent.degrade` structured logs (see [Telemetry](#telemetry-proposed)) carry the same forensic data — the reflector joins logs to events by `runId` + `conversationId` without an extra column. Wire when SQL access becomes necessary.
+2. **`repair_attempts` column on `messages`.** Today the design persists only the final degraded reply plus successful intermediate iterations. A JSONB column would let the failure-reflector query historically by SQL. In the interim the `agent.repair` / `agent.degrade` structured logs (see [Telemetry](#telemetry-confirmed)) carry the same forensic data — the reflector joins logs to events by `runId` + `conversationId` without an extra column. Wire when SQL access becomes necessary.
 3. **Per-provider Class C rate counter with paging threshold.** A per-provider counter (`agent.classC.rate{provider}`) with a threshold ("rate > 10% over 1h → page") would surface a degraded provider before the bill. Wire when there's a metrics sink to attach to.
 4. **Per-adapter `decodeRefusal` hook for OpenAI-compat.** OpenAI-compat refusals degrade through the empty-content path in v1 (see [Class C](#class-c-model-misbehavior-proposed)). Wire a permissive regex-default hook when telemetry shows the wasted continuation-prompt budget is a real cost driver.
+5. **Telemetry-driven degraded → cooldown escalation.** Today repeated `degraded` events on the same conversation surface in telemetry but never escalate. A threshold ("5 degrades within 10 minutes → enter cooldown") would treat chronic in-loop failure as equivalent to a Class B failure for circuit-breaker purposes. Wire when telemetry shows real conversations stuck in repeat-degrade loops.
 
 The failure-reflector's downstream consumption — proposing steering rules from repair-subtype telemetry — lives in [evolution.md](evolution.md), not here.
 
