@@ -6,7 +6,7 @@ import type {
   SandboxSession,
 } from "../../sandbox/index.js";
 import { type CtxHandler, Dispatcher } from "../dispatcher.js";
-import type { TaskInvoke } from "../protocol.js";
+import type { RuntimeRusage, TaskInvoke } from "../protocol.js";
 import { DEFAULT_RESOURCE_LIMITS } from "./host.js";
 import { createNdjsonTransport } from "./transport.js";
 
@@ -75,6 +75,14 @@ export interface InvokeResult {
   ok: boolean;
   output?: unknown;
   error?: string;
+  /**
+   * Per-task rusage from the supervisor's child. Populated for every
+   * normally-completing run (`runner.py` snapshots `getrusage(RUSAGE_SELF)`
+   * just before emitting `task_result`). Absent for synthesised results
+   * — wall-clock kill, supervisor-hung watchdog, dispatcher transport
+   * errors — since none of those paths see the child's rusage.
+   */
+  rusage?: RuntimeRusage;
   /**
    * True when the worker is safe to reuse for another task. False on
    * wall-clock kill, transport error, or `isolation: recycle` declaration —
@@ -294,7 +302,12 @@ export class SysboxSkillWorker {
       return { ok: false, error: `dispatcher_error: ${message}`, workerReusable: false };
     }
 
-    const taskResult = winner.r as { ok: boolean; output?: unknown; error?: string };
+    const taskResult = winner.r as {
+      ok: boolean;
+      output?: unknown;
+      error?: string;
+      rusage?: RuntimeRusage;
+    };
     // `isolation: recycle` poisons the worker after the task regardless of
     // success — the manifest declared it can't share state with another
     // task on the same supervisor.
@@ -305,6 +318,7 @@ export class SysboxSkillWorker {
       ok: taskResult.ok,
       ...(taskResult.output !== undefined && { output: taskResult.output }),
       ...(taskResult.error !== undefined && { error: taskResult.error }),
+      ...(taskResult.rusage !== undefined && { rusage: taskResult.rusage }),
       workerReusable: this.#state === "busy",
     };
   }

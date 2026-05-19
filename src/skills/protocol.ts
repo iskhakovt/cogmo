@@ -35,17 +35,34 @@ export const TaskInvokeSchema = z.object({
 });
 export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
 
+/**
+ * Optional rusage block the runtime contributes back to the host. Tier 2's
+ * `runner.py` populates `peakMemoryBytes` from `getrusage(RUSAGE_SELF)`
+ * just before emitting `task_result`; tier 1 (Pyodide WASM) leaves it
+ * unset because `getrusage` is process-wide and would inflate under
+ * concurrent workers. Synthesised `task_result`s from the supervisor
+ * (wall-clock kill, child died abnormally) also leave it unset — they
+ * never saw the child's rusage. The host fills in `wallClockMs`
+ * separately and writes the combined blob to `skill_runs.resource_usage`.
+ */
+const RuntimeRusageSchema = z.object({
+  peakMemoryBytes: z.number().int().nonnegative().optional(),
+});
+export type RuntimeRusage = z.infer<typeof RuntimeRusageSchema>;
+
 const TaskResultOkSchema = z.object({
   type: z.literal("task_result"),
   id: z.string().min(1),
   ok: z.literal(true),
   output: z.unknown(),
+  rusage: RuntimeRusageSchema.optional(),
 });
 const TaskResultErrSchema = z.object({
   type: z.literal("task_result"),
   id: z.string().min(1),
   ok: z.literal(false),
   error: z.string(),
+  rusage: RuntimeRusageSchema.optional(),
 });
 export const TaskResultSchema = z.union([TaskResultOkSchema, TaskResultErrSchema]);
 export type TaskResult = z.infer<typeof TaskResultSchema>;

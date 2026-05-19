@@ -114,6 +114,10 @@ describe("SkillRunnerImpl", () => {
     expect(run?.output).toEqual({ echo: 8 });
     expect(run?.error).toBeNull();
     expect(run?.finishedAt).toBeInstanceOf(Date);
+    // Tier-1 (Pyodide) leaves rusage unset — the host still records
+    // wall_clock_ms from the timestamps and writes null for peak memory.
+    expect(run?.resourceUsage?.wallClockMs).toBeGreaterThanOrEqual(0);
+    expect(run?.resourceUsage?.peakMemoryBytes).toBeNull();
   });
 
   it("records a ctx.* audit row when the skill calls a host RPC", async () => {

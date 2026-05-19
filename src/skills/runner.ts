@@ -1040,6 +1040,14 @@ export class SkillRunnerImpl implements SkillRunner {
     }
 
     const finishedAt = new Date();
+    // Build the resource_usage blob once — `wallClockMs` is always derived
+    // from the host-side timestamps; `peakMemoryBytes` rides whatever the
+    // runtime contributed via `result.rusage` (tier-2 populates it from
+    // `getrusage`, tier-1 leaves it unset and we store null).
+    const resourceUsage = {
+      wallClockMs: Math.max(0, finishedAt.getTime() - run.createdAt.getTime()),
+      peakMemoryBytes: result.rusage?.peakMemoryBytes ?? null,
+    };
     if (result.ok) {
       const outputsValidationErr = this.#validateOutput(cached, result.output, opts.name);
       if (outputsValidationErr !== null) {
@@ -1049,6 +1057,7 @@ export class SkillRunnerImpl implements SkillRunner {
             status: "error",
             output: null,
             error: outputsValidationErr,
+            resourceUsage,
             finishedAt,
           }),
         );
@@ -1060,6 +1069,7 @@ export class SkillRunnerImpl implements SkillRunner {
           status: "success",
           output: result.output ?? null,
           error: null,
+          resourceUsage,
           finishedAt,
         }),
       );
@@ -1071,6 +1081,7 @@ export class SkillRunnerImpl implements SkillRunner {
         status: "error",
         output: null,
         error: result.error ?? "unknown_error",
+        resourceUsage,
         finishedAt,
       }),
     );
