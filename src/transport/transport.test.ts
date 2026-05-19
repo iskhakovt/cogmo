@@ -624,6 +624,58 @@ describe("createTransport", () => {
         reason: expect.stringContaining("not visible"),
       });
     });
+
+    // Auto-repair clear trigger — switching profile is a context change
+    // that should end any active cooldown so the new profile's
+    // provider/tools get a clean slate. Same-tx so a partial commit
+    // can't leave "switched profile but still cooling down". Verify
+    // the clear fires when cooldown_state was set.
+    it("clears cooldown_state in the same tx as the profile switch", async () => {
+      const setConversationProfile = vi.fn();
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-old",
+          isPrivate: true,
+          cooldownState: {
+            lastErroredAt: "2026-05-19T11:00:00.000Z",
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
+        }),
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        setConversationProfile,
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.setProfile("handle", "c1", "p-new");
+      expect(res.isOk()).toBe(true);
+      expect(setConversationProfile).toHaveBeenCalledWith(expect.anything(), "c1", "p-new");
+      expect(clearCooldown).toHaveBeenCalledWith(expect.anything(), "c1");
+    });
+
+    // Symmetric to the success-path clear in handle-message:
+    // skipping the UPDATE when cooldown_state is already NULL avoids
+    // a per-call pointless write.
+    it("does NOT call clearCooldown when cooldown_state was already NULL", async () => {
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-old",
+          isPrivate: true,
+          cooldownState: null,
+        }),
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      await transport.conversations.setProfile("handle", "c1", "p-new");
+      expect(clearCooldown).not.toHaveBeenCalled();
+    });
   });
 
   describe("conversations.repair", () => {
@@ -1015,6 +1067,218 @@ describe("createTransport", () => {
       };
       await transport.profiles.update("handle", "p-mine", { memoryScope });
       expect(updateProfile).toHaveBeenCalledWith(expect.anything(), "p-mine", { memoryScope });
+    });
+
+    // Auto-repair clear trigger — `/model` passes
+    // `clearCooldownForConversation: currentConversationId` so the model
+    // update and the cooldown clear land in the same tx. Verifies the
+    // clear fires and ownership is checked against the conversation
+    // before the profile update commits.
+    it("clearCooldownForConversation: calls clearCooldown in the same tx as the model update", async () => {
+      const updateProfile = vi.fn().mockResolvedValue({});
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-mine",
+          isPrivate: true,
+          cooldownState: {
+            lastErroredAt: "2026-05-19T11:00:00.000Z",
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
+        }),
+        updateProfile,
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { model: "gpt-4o" },
+        { clearCooldownForConversation: "c1" },
+      );
+      expect(res.isOk()).toBe(true);
+      expect(updateProfile).toHaveBeenCalled();
+      expect(clearCooldown).toHaveBeenCalledWith(expect.anything(), "c1");
+    });
+
+    // Without the opt, no cooldown clear — verifies the option is
+    // opt-in (other update callers like `/profile edit` shouldn't
+    // touch cooldown).
+    it("clearCooldownForConversation absent: does NOT call clearCooldown", async () => {
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      await transport.profiles.update("handle", "p-mine", { model: "gpt-4o" });
+      expect(clearCooldown).not.toHaveBeenCalled();
+    });
+
+    // Ownership check on the conversation runs BEFORE the profile
+    // update commits — so a wrong conversationId aborts the whole
+    // update rather than silently dropping the cooldown-clear side
+    // effect.
+    it("clearCooldownForConversation: returns access_denied when conversation isn't owned by caller", async () => {
+      const updateProfile = vi.fn().mockResolvedValue({});
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c-other",
+          userId: "user-2",
+          profileId: "p-other",
+          isPrivate: true,
+          cooldownState: null,
+        }),
+        updateProfile,
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { model: "gpt-4o" },
+        { clearCooldownForConversation: "c-other" },
+      );
+      expect(res._unsafeUnwrapErr()).toMatchObject({
+        code: "access_denied",
+        reason: expect.stringContaining("conversation"),
+      });
+      expect(updateProfile).not.toHaveBeenCalled();
+      expect(clearCooldown).not.toHaveBeenCalled();
+    });
+
+    it("clearCooldownForConversation: returns conversation_not_found when conv row is missing", async () => {
+      const updateProfile = vi.fn().mockResolvedValue({});
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue(undefined),
+        updateProfile,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { model: "gpt-4o" },
+        { clearCooldownForConversation: "c-gone" },
+      );
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "conversation_not_found" });
+      expect(updateProfile).not.toHaveBeenCalled();
+    });
+
+    // The clear's rationale is "the model the failing turn used
+    // changed." If the conversation doesn't actually use this profile,
+    // the new model isn't its model and the clear would be spurious.
+    // Reject so the caller surfaces a bug rather than silently
+    // clearing cooldown on an unrelated conversation.
+    it("clearCooldownForConversation: returns access_denied when conversation uses a different profile", async () => {
+      const updateProfile = vi.fn().mockResolvedValue({});
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c-elsewhere",
+          userId: "user-1",
+          profileId: "p-other",
+          isPrivate: true,
+          cooldownState: null,
+        }),
+        updateProfile,
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { model: "gpt-4o" },
+        { clearCooldownForConversation: "c-elsewhere" },
+      );
+      expect(res._unsafeUnwrapErr()).toMatchObject({
+        code: "access_denied",
+        reason: expect.stringContaining("does not use this profile"),
+      });
+      expect(updateProfile).not.toHaveBeenCalled();
+      expect(clearCooldown).not.toHaveBeenCalled();
+    });
+
+    // Mirror setProfile's optimization — skip the UPDATE when there's
+    // nothing to clear. Without this, every `/model` against a
+    // not-currently-cooling-down conversation would write a no-op
+    // row version on `conversations`.
+    // When `updateProfile` raises `UniqueViolationError`, Postgres
+    // marks the tx as aborted. The error MUST propagate out of
+    // `runInTx` so Drizzle issues a clean ROLLBACK before the outer
+    // catch translates to `err`. Catching inside the tx and returning
+    // `err` would let `runInTx` resolve, Drizzle would send COMMIT,
+    // and Postgres would silently turn that into a ROLLBACK with a
+    // NOTICE — end-to-end correct but misleading-on-paper. The
+    // observable contract this test pins: `clearCooldown` must NOT
+    // fire on the unique-violation path, even though
+    // `clearCooldownForConversation` was passed and the conversation
+    // was cooling down.
+    it("UniqueViolationError aborts the tx without firing clearCooldown", async () => {
+      const updateProfile = vi
+        .fn()
+        .mockRejectedValue(
+          new (await import("../agent/store/errors.js")).UniqueViolationError(
+            "uq_profiles_user_name",
+          ),
+        );
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-mine",
+          isPrivate: true,
+          cooldownState: {
+            lastErroredAt: "2026-05-19T11:00:00.000Z",
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
+        }),
+        updateProfile,
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { name: "taken" },
+        { clearCooldownForConversation: "c1" },
+      );
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_name_taken" });
+      expect(clearCooldown).not.toHaveBeenCalled();
+    });
+
+    it("clearCooldownForConversation: skips the clear write when cooldown_state was already NULL", async () => {
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-mine",
+          isPrivate: true,
+          cooldownState: null,
+        }),
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { model: "gpt-4o" },
+        { clearCooldownForConversation: "c1" },
+      );
+      expect(res.isOk()).toBe(true);
+      expect(clearCooldown).not.toHaveBeenCalled();
     });
   });
 
