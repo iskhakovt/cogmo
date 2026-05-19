@@ -1,4 +1,5 @@
 import { Ajv, type ValidateFunction } from "ajv";
+import { computeNextRun } from "../agent/scheduling/cron.js";
 import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
@@ -274,6 +275,14 @@ export interface SkillRunnerOptions {
       | "idleSweepIntervalMs"
     >
   >;
+  /**
+   * Clock override for testability. Used by the lifecycle paths
+   * (`register` / `approveDeploy` / `rollback`) that seed `next_run_at`
+   * from the manifest's cron. Defaults to `() => new Date()`. Matches the
+   * `now` injection on the cron ticker — keeps the test surface uniform
+   * across the module.
+   */
+  clock?: () => Date;
 }
 
 interface SkillSourceCacheEntry {
@@ -301,6 +310,7 @@ export class SkillRunnerImpl implements SkillRunner {
   #pyodidePackageCacheDir: string | undefined;
   #sandbox: SandboxClient | undefined;
   #tier2Image: string;
+  #clock: () => Date;
   /**
    * Lazily-created warm pool over `#sandbox`. Created on first tier-2
    * invocation, not at boot — keeps cogmo serve startup independent of
@@ -345,7 +355,21 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#sandbox = opts.sandbox;
     this.#tier2Image = opts.tier2Image ?? DEFAULT_TIER2_IMAGE;
     this.#poolOptions = opts.poolOptions;
+    this.#clock = opts.clock ?? (() => new Date());
     this.#ajv = new Ajv({ allErrors: true, strict: false });
+  }
+
+  /**
+   * Compute the first occurrence of the manifest's `schedule` after the
+   * current clock tick, using the user's timezone. Returns null when the
+   * manifest has no schedule — preserves the all-or-none invariant on
+   * `(schedule, scheduleNextRunAt)`. The timezone is sourced from
+   * `this.#user.timezone` (single source of truth — the bootstrap path
+   * sets it from `env.USER_TIMEZONE`).
+   */
+  #computeScheduleNextRunAt(schedule: string | null): Date | null {
+    if (schedule === null) return null;
+    return computeNextRun(schedule, this.#user.timezone, this.#clock());
   }
 
   static async create(opts: SkillRunnerOptions): Promise<SkillRunnerImpl> {
@@ -504,13 +528,15 @@ export class SkillRunnerImpl implements SkillRunner {
       return rejectedResult(branchSha, classifierLog.validation_errors.join("; "));
     }
 
+    const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeRegister(tx, {
         name: manifest.name,
         tier: manifest.tier,
         riskTier: classifierLog.risk_tier,
         effects: manifest.effects,
-        schedule: manifest.schedule ?? null,
+        schedule,
+        scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
         branchTipSha: branchSha,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
@@ -610,6 +636,7 @@ export class SkillRunnerImpl implements SkillRunner {
       };
     }
 
+    const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeApprove(tx, {
         pendingId: opts.pendingId,
@@ -620,7 +647,8 @@ export class SkillRunnerImpl implements SkillRunner {
         // different tier mid-flow, which would be confusing.
         riskTier: deploy.riskTier,
         effects: manifest.effects,
-        schedule: manifest.schedule ?? null,
+        schedule,
+        scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         applyFilesystem: async () => {
@@ -738,6 +766,7 @@ export class SkillRunnerImpl implements SkillRunner {
 
     const mainSha = await getMainSha(repoPath);
 
+    const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeRollback(tx, {
         name: opts.name,
@@ -745,7 +774,8 @@ export class SkillRunnerImpl implements SkillRunner {
         tier: manifest.tier,
         riskTier: classifierLog.risk_tier,
         effects: manifest.effects,
-        schedule: manifest.schedule ?? null,
+        schedule,
+        scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
@@ -895,10 +925,10 @@ export class SkillRunnerImpl implements SkillRunner {
   }): Promise<SkillRunResult> {
     const skill = await this.#runInTx((tx) => this.#store.getSkillByName(tx, opts.name));
     if (!skill) {
-      throw new Error(`skill not found: ${opts.name}`);
+      throw new SkillNotFoundError(opts.name);
     }
     if (skill.disabled) {
-      throw new Error(`skill is disabled: ${opts.name}`);
+      throw new SkillDisabledError(opts.name);
     }
 
     const cached = await this.#loadSourceForRow(skill);
@@ -914,9 +944,7 @@ export class SkillRunnerImpl implements SkillRunner {
     }
 
     if (skill.tier === "container" && !this.#sandbox) {
-      throw new Error(
-        `skill '${opts.name}' is tier=container but no sandbox is configured (set SANDBOX_RUNTIME)`,
-      );
+      throw new SandboxUnavailableError(opts.name);
     }
 
     const run = await this.#runInTx((tx) =>
@@ -1074,12 +1102,14 @@ export class SkillRunnerImpl implements SkillRunner {
     }
 
     const gitSha = params.gitSha ?? hashStub(params.manifestSource + params.body);
+    const schedule = manifest.schedule ?? null;
     const insertParams: InsertSkillParams = {
       name: manifest.name,
       tier: manifest.tier,
       riskTier: "auto",
       effects: manifest.effects,
-      schedule: manifest.schedule ?? null,
+      schedule,
+      scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
       gitSha,
       inputs: manifest.inputs,
       outputs: manifest.outputs ?? null,
@@ -1366,6 +1396,46 @@ export class InputValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "InputValidationError";
+  }
+}
+
+/**
+ * `invoke` was called with a name that doesn't resolve to a skills row.
+ * Discriminated via `instanceof` rather than substring matching against
+ * `error.message` — call sites (the cron-fire-handler is the only one
+ * today) translate it into their own skipped-result reason without
+ * coupling to message wording.
+ */
+export class SkillNotFoundError extends Error {
+  constructor(name: string) {
+    super(`skill not found: ${name}`);
+    this.name = "SkillNotFoundError";
+  }
+}
+
+/**
+ * `invoke` was called on a row whose `disabled = true`. Same rationale as
+ * {@link SkillNotFoundError}: `instanceof` discrimination, not string match.
+ */
+export class SkillDisabledError extends Error {
+  constructor(name: string) {
+    super(`skill is disabled: ${name}`);
+    this.name = "SkillDisabledError";
+  }
+}
+
+/**
+ * `invoke` was called on a `tier: container` skill but no sandbox is wired
+ * (e.g. `SANDBOX_RUNTIME` unset in the deployment). Permanent
+ * misconfiguration — won't self-heal between retry attempts. The
+ * cron-fire-handler discriminates this via `instanceof` to short-circuit
+ * the retry budget into a `skipped: sandbox_unavailable` result, same
+ * shape as {@link InputValidationError}'s `invalid_inputs` skip.
+ */
+export class SandboxUnavailableError extends Error {
+  constructor(name: string) {
+    super(`skill '${name}' is tier=container but no sandbox is configured (set SANDBOX_RUNTIME)`);
+    this.name = "SandboxUnavailableError";
   }
 }
 
