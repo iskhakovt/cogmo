@@ -29,7 +29,6 @@ function basePayload(
     functionId: string;
     runId: string;
     errorMessage: string;
-    innerEventName: string;
     conversationId: string | undefined;
     triggerInboundId: string | null | undefined;
   }>,
@@ -38,7 +37,6 @@ function basePayload(
     functionId: overrides?.functionId ?? "cogmo-handle-message",
     runId: overrides?.runId ?? "01KS04KFF783YZZS67QS4Y3Y5B",
     errorMessage: overrides?.errorMessage ?? "connect_worker_stopped_responding",
-    innerEventName: overrides?.innerEventName ?? "inbound/ready",
     conversationId:
       overrides && "conversationId" in overrides ? overrides.conversationId : "conv-1",
     triggerInboundId:
@@ -76,18 +74,6 @@ describe("decideReconcile", () => {
       status: "skipped",
       reason: "not_handle_message",
     });
-  });
-
-  // `handle-message` is triggered exclusively by `inbound/ready`. A failed
-  // run with any other inner event name means something is upstream-broken;
-  // synthesising `conversation/errored` from a payload that may not carry
-  // `conversationId` by contract would be a worse failure than skipping.
-  it("skips and warns when the inner event name is unexpected", () => {
-    const warnSpy = vi.spyOn(logger, "warn");
-    const result = decideReconcile(basePayload({ innerEventName: "something/else" }));
-    expect(result).toEqual({ status: "skipped", reason: "wrong_inner_event" });
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
   });
 
   it("skips and warns when conversationId is missing from the inner event data", () => {
@@ -205,10 +191,9 @@ describe("createHandleMessageReconcile — durable wrapper", () => {
   });
 
   it.each([
-    ["not_handle_message", "coding-task-start", "conv-1", "inbound/ready"],
-    ["missing_conversation_id", "cogmo-handle-message", undefined, "inbound/ready"],
-    ["wrong_inner_event", "cogmo-handle-message", "conv-1", "something/else"],
-  ])("on skipped (reason=%s): does NOT emit", async (_reason, functionId, conversationId, innerEventName) => {
+    ["not_handle_message", "coding-task-start", "conv-1"],
+    ["missing_conversation_id", "cogmo-handle-message", undefined],
+  ])("on skipped (reason=%s): does NOT emit", async (_reason, functionId, conversationId) => {
     const fn = createHandleMessageReconcile(inngest);
     const engine = new InngestTestEngine({
       function: fn,
@@ -218,13 +203,44 @@ describe("createHandleMessageReconcile — durable wrapper", () => {
           triggerInboundId: null,
           runId: "run-skip",
           functionId,
-          innerEventName,
         }),
       ],
     });
 
     await engine.execute();
     expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  // Future-trigger compatibility — if a contributor adds a second
+  // trigger to `handle-message` that carries `conversationId` but a
+  // different event name (e.g. a hypothetical direct scheduled-fire
+  // path that bypasses `inbound/arrived`), the reconcile MUST still
+  // fire on worker-death for that path. PR #297 review flagged the
+  // prior strict-inner-event-name check as exactly the silent skip
+  // this test now guards against.
+  it("reconciles on worker-death even when the inner event name is not inbound/ready", async () => {
+    const fn = createHandleMessageReconcile(inngest);
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [
+        makeFailureEvent({
+          conversationId: "conv-1",
+          triggerInboundId: null,
+          runId: "run-future",
+          functionId: "cogmo-handle-message",
+          innerEventName: "agent/scheduled-task.fire",
+        }),
+      ],
+    });
+    await engine.execute();
+    const sendCall = expectDefined(sendSpy.mock.calls[0]?.[0], "first send call");
+    expect(sendCall).toMatchObject({
+      payload: {
+        name: "conversation/errored",
+        id: "errored-run-future",
+        data: { conversationId: "conv-1", runId: "run-future" },
+      },
+    });
   });
 
   // Forensic record: a human reading `conversation/errored.errorMessage`

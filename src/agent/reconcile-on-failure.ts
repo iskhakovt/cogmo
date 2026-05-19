@@ -18,11 +18,7 @@
  */
 
 import type { Inngest } from "inngest";
-import {
-  buildConversationErroredEvent,
-  inboundReady,
-  inngestFunctionFailed,
-} from "../inngest/events.js";
+import { buildConversationErroredEvent, inngestFunctionFailed } from "../inngest/events.js";
 import { logger } from "../logger.js";
 
 const log = logger.child({ component: "handle-message.reconcile-on-failure" });
@@ -53,43 +49,39 @@ export type ReconcileResult =
       errorMessage: string;
     }
   | { status: "skipped"; reason: "not_handle_message" }
-  | { status: "skipped"; reason: "missing_conversation_id" }
-  | { status: "skipped"; reason: "wrong_inner_event" };
+  | { status: "skipped"; reason: "missing_conversation_id" };
 
 /**
  * Decide whether this reconcile should re-emit and, if so, package the
- * fields the wrapper needs into a single typed value. The function logs
- * `warn` on the two anomalous skip paths (so a misconfigured upstream
- * shows up in operator logs even when no event lands on the bus) but
- * does no I/O — emit is the wrapper's job.
+ * fields the wrapper needs into a single typed value. Logs a `warn` on
+ * the `missing_conversation_id` skip path so a misconfigured upstream
+ * shows up in operator logs even when no event lands on the bus;
+ * otherwise does no I/O — emit is the wrapper's job.
+ *
+ * The contract this gates on is `conversationId in event.data` — NOT the
+ * inner event's `name`. `handle-message` has one trigger today
+ * (`inbound/ready`), but the reconcile shouldn't break the day someone
+ * adds a second trigger that also carries a `conversationId`. The
+ * `inboundReady`-name-equality check that lived here before would have
+ * routed those failures to a silent skip and lost cooldown on
+ * worker-death for the new path — flagged on PR #297 review.
  */
 export function decideReconcile(payload: {
   functionId: string;
   runId: string;
   errorMessage: string;
-  innerEventName: string;
   conversationId: string | undefined;
   triggerInboundId: string | null | undefined;
 }): ReconcileResult {
   if (!matchesHandleMessage(payload.functionId)) {
     return { status: "skipped", reason: "not_handle_message" };
   }
-  // `handle-message` is only triggered by `inbound/ready`. A failed run
-  // with a different inner event name means something is misconfigured
-  // upstream — log and skip rather than synthesize a `conversation/errored`
-  // from a payload that doesn't carry a conversation id by contract.
-  if (payload.innerEventName !== inboundReady.name) {
-    log.warn(
-      {
-        functionId: payload.functionId,
-        runId: payload.runId,
-        innerEventName: payload.innerEventName,
-      },
-      "reconcile: failed handle-message run had unexpected inner event",
-    );
-    return { status: "skipped", reason: "wrong_inner_event" };
-  }
   if (typeof payload.conversationId !== "string" || payload.conversationId.length === 0) {
+    // Empty-string check is intentionally defensive — `inboundReady.data`
+    // declares `conversationId: z.string()` and `inngestFunctionFailed`
+    // re-declares it optional via passthrough, so an empty string SHOULD
+    // be unreachable under intact upstream validation. Don't weaken to
+    // assume the schema can be trusted at this surface.
     log.warn(
       { functionId: payload.functionId, runId: payload.runId },
       "reconcile: failed handle-message run missing conversationId",
@@ -125,7 +117,6 @@ export function createHandleMessageReconcile(inngest: Inngest) {
         functionId: function_id,
         runId: run_id,
         errorMessage,
-        innerEventName: innerEvent.name,
         conversationId,
         triggerInboundId,
       });
@@ -144,12 +135,18 @@ export function createHandleMessageReconcile(inngest: Inngest) {
           runId: decision.runId,
           triggerInboundId: decision.triggerInboundId,
           // `errorClass: "WorkerDeath"` distinguishes this path from
-          // `onFailure`'s typical `NonRetriableError`. The evolution
-          // failure-reflector can bucket by class to keep
-          // worker-disconnect noise out of the model-error corpus.
-          // (When dedup wins for `onFailure`, this label is dropped —
-          // only the case where the reconcile got to the bus first
-          // actually surfaces "WorkerDeath" downstream.)
+          // `onFailure`'s typical `NonRetriableError`. **Best-effort
+          // under bus race.** Both emitters land on the bus on a normal
+          // `NonRetriableError` failure (onFailure + the system event
+          // both fire); whichever arrives first wins dedup. If the
+          // reconcile wins, `recover-conversation` sees "WorkerDeath"
+          // even though the real cause was the wrapped provider error.
+          // Cooldown writes don't branch on this field, so the
+          // mislabel is harmless for the circuit breaker. Downstream
+          // consumers that bucket by class (evolution failure-reflector)
+          // must cross-check against the structured logs by `runId`.
+          // See design/agent-resilience.md → Triggers → "errorClass
+          // is best-effort under bus race".
           errorClass: "WorkerDeath",
           causeClass: null,
           errorMessage: `inngest run terminated abnormally (run_id ${decision.runId}, function_id ${decision.functionId}): ${decision.errorMessage}`,
