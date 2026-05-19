@@ -270,4 +270,71 @@ describe("runSkillsCli", () => {
     // The pretty-printed JSON spans multiple lines; reparse.
     expect(() => JSON.parse(last)).not.toThrow();
   });
+
+  it("`approve` without pendingId exits 2 with usage hint", async () => {
+    const io = makeIo();
+    const code = await runSkillsCli(["approve"], makeRunner(), io);
+    expect(code).toBe(2);
+    expect(io.stderr.join("\n")).toContain("Usage: cogmo skills approve");
+  });
+
+  it("`approve` exits 1 when runner.approveDeploy returns rejected", async () => {
+    const io = makeIo();
+    const approveDeploy = vi
+      .fn()
+      .mockResolvedValue({ status: "rejected", reason: "schema_mismatch" });
+    const code = await runSkillsCli(["approve", "p-1"], makeRunner({ approveDeploy }), io);
+    expect(code).toBe(1);
+  });
+
+  it("`deny` without pendingId exits 2 with usage hint", async () => {
+    const io = makeIo();
+    const code = await runSkillsCli(["deny"], makeRunner(), io);
+    expect(code).toBe(2);
+    expect(io.stderr.join("\n")).toContain("Usage: cogmo skills deny");
+  });
+
+  it("`deny` without reason words emits reason=null in the JSON", async () => {
+    const io = makeIo();
+    const denyDeploy = vi.fn().mockResolvedValue(undefined);
+    const code = await runSkillsCli(["deny", "p-1"], makeRunner({ denyDeploy }), io);
+    expect(code).toBe(0);
+    expect(denyDeploy).toHaveBeenCalledWith({ pendingId: "p-1" });
+    expect(io.stdout.join("\n")).toContain('"reason": null');
+  });
+
+  it("`rollback` without args exits 2 with usage hint", async () => {
+    const io = makeIo();
+    const code = await runSkillsCli(["rollback"], makeRunner(), io);
+    expect(code).toBe(2);
+    expect(io.stderr.join("\n")).toContain("Usage: cogmo skills rollback");
+  });
+
+  it("`rollback` with only one arg exits 2", async () => {
+    const io = makeIo();
+    const code = await runSkillsCli(["rollback", "echo"], makeRunner(), io);
+    expect(code).toBe(2);
+    expect(io.stderr.join("\n")).toContain("Usage: cogmo skills rollback");
+  });
+
+  it("`rollback` exits 1 when runner.rollback returns rejected", async () => {
+    const io = makeIo();
+    const rollback = vi.fn().mockResolvedValue({ status: "rejected", reason: "git_sha_not_known" });
+    const code = await runSkillsCli(["rollback", "echo", "sha"], makeRunner({ rollback }), io);
+    expect(code).toBe(1);
+  });
+
+  it("`deregister` without name exits 2 with usage hint", async () => {
+    const io = makeIo();
+    const code = await runSkillsCli(["deregister"], makeRunner(), io);
+    expect(code).toBe(2);
+    expect(io.stderr.join("\n")).toContain("Usage: cogmo skills deregister");
+  });
+
+  it("`register` exits 0 on live (already-tested live status — confirmed exit code)", async () => {
+    const io = makeIo();
+    const register = vi.fn().mockResolvedValue({ status: "live", name: "echo" });
+    const code = await runSkillsCli(["register", "feat/echo"], makeRunner({ register }), io);
+    expect(code).toBe(0);
+  });
 });

@@ -624,6 +624,58 @@ describe("createTransport", () => {
         reason: expect.stringContaining("not visible"),
       });
     });
+
+    // Auto-repair clear trigger — switching profile is a context change
+    // that should end any active cooldown so the new profile's
+    // provider/tools get a clean slate. Same-tx so a partial commit
+    // can't leave "switched profile but still cooling down". Verify
+    // the clear fires when cooldown_state was set.
+    it("clears cooldown_state in the same tx as the profile switch", async () => {
+      const setConversationProfile = vi.fn();
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-old",
+          isPrivate: true,
+          cooldownState: {
+            lastErroredAt: "2026-05-19T11:00:00.000Z",
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
+        }),
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        setConversationProfile,
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.setProfile("handle", "c1", "p-new");
+      expect(res.isOk()).toBe(true);
+      expect(setConversationProfile).toHaveBeenCalledWith(expect.anything(), "c1", "p-new");
+      expect(clearCooldown).toHaveBeenCalledWith(expect.anything(), "c1");
+    });
+
+    // Symmetric to the success-path clear in handle-message:
+    // skipping the UPDATE when cooldown_state is already NULL avoids
+    // a per-call pointless write.
+    it("does NOT call clearCooldown when cooldown_state was already NULL", async () => {
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-old",
+          isPrivate: true,
+          cooldownState: null,
+        }),
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      await transport.conversations.setProfile("handle", "c1", "p-new");
+      expect(clearCooldown).not.toHaveBeenCalled();
+    });
   });
 
   describe("conversations.repair", () => {
@@ -1015,6 +1067,218 @@ describe("createTransport", () => {
       };
       await transport.profiles.update("handle", "p-mine", { memoryScope });
       expect(updateProfile).toHaveBeenCalledWith(expect.anything(), "p-mine", { memoryScope });
+    });
+
+    // Auto-repair clear trigger — `/model` passes
+    // `clearCooldownForConversation: currentConversationId` so the model
+    // update and the cooldown clear land in the same tx. Verifies the
+    // clear fires and ownership is checked against the conversation
+    // before the profile update commits.
+    it("clearCooldownForConversation: calls clearCooldown in the same tx as the model update", async () => {
+      const updateProfile = vi.fn().mockResolvedValue({});
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-mine",
+          isPrivate: true,
+          cooldownState: {
+            lastErroredAt: "2026-05-19T11:00:00.000Z",
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
+        }),
+        updateProfile,
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { model: "gpt-4o" },
+        { clearCooldownForConversation: "c1" },
+      );
+      expect(res.isOk()).toBe(true);
+      expect(updateProfile).toHaveBeenCalled();
+      expect(clearCooldown).toHaveBeenCalledWith(expect.anything(), "c1");
+    });
+
+    // Without the opt, no cooldown clear — verifies the option is
+    // opt-in (other update callers like `/profile edit` shouldn't
+    // touch cooldown).
+    it("clearCooldownForConversation absent: does NOT call clearCooldown", async () => {
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      await transport.profiles.update("handle", "p-mine", { model: "gpt-4o" });
+      expect(clearCooldown).not.toHaveBeenCalled();
+    });
+
+    // Ownership check on the conversation runs BEFORE the profile
+    // update commits — so a wrong conversationId aborts the whole
+    // update rather than silently dropping the cooldown-clear side
+    // effect.
+    it("clearCooldownForConversation: returns access_denied when conversation isn't owned by caller", async () => {
+      const updateProfile = vi.fn().mockResolvedValue({});
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c-other",
+          userId: "user-2",
+          profileId: "p-other",
+          isPrivate: true,
+          cooldownState: null,
+        }),
+        updateProfile,
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { model: "gpt-4o" },
+        { clearCooldownForConversation: "c-other" },
+      );
+      expect(res._unsafeUnwrapErr()).toMatchObject({
+        code: "access_denied",
+        reason: expect.stringContaining("conversation"),
+      });
+      expect(updateProfile).not.toHaveBeenCalled();
+      expect(clearCooldown).not.toHaveBeenCalled();
+    });
+
+    it("clearCooldownForConversation: returns conversation_not_found when conv row is missing", async () => {
+      const updateProfile = vi.fn().mockResolvedValue({});
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue(undefined),
+        updateProfile,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { model: "gpt-4o" },
+        { clearCooldownForConversation: "c-gone" },
+      );
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "conversation_not_found" });
+      expect(updateProfile).not.toHaveBeenCalled();
+    });
+
+    // The clear's rationale is "the model the failing turn used
+    // changed." If the conversation doesn't actually use this profile,
+    // the new model isn't its model and the clear would be spurious.
+    // Reject so the caller surfaces a bug rather than silently
+    // clearing cooldown on an unrelated conversation.
+    it("clearCooldownForConversation: returns access_denied when conversation uses a different profile", async () => {
+      const updateProfile = vi.fn().mockResolvedValue({});
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c-elsewhere",
+          userId: "user-1",
+          profileId: "p-other",
+          isPrivate: true,
+          cooldownState: null,
+        }),
+        updateProfile,
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { model: "gpt-4o" },
+        { clearCooldownForConversation: "c-elsewhere" },
+      );
+      expect(res._unsafeUnwrapErr()).toMatchObject({
+        code: "access_denied",
+        reason: expect.stringContaining("does not use this profile"),
+      });
+      expect(updateProfile).not.toHaveBeenCalled();
+      expect(clearCooldown).not.toHaveBeenCalled();
+    });
+
+    // Mirror setProfile's optimization — skip the UPDATE when there's
+    // nothing to clear. Without this, every `/model` against a
+    // not-currently-cooling-down conversation would write a no-op
+    // row version on `conversations`.
+    // When `updateProfile` raises `UniqueViolationError`, Postgres
+    // marks the tx as aborted. The error MUST propagate out of
+    // `runInTx` so Drizzle issues a clean ROLLBACK before the outer
+    // catch translates to `err`. Catching inside the tx and returning
+    // `err` would let `runInTx` resolve, Drizzle would send COMMIT,
+    // and Postgres would silently turn that into a ROLLBACK with a
+    // NOTICE — end-to-end correct but misleading-on-paper. The
+    // observable contract this test pins: `clearCooldown` must NOT
+    // fire on the unique-violation path, even though
+    // `clearCooldownForConversation` was passed and the conversation
+    // was cooling down.
+    it("UniqueViolationError aborts the tx without firing clearCooldown", async () => {
+      const updateProfile = vi
+        .fn()
+        .mockRejectedValue(
+          new (await import("../agent/store/errors.js")).UniqueViolationError(
+            "uq_profiles_user_name",
+          ),
+        );
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-mine",
+          isPrivate: true,
+          cooldownState: {
+            lastErroredAt: "2026-05-19T11:00:00.000Z",
+            cooldownSeconds: 60,
+            consecutiveFailures: 1,
+          },
+        }),
+        updateProfile,
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { name: "taken" },
+        { clearCooldownForConversation: "c1" },
+      );
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_name_taken" });
+      expect(clearCooldown).not.toHaveBeenCalled();
+    });
+
+    it("clearCooldownForConversation: skips the clear write when cooldown_state was already NULL", async () => {
+      const clearCooldown = vi.fn();
+      const agentStore = mockAgentStore({
+        getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
+        getConversation: vi.fn().mockResolvedValue({
+          id: "c1",
+          userId: "user-1",
+          profileId: "p-mine",
+          isPrivate: true,
+          cooldownState: null,
+        }),
+        clearCooldown,
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.profiles.update(
+        "handle",
+        "p-mine",
+        { model: "gpt-4o" },
+        { clearCooldownForConversation: "c1" },
+      );
+      expect(res.isOk()).toBe(true);
+      expect(clearCooldown).not.toHaveBeenCalled();
     });
   });
 
@@ -2005,6 +2269,165 @@ describe("createTransport", () => {
       expect(a._unsafeUnwrapErr()).toEqual({ code: "sandbox_disabled" });
       const c = await transport.coding.cancelTask(taskId, "x", "y");
       expect(c._unsafeUnwrapErr()).toEqual({ code: "sandbox_disabled" });
+    });
+  });
+
+  describe("evolution namespace", () => {
+    function buildEvolutionTransport(
+      opts: {
+        identity?: { userId: string } | null;
+        session?: { conversationId: string } | null;
+        conv?: { id: string; userId: string } | null;
+        events?: ReadonlyArray<unknown>;
+        event?: unknown | null;
+        triggerReflection?: (id: string) => Promise<never>;
+      } = {},
+    ) {
+      const listEvolutionEvents = vi.fn().mockResolvedValue(opts.events ?? []);
+      const getEvolutionEvent = vi.fn().mockResolvedValue(opts.event ?? null);
+      const getConversation = vi.fn().mockResolvedValue(opts.conv ?? null);
+      const agentStore = mockAgentStore({
+        listEvolutionEvents,
+        getEvolutionEvent,
+        getConversation,
+      });
+      const transportStore = mockTransportStore({
+        resolveUser: vi
+          .fn()
+          .mockResolvedValue(opts.identity === undefined ? { userId: "user-1" } : opts.identity),
+        resolveSession: vi.fn().mockResolvedValue(opts.session ?? null),
+      });
+      const inngestSend = vi.fn().mockResolvedValue(undefined);
+      const inngest = { send: inngestSend } as never;
+      const mockEvent = {
+        create: vi.fn((data: unknown) => ({ name: "inbound/arrived", data })),
+      } as unknown as typeof inboundArrived;
+      const transport = createTransport({
+        channelId: "ch-1",
+        defaultUserId: "user-1",
+        defaultProfileId: "profile-1",
+        runInTx: fakeRunInTx,
+        transportStore,
+        agentStore,
+        inngest,
+        inboundArrived: mockEvent,
+        attachments: { upload: vi.fn(), download: vi.fn() } as never,
+        idleTimeoutMs: 0,
+        ...(opts.triggerReflection && { triggerReflection: opts.triggerReflection }),
+      });
+      return { transport, listEvolutionEvents, getEvolutionEvent };
+    }
+
+    it("listEvents: rejects unknown identity", async () => {
+      const { transport } = buildEvolutionTransport({ identity: null });
+      const res = await transport.evolution.listEvents("ghost", { limit: 10 });
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    });
+
+    it("listEvents: returns mapped rows when identity resolves", async () => {
+      const { transport, listEvolutionEvents } = buildEvolutionTransport({
+        events: [
+          {
+            id: "evt-1",
+            userId: "user-1",
+            conversationId: "c1",
+            triggeredBy: "idle",
+            payload: {},
+            createdAt: new Date(),
+          },
+        ],
+      });
+      const res = await transport.evolution.listEvents("h", { limit: 10 });
+      expect(res.isOk()).toBe(true);
+      expect(listEvolutionEvents).toHaveBeenCalled();
+    });
+
+    it("getEvent: returns null when no row found", async () => {
+      const { transport } = buildEvolutionTransport({ event: null });
+      const res = await transport.evolution.getEvent("h", "evt-x");
+      expect(res.isOk()).toBe(true);
+      expect(res._unsafeUnwrap()).toBeNull();
+    });
+
+    it("getEvent: returns identity_rejected when identity missing", async () => {
+      const { transport } = buildEvolutionTransport({ identity: null });
+      const res = await transport.evolution.getEvent("h", "evt-x");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    });
+
+    it("triggerReflection: evolution_unavailable when wiring missing", async () => {
+      const { transport } = buildEvolutionTransport({});
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "evolution_unavailable" });
+    });
+
+    it("triggerReflection: identity_rejected", async () => {
+      const trigger = vi.fn();
+      const { transport } = buildEvolutionTransport({ identity: null, triggerReflection: trigger });
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+      expect(trigger).not.toHaveBeenCalled();
+    });
+
+    it("triggerReflection: no_session when no session", async () => {
+      const trigger = vi.fn();
+      const { transport } = buildEvolutionTransport({
+        identity: { userId: "user-1" },
+        session: null,
+        triggerReflection: trigger,
+      });
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "no_session" });
+      expect(trigger).not.toHaveBeenCalled();
+    });
+
+    it("triggerReflection: no_session when conversation owner mismatches", async () => {
+      const trigger = vi.fn();
+      const { transport } = buildEvolutionTransport({
+        identity: { userId: "user-1" },
+        session: { conversationId: "c1" },
+        conv: { id: "c1", userId: "other-user" },
+        triggerReflection: trigger,
+      });
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "no_session" });
+      expect(trigger).not.toHaveBeenCalled();
+    });
+
+    it("triggerReflection: skipped reason passes through", async () => {
+      const trigger = vi.fn().mockResolvedValue({ status: "skipped", reason: "drained_zero" });
+      const { transport } = buildEvolutionTransport({
+        identity: { userId: "user-1" },
+        session: { conversationId: "c1" },
+        conv: { id: "c1", userId: "user-1" },
+        triggerReflection: trigger,
+      });
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "skipped", reason: "drained_zero" });
+    });
+
+    it("triggerReflection: processed → emits eventId + counts", async () => {
+      const trigger = vi.fn().mockResolvedValue({
+        status: "processed",
+        eventId: "evt-99",
+        corrections: { extracted: 1, reinforced: 2, promoted: 3 },
+        memories: { extracted: 4 },
+        drained: { drained: 5 },
+      });
+      const { transport } = buildEvolutionTransport({
+        identity: { userId: "user-1" },
+        session: { conversationId: "c1" },
+        conv: { id: "c1", userId: "user-1" },
+        triggerReflection: trigger,
+      });
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrap()).toMatchObject({
+        status: "processed",
+        eventId: "evt-99",
+        memoryCount: 4,
+        drained: 5,
+        ruleChanges: { extracted: 1, reinforced: 2, promoted: 3 },
+      });
     });
   });
 });

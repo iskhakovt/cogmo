@@ -392,7 +392,16 @@ export async function handleModel(
     return;
   }
 
-  const res = await transport.profiles.update(handle, current.value.profileId, { model: pick });
+  // Pass `clearCooldownForConversation` so the model update and the
+  // cooldown clear land in the same transaction — model switches end
+  // any active cooldown by design (see design/agent-resilience.md →
+  // Clear triggers).
+  const res = await transport.profiles.update(
+    handle,
+    current.value.profileId,
+    { model: pick },
+    { clearCooldownForConversation: current.value.conversationId },
+  );
   if (res.isErr()) {
     await ctx.reply(errorMessage(res.error));
     return;

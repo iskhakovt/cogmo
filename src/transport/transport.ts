@@ -444,6 +444,19 @@ export interface Transport {
       platformUserHandle: string,
       profileId: string,
       changes: Partial<ProfileInput>,
+      /**
+       * When set, clears `cooldown_state` on this conversation in the
+       * same transaction as the profile update. Used by `/model` — the
+       * design treats model switches as context changes that should
+       * end any active cooldown; same-tx atomicity prevents a partial
+       * commit from leaving "switched model but still cooling down"
+       * state. Transport validates that the conversation is owned by
+       * the caller AND uses this profile before applying the clear;
+       * mismatch surfaces `access_denied` or `conversation_not_found`.
+       *
+       * See `design/agent-resilience.md` → Clear triggers.
+       */
+      opts?: { clearCooldownForConversation?: string },
     ): Promise<Result<Profile, TransportError>>;
     delete(platformUserHandle: string, profileId: string): Promise<Result<void, TransportError>>;
     /**
@@ -1147,6 +1160,21 @@ export function createTransport(deps: {
             });
           }
           await agentStore.setConversationProfile(tx, conversationId, profileId);
+          // Auto-repair clear trigger — `/profile` is a context switch
+          // ("the new profile has its own provider/tools and may not
+          // exhibit the failure"), so end any active cooldown in the
+          // same tx. Atomicity matters: a partial commit could leave
+          // the conversation switched but still cooling down. Skip
+          // the write when `cooldown_state` is already NULL —
+          // Postgres MVCC writes a fresh tuple version on every
+          // UPDATE regardless of whether values changed (no
+          // suppress_redundant_updates_trigger on this table), so
+          // the gate avoids a wasted row version + WAL entry per
+          // profile switch. See design/agent-resilience.md → Clear
+          // triggers.
+          if (conv.cooldownState !== null) {
+            await agentStore.clearCooldown(tx, conversationId);
+          }
           return ok(undefined);
         });
       },
@@ -1282,47 +1310,102 @@ export function createTransport(deps: {
         });
       },
 
-      async update(platformUserHandle, profileId, changes) {
-        return runInTx(async (tx) => {
-          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
-          if (!identity) return err({ code: "identity_rejected" as const });
-          const owner = await agentStore.getProfileOwner(tx, profileId);
-          if (!owner) return err({ code: "profile_not_found" as const });
-          if (owner.userId === null) {
-            return err({
-              code: "access_denied" as const,
-              reason: "org profiles are read-only via Transport",
-            });
-          }
-          if (owner.userId !== identity.userId) {
-            return err({ code: "access_denied" as const, reason: "profile not owned by caller" });
-          }
-          if (
-            changes.model !== undefined &&
-            !(await agentStore.isModelUserSelectable(tx, changes.model))
-          ) {
-            return err({ code: "model_unavailable" as const, model: changes.model });
-          }
-          if (changes.memoryScope) {
-            const unknown = await findUnknownCompartmentImpl(
-              tx,
-              agentStore,
-              identity.userId,
-              changes.memoryScope.compartments,
-            );
-            if (unknown !== null) {
-              return err({ code: "compartment_unknown" as const, name: unknown });
+      async update(platformUserHandle, profileId, changes, opts) {
+        // `UniqueViolationError` from the profile_name unique constraint
+        // is caught OUTSIDE `runInTx` so the underlying Postgres tx
+        // rolls back cleanly. Catching inside the tx (and `return
+        // err(...)`-ing) lets the cb resolve, which makes Drizzle send
+        // COMMIT — and Postgres turns COMMIT-after-failed-statement
+        // into a silent ROLLBACK plus a NOTICE. End-to-end behaviour is
+        // the same (no data persists, err result returned) but the
+        // intent is misleading and the log noise hides real issues.
+        // Letting the error propagate triggers Drizzle's proper
+        // ROLLBACK path before this handler translates the error.
+        try {
+          return await runInTx(async (tx) => {
+            const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+            if (!identity) return err({ code: "identity_rejected" as const });
+            const owner = await agentStore.getProfileOwner(tx, profileId);
+            if (!owner) return err({ code: "profile_not_found" as const });
+            if (owner.userId === null) {
+              return err({
+                code: "access_denied" as const,
+                reason: "org profiles are read-only via Transport",
+              });
             }
-          }
-          try {
+            if (owner.userId !== identity.userId) {
+              return err({
+                code: "access_denied" as const,
+                reason: "profile not owned by caller",
+              });
+            }
+            if (
+              changes.model !== undefined &&
+              !(await agentStore.isModelUserSelectable(tx, changes.model))
+            ) {
+              return err({ code: "model_unavailable" as const, model: changes.model });
+            }
+            if (changes.memoryScope) {
+              const unknown = await findUnknownCompartmentImpl(
+                tx,
+                agentStore,
+                identity.userId,
+                changes.memoryScope.compartments,
+              );
+              if (unknown !== null) {
+                return err({ code: "compartment_unknown" as const, name: unknown });
+              }
+            }
+            // Pre-validate the cooldown-clear side effect BEFORE the
+            // profile update commits, so a wrong / missing / mismatched
+            // conversation aborts the whole update rather than silently
+            // dropping the clear (or worse — clearing the cooldown on a
+            // conversation that doesn't use this profile, defeating the
+            // "context switch ends cooldown" rationale).
+            let shouldClearCooldown = false;
+            const clearTarget = opts?.clearCooldownForConversation;
+            if (clearTarget !== undefined) {
+              const conv = await agentStore.getConversation(tx, clearTarget);
+              if (!conv) return err({ code: "conversation_not_found" as const });
+              if (conv.userId !== identity.userId) {
+                return err({
+                  code: "access_denied" as const,
+                  reason: "conversation not owned by caller",
+                });
+              }
+              if (conv.profileId !== profileId) {
+                // The clear's rationale is "the model the failing turn
+                // used changed". If the conversation doesn't actually
+                // use this profile, the new model isn't its model and
+                // the clear would be a spurious side effect. Reject
+                // rather than silently no-op so the caller surfaces a
+                // bug instead of hiding it.
+                return err({
+                  code: "access_denied" as const,
+                  reason: "conversation does not use this profile",
+                });
+              }
+              // Match setProfile's optimization — skip the UPDATE when
+              // there's nothing to clear, avoiding a no-op row write.
+              shouldClearCooldown = conv.cooldownState !== null;
+            }
             const updated = await agentStore.updateProfile(tx, profileId, changes);
+            // Same-tx clear — `/model` rationale: model switch is a
+            // context change that ends any active cooldown. Atomicity
+            // prevents the partial-commit "switched model but still
+            // cooling down" state. See
+            // design/agent-resilience.md → Clear triggers.
+            if (shouldClearCooldown && clearTarget !== undefined) {
+              await agentStore.clearCooldown(tx, clearTarget);
+            }
             return ok(updated);
-          } catch (e) {
-            if (e instanceof UniqueViolationError)
-              return err({ code: "profile_name_taken" as const });
-            throw e;
+          });
+        } catch (e) {
+          if (e instanceof UniqueViolationError) {
+            return err({ code: "profile_name_taken" as const });
           }
-        });
+          throw e;
+        }
       },
 
       async delete(platformUserHandle, profileId) {

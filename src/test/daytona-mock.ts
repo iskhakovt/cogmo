@@ -124,6 +124,50 @@ export interface DaytonaMockRecordOptions {
   upstreamApiKey: string;
   /** Optional organization id, threaded through Authorization. */
   upstreamOrganizationId?: string;
+  /**
+   * Field-level redactions applied to both request and response body
+   * JSON before journaling. Defaults to redacting `organizationId`
+   * and `runnerId` — Daytona echoes the operator's actual UUIDs back
+   * on every create/get call, and they'd otherwise land in every
+   * committed fixture. Extend (don't replace) the defaults to add
+   * project-specific PII fields.
+   */
+  bodyRedactions?: ReadonlyArray<BodyRedaction>;
+}
+
+export interface BodyRedaction {
+  /** JSON field name to replace at any nesting depth. */
+  fieldName: string;
+  /** Stable placeholder substituted in for the field's string value. */
+  replacement: string;
+}
+
+/**
+ * Default redactions applied even when `bodyRedactions` is omitted.
+ * `organizationId` is the operator's Daytona account UUID; `runnerId`
+ * is a Daytona-side infra identifier. Both are returned in nearly
+ * every response body and would link a committed fixture to a real
+ * account if left in place.
+ */
+const DEFAULT_BODY_REDACTIONS: ReadonlyArray<BodyRedaction> = [
+  { fieldName: "organizationId", replacement: "00000000-0000-0000-0000-000000000000" },
+  { fieldName: "runnerId", replacement: "11111111-1111-1111-1111-111111111111" },
+];
+
+/**
+ * Replace string values at keys named in `rules` anywhere in a
+ * JSON-shaped value. Uses `JSON.stringify`'s replacer hook to walk
+ * the tree once; safe for the journaling path because the inputs are
+ * already `JSON.parse` outputs (no circular refs, no functions /
+ * BigInts / Dates that would round-trip incorrectly).
+ */
+function redactBodyFields(value: unknown, rules: ReadonlyArray<BodyRedaction>): unknown {
+  return JSON.parse(
+    JSON.stringify(value, (key, val) => {
+      const rule = rules.find((r) => r.fieldName === key);
+      return rule && typeof val === "string" ? rule.replacement : val;
+    }),
+  );
 }
 
 export interface DaytonaMockReplayOptions {
@@ -235,7 +279,19 @@ export class DaytonaMock {
     this.#server = server;
     this.#wss = wss;
     this.url = `http://127.0.0.1:${port}`;
+    this.#bodyRedactions =
+      opts.mode === "record" ? (opts.bodyRedactions ?? DEFAULT_BODY_REDACTIONS) : [];
   }
+
+  /**
+   * Field-level redactions applied to journaled request + response
+   * body JSON. Populated from `bodyRedactions` in record mode; empty
+   * in replay (no journaling). Recorded fixtures should be safe to
+   * commit because of this — the live operator's `organizationId`,
+   * `runnerId`, and any other configured fields are substituted with
+   * stable placeholders before bytes hit disk.
+   */
+  #bodyRedactions: ReadonlyArray<BodyRedaction>;
 
   static async create(opts: DaytonaMockOptions): Promise<DaytonaMock> {
     const server = createServer();
@@ -598,7 +654,7 @@ export class DaytonaMock {
         const rewrittenForClient = this.#materializePlaceholders(
           JSON.parse(JSON.stringify(rewrittenForFixture)),
         );
-        respBodyJsonForFixture = rewrittenForFixture;
+        respBodyJsonForFixture = redactBodyFields(rewrittenForFixture, this.#bodyRedactions);
         respBodyForClient = Buffer.from(JSON.stringify(rewrittenForClient));
         // Recompute content-length so the proxied response doesn't
         // mismatch its body bytes after rewriting.
@@ -639,7 +695,10 @@ export class DaytonaMock {
       const reqContentType = headers["content-type"];
       if (typeof reqContentType === "string" && reqContentType.includes("application/json")) {
         try {
-          reqBodyJson = JSON.parse(body.toString("utf8"));
+          reqBodyJson = redactBodyFields(
+            JSON.parse(body.toString("utf8")) as unknown,
+            this.#bodyRedactions,
+          );
         } catch {
           reqBodyText = body.toString("utf8");
         }

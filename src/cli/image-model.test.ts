@@ -294,4 +294,135 @@ describe("runImageModelCli", () => {
     expect(rc).toBe(1);
     expect(err.join("\n")).toMatch(/No image model named "ghost"/);
   });
+
+  it("rejects unknown commands with exit code 1 and the usage banner", async () => {
+    const { io, err } = makeIo();
+    const rc = await runImageModelCli(["foo"], { runInTx: tx, agentStore: {} as AgentStore }, io);
+    expect(rc).toBe(1);
+    expect(err.join("\n")).toMatch(/Unknown command: foo/);
+    expect(err.join("\n")).toMatch(/Usage: cogmo image-model/);
+  });
+
+  it("`image-model add` with no name returns 2 and prints usage", async () => {
+    const { io, err } = makeIo();
+    const rc = await runImageModelCli(["add"], { runInTx: tx, agentStore: {} as AgentStore }, io);
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/Usage: cogmo image-model add/);
+  });
+
+  it("rejects `add` without --description (matches usage hint)", async () => {
+    const { io, err } = makeIo();
+    const rc = await runImageModelCli(
+      ["add", "fal/x", "--provider", "fal", "--model-string", "f"],
+      { runInTx: tx, agentStore: {} as AgentStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--description is required/);
+  });
+
+  it("reports unknown provider with exit code 1", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {
+      findImageProviderByName: vi.fn().mockResolvedValue(undefined),
+    } as unknown as AgentStore;
+    const rc = await runImageModelCli(
+      ["add", "fal/x", "--provider", "ghost", "--model-string", "f", "--description", "d"],
+      { runInTx: tx, agentStore },
+      io,
+    );
+    expect(rc).toBe(1);
+    expect(err.join("\n")).toMatch(/No image provider named "ghost"/);
+  });
+
+  it("surfaces createImageModel failures as exit code 1", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {
+      findImageProviderByName: vi.fn().mockResolvedValue(fakeProvider()),
+      createImageModel: vi.fn().mockRejectedValue(new Error("duplicate name")),
+    } as unknown as AgentStore;
+    const rc = await runImageModelCli(
+      ["add", "fal/x", "--provider", "fal", "--model-string", "f", "--description", "d"],
+      { runInTx: tx, agentStore },
+      io,
+    );
+    expect(rc).toBe(1);
+    expect(err.join("\n")).toMatch(/Failed to add image model: duplicate name/);
+  });
+
+  it("`image-model list` with no rows prints (no image models)", async () => {
+    const { io, out } = makeIo();
+    const agentStore = {
+      listImageModelsWithProvider: vi.fn().mockResolvedValue([]),
+    } as unknown as AgentStore;
+    const rc = await runImageModelCli(["list"], { runInTx: tx, agentStore }, io);
+    expect(rc).toBe(0);
+    expect(out.join("\n")).toMatch(/no image models/);
+  });
+
+  it("`image-model remove` with no name returns 2", async () => {
+    const { io, err } = makeIo();
+    const rc = await runImageModelCli(
+      ["remove"],
+      { runInTx: tx, agentStore: {} as AgentStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/Usage: cogmo image-model remove/);
+  });
+
+  it("rejects an unknown flag in `add`", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {} as AgentStore;
+    const rc = await runImageModelCli(["add", "fal/x", "--bogus"], { runInTx: tx, agentStore }, io);
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/Unknown flag "--bogus"/);
+  });
+
+  it("rejects --provider followed by another flag (takeValue: next-is-flag)", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {} as AgentStore;
+    const rc = await runImageModelCli(
+      ["add", "fal/x", "--provider", "--model-string", "f"],
+      { runInTx: tx, agentStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--provider requires a value \(got next flag/);
+  });
+
+  it("rejects --provider with no following value (takeValue: missing)", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {} as AgentStore;
+    const rc = await runImageModelCli(
+      ["add", "fal/x", "--provider"],
+      { runInTx: tx, agentStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--provider requires a value/);
+  });
+
+  it("rejects --ratios with an empty list (all whitespace)", async () => {
+    const { io, err } = makeIo();
+    const agentStore = {} as AgentStore;
+    const rc = await runImageModelCli(
+      [
+        "add",
+        "fal/x",
+        "--provider",
+        "fal",
+        "--model-string",
+        "f",
+        "--description",
+        "d",
+        "--ratios",
+        " , ,",
+      ],
+      { runInTx: tx, agentStore },
+      io,
+    );
+    expect(rc).toBe(2);
+    expect(err.join("\n")).toMatch(/--ratios got an empty list/);
+  });
 });
