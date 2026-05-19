@@ -14,6 +14,12 @@ vi.mock("@clack/prompts", () => ({
   password: vi.fn(),
   text: vi.fn(),
   select: vi.fn(),
+  // `wizard.ts:pickModelInteractive` calls `p.autocomplete` when the
+  // provider's discovery returns a non-empty model list. Today's tests
+  // mock that to `[]` and hit the `p.text` fallback, but include the mock
+  // so future tests exercising the discovered-models path don't crash
+  // with "p.autocomplete is not a function".
+  autocomplete: vi.fn(),
   spinner: vi.fn(() => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() })),
   note: vi.fn(),
   outro: vi.fn(),
@@ -161,6 +167,10 @@ function buildDeps(): TestDeps {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Restore any `process.env` keys swapped via `vi.stubEnv` in a prior
+  // test so state can't leak. Matches the pattern in
+  // `src/db/transactor.test.ts` and `src/setup/non-interactive.test.ts`.
+  vi.unstubAllEnvs();
   // mockResolvedValueOnce / mockReturnValueOnce queues survive
   // vi.clearAllMocks; reset them explicitly so leftover queued returns
   // from a previous test don't bleed into the next prompt sequence.
@@ -327,23 +337,17 @@ describe("stepConfigureDaytona", () => {
     vi.mocked(p.confirm).mockResolvedValueOnce(true);
     vi.mocked(p.password).mockResolvedValueOnce("daytona-pat-very-long-token-xx");
     validateDaytonaApiKeySpy.mockResolvedValueOnce({ valid: true });
-    const prevApi = process.env.DAYTONA_API_URL;
-    const prevOrg = process.env.DAYTONA_ORGANIZATION_ID;
-    process.env.DAYTONA_API_URL = "http://self-hosted/api";
-    process.env.DAYTONA_ORGANIZATION_ID = "org-xyz";
+    // Mirrors `src/setup/non-interactive.test.ts:326-327` — same env vars,
+    // same idiom. `vi.unstubAllEnvs()` in `beforeEach` restores afterwards.
+    vi.stubEnv("DAYTONA_API_URL", "http://self-hosted/api");
+    vi.stubEnv("DAYTONA_ORGANIZATION_ID", "org-xyz");
 
-    try {
-      await stepConfigureDaytona(deps);
-      expect(validateDaytonaApiKeySpy).toHaveBeenCalledWith(
-        "daytona-pat-very-long-token-xx",
-        expect.objectContaining({ apiUrl: "http://self-hosted/api", organizationId: "org-xyz" }),
-      );
-    } finally {
-      if (prevApi === undefined) delete process.env.DAYTONA_API_URL;
-      else process.env.DAYTONA_API_URL = prevApi;
-      if (prevOrg === undefined) delete process.env.DAYTONA_ORGANIZATION_ID;
-      else process.env.DAYTONA_ORGANIZATION_ID = prevOrg;
-    }
+    await stepConfigureDaytona(deps);
+
+    expect(validateDaytonaApiKeySpy).toHaveBeenCalledWith(
+      "daytona-pat-very-long-token-xx",
+      expect.objectContaining({ apiUrl: "http://self-hosted/api", organizationId: "org-xyz" }),
+    );
   });
 
   it("falls through with save-anyway=false when validation fails", async () => {
