@@ -520,6 +520,15 @@ Compound commands prompt if any sub-command is in the prompt set (worst-case win
 
 **Block indefinitely on Telegram outage.** Slice 3 design: the CLI just waits. Implementation uses a 7-day `step.waitForEvent` timeout as an abandoned-task safety net, not a deny-on-timeout. If a prompt hits the safety-net deny, it's logged for surfacing to the operator.
 
+**Per-profile auto-approve.** `profiles.coding_autoapprove_mode` (enum `off`/`on`, default `off`) lets a user opt a profile out of the Telegram round trip for prompt-worthy calls. Resolved once per execute run via `coding_tasks → conversations → profiles`; resolves to `off` when the task has no conversation (evolution / signal-pipeline triggers). Order of evaluation in `handlePermissionRequest`:
+
+1. **Decision-log replay** — task-scoped user decisions win first. A `scope=task, decision=deny` row beats profile autoapprove (pinned by test).
+2. **Static `policy.evaluate`** — `allow` / `deny` short-circuit before the autoapprove check.
+3. **Profile autoapprove** — when the resolved mode is `on` and the policy said `prompt`, return `allow` and persist `scope=once, decision=allow`. **The in-table audit is intentionally lossy at this point**: the row shape is identical to a `policy.allow` row, so a future compliance reviewer can't tell from `coding_tool_decisions` alone whether `Bash(git push *)` was auto-allowed by static policy (impossible — `git push` is in the prompt set) or by profile bypass. The profile's `coding_autoapprove_mode` is the higher-level audit; the row count under the prompt-worthy pattern set is the lower bound on how many bypasses happened. Adding a `decided_by` column would close the gap but isn't worth the schema churn today.
+4. **Telegram prompt** — fallback for `prompt` decisions when autoapprove is `off`.
+
+Toggle via `/profile autoapprove <name> [on|off]` (Telegram). The model is told nothing — its view of the gate is identical whether autoapprove is on or off, which is intentional (the user opts into "skip my prompts," not into nudging the model to take more liberties).
+
 ### Merge gate `[confirmed]`
 
 The final artifact is a **draft PR**. Cogmo never pushes to `main`, never merges, never marks ready-for-review. The user reviews the diff in GitHub Mobile (or desktop) using their normal review flow — branch protection, required checks, and reviewers apply.

@@ -1,0 +1,2 @@
+CREATE TYPE "public"."coding_autoapprove_mode" AS ENUM('off', 'on');--> statement-breakpoint
+ALTER TABLE "profiles" ADD COLUMN "coding_autoapprove_mode" "coding_autoapprove_mode" DEFAULT 'off' NOT NULL;

@@ -60,6 +60,7 @@ describe("triggerReflection", () => {
       profileClass: null,
       streamChunkChars: 4000,
       streamEdits: true,
+      codingAutoapproveMode: "off",
     });
     agentStore.getHistory.mockResolvedValue(emptyHistory());
     const result = await triggerReflection(CONV_ID, {

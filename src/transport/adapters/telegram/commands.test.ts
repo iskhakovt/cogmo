@@ -243,6 +243,7 @@ describe("handleNew", () => {
       profileClass: null,
       streamChunkChars: 4000,
       streamEdits: true,
+      codingAutoapproveMode: "off",
     };
   }
 
@@ -403,6 +404,7 @@ describe("handleProfile", () => {
       memoryScope: null,
       streamChunkChars: 4000,
       streamEdits: true,
+      codingAutoapproveMode: "off",
     };
     const transport = transportWith({
       profiles: {
@@ -603,6 +605,7 @@ describe("handleProfile", () => {
         profileClass: null,
         streamChunkChars: 4000,
         streamEdits: true,
+        codingAutoapproveMode: "off",
       };
     }
 
@@ -716,6 +719,7 @@ describe("handleProfile", () => {
         profileClass,
         streamChunkChars: 4000,
         streamEdits: true,
+        codingAutoapproveMode: "off",
       };
     }
 
@@ -1980,6 +1984,7 @@ describe("handleCompartments", () => {
               profileClass: null,
               streamChunkChars: 4000,
               streamEdits: true,
+              codingAutoapproveMode: "off",
             },
           ]),
         ),
@@ -2013,6 +2018,7 @@ describe("/profile class subcommand", () => {
       profileClass,
       streamChunkChars: 4000,
       streamEdits: true,
+      codingAutoapproveMode: "off",
     };
   }
 
@@ -2171,6 +2177,7 @@ describe("/profile stream subcommand", () => {
       profileClass: null,
       streamChunkChars: 4000,
       streamEdits: true,
+      codingAutoapproveMode: "off",
       ...overrides,
     };
   }
@@ -2288,6 +2295,155 @@ describe("/profile stream subcommand", () => {
     const reply = ctx.reply.mock.calls[0]?.[0];
     expect(reply).toBe("Profile not found.");
     expect(reply).not.toContain("Stream prefs");
+  });
+});
+
+describe("/profile autoapprove subcommand", () => {
+  function makeProfile(overrides: Partial<Profile> = {}): Profile {
+    return {
+      id: "p1",
+      userId: "u",
+      name: "personal",
+      basePrompt: "",
+      model: "claude-sonnet-4-6",
+      summarizationModel: null,
+      extractionModel: null,
+      autoRecall: "heuristic",
+      voiceMode: "auto",
+      toolSet: [],
+      memoryScope: null,
+      profileClass: null,
+      streamChunkChars: 4000,
+      streamEdits: true,
+      codingAutoapproveMode: "off",
+      ...overrides,
+    };
+  }
+
+  it("with no name argument replies with usage", async () => {
+    const transport = transportWith({ profiles: { update: vi.fn() } });
+    const ctx = mkCtx("autoapprove");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /profile");
+  });
+
+  it("show form: name only → renders current mode without writing", async () => {
+    const update = vi.fn();
+    const transport = transportWith({
+      profiles: { list: vi.fn().mockResolvedValue(ok([makeProfile()])), update },
+    });
+    const ctx = mkCtx("autoapprove personal");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).not.toHaveBeenCalled();
+    const reply = ctx.reply.mock.calls[0]?.[0] ?? "";
+    expect(reply).toContain('Autoapprove for "personal"');
+    expect(reply).toContain("off");
+  });
+
+  it("set form: `on` calls update with codingAutoapproveMode and renders new state", async () => {
+    const update = vi.fn().mockResolvedValue(ok(makeProfile({ codingAutoapproveMode: "on" })));
+    const transport = transportWith({
+      profiles: { list: vi.fn().mockResolvedValue(ok([makeProfile()])), update },
+    });
+    const ctx = mkCtx("autoapprove personal on");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).toHaveBeenCalledWith("1", "p1", { codingAutoapproveMode: "on" });
+    const reply = ctx.reply.mock.calls[0]?.[0] ?? "";
+    expect(reply).toContain("on");
+    expect(reply).toContain("auto-approve");
+  });
+
+  it("set form: `off` calls update with codingAutoapproveMode=off", async () => {
+    const update = vi.fn().mockResolvedValue(ok(makeProfile()));
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile({ codingAutoapproveMode: "on" })])),
+        update,
+      },
+    });
+    const ctx = mkCtx("autoapprove personal off");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).toHaveBeenCalledWith("1", "p1", { codingAutoapproveMode: "off" });
+  });
+
+  it("trailing token that isn't on/off becomes part of the profile name (show form)", async () => {
+    const update = vi.fn();
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile({ name: "two words" })])),
+        update,
+      },
+    });
+    const ctx = mkCtx("autoapprove two words");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).not.toHaveBeenCalled();
+    const reply = ctx.reply.mock.calls[0]?.[0] ?? "";
+    expect(reply).toContain('Autoapprove for "two words"');
+  });
+
+  it("unknown profile name replies friendly without writing", async () => {
+    const update = vi.fn();
+    const transport = transportWith({
+      profiles: { list: vi.fn().mockResolvedValue(ok([])), update },
+    });
+    const ctx = mkCtx("autoapprove ghost on");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain('No profile named "ghost"');
+  });
+
+  it("transport.profiles.update error surfaces to the user without crashing", async () => {
+    // The `res.isErr()` branch in replyProfileAutoapprove was previously
+    // untested. Most natural trigger today: trying to flip autoapprove
+    // on an org profile returns `access_denied` per Transport's
+    // org-profile-read-only invariant. We mock the error surface
+    // directly to keep the test focused on the command's reply path.
+    const update = vi.fn().mockResolvedValue(
+      err({
+        code: "access_denied",
+        reason: "org profiles are read-only via Transport",
+      }),
+    );
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile({ userId: null, name: "shared" })])),
+        update,
+      },
+    });
+    const ctx = mkCtx("autoapprove shared on");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).toHaveBeenCalledTimes(1);
+    const reply = ctx.reply.mock.calls[0]?.[0] ?? "";
+    // Doesn't render the success-shape "Autoapprove for ..." line.
+    expect(reply).not.toContain('Autoapprove for "shared"');
+    // Surfaces something — the actual error text comes from `errorMessage`
+    // and is identical across all subcommands; the contract here is
+    // "any non-empty failure surface, not a crash."
+    expect(reply.length).toBeGreaterThan(0);
+  });
+
+  it("ambiguous profile name replies with disambiguation hint without writing", async () => {
+    // Two org profiles sharing a name is the practical trigger — both
+    // user_id IS NULL, so `resolveProfileByName`'s "pick the owned one"
+    // tiebreaker can't help and the resolver surfaces ambiguous.
+    const update = vi.fn();
+    const transport = transportWith({
+      profiles: {
+        list: vi
+          .fn()
+          .mockResolvedValue(
+            ok([
+              makeProfile({ id: "p1", userId: null, name: "shared" }),
+              makeProfile({ id: "p2", userId: null, name: "shared" }),
+            ]),
+          ),
+        update,
+      },
+    });
+    const ctx = mkCtx("autoapprove shared on");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("shared");
   });
 });
 
@@ -3308,6 +3464,7 @@ describe("handleStatus", () => {
           profileClass: null,
           streamChunkChars: 4000,
           streamEdits: true,
+          codingAutoapproveMode: "off",
           voiceMode: "auto",
         },
         voiceMode: null,
@@ -3468,6 +3625,7 @@ describe("handleStatus", () => {
               profileClass: null,
               streamChunkChars: 4000,
               streamEdits: true,
+              codingAutoapproveMode: "off",
               voiceMode: "auto",
             },
             voiceMode: null,
