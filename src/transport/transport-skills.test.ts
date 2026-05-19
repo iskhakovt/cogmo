@@ -18,7 +18,7 @@ import type {
   SkillRunner,
   SkillSummary,
 } from "../skills/runner.js";
-import type { SkillDeployRow, SkillRow, SkillStore } from "../skills/store/index.js";
+import type { SkillDeployRow, SkillStore } from "../skills/store/index.js";
 import { mockAgentStore, mockTransportStore } from "../test/factories.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { TransportStore } from "./store/index.js";
@@ -38,23 +38,6 @@ function makeTransportStore(): TransportStore {
     handle === KNOWN_HANDLE ? { userId: USER_ID } : undefined,
   );
   return ts;
-}
-
-function makeSkillRow(overrides: Partial<SkillRow> = {}): SkillRow {
-  return {
-    id: "019d0000-0000-7000-8000-000000000010",
-    name: "echo",
-    tier: "wasm",
-    riskTier: "auto",
-    effects: [],
-    schedule: null,
-    gitSha: "abcdef0abcdef0abcdef0abcdef0abcdef0abcd0",
-    inputs: { type: "object", properties: {} },
-    outputs: null,
-    disabled: false,
-    createdAt: new Date(),
-    ...overrides,
-  };
 }
 
 function makeTransport(opts: {

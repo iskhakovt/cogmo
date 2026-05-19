@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "../../test/assertions.js";
-import { CodingProgressSubscriber, type ProgressBot } from "./progress-subscriber.js";
+import { type ProgressBot, startCodingProgressSubscriber } from "./progress-subscriber.js";
 import { CodingStreamingRegistry } from "./streaming-registry.js";
 
 const InlineKeyboardSchema = z.object({
@@ -47,7 +47,7 @@ function start(args?: { editIntervalMs?: number }): {
 } {
   const registry = new CodingStreamingRegistry();
   const bot = fakeBot();
-  CodingProgressSubscriber.start({
+  startCodingProgressSubscriber({
     taskId: TASK_ID,
     chatId: 42,
     goal: "do a thing",
@@ -61,7 +61,7 @@ function start(args?: { editIntervalMs?: number }): {
   return { registry, bot };
 }
 
-describe("CodingProgressSubscriber", () => {
+describe("startCodingProgressSubscriber", () => {
   it("posts the initial message on the first event, edits subsequently", async () => {
     const { registry, bot } = start();
 
